@@ -685,7 +685,9 @@ export class SessionAttachmentStore {
   async resolveContent(
     content: ReadonlyArray<ContentBlock | SessionAttachmentReference>,
     memo?: Map<string, Promise<ContentBlock>>,
+    signal?: AbortSignal,
   ): Promise<ContentBlock[]> {
+    signal?.throwIfAborted();
     // Resolve each distinct attachment once: duplicate references share the read
     // and base64 encode instead of amplifying heap per occurrence. Callers
     // resolving several messages in one batch can pass a shared `memo` so a
@@ -697,7 +699,7 @@ export class SessionAttachmentStore {
         const id = block.attachmentId;
         let pending = pendingById.get(id);
         if (!pending) {
-          const created = this.resolve(block);
+          const created = this.resolve(block, signal);
           pendingById.set(id, created);
           // A transient read failure must not poison later resolutions of the
           // same attachment: a cached rejection would hand every sibling message
@@ -721,6 +723,7 @@ export class SessionAttachmentStore {
   async resolveContentDegrading(
     content: ReadonlyArray<ContentBlock | SessionAttachmentReference>,
     memo?: Map<string, Promise<ContentBlock>>,
+    signal?: AbortSignal,
   ): Promise<{
     retainedBlocks: Array<ContentBlock | SessionAttachmentReference>;
     resolvedBlocks: ContentBlock[];
@@ -730,13 +733,14 @@ export class SessionAttachmentStore {
     const resolvedBlocks: ContentBlock[] = [];
     let degraded = 0;
     for (const block of content) {
+      signal?.throwIfAborted();
       if (!isSessionAttachmentReference(block)) {
         retainedBlocks.push(block);
         resolvedBlocks.push(block);
         continue;
       }
       try {
-        const [resolved] = await this.resolveContent([block], memo);
+        const [resolved] = await this.resolveContent([block], memo, signal);
         if (resolved) resolvedBlocks.push(resolved);
         retainedBlocks.push(block);
       } catch (error) {
@@ -757,10 +761,13 @@ export class SessionAttachmentStore {
 
   private async readStored(
     attachmentId: string,
+    signal?: AbortSignal,
   ): Promise<StoredAttachment | undefined> {
+    signal?.throwIfAborted();
     const releasePublication = await this.acquireReadPublication();
     try {
-      return await this.readPublished(attachmentId);
+      signal?.throwIfAborted();
+      return await this.readPublished(attachmentId, signal);
     } finally {
       releasePublication();
     }
@@ -768,32 +775,35 @@ export class SessionAttachmentStore {
 
   private async readPublished(
     attachmentId: string,
+    signal?: AbortSignal,
   ): Promise<StoredAttachment | undefined> {
     const name = safeAttachmentName(attachmentId);
     if (!name || name !== attachmentId || this.pendingNames.has(name))
       return undefined;
     let primary: StoredAttachment | undefined;
     try {
-      primary = await this.tryRead(await this.peekDirectory(), name);
+      primary = await this.tryRead(await this.peekDirectory(), name, signal);
     } catch (error) {
+      signal?.throwIfAborted();
       if (!this.persistentFallbackDirectory) throw error;
       // A degraded primary root must not hide healthy fallback bytes: any
       // primary lookup failure degrades to the fallback read.
       primary = undefined;
     }
     if (primary) return primary;
-    return await this.tryRead(this.persistentFallbackDirectory, name);
+    return await this.tryRead(this.persistentFallbackDirectory, name, signal);
   }
 
   private async tryRead(
     directory: string | undefined,
     name: string,
+    signal?: AbortSignal,
   ): Promise<StoredAttachment | undefined> {
     if (!directory) return undefined;
     const absolutePath = path.resolve(directory, name);
     try {
       return {
-        data: await fs.readFile(absolutePath),
+        data: await fs.readFile(absolutePath, { signal }),
         mimeType: mimeTypeForName(name),
         absolutePath,
       };
@@ -1177,7 +1187,8 @@ export class SessionAttachmentStore {
       directory &&
       !this.closed &&
       !this.closing &&
-      !this.pendingNames.has(name)
+      !this.pendingNames.has(name) &&
+      !this.removingNames.has(name)
     ) {
       size = statSize(path.join(directory, name));
       if (size === undefined && this.persistentFallbackDirectory) {
@@ -1228,9 +1239,11 @@ export class SessionAttachmentStore {
 
   private async resolve(
     reference: SessionAttachmentReference,
+    signal?: AbortSignal,
   ): Promise<ContentBlock> {
     const id = reference.attachmentId;
-    const attachment = await this.readStored(id);
+    const attachment = await this.readStored(id, signal);
+    signal?.throwIfAborted();
     if (!attachment) {
       throw new SessionAttachmentReferenceError(
         `Unknown or unavailable session attachment: ${id}`,

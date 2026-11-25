@@ -26,12 +26,16 @@ import { isDaemonSessionPrInfo } from './session-pr.js';
 // as a `typeof`-d type argument.
 import {
   MID_TURN_MESSAGE_INJECTED_EVENT,
+  MID_TURN_MESSAGE_RECOVERY_EVENT,
+  MID_TURN_MESSAGE_REJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
 } from '@qwen-code/acp-bridge/daemonEventTypes';
 export {
   MID_TURN_MESSAGE_INJECTED_EVENT,
+  MID_TURN_MESSAGE_RECOVERY_EVENT,
+  MID_TURN_MESSAGE_REJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
@@ -52,6 +56,8 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'source_changed',
   'sub_session_task_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
+  MID_TURN_MESSAGE_RECOVERY_EVENT,
+  MID_TURN_MESSAGE_REJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
@@ -352,6 +358,8 @@ export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
   messages: string[];
   messageIds?: string[];
+  /** The checked message opened its own turn after the preceding turn ended. */
+  promoted?: true;
   /**
    * Parallel array to `messages` — one entry per drained message. Each entry
    * may carry image content blocks the daemon attached to the
@@ -1076,6 +1084,14 @@ export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
   typeof MID_TURN_MESSAGE_INJECTED_EVENT,
   DaemonMidTurnMessageInjectedData
 >;
+export type DaemonMidTurnMessageRecoveryEvent = DaemonEventEnvelope<
+  typeof MID_TURN_MESSAGE_RECOVERY_EVENT,
+  { sessionId: string; messageIds: string[] }
+>;
+export type DaemonMidTurnMessageRejectedEvent = DaemonEventEnvelope<
+  typeof MID_TURN_MESSAGE_REJECTED_EVENT,
+  { sessionId: string; messageId: string; reason: string }
+>;
 export interface DaemonPendingPromptAddedData {
   sessionId: string;
   promptId: string;
@@ -1278,6 +1294,8 @@ export type DaemonSessionEvent =
   | DaemonArtifactChangedEvent
   | DaemonSubSessionTaskChangedEvent
   | DaemonMidTurnMessageInjectedEvent
+  | DaemonMidTurnMessageRecoveryEvent
+  | DaemonMidTurnMessageRejectedEvent
   | DaemonPendingPromptEvent
   | DaemonChannelDeliveryResultEvent
   | DaemonSessionBranchedEvent;
@@ -1774,6 +1792,20 @@ export function asKnownDaemonEvent(
         ? ({ ...event, data } as DaemonMidTurnMessageInjectedEvent)
         : undefined;
     }
+    case MID_TURN_MESSAGE_RECOVERY_EVENT:
+      return isRecord(event.data) &&
+        isNonEmptyString(event.data['sessionId']) &&
+        Array.isArray(event.data['messageIds']) &&
+        event.data['messageIds'].every(isNonEmptyString)
+        ? (event as DaemonMidTurnMessageRecoveryEvent)
+        : undefined;
+    case MID_TURN_MESSAGE_REJECTED_EVENT:
+      return isRecord(event.data) &&
+        isNonEmptyString(event.data['sessionId']) &&
+        isNonEmptyString(event.data['messageId']) &&
+        typeof event.data['reason'] === 'string'
+        ? (event as DaemonMidTurnMessageRejectedEvent)
+        : undefined;
     case PENDING_PROMPT_ADDED_EVENT:
       return isPendingPromptAddedData(event.data)
         ? (event as DaemonPendingPromptAddedEvent)
@@ -2348,6 +2380,8 @@ export function reduceDaemonSessionEvent(
     case 'source_changed':
     case 'sub_session_task_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
+    case MID_TURN_MESSAGE_RECOVERY_EVENT:
+    case MID_TURN_MESSAGE_REJECTED_EVENT:
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:
     case PENDING_PROMPT_COMPLETED_EVENT:

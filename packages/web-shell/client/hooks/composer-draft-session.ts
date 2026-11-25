@@ -45,6 +45,8 @@ export class ComposerDraftSession {
   private pending: ComposerDraftAttachments | undefined;
   private removed: ComposerDraftAttachments = { images: [], files: [] };
   private discardStored = false;
+  private recoveredMessageIds = new Set<string>();
+  private attachmentWrite = Promise.resolve(true);
   private ingestionCounts = new Map<Listener, number>();
 
   get pendingBatches() {
@@ -100,10 +102,35 @@ export class ComposerDraftSession {
     this.emit('content', source);
   }
 
-  private persist(attachments: ComposerDraftAttachments) {
-    if (attachments.images.length || attachments.files.length)
-      void this.store?.save(this.key, attachments);
-    else void this.store?.delete(this.key);
+  private persist(attachments: ComposerDraftAttachments): Promise<boolean> {
+    const recoveredMessageIds = [...this.recoveredMessageIds];
+    const store = this.store;
+    if (!store) return Promise.resolve(false);
+    const write = () =>
+      attachments.images.length ||
+      attachments.files.length ||
+      recoveredMessageIds.length
+        ? store.save(this.key, {
+            ...attachments,
+            ...(recoveredMessageIds.length ? { recoveredMessageIds } : {}),
+          })
+        : store.delete(this.key);
+    this.attachmentWrite = this.attachmentWrite.then(write, write);
+    return this.attachmentWrite;
+  }
+
+  hasRecoveredAttachments(messageId: string): boolean {
+    return this.recoveredMessageIds.has(messageId);
+  }
+
+  async recoverAttachments(
+    attachments: ComposerDraftAttachments,
+    messageIds: readonly string[],
+  ): Promise<boolean> {
+    for (const id of messageIds) this.recoveredMessageIds.add(id);
+    this.attachments = attachments;
+    this.emit('attachments');
+    return await this.persist(attachments);
   }
 
   setAttachments(attachments: ComposerDraftAttachments, clear = false) {
@@ -114,7 +141,7 @@ export class ComposerDraftSession {
       this.pending = attachments;
       this.discardStored ||= clear;
     } else {
-      this.persist(attachments);
+      void this.persist(attachments);
     }
     this.attachments = attachments;
     this.emit(clear ? 'clear' : 'attachments');
@@ -128,6 +155,9 @@ export class ComposerDraftSession {
     }
     this.loading = true;
     this.loaded = this.store.load(this.key).then((stored) => {
+      for (const id of stored?.recoveredMessageIds ?? []) {
+        this.recoveredMessageIds.add(id);
+      }
       this.attachments = mergeDraftAttachments(
         this.pending ?? { images: [], files: [] },
         this.discardStored
@@ -137,7 +167,7 @@ export class ComposerDraftSession {
               this.removed,
             ),
       );
-      if (this.pending) this.persist(this.attachments);
+      if (this.pending) void this.persist(this.attachments);
       this.pending = undefined;
       this.removed = { images: [], files: [] };
       this.loading = false;

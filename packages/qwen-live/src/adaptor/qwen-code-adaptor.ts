@@ -103,7 +103,11 @@ export interface DaemonClientLike {
     sessionId: string,
     message: string,
     opts?: Record<string, unknown>,
-  ): Promise<{ accepted: boolean; messageId?: string }>;
+  ): Promise<{
+    accepted: boolean;
+    messageId?: string;
+    reason?: 'session_idle' | 'turn_cancelled';
+  }>;
   cancel(sessionId: string, clientId?: string): Promise<void>;
   removePendingPrompt(
     sessionId: string,
@@ -510,7 +514,9 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           )
           .map((block) => block.text)
           .join('\n\n');
-        let steered: { accepted: boolean; messageId?: string } | undefined;
+        let steered:
+          | Awaited<ReturnType<DaemonClientLike['enqueueMidTurnMessage']>>
+          | undefined;
         try {
           steered = await this.client.enqueueMidTurnMessage(
             handle.id,
@@ -522,6 +528,9 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           // payload is admissible as a queued full prompt, so fall through
           // instead of failing the handoff. Anything else is a real error.
           if (!(isRecord(error) && error['status'] === 400)) throw error;
+        }
+        if (steered?.reason === 'turn_cancelled') {
+          return { status: 'rejected', note: 'the target turn was stopped' };
         }
         if (steered?.accepted) {
           return {

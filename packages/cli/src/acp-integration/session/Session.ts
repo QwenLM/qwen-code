@@ -70,6 +70,7 @@ import {
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import { SESSION_TRANSCRIPT_MAX_LINE_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
   getTurnToolCallCapHalt,
   shouldRemindTurnToolCallCap,
@@ -91,6 +92,7 @@ import {
   createUserPromptSubmitContextPart,
   hasUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
+  restoreUserPromptSubmitContextReceipt,
 } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import { runUserPromptSubmit } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit.js';
 import { getChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
@@ -370,7 +372,6 @@ import {
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
-  MID_TURN_DRAIN_BATCH,
   parseChannelWorkflowOrigin,
   type ChannelWorkflowOrigin,
 } from '@qwen-code/channel-base';
@@ -388,7 +389,9 @@ import {
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
   type ActiveWorkHoldV1,
+  type BridgeCommittedMidTurnMessage,
   type BridgeConversationDirectoryExpectation,
+  type BridgeMidTurnOutcome,
   type BridgeSessionExternalRecordRequest,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
@@ -402,8 +405,14 @@ import {
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_USER_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
+  MAX_MID_TURN_DRAIN_ITEMS,
   MID_TURN_GOAL_HANDOFF_METHOD,
+  MID_TURN_HANDOFF_META_KEY,
+  MID_TURN_LEASE_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
+  MID_TURN_QUEUE_RECORDED_METHOD,
+  MID_TURN_QUEUE_SETTLE_METHOD,
+  MID_TURN_RECOVERY_PENDING_META_KEY,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   USER_CANCEL_ABORT_REASON,
@@ -1737,9 +1746,6 @@ const MID_TURN_KEEP_RESOLVE_TIMEOUT_MS = 2_000;
 // full drain budget.
 const ACTIVE_TURN_POLL_INTERVAL_MS = 10;
 const CHANNEL_TASK_POLL_INTERVAL_MS = 100;
-// Shared with the ACP bridge that produces the drain response, so the
-// producer's batch and this consumer's cap cannot drift apart.
-const MAX_MID_TURN_DRAIN_ITEMS = MID_TURN_DRAIN_BATCH;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
   '[Attachment could not be processed]';
 const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
@@ -1774,7 +1780,27 @@ type DrainedMidTurnMessage =
       displayText: string;
       queueOnly?: true;
       attachmentReferences?: SessionAttachmentReference[];
+      lease?: { leaseId: string; messageId: string };
+      invalid?: true;
     };
+
+const committedMidTurnMessageId = Symbol('committedMidTurnMessageId');
+type CommittedMidTurnPart = Part & { [committedMidTurnMessageId]?: string };
+
+function readMidTurnLease(
+  value: unknown,
+): { leaseId: string; messageId: string } | undefined {
+  if (
+    isRecord(value) &&
+    typeof value['leaseId'] === 'string' &&
+    value['leaseId'].length > 0 &&
+    typeof value['messageId'] === 'string' &&
+    value['messageId'].length > 0
+  ) {
+    return { leaseId: value['leaseId'], messageId: value['messageId'] };
+  }
+  return undefined;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
@@ -1906,7 +1932,11 @@ interface InFlightTurnRecording {
   cancelledAt?: number;
   promptText: string;
   promptTextTruncated: boolean;
-  finalAnswer: { finalText: string; historyPromptId?: string };
+  finalAnswer: {
+    finalText: string;
+    historyPromptId?: string;
+    midTurnCommitPending?: true;
+  };
   /**
    * Captured at turn start; settle writes against this instance (pinned to
    * the turn-start session by `Config.startNewSession`) instead of
@@ -2049,6 +2079,7 @@ function getStructuredMidTurnDisplayText(
 
 function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
   if (!isRecord(response)) return [];
+  const daemonHost = process.env[QWEN_CODE_SERVE_ENV] === '1';
 
   if (Array.isArray(response['items'])) {
     return capMidTurnDrainItems(response['items'], 'item(s)').flatMap(
@@ -2056,14 +2087,30 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
         if (!isRecord(item)) {
           return [];
         }
+        const lease = readMidTurnLease(item);
+        const queueOnly =
+          item['queueOnly'] === true &&
+          (daemonHost || getInvocationContext() !== undefined);
+        if (
+          !lease &&
+          (item['leaseId'] !== undefined || (daemonHost && !queueOnly))
+        )
+          return [];
         const content = getValidMidTurnContentBlocks(
           item['content'],
           item['displayText'],
         );
-        if (content.length === 0) return [];
+        if (content.length === 0 && !lease) return [];
         const attachmentReferences = readDaemonAttachmentReferences(
           item['attachmentReferences'],
         );
+        const invalid =
+          lease !== undefined &&
+          (!Array.isArray(item['content']) ||
+            content.length === 0 ||
+            content.length !== item['content'].length ||
+            (item['attachmentReferences'] !== undefined &&
+              !attachmentReferences));
         // Same gate #buildMidTurnParts uses to decide whether references are
         // persisted; display text must agree or a mixed inline+reference
         // message records displayText:'' with NO references — a shape replay
@@ -2083,16 +2130,17 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               item['displayText'],
               willPersistReferences,
             ),
-            ...(item['queueOnly'] === true && getInvocationContext()
-              ? { queueOnly: true }
-              : {}),
+            ...(queueOnly ? { queueOnly: true } : {}),
             ...(attachmentReferences ? { attachmentReferences } : {}),
+            ...(lease ? { lease } : {}),
+            ...(invalid ? { invalid: true } : {}),
           },
         ];
       },
     );
   }
 
+  if (daemonHost) return [];
   if (!Array.isArray(response['messages'])) {
     debugLogger.warn(
       `Mid-turn drain response had no recognized 'items' or 'messages' field; keys: ${Object.keys(
@@ -2278,10 +2326,7 @@ interface AgentResponseCapture {
   channelDelivery?: {
     finalText: string;
   };
-  turnResult?: {
-    finalText: string;
-    historyPromptId?: string;
-  };
+  turnResult?: InFlightTurnRecording['finalAnswer'];
   recordingService?: ChatRecordingService;
   agentOutput: AgentOutputMessageCapture;
   /** The turn the session's Mods hear, for a prompt that starts one. */
@@ -2878,6 +2923,10 @@ export class Session implements SessionContext {
   // the conversation if it ends before sending them.
   private readonly earlyDrainedMidTurnMessages =
     new WeakSet<DrainedMidTurnMessage>();
+  private readonly committedMidTurnHistory = new Map<
+    string,
+    { sessionId: string; content: Content }
+  >();
   private readonly todoStopGuard: DaemonTodoStopGuard;
   private readonly repeatedToolFailureGuardMode: RepeatedToolFailureGuardMode;
   private todoStopGuardBackgroundBaseline: TodoStopGuardBackgroundBaseline;
@@ -2901,6 +2950,7 @@ export class Session implements SessionContext {
   private notificationProcessing = false;
   // Admission only: cwd restoration must still drain executing turns.
   private cwdRestorePending = false;
+  private midTurnRecoveryPending = false;
   private backgroundTurn: BackgroundNotificationTurn | undefined;
   private lastCompletedRpcPromptId: string | undefined;
   private notificationsPaused = false;
@@ -5364,6 +5414,7 @@ export class Session implements SessionContext {
   #isAutomaticWorkHeld(): boolean {
     return (
       this.cwdRestorePending ||
+      this.midTurnRecoveryPending ||
       (this.requiresManagedConversationBinding &&
         this.managedConversationBinding?.state !== 'released') ||
       this.shouldHintAskUserQuestionRestore()
@@ -5372,6 +5423,11 @@ export class Session implements SessionContext {
 
   deferAutomaticWorkUntilCwdRestore(): void {
     this.cwdRestorePending = true;
+    this.#activeWorkChanged();
+  }
+
+  deferAutomaticWorkUntilMidTurnRecovery(): void {
+    this.midTurnRecoveryPending = true;
     this.#activeWorkChanged();
   }
 
@@ -5398,6 +5454,15 @@ export class Session implements SessionContext {
 
   async assertCanStartTurn(): Promise<void> {
     this.assertHistoryContextAvailable();
+    if (this.midTurnRecoveryPending) {
+      throw new RequestError(
+        -32602,
+        'Committed mid-turn input is being recovered',
+        {
+          errorKind: 'session_busy',
+        },
+      );
+    }
     if (this.cwdRestorePending) {
       throw new RequestError(-32602, 'Session working directory is restoring', {
         errorKind: 'session_busy',
@@ -5464,6 +5529,7 @@ export class Session implements SessionContext {
     return (
       !this.closing &&
       !this.cwdRestorePending &&
+      !this.midTurnRecoveryPending &&
       this.channelTaskCaptures.size === 0 &&
       !this.#hasActiveTurn()
     );
@@ -5561,6 +5627,7 @@ export class Session implements SessionContext {
     if (
       this.mcpAppCalls.size > 0 ||
       this.cwdRestorePending ||
+      this.midTurnRecoveryPending ||
       this.historyMutationActive ||
       this.goalProcessing ||
       this.cronProcessing ||
@@ -6450,6 +6517,15 @@ export class Session implements SessionContext {
       if (channelTask && result.stopReason === 'end_turn') {
         result = await this.#waitForChannelTaskResult(channelTask, result);
       }
+      if (this.midTurnRecoveryPending) {
+        result = {
+          ...result,
+          _meta: {
+            ...result._meta,
+            [MID_TURN_RECOVERY_PENDING_META_KEY]: true,
+          },
+        };
+      }
       recordAdmissionCancellation();
       await this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
@@ -6953,18 +7029,29 @@ export class Session implements SessionContext {
           );
         }
       }
-      const completedResult: PromptResponse = branchPoint
-        ? {
-            ...result,
-            _meta: {
-              ...result._meta,
-              'qwen.branchPoint': {
-                assistantRecordUuid: branchPoint.assistantRecordUuid,
-                checkpointUuid: branchPoint.checkpointUuid,
+      const midTurnHandoff =
+        (invocationContext !== undefined || scheduledGoalTurn !== undefined) &&
+        pendingSend.signal.reason === MID_TURN_SEND_NOW_ABORT_REASON;
+      const completedResult: PromptResponse =
+        branchPoint || midTurnHandoff
+          ? {
+              ...result,
+              _meta: {
+                ...result._meta,
+                ...(branchPoint
+                  ? {
+                      'qwen.branchPoint': {
+                        assistantRecordUuid: branchPoint.assistantRecordUuid,
+                        checkpointUuid: branchPoint.checkpointUuid,
+                      },
+                    }
+                  : {}),
+                ...(midTurnHandoff
+                  ? { [MID_TURN_HANDOFF_META_KEY]: true }
+                  : {}),
               },
-            },
-          }
-        : result;
+            }
+          : result;
       promptResult = completedResult;
       const proposalTurn = responseCapture.goalProposalTurn;
       if (proposalTurn) {
@@ -7762,6 +7849,57 @@ export class Session implements SessionContext {
               !isRestoreAskUserQuestion &&
               isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
+            let fullTurnModelOverride: string | undefined;
+            const onFullTurnModel = (model: string) => {
+              if (fullTurnModelOverride === model) return true;
+              if (fullTurnModelOverride) return false;
+              fullTurnModelOverride = model;
+              return true;
+            };
+            const promotedLease = readMidTurnLease(
+              promptMetadata?.[MID_TURN_LEASE_META_KEY],
+            );
+            if (
+              promptMetadata?.[MID_TURN_LEASE_META_KEY] !== undefined &&
+              !promotedLease
+            ) {
+              throw RequestError.invalidParams(
+                undefined,
+                'Invalid promoted mid-turn lease',
+              );
+            }
+            let promoted: BridgeCommittedMidTurnMessage | undefined;
+            if (promotedLease) {
+              if (promotedLease.messageId !== daemonPromptId) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  'Invalid promoted mid-turn lease',
+                );
+              }
+              const outcome = await this.#inspectMidTurnLease(
+                promotedLease,
+                modelPromptBlocks,
+                promptDisplayText ?? promptText,
+                pendingSend.signal,
+                {
+                  historyPromptId: promptId,
+                  attachmentReferences: readDaemonAttachmentReferences(
+                    promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
+                  ),
+                },
+              );
+              if (pendingSend.signal.aborted)
+                return { stopReason: 'cancelled' };
+              [promoted] = await this.#settleMidTurnLease(
+                promotedLease.leaseId,
+                [outcome],
+              );
+              if (promoted)
+                delete responseCapture.turnResult?.midTurnCommitPending;
+              if (pendingSend.signal.aborted)
+                return { stopReason: 'cancelled' };
+              if (!promoted) return { stopReason: 'end_turn' };
+            }
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -7838,7 +7976,10 @@ export class Session implements SessionContext {
                 this.config
                   .getLlmClient()!
                   .stripOrphanedUserEntriesFromHistory() ?? [];
-            } else if (!isSlashInput || slashCommandName !== 'advisor') {
+            } else if (
+              !promoted &&
+              (!isSlashInput || slashCommandName !== 'advisor')
+            ) {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
               // user-defined command shadowing the name must keep its record
@@ -7886,17 +8027,6 @@ export class Session implements SessionContext {
 
             let parts: Part[] | null;
             let suppressedHookContext: string | undefined;
-            let fullTurnModelOverride: string | undefined;
-            const onFullTurnModel = (model: string) => {
-              if (fullTurnModelOverride === model) {
-                return true;
-              }
-              if (fullTurnModelOverride) {
-                return false;
-              }
-              fullTurnModelOverride = model;
-              return true;
-            };
 
             if (isRestoreAskUserQuestion) {
               parts = [];
@@ -7952,6 +8082,7 @@ export class Session implements SessionContext {
                 resolvedCommandInfo.name === 'advisor'
               );
               if (
+                !promoted &&
                 slashCommandName === 'advisor' &&
                 shouldRecordSlashCommand &&
                 goalTurn?.origin !== 'runtime' &&
@@ -7996,6 +8127,8 @@ export class Session implements SessionContext {
               // If parts is null, the command was fully handled (e.g., /summary completed)
               // Return early without sending to the model
               if (parts === null) {
+                if (promoted)
+                  this.committedMidTurnHistory.delete(promoted.messageId);
                 logConversationFinishedEvent(
                   this.config,
                   new ConversationFinishedEvent(
@@ -8005,6 +8138,22 @@ export class Session implements SessionContext {
                 );
                 return { stopReason: 'end_turn' };
               }
+              if (promoted) {
+                if (promoted.hookContext)
+                  parts.push(
+                    createUserPromptSubmitContextPart(promoted.hookContext),
+                  );
+                const marker: CommittedMidTurnPart | undefined = parts[0];
+                if (marker)
+                  marker[committedMidTurnMessageId] = promoted.messageId;
+              }
+            } else if (promoted) {
+              parts = await this.#convertCommittedMidTurnParts(
+                promoted.parts,
+                modelPromptBlocks,
+                pendingSend.signal,
+                onFullTurnModel,
+              );
             } else {
               // Normal processing for non-slash commands. promptLast keeps the
               // user's instruction the final, prominent part when referenced
@@ -8050,6 +8199,7 @@ export class Session implements SessionContext {
             const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
             const isNewUserPrompt =
               isFreshUserTurn &&
+              !promoted &&
               (channelTurn
                 ? getChannelWorkflowOrigin()?.userInitiated === true
                 : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false);
@@ -9374,6 +9524,7 @@ export class Session implements SessionContext {
    * turn around it runs the tool batch and decides what is sent next.
    */
   async #runSharedRound(round: SharedRound): Promise<SharedRoundResult> {
+    this.#reconcileCommittedMidTurnHistory(false);
     debugLogger.debug(
       `[ACP] model round on the shared agent loop (prompt ${round.promptId})`,
     );
@@ -11598,7 +11749,12 @@ export class Session implements SessionContext {
         : {}),
       promptText: text,
       promptTextTruncated: truncated,
-      finalAnswer: { finalText: '' },
+      finalAnswer: {
+        finalText: '',
+        ...(promptMetadata?.[MID_TURN_LEASE_META_KEY] !== undefined
+          ? { midTurnCommitPending: true }
+          : {}),
+      },
       ...(recordingService !== undefined ? { recordingService } : {}),
     };
   }
@@ -11609,7 +11765,8 @@ export class Session implements SessionContext {
     response?: PromptResponse,
     error?: unknown,
   ): Promise<void> {
-    if (recording === null) return;
+    if (recording === null || recording.finalAnswer.midTurnCommitPending)
+      return;
     const cancelledAt =
       state === 'cancelled' ? recording.cancelledAt : undefined;
     if (cancelledAt !== undefined && response) {
@@ -11751,6 +11908,7 @@ export class Session implements SessionContext {
       isSessionTurn?: boolean;
     } = {},
   ): Promise<AutoCompressionSendResult> {
+    this.#reconcileCommittedMidTurnHistory(false);
     const llmClient = this.config.getLlmClient()!;
     if (options.prepareBeforeCompression) {
       const decision = await options.prepareBeforeCompression();
@@ -12674,11 +12832,7 @@ export class Session implements SessionContext {
     // An early drain for an open response may still be in flight; let it land
     // so the messages it took are injected here rather than stranded.
     if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
-    // Flush anything recovered from a PRIOR timed-out drain first: the daemon
-    // splices + SSE-publishes synchronously, so on a timeout the browser has
-    // already deduped those messages — discarding the late response would lose
-    // them from both queues. We stash them (see the timeout branch) and
-    // re-inject them here on the next batch.
+    // A late legacy drain or an early send-now claim may already be buffered.
     const recovered = this.#takeRecoveredMidTurnMessages();
 
     // A stopped turn takes nothing more from the host, which promotes what is
@@ -12748,6 +12902,7 @@ export class Session implements SessionContext {
     try {
       drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
         sessionId: this.sessionId,
+        leaseUserInput: true,
         ...(promptId ? { promptId } : {}),
         // Keep the legacy wire name for ACP host compatibility.
         ...(watchQueuedPrompt ? { todoStopGuardWatchQueuedPrompt: true } : {}),
@@ -12789,18 +12944,8 @@ export class Session implements SessionContext {
       const isTimeout = error instanceof MidTurnDrainTimeoutError;
       if (isTimeout) {
         this.midTurnDrainTimeoutStrikes += 1;
-        // The lost race leaves the drain request pending. The daemon answers it
-        // by splicing the queue + publishing the SSE echo (so the browser has
-        // already deduped), then returns the messages we just timed out waiting
-        // for. Recover that late response and inject it on the next batch instead
-        // of discarding it (which would lose the messages from both queues —
-        // silent loss). `#recoverLateDrain` bounds the wait and swallows a late
-        // rejection, but only of the drain promise: anything that throws after
-        // that race — the debug logger among them — escapes a bare `void` as an
-        // unhandled rejection, which ends the process. This recovery is
-        // best-effort by construction, so nothing it does may take the session
-        // down with it. Swallow silently rather than log, since the logger is
-        // itself one of the things that can throw here.
+        // Internal and legacy deliveries are transferred by the drain itself.
+        // The host retains responsibility for unfinished user leases.
         if (drainPromise) {
           void this.#recoverLateDrain(drainPromise, sendNow?.onLate).catch(
             () => {},
@@ -12978,12 +13123,8 @@ export class Session implements SessionContext {
       },
       takeInput: async (onFullTurnModel) => {
         if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
-        // Without input taken here, delivery stays at tool boundaries. A
-        // stopped turn takes nothing more from the host, which promotes what
-        // is still queued; the input already taken is kept when the turn ends.
+        // Without a claim here, delivery stays at tool boundaries.
         if (!tookInput || turnSignal.aborted) return null;
-        // The user already sees this input as delivered: keep it, as text if
-        // need be, even when the turn is cancelled while it is resolved.
         const drained = await this.#drainMidTurnInput(turnSignal, {
           onFullTurnModel,
           preserveFallbackOnAbort: true,
@@ -12999,21 +13140,25 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Keeps input an early drain took during this turn but never sent. The host
-   * has already handed it over and the user sees it as delivered, so a turn
-   * that is cancelled or fails first records it in the conversation, as a
-   * stopped tool run does, instead of carrying it into a later turn.
+   * Preserve committed user messages and internal deliveries. The host
+   * settles the remaining user leases when the turn ends.
    */
   async #keepUnsentEarlyMidTurnInput(abortSignal: AbortSignal): Promise<void> {
     try {
       if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
-      const unsent = this.midTurnRecoveredMessages.filter((message) =>
-        this.earlyDrainedMidTurnMessages.has(message),
+      this.#reconcileCommittedMidTurnHistory(true);
+      const unsent = this.midTurnRecoveredMessages.filter(
+        (message) =>
+          this.earlyDrainedMidTurnMessages.has(message) &&
+          message.kind === 'structured' &&
+          message.queueOnly,
+      );
+      this.midTurnRecoveredMessages = this.midTurnRecoveredMessages.filter(
+        (message) =>
+          !this.earlyDrainedMidTurnMessages.has(message) &&
+          (message.kind !== 'structured' || !message.lease),
       );
       if (unsent.length === 0) return;
-      this.midTurnRecoveredMessages = this.midTurnRecoveredMessages.filter(
-        (message) => !this.earlyDrainedMidTurnMessages.has(message),
-      );
       const deadline = new AbortController();
       const timer = setTimeout(
         () => deadline.abort(),
@@ -13040,13 +13185,198 @@ export class Session implements SessionContext {
     }
   }
 
+  #reconcileCommittedMidTurnHistory(preserveMissing: boolean): void {
+    if (this.committedMidTurnHistory.size === 0) return;
+    const chat = this.#getCurrentChat();
+    for (const [messageId, { sessionId, content }] of this
+      .committedMidTurnHistory) {
+      const belongsToSession = this.config.getSessionId() === sessionId;
+      const delivered =
+        belongsToSession &&
+        chat.findLastHistoryEntry(
+          (entry) =>
+            entry.parts?.some(
+              (part: CommittedMidTurnPart) =>
+                part[committedMidTurnMessageId] === messageId,
+            ) === true,
+        );
+      if (preserveMissing && belongsToSession && !delivered) {
+        chat.addHistory(content);
+      }
+      if (delivered || preserveMissing)
+        this.committedMidTurnHistory.delete(messageId);
+    }
+  }
+
+  async #recordCommittedMidTurn(
+    message: BridgeCommittedMidTurnMessage,
+  ): Promise<boolean> {
+    const recorder = this.config.getChatRecordingService();
+    if (!recorder) throw new Error('Mid-turn transcript recorder unavailable');
+    return recorder.recordCommittedMidTurnUserMessage(
+      message.transcriptParts ?? message.parts,
+      message.messageId,
+      message,
+    );
+  }
+
+  async recoverCommittedMidTurnMessages(messages: unknown): Promise<string[]> {
+    if (!Array.isArray(messages)) throw RequestError.invalidParams();
+    const records = messages.map(
+      (message: unknown): BridgeCommittedMidTurnMessage => {
+        if (
+          !isRecord(message) ||
+          typeof message['messageId'] !== 'string' ||
+          typeof message['displayText'] !== 'string' ||
+          !Array.isArray(message['parts']) ||
+          message['parts'].length === 0 ||
+          !message['parts'].every(
+            (part: unknown) => isRecord(part) && !Array.isArray(part),
+          ) ||
+          (message['promoted'] !== undefined && message['promoted'] !== true) ||
+          (message['historyPromptId'] !== undefined &&
+            typeof message['historyPromptId'] !== 'string') ||
+          (message['hookContext'] !== undefined &&
+            typeof message['hookContext'] !== 'string')
+        )
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid committed mid-turn message',
+          );
+        const attachmentReferences = readDaemonAttachmentReferences(
+          message['attachmentReferences'],
+        );
+        const transcriptParts = message['transcriptParts'];
+        if (
+          transcriptParts !== undefined &&
+          (!Array.isArray(transcriptParts) ||
+            transcriptParts.length === 0 ||
+            !transcriptParts.every(
+              (part: unknown) => isRecord(part) && !Array.isArray(part),
+            ))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid committed mid-turn transcript',
+          );
+        }
+        if (
+          message['attachmentReferences'] !== undefined &&
+          !attachmentReferences
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid committed mid-turn attachments',
+          );
+        }
+        return {
+          messageId: message['messageId'],
+          displayText: message['displayText'],
+          parts: message['parts'] as Part[],
+          ...(transcriptParts
+            ? { transcriptParts: transcriptParts as Part[] }
+            : {}),
+          ...(attachmentReferences ? { attachmentReferences } : {}),
+          ...(message['promoted'] === true ? { promoted: true } : {}),
+          ...(message['historyPromptId'] !== undefined
+            ? { historyPromptId: message['historyPromptId'] }
+            : {}),
+          ...(message['hookContext'] !== undefined
+            ? { hookContext: message['hookContext'] }
+            : {}),
+        };
+      },
+    );
+    this.assertHistoryContextAvailable();
+    for (const message of records) {
+      const content: Content = { role: 'user', parts: message.parts };
+      if (message.hookContext)
+        restoreUserPromptSubmitContextReceipt(content, message.hookContext);
+      if (await this.#recordCommittedMidTurn(message)) {
+        markApiHistoryPrompt(content, message.historyPromptId);
+        this.#getCurrentChat().addHistory(content);
+      }
+    }
+    if (this.midTurnRecoveryPending) {
+      this.midTurnRecoveryPending = false;
+      this.#activeWorkChanged();
+      this.startCronScheduler();
+      void this.#drainGoalQueue();
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    }
+    return records.map((record) => record.messageId);
+  }
+
+  async #settleMidTurnLease(
+    leaseId: string,
+    outcomes: BridgeMidTurnOutcome[],
+  ): Promise<BridgeCommittedMidTurnMessage[]> {
+    try {
+      const requested = new Map(
+        outcomes.flatMap((outcome) =>
+          outcome.kind === 'allow'
+            ? [[outcome.messageId, outcome] as const]
+            : [],
+        ),
+      );
+      const response = await withTimeoutSignal(
+        new AbortController().signal,
+        MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+        () =>
+          this.client.extMethod(MID_TURN_QUEUE_SETTLE_METHOD, {
+            sessionId: this.sessionId,
+            leaseId,
+            outcomes,
+          }),
+      );
+      if (
+        !Array.isArray(response['committedMessageIds']) ||
+        !response['committedMessageIds'].every(
+          (id: unknown) => typeof id === 'string' && requested.has(id),
+        )
+      ) {
+        throw new Error('Invalid mid-turn commit acknowledgement');
+      }
+      const committed: BridgeCommittedMidTurnMessage[] = [];
+      for (const id of new Set<string>(response['committedMessageIds'])) {
+        const message = requested.get(id)!;
+        await this.#recordCommittedMidTurn(message);
+        const marker = message.parts[0] as CommittedMidTurnPart;
+        marker[committedMidTurnMessageId] = id;
+        const content: Content = { role: 'user', parts: message.parts };
+        markApiHistoryPrompt(content, message.historyPromptId);
+        this.committedMidTurnHistory.set(id, {
+          sessionId: this.config.getSessionId(),
+          content,
+        });
+        committed.push(message);
+      }
+      if (committed.length > 0) {
+        void this.client
+          .extMethod(MID_TURN_QUEUE_RECORDED_METHOD, {
+            sessionId: this.sessionId,
+            messageIds: committed.map((message) => message.messageId),
+          })
+          .catch((error: unknown) => {
+            debugLogger.warn(
+              'Could not acknowledge persisted mid-turn messages',
+              error,
+            );
+          });
+      }
+      return committed;
+    } catch (error) {
+      this.deferAutomaticWorkUntilMidTurnRecovery();
+      throw new RequestError(-32000, this.#formatError(error), {
+        errorKind: 'mid_turn_settlement_unknown',
+      });
+    }
+  }
+
   /**
-   * After a drain times out, the request is still pending; the daemon settles it
-   * shortly after (it splices + SSE-publishes synchronously, so the browser has
-   * already deduped). Recover that late response for the next batch instead of
-   * discarding it, but bound the wait with a secondary deadline so a response
-   * that only arrives long after the turn isn't pushed into an unrelated
-   * context. A late rejection is swallowed (no unhandled rejection).
+   * Recover legacy and internal deliveries from a late drain. The host
+   * recovers unfinished leases when their owning turn settles.
    */
   async #recoverLateDrain(
     pending: ReturnType<AgentSideConnection['extMethod']>,
@@ -13077,7 +13407,9 @@ export class Session implements SessionContext {
       );
       return;
     }
-    const lateMessages = parseMidTurnDrainResponse(late);
+    const lateMessages = parseMidTurnDrainResponse(late).filter(
+      (message) => message.kind !== 'structured' || !message.lease,
+    );
     if (lateMessages.length > 0) {
       debugLogger.debug(
         `[mid-turn] recovered ${lateMessages.length} message(s) from a timed-out drain [session ${this.sessionId}]`,
@@ -13088,10 +13420,7 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Resolve each drained mid-turn message (text or structured content) into
-   * agent-visible `Part`s and record it once to the chat transcript. Recording
-   * happens on injection (here), so a message recovered from an earlier
-   * timed-out drain is still recorded exactly once.
+   * Resolve drained messages and return model parts only after admission.
    */
   async #buildMidTurnParts(
     messages: DrainedMidTurnMessage[],
@@ -13114,8 +13443,45 @@ export class Session implements SessionContext {
     ) {
       proposalTurn.settlementBlocked = true;
     }
-    const parts: Part[] = [];
-    for (const [index, message] of messages.entries()) {
+    const rendered: Array<{
+      parts: Part[];
+      lease?: { messageId: string; blocks: ContentBlock[] };
+    }> = [];
+    const batches = new Map<string, BridgeMidTurnOutcome[]>();
+    const approved = new Set<string>();
+    for (const message of messages) {
+      if (message.kind === 'structured' && message.lease) {
+        if (abortSignal.aborted) break;
+        const { leaseId, messageId } = message.lease;
+        let batch = batches.get(leaseId);
+        if (!batch) {
+          batch = [];
+          batches.set(leaseId, batch);
+        }
+        const outcome = await this.#inspectMidTurnLease(
+          message.lease,
+          message.content,
+          message.displayText,
+          abortSignal,
+          {
+            attachmentReferences: message.attachmentReferences,
+            prefix: options.prefix,
+            invalid: message.invalid,
+          },
+        );
+        batch.push(outcome);
+        if (outcome.kind === 'allow')
+          rendered.push({
+            parts: outcome.parts,
+            lease: { messageId, blocks: message.content },
+          });
+        continue;
+      }
+      if (
+        abortSignal.aborted &&
+        (message.kind !== 'structured' || !message.queueOnly)
+      )
+        break;
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
@@ -13146,16 +13512,7 @@ export class Session implements SessionContext {
         }
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
-          // Input an early drain took is kept when the turn ends, so give
-          // back what of it this drain did not build.
-          this.midTurnRecoveredMessages.unshift(
-            ...messages
-              .slice(index)
-              .filter((unbuilt) =>
-                this.earlyDrainedMidTurnMessages.has(unbuilt),
-              ),
-          );
-          return parts;
+          break;
         }
         if (!abortSignal.aborted) {
           const errorMessage = this.#formatError(messageError);
@@ -13198,15 +13555,7 @@ export class Session implements SessionContext {
           );
           abortSignal.throwIfAborted();
         } catch (error) {
-          if (abortSignal.aborted) {
-            // The host already settled these queue IDs. The finalizer keeps
-            // the unsent input without starting another hook check.
-            const unsent = messages.slice(index);
-            for (const item of unsent)
-              this.earlyDrainedMidTurnMessages.add(item);
-            this.midTurnRecoveredMessages.unshift(...unsent);
-            return parts;
-          }
+          if (abortSignal.aborted) break;
           await this.messageEmitter.emitAgentMessage(
             userPromptBlockedNotice(this.#formatError(error)),
           );
@@ -13244,9 +13593,160 @@ export class Session implements SessionContext {
       } else {
         recorder?.recordMidTurnUserMessage(built, displayText);
       }
-      parts.push(...built);
+      rendered.push({ parts: built });
+    }
+    if (!abortSignal.aborted) {
+      for (const [leaseId, outcomes] of batches) {
+        if (abortSignal.aborted) break;
+        for (const message of await this.#settleMidTurnLease(
+          leaseId,
+          outcomes,
+        )) {
+          approved.add(message.messageId);
+        }
+      }
+    }
+    const parts: Part[] = [];
+    for (const entry of rendered) {
+      if (!entry.lease) parts.push(...entry.parts);
+      else if (approved.has(entry.lease.messageId)) {
+        parts.push(
+          ...(await this.#convertCommittedMidTurnParts(
+            entry.parts,
+            entry.lease.blocks,
+            abortSignal,
+            options.onFullTurnModel,
+          )),
+        );
+      }
     }
     return parts;
+  }
+
+  async #inspectMidTurnLease(
+    lease: { leaseId: string; messageId: string },
+    blocks: ContentBlock[],
+    displayText: string,
+    signal: AbortSignal,
+    options: {
+      prefix?: string;
+      attachmentReferences?: SessionAttachmentReference[];
+      invalid?: true;
+      historyPromptId?: string;
+    } = {},
+  ): Promise<BridgeMidTurnOutcome> {
+    const { messageId } = lease;
+    try {
+      signal.throwIfAborted();
+      if (options.invalid) throw new Error('Invalid mid-turn input from host');
+      const prompt = blocks
+        .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+        .join(' ');
+      const decision = await runUserPromptSubmit(
+        this.config,
+        prompt,
+        displayText || undefined,
+        signal,
+        undefined,
+        true,
+      );
+      signal.throwIfAborted();
+      if (decision?.blockReason !== undefined) {
+        return { messageId, kind: 'reject', reason: decision.blockReason };
+      }
+      if (!this.config.getChatRecordingService()) {
+        throw new Error('Mid-turn transcript recorder unavailable');
+      }
+      const rawParts = await withTimeoutSignal(
+        signal,
+        MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+        (resolveSignal) =>
+          this.#resolvePrompt(blocks, resolveSignal, {
+            promptLast: options.historyPromptId !== undefined,
+            deferBridgeConversions: true,
+          }),
+      );
+      signal.throwIfAborted();
+      const parts = options.historyPromptId
+        ? rawParts
+        : prefixMidTurnUserMessageParts(rawParts, displayText, options.prefix);
+      const hookContext = decision?.additionalContext;
+      if (hookContext)
+        parts.push(createUserPromptSubmitContextPart(hookContext));
+      if (parts.length === 0)
+        throw new Error('Mid-turn input resolved to no content');
+      let transcriptParts = parts;
+      const attachmentReferences = options.attachmentReferences;
+      if (attachmentReferences) {
+        const attachments = blocks.filter(
+          (block) => block.type === 'image' || block.type === 'resource',
+        );
+        const referenced =
+          attachments.length === attachmentReferences.length
+            ? attachments
+            : attachments.filter(
+                (block) =>
+                  typeof block._meta?.[DAEMON_ATTACHMENT_CONTEXT_META_KEY] ===
+                  'string',
+              );
+        transcriptParts = stripReferencedAttachmentDataParts(parts, referenced);
+        if (transcriptParts.length === 0)
+          transcriptParts = [{ text: displayText }];
+      }
+      if (
+        Buffer.byteLength(
+          JSON.stringify({
+            transcriptParts,
+            displayText,
+            attachmentReferences,
+            hookContext,
+          }),
+        ) >=
+        SESSION_TRANSCRIPT_MAX_LINE_BYTES - 64 * 1024
+      ) {
+        throw new Error(
+          'Mid-turn input is too large to recover from the transcript',
+        );
+      }
+      return {
+        messageId,
+        kind: 'allow',
+        parts,
+        ...(transcriptParts !== parts ? { transcriptParts } : {}),
+        displayText,
+        ...(options.historyPromptId
+          ? { promoted: true, historyPromptId: options.historyPromptId }
+          : {}),
+        ...(options.attachmentReferences
+          ? { attachmentReferences: options.attachmentReferences }
+          : {}),
+        ...(hookContext ? { hookContext } : {}),
+      };
+    } catch (error) {
+      return signal.aborted
+        ? { messageId, kind: 'release' }
+        : { messageId, kind: 'error', reason: this.#formatError(error) };
+    }
+  }
+
+  async #convertCommittedMidTurnParts(
+    parts: Part[],
+    blocks: ContentBlock[],
+    signal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
+  ): Promise<Part[]> {
+    if (signal.aborted) return parts;
+    const converted = await this.#applyBridgeConversionsIfNeeded(
+      parts,
+      blocks,
+      signal,
+      onFullTurnModel,
+    );
+    const original: CommittedMidTurnPart | undefined = parts[0];
+    const leading: CommittedMidTurnPart | undefined = converted[0];
+    if (leading && original)
+      leading[committedMidTurnMessageId] = original[committedMidTurnMessageId];
+    return converted;
   }
 
   /**
@@ -15773,7 +16273,9 @@ export class Session implements SessionContext {
     try {
       await this.client.extNotification('_qwencode/end_turn', {
         sessionId: this.sessionId,
-        reason,
+        reason: this.midTurnRecoveryPending
+          ? 'mid_turn_settlement_unknown'
+          : reason,
         ...(turnId ? { turnId } : {}),
         source: 'background_notification',
       });
@@ -15811,10 +16313,15 @@ export class Session implements SessionContext {
     try {
       await this.client.extNotification('_qwencode/end_turn', {
         sessionId: this.sessionId,
-        reason: result?.stopReason ?? 'cancelled',
+        reason: this.midTurnRecoveryPending
+          ? 'mid_turn_settlement_unknown'
+          : (result?.stopReason ?? 'cancelled'),
         source: 'goal',
         turnId,
         promptId: this.config.getSessionId() + '########' + String(this.turn),
+        ...(result?._meta?.[MID_TURN_HANDOFF_META_KEY] === true
+          ? { midTurnHandoff: true }
+          : {}),
       });
     } catch (error) {
       debugLogger.debug(

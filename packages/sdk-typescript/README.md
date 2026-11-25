@@ -207,6 +207,12 @@ entry there.
 
 ### Talking to running sessions
 
+On a daemon advertising `session_mid_turn_draft_recovery`, call `session.prepareMidTurnMessage()` before uploading attachments or sending a mid-turn follow-up. The result supplies the stable `messageId` and `target` to pass to `session.enqueueMidTurnMessage`. Keep the local draft and these identifiers until the daemon accepts the message.
+
+After an ambiguous transport failure, query `session.getMidTurnMessages({ messageId })`. If the host reports `owned`, let the host handle delivery or recovery. When the host reports `unknown`, retry a live submission with the same ID and target, or restore it locally once cancellation has fenced its generation. Keep a pending local copy while cancellation remains uncertain. A `turn_cancelled` rejection returns the input to the draft.
+
+The queue snapshot's `recoveries` belong to this session client identity. Merge them into the local draft by `messageId` and call `session.consumeMidTurnRecovery(messageIds)` after saving the text and attachments. Reattach with the same client identity after a refresh to retrieve unconsumed recoveries.
+
 `@qwen-code/sdk/peer` lets a program that is not a Qwen Code session join the
 sessions running as the same user on the same machine — a voice front-end, a
 relay, a build watcher. The program shows up in `qwen sessions ps`, and in the

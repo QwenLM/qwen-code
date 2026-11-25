@@ -5319,7 +5319,13 @@ export interface DaemonSessionBtwResult {
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
   messageId?: string;
-  reason?: 'session_idle';
+  reason?: 'session_idle' | 'turn_cancelled';
+}
+
+/** The host turn and cancellation generation observed before sending a steer. */
+export interface DaemonMidTurnTarget {
+  promptId: string;
+  cancelGeneration: number;
 }
 
 export interface DaemonRemoveMidTurnMessageResult {
@@ -5346,6 +5352,11 @@ export interface DaemonMidTurnMessageSummary {
   content?: PromptContentBlock[];
 }
 
+/** Unconsumed draft input assigned to the requesting daemon client. */
+export interface DaemonMidTurnRecovery extends DaemonMidTurnMessageSummary {
+  error?: string;
+}
+
 /**
  * Response body of `GET /session/:id/mid-turn-messages`. Reconciliation
  * session-owned snapshot for page refresh, session switching, and missed
@@ -5360,6 +5371,10 @@ export interface DaemonMidTurnMessagesResult {
   messages: DaemonMidTurnMessageSummary[];
   settledMessageIds: string[];
   promotedMessageIds: string[];
+  target?: DaemonMidTurnTarget;
+  cancelGeneration?: number;
+  recoveries?: DaemonMidTurnRecovery[];
+  disposition?: 'owned' | 'unknown';
 }
 
 /**

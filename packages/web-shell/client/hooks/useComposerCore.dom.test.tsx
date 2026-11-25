@@ -4592,6 +4592,46 @@ describe('composer draft attachment races', () => {
     });
   });
 
+  it('restores identical messages by id exactly once, including attachments after a reload', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const options = {
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/work',
+      attachmentsEnabled: true,
+    };
+    await mount(options);
+    await flushDraftAttachments();
+    act(() => latest!.handle.setText('new draft'));
+    const image = { data: 'payload', media_type: 'image/png' };
+    const drafts = [
+      { messageId: 'one', text: 'same message', images: [image] },
+      { messageId: 'two', text: 'same message', images: [image] },
+    ];
+    await act(async () => {
+      expect(
+        await latest!.handle.recoverMidTurnDrafts!('session-a', drafts),
+      ).toBe(true);
+    });
+    expect(latest!.handle.getText()).toBe(
+      'same message\nsame message\nnew draft',
+    );
+    expect(latest!.pastedImages).toEqual([image, image]);
+    await act(async () => root!.unmount());
+    container!.remove();
+    await mount(options);
+    await flushDraftAttachments();
+    await act(async () => {
+      expect(
+        await latest!.handle.recoverMidTurnDrafts!('session-a', drafts),
+      ).toBe(true);
+    });
+    expect(latest!.handle.getText()).toBe(
+      'same message\nsame message\nnew draft',
+    );
+    expect(latest!.pastedImages).toEqual([image, image]);
+  });
+
   it('restores on re-enabling while same-session workspace metadata resolves', async () => {
     const fake = createFakeIndexedDB();
     vi.stubGlobal('indexedDB', fake.factory);

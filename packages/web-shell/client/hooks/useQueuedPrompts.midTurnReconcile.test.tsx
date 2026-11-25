@@ -15,6 +15,7 @@ import {
 import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { getTranslator } from '../i18n';
+import type { MidTurnDraftAdmission } from './mid-turn-drafts';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -26,6 +27,7 @@ const sdkMock = vi.hoisted(() => {
       removeAttachment: vi.fn(),
       enqueueMidTurnMessage: vi.fn(),
       getMidTurnMessages: vi.fn(),
+      consumeMidTurnRecovery: vi.fn(),
       submitPrompt: vi.fn(),
       removePendingPrompt: vi.fn(),
       getPendingPrompts: vi.fn(),
@@ -42,12 +44,36 @@ const sdkMock = vi.hoisted(() => {
     pendingEvents: [] as Array<Record<string, unknown>>,
     ownerVersion: 0,
     pendingEventListeners,
+    draftAdmissions: new Map<string, MidTurnDraftAdmission>(),
     publishPendingEvents: (events: Array<Record<string, unknown>>) => {
       mock.pendingEvents = events;
       for (const listener of [...pendingEventListeners]) listener();
     },
   };
   return mock;
+});
+
+vi.mock('./mid-turn-drafts', async () => {
+  const actual =
+    await vi.importActual<typeof import('./mid-turn-drafts')>(
+      './mid-turn-drafts',
+    );
+  return {
+    ...actual,
+    saveMidTurnAdmission: vi.fn(
+      async (owner: string, draft: MidTurnDraftAdmission) => {
+        sdkMock.draftAdmissions.set(`${owner}${draft.messageId}`, draft);
+      },
+    ),
+    deleteMidTurnAdmission: vi.fn(async (owner: string, id: string) => {
+      sdkMock.draftAdmissions.delete(`${owner}${id}`);
+    }),
+    loadMidTurnAdmissions: vi.fn(async (owner: string) =>
+      [...sdkMock.draftAdmissions].flatMap(([key, draft]) =>
+        key.startsWith(owner) ? [draft] : [],
+      ),
+    ),
+  };
 });
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
@@ -112,6 +138,7 @@ interface HarnessOptions {
   clientId?: string;
   canMutateMidTurn?: boolean;
   canQueryMidTurn?: boolean;
+  canRecoverMidTurnDrafts?: boolean;
   canQueryPendingPrompts?: boolean;
   canInjectMidTurnMedia?: boolean;
   streamingState?: DaemonStreamingState;
@@ -137,6 +164,7 @@ function createHarness(language?: 'en' | 'zh-CN') {
     restoreImages: vi.fn(),
     restoreFiles: vi.fn(),
     restoreInputAnnotations: vi.fn(),
+    recoverMidTurnDrafts: vi.fn(async () => true),
     focus: vi.fn(),
   };
   const stableEditorRef = { current: stableEditor } as never;
@@ -171,6 +199,7 @@ function createHarness(language?: 'en' | 'zh-CN') {
       clientId: opts.clientId ?? CLIENT_ID,
       canMutateMidTurn: opts.canMutateMidTurn ?? true,
       canQueryMidTurn: opts.canQueryMidTurn ?? true,
+      canRecoverMidTurnDrafts: opts.canRecoverMidTurnDrafts ?? false,
       canQueryPendingPrompts: opts.canQueryPendingPrompts ?? true,
       canInjectMidTurnMedia: opts.canInjectMidTurnMedia ?? true,
       workspaceFileActions: stableWorkspaceFileActions as never,
@@ -224,6 +253,8 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
   beforeEach(() => {
     vi.clearAllMocks();
     sdkMock.ownerVersion = 0;
+    sdkMock.draftAdmissions.clear();
+    sessionStorage.clear();
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
       (_message: string, opts?: { messageId?: string }) =>
         Promise.resolve({ accepted: true, messageId: opts?.messageId }),
@@ -263,6 +294,215 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     sdkMock.injectedBatches = [];
     sdkMock.pendingEvents = [];
   });
+
+  it('returns an uploading steer to the draft on stop before the daemon takes ownership', async () => {
+    const harness = createHarness();
+    const image = { data: 'aGVsbG8=', media_type: 'image/png' };
+    const target = { promptId: 'turn-1', cancelGeneration: 4 };
+    const snapshot = {
+      messages: [],
+      promotedMessageIds: [],
+      settledMessageIds: [],
+    };
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      ...snapshot,
+      target,
+    });
+    const started = deferred<void>();
+    let uploadSignal: AbortSignal | undefined;
+    sdkMock.actions.uploadAttachment.mockImplementationOnce(
+      (_image, { signal }) => {
+        uploadSignal = signal;
+        started.resolve();
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        });
+      },
+    );
+    try {
+      await harness.render({ canRecoverMidTurnDrafts: true });
+      const stored = vi.fn();
+      await act(async () => {
+        expect(
+          harness
+            .result()
+            .enqueuePrompt(
+              'keep me',
+              [image],
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              stored,
+            ),
+        ).toBe(false);
+        await started.promise;
+      });
+      expect(stored).toHaveBeenCalledOnce();
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        ...snapshot,
+        cancelGeneration: 5,
+      });
+      await act(async () => {
+        harness.result().cancelMidTurnDrafts()?.();
+      });
+      expect(uploadSignal?.aborted).toBe(true);
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.editor.recoverMidTurnDrafts).toHaveBeenCalledWith(
+        'session-a',
+        [expect.objectContaining({ text: 'keep me', images: [image], target })],
+      );
+      expect(sdkMock.actions.consumeMidTurnRecovery).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('uses the host rejection of a bound steer without falling back to ordinary send', async () => {
+    const harness = createHarness();
+    const target = { promptId: 'turn-1', cancelGeneration: 5 };
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [],
+      promotedMessageIds: [],
+      settledMessageIds: [],
+      target,
+    });
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      async (_text, opts) => {
+        opts.onAdmissionStarted();
+        return { accepted: false, reason: 'turn_cancelled' };
+      },
+    );
+    try {
+      await harness.render({ canRecoverMidTurnDrafts: true });
+      await act(async () => {
+        harness.result().enqueuePrompt('do not resend');
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+        'do not resend',
+        expect.objectContaining({ target, messageId: expect.any(String) }),
+      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.editor.recoverMidTurnDrafts).toHaveBeenCalledWith(
+        'session-a',
+        [expect.objectContaining({ text: 'do not resend' })],
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('acknowledges all assigned ids in order only after storing the recovered draft', async () => {
+    const harness = createHarness();
+    const merged = deferred<boolean>();
+    harness.editor.recoverMidTurnDrafts.mockReturnValueOnce(merged.promise);
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [],
+      promotedMessageIds: [],
+      settledMessageIds: [],
+      recoveries: [
+        { messageId: 'one', text: 'same' },
+        { messageId: 'two', text: 'same' },
+      ],
+    });
+    try {
+      await harness.render({ canRecoverMidTurnDrafts: true });
+      expect(harness.editor.recoverMidTurnDrafts).toHaveBeenCalledWith(
+        'session-a',
+        [
+          expect.objectContaining({ messageId: 'one', text: 'same' }),
+          expect.objectContaining({ messageId: 'two', text: 'same' }),
+        ],
+      );
+      expect(sdkMock.actions.consumeMidTurnRecovery).not.toHaveBeenCalled();
+      await act(async () => merged.resolve(true));
+      expect(sdkMock.actions.consumeMidTurnRecovery).toHaveBeenCalledWith(
+        ['one', 'two'],
+        'session-a',
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it.each(['unknown', 'owned'] as const)(
+    'reconciles an interrupted POST whose ownership is %s without re-sending it after stop',
+    async (disposition) => {
+      const harness = createHarness();
+      const target = { promptId: 'turn-1', cancelGeneration: 8 };
+      const snapshot = {
+        messages: [],
+        promotedMessageIds: [],
+        settledMessageIds: [],
+      };
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        ...snapshot,
+        target,
+      });
+      const started = deferred<string>();
+      sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+        (_text, opts) => {
+          opts.onAdmissionStarted();
+          started.resolve(opts.messageId);
+          return new Promise((_resolve, reject) => {
+            opts.signal.addEventListener(
+              'abort',
+              () => reject(opts.signal.reason),
+              { once: true },
+            );
+          });
+        },
+      );
+      try {
+        await harness.render({ canRecoverMidTurnDrafts: true });
+        await act(async () => {
+          harness.result().enqueuePrompt('restore this exactly');
+          await started.promise;
+        });
+        const id = await started.promise;
+        sdkMock.actions.getMidTurnMessages.mockImplementation(
+          async (options) => ({
+            ...snapshot,
+            cancelGeneration: 9,
+            ...(options?.messageId ? { disposition } : {}),
+            ...(disposition === 'owned'
+              ? {
+                  recoveries: [{ messageId: id, text: 'restore this exactly' }],
+                }
+              : {}),
+          }),
+        );
+        await act(async () => {
+          harness.result().cancelMidTurnDrafts()?.();
+        });
+        expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledOnce();
+        expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+        expect(harness.editor.recoverMidTurnDrafts).toHaveBeenCalledWith(
+          'session-a',
+          [
+            expect.objectContaining({
+              messageId: id,
+              text: 'restore this exactly',
+            }),
+          ],
+        );
+        if (disposition === 'owned') {
+          expect(sdkMock.actions.consumeMidTurnRecovery).toHaveBeenCalledWith(
+            [id],
+            'session-a',
+          );
+        } else {
+          expect(sdkMock.actions.consumeMidTurnRecovery).not.toHaveBeenCalled();
+        }
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
 
   it.each(['', 'summarize the log'])(
     'discards a refused held command without changing draft %j',

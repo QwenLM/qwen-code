@@ -555,6 +555,9 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_LEASE_META_KEY,
+  MID_TURN_QUEUE_RECOVER_METHOD,
+  MID_TURN_RECOVERY_PENDING_META_KEY,
   MID_TURN_SEND_NOW_METHOD,
   PROMPT_CANCEL_METHOD,
   PROMPT_CANCEL_REASON_META_KEY,
@@ -5042,6 +5045,19 @@ class QwenAgent implements Agent {
     return true;
   }
 
+  private deferAutomaticWorkForMidTurnRecovery(
+    meta: Record<string, unknown> | null | undefined,
+  ): boolean {
+    if (meta?.[MID_TURN_RECOVERY_PENDING_META_KEY] !== true) return false;
+    if (this.privateParentState !== 'trusted') {
+      throw RequestError.invalidParams(
+        undefined,
+        'Mid-turn recovery requires a trusted private ACP parent',
+      );
+    }
+    return true;
+  }
+
   private async retryPendingConfigCleanup(
     runtimeBaseDir: string,
     requiredSessionId?: string,
@@ -6365,6 +6381,8 @@ class QwenAgent implements Agent {
     const deferAutomaticWorkUntilCwdRestore = this.deferAutomaticWorkForRestore(
       params._meta,
     );
+    const deferAutomaticWorkUntilMidTurnRecovery =
+      this.deferAutomaticWorkForMidTurnRecovery(params._meta);
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
     >(
@@ -6668,6 +6686,7 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             deferAutomaticWorkUntilCwdRestore,
+            deferAutomaticWorkUntilMidTurnRecovery,
             configProviderRevision,
             fileDerivedApprovalMode,
             ...(provisionalStandalone
@@ -6967,6 +6986,8 @@ class QwenAgent implements Agent {
     const deferAutomaticWorkUntilCwdRestore = this.deferAutomaticWorkForRestore(
       params._meta,
     );
+    const deferAutomaticWorkUntilMidTurnRecovery =
+      this.deferAutomaticWorkForMidTurnRecovery(params._meta);
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
     >(
@@ -7087,6 +7108,7 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             deferAutomaticWorkUntilCwdRestore,
+            deferAutomaticWorkUntilMidTurnRecovery,
             configProviderRevision,
             fileDerivedApprovalMode,
             ...(provisionalStandalone
@@ -7502,6 +7524,8 @@ class QwenAgent implements Agent {
         ? { ...params._meta }
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    if (this.privateParentState !== 'trusted')
+      delete meta[MID_TURN_LEASE_META_KEY];
     const skillLeaseKey =
       this.privateParentState === 'trusted' &&
       typeof meta[TURN_SKILL_LEASE_META_KEY] === 'string'
@@ -10350,6 +10374,7 @@ class QwenAgent implements Agent {
   private isSessionScopedExtMethod(method: string): boolean {
     return (
       method === PROMPT_CANCEL_METHOD ||
+      method === MID_TURN_QUEUE_RECOVER_METHOD ||
       method === MID_TURN_SEND_NOW_METHOD ||
       method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD ||
       method.startsWith('qwen/control/session/') ||
@@ -10377,7 +10402,8 @@ class QwenAgent implements Agent {
           : params;
       if (
         (method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification ||
-          method === SERVE_CONTROL_EXT_METHODS.sessionExternalRecord) &&
+          method === SERVE_CONTROL_EXT_METHODS.sessionExternalRecord ||
+          method === MID_TURN_QUEUE_RECOVER_METHOD) &&
         this.privateParentState !== 'trusted'
       ) {
         throw RequestError.invalidParams(
@@ -10650,6 +10676,23 @@ class QwenAgent implements Agent {
         );
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
+      }
+      case MID_TURN_QUEUE_RECOVER_METHOD: {
+        const sessionId = params['sessionId'];
+        const session =
+          typeof sessionId === 'string'
+            ? this.sessions.get(sessionId)
+            : undefined;
+        if (!session)
+          throw RequestError.invalidParams(
+            undefined,
+            'Unknown mid-turn recovery session',
+          );
+        return {
+          recordedMessageIds: await session.recoverCommittedMidTurnMessages(
+            params['messages'],
+          ),
+        };
       }
       case MID_TURN_SEND_NOW_METHOD: {
         const sessionId = params['sessionId'];
@@ -18307,6 +18350,7 @@ class QwenAgent implements Agent {
       enableLiveScreenContext?: boolean;
       deferWorkspaceActivation?: boolean;
       deferAutomaticWorkUntilCwdRestore?: boolean;
+      deferAutomaticWorkUntilMidTurnRecovery?: boolean;
       configProviderRevision?: number;
       fileDerivedApprovalMode?: ApprovalMode;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
@@ -18349,6 +18393,9 @@ class QwenAgent implements Agent {
     );
     if (options.deferAutomaticWorkUntilCwdRestore) {
       session.deferAutomaticWorkUntilCwdRestore();
+    }
+    if (options.deferAutomaticWorkUntilMidTurnRecovery) {
+      session.deferAutomaticWorkUntilMidTurnRecovery();
     }
     const replaySessionHistory = async () => {
       if (

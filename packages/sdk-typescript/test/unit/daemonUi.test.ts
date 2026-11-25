@@ -8901,6 +8901,59 @@ describe('R5 review batch — coverage additions', () => {
     ]);
   });
 
+  it('renders a promoted committed steer as its own rewindable user turn', () => {
+    const prior = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      promptId: 'preceding-turn',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'Start' },
+      },
+    });
+    const promoted = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      promptId: 'promoted-turn',
+      data: {
+        sessionId: 's1',
+        messages: ['Next turn'],
+        messageIds: ['promoted-turn'],
+        promoted: true,
+        items: [
+          {
+            content: [
+              {
+                type: 'resource',
+                attachmentId: 'notes.txt',
+                mimeType: 'text/plain',
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [...prior, ...promoted],
+    );
+    expect(state.blocks).toMatchObject([
+      { kind: 'user', promptId: 'preceding-turn', text: 'Start' },
+      {
+        kind: 'user',
+        promptId: 'promoted-turn',
+        text: 'Next turn',
+        files: [{ attachmentId: 'notes.txt' }],
+      },
+    ]);
+    expect(state.blocks[1]).not.toHaveProperty(
+      'meta.source',
+      'mid_turn_message_injected',
+    );
+  });
+
   it('normalizes a resource-only mid-turn message without dropping its slot', () => {
     const data = {
       sessionId: 's1',

@@ -749,7 +749,9 @@ If the hooks fail, or do not finish within 15 seconds, the batch continues with 
 
 #### UserPromptSubmit
 
-**Purpose**: Runs once when admitting a fresh user message, including a user message steered into an active turn. It can validate, block, or enrich that message. Tool results, Stop-driven continuations, model-request retries, and automated prompts skip the event. If a hook blocks a steering message, tool results in the same continuation can still proceed. ACP cancellation can preserve a message that the host has already delivered. This history operation skips the event.
+**Purpose**: Runs once when admitting a fresh user message, including a user message steered into an active turn. It can validate, block, or enrich that message. Tool results, Stop-driven continuations, model-request retries, and automated prompts skip the event. If a hook blocks a steering message, tool results in the same continuation can still proceed.
+
+In ACP Web Shell and desktop sessions, a follow-up appears in the conversation after the hook allows it and the daemon commits it. Pressing Esc or Stop before that point returns the follow-up and its valid attachments to the sending client's draft. A hook execution error can also return the draft with an error. An explicit policy rejection is shown as a rejection. Press Send to submit a restored draft as new input and run the hook again. A committed follow-up stays in the conversation if the turn stops immediately afterward. If the current turn ends normally, a queued follow-up can start the next turn under the same hook and commit rules. See [追问与取消](user-prompt-submit-steering.zh-CN.md) for the Chinese guide.
 
 **Event-specific fields**:
 

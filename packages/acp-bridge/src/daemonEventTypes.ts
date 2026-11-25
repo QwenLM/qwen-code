@@ -16,13 +16,15 @@
  */
 
 /**
- * Published when the daemon drains queued mid-turn messages into the running
- * turn. The browser consumes it to move those messages out of its pending queue
+ * Published when the daemon commits checked mid-turn messages. The browser
+ * consumes it to move those messages out of its pending queue
  * so they aren't resent as the next turn (a transient dedupe signal). Single
  * source of truth: a rename here propagates to every importer, so it can't
  * silently break browser-side dedup. `data: { sessionId, messages: string[] }`.
  */
 export const MID_TURN_MESSAGE_INJECTED_EVENT = 'mid_turn_message_injected';
+export const MID_TURN_MESSAGE_RECOVERY_EVENT = 'mid_turn_message_recovery';
+export const MID_TURN_MESSAGE_REJECTED_EVENT = 'mid_turn_message_rejected';
 
 /**
  * Published when a prompt is accepted into the per-session FIFO queue

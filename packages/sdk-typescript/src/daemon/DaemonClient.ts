@@ -248,6 +248,7 @@ import type {
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
+  DaemonMidTurnTarget,
   DaemonRemoveMidTurnMessageResult,
   DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
@@ -5850,9 +5851,16 @@ export class DaemonClient {
       eventDetailMode?: 'full' | 'summary';
       clientId?: string;
       messageId?: string;
+      target?: DaemonMidTurnTarget;
+      draftText?: string;
       content?: PromptContentBlock[];
     },
   ): Promise<DaemonMidTurnMessageResult> {
+    if (opts?.target && !opts.messageId) {
+      throw new TypeError(
+        'A targeted mid-turn message requires a stable messageId',
+      );
+    }
     // Route through `fetchWithTimeout` like every other method so a hung daemon
     // can't wedge this promise forever (the caller in `actions.ts` awaits it).
     // The helper composes any caller signal with its timeout controller. Legacy
@@ -5868,6 +5876,10 @@ export class DaemonClient {
         body: JSON.stringify({
           message,
           messageId: opts?.messageId,
+          ...(opts?.target ? { target: opts.target } : {}),
+          ...(opts?.draftText !== undefined
+            ? { draftText: opts.draftText }
+            : {}),
           ...(opts?.eventDetailMode !== undefined
             ? { eventDetailMode: opts.eventDetailMode }
             : {}),
@@ -5887,6 +5899,16 @@ export class DaemonClient {
         return (await res.json()) as DaemonMidTurnMessageResult;
       },
     );
+  }
+
+  /** Capture a stable id and host turn before preparing attachments. */
+  async prepareMidTurnMessage(
+    sessionId: string,
+    opts?: { clientId?: string; signal?: AbortSignal },
+  ): Promise<{ messageId: string; target: DaemonMidTurnTarget } | undefined> {
+    const messageId = createDaemonRequestId();
+    const { target } = await this.getMidTurnMessages(sessionId, opts);
+    return target ? { messageId, target } : undefined;
   }
 
   /**
@@ -5963,10 +5985,13 @@ export class DaemonClient {
    */
   async getMidTurnMessages(
     sessionId: string,
-    opts?: { clientId?: string; signal?: AbortSignal },
+    opts?: { clientId?: string; signal?: AbortSignal; messageId?: string },
   ): Promise<DaemonMidTurnMessagesResult> {
+    const query = opts?.messageId
+      ? `?messageId=${urlEncode(opts.messageId)}`
+      : '';
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-messages`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-messages${query}`,
       {
         method: 'GET',
         headers: this.headers({}, opts?.clientId),
@@ -5980,6 +6005,33 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonMidTurnMessagesResult;
+      },
+    );
+  }
+
+  /** Acknowledge assigned drafts after storing them locally. */
+  async consumeMidTurnRecovery(
+    sessionId: string,
+    messageIds: readonly string[],
+    opts?: { clientId?: string },
+  ): Promise<void> {
+    await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-messages/recovery/consume`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ messageIds }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/mid-turn-messages/recovery/consume',
+          );
+        }
       },
     );
   }

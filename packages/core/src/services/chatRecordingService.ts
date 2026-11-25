@@ -1316,6 +1316,7 @@ export class ChatRecordingService {
   private turnDaemonPromptIds: Array<string | undefined> = [];
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
+  private committedMidTurnWriteTail = Promise.resolve();
   private legacyArchiveGeneration?: { filePath: string; value?: string };
   private pendingPromptTitleProjections = 0;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
@@ -2300,7 +2301,9 @@ export class ChatRecordingService {
       record,
       legacyConversationFile,
       updateActiveTail,
-      options?.afterWrite,
+      options?.projectPromptTitle
+        ? this.preparePromptTitleProjection(record, legacyConversationFile)
+        : options?.afterWrite,
     );
     // Keep anchor accounting in logical queue order, matching appendRecord.
     // Once accepted, a failed write permanently stops this recorder, so no
@@ -3071,22 +3074,24 @@ export class ChatRecordingService {
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
         ...(promptId ? { promptId } : {}),
       };
-      // Advance rewind associations only after the record is built, so a
-      // rejected message cannot skew the projection.
-      this.trackTitleText(record);
-      const turnId = getRecordRewindId(record);
-      this.turnParentUuids.push(
-        turnId && this.pendingHookTurnParents.has(turnId)
-          ? this.pendingHookTurnParents.get(turnId)!
-          : (record.parentUuid ?? null),
-      );
-      if (turnId) this.pendingHookTurnParents.delete(turnId);
-      this.turnPromptIds.push(turnId);
-      this.turnDaemonPromptIds.push(record.daemonPromptId);
+      this.trackUserTurn(record);
       this.appendRecord(record, { projectPromptTitle: true });
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }
+  }
+
+  private trackUserTurn(record: ChatRecord): void {
+    this.trackTitleText(record);
+    const turnId = getRecordRewindId(record);
+    this.turnParentUuids.push(
+      turnId && this.pendingHookTurnParents.has(turnId)
+        ? this.pendingHookTurnParents.get(turnId)!
+        : (record.parentUuid ?? null),
+    );
+    if (turnId) this.pendingHookTurnParents.delete(turnId);
+    this.turnPromptIds.push(turnId);
+    this.turnDaemonPromptIds.push(record.daemonPromptId);
   }
 
   getUserDisplayTextsForTitle(): ReadonlyArray<string | null | undefined> {
@@ -3162,6 +3167,79 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving mid-turn user message:', error);
     }
+  }
+
+  recordCommittedMidTurnUserMessage(
+    parts: Part[],
+    messageId: string,
+    options: {
+      displayText: string;
+      attachmentReferences?: UserPromptAttachmentReference[];
+      promoted?: boolean;
+      historyPromptId?: string;
+      hookContext?: string;
+    },
+  ): Promise<boolean> {
+    const write = this.committedMidTurnWriteTail.then(async () => {
+      const uuid = createHash('sha256')
+        .update(
+          JSON.stringify([
+            'mid_turn_user_message',
+            this.getSessionId(),
+            messageId,
+          ]),
+        )
+        .digest('hex');
+      await this.flush();
+      if (this.lastPersistedRecordUuid !== null) {
+        const transcript = await this.runWithWriteBarrier(async () =>
+          this.binding
+            ? this.binding.lease.readTranscript()
+            : fs.promises.readFile(this.ensureConversationFile(), 'utf8'),
+        );
+        if (
+          transcript
+            .split('\n')
+            .some(
+              (line) =>
+                line.includes(`"uuid":"${uuid}"`) &&
+                jsonl
+                  .parseLineTolerant<ChatRecord>(line, this.getSessionId())
+                  .some((record) => record.uuid === uuid),
+            )
+        ) {
+          return false;
+        }
+      }
+      const record: ChatRecord = {
+        ...this.createBaseRecord('user'),
+        uuid,
+        executionContext: this.getExecutionContext(),
+        daemonPromptId: messageId,
+        ...(options.promoted ? {} : { subtype: 'mid_turn_user_message' }),
+        ...(options.historyPromptId
+          ? { promptId: options.historyPromptId }
+          : {}),
+        message: createUserContent(parts),
+        systemPayload: {
+          displayText: options.displayText,
+          ...(options.hookContext ? { hookContext: options.hookContext } : {}),
+          ...(options.attachmentReferences
+            ? { attachmentReferences: options.attachmentReferences }
+            : {}),
+        },
+      };
+      if (options.promoted) this.trackUserTurn(record);
+      await this.appendRecordStrict(record, {
+        projectPromptTitle: options.promoted,
+      });
+      return true;
+    });
+    this.committedMidTurnWriteTail = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    return write;
   }
 
   /**

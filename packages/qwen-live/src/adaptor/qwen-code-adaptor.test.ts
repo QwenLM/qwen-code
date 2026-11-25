@@ -606,6 +606,23 @@ describe('QwenCodeAdaptor.prompt steering', () => {
     expect(receipt.joinedActiveTurn).toBeUndefined();
   });
 
+  it('keeps a cancelled follow-up from starting another turn', async () => {
+    const client = makeClient({
+      enqueueMidTurnMessage: vi.fn(async () => ({
+        accepted: false,
+        reason: 'turn_cancelled' as const,
+      })),
+    });
+    const { adaptor, handle } = await busyAdaptor(client);
+
+    await expect(
+      adaptor.prompt(handle, [{ type: 'text', text: 'next up' }], {
+        steer: true,
+      }),
+    ).resolves.toMatchObject({ status: 'rejected' });
+    expect(client.promptNonBlocking).not.toHaveBeenCalled();
+  });
+
   it('falls back to a queued prompt when the injection is rejected with 400', async () => {
     // The mid-turn route caps the message length with a 400; the identical
     // payload is admissible as a queued full prompt.

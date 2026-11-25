@@ -3626,13 +3626,8 @@ export function createDaemonSessionActions({
     },
 
     async enqueueMidTurnMessage(
-      message: string,
-      opts?: {
-        signal?: AbortSignal;
-        messageId?: string;
-        content?: PromptContentBlock[];
-        onAdmissionStarted?: () => void;
-      },
+      message,
+      opts,
     ): Promise<DaemonMidTurnMessageResult> {
       // Calls without an id are the old-daemon compatibility path and fall back
       // locally. With a stable id, transport failure is ambiguous (the POST may
@@ -3703,9 +3698,9 @@ export function createDaemonSessionActions({
       return await session.sendMidTurnMessagesNow();
     },
 
-    async getMidTurnMessages(opts?: {
-      signal?: AbortSignal;
-    }): Promise<DaemonMidTurnMessagesResult | undefined> {
+    async getMidTurnMessages(
+      opts,
+    ): Promise<DaemonMidTurnMessagesResult | undefined> {
       // Best-effort and silent, like `enqueueMidTurnMessage`: reconciliation
       // is a bookkeeping recovery aid (page refresh / missed echo), not a
       // user-initiated action. `undefined` means callers preserve their
@@ -3723,6 +3718,16 @@ export function createDaemonSessionActions({
         }
         return undefined;
       }
+    },
+
+    async consumeMidTurnRecovery(messageIds, targetSessionId) {
+      const session = sessionRef.current;
+      if (session?.sessionId !== targetSessionId) {
+        throw new Error(
+          'Session changed before acknowledging recovered drafts',
+        );
+      }
+      await session.consumeMidTurnRecovery(messageIds);
     },
 
     async getPendingPrompts(opts) {

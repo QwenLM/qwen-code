@@ -203,7 +203,10 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   MID_TURN_SEND_NOW_METHOD,
-  MID_TURN_RECONCILIATION_RING_SIZE,
+  MID_TURN_LEASE_META_KEY,
+  MID_TURN_QUEUE_RECOVER_METHOD,
+  MID_TURN_RECOVERY_PENDING_META_KEY,
+  MID_TURN_HANDOFF_META_KEY,
   PROMPT_CANCEL_METHOD,
   PROMPT_CANCEL_REASON_META_KEY,
   USER_CANCEL_ABORT_REASON,
@@ -247,6 +250,8 @@ import type {
   BridgeSessionFeedbackResult,
   BridgePendingInteraction,
   BridgeClientRequestContext,
+  BridgeCommittedMidTurnMessage,
+  BridgeMidTurnOwnership,
   CloseSessionOpts,
   AcpSessionBridge,
   MidTurnQueueEntry,
@@ -275,10 +280,26 @@ import type {
   RuntimeMcpServerRemoveResult,
 } from './bridgeTypes.js';
 import {
+  clearCommittedMidTurnMessages,
+  commitMidTurnMessages,
+  deleteMidTurnDeliveryData,
+  readCommittedMidTurnMessages,
+  readMidTurnCancelGeneration,
+  readMidTurnOwnership,
+  writeMidTurnCancelGeneration,
+  writeMidTurnOwnership,
+} from './mid-turn-commit-ledger.js';
+import {
+  finishMidTurnMessage,
+  recoverMidTurnMessages,
+  rememberMidTurnId,
+  setMidTurnOwnership,
+  terminalMidTurnOwnership,
+  type MidTurnRecoveryEntry,
+} from './mid-turn-queue.js';
+import {
   isSessionAttachmentReference,
-  SessionAttachmentReferenceError,
   SessionAttachmentStore,
-  withAttachmentDegradationMarker,
 } from './sessionAttachments.js';
 import type {
   BridgeExecutionEngine,
@@ -916,6 +937,16 @@ interface SessionEntry {
    * normal prompt FIFO if it remains undrained at idle.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  midTurnOwnership: Map<string, BridgeMidTurnOwnership>;
+  midTurnRecoveries: MidTurnRecoveryEntry[];
+  persistMidTurnOwnership: (records: BridgeMidTurnOwnership[]) => void;
+  commitMidTurnMessages: (messages: BridgeCommittedMidTurnMessage[]) => void;
+  clearCommittedMidTurnMessages: (messageIds: string[]) => void;
+  midTurnFinishedNaturally: Set<string>;
+  midTurnInterrupted: Set<string>;
+  midTurnGenerationPersisted: boolean;
+  committedMidTurnRecovery?: Promise<boolean>;
+  committedMidTurnRestoreHold?: true;
   /** Drains that took messages and have not answered the child yet. */
   midTurnDrainsAnswering?: number;
   /** A send-now request held until those drains have answered. */
@@ -1920,6 +1951,7 @@ function rememberTerminalTurnStatus(
   pending: PendingPromptEntry,
   terminal: PromptTerminal,
 ): void {
+  if (!isCommittedOrOrdinaryPrompt(entry, pending)) return;
   const promptText = truncateTurnText(pending.text);
   const shared = {
     sessionId: entry.sessionId,
@@ -2284,6 +2316,7 @@ function findLiveTurnStatus(
   const live = entry.pendingPromptList.filter(
     (pending) =>
       !pending.terminalPublished &&
+      isCommittedOrOrdinaryPrompt(entry, pending) &&
       (!pending.removed || pending.state === 'running'),
   );
   if (promptId !== undefined) {
@@ -2294,6 +2327,16 @@ function findLiveTurnStatus(
   if (running) return liveTurnStatus(entry.sessionId, running);
   const queued = live.find((pending) => pending.state === 'queued');
   return queued ? liveTurnStatus(entry.sessionId, queued) : undefined;
+}
+
+function isCommittedOrOrdinaryPrompt(
+  entry: SessionEntry,
+  pending: PendingPromptEntry,
+): boolean {
+  return (
+    !pending.promotedMidTurn ||
+    entry.promotedMidTurnMessageIds.includes(pending.promptId)
+  );
 }
 
 function settledTurnStatus(
@@ -4931,7 +4974,13 @@ export function createSessionControlPlane(
     entry: SessionEntry,
     requestedClientId?: string,
   ): string => {
-    if (requestedClientId && entry.clientIds.has(requestedClientId)) {
+    if (
+      requestedClientId &&
+      (entry.clientIds.has(requestedClientId) ||
+        [...entry.midTurnOwnership.values()].some(
+          (item) => item.clientId === requestedClientId,
+        ))
+    ) {
       entry.clientIds.set(
         requestedClientId,
         (entry.clientIds.get(requestedClientId) ?? 0) + 1,
@@ -5171,10 +5220,10 @@ export function createSessionControlPlane(
       markSessionCatalogChanged,
       // A Goal turn drains the mid-turn queue but owns no prompt slot, so
       // nothing else would settle what its last drain missed.
-      (sessionId) => {
+      (sessionId, turnId, reason) => {
         const entry = byId.get(sessionId);
         if (entry?.channel !== channel) return;
-        settleMidTurnQueueAfterAutomaticTurn(sessionId);
+        settleMidTurnQueueAfterAutomaticTurn(sessionId, turnId, reason);
         drainQuarantinedChannelFor(entry);
       },
       opts.onCreateCurrentSessionScheduledTask,
@@ -5386,6 +5435,10 @@ export function createSessionControlPlane(
     for (const sid of sessions) {
       const sessEntry = byId.get(sid);
       if (!sessEntry) continue;
+      interruptMidTurnQueue(
+        sessEntry,
+        'Agent channel exited before mid-turn input was committed.',
+      );
       cancelPendingForSession(sid);
       // DAEMON-002/005: every still-pending prompt owes its formal
       // terminal before the bus closes below.
@@ -7782,6 +7835,56 @@ export function createSessionControlPlane(
   ): SessionEntry => {
     const childSnapshot = ci.harness.activeWork?.snapshot;
     const reportedChildHolds = childSnapshot?.sessions.get(sessionId);
+    const ledgerDir = opts.artifactSnapshotRuntimeBaseDir;
+    const cancelGeneration =
+      readMidTurnCancelGeneration(workspaceCwd, sessionId, ledgerDir) + 1;
+    const commits = new Set(
+      readCommittedMidTurnMessages(workspaceCwd, sessionId, ledgerDir).map(
+        ({ messageId }) => messageId,
+      ),
+    );
+    const midTurnOwnership = new Map<string, BridgeMidTurnOwnership>();
+    const midTurnRecoveries: MidTurnRecoveryEntry[] = [];
+    const ownershipRecords = readMidTurnOwnership(
+      workspaceCwd,
+      sessionId,
+      ledgerDir,
+    );
+    for (const ownership of [
+      ...ownershipRecords.filter((item) => item.state !== 'pending'),
+      ...ownershipRecords.filter((item) => item.state === 'pending'),
+    ]) {
+      const { messageId, clientId } = ownership;
+      const anonymity = ownership.anonymous ? { anonymous: true as const } : {};
+      if (commits.has(messageId)) {
+        midTurnOwnership.set(messageId, {
+          messageId,
+          clientId,
+          ...anonymity,
+          state: 'terminal',
+        });
+      } else if (ownership.draft) {
+        const draft =
+          ownership.state === 'pending'
+            ? {
+                ...ownership.draft,
+                error: 'The session ended before mid-turn input was committed.',
+              }
+            : ownership.draft;
+        midTurnOwnership.set(messageId, {
+          messageId,
+          clientId,
+          ...anonymity,
+          state: 'recovery',
+          draft,
+        });
+        midTurnRecoveries.push({ clientId, ...draft });
+      } else {
+        midTurnOwnership.set(messageId, ownership);
+      }
+    }
+    const persistMidTurnOwnership = (records: BridgeMidTurnOwnership[]) =>
+      writeMidTurnOwnership(workspaceCwd, sessionId, records, ledgerDir);
     const entry: SessionEntry = {
       sessionId,
       workspaceCwd,
@@ -7822,7 +7925,7 @@ export function createSessionControlPlane(
       promptQueue: Promise.resolve(),
       rewindTail: Promise.resolve(),
       pendingPromptCount: 0,
-      cancelGeneration: 0,
+      cancelGeneration,
       pendingAgentNotificationCount: 0,
       sideRequestCount: 0,
       ...(opts.promptLedger ? { promptLedger: opts.promptLedger } : {}),
@@ -7831,6 +7934,40 @@ export function createSessionControlPlane(
       enrichedTerminalPromptIds: new Set(),
       rewindGeneration: 0,
       midTurnMessageQueue: [],
+      midTurnOwnership,
+      midTurnRecoveries,
+      persistMidTurnOwnership,
+      commitMidTurnMessages(messages) {
+        commitMidTurnMessages(workspaceCwd, sessionId, messages, ledgerDir);
+        for (const { messageId } of messages) {
+          const prior = midTurnOwnership.get(messageId);
+          midTurnOwnership.set(messageId, {
+            messageId,
+            clientId: prior?.clientId,
+            ...(prior?.anonymous ? { anonymous: true } : {}),
+            state: 'terminal',
+          });
+        }
+        for (const message of messages) {
+          if (message.promoted)
+            rememberMidTurnId(
+              entry.promotedMidTurnMessageIds,
+              message.messageId,
+            );
+        }
+      },
+      clearCommittedMidTurnMessages(messageIds) {
+        persistMidTurnOwnership([...midTurnOwnership.values()]);
+        clearCommittedMidTurnMessages(
+          workspaceCwd,
+          sessionId,
+          messageIds,
+          ledgerDir,
+        );
+      },
+      midTurnFinishedNaturally: new Set(),
+      midTurnInterrupted: new Set(),
+      midTurnGenerationPersisted: false,
       settledMidTurnMessageIds: [],
       promotedMidTurnMessageIds: [],
       modelChangeQueue: Promise.resolve(),
@@ -9531,6 +9668,12 @@ export function createSessionControlPlane(
       let replayHasMore: true | undefined;
       let replayAnchorRecordId: string | undefined;
       let restoreAskUserQuestionHint = false;
+      const committedMidTurnPending =
+        readCommittedMidTurnMessages(
+          workspaceKey,
+          req.sessionId,
+          opts.artifactSnapshotRuntimeBaseDir,
+        ).length > 0;
       // Before the restore deadline starts; this never throws.
       await deliverRememberedUserLanguage(restoreChannel);
       try {
@@ -9560,6 +9703,9 @@ export function createSessionControlPlane(
                     req.sourceId,
                     daemonOwnedStandaloneRestore,
                   ),
+                  ...(committedMidTurnPending
+                    ? { [MID_TURN_RECOVERY_PENDING_META_KEY]: true }
+                    : {}),
                   ...(engine !== undefined
                     ? { [SESSION_EXECUTION_ENGINE_META_KEY]: engine }
                     : {}),
@@ -9609,6 +9755,9 @@ export function createSessionControlPlane(
                   req.sourceId,
                   daemonOwnedStandaloneRestore,
                 ),
+                ...(committedMidTurnPending
+                  ? { [MID_TURN_RECOVERY_PENDING_META_KEY]: true }
+                  : {}),
                 ...(engine !== undefined
                   ? { [SESSION_EXECUTION_ENGINE_META_KEY]: engine }
                   : {}),
@@ -9919,6 +10068,10 @@ export function createSessionControlPlane(
         },
       );
       releaseAdmissionOnce();
+      if (committedMidTurnPending) entry.committedMidTurnRestoreHold = true;
+      const recoveredCommittedMidTurn = daemonOwnedStandaloneRestore
+        ? false
+        : await recoverCommittedMidTurnMessages(entry);
       const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
       const publicState = publicRestoreState(state);
       entry.restoreState = publicState;
@@ -10087,7 +10240,13 @@ export function createSessionControlPlane(
         ...(entry.backgroundTurn
           ? { backgroundTurn: entry.backgroundTurn }
           : {}),
-        ...replayFieldsFor(entry, action, liveReplayMode),
+        ...(recoveredCommittedMidTurn && action === 'load'
+          ? await refreshedReplayFieldsFor(
+              entry,
+              historyPageSize ?? SESSION_TRANSCRIPT_MAX_LIMIT,
+              liveReplayMode,
+            )
+          : replayFieldsFor(entry, action, liveReplayMode)),
       };
     })().finally(async () => {
       if (restoreLifecycle.phase === 'abandoned') return;
@@ -10398,6 +10557,10 @@ export function createSessionControlPlane(
       activePromptCounter--;
       touchActivity(entry);
     }
+    interruptMidTurnQueue(
+      entry,
+      'The session closed before mid-turn input was committed.',
+    );
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
     emitSessionLifecycle({
@@ -10736,66 +10899,139 @@ export function createSessionControlPlane(
 
   startSessionReaper();
 
-  const rememberMidTurnId = (ring: string[], messageId: string) => {
-    ring.push(messageId);
-    if (ring.length > MID_TURN_RECONCILIATION_RING_SIZE) {
-      ring.splice(0, ring.length - MID_TURN_RECONCILIATION_RING_SIZE);
+  function interruptMidTurnQueue(
+    entry: SessionEntry,
+    error?: string,
+    clientId?: string,
+  ) {
+    const messages = entry.midTurnMessageQueue.filter(
+      (item) => !item.queueOnly,
+    );
+    recoverMidTurnMessages(entry, messages, error, clientId);
+    for (const item of messages) item.promoted?.controller.abort();
+  }
+
+  function currentMidTurnTarget(entry: SessionEntry): string | undefined {
+    const { activePromptId, goalTurnId, backgroundTurn } = entry;
+    if (
+      goalTurnId !== undefined &&
+      !entry.pendingPromptList.some(
+        (prompt) => prompt.promptId === activePromptId && prompt.dispatched,
+      )
+    )
+      return goalTurnId;
+    return (
+      activePromptId ??
+      backgroundTurn?.turnId ??
+      entry.pendingPromptList.find(
+        (prompt) => prompt.state === 'running' && !prompt.terminalPublished,
+      )?.promptId
+    );
+  }
+
+  function persistMidTurnGeneration(entry: SessionEntry): void {
+    if (entry.midTurnGenerationPersisted) return;
+    writeMidTurnCancelGeneration(
+      entry.workspaceCwd,
+      entry.sessionId,
+      entry.cancelGeneration,
+      opts.artifactSnapshotRuntimeBaseDir,
+    );
+    entry.midTurnGenerationPersisted = true;
+  }
+
+  async function recoverCommittedMidTurnMessages(
+    entry: SessionEntry,
+    force = false,
+  ): Promise<boolean> {
+    if (entry.committedMidTurnRecovery) return entry.committedMidTurnRecovery;
+    const records = readCommittedMidTurnMessages(
+      entry.workspaceCwd,
+      entry.sessionId,
+      opts.artifactSnapshotRuntimeBaseDir,
+    );
+    if (records.length === 0 && !entry.committedMidTurnRestoreHold && !force)
+      return false;
+    const recovery = (async () => {
+      const reply = await raceLongLived(
+        withTimeout(
+          entry.connection.extMethod(MID_TURN_QUEUE_RECOVER_METHOD, {
+            sessionId: entry.sessionId,
+            messages: records,
+          }),
+          initTimeoutMs,
+          MID_TURN_QUEUE_RECOVER_METHOD,
+        ),
+        getTransportClosedReject(entry),
+      );
+      const ids = reply['recordedMessageIds'];
+      if (
+        !Array.isArray(ids) ||
+        !records.every(({ messageId }) => ids.includes(messageId))
+      )
+        throw new Error('Agent did not record all committed mid-turn input');
+      entry.clearCommittedMidTurnMessages(
+        records.map(({ messageId }) => messageId),
+      );
+      delete entry.committedMidTurnRestoreHold;
+      return records.length > 0;
+    })();
+    entry.committedMidTurnRecovery = recovery;
+    try {
+      return await recovery;
+    } finally {
+      delete entry.committedMidTurnRecovery;
     }
-  };
+  }
+
+  function retryCommittedMidTurnRecovery(entry: SessionEntry): void {
+    entry.committedMidTurnRestoreHold = true;
+    void recoverCommittedMidTurnMessages(entry, true).catch(
+      (error: unknown) => {
+        writeStderrLine(
+          `[mid-turn] ${entry.sessionId}: ${extractErrorMessage(error)}`,
+        );
+      },
+    );
+  }
 
   const promoteMidTurnMessage = (
     entry: SessionEntry,
-    messageId: string,
-    text: string,
-    originatorClientId?: string,
-    content?: readonly BridgePromptContentBlock[],
-    eventDetailMode?: LiveReplayMode,
-  ): boolean => {
-    // Drop references that are already gone BEFORE admission: the admission
-    // check throws on the first dead reference, and the fallback would then
-    // replace the ENTIRE prompt with the marker, discarding the siblings the
-    // store still holds.
-    const resolvableBlocks: BridgePromptContentBlock[] = [];
-    let degraded = 0;
-    for (const block of content ?? []) {
-      try {
-        entry.attachments.assertReference(block);
-        resolvableBlocks.push(block);
-      } catch (error) {
-        if (!(error instanceof SessionAttachmentReferenceError)) throw error;
-        degraded += 1;
-      }
-    }
-    let prompt: BridgePromptContentBlock[] = [
+    message: MidTurnQueueEntry,
+  ): void => {
+    const { messageId, text, originatorClientId, content, eventDetailMode } =
+      message;
+    const leaseId = randomUUID();
+    const controller = new AbortController();
+    message.promoted = { controller };
+    message.targetPromptId = messageId;
+    const failed = (error?: unknown) => {
+      if (!entry.midTurnMessageQueue.includes(message)) return;
+      recoverMidTurnMessages(
+        entry,
+        [message],
+        error instanceof Error
+          ? error.message
+          : 'The next turn ended before mid-turn input was committed.',
+      );
+    };
+    const prompt: BridgePromptContentBlock[] = [
       ...(text ? [{ type: 'text', text } as ContentBlock] : []),
-      ...resolvableBlocks,
+      ...(content ?? []),
     ];
-    if (degraded > 0) {
-      prompt = withAttachmentDegradationMarker(prompt);
-    }
     const context = {
       promptId: messageId,
-      promotedMidTurn: { originatorClientId },
-      onPromptAdmitted: () => {
-        rememberMidTurnId(entry.promotedMidTurnMessageIds, messageId);
+      promotedMidTurn: { originatorClientId, leaseId },
+      dispatchSignal: controller.signal,
+      assertCanDispatch: () => {
+        controller.signal.throwIfAborted();
+      },
+      onPromptWriteStarted: () => {
+        message.lease = { id: leaseId, controller };
       },
     };
-    const sendFallback = () =>
-      bridgeApi.sendPrompt(
-        entry.sessionId,
-        {
-          sessionId: entry.sessionId,
-          eventDetailMode,
-          prompt: withAttachmentDegradationMarker(
-            text ? [{ type: 'text', text } as ContentBlock] : [],
-          ),
-        },
-        undefined,
-        context,
-      );
-    let result: Promise<PromptResponse>;
     try {
-      result = bridgeApi.sendPrompt(
+      const result = bridgeApi.sendPrompt(
         entry.sessionId,
         {
           sessionId: entry.sessionId,
@@ -10805,26 +11041,10 @@ export function createSessionControlPlane(
         undefined,
         context,
       );
+      void result.then(() => failed(), failed);
     } catch (error) {
-      try {
-        if (!(error instanceof SessionAttachmentReferenceError)) throw error;
-        result = sendFallback();
-      } catch (fallbackError) {
-        writeStderrLine(
-          `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to run promoted message ${JSON.stringify(messageId)}: ${JSON.stringify(fallbackError instanceof Error ? fallbackError.message : String(fallbackError))}`,
-        );
-        return false;
-      }
+      failed(error);
     }
-    // SessionAttachmentReferenceError can no longer reject this result
-    // asynchronously: admission-time reference checks throw synchronously
-    // (handled above) and dispatch degrades in place.
-    void result.catch((error: unknown) => {
-      writeStderrLine(
-        `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to run promoted message ${JSON.stringify(messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
-      );
-    });
-    return true;
   };
 
   /**
@@ -10838,6 +11058,8 @@ export function createSessionControlPlane(
   ) => {
     for (const message of messages) {
       if (message.queueOnly) {
+        const index = entry.midTurnMessageQueue.indexOf(message);
+        if (index !== -1) entry.midTurnMessageQueue.splice(index, 1);
         try {
           message.onSettledWithoutDrain?.();
         } catch (error) {
@@ -10847,34 +11069,16 @@ export function createSessionControlPlane(
         }
         continue;
       }
-      const promoted = promoteMidTurnMessage(
-        entry,
-        message.messageId,
-        message.text,
-        message.originatorClientId,
-        message.content,
-        message.eventDetailMode,
-      );
-      // Refused (for example on a quarantined channel): the message left the
-      // queue without a turn, so take it out of the queue views that showed
-      // it. It is not remembered as settled, so a retry is refused again
-      // rather than acknowledged.
-      if (!promoted && message.originatorClientId) {
-        try {
-          entry.events.publish({
-            type: 'pending_prompt_completed',
-            promptId: message.messageId,
-            data: {
-              sessionId: entry.sessionId,
-              promptId: message.messageId,
-              state: 'removed',
-            },
-            originatorClientId: message.originatorClientId,
-          });
-        } catch {
-          /* bus may be closed during session teardown */
-        }
+      if (message.promoted) continue;
+      if (message.lease) {
+        recoverMidTurnMessages(
+          entry,
+          [message],
+          'The agent did not settle the mid-turn input lease.',
+        );
+        continue;
       }
+      promoteMidTurnMessage(entry, message);
     }
   };
 
@@ -10886,27 +11090,84 @@ export function createSessionControlPlane(
    * while a Goal is still active: the child's `claimGoalTurn` makes the
    * promoted prompt wait for the permit and run as the next Goal turn.
    */
-  const settleMidTurnQueueAfterAutomaticTurn = (sessionId: string) => {
+  const settleMidTurnQueueAfterAutomaticTurn = (
+    sessionId: string,
+    promptId: string | undefined,
+    reason: unknown,
+  ) => {
     const entry = byId.get(sessionId);
     if (!entry) return;
-    delete entry.sendNowAfterDrains;
+    const activeTarget = currentMidTurnTarget(entry);
+    if (!activeTarget || activeTarget === promptId)
+      delete entry.sendNowAfterDrains;
     advanceTurnActivity(entry);
     entry.sessionLastSeenAt = Date.now();
     touchActivity(entry);
-    // A prompt owns the queue and settles it on its own terminal; a Goal turn
-    // that started again already re-armed the child's drain.
+    const natural =
+      reason === 'end_turn' ||
+      reason === 'max_turn_requests' ||
+      reason === 'mid_turn_handoff';
+    if (reason === 'mid_turn_settlement_unknown')
+      retryCommittedMidTurnRecovery(entry);
     if (
-      entry.goalTurnActive === true ||
-      entry.backgroundTurn !== undefined ||
-      entry.pendingPromptCount > 0 ||
-      entry.closing
+      !entry.pendingPromptCount &&
+      !entry.goalTurnActive &&
+      !entry.backgroundTurn
     ) {
+      settleUndrainedMidTurnMessages(
+        entry,
+        entry.midTurnMessageQueue.filter((message) => message.queueOnly),
+      );
+    }
+    if (promptId) {
+      settleMidTurnOwner(entry, promptId, natural, reason);
+    } else {
+      settleUnboundMidTurnMessages(entry, natural);
+    }
+  };
+
+  function settleUnboundMidTurnMessages(
+    entry: SessionEntry,
+    natural: boolean,
+  ): void {
+    const unbound = entry.midTurnMessageQueue.filter(
+      (item) => !item.queueOnly && item.targetPromptId === undefined,
+    );
+    if (natural) settleUndrainedMidTurnMessages(entry, unbound);
+    else
+      recoverMidTurnMessages(
+        entry,
+        unbound,
+        'The turn ended before mid-turn input was committed.',
+      );
+  }
+
+  function settleMidTurnOwner(
+    entry: SessionEntry,
+    promptId: string,
+    natural: boolean,
+    reason?: unknown,
+  ) {
+    if (entry.closing || byId.get(entry.sessionId) !== entry) return;
+    const ownedMessages = entry.midTurnMessageQueue.filter(
+      (item) => !item.queueOnly && item.targetPromptId === promptId,
+    );
+    if (natural && !entry.midTurnInterrupted.has(promptId)) {
+      entry.midTurnFinishedNaturally.add(promptId);
+      settleUndrainedMidTurnMessages(entry, ownedMessages);
       return;
     }
-    const undrained = entry.midTurnMessageQueue.splice(0);
-    if (undrained.length === 0) return;
-    settleUndrainedMidTurnMessages(entry, undrained);
-  };
+    entry.midTurnInterrupted.add(promptId);
+    recoverMidTurnMessages(
+      entry,
+      ownedMessages,
+      reason === 'cancelled'
+        ? undefined
+        : reason instanceof Error
+          ? reason.message
+          : 'The turn ended before mid-turn input was committed.',
+    );
+  }
 
   const trustedStandaloneSpawnRequests = new WeakMap<
     BridgeSpawnRequest,
@@ -12101,7 +12362,7 @@ export function createSessionControlPlane(
           publishPromptFailure(dispatchSignal?.reason);
         }
       };
-      if (isQueued) {
+      if (isQueued && !isPromotedMidTurn) {
         pendingAbort.signal.addEventListener(
           'abort',
           () => {
@@ -12158,31 +12419,24 @@ export function createSessionControlPlane(
           }
           // A prompt queued before the quarantine began is still a new turn.
           assertChannelAdmitsPrompts(entry);
+          await recoverCommittedMidTurnMessages(entry);
+          pendingAbort.signal.throwIfAborted();
           pendingEntry.startedAt = Date.now();
-          // If this prompt was queued behind another, promote it to
-          // 'running' and publish a started event now that it has reached the
-          // head of the FIFO. A promoted mid-turn message that starts
-          // immediately (the turn settled while the POST was in flight) never
-          // has a queued phase but still needs the started event: the
-          // originator suppresses its own stream echo, and a daemon-owned
-          // mid-turn message has no client-side row to render.
-          if (pendingEntry.state === 'queued' || isPromotedMidTurn) {
-            if (pendingEntry.state === 'queued') {
-              // Promotion can still fail before the child receives the prompt.
-              handoffOwnerPromptId =
-                entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
-              pendingEntry.state = 'running';
-            }
-            entry.events.publish({
-              type: 'pending_prompt_started',
-              promptId: pendingEntry.promptId,
-              data: {
-                sessionId,
+          if (pendingEntry.state === 'queued') {
+            handoffOwnerPromptId =
+              entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+            pendingEntry.state = 'running';
+            if (!isPromotedMidTurn)
+              entry.events.publish({
+                type: 'pending_prompt_started',
                 promptId: pendingEntry.promptId,
-                text: pendingEntry.text,
-              },
-              ...(originatorClientId ? { originatorClientId } : {}),
-            });
+                data: {
+                  sessionId,
+                  promptId: pendingEntry.promptId,
+                  text: pendingEntry.text,
+                },
+                ...(originatorClientId ? { originatorClientId } : {}),
+              });
           }
           const dispatchStartMs = Date.now();
           try {
@@ -12197,37 +12451,12 @@ export function createSessionControlPlane(
                   : {}),
               },
               async () => {
-                // Degrade in place, never by re-admission: a fallback
-                // re-admitted at the FIFO tail would double the terminal
-                // for this promptId, transpose the turn behind later
-                // prompts, and race the deferred close-on-prompt-complete
-                // on a detached session.
-                let dispatchBlocks = req.prompt;
-                let resolvedPrompt: ContentBlock[];
-                try {
-                  resolvedPrompt =
-                    await entry.attachments.resolveContent(dispatchBlocks);
-                } catch (error) {
-                  if (
-                    !isPromotedMidTurn ||
-                    !(error instanceof SessionAttachmentReferenceError)
-                  ) {
-                    throw error;
-                  }
-                  // Degrade per block: one dead reference drops itself and
-                  // keeps its resolvable siblings instead of replacing the
-                  // whole prompt with the marker.
-                  const perBlock =
-                    await entry.attachments.resolveContentDegrading(
-                      dispatchBlocks,
-                    );
-                  dispatchBlocks = perBlock.retainedBlocks;
-                  // The batch resolve threw on a dead reference, so the
-                  // marker always applies here.
-                  resolvedPrompt = withAttachmentDegradationMarker(
-                    perBlock.resolvedBlocks,
-                  );
-                }
+                const dispatchBlocks = req.prompt;
+                const resolvedPrompt = await entry.attachments.resolveContent(
+                  dispatchBlocks,
+                  undefined,
+                  isPromotedMidTurn ? dispatchSignal : undefined,
+                );
                 const normalized: PromptRequest = telemetry.injectPromptContext(
                   {
                     ...req,
@@ -12296,6 +12525,13 @@ export function createSessionControlPlane(
                   delete meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
                   delete meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
                   delete meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
+                  delete meta[MID_TURN_LEASE_META_KEY];
+                  if (promotedMidTurn) {
+                    meta[MID_TURN_LEASE_META_KEY] = {
+                      leaseId: promotedMidTurn.leaseId,
+                      messageId: pendingEntry.promptId,
+                    };
+                  }
                   // Channel classification is authenticated channel-worker
                   // metadata; the daemon prompt route validates the worker
                   // authorization and re-arms it through the trusted
@@ -12439,7 +12675,12 @@ export function createSessionControlPlane(
                   // in the transcript from the first attempt.
                   // Continuations carry no user prompt to echo (empty `prompt`);
                   // the original user_message_chunk is already in the transcript.
-                  if (!isRetry && !isContinue && !isRestoreAskUserQuestion) {
+                  if (
+                    !isRetry &&
+                    !isContinue &&
+                    !isRestoreAskUserQuestion &&
+                    !isPromotedMidTurn
+                  ) {
                     echoPromptToSessionBus(
                       entry,
                       {
@@ -12625,6 +12866,14 @@ export function createSessionControlPlane(
                 // trigger the cancel path on running prompts too.
                 const abortSignal = pendingAbort.signal;
                 const onAbort = () => {
+                  settleMidTurnOwner(
+                    entry,
+                    pendingEntry.promptId,
+                    false,
+                    abortSignal.reason === USER_CANCEL_ABORT_REASON
+                      ? 'cancelled'
+                      : abortSignal.reason,
+                  );
                   broadcastPromptCancelledOnce(
                     entry,
                     sessionId,
@@ -12678,12 +12927,29 @@ export function createSessionControlPlane(
       // registration order and the broadcasts are synchronous, which is what
       // guarantees the terminal frame precedes the deferred
       // close-on-prompt-complete in `result.finally`.
+      let promoteUndrainedMidTurn = false;
       result.then(
         (promptResult) => {
+          const needsMidTurnRecovery =
+            promptResult._meta?.[MID_TURN_RECOVERY_PENDING_META_KEY] === true;
           publishPromptTerminal(entry, pendingEntry, {
             kind: 'complete',
             result: promptResult,
           });
+          promoteUndrainedMidTurn =
+            !needsMidTurnRecovery &&
+            !pendingEntry.abortController.signal.aborted &&
+            (promptResult.stopReason !== 'cancelled' ||
+              promptResult._meta?.[MID_TURN_HANDOFF_META_KEY] === true) &&
+            promptResult.stopReason !== 'refusal';
+          if (!promoteUndrainedMidTurn)
+            settleMidTurnOwner(
+              entry,
+              pendingEntry.promptId,
+              false,
+              promptResult.stopReason,
+            );
+          if (needsMidTurnRecovery) retryCommittedMidTurnRecovery(entry);
           if (promptResult.stopReason === 'cancelled') {
             releaseGuardWaitWithoutSuccessor();
           } else if (
@@ -12695,6 +12961,12 @@ export function createSessionControlPlane(
           }
         },
         (err) => {
+          settleMidTurnOwner(entry, pendingEntry.promptId, false, err);
+          if (
+            extractJsonRpcErrorField(err, 'errorKind') ===
+            'mid_turn_settlement_unknown'
+          )
+            retryCommittedMidTurnRecovery(entry);
           publishPromptFailure(err);
           releaseGuardWaitWithoutSuccessor();
         },
@@ -12731,7 +13003,7 @@ export function createSessionControlPlane(
             // (and thus had an `added` event). The first prompt on an idle
             // session starts immediately without `added`, so publishing
             // `completed` would produce an unpaired event.
-            if (isQueued && !pendingEntry.removed) {
+            if (isQueued && !pendingEntry.removed && !isPromotedMidTurn) {
               try {
                 entry.events.publish({
                   type: 'pending_prompt_completed',
@@ -12757,7 +13029,7 @@ export function createSessionControlPlane(
             !entry.closing &&
             byId.get(entry.sessionId) === entry;
           const undrainedMessages = shouldSettleMidTurnQueue
-            ? entry.midTurnMessageQueue.splice(0)
+            ? entry.midTurnMessageQueue.filter((message) => message.queueOnly)
             : [];
           // A refused prompt never took ownership of the active Goal's
           // queue or its held send-now request.
@@ -12776,6 +13048,10 @@ export function createSessionControlPlane(
           // promotions follow it without exposing the fallback as queued.
           releasePromptSlot();
           settleUndrainedMidTurnMessages(entry, undrainedMessages);
+          if (promoteUndrainedMidTurn)
+            settleMidTurnOwner(entry, pendingEntry.promptId, true);
+          if (shouldSettleMidTurnQueue)
+            settleUnboundMidTurnMessages(entry, promoteUndrainedMidTurn);
           // DAEMON-005: deferred close-on-prompt-complete. Lives here (not
           // in `promptPromise.finally`) so the terminal broadcast — the
           // `result.then` registered above on this same promise — runs
@@ -12817,6 +13093,23 @@ export function createSessionControlPlane(
         context?.clientId,
       );
       entry.cancelGeneration += 1;
+      entry.midTurnGenerationPersisted = false;
+      try {
+        persistMidTurnGeneration(entry);
+      } catch (error) {
+        writeStderrLine(
+          `[mid-turn] ${entry.sessionId}: ${extractErrorMessage(error)}`,
+        );
+      }
+      const midTurnTarget = currentMidTurnTarget(entry);
+      if (midTurnTarget) entry.midTurnInterrupted.add(midTurnTarget);
+      interruptMidTurnQueue(
+        entry,
+        getPromptCancelAbortReason(req?._meta) === USER_CANCEL_ABORT_REASON
+          ? undefined
+          : 'The session was interrupted before mid-turn input was committed.',
+        cancelOriginatorClientId,
+      );
       entry.backgroundAdmissionEpoch =
         (entry.backgroundAdmissionEpoch ?? 0) + 1;
       entry.backgroundStartsSuspended = true;
@@ -13743,6 +14036,13 @@ export function createSessionControlPlane(
         !isReservedStandaloneSessionSourceType(entry.sourceType) ||
         !binding ||
         !sameConversationDirectoryExpectation(binding.expectation, expectation)
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
+      await recoverCommittedMidTurnMessages(entry);
+      if (
+        byId.get(sessionId) !== entry ||
+        entry.managedConversationBinding !== binding
       ) {
         throw standaloneWorkingDirectoryMissingError();
       }
@@ -16023,7 +16323,12 @@ export function createSessionControlPlane(
       // Authorize the caller against this session — mirrors /prompt.
       resolveTrustedClientId(entry, context?.clientId);
       return entry.pendingPromptList
-        .filter((p) => !p.removed && !p.terminalPublished)
+        .filter(
+          (p) =>
+            !p.removed &&
+            !p.terminalPublished &&
+            isCommittedOrOrdinaryPrompt(entry, p),
+        )
         .map((p) => ({
           promptId: p.promptId,
           text: p.text,
@@ -16194,18 +16499,47 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
+      const references = (
+        blocks: readonly BridgePromptContentBlock[] | undefined,
+      ) =>
+        blocks?.some(
+          (block) =>
+            isSessionAttachmentReference(block) &&
+            block.attachmentId === attachmentId,
+        );
+      if (
+        entry.midTurnMessageQueue.some(
+          (message) => !message.queueOnly && references(message.content),
+        ) ||
+        entry.midTurnRecoveries.some((message) =>
+          references(message.content),
+        ) ||
+        readCommittedMidTurnMessages(
+          entry.workspaceCwd,
+          sessionId,
+          opts.artifactSnapshotRuntimeBaseDir,
+        ).some((message) => references(message.attachmentReferences))
+      )
+        return false;
       return await entry.attachments.remove(attachmentId);
     },
 
     async deleteSessionAttachments(sessionId, options) {
       retirementLedger?.assertOpen(sessionId);
+      const entry = byId.get(sessionId);
       const store =
-        byId.get(sessionId)?.attachments ??
+        entry?.attachments ??
         new SessionAttachmentStore(
           opts.sessionAttachmentsRoot,
           sessionId,
           opts.sessionAttachmentsFallbackRoot,
         );
+      options?.assertCanCommit?.();
+      deleteMidTurnDeliveryData(
+        entry?.workspaceCwd ?? boundWorkspace,
+        sessionId,
+        opts.artifactSnapshotRuntimeBaseDir,
+      );
       await store.delete(options);
     },
 
@@ -16219,6 +16553,8 @@ export function createSessionControlPlane(
       );
       if (idx === -1) return { removed: false };
       const target = entry.pendingPromptList[idx];
+      if (target.promotedMidTurn)
+        return bridgeApi.removeMidTurnMessage(sessionId, promptId, context);
       // A running prompt already removed once is invisible to the API —
       // repeat removals are no-ops.
       if (target.removed) return { removed: false };
@@ -16304,6 +16640,12 @@ export function createSessionControlPlane(
         entry,
         context?.clientId,
       );
+      const recoveryClientId =
+        originatorClientId ??
+        (!options?.queueOnly
+          ? (entry.activePromptOriginatorClientId ??
+            entry.clientIds.keys().next().value)
+          : undefined);
       const eventDetailMode = options?.eventDetailMode ?? 'full';
       if (eventDetailMode !== 'full' && eventDetailMode !== 'summary') {
         throw RequestError.invalidParams(
@@ -16337,7 +16679,11 @@ export function createSessionControlPlane(
             JSON.stringify(mediaBlocks);
           if (
             existing.text === trimmed &&
+            existing.originatorClientId === originatorClientId &&
             sameMedia &&
+            existing.draftText ===
+              (options?.draftText ??
+                (message !== trimmed ? message : undefined)) &&
             (existing.eventDetailMode ?? 'full') === eventDetailMode
           ) {
             return { accepted: true, messageId: requestedMessageId };
@@ -16347,47 +16693,51 @@ export function createSessionControlPlane(
           );
           return { accepted: false };
         }
-        const promoted = entry.pendingPromptList.find(
-          (pending) => pending.promptId === requestedMessageId,
-        );
-        if (promoted) {
-          const promotedMedia = (promoted.content ?? []).filter(
-            (block) => block.type === 'image' || block.type === 'resource',
-          );
-          const sameMedia =
-            JSON.stringify(promotedMedia) === JSON.stringify(mediaBlocks);
-          const promotedText =
-            promoted.text === IMAGE_ONLY_PROMPT_TEXT && trimmed.length === 0
-              ? ''
-              : promoted.text;
-          if (
-            promotedText === trimmed &&
-            sameMedia &&
-            (promoted.eventDetailMode ?? 'full') === eventDetailMode
-          ) {
-            return { accepted: true, messageId: requestedMessageId };
-          }
-          writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected promoted id ${JSON.stringify(requestedMessageId)}: text, content or mode mismatch`,
-          );
+        const owned = entry.midTurnOwnership.get(requestedMessageId);
+        if (owned) {
+          return owned.clientId === originatorClientId ||
+            (originatorClientId === undefined && owned.anonymous)
+            ? { accepted: true, messageId: requestedMessageId }
+            : { accepted: false };
+        }
+        if (
+          options?.queueOnly &&
+          entry.settledMidTurnMessageIds.includes(requestedMessageId)
+        ) {
+          return { accepted: true, messageId: requestedMessageId };
+        }
+        if (
+          entry.pendingPromptList.some(
+            (pending) => pending.promptId === requestedMessageId,
+          ) ||
+          entry.terminalTurnStatuses.has(requestedMessageId)
+        )
           return { accepted: false };
-        }
-        if (entry.settledMidTurnMessageIds.includes(requestedMessageId)) {
-          return { accepted: true, messageId: requestedMessageId };
-        }
-        if (entry.promotedMidTurnMessageIds.includes(requestedMessageId)) {
-          return { accepted: true, messageId: requestedMessageId };
-        }
       }
       // Answer retries for daemon-owned ids before rejecting genuinely new
       // work during conditional close. Existing ownership remains idempotent;
       // only fresh admission can race the teardown.
+      if (resetPendingSessions.has(sessionId)) return { accepted: false };
       if (isClosingOrAuthorizingClose(entry)) {
         writeStderrLine(
           `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected: session closing`,
         );
         return { accepted: false };
       }
+      const activeTarget = currentMidTurnTarget(entry);
+      const targetPromptId = options?.target?.promptId ?? activeTarget;
+      const naturalTarget =
+        targetPromptId !== undefined &&
+        entry.midTurnFinishedNaturally.has(targetPromptId);
+      if (
+        !options?.queueOnly &&
+        ((options?.target &&
+          (options.target.cancelGeneration !== entry.cancelGeneration ||
+            (!naturalTarget && activeTarget !== targetPromptId))) ||
+          (targetPromptId && entry.midTurnInterrupted.has(targetPromptId)) ||
+          (!options?.target && entry.midTurnInterrupted.size > 0))
+      )
+        return { accepted: false, reason: 'turn_cancelled' };
       // New user input, whether a running turn drains it or it becomes the
       // next prompt: a quarantined channel takes neither.
       assertChannelAdmitsPrompts(entry);
@@ -16423,32 +16773,23 @@ export function createSessionControlPlane(
       // queue. Without `goalTurnActive` here every mid-turn insert during a
       // Goal turn is rejected as idle even though the client enables the
       // affordance (Goal turns are non-idle in `hasActivePrompt` summaries).
-      if (
+      const idle =
         entry.pendingPromptCount === 0 &&
         entry.goalTurnActive !== true &&
-        (!entry.backgroundTurn || options?.queueOnly)
-      ) {
+        (!entry.backgroundTurn || options?.queueOnly);
+      if (idle) {
         // Both modes refuse new ownership once idle. `queueOnly` callers (live
         // steering) additionally drive the next turn themselves: a promoted
         // message would have no collector forwarding its response or deadline.
         // An automatic background turn has no coordinator collector either, so
         // `queueOnly` steering must still be rejected while one runs; ordinary
         // input belongs in its mid-turn queue.
-        if (options?.queueOnly || options?.rejectIfIdle) {
+        if (options?.queueOnly || (options?.rejectIfIdle && !naturalTarget)) {
           writeStderrLine(
             `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(messageId)}: session idle`,
           );
           return { accepted: false, reason: 'session_idle' };
         }
-        const promoted = promoteMidTurnMessage(
-          entry,
-          messageId,
-          trimmed,
-          originatorClientId,
-          mediaBlocks.length > 0 ? mediaBlocks : undefined,
-          eventDetailMode,
-        );
-        return promoted ? { accepted: true, messageId } : { accepted: false };
       }
       // Bound the drain queue. Rejected requests remain unowned.
       if (entry.midTurnMessageQueue.length >= MAX_MID_TURN_QUEUE_DEPTH) {
@@ -16463,6 +16804,10 @@ export function createSessionControlPlane(
         text: trimmed,
         ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),
         originatorClientId,
+        recoveryClientId,
+        draftText:
+          options?.draftText ?? (message !== trimmed ? message : undefined),
+        ...(options?.queueOnly ? {} : { targetPromptId }),
         ...(options?.queueOnly
           ? {
               queueOnly: true,
@@ -16470,6 +16815,24 @@ export function createSessionControlPlane(
             }
           : {}),
       };
+      if (!queuedMessage.queueOnly) {
+        persistMidTurnGeneration(entry);
+        setMidTurnOwnership(entry, [
+          {
+            messageId,
+            clientId: recoveryClientId,
+            ...(originatorClientId === undefined ? { anonymous: true } : {}),
+            state: 'pending',
+            draft: {
+              messageId,
+              text: queuedMessage.draftText ?? trimmed,
+              ...(queuedMessage.content
+                ? { content: queuedMessage.content }
+                : {}),
+            },
+          },
+        ]);
+      }
       entry.midTurnMessageQueue.push(queuedMessage);
       // UI enqueues only: an anonymous enqueue (live steering) is an internal
       // delegation prompt — publishing it would surface its raw text in every
@@ -16491,6 +16854,8 @@ export function createSessionControlPlane(
           /* bus may be closed during session teardown */
         }
       }
+      if (!queuedMessage.queueOnly && (idle || naturalTarget))
+        promoteMidTurnMessage(entry, queuedMessage);
       return { accepted: true, messageId };
     },
 
@@ -16501,7 +16866,10 @@ export function createSessionControlPlane(
       // Only the user's own messages ask for this; queue-only steering keeps
       // its tool-boundary delivery unless user input travels with it.
       const holdsUserInput = () =>
-        entry.midTurnMessageQueue.some((message) => !message.queueOnly);
+        entry.midTurnMessageQueue.some(
+          (message) =>
+            !message.queueOnly && !message.lease && !message.promoted,
+        );
       if (!holdsUserInput()) {
         return { requested: false };
       }
@@ -16555,50 +16923,23 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
-      const index = entry.midTurnMessageQueue.findIndex(
+      const removed = entry.midTurnMessageQueue.find(
         (message) => message.messageId === messageId,
       );
-      if (index === -1) {
-        const isPromoted = entry.pendingPromptList.some(
-          (pending) =>
-            pending.promptId === messageId && pending.promotedMidTurn === true,
-        );
-        if (!isPromoted) {
-          writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} remove missed messageId=${JSON.stringify(messageId)} (already drained or completed)`,
-          );
-          return { removed: false };
-        }
-        const promoted = bridgeApi.removePendingPrompt(
-          sessionId,
-          messageId,
-          context,
-        );
-        if (promoted.removed) {
-          rememberMidTurnId(entry.settledMidTurnMessageIds, messageId);
-          return promoted;
-        }
-        writeStderrLine(
-          `[mid-turn] session=${JSON.stringify(entry.sessionId)} remove missed messageId=${JSON.stringify(messageId)} (already drained or completed)`,
-        );
-        return { removed: false };
-      }
-      const [removed] = entry.midTurnMessageQueue.splice(index, 1);
-      rememberMidTurnId(entry.settledMidTurnMessageIds, messageId);
-      if (removed) {
-        try {
-          entry.events.publish({
-            type: 'pending_prompt_completed',
-            promptId: messageId,
-            data: { sessionId, promptId: messageId, state: 'removed' },
-            ...(removed.originatorClientId
-              ? { originatorClientId: removed.originatorClientId }
-              : {}),
-          });
-        } catch {
-          /* bus may be closed during session teardown */
-        }
-      }
+      if (!removed) return { removed: false };
+      if (!removed.queueOnly)
+        setMidTurnOwnership(entry, [terminalMidTurnOwnership(removed)]);
+      finishMidTurnMessage(entry, removed);
+      removed.lease?.controller.abort();
+      removed.promoted?.controller.abort();
+      entry.events.publish({
+        type: 'pending_prompt_completed',
+        promptId: messageId,
+        data: { sessionId, promptId: messageId, state: 'removed' },
+        ...(removed.originatorClientId
+          ? { originatorClientId: removed.originatorClientId }
+          : {}),
+      });
       return { removed: true };
     },
 
@@ -16681,15 +17022,36 @@ export function createSessionControlPlane(
       }
     },
 
-    getMidTurnMessages(sessionId, context) {
+    getMidTurnMessages(sessionId, context, messageId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       // Authorize the caller against THIS session — mirrors the sibling
       // mid-turn routes and `getPendingPrompts`. The queue is session-global,
       // so a refreshed client with a newly-issued id can still restore and
       // mutate it.
-      resolveTrustedClientId(entry, context?.clientId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const promptId = currentMidTurnTarget(entry);
+      const cancelGeneration = entry.cancelGeneration;
+      if (promptId) persistMidTurnGeneration(entry);
+      const owned =
+        messageId === undefined
+          ? undefined
+          : entry.midTurnOwnership.get(messageId);
+      const recoveries = entry.midTurnRecoveries
+        .filter((item) => item.clientId === clientId)
+        .map(({ clientId: _clientId, ...draft }) => draft);
       return {
+        cancelGeneration,
+        ...(promptId && !entry.midTurnInterrupted.has(promptId)
+          ? { target: { promptId, cancelGeneration } }
+          : {}),
+        ...(messageId === undefined
+          ? {}
+          : {
+              disposition:
+                owned && owned.clientId === clientId ? 'owned' : 'unknown',
+            }),
+        ...(recoveries.length > 0 ? { recoveries } : {}),
         // Anonymous enqueues (live steering) stay off the shared surface:
         // their delegation text is not a user message other attached clients
         // should restore into their queue views.
@@ -16706,6 +17068,31 @@ export function createSessionControlPlane(
         settledMessageIds: [...entry.settledMidTurnMessageIds],
         promotedMessageIds: [...entry.promotedMidTurnMessageIds],
       };
+    },
+
+    consumeMidTurnRecoveries(sessionId, messageIds, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const records: BridgeMidTurnOwnership[] = [];
+      const requested = new Set(messageIds);
+      for (const item of entry.midTurnRecoveries) {
+        if (item.clientId === clientId && requested.has(item.messageId)) {
+          records.push({
+            messageId: item.messageId,
+            clientId,
+            state: 'terminal',
+          });
+        }
+      }
+      setMidTurnOwnership(entry, records);
+      const consumedMessageIds = records.map(({ messageId }) => messageId);
+      const consumed = new Set(consumedMessageIds);
+      for (let i = entry.midTurnRecoveries.length - 1; i >= 0; --i) {
+        if (consumed.has(entry.midTurnRecoveries[i]!.messageId))
+          entry.midTurnRecoveries.splice(i, 1);
+      }
+      return { consumedMessageIds };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {
@@ -18015,6 +18402,10 @@ export function createSessionControlPlane(
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;
+      interruptMidTurnQueue(
+        entry,
+        'The session stopped before mid-turn input was committed.',
+      );
       byId.delete(sessionId);
       telemetry.metrics?.sessionLifecycle('die');
       emitSessionLifecycle({
@@ -18230,6 +18621,10 @@ export function createSessionControlPlane(
         // `byId` (above), so the handler's `byId.get(...)` is undefined
         // and the automatic publish wouldn't fire.
         for (const e of entries) {
+          interruptMidTurnQueue(
+            e,
+            'The daemon shut down before mid-turn input was committed.',
+          );
           telemetry.metrics?.sessionLifecycle('die');
           emitSessionLifecycle({
             type: 'removed',

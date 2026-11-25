@@ -13073,34 +13073,8 @@ export function registerSessionRoutes(
     ),
   );
 
-  // Queue a user message typed while the session's turn is still running. The
-  // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
-  // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted, messageId?, reason? }`; `reason` is `'session_idle'`
-  // when an open session has no prompt admitted to its prompt FIFO and no
-  // active Goal turn, which lets a client resubmit as an ordinary prompt
-  // instead of reporting a failure. The verdict describes only what can drain
-  // a mid-turn message, not everything the session may hold (a session
-  // snapshot can still report `hasActivePrompt: true`). Every other rejection
-  // cause — closing, attachment budget, mismatched `messageId`, full queue —
-  // omits it, and a kept mismatched payload is not a delivery promise: a
-  // removed promoted message disappears from snapshots at once — one that had
-  // not started is dropped where it stands, one already running is hidden
-  // until its aborted turn settles — so the removal response is the only
-  // `removed = true` a client ever observes.
-  // For a new admission, a `content` reference the session no longer holds
-  // (or an invalid one) is declined before the idle/queue verdicts: the
-  // bridge throws and the error mapping answers 410/400 with an
-  // `{ error, code }` body — no `accepted`, no `reason`. A same-`messageId`
-  // retry whose payload matches acks idempotently first, and a closing
-  // session is refused reasonless first. Accepted requests are owned by the
-  // daemon; rejected requests were not admitted. Synchronous — the bridge
-  // only mutates its in-memory session queues.
-  //
-  // Per-message abuse guard. The sibling `/btw` caps its field; without this
-  // only the global 10 MB body limit applies. It bounds how much a single
-  // mid-turn push can pin in memory; queue depth is bounded separately in
-  // `enqueueMidTurnMessage`.
+  // Acceptance transfers ownership to the bridge. Delivery is a separate
+  // decision after the ACP child reports its hook verdict.
   const MID_TURN_MESSAGE_MAX_LENGTH = 16 * 1024;
   app.post(
     '/session/:id/mid-turn-message',
@@ -13113,9 +13087,44 @@ export function registerSessionRoutes(
         if (eventDetailMode === null) return;
         const message = body['message'];
         const messageId = body['messageId'];
-        // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
-        // stores the trimmed string, so checking the raw length would reject input
-        // whose real content fits but is padded with whitespace.
+        const target = body['target'];
+        const draftText = body['draftText'];
+        if (
+          draftText !== undefined &&
+          (typeof draftText !== 'string' ||
+            draftText.length > MID_TURN_MESSAGE_MAX_LENGTH)
+        ) {
+          res.status(400).json({ error: 'Invalid mid-turn draft text' });
+          return;
+        }
+        let turnTarget:
+          | { promptId: string; cancelGeneration: number }
+          | undefined;
+        if (target !== undefined) {
+          if (!target || typeof target !== 'object' || Array.isArray(target)) {
+            res.status(400).json({ error: 'Invalid mid-turn target' });
+            return;
+          }
+          const { promptId, cancelGeneration } = target as Record<
+            string,
+            unknown
+          >;
+          if (
+            typeof promptId !== 'string' ||
+            promptId.length === 0 ||
+            promptId.length > 128 ||
+            typeof cancelGeneration !== 'number' ||
+            !Number.isSafeInteger(cancelGeneration) ||
+            cancelGeneration < 0 ||
+            typeof messageId !== 'string'
+          ) {
+            res
+              .status(400)
+              .json({ error: 'Invalid mid-turn target or message ID' });
+            return;
+          }
+          turnTarget = { promptId, cancelGeneration };
+        }
         const trimmed = typeof message === 'string' ? message.trim() : '';
         // Optional image blocks injected mid-turn alongside the
         // text. Validate strictly here — the ACP child silently drops blocks
@@ -13156,7 +13165,10 @@ export function registerSessionRoutes(
           });
           return;
         }
-        if (trimmed.length > MID_TURN_MESSAGE_MAX_LENGTH) {
+        if (
+          typeof message === 'string' &&
+          message.length > MID_TURN_MESSAGE_MAX_LENGTH
+        ) {
           res.status(400).json({
             error: `\`message\` must be at most ${MID_TURN_MESSAGE_MAX_LENGTH} characters`,
           });
@@ -13180,13 +13192,22 @@ export function registerSessionRoutes(
         // originator for SSE echo routing. `null` = malformed id (already answered).
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (turnTarget && clientId === undefined) {
+          res.status(403).json({
+            error: 'Mid-turn steering requires a session-bound client ID',
+            code: 'client_id_required',
+          });
+          return;
+        }
         const result = runtime.bridge.enqueueMidTurnMessage(
           sessionId,
-          trimmed,
+          typeof message === 'string' ? message : '',
           clientId !== undefined ? { clientId } : undefined,
           typeof messageId === 'string' ? messageId : undefined,
           {
             rejectIfIdle: true,
+            ...(turnTarget ? { target: turnTarget } : {}),
+            ...(typeof draftText === 'string' ? { draftText } : {}),
             ...(eventDetailMode !== undefined ? { eventDetailMode } : {}),
             ...(mediaBlocks ? { content: mediaBlocks } : {}),
           },
@@ -13240,10 +13261,7 @@ export function registerSessionRoutes(
     ),
   );
 
-  // Session-owned mid-turn snapshot: messages still waiting plus bounded
-  // terminal id rings. Query-capable clients project it after refresh,
-  // session switches, or missed events. Older daemons lack this route and
-  // retain the legacy client-side fallback.
+  // The snapshot includes drafts assigned to the requesting client.
   app.get(
     '/session/:id/mid-turn-messages',
     withOwnerReadSession(
@@ -13251,11 +13269,54 @@ export function registerSessionRoutes(
       (req, res, sessionId, runtime) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        const messageId = req.query['messageId'];
+        if (
+          messageId !== undefined &&
+          (typeof messageId !== 'string' ||
+            messageId.length === 0 ||
+            messageId.length > 128)
+        ) {
+          res.status(400).json({ error: 'Invalid mid-turn message ID' });
+          return;
+        }
         const snapshot = runtime.bridge.getMidTurnMessages(
           sessionId,
           clientId !== undefined ? { clientId } : undefined,
+          messageId,
         );
         res.status(200).json(snapshot);
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/mid-turn-messages/recovery/consume',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/mid-turn-messages/recovery/consume',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const ids = safeBody(req)['messageIds'];
+        if (
+          clientId === undefined ||
+          !Array.isArray(ids) ||
+          ids.length === 0 ||
+          ids.some(
+            (id: unknown) =>
+              typeof id !== 'string' || id.length === 0 || id.length > 128,
+          )
+        ) {
+          res
+            .status(400)
+            .json({ error: 'A client ID and valid message IDs are required' });
+          return;
+        }
+        res.status(200).json(
+          runtime.bridge.consumeMidTurnRecoveries(sessionId, ids, {
+            clientId,
+          }),
+        );
       },
     ),
   );

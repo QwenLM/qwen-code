@@ -43,6 +43,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   session_attachment_list: [],
   session_mid_turn_message_mutation: [],
   session_mid_turn_message_query: [],
+  session_mid_turn_draft_recovery: [],
   session_mid_turn_send_now: [],
   session_cancel: [],
   session_events: [],
