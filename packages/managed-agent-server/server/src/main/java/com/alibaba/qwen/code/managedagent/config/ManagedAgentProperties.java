@@ -81,6 +81,8 @@ public class ManagedAgentProperties
     private final Automation automation = new Automation();
     private final Channels channels = new Channels();
     private final EventTransport eventTransport = new EventTransport();
+    private final Schema schema = new Schema();
+    private boolean enabled;
     private String agentRevision = "1";
     private boolean sideQueriesEnabled;
     // The tool profiles a stored AgentDefinition may select (D8c-1).
@@ -110,6 +112,19 @@ public class ManagedAgentProperties
         private boolean enabled;
         private String endpoint;
         private String apiKey;
+    }
+
+    @Getter
+    public static class Schema {
+        private boolean initializeEnabled = true;
+
+        public void setInitializeEnabled(boolean value) {
+            initializeEnabled = value;
+        }
+
+        public boolean isInitializeEnabled() {
+            return initializeEnabled;
+        }
     }
 
     @Override

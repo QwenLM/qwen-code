@@ -40,6 +40,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `child-workspace.scan-delay` | — | 时长 | `2s` | 子 Workspace 任务两次运行之间的间隔；每次运行继续未完成的子 Workspace Git 步骤（准备、合并、应用、丢弃）。仅在 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `definition-models` | `QWEN_MANAGED_AGENT_DEFINITION_MODELS` | 列表 | *（空）* | 存储的 AgentDefinition 可在 `model.id` 中指定的模型 ID，以逗号分隔；定义中指定其他模型的 Session 会在准入时被拒绝。每个 ID 应对应 Harness 中配置的一个模型提供方路由。为空时只接受未指定模型的定义。 |
 | `definition-tool-profiles` | `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` | 列表 | `hosted-workspace-files/1` | 存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-files/4`、`hosted-workspace-shell/1`、`hosted-workspace-shell/4` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。内部的 `hosted-workspace-team-lead/1`、`hosted-workspace-team-lead/2` 配置，`hosted-workspace-shell/1`、`hosted-workspace-shell/3`、`hosted-workspace-shell/4` 以外的 Shell 配置，以及审批模式为 `yolo` 的 Shell 配置始终被拒绝。预检会确认 Harness 支持所列的每个配置。 |
+| `enabled` | `QWEN_MANAGED_AGENT_ENABLED` | 布尔 | `false` | 官方 Spring Boot Starter 是否导入嵌入式控制面，默认 false。独立应用和显式导入 ManagedAgentConfiguration 不读取此属性；Starter 两种方式下都不会挂载公共或内部 Controller。 |
 | `message-relay.scan-delay` | — | 时长 | `2s` | Session 消息中继两次运行之间的间隔；每次运行推进 Session 之间待投递的消息（移交、回执、接受），并结算无法投递的消息。没有可用 Hosted Harness 的节点会跳过。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `model-catalog` | — | YAML 列表 | *（空）* | 为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 128 个字符）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。 |
 | `model-config-base-urls` | — | YAML 列表 | *（空）* | 允许完整 Session 模型配置使用的 HTTP(S) API 地址，按完整字符串精确匹配，以 YAML 列表设置。为空时禁止准入新配置。公共创建接口接受 `model_config`，WebShell 创建接口接受 `modelConfig`。要求启用 Session Store、Harness 能力 `session-model-config/1` 和 `SecretProtector`（标准服务由已启用的 Runtime Broker 及其凭据密钥环提供）。模型 ID 和 API key 无需在 Harness 注册。参见 [Session 模型配置设计](../design/managed-session-model-config.zh-CN.md)。 |
@@ -331,6 +332,14 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | --- | --- | --- | --- | --- |
 | `enabled` | — | 布尔 | — | 是否提供 SSH Workspace：节点 `access` 中列出的 actor 可以浏览该节点允许的根目录，并把其中的目录登记为 Workspace；关闭时这些路由返回 `404 ssh_runtime_disabled`。未开启 `qwen.managed-agent.harness.workspace-files-enabled` 或未配置 `qwen.managed-agent.runtime-broker.ssh.nodes`、使用外部 provisioner，或处于 `managed-local` profile 时，启动时拒绝。 |
 | `nodes` | — | YAML 列表 | *（空）* | SSH Runtime 节点，以列表形式写在配置文件（YAML）中。每一项包含 `node-id` 和 `display-name`；`ssh-host`（服务端账号 SSH 配置中的主机别名）；节点上的绝对路径 `node-executable`、`qwen-entry` 和 `state-directory`；`allowed-roots`（至少一个绝对目录，Workspace 只能登记在其下）；`publication-port`（节点上的 loopback 端口，工具发布通过 SSH 转发到这里）；`qwen-version`（必填，必须与节点报告的版本一致）；`access`（允许使用该节点的 `tenant-id` 与 `actor-id` 组合）。条目无效时启动时拒绝。配置了节点后，`qwen.managed-agent.tool-publication.service-base-url` 必须是 `http` URL。 |
+
+## `qwen.managed-agent.schema`
+
+Managed 专用数据库 catalog 的准入，包括嵌入场景是否允许初始化基线，或是否只能校验部署流程已准备的结构。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `initialize-enabled` | `QWEN_MANAGED_AGENT_SCHEMA_INITIALIZE_ENABLED` | 布尔 | `true` | 嵌入式持久层是否初始化新的 Managed catalog。默认 true，保持显式导入和独立服务原行为。部署托管 schema 时应设置 false，只校验既有基线而不执行 DDL。缺失、部分结构或外部 catalog 都会被拒绝。 |
 
 ## `qwen.managed-agent.session-resources`
 
