@@ -989,6 +989,25 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     ...extra,
   });
   const DOWNSAMPLED = { disclosure: 'downsampled to 1568px', degraded: true };
+
+  it('routes a file-read policy stop to its tool and scopes direct input processing separately', async () => {
+    const runMock = runReturning([derivative(DOWNSAMPLED)]);
+    const { mod } = await armPipeline(runMock);
+    const { withFixedPolicyHookStop } = await import(
+      './policy/fixed-policy-hook-stop.js'
+    );
+    const filePath = await realFile('pic.png');
+    const config = policyConfig();
+    const report = vi.fn(() => true);
+    await withFixedPolicyHookStop(report, async () => {
+      await readVia(mod, filePath, config);
+      expect(runMock.mock.calls[0][2].onHookStop('read finished')).toBe(true);
+      await mod.processMediaForOmniDelivery(filePath, config);
+      expect(runMock.mock.calls[1][2].onHookStop).toBeUndefined();
+    });
+    expect(report).toHaveBeenCalledExactlyOnceWith('read finished');
+  });
+
   /** A derivative still over the 500-byte cap used below. */
   const OVER_CAP = {
     recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
