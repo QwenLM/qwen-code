@@ -526,8 +526,9 @@ jobs:
     # Forks of this repo fall back to ubuntu-latest as before.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Read-only by construction: the agent's GH_TOKEN is this job's
-    # GITHUB_TOKEN. Every write goes through publish-triage's PAT. The
-    # pre-agent reaction step uses the PAT explicitly (reactions need write).
+    # GITHUB_TOKEN. Every write goes through publish-triage's write token
+    # (PAT preferred, else its write-scoped GITHUB_TOKEN). The pre-agent
+    # reaction step uses the PAT explicitly (reactions need write).
     permissions:
       contents: 'read'
       issues: 'read'
@@ -599,7 +600,8 @@ jobs:
         if: "github.event_name == 'issue_comment'"
         env:
           # Reactions need write scope; the job's GITHUB_TOKEN is read-only.
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
+          # PAT-only: without a PAT the reaction is skipped (best-effort).
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
           gh api \
@@ -712,7 +714,9 @@ jobs:
         if: "steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
+          # PAT-only: the read-only GITHUB_TOKEN cannot post comments; without
+          # a PAT this step skips with a warning instead of attempting a 403.
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           NUMBER: '${{ steps.resolve.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
@@ -1424,7 +1428,7 @@ jobs:
         if: "always() && steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
@@ -1572,8 +1576,14 @@ jobs:
     # no agent-provided code runs here. Kill-switch:
     # MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Comments, reviews, labels, assignees and closes are all writes: with no
+    # bot PAT configured, the built-in GITHUB_TOKEN fallback needs these write
+    # scopes to actually publish. Only trusted base-repo scripts run here, so
+    # the write token never reaches agent-provided code.
     permissions:
       contents: 'read'
+      issues: 'write'
+      pull-requests: 'write'
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -1588,7 +1598,7 @@ jobs:
 
       # The pool reuses workspaces: an earlier agent run owned this directory
       # and could have planted .git hooks/config that checkout's git commands
-      # would execute — in the job that then publishes with the write PAT.
+      # would execute — in the job that then publishes with the write token.
       # Drop the metadata first, exactly as the triage/tmux/verify jobs do
       # before their checkouts (pinned by
       # qwen-runner-checkout-workflow.test.js).
