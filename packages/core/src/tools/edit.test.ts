@@ -1104,6 +1104,37 @@ describe('EditTool', () => {
       filePath = path.join(rootDir, testFile);
     });
 
+    describe('deleting text that ends a line', () => {
+      it.each([
+        {
+          name: 'a trailing comment keeps its line break',
+          content: 'const a = 1; // TODO\nconst b = 2;\n',
+          params: { old_string: ' // TODO', new_string: '' },
+          expected: 'const a = 1;\nconst b = 2;\n',
+        },
+        {
+          name: 'replace_all removes every occurrence without joining lines',
+          content: 'a TODO\nb TODO later\n',
+          params: { old_string: 'TODO', new_string: '', replace_all: true },
+          expected: 'a \nb  later\n',
+        },
+      ])('$name', async ({ content, params, expected }) => {
+        seedFile(filePath, content);
+        const result = await run(
+          edit(filePath, params.old_string, params.new_string, params),
+        );
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(expected);
+      });
+
+      it('rejects an ambiguous deletion instead of deleting the line', async () => {
+        seedFile(filePath, 'foo(); // x\nfoo();\n');
+        const result = await run(edit(filePath, 'foo();', ''));
+        expect(result.error).toBeDefined();
+        expect(readText(filePath)).toBe('foo(); // x\nfoo();\n');
+      });
+    });
+
     it('should throw error if file path is not absolute', async () => {
       expect(() => tool.build(edit('relative.txt'))).toThrow(
         /File path must be absolute/,

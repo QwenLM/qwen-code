@@ -493,11 +493,33 @@ export function maybeAugmentOldStringForDeletion(
     return oldString;
   }
 
-  const candidate = `${oldString}\n`;
-  const hasCandidate = lineBasedMatch
-    ? findLineBasedMatchOffsets(fileContent, candidate).length > 0
-    : fileContent.includes(candidate);
-  return hasCandidate ? candidate : oldString;
+  // Only a deletion that empties whole lines leaves a blank line behind. Take
+  // the newline only when every match is a whole line followed by `\n`: a
+  // match inside a line would otherwise join that line with the next one,
+  // and widening only some matches would change how many there are, which
+  // the uniqueness check and replace_all both rely on.
+  const offsets = lineBasedMatch
+    ? findLineBasedMatchOffsets(fileContent, oldString)
+    : findLiteralMatchOffsets(fileContent, oldString);
+  const everyMatchIsWholeLine =
+    offsets.length > 0 &&
+    offsets.every(
+      (offset) =>
+        (offset === 0 || fileContent[offset - 1] === '\n') &&
+        fileContent[offset + oldString.length] === '\n',
+    );
+  return everyMatchIsWholeLine ? `${oldString}\n` : oldString;
+}
+
+/** Offsets of the non-overlapping matches {@link countOccurrences} counts. */
+function findLiteralMatchOffsets(source: string, substr: string): number[] {
+  const offsets: number[] = [];
+  let index = source.indexOf(substr);
+  while (index !== -1) {
+    offsets.push(index);
+    index = source.indexOf(substr, index + substr.length);
+  }
+  return offsets;
 }
 
 /**
