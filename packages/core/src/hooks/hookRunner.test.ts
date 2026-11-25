@@ -5,10 +5,15 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import {
+  hasTurnResourceWork,
+  runWithTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+} from '../skills/turn-skill-snapshot.js';
 import { HookRunner } from './hookRunner.js';
 import { HookCommandCgroup } from './hook-command-cgroup.js';
 import {
@@ -2097,6 +2102,82 @@ describe('HookRunner', () => {
       expect(result.outcome).toBe('non_blocking_error');
       expect(result.isAsync).toBe(true);
     });
+
+    it('retains only the originating turn until the async hook child closes', async () => {
+      const child = createControllableMockProcess();
+      mockSpawn.mockReturnValue(child);
+      const source: TurnSkillSnapshot = {
+        version: 1,
+        id: 'old',
+        digest: 'old',
+        skills: [],
+      };
+      const next = { ...source, id: 'new' };
+      const result = await runWithTurnSkillSnapshot(source, runAsyncHook);
+      expect(result.isAsync).toBe(true);
+      expect(hasTurnResourceWork(source)).toBe(true);
+      expect(hasTurnResourceWork(next)).toBe(false);
+      await vi.waitFor(() =>
+        expect(child.on).toHaveBeenCalledWith('close', expect.any(Function)),
+      );
+      child.emit('close', 0);
+      await vi.waitFor(() => expect(hasTurnResourceWork(source)).toBe(false));
+    });
+
+    it('retains the pinned files while a real async hook reads them after handoff', async () => {
+      const childProcess =
+        await vi.importActual<typeof import('node:child_process')>(
+          'node:child_process',
+        );
+      mockSpawn.mockImplementation(childProcess.spawn);
+      const dir = await mkdtemp(join(tmpdir(), 'qwen-hook-turn-'));
+      const source: TurnSkillSnapshot = {
+        version: 1,
+        id: 'old',
+        digest: 'old',
+        skills: [],
+      };
+      const controller = new AbortController();
+      try {
+        await writeFile(join(dir, 'artifact'), 'version-one');
+        await writeFile(
+          join(dir, 'read-later.cjs'),
+          [
+            "const fs = require('node:fs');",
+            "const wait = require('node:timers/promises').setTimeout;",
+            '(async () => {',
+            '  for (let i = 0; i < 400; i++) {',
+            "    if (fs.existsSync('proceed')) {",
+            "      fs.writeFileSync('result', fs.readFileSync('artifact'));",
+            '      return;',
+            '    }',
+            '    await wait(10);',
+            '  }',
+            '  process.exitCode = 1;',
+            '})();',
+          ].join('\n'),
+        );
+        const result = await runWithTurnSkillSnapshot(source, () =>
+          hookRunner.executeHook(
+            cmd('node read-later.cjs', { async: true }),
+            HookEventName.PostToolUse,
+            createMockInput({ cwd: dir }),
+            { signal: controller.signal },
+          ),
+        );
+        expect(result.isAsync).toBe(true);
+        expect(hasTurnResourceWork(source)).toBe(true);
+        await writeFile(join(dir, 'proceed'), '');
+        await vi.waitFor(
+          () => expect(hasTurnResourceWork(source)).toBe(false),
+          { timeout: 10000 },
+        );
+        expect(await readFile(join(dir, 'result'), 'utf8')).toBe('version-one');
+      } finally {
+        controller.abort();
+        await rm(dir, { recursive: true, force: true });
+      }
+    }, 15000);
 
     it('reports an async hook handed to the background as success', async () => {
       mockSpawn.mockImplementation(() => createMockProcess());
