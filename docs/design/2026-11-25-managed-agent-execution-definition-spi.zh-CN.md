@@ -394,5 +394,5 @@ Definition 准备、原生 Session 准入、Extension 导入、settings 保存/�
 - 使用本地脚本检查相对链接和中英文互链。
 - 对照中英文的章节结构、Java 声明与 Mermaid 时序。Java 注释属于解释性文字，在声明对比中被排除。
 - `git diff --check` 及新增文件空白检查通过。
-- **Prettier 检查未完成**：本机没有可执行安装，`npx --no-install` 尝试访问 registry 时报 `ECONNRESET`。本机也没有 `mmdc`，未验证生成图片。这些未完成的检查不得记为通过。
+- 仓库 pre-commit 钩子已对两份 Markdown 文件成功执行 `prettier --write`。本机没有 `mmdc`，因此仅对 Mermaid 做文本结构校验，未验证渲染图。
 - 未修改生产 Java/TypeScript，未运行构建、真实进程或端到端验收。本文仍是设计提案，不代表实现、恢复或验收已经完成。

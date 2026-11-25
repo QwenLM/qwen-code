@@ -394,5 +394,5 @@ Documentation verification for this update:
 - Relative links and reciprocal language links were checked with a local script.
 - English and Chinese section structure, Java declarations and Mermaid diagrams were compared. Translated Java comments are explanatory text and were excluded from the declaration comparison.
 - `git diff --check` and added-file whitespace checks passed.
-- The standard Prettier check was **not completed**: no installed executable exists locally, and `npx --no-install` attempted a registry request that failed with `ECONNRESET`. `mmdc` was also unavailable locally, so no generated image was validated. These missing checks must not be reported as passed.
+- The repository pre-commit hook successfully ran `prettier --write` on both Markdown documents. The local `mmdc` executable was unavailable, so Mermaid was checked structurally rather than by rendering an image.
 - No production Java/TypeScript changes were made and no build, runtime process or end-to-end acceptance has been run. This remains a design proposal, not an implemented, recovered or accepted capability.
