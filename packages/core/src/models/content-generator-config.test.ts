@@ -157,7 +157,7 @@ describe('buildAgentContentGeneratorConfig', () => {
   });
 
   describe('same-provider, bare model ID, no registry match', () => {
-    it('uses the target window and retains other parent generation settings', () => {
+    it('leaves an unknown target window unset and retains other parent generation settings', () => {
       const result = buildOver('custom-model', { authType: 'openai' });
 
       expect(result.model).toBe('custom-model');
@@ -170,7 +170,7 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.timeout).toBe(30000);
       expect(result.streamIdleTimeoutMs).toBe(300000);
       expect(result.maxRetries).toBe(3);
-      expect(result.contextWindowSize).toBe(200_000);
+      expect(result.contextWindowSize).toBeUndefined();
       expect(result.extra_body).toEqual({ custom: 'value' });
     });
 
@@ -264,14 +264,15 @@ describe('buildAgentContentGeneratorConfig', () => {
     });
 
     it.each([
-      [{}, 131_072],
-      [{ contextWindowSize: 64_000 }, 64_000],
+      ['deepseek-r1', {}, 131_072],
+      ['deepseek-r1', { contextWindowSize: 64_000 }, 64_000],
+      ['custom-model', {}, undefined],
     ] as const)(
-      'resolves a same-provider target window from %j to %i',
-      (generationConfig, contextWindowSize) => {
+      'resolves the same-provider window for %s with config %j',
+      (model, generationConfig, contextWindowSize) => {
         const target = {
           ...openaiResolved,
-          id: 'deepseek-r1',
+          id: model,
           baseUrl: 'https://parent.example.com',
           generationConfig,
         };

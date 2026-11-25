@@ -1434,6 +1434,17 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('leaves the window unset for a routed custom model without a configured limit', async () => {
+      getResolvedModel.mockReturnValue(
+        anthropicKey({ id: fastModel, generationConfig: {} }),
+      );
+
+      const resolved = await resolve(fastModel);
+
+      expect(resolved.contentGenerator).toBe(fastContentGenerator);
+      expect(resolved.contextWindowSize).toBeUndefined();
+    });
+
     it('does not cache the unregistered-model fallback across runtime-view changes', async () => {
       // An unregistered selector falls back to getCurrentContentGenerator(),
       // and the runtime view changes between calls: caching would pin the
@@ -2020,7 +2031,7 @@ describe('BaseLlmClient', () => {
       expect(sentThinking()).toEqual({ includeThoughts: false });
     });
 
-    it('uses the target window when the same model ID is routed to another endpoint', async () => {
+    it('uses the configured window when the same model ID is routed to another endpoint', async () => {
       const model = 'deepseek-r1';
       const baseUrl = 'https://target.example.com';
       useWindow(model, 8_192);
@@ -2047,11 +2058,10 @@ describe('BaseLlmClient', () => {
         embedContent: vi.fn(),
       });
 
-      await askText(`${model}\0${baseUrl}`, 100_000);
+      await askText(`${model}\0${baseUrl}`, 7_000);
 
       expect(targetGenerateContent).toHaveBeenCalledTimes(1);
-      expect(sentBudget(targetGenerateContent)).toBe(31_072);
-      expect(100_000 + 31_072).toBeLessThanOrEqual(131_072);
+      expect(sentBudget(targetGenerateContent)).toBe(1_192);
     });
 
     it('budgets against the session window when the target model is not registered', async () => {

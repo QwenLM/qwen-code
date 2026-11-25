@@ -51,6 +51,7 @@ import {
 import {
   defaultOutputCeiling,
   hasExplicitOutputLimit,
+  knownTokenLimit,
   parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
@@ -179,10 +180,8 @@ function estimateResponseSchemaTokens(schema: unknown): number {
  * that read no ceiling stay uncapped — which is also what they did before, and
  * the point of not emitting.
  *
- * `resolvedContextWindowSize` comes from the active config for the current
- * model. For a separately routed model it comes from that target's registry
- * entry or catalog window, including when the target shares a model ID with
- * the session but uses a different endpoint.
+ * `resolvedContextWindowSize` is the window of the config sending the
+ * request, or a known limit for the target model when its config omits one.
  *
  * Call after `resolveForModel` so `model` is the resolved target and
  * `contents` is the slimmed payload actually sent. Caveats:
@@ -331,9 +330,8 @@ export interface ResolvedGeneratorForModel {
   retryErrorCodes?: readonly number[];
   model: string;
   /**
-   * Configured window for the active model, or the registry/catalog window
-   * for a separately routed model. On fallback to the session generator,
-   * callers use its `contentGeneratorConfig.contextWindowSize` instead.
+   * Configured or known window for the model receiving the request.
+   * On fallback to the session generator, callers read the session config.
    */
   contextWindowSize?: number;
 }
@@ -933,8 +931,8 @@ export class BaseLlmClient {
       model: targetModel,
       contextWindowSize: fellBackToSessionGenerator
         ? undefined
-        : (resolvedModel?.generationConfig?.contextWindowSize ??
-          tokenLimit(targetModel, 'input')),
+        : (contentGeneratorConfig?.contextWindowSize ??
+          knownTokenLimit(targetModel, 'input')),
     };
   }
 

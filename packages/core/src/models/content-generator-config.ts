@@ -22,7 +22,7 @@ import {
   createContentGenerator,
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
-import { tokenLimit } from '../core/tokenLimits.js';
+import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
   DEFAULT_DASHSCOPE_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
@@ -276,7 +276,7 @@ function buildInheritedAgentContentGeneratorConfig(
   if (modelId && modelId !== parentConfig.model) {
     nextConfig.thinkingMandatory = undefined;
     if (sameProvider) {
-      nextConfig.contextWindowSize = tokenLimit(modelId, 'input');
+      nextConfig.contextWindowSize = knownTokenLimit(modelId, 'input');
     }
   }
 
@@ -502,7 +502,10 @@ function applyResolvedModelConfig(
     targetConfig.model !== parentConfig.model &&
     resolvedModel.generationConfig.contextWindowSize === undefined
   ) {
-    targetConfig.contextWindowSize = tokenLimit(targetConfig.model, 'input');
+    targetConfig.contextWindowSize = knownTokenLimit(
+      targetConfig.model,
+      'input',
+    );
   }
 }
 
