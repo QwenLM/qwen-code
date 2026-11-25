@@ -765,8 +765,7 @@ final class AgentSessionPolicies {
         return false;
     }
 
-    static void requireSessionStatus(String actual,
-            String expected) {
+    static void requireSessionStatus(String actual, String expected) {
         if (!expected.equals(actual)) {
             throw sessionStateConflict(actual);
         }
