@@ -46,8 +46,13 @@ defects and neither survived an independent check.
    `df2ad8ce-e86d-49f5-80c7-6012e8736660` (6,682,231 / 5,209,415 / 30,559,974 for
    `qwen3.8-max-preview` / `gpt-6-astra` / `glm-5.3`). Every resume of that
    conversation appends another full copy. This is the dominant term. Both sides
-   are now fixed: the dashboard does not read those tokens for a day the ledger
-   covers, and a run no longer persists history it did not spend.
+   are now fixed for verifiable records: a run no longer persists history it did
+   not spend, and model/session entries covered by ledger identity are replaced
+   rather than added again. Pre-upgrade unmarked replay-only records whose
+   `sessionId` owns zero ledger rows in known roots (such as `4669c795`) cannot
+   be distinguished from legitimate independent spend by day and model alone; by
+   explicit maintainer decision (R10-1), those uncorrelatable legacy records are
+   conservatively retained rather than deleted.
 
 3. **Windows attributed by session end (fixed where the ledger covers).**
    `aggregateUsage` filters on `r.timestamp` (the session's last record) and the
@@ -930,6 +935,20 @@ than a fabricated attribution.
   The same requests exist in both sources. A model from a record is omitted if
   that record's `[startTime, timestamp]` span and session/model identity match
   ledger coverage. Other models and independent session records remain additive.
+- **Maintainer decision on R10-1 (residual uncorrelatable legacy replay-only
+  double-count is accepted).** An unmarked pre-upgrade record whose `sessionId`
+  has zero ledger rows in known roots cannot be proved to be another session's
+  replay copy from day and model alone. Relaxing the session-identity guard
+  would delete genuine independent spend (measured counterexample: an existing
+  real-reader case drops from `600 + 900` to `600`), and
+  `packages/cli/src/serve/server.ts` merges multiple workspaces into one table
+  where per-session identity prevents one root's ledger row from suppressing
+  another root's run. On 2026-11-23 the maintainer explicitly chose the
+  conservative boundary for this PR: keep the session-identity guard and accept
+  residual double-counting for uncorrelatable pre-upgrade replay-only records
+  rather than risking deletion of legitimate usage. Newly written runs carry
+  `runScoped: true` and persist only their own delta, so no new replay copies
+  are produced.
 - **Runs with no ledger overlap keep session-record attribution.** This preserves
   heatmap history from before the ledger existed and users who have usage
   statistics disabled. The conservative trade is explicit: if a covered model
@@ -1134,11 +1153,22 @@ than a fabricated attribution.
 
 ## Acceptance criteria
 
-- With ledger coverage, today / 7 days / 30 days token totals, requests, input,
-  cached and thoughts equal an independent ledger aggregate for the same window,
-  and every covered day's heatmap tokens and cache rate match. **Verified**: on a
-  frozen copy of the reference history all three ranges matched exactly
+- For sessions and models covered by ledger identity (excluding uncorrelatable
+  pre-upgrade zero-ledger records preserved under the R10-1 boundary below),
+  today / 7 days / 30 days token totals, requests, input, cached and thoughts
+  equal an independent ledger aggregate for the same window, and every covered
+  day's heatmap tokens and cache rate match. **Verified**: on a frozen copy of
+  the reference history's covered set all three ranges matched exactly
   (`ALL_RANGES_EXACT=true`, 0 day mismatches).
+- **Conservative R10-1 boundary preserved (maintainer-accepted tradeoff).** An
+  unmarked pre-upgrade record whose `sessionId` owns zero ledger rows is not
+  deleted solely because another session has ledger activity on the same day and
+  model; residual double-counting from such uncorrelatable pre-upgrade
+  replay-only copies is explicitly accepted for this PR so legitimate
+  independent spend is never deleted, while newly persisted runs do not emit
+  replay copies. **Verified** by unit tests (same-day/same-model independent
+  spend `600 + 900` stays `1,500`, and multi-workspace server aggregation keeps
+  per-session isolation).
 - `inputTokens + outputTokens == totalTokens` for every range. **Verified.**
 - Session-granular tiles (sessions, tool calls, changed lines, skills) are unchanged
   by the ledger. **Verified** against the same records with an empty ledger.
@@ -1173,10 +1203,13 @@ than a fabricated attribution.
   records / 379,387,040,763 tokens with an identical per-session/per-window key
   (`IDENTICAL_REDUCTION=true`).
 - The TUI cross-session view matches the ledger for tokens, requests, average
-  latency and cache hit rate. **Verified** on the live history and on a frozen
-  copy: all three windows at 1.00x (before: 2.06x for 7 days, 6.25x for 30 days).
-- The dashboard stays exact after the shared-table extraction. **Verified**:
-  `ALL_RANGES_EXACT=true`, 0 day mismatches on a fresh frozen copy.
+  latency and cache hit rate across ledger-covered sessions (while retaining
+  uncorrelatable zero-ledger legacy records under the R10-1 boundary).
+  **Verified** on the live history and on a frozen copy of the covered set: all
+  three windows at 1.00x (before: 2.06x for 7 days, 6.25x for 30 days).
+- The dashboard stays exact after the shared-table extraction on the covered
+  set. **Verified**: `ALL_RANGES_EXACT=true`, 0 day mismatches on a fresh frozen
+  copy of the covered set.
 
 ## Open questions
 
