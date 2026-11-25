@@ -1690,11 +1690,13 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain('QWEN_E2E_DROP_LOAD_REPLY: session.id');
     expect(source).toContain("'Takeover load reply lost'");
     expect(source).toContain('E2E dropping first load reply');
-    const harnessSource = read(
-      'packages/cli/src/serve/hosted-harness-session.ts',
+    const sessionOpenSource = read(
+      'packages/cli/src/serve/hosted-harness-session/session-open.ts',
     );
-    expect(harnessSource).toContain("process.env['QWEN_E2E_DROP_LOAD_REPLY']");
-    expect(harnessSource).toContain('E2E dropping first load reply');
+    expect(sessionOpenSource).toContain(
+      "process.env['QWEN_E2E_DROP_LOAD_REPLY']",
+    );
+    expect(sessionOpenSource).toContain('E2E dropping first load reply');
     // B3a crashes the replacement inside the window after its post-tool stream
     // Finished marker is durable but before the assistant commit, via a
     // test-gated hook set only on that generation. The barrier proves the
@@ -1786,10 +1788,13 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toMatch(
       /if \(\s*approvalFault === 'after-result' \|\|\s*approvalFault === 'finished-before-commit'\s*\)/,
     );
-    expect(harnessSource).toContain(
+    const turnSource = read(
+      'packages/cli/src/serve/hosted-harness-session/turn.ts',
+    );
+    expect(turnSource).toContain(
       "process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT']",
     );
-    expect(harnessSource).toContain(
+    expect(turnSource).toContain(
       'E2E holding finished turn before assistant commit',
     );
     // A3 crashes the replacement inside a two-call approval batch — sibling[0]
