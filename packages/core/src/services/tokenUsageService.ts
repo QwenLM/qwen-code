@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { readdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
@@ -71,7 +72,7 @@ export interface TokenUsageGroupSummary extends TokenUsageTotals {
 }
 
 export interface TokenUsageSummary {
-  period: TokenUsagePeriod;
+  period: TokenUsagePeriod | 'range';
   value: string;
   generatedAt: string;
   totals: TokenUsageTotals;
@@ -306,7 +307,7 @@ async function readRecordsForMonth(month: string): Promise<TokenUsageRecord[]> {
 }
 
 function summarizeRecords(
-  period: TokenUsagePeriod,
+  period: TokenUsageSummary['period'],
   value: string,
   records: TokenUsageRecord[],
 ): TokenUsageSummary {
@@ -457,6 +458,51 @@ export async function queryTokenUsage(
   return summarizeRecords(query.period, value, records);
 }
 
+export async function queryTokenUsageRange(
+  startDate: string,
+  endDate: string,
+): Promise<TokenUsageSummary> {
+  for (const value of [startDate, endDate]) {
+    if (!isValidDay(value)) {
+      throw new Error(`Invalid day value "${value}". Expected YYYY-MM-DD.`);
+    }
+  }
+  if (startDate > endDate) {
+    throw new Error('Start date must be on or before end date.');
+  }
+
+  let filenames: string[];
+  try {
+    filenames = await readdir(usageDir());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+    filenames = [];
+  }
+
+  const startMonth = startDate.slice(0, 7);
+  const endMonth = endDate.slice(0, 7);
+  const records: TokenUsageRecord[] = [];
+  for (const filename of filenames.sort()) {
+    const month = /^token-usage-(\d{4}-\d{2})\.jsonl$/.exec(filename)?.[1];
+    if (
+      !month ||
+      !isValidMonth(month) ||
+      month < startMonth ||
+      month > endMonth
+    ) {
+      continue;
+    }
+    for (const record of await readRecordsForMonth(month)) {
+      if (record.localDate >= startDate && record.localDate <= endDate) {
+        records.push(record);
+      }
+    }
+  }
+  return summarizeRecords('range', `${startDate}..${endDate}`, records);
+}
+
 function csvEscape(value: string | number | undefined): string {
   const stringValue = value === undefined ? '' : String(value);
   const trimmed = stringValue.trimStart();
@@ -471,7 +517,7 @@ function csvEscape(value: string | number | undefined): string {
 }
 
 function groupRows(
-  period: TokenUsagePeriod,
+  period: TokenUsageSummary['period'],
   value: string,
   groupType: string,
   groups: TokenUsageGroupSummary[],
