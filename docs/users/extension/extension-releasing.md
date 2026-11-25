@@ -6,6 +6,8 @@ There are three primary ways of releasing extensions to users:
 - [Github Releases](#releasing-through-github-releases)
 - [npm Registry](#releasing-through-npm-registry)
 
+You can publish an extension through any of these sources without submitting it to the Qwen Code repository. Share the install command for your chosen source with users. If you publish a marketplace, users can [add it as a source](./introduction.md#managing-marketplace-sources) to browse its plugins in the **Discover** tab.
+
 Git repository releases tend to be the simplest and most flexible approach, while GitHub releases can be more efficient on initial install as they are shipped as single archives instead of requiring a git clone which downloads each file individually. Github releases may also contain platform specific archives if you need to ship platform specific binary files. npm registry releases are ideal for teams that already use npm for package distribution, especially with private registries.
 
 ## Releasing through a git repository
