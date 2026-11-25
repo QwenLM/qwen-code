@@ -33,19 +33,22 @@ class WorkspaceRecordTest {
 
     @Test
     void rejectsInvalidIdentifiers() {
-        for (String id : new String[] {null, "", "a/b", "a b", "é",
-                "x".repeat(129)}) {
+        for (String id : new String[] {null, "", "a/b", "a b", "é"}) {
             assertInvalid(values -> values.tenantId = id);
             assertInvalid(values -> values.workspaceId = id);
         }
+        assertInvalid(values -> values.tenantId = "t".repeat(37));
+        assertInvalid(values -> values.workspaceId = "w".repeat(129));
     }
 
     @Test
     void acceptsIdentifiersAtTheLengthLimit() {
         Values values = new Values();
-        values.tenantId = "t".repeat(128);
+        values.tenantId = "t".repeat(36);
         values.workspaceId = "w".repeat(128);
-        assertEquals(128, values.build().getWorkspaceId().length());
+        WorkspaceRecord record = values.build();
+        assertEquals(36, record.getTenantId().length());
+        assertEquals(128, record.getWorkspaceId().length());
     }
 
     @Test

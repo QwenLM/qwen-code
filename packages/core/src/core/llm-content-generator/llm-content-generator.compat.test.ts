@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import type { Content, Part } from '@google/genai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LlmContentGenerator } from './llm-content-generator.js';
+import { slimCompactionInput } from '../../services/compactionInputSlimming.js';
+import { applyOssMediaReplacements } from '../../omni/reactive-degrade.js';
 
 const PROXY_URL = 'https://proxy.example.test';
 const OFFICIAL_URL = 'https://generativelanguage.googleapis.com';
@@ -300,5 +305,282 @@ describe('SSE sentinel compatibility', () => {
     await expect(readStreamText(sseResponse(['data: [DONE]']))).rejects.toThrow(
       'Incomplete JSON segment at the end',
     );
+  });
+});
+
+describe('real HTTP wire compliance for Gemini functionResponse.parts', () => {
+  const PNG_1X1 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+  async function withLocalGeminiServer<T>(
+    run: (
+      baseUrl: string,
+      capturedBodies: Array<{ url: string; body: Record<string, unknown> }>,
+    ) => Promise<T>,
+  ): Promise<T> {
+    const capturedBodies: Array<{
+      url: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        capturedBodies.push({
+          url: req.url ?? '',
+          body: JSON.parse(raw) as Record<string, unknown>,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            candidates: [
+              { content: { role: 'model', parts: [{ text: 'ok' }] } },
+            ],
+          }),
+        );
+      });
+    });
+
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    try {
+      return await run(`http://127.0.0.1:${port}`, capturedBodies);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  }
+
+  function assertFunctionResponsePartsWireSchema(
+    body: Record<string, unknown>,
+  ) {
+    const contents = body['contents'] as Array<{
+      parts?: Array<{
+        functionResponse?: {
+          parts?: Array<Record<string, unknown>>;
+        };
+      }>;
+    }>;
+    for (const content of contents) {
+      for (const part of content.parts ?? []) {
+        const frParts = part.functionResponse?.parts;
+        if (!frParts) continue;
+        expect(frParts.length).toBeGreaterThan(0);
+        for (const frPart of frParts) {
+          const keys = Object.keys(frPart);
+          expect(keys).toHaveLength(1);
+          expect(['inlineData', 'fileData']).toContain(keys[0]);
+          if (keys[0] === 'inlineData') {
+            const blobKeys = Object.keys(
+              frPart['inlineData'] as Record<string, unknown>,
+            );
+            for (const key of blobKeys) {
+              expect(['mimeType', 'data']).toContain(key);
+            }
+          } else {
+            const fileKeys = Object.keys(
+              frPart['fileData'] as Record<string, unknown>,
+            );
+            for (const key of fileKeys) {
+              expect(['fileUri', 'mimeType']).toContain(key);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  it.each([false, true])(
+    'serializes compliant wire JSON over real HTTP for both Developer API and Vertex (vertexai=%s)',
+    async (vertexai) => {
+      await withLocalGeminiServer(async (baseUrl, capturedBodies) => {
+        const generator = new LlmContentGenerator(
+          {
+            apiKey: 'local-test-key',
+            vertexai,
+            httpOptions: { baseUrl },
+          },
+          { model: 'gemini-test' },
+        );
+
+        const contents: Content[] = [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: 'Reattached summary',
+                partMetadata: { 'qwen-code:reattach-boundary': true },
+              },
+              {
+                functionResponse: {
+                  id: 'call-mixed',
+                  name: 'read_file',
+                  response: { output: '' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'VIDEO/WEBM',
+                        data: 'GkXfo59C',
+                        displayName: 'video.webm',
+                      },
+                    },
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: PNG_1X1,
+                        displayName: 'shot.png',
+                        extraKey: 'must-be-dropped',
+                      } as Part['inlineData'],
+                      partMetadata: { nested: true },
+                    } as Part,
+                  ] as NonNullable<
+                    NonNullable<Part['functionResponse']>['parts']
+                  >,
+                },
+              },
+            ],
+          },
+        ];
+
+        await generator.generateContent(
+          { model: 'gemini-test', contents },
+          'wire-test',
+        );
+
+        expect(capturedBodies).toHaveLength(1);
+        const wireBody = capturedBodies[0]!.body;
+        assertFunctionResponsePartsWireSchema(wireBody);
+
+        const sentFr = (
+          wireBody['contents'] as Array<{
+            parts: Array<{ functionResponse?: Record<string, unknown> }>;
+          }>
+        )[0]!.parts[1]!.functionResponse!;
+        expect(sentFr['response']).toEqual({
+          output: 'Unsupported media type for Gemini: VIDEO/WEBM (video.webm).',
+        });
+        expect(sentFr['parts']).toEqual([
+          { inlineData: { mimeType: 'image/png', data: PNG_1X1 } },
+        ]);
+      });
+    },
+  );
+
+  it('produces compliant wire JSON for real compactionInputSlimming and reactive-degrade outputs', async () => {
+    await withLocalGeminiServer(async (baseUrl, capturedBodies) => {
+      const generator = new LlmContentGenerator(
+        {
+          apiKey: 'local-test-key',
+          vertexai: false,
+          httpOptions: { baseUrl },
+        },
+        { model: 'gemini-test' },
+      );
+
+      // 1. Real compactionInputSlimming replaces nested image with `{ text }`.
+      const { slimmedHistory } = slimCompactionInput(
+        [
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-slim',
+                  name: 'read_file',
+                  response: { output: 'Image overview: 1x1' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: PNG_1X1 } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+        { image: false },
+      );
+
+      await generator.generateContent(
+        { model: 'gemini-test', contents: slimmedHistory },
+        'wire-slim',
+      );
+
+      // 2. Real applyOssMediaReplacements inserts a disclosure `{ text }` in functionResponse.parts.
+      const degradedHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-oss',
+                name: 'read_file',
+                response: { output: 'ok' },
+                parts: [
+                  {
+                    fileData: {
+                      fileUri: 'oss://bucket/orig.jpg',
+                      mimeType: 'image/jpeg',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ];
+      applyOssMediaReplacements(
+        degradedHistory,
+        new Map([
+          [
+            'oss://bucket/orig.jpg',
+            {
+              fileUri: 'oss://bucket/degraded.jpg',
+              mimeType: 'image/jpeg',
+              disclosureText: '[Image degraded to lower resolution]',
+            },
+          ],
+        ]),
+      );
+
+      await generator.generateContent(
+        { model: 'gemini-test', contents: degradedHistory },
+        'wire-oss',
+      );
+
+      expect(capturedBodies).toHaveLength(2);
+      for (const entry of capturedBodies) {
+        assertFunctionResponsePartsWireSchema(entry.body);
+      }
+
+      const slimFr = (
+        capturedBodies[0]!.body['contents'] as Array<{
+          parts: Array<{ functionResponse: Record<string, unknown> }>;
+        }>
+      )[0]!.parts[0]!.functionResponse;
+      expect(slimFr['parts']).toBeUndefined();
+      expect(slimFr['response']).toEqual({
+        output: 'Image overview: 1x1\n[image: image/png]',
+      });
+
+      const ossFr = (
+        capturedBodies[1]!.body['contents'] as Array<{
+          parts: Array<{ functionResponse: Record<string, unknown> }>;
+        }>
+      )[0]!.parts[0]!.functionResponse;
+      expect(ossFr['parts']).toEqual([
+        {
+          fileData: {
+            fileUri: 'oss://bucket/degraded.jpg',
+            mimeType: 'image/jpeg',
+          },
+        },
+      ]);
+      expect(ossFr['response']).toEqual({
+        output: 'ok\n[Image degraded to lower resolution]',
+      });
+    });
   });
 });

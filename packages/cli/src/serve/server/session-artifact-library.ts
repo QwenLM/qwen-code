@@ -19,7 +19,10 @@ import {
   type SessionListItem,
 } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { SessionWriterError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
-import { SessionTranscriptTooLargeError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import {
+  SessionTranscriptTooLargeError,
+  type SessionTranscriptLimitDimension,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 
@@ -50,6 +53,11 @@ export interface ArtifactLibraryMemberError {
   status: number;
   code: string;
   message: string;
+  snapshotSize?: number;
+  maxBytes?: number;
+  dimension?: SessionTranscriptLimitDimension;
+  measuredBytes?: number;
+  retryable?: boolean;
 }
 
 export function artifactLibraryMemberError(
@@ -88,6 +96,13 @@ export function artifactLibraryMemberError(
       status: 413,
       code: 'transcript_too_large',
       message: error.message,
+      snapshotSize: error.snapshotSize,
+      maxBytes: error.maxBytes,
+      ...(error.dimension !== 'snapshot' ? { dimension: error.dimension } : {}),
+      ...(error.measuredBytes !== undefined
+        ? { measuredBytes: error.measuredBytes }
+        : {}),
+      ...(error.retryable !== undefined ? { retryable: error.retryable } : {}),
     };
   return {
     status: 500,

@@ -62,12 +62,23 @@ export function validateBranchName(name: string): boolean {
   );
 }
 
+export interface GitModePopoverDraft {
+  selectedMode: SessionGitIntent['mode'];
+  branchName: string;
+}
+
 interface GitModePopoverProps {
   branch: string;
   status?: DaemonWorkspaceGitStatus;
   compact?: boolean;
   intent: SessionGitIntent;
   onIntentChange: (intent: SessionGitIntent) => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  draft?: GitModePopoverDraft;
+  onDraftChange?: (
+    update: (current: GitModePopoverDraft) => GitModePopoverDraft,
+  ) => void;
 }
 
 export function GitModePopover({
@@ -76,15 +87,43 @@ export function GitModePopover({
   compact = false,
   intent,
   onIntentChange,
+  open: openProp,
+  onOpenChange,
+  draft,
+  onDraftChange,
 }: GitModePopoverProps) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = openProp ?? internalOpen;
+  const setOpen = useCallback(
+    (value: boolean) => {
+      setInternalOpen(value);
+      onOpenChange?.(value);
+    },
+    [onOpenChange],
+  );
   const [tooltipOpen, setTooltipOpen] = useState(false);
-  const [selectedMode, setSelectedMode] = useState<
+  const [internalSelectedMode, setInternalSelectedMode] = useState<
     'current' | 'branch' | 'worktree'
   >(intent.mode);
-  const [branchName, setBranchName] = useState(
+  const [internalBranchName, setInternalBranchName] = useState(
     intent.mode === 'branch' ? intent.name : '',
+  );
+  const selectedMode = draft?.selectedMode ?? internalSelectedMode;
+  const branchName = draft?.branchName ?? internalBranchName;
+  const setSelectedMode = useCallback(
+    (value: SessionGitIntent['mode']) => {
+      setInternalSelectedMode(value);
+      onDraftChange?.((current) => ({ ...current, selectedMode: value }));
+    },
+    [onDraftChange],
+  );
+  const setBranchName = useCallback(
+    (value: string) => {
+      setInternalBranchName(value);
+      onDraftChange?.((current) => ({ ...current, branchName: value }));
+    },
+    [onDraftChange],
   );
 
   const contentRef = useRef<HTMLDivElement>(null);
@@ -103,24 +142,24 @@ export function GitModePopover({
         setBranchName(intent.mode === 'branch' ? intent.name : '');
       }
     },
-    [intent],
+    [intent, setOpen, setSelectedMode, setBranchName],
   );
 
   const handleSelectCurrent = useCallback(() => {
     onIntentChange({ mode: 'current' });
     setOpen(false);
-  }, [onIntentChange]);
+  }, [onIntentChange, setOpen]);
 
   const handleConfirmBranch = useCallback(() => {
     if (!branchName || !branchValid) return;
     onIntentChange({ mode: 'branch', name: branchName });
     setOpen(false);
-  }, [branchName, branchValid, onIntentChange]);
+  }, [branchName, branchValid, onIntentChange, setOpen]);
 
   const handleSelectWorktree = useCallback(() => {
     onIntentChange({ mode: 'worktree' });
     setOpen(false);
-  }, [onIntentChange]);
+  }, [onIntentChange, setOpen]);
 
   const handleClear = useCallback(
     (e: React.MouseEvent) => {
@@ -128,7 +167,7 @@ export function GitModePopover({
       onIntentChange({ mode: 'current' });
       setOpen(false);
     },
-    [onIntentChange],
+    [onIntentChange, setOpen],
   );
 
   const isBranch = intent.mode === 'branch';
@@ -177,7 +216,10 @@ export function GitModePopover({
                 </button>
               </PopoverTrigger>
             </TooltipTrigger>
-            <TooltipContent side="top" className="[overflow-wrap:anywhere]">
+            <TooltipContent
+              side="top"
+              className="pointer-events-none [overflow-wrap:anywhere]"
+            >
               {isBranch ? intent.name : branch}
             </TooltipContent>
           </Tooltip>

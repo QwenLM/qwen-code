@@ -31,6 +31,9 @@ export {
 export interface AdvertiseFeatureToggles {
   hostedHarness?: boolean;
   requireAuth?: boolean;
+  turnSkillFileSnapshotAvailable?: boolean;
+  turnExtensionStoreLeaseAvailable?: boolean;
+  sessionRetireIfIdleAvailable?: boolean;
   /**
    * Whether the daemon is serving the workspace-agent collaboration routes
    * (`agent_collaboration_v1`) for this response. Resolved from
@@ -146,7 +149,23 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'managed_session_journal_delta_v1',
     (toggles) => toggles.hostedHarness === true,
   ],
+  [
+    'session_retire_if_idle',
+    (toggles) => toggles.sessionRetireIfIdleAvailable === true,
+  ],
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'turn_skill_file_snapshot',
+    (toggles) => toggles.turnSkillFileSnapshotAvailable === true,
+  ],
+  [
+    'turn_skill_session_effects_check',
+    (toggles) => toggles.turnSkillFileSnapshotAvailable === true,
+  ],
+  [
+    'turn_extension_store_lease',
+    (toggles) => toggles.turnExtensionStoreLeaseAvailable === true,
+  ],
   [
     'agent_collaboration_v1',
     (toggles) => toggles.agentCollaborationEnabled === true,

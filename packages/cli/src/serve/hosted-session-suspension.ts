@@ -183,6 +183,11 @@ export interface SuspensionAttemptDeps {
   readonly markClosing: (attemptStart: number) => boolean;
   /** Synchronous live-work recheck after the bounded wait. */
   readonly liveWork: () => boolean;
+  /**
+   * Last reversible step before the irreversible teardown boundary. False
+   * is a routine refusal that reverts like any other abandoned exit.
+   */
+  readonly beforeTeardown?: () => boolean | Promise<boolean>;
   /** Teardown steps 2-7; throws on failure or uncertain outcome. */
   readonly teardown: () => Promise<void>;
   /** Drops the resident; the gate registry entry outlives it if blocked. */
@@ -244,6 +249,7 @@ export async function runSuspensionAttempt(
     // escalation happened inside calls TypeScript cannot narrow through.
     if (suspensionRefusalCode(suspension) !== 'hosted_session_closing')
       return 'reverted';
+    if ((await deps.beforeTeardown?.()) === false) return revert();
   } catch (cause) {
     // A failed eligibility dep must not strand the closing mark: before
     // the irreversible boundary the attempt reverts and rearms like any

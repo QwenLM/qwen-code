@@ -41,7 +41,7 @@ Ownership assertions must follow the baseline's actual protocol. Ordinary LOCAL 
 
 ## Reusable commands
 
-Run package tests from their package directories. From `packages/cli`, run the native status tests and the targeted recovery-cleanup cases in `src/serve/hosted-harness-session.test.ts`; record the selector and excluded count. From `packages/web-shell`, run the affected provider, Session/recovery/cancel hooks, Session page, Workspace creator and handoff tests. The browser fixture must exercise the gate, operation tracking after reload and editable handoff through real Chromium; record that its HTTP adapter is controlled.
+Run package tests from their package directories. From `packages/cli`, run the native status tests and the targeted recovery-cleanup cases in `src/serve/hosted-harness-session.runtime-cleanup.test.ts`; record the selector and excluded count. From `packages/web-shell`, run the affected provider, Session/recovery/cancel hooks, Session page, Workspace creator and handoff tests. The browser fixture must exercise the gate, operation tracking after reload and editable handoff through real Chromium; record that its HTTP adapter is controlled.
 
 Also cover cancellation without durable operations: an acknowledged A delivery must not prevent a later explicit stop of B; a failed A still lacking matching ready proof stays unconfirmed. Lost replies retain the original key and Turn, and a stale or foreign Session response cannot retire delivery tracking. Retiring an acknowledged delivery slot never labels A cancelled or changes the recovery send gate.
 

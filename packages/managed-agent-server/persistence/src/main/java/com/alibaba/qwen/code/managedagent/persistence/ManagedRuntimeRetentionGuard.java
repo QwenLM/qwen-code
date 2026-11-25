@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeRetention;
@@ -13,14 +11,22 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.ReferenceGuard {
+    // The plain equalities reach the record's unique key; the binary casts
+    // keep the match byte-exact under the PAD SPACE collation.
+    static final String SETTLED_CHILD_RUN_SQL = "SELECT 1 FROM ma_session_record WHERE record_kind = 'DOMAIN' AND"
+            + " tenant_id = ? AND session_id = ? AND domain = 'child_run' AND record_id = ? AND CAST(domain AS"
+            + " BINARY(2048)) = CAST('child_run' AS BINARY(2048)) AND"
+            + " CAST(record_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) AND"
+            + " settled_at IS NOT NULL LIMIT 1";
+
     @Override
     public boolean bindingReferenced(Connection connection, RuntimeBindingRecord binding)
             throws SQLException {
         return exists(
                         connection,
                         "SELECT 1 FROM ma_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
-                                + " AND execution_storage_key IS NOT NULL LIMIT 1",
-                        identity(binding.getBindingId()), binding.getGeneration())
+                                + " AND execution_storage_id IS NOT NULL LIMIT 1",
+                        binding.getBindingId(), binding.getGeneration())
                 || exists(
                         connection,
                         "SELECT 1 FROM ma_operation WHERE operation_kind = 'WORKSPACE_RETIREMENT' AND"
@@ -38,10 +44,9 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
             throws SQLException {
         var scope = binding.getRequest().getScope();
         return exists(connection, "SELECT 1 FROM ma_resource_ref WHERE owner_kind = 'HOSTED_CLEANUP'"
-                        + " AND runtime_binding_key = ? AND owner_revision = ? AND tenant_id = ?"
-                        + " AND workspace_id = ? LIMIT 1", HostedCleanupReferences.bindingKey(
-                                scope.getTenantId(), scope.getWorkspaceId(), binding.getBindingId()),
-                binding.getGeneration(), identity(scope.getTenantId()), identity(scope.getWorkspaceId()));
+                        + " AND runtime_binding_id = ? AND owner_revision = ? AND tenant_id = ?"
+                        + " AND workspace_id = ? LIMIT 1", binding.getBindingId(),
+                binding.getGeneration(), scope.getTenantId(), scope.getWorkspaceId());
     }
 
     private static boolean unverifiedCleanupHistory(Connection connection, RuntimeBindingRecord binding)
@@ -54,13 +59,13 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
             return exists(connection, "SELECT 1 FROM ma_session_head h WHERE h.tenant_id = ?"
                             + " AND h.harness_session_id = ?"
                             + stale + " LIMIT 1",
-                    identity(request.getScope().getTenantId()), identity(request.getIsolationKey()));
+                    request.getScope().getTenantId(), request.getIsolationKey());
         }
         return exists(connection, "SELECT 1 FROM ma_runtime_session s JOIN ma_session_head h"
                         + " ON h.tenant_id = ? AND h.tenant_id = s.tenant_id AND h.session_id = s.harness_session_id"
                         + " WHERE s.binding_id = ? AND s.runtime_generation = ?" + stale + " LIMIT 1",
-                identity(request.getScope().getTenantId()),
-                identity(binding.getBindingId()), binding.getGeneration());
+                request.getScope().getTenantId(),
+                binding.getBindingId(), binding.getGeneration());
     }
 
     private static boolean backgroundRunUnsettled(
@@ -70,22 +75,20 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
         // Deduplicate owners by binary identity to avoid scanning a Session for every process.
         return exists(
                 connection,
-                "SELECT 1 FROM (SELECT DISTINCT e.harness_session_id, CAST(e.harness_session_id AS"
-                    + " BINARY(2048)) AS harness_session_key FROM ma_tool_execution e WHERE"
+                "SELECT 1 FROM (SELECT DISTINCT e.harness_session_id FROM ma_tool_execution e WHERE"
                     + " e.binding_id = ? AND e.runtime_generation = ? AND CAST(e.binding_id AS"
                     + " BINARY(2048)) = CAST(? AS BINARY(2048)) AND CAST(RIGHT(e.execution_call_id,"
                     + " 8) AS BINARY(8)) = CAST(':process' AS BINARY(8))) s JOIN ma_session_record"
                     + " r ON r.tenant_id = ? AND r.session_id = s.harness_session_id AND"
                     + " r.record_kind = 'DOMAIN' AND r.domain = 'child_run' WHERE CAST(r.tenant_id"
                     + " AS BINARY(2048)) = CAST(? AS BINARY(2048)) AND CAST(r.workspace_id AS"
-                    + " BINARY(2048)) = CAST(? AS BINARY(2048)) AND CAST(r.session_id AS"
-                    + " BINARY(2048)) = s.harness_session_key AND CAST(r.domain AS BINARY(2048)) ="
+                    + " BINARY(2048)) = CAST(? AS BINARY(2048)) AND CAST(r.domain AS BINARY(2048)) ="
                     + " CAST('child_run' AS BINARY(2048)) AND CAST(r.task_kind AS BINARY(2048)) ="
                     + " CAST('background_shell' AS BINARY(2048)) AND r.settled_at IS NULL LIMIT 1",
-                identity(binding.getBindingId()),
+                binding.getBindingId(),
                 binding.getGeneration(),
                 binding.getBindingId(),
-                identity(tenantId),
+                tenantId,
                 tenantId,
                 binding.getRequest().getScope().getWorkspaceId());
     }
@@ -101,9 +104,9 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                             "SELECT DISTINCT harness_session_id FROM ma_runtime_session"
                                     + " WHERE binding_id = ? AND runtime_generation = ? AND tenant_id = ?")) {
                 statement.setQueryTimeout(10);
-                statement.setBytes(1, identity(binding.getBindingId()));
+                statement.setString(1, binding.getBindingId());
                 statement.setLong(2, binding.getGeneration());
-                statement.setBytes(3, identity(tenantId));
+                statement.setString(3, tenantId);
                 try (var rows = statement.executeQuery()) {
                     while (rows.next()) {
                         owners.add(rows.getString("harness_session_id"));
@@ -131,8 +134,8 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                         "SELECT tenant_id, session_id, parent_session_id, parent_child_run_id FROM"
                             + " ma_session WHERE tenant_id = ? AND session_id = ?")) {
             statement.setQueryTimeout(10);
-            statement.setBytes(1, tenantId.getBytes(StandardCharsets.UTF_8));
-            statement.setBytes(2, sessionId.getBytes(StandardCharsets.UTF_8));
+            statement.setString(1, tenantId);
+            statement.setString(2, sessionId);
             try (var rows = statement.executeQuery()) {
                 if (!rows.next() || !tenantId.equals(rows.getString("tenant_id"))
                         || !sessionId.equals(rows.getString("session_id"))) {
@@ -148,17 +151,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                 }
                 // Lineage precedes warm; a canonical terminal run cannot reopen its identity repair
                 // debt.
-                return !exists(
-                        connection,
-                        "SELECT 1 FROM ma_session_record WHERE record_kind = 'DOMAIN' AND"
-                            + " tenant_id = ? AND session_id = ? AND record_key = ? AND CAST(domain AS"
-                            + " BINARY(2048)) = CAST('child_run' AS BINARY(2048)) AND"
-                            + " CAST(record_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) AND"
-                            + " settled_at IS NOT NULL LIMIT 1",
-                        identity(tenantId),
-                        identity(parent),
-                        ManagedExtensionProjection.recordKey(parent, "child_run", run),
-                        run);
+                return !exists(connection, SETTLED_CHILD_RUN_SQL, tenantId, parent, run, run);
             }
         }
     }
@@ -166,12 +159,10 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
     @Override
     public boolean executionReferenced(Connection connection, String executionCallId)
             throws SQLException {
-        String key =
-                ToolPublicationContract.sha256(executionCallId.getBytes(StandardCharsets.UTF_8));
         return exists(
                 connection,
-                "SELECT 1 FROM ma_output_capture WHERE execution_key = ? LIMIT 1",
-                key);
+                "SELECT 1 FROM ma_output_capture WHERE execution_call_id = ? LIMIT 1",
+                executionCallId);
     }
 
     private static byte[] identity(String value) {

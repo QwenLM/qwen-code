@@ -47,7 +47,7 @@ class HostedWorkspaceStorageGuardMySqlIT {
         Files.createDirectory(root.resolve("child"));
         // Keep initialized-root mtime distinct from birth time without relying on sleeps.
         Files.setLastModifiedTime(root, FileTime.fromMillis(1));
-        String tenant = "w1-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String storage = "storage-" + UUID.randomUUID();
         var properties = new ManagedAgentProperties();
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);

@@ -449,6 +449,14 @@ describe('summarizeProjectHooks', () => {
       'a command hook without a command',
       { Stop: [{ hooks: [{ type: 'command' }] }] },
     ],
+    [
+      'a command hook with exec arguments',
+      {
+        Stop: [
+          { hooks: [{ type: 'command', command: 'node', args: ['audit.js'] }] },
+        ],
+      },
+    ],
     ['an http hook without a url', { Stop: [{ hooks: [{ type: 'http' }] }] }],
     [
       'a prompt hook without a prompt',

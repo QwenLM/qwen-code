@@ -40,7 +40,8 @@ export function outputIncludesThoughts(authType: string | undefined): boolean {
   return (
     authType === AuthType.USE_OPENAI ||
     authType === AuthType.USE_OPENAI_RESPONSES ||
-    authType === AuthType.QWEN_OAUTH
+    authType === AuthType.QWEN_OAUTH ||
+    authType === AuthType.QWEN_SUBSCRIPTION
   );
 }
 

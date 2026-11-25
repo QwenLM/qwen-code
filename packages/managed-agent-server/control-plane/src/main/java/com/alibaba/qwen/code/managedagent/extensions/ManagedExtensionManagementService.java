@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.extensions;
 
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
@@ -16,8 +17,10 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -139,8 +142,8 @@ public class ManagedExtensionManagementService {
         if (!harness.supportsSessionExtensions()) {
             throw unsupported();
         }
-        List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> pins = json.convertValue(command.get("extensions"), json.getTypeFactory().constructCollectionType(
-                List.class, com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin.class));
+        List<ManagedExtensionPackages.Pin> pins = json.convertValue(command.get("extensions"), json.getTypeFactory().constructCollectionType(
+                List.class, ManagedExtensionPackages.Pin.class));
         packages.authorizeSelection(tenant, actor, session.workspace().getWorkspaceId(), pins);
         return invoke(() -> harness.applyExtensions(tenant, sessionId, request), sessionId, operationId);
     }
@@ -148,7 +151,7 @@ public class ManagedExtensionManagementService {
     private boolean sameCommand(Map<String, Object> request, JsonNode saved) {
         try {
             return json.readTree(json.writeValueAsBytes(request)).equals(saved);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw corrupt();
         }
     }
@@ -283,7 +286,7 @@ public class ManagedExtensionManagementService {
             }
             return result;
         } catch (HarnessHttpFailure error) {
-            org.springframework.http.HttpStatus status = org.springframework.http.HttpStatus.resolve(error.getStatusCode());
+            HttpStatus status = HttpStatus.resolve(error.getStatusCode());
             if (status != null && status.is4xxClientError() && error.getErrorCode() != null
                     && error.getErrorCode().matches("[a-z][a-z0-9_]{0,127}")) {
                 throw new ManagedAgentException(status.value(), error.getErrorCode(), "Extension configuration was refused.");
