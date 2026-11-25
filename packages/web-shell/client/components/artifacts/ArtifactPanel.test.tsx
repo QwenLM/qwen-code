@@ -432,6 +432,9 @@ function scheduledTaskPanel(
     onCancelSessionScheduledTask?: Parameters<
       typeof ArtifactPanel
     >[0]['onCancelSessionScheduledTask'];
+    onSessionScheduledTaskStopped?: Parameters<
+      typeof ArtifactPanel
+    >[0]['onSessionScheduledTaskStopped'];
     onDurableScheduledTaskDeleted?: Parameters<
       typeof ArtifactPanel
     >[0]['onDurableScheduledTaskDeleted'];
@@ -487,6 +490,7 @@ function scheduledTaskPanel(
           options.hasLiveSessionScheduledSnapshot
         }
         onCancelSessionScheduledTask={options.onCancelSessionScheduledTask}
+        onSessionScheduledTaskStopped={options.onSessionScheduledTaskStopped}
         onDurableScheduledTaskDeleted={options.onDurableScheduledTaskDeleted}
         onSelectTab={() => {}}
         onCloseTab={() => {}}
@@ -3285,13 +3289,110 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       await Promise.resolve();
     });
 
-    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith('cron-secondary');
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      'cron',
+    );
     expect(container.textContent).not.toContain('Stop task');
     const detail = container.querySelector(
       '[role="group"][aria-label="Scheduled tasks"]',
     );
     expect(detail).not.toBeNull();
     expect(document.activeElement).toBe(detail);
+  });
+
+  it('stops the wakeup task when cron and wakeup share an id', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const onSessionScheduledTaskStopped = vi.fn();
+    const cronTask = {
+      id: 'shared-scheduled-task',
+      source: 'cron' as const,
+      cronExpr: '0 9 * * *',
+      prompt: 'Cron live prompt',
+      recurring: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: null,
+      enabled: true,
+    };
+    const wakeupTask = {
+      ...cronTask,
+      source: 'wakeup' as const,
+      cronExpr: '@wakeup',
+      prompt: 'Wakeup live prompt',
+      recurring: false,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: {
+            id: 'shared-scheduled-task',
+            toolCallId: 'shared-wakeup-call',
+            cron: '@wakeup',
+            prompt: 'Wakeup historical prompt',
+            recurring: false,
+            durable: false,
+          },
+          liveSessionScheduledTasks: new Map([
+            [
+              scheduledTaskRuntimeKey({ ...cronTask, scope: 'session' }),
+              cronTask,
+            ],
+            [
+              scheduledTaskRuntimeKey({ ...wakeupTask, scope: 'session' }),
+              wakeupTask,
+            ],
+          ]),
+          liveSessionScheduledTasksOwnerSessionId: 'owner-session',
+          hasLiveSessionScheduledSnapshot: true,
+          onCancelSessionScheduledTask,
+          onSessionScheduledTaskStopped,
+          sourceSessionId: 'owner-session',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain(
+      'Active in this session. Stopping cancels future runs immediately.',
+    );
+    expect(container.textContent).toContain('Wakeup live prompt');
+    expect(container.textContent).not.toContain('Cron live prompt');
+    const stop = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Stop task',
+    );
+    expect(stop).toBeDefined();
+    expect(stop?.disabled).toBe(false);
+
+    await act(async () => {
+      stop?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'shared-scheduled-task',
+      'wakeup',
+    );
+    expect(onSessionScheduledTaskStopped).toHaveBeenCalledWith(
+      'shared-scheduled-task',
+      'owner-session',
+      'wakeup',
+    );
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Stop task',
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -7095,6 +7196,7 @@ describe('ArtifactPanel binary document previews', () => {
     });
     expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
       'cron-paused-live',
+      'cron',
     );
     expect(container.textContent).toContain(
       'This session-scoped scheduled task is no longer active.',
@@ -7178,7 +7280,10 @@ describe('ArtifactPanel binary document previews', () => {
       stopButton?.click();
       await Promise.resolve();
     });
-    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith('cron-live-1');
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-live-1',
+      'cron',
+    );
     expect(container.textContent).toContain(
       'This session-scoped scheduled task is no longer active.',
     );
@@ -7311,7 +7416,10 @@ describe('ArtifactPanel binary document previews', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith('cron-refused-1');
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-refused-1',
+      'cron',
+    );
     expect(container.textContent).toContain(
       'Failed to stop the scheduled task',
     );

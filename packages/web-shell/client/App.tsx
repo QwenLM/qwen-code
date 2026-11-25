@@ -9749,7 +9749,7 @@ export function App({
       openScheduledTaskPanel(
         {
           id: entry.id,
-          toolCallId: `scheduled:${entry.scope}:${entry.id}`,
+          toolCallId: `scheduled:${entry.scope}:${entry.scope === 'session' ? `${entry.source}:` : ''}${entry.id}`,
           title: entry.title,
           cron: entry.cronExpr,
           prompt: entry.prompt,
@@ -24846,8 +24846,16 @@ export function App({
     hasLiveSessionScheduledSnapshot:
       sessionScheduledTasks.hasLiveSessionSnapshot,
     onCancelSessionScheduledTask: sessionScheduledTasks.cancelSessionTaskById,
-    onSessionScheduledTaskStopped: (id: string, sourceSessionId?: string) =>
-      sessionScheduledTasks.confirmSessionCancellation(id, sourceSessionId),
+    onSessionScheduledTaskStopped: (
+      id: string,
+      sourceSessionId?: string,
+      source?: 'cron' | 'wakeup',
+    ) =>
+      sessionScheduledTasks.confirmSessionCancellation(
+        id,
+        sourceSessionId,
+        source,
+      ),
     onDurableScheduledTaskDeleted: (
       id: string,
       workspaceId: string | undefined,

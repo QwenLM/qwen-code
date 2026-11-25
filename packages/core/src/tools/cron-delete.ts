@@ -70,7 +70,9 @@ class CronDeleteInvocation extends BaseToolInvocation<
         deleted = true;
       } else if (!deleted) {
         deleted = await scheduler.delete(this.params.id);
-        await removeCronTasks(this.config.getProjectRoot(), [this.params.id]);
+        await removeCronTasks(this.config.getProjectRoot(), [this.params.id], {
+          tombstoneOnly: true,
+        });
       }
     } catch (error) {
       // Durable removal failed to persist — the job is restored, so don't

@@ -1175,6 +1175,71 @@ describe('EnvironmentPanel', () => {
     expect(onManageAllScheduledTasks).toHaveBeenCalledOnce();
   });
 
+  it('routes same-id cron and wakeup Stop buttons to their own source', async () => {
+    const makeEntry = (source: 'cron' | 'wakeup') => {
+      const title = source === 'cron' ? 'Cron row' : 'Wakeup row';
+      const cronExpr = source === 'cron' ? '0 9 * * *' : '@wakeup';
+      const recurring = source === 'cron';
+      return {
+        scope: 'session' as const,
+        source,
+        id: 'shared-environment-task',
+        title,
+        prompt: title,
+        cronExpr,
+        recurring,
+        enabled: true as const,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        expiresAt: null,
+        task: {
+          id: 'shared-environment-task',
+          source,
+          cronExpr,
+          prompt: title,
+          recurring,
+          createdAt: 1_000,
+          expiresAt: null,
+          lastFiredAt: null,
+          nextRunAt: null,
+        },
+      };
+    };
+    const entries = [makeEntry('cron'), makeEntry('wakeup')];
+    const onCancelSessionScheduledTask = vi.fn();
+    const view = mount({
+      scheduledTasks: entries,
+      scheduledTasksOwnerSessionId: 'session-1',
+      onCancelSessionScheduledTask,
+    });
+    const rows = Array.from(
+      view.querySelectorAll<HTMLElement>(
+        '[data-testid="environment-scheduled-task"]',
+      ),
+    );
+    expect(rows).toHaveLength(2);
+
+    for (const [index, entry] of entries.entries()) {
+      const row = rows.find((candidate) =>
+        candidate.textContent?.includes(entry.title),
+      );
+      const stop = row?.querySelector<HTMLButtonElement>(
+        'button[aria-label="Stop"]',
+      );
+      expect(row).toBeDefined();
+      expect(stop).not.toBeNull();
+      await act(async () => {
+        stop?.click();
+        await Promise.resolve();
+      });
+      expect(onCancelSessionScheduledTask).toHaveBeenNthCalledWith(
+        index + 1,
+        entry,
+      );
+    }
+  });
+
   it('does not restore focus into a replacement session', () => {
     const entry = {
       scope: 'session' as const,

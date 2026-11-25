@@ -126,6 +126,39 @@ describe('CronDeleteTool', () => {
     expect(result.error?.message).toContain('transient durable read failure');
   });
 
+  it('does not delete a later durable record from a different owner after an empty read', async () => {
+    let releaseDelete!: (deleted: boolean) => void;
+    const pendingDelete = new Promise<boolean>((resolve) => {
+      releaseDelete = resolve;
+    });
+    vi.spyOn(config._scheduler, 'delete').mockReturnValue(pendingDelete);
+    const running = tool
+      .build({ id: 'arrived-after-read' })
+      .execute(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(config._scheduler.delete).toHaveBeenCalledOnce();
+    });
+    const later = {
+      id: 'arrived-after-read',
+      cron: '0 */2 * * *',
+      prompt: 'preserve the separate owner',
+      recurring: true,
+      createdAt: Date.now(),
+      lastFiredAt: null,
+      sessionId: 'later-owner',
+    };
+    try {
+      await writeCronTasks(tmpDir, [later]);
+    } finally {
+      releaseDelete(false);
+    }
+    const result = await running;
+
+    expect(await readCronTasks(tmpDir)).toEqual([later]);
+    expect(result.error?.message).toContain('not found');
+    expect(result.llmContent).not.toContain('Cancelled job');
+  });
+
   it('returns error for non-existent job', async () => {
     const invocation = tool.build({ id: 'nonexist' });
     const result = await invocation.execute(new AbortController().signal);

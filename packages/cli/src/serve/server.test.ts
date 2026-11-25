@@ -12270,6 +12270,33 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it.each([
+      { kind: 'agent', source: 'wakeup' },
+      { kind: 'cron', source: 'unsupported' },
+    ])('rejects invalid kind/source combinations: %j', async (body) => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/task-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '`source` must be "cron" or "wakeup" for a cron task',
+      );
+      expect(bridge.cancelSessionTaskCalls).toEqual([]);
+    });
+
     it('forwards the selected cron wakeup source through the bridge', async () => {
       const bridge = fakeBridge({
         cancelSessionTaskImpl: async () => ({ cancelled: true }),

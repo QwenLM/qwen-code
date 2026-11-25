@@ -738,7 +738,7 @@ export function EnvironmentPanel({
 
                   return (
                     <li
-                      key={`${entry.scope}:${entry.id}`}
+                      key={scheduledTaskKey(entry)}
                       className={styles.scheduledItem}
                       data-testid="environment-scheduled-task"
                       data-scope={entry.scope}

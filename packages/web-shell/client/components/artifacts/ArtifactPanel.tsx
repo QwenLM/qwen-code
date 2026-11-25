@@ -1994,7 +1994,8 @@ export function ArtifactPanel({
                 ? liveSessionScheduledTasks?.get(
                     scheduledTaskRuntimeKey({
                       scope: 'session',
-                      source: 'cron',
+                      source:
+                        activeTab.task.cron === '@wakeup' ? 'wakeup' : 'cron',
                       id: activeTab.task.id,
                     }),
                   )
@@ -2033,7 +2034,8 @@ export function ArtifactPanel({
                 confirmedCancelledSessionTaskIds?.has(
                   scheduledTaskRuntimeKey({
                     scope: 'session',
-                    source: 'cron',
+                    source:
+                      activeTab.task.cron === '@wakeup' ? 'wakeup' : 'cron',
                     id: activeTab.task.id,
                   }),
                 ),
@@ -2226,8 +2228,15 @@ function ScheduledTaskDetail({
   liveDurableTask?: DaemonScheduledTask;
   confirmedDurableDeletion?: boolean;
   confirmedSessionCancellation?: boolean;
-  onCancelSessionTask?: (taskId: string) => Promise<boolean>;
-  onSessionTaskStopped?: (taskId: string, sourceSessionId?: string) => void;
+  onCancelSessionTask?: (
+    taskId: string,
+    source?: 'cron' | 'wakeup',
+  ) => Promise<boolean>;
+  onSessionTaskStopped?: (
+    taskId: string,
+    sourceSessionId?: string,
+    source?: 'cron' | 'wakeup',
+  ) => void;
   onDurableTaskDeleted?: (
     id: string,
     workspaceId: string | undefined,
@@ -2695,12 +2704,19 @@ function ScheduledTaskDetail({
     setBusy(true);
     setFormError(null);
     try {
-      const cancelled = await onCancelSessionTask(liveSessionTask.id);
+      const cancelled = await onCancelSessionTask(
+        liveSessionTask.id,
+        liveSessionTask.source,
+      );
       if (!cancelled) {
         setFormError(t('scheduledTasks.error.cancelFailed'));
         return;
       }
-      onSessionTaskStopped?.(liveSessionTask.id, sourceSessionId);
+      onSessionTaskStopped?.(
+        liveSessionTask.id,
+        sourceSessionId,
+        liveSessionTask.source,
+      );
       setStopConfirmed(true);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : String(err));

@@ -7220,6 +7220,7 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.sessionTaskCancel).toHaveBeenCalledWith(
       task.id,
       'cron',
+      'cron',
     );
     expect(container.textContent).toContain(
       'This session-scoped scheduled task is no longer active.',
@@ -7234,6 +7235,119 @@ describe('task activity key', () => {
     expect(container.textContent).toContain(
       'This session-scoped scheduled task is no longer active.',
     );
+  });
+
+  it('scopes same-id Environment tabs and stop confirmations by task source', async () => {
+    const taskId = 'shared-app-scheduled-task';
+    const cronTask = {
+      id: taskId,
+      source: 'cron' as const,
+      cronExpr: '0 9 * * *',
+      prompt: 'Cron source prompt',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: null,
+    };
+    const wakeupTask = {
+      ...cronTask,
+      source: 'wakeup' as const,
+      cronExpr: '@wakeup',
+      prompt: 'Wakeup source prompt',
+      recurring: false,
+      createdAt: 2_000,
+    };
+    testState.sessionScheduledTasks = [cronTask, wakeupTask];
+    testState.messages = [
+      {
+        id: 'scheduled-intent-shared-sources',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'cron-create-shared-sources',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: cronTask.cronExpr,
+              prompt: cronTask.prompt,
+              recurring: true,
+            },
+            rawOutput: `Scheduled recurring job ${taskId} (${cronTask.cronExpr}).`,
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelectorAll(
+          '[data-testid="environment-scheduled-task"]',
+        ),
+      ).toHaveLength(2);
+    });
+    const environmentRows = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-testid="environment-scheduled-task"]',
+        ),
+      );
+    const openRow = async (prompt: string) => {
+      const row = environmentRows().find((candidate) =>
+        candidate.textContent?.includes(prompt),
+      );
+      expect(row).toBeDefined();
+      await act(async () => {
+        row?.querySelector<HTMLButtonElement>('button')?.click();
+        await flush();
+      });
+    };
+
+    await openRow(cronTask.prompt);
+    const cronTabId = `scheduled-task:session-1:scheduled:session:cron:${taskId}`;
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(cronTabId);
+    expect(
+      testState.latestArtifactPanelProps?.tabs.find(
+        (tab) => tab.id === cronTabId,
+      ),
+    ).toMatchObject({
+      kind: 'scheduled_task',
+      sourceSessionId: 'session-1',
+      task: { toolCallId: `scheduled:session:cron:${taskId}` },
+    });
+
+    await openRow(wakeupTask.prompt);
+    const wakeupTabId = `scheduled-task:session-1:scheduled:session:wakeup:${taskId}`;
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(wakeupTabId);
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    expect(
+      testState.latestArtifactPanelProps?.tabs.find(
+        (tab) => tab.id === wakeupTabId,
+      ),
+    ).toMatchObject({
+      kind: 'scheduled_task',
+      sourceSessionId: 'session-1',
+      task: { toolCallId: `scheduled:session:wakeup:${taskId}` },
+    });
+
+    const notifyStopped =
+      testState.latestArtifactPanelProps?.onSessionScheduledTaskStopped;
+    expect(notifyStopped).toBeTypeOf('function');
+    act(() => {
+      Reflect.apply(notifyStopped!, undefined, [taskId, 'session-1', 'wakeup']);
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(environmentRows()).toHaveLength(1);
+      expect(environmentRows()[0]?.textContent).toContain(cronTask.prompt);
+      expect(container.textContent).toContain(
+        'This session-scoped scheduled task is no longer active.',
+      );
+    });
   });
 
   it('retires an environment row immediately after a direct detail deletion without awaiting refresh', async () => {

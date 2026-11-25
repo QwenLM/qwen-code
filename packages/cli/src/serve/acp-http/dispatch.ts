@@ -4462,6 +4462,18 @@ export class AcpDispatcher {
               }
               return;
             }
+            if (kind !== 'cron' && source !== undefined) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`source` is valid only for kind "cron"',
+                  ),
+                );
+              }
+              return;
+            }
             if (kind === 'workflow' && !this.isWorkspaceTrusted()) {
               this.replyConn(conn, id, {
                 cancelled: false,

@@ -10424,6 +10424,40 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('_qwen/session/tasks/cancel rejects non-cron invalid source without executing the bridge', async () => {
+      const cancel = vi.spyOn(bridge, 'cancelSessionTask');
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 70,
+        method: '_qwen/session/tasks/cancel',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'task-1',
+          kind: 'agent',
+          source: 'wakeup',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          message: '`source` is valid only for kind "cron"',
+        },
+      });
+      expect(cancel).not.toHaveBeenCalled();
+      cancel.mockRestore();
+    });
+
     it('_qwen/session/tasks/workflow_action forwards the action result and trusted client context', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);

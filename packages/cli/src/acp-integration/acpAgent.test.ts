@@ -19264,10 +19264,42 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           {
             id: 'shared-source',
             cronExpr: '*/5 * * * *',
+            durable: true,
+            sessionId: 'owner-a',
+          },
+          {
+            id: 'shared-source',
+            cronExpr: '*/5 * * * *',
             durable: false,
           },
           {
             id: 'shared-source',
+            cronExpr: '@wakeup',
+            durable: false,
+          },
+          {
+            id: 'legacy-unbound-sibling',
+            cronExpr: '*/5 * * * *',
+            durable: false,
+          },
+          {
+            id: 'legacy-unbound-sibling',
+            cronExpr: '*/5 * * * *',
+            durable: true,
+          },
+          {
+            id: 'source-bound-sibling',
+            cronExpr: '*/5 * * * *',
+            durable: true,
+            sessionId: 'owner-a',
+          },
+          {
+            id: 'source-bound-sibling',
+            cronExpr: '*/5 * * * *',
+            durable: false,
+          },
+          {
+            id: 'legacy-wakeup',
             cronExpr: '@wakeup',
             durable: false,
           },
@@ -19298,7 +19330,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskKind: 'cron',
       }),
     ).resolves.toEqual({ cancelled: true });
-    expect(deleteCron).toHaveBeenCalledWith('session-cron-1');
+    expect(cancelCron).toHaveBeenCalledExactlyOnceWith('session-cron-1');
+    expect(deleteCron).not.toHaveBeenCalled();
 
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
@@ -19324,6 +19357,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskKind: 'cron',
       }),
     ).resolves.toEqual({ cancelled: false, reason: 'ambiguous' });
+    expect(cancelCron).not.toHaveBeenCalledWith('shared-source');
+    expect(cancelWakeup).not.toHaveBeenCalledWith('shared-source');
     expect(deleteCron).not.toHaveBeenCalledWith('shared-source');
 
     await expect(
@@ -19335,7 +19370,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).resolves.toEqual({ cancelled: true });
     expect(cancelWakeup).toHaveBeenCalledExactlyOnceWith('shared-source');
-    expect(cancelCron).not.toHaveBeenCalled();
+    expect(cancelCron).not.toHaveBeenCalledWith('shared-source');
 
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
@@ -19345,8 +19380,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         source: 'cron',
       }),
     ).resolves.toEqual({ cancelled: true });
-    expect(cancelCron).toHaveBeenCalledExactlyOnceWith('shared-source');
+    expect(cancelCron).toHaveBeenNthCalledWith(2, 'shared-source');
     expect(cancelWakeup).toHaveBeenCalledTimes(1);
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'legacy-unbound-sibling',
+        taskKind: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(cancelCron).toHaveBeenCalledWith('legacy-unbound-sibling');
+    expect(deleteCron).not.toHaveBeenCalledWith('legacy-unbound-sibling');
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'source-bound-sibling',
+        taskKind: 'cron',
+        source: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(cancelCron).toHaveBeenCalledWith('source-bound-sibling');
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'legacy-wakeup',
+        taskKind: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(cancelWakeup).toHaveBeenCalledWith('legacy-wakeup');
+    expect(deleteCron).not.toHaveBeenCalled();
+
+    const sdk = await vi.importActual<
+      typeof import('@agentclientprotocol/sdk')
+    >('@agentclientprotocol/sdk');
+    vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+      sdk.RequestError.invalidParams,
+    );
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'task-1',
+        taskKind: 'agent',
+        source: 'wakeup',
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      message: expect.stringContaining(
+        'source is valid only for taskKind "cron"',
+      ),
+    });
+    expect(deleteCron).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -19356,17 +19442,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     let enabled = false;
-    const deleteCron = vi
+    const cancelCron = vi
       .fn()
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
     Object.assign(innerConfig, {
       isCronEnabled: vi.fn().mockImplementation(() => enabled),
       getCronScheduler: vi.fn().mockReturnValue({
         list: vi
           .fn()
           .mockReturnValue([{ id: 'session-cron-1', durable: false }]),
-        delete: deleteCron,
+        cancelSessionCron: cancelCron,
       }),
     });
 
@@ -19390,7 +19476,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskKind: 'cron',
       }),
     ).resolves.toEqual({ cancelled: false, reason: 'disabled' });
-    expect(deleteCron).not.toHaveBeenCalled();
+    expect(cancelCron).not.toHaveBeenCalled();
 
     enabled = true;
     await expect(
@@ -19400,7 +19486,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskKind: 'cron',
       }),
     ).resolves.toEqual({ cancelled: false });
-    expect(deleteCron).toHaveBeenCalledWith('session-cron-1');
+    expect(cancelCron).toHaveBeenCalledWith('session-cron-1');
 
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
@@ -19409,7 +19495,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskKind: 'cron',
       }),
     ).resolves.toEqual({ cancelled: true });
-    expect(deleteCron).toHaveBeenCalledTimes(2);
+    expect(cancelCron).toHaveBeenCalledTimes(2);
 
     mockConnectionState.resolve();
     await agentPromise;

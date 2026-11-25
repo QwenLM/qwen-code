@@ -14508,6 +14508,12 @@ class QwenAgent implements Agent {
             'taskKind must be "agent", "shell", "monitor", "workflow", or "cron"',
           );
         }
+        if (taskKind !== 'cron' && source !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'source is valid only for taskKind "cron"',
+          );
+        }
         debugLogger.info(
           `sessionTaskCancel requested sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind}`,
         );
@@ -14617,15 +14623,19 @@ class QwenAgent implements Agent {
             }
             const scheduler = config.getCronScheduler?.();
             const candidates =
-              scheduler?.list?.().filter((item) => item.id === taskId) ?? [];
+              scheduler
+                ?.list?.()
+                .filter(
+                  (item) =>
+                    item.id === taskId &&
+                    (source === undefined ||
+                      (source === 'wakeup'
+                        ? item.cronExpr === '@wakeup'
+                        : item.cronExpr !== '@wakeup')),
+                ) ?? [];
             const job =
-              source === undefined
-                ? candidates[0]
-                : candidates.find((item) =>
-                    source === 'wakeup'
-                      ? item.cronExpr === '@wakeup'
-                      : item.cronExpr !== '@wakeup',
-                  );
+              candidates.find((item) => !item.durable) ??
+              candidates.find((item) => item.durable);
             if (!job) {
               debugLogger.info(
                 `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} source=${source ?? 'legacy'} reason=not_found`,
@@ -14644,11 +14654,10 @@ class QwenAgent implements Agent {
             ) {
               return { cancelled: false, reason: 'ambiguous' };
             }
-            const deleted = source
-              ? source === 'wakeup'
+            const deleted =
+              job.cronExpr === '@wakeup'
                 ? scheduler!.cancelWakeup(taskId)
-                : scheduler!.cancelSessionCron(taskId)
-              : await scheduler!.delete(taskId);
+                : scheduler!.cancelSessionCron(taskId);
             debugLogger.info(
               `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} deleted=${deleted}`,
             );

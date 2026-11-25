@@ -782,6 +782,7 @@ export async function addCronTask(
 export async function removeCronTasks(
   projectRoot: string,
   ids: string[],
+  options?: { tombstoneOnly?: boolean },
 ): Promise<number> {
   const idSet = new Set(ids);
   // Avoid creating the tasks directory for a project with no task file. When
@@ -797,6 +798,7 @@ export async function removeCronTasks(
   await updateCronTasks(
     projectRoot,
     (tasks) => {
+      if (options?.tombstoneOnly) return tasks;
       const remaining = tasks.filter((t) => !idSet.has(t.id));
       removed = tasks.length - remaining.length;
       return removed === 0 ? tasks : remaining;
