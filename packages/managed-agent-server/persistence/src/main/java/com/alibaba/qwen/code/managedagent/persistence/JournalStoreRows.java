@@ -13,12 +13,18 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
+import javax.sql.DataSource;
+
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
@@ -69,8 +75,8 @@ final class JournalStoreRows {
 
     /** The RESOURCE projection's row, shared by every reader of ma_resource so
      * the committed-state predicate sees the same columns everywhere. */
-    static ResourceRow resourceRow(java.sql.ResultSet result)
-            throws java.sql.SQLException {
+    static ResourceRow resourceRow(ResultSet result)
+            throws SQLException {
         return new ResourceRow(
                 result.getString("tenant_id"),
                 result.getString("workspace_id"),
@@ -94,12 +100,12 @@ final class JournalStoreRows {
 
     static final ObjectMapper JSON = new ObjectMapper();
 
-    static final ObjectMapper TERMINAL_JSON = JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
-            .disable(com.fasterxml.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS)
-            .disable(com.fasterxml.jackson.databind.DeserializationFeature.ACCEPT_FLOAT_AS_INT);
+    static final ObjectMapper TERMINAL_JSON = JSON.copy().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
+            .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
+            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
 
     static final int MAX_ID_BYTES = 512;
 
@@ -120,7 +126,7 @@ final class JournalStoreRows {
 
     final RowMapper<ResourceRow> resourceMapper;
 
-    boolean usesDataSource(javax.sql.DataSource source) {
+    boolean usesDataSource(DataSource source) {
         return source != null && jdbc.getDataSource() == source;
     }
 
@@ -201,7 +207,7 @@ final class JournalStoreRows {
                                 }
                                 return new ActivationLeaseRow(result.getLong("journal_revision"),
                                         payload.path("workerId").textValue(), lease);
-                            } catch (java.io.IOException error) {
+                            } catch (IOException error) {
                                 throw journalCorrupt();
                             }
                         }, head.tenantId(), head.sessionId(), head.activationEpoch());
@@ -497,7 +503,7 @@ final class JournalStoreRows {
             return false;
         }
         try {
-            return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value).length <= maxBytes;
+            return ManagedSchemaKeys.identity(value).length <= maxBytes;
         } catch (IllegalArgumentException invalidUnicode) {
             return false;
         }

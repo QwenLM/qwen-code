@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModel
 import com.alibaba.qwen.code.managedagent.repository.ClientFilesRelay;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -15,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 
 @Repository
@@ -72,7 +74,7 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
                 return new RegisterOutcome(new Binding(tenantId, sessionId, actorId, 1L,
                         ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, expiresAt, now, now,
                         connectionId), null);
-            } catch (org.springframework.dao.DuplicateKeyException raced) {
+            } catch (DuplicateKeyException raced) {
                 // A concurrent first registration won the insert; advance it.
                 previous = findForUpdate(tenantId, sessionId);
             }
@@ -259,7 +261,7 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         List<Binding> expired = jdbc.query("SELECT " + BINDING_COLUMNS
                         + " FROM ma_client_files_binding WHERE state=? AND expires_at<=? LIMIT ?",
                 BINDING_MAPPER, ClientFilesModels.STATE_ACTIVE, now, limit);
-        List<Binding> closed = new java.util.ArrayList<>();
+        List<Binding> closed = new ArrayList<>();
         for (Binding binding : expired) {
             // Fence on the generation so a concurrent re-registration that
             // already advanced it is not closed by this sweep.

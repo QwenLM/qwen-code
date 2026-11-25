@@ -18,6 +18,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -164,7 +165,7 @@ final class AgentEventJournal {
         } else {
             rows = new ArrayList<>(rows);
         }
-        java.util.Collections.reverse(rows);
+        Collections.reverse(rows);
         return new EventPage(List.copyOf(rows), hasMore);
     }
 
