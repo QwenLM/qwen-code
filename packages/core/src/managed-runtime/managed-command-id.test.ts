@@ -25,7 +25,7 @@ describe('managedCommandId', () => {
       surrogateBounded,
     );
 
-    const longAscii = `${'z'.repeat(39)}😀${'q'.repeat(39)}`;
-    expect(managedCommandId(`wake-recovery:${longAscii}`)).toHaveLength(128);
+    const shortWake = `wake-recovery:${'z'.repeat(39)}😀${'q'.repeat(39)}`;
+    expect(managedCommandId(shortWake)).toBe(shortWake);
   });
 });

@@ -36,7 +36,7 @@ class RuntimeBrokerHttpExecutorTest {
                 fixture.connect();
             }
             await().atMost(5, TimeUnit.SECONDS).until(() -> fixture.executor.getQueue().size() == 64);
-            try (Socket rejected = fixture.connectSocket()) {
+            try (Socket rejected = fixture.open()) {
                 assertDisconnected(rejected);
             }
             assertEquals(32, fixture.executor.getLargestPoolSize());
