@@ -12,7 +12,7 @@ public interface ToolExecutionRepository {
      * Adds observational metadata to the identical settled execution; cannot change its outcome.
      */
     public default ToolExecutionRecord attachMeasurements(
-            ToolExecutionRecord expected, Map<String, Object> metadata) {
+            ToolExecutionRecord expected, RuntimeToolMeasurements.Metadata metadata) {
         throw new RuntimeBrokerException(
                 501,
                 "runtime_tool_v4_unsupported",

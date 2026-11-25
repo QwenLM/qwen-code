@@ -3,10 +3,10 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionMessageRelayStore;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.JournalTurns;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore.MessageRow;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore.PendingMessage;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -66,15 +66,14 @@ class SessionMessageRelayStoreTest {
         // as a Session's commits do.
         long sequence = IDS.incrementAndGet();
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " delivery_target, delivery_state, gmt_create,"
                         + " first_sequence)"
-                        + " VALUES (?, ?, ?, 'workspace', ?, ?, ?,"
+                        + " VALUES (?, 'workspace', ?, ?, ?,"
                         + " 'h', 1, ?, 'session', ?, ?, ?)",
-                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, domain, recordId), TENANT, sessionId, domain,
+                TENANT, sessionId, domain,
                 recordId, resource, state, sequence, sequence);
     }
 
@@ -90,18 +89,13 @@ class SessionMessageRelayStoreTest {
     }
 
     private void session(String sessionId, String status) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, tenant_key, session_key, session_scope_key, agent_id, status,"
-                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 0, 0)"
-                        + " ON DUPLICATE KEY UPDATE status = VALUES(status)", TENANT, sessionId,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(sessionId), scope, status);
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status,"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', ?, 0, 0)"
+                        + " ON DUPLICATE KEY UPDATE status = VALUES(status)", TENANT, sessionId, status);
     }
 
     private void resource(String sessionId, String resourceId, byte[] bytes) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, 'managed-message', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), scope,
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, 'workspace', ?, ?, 'managed-message', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 TENANT, sessionId, resourceId, bytes.length, "a".repeat(64), bytes);
     }
 
@@ -113,20 +107,10 @@ class SessionMessageRelayStoreTest {
                     + "\"managedSession\":").append(event).append("}\n");
         }
         byte[] bytes = lines.toString().getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES (?, 'workspace', ?, ?, ?, 'tx', 'op', 'command', ?, 1, 1, ?, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                TENANT, sessionId, revision, hash(sessionId + revision),
-                "c".repeat(64), events.length, "t".repeat(64), bytes,
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_ref, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES (?, 'workspace', ?, ?, ?, 'tx', 'op', ?, ?, 1, 1, ?, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                TENANT, sessionId, revision, ManagedIdentityRefs.commandRef("op", "command-" + revision),
+                "command-" + revision, "c".repeat(64), events.length, "t".repeat(64), bytes,
                 bytes.length, "d".repeat(64));
-    }
-
-    private static String hash(String text) {
-        try {
-            return java.util.HexFormat.of().formatHex(
-                    java.security.MessageDigest.getInstance("SHA-256")
-                            .digest(text.getBytes(StandardCharsets.UTF_8)));
-        } catch (java.security.NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
     }
 
     private static String input(String turnId, String source) {
@@ -333,8 +317,8 @@ class SessionMessageRelayStoreTest {
         message(sender, "msg_z_first", "planned", outbound("to_child", "r"));
         message(sender, "msg_a_second", "planned", outbound("to_child", "r"));
         jdbc.update("UPDATE ma_session_record SET gmt_create = 5"
-                + " WHERE session_scope_key = ?",
-                ManagedSessionStore.sessionScopeKey(TENANT, sender));
+                + " WHERE tenant_id = ? AND session_id = ?",
+                TENANT, sender);
         assertThat(store.findPendingMessages("owner-a", 1_000, 50).stream()
                 .filter(entry -> entry.senderSessionId().equals(sender))
                 .map(PendingMessage::messageId))
@@ -438,22 +422,22 @@ class SessionMessageRelayStoreTest {
         // further revision): past the bound, then classified.
         store.claim(TENANT, child, "msg_e", "owner-a", 31_000, 1_000);
         jdbc.update("UPDATE ma_delivery SET attempt_count"
-                + " = ? WHERE source_session_id = ? AND delivery_id = X'6d73675f65'",
+                + " = ? WHERE source_session_id = ? AND delivery_id = 'msg_e'",
                 JdbcSessionMessageRelayStore.MAX_ATTEMPTS - 1, child);
         assertThat(records.childOwesHandover(TENANT, child)).isTrue();
         jdbc.update("UPDATE ma_delivery SET attempt_count"
-                + " = ? WHERE source_session_id = ? AND delivery_id = X'6d73675f65'",
+                + " = ? WHERE source_session_id = ? AND delivery_id = 'msg_e'",
                 JdbcSessionMessageRelayStore.MAX_ATTEMPTS, child);
         assertThat(records.childOwesHandover(TENANT, child)).isFalse();
         assertThat(records.edgeMessages(TENANT, parent, "run-1", child)
                 .undelivered()).isEqualTo(1);
         jdbc.update("UPDATE ma_delivery SET attempt_count"
                 + " = 0, transport_state = 'orphaned' WHERE source_session_id = ?"
-                + " AND delivery_id = X'6d73675f65'", child);
+                + " AND delivery_id = 'msg_e'", child);
         assertThat(records.childOwesHandover(TENANT, child)).isFalse();
         jdbc.update("UPDATE ma_delivery SET transport_state ="
                 + " 'relaying' WHERE source_session_id = ?"
-                + " AND delivery_id = X'6d73675f65'", child);
+                + " AND delivery_id = 'msg_e'", child);
         assertThat(records.childOwesHandover(TENANT, child)).isTrue();
         // A closed child's outbox is orphaned and never moves again: it
         // holds neither the settlement nor the close.
@@ -470,15 +454,14 @@ class SessionMessageRelayStoreTest {
     void refusesToCountAnEdgeOverAnUnreadableBody() {
         String parent = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " delivery_target, delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'workspace', ?,"
+                        + " VALUES (?, 'workspace', ?,"
                         + " 'session_message', 'msg_x', 'h', 1, 'missing',"
                         + " 'session', 'planned', 1)",
-                ManagedSessionStore.sessionScopeKey(TENANT, parent),
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(parent, "session_message", "msg_x"), TENANT, parent);
+                TENANT, parent);
         assertThatThrownBy(() -> records.edgeMessages(TENANT, parent,
                 "run-1", UUID.randomUUID().toString()))
                 .isInstanceOf(IllegalStateException.class);
@@ -583,9 +566,7 @@ class SessionMessageRelayStoreTest {
     void refusesToProveTurnsFromACompactedJournal() {
         String child = UUID.randomUUID().toString();
         journal(child, 1, input("turn-api", "hosted-harness"));
-        jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, harness_session_id, tenant_id, workspace_id, session_id, state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES ('MANAGED_SESSION', ?, ?, ?, ?, 'workspace', ?, 'ACTIVE', 1, 1, 1, 1, 1, 'NONE', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(child), child, TENANT, child);
+        jdbc.update("INSERT INTO ma_session_head (head_kind, harness_session_id, tenant_id, workspace_id, session_id, state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES ('MANAGED_SESSION', ?, ?, 'workspace', ?, 'ACTIVE', 1, 1, 1, 1, 1, 'NONE', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")", child, TENANT, child);
         assertThatThrownBy(() -> records.journalTurns(TENANT, child))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("compacted");

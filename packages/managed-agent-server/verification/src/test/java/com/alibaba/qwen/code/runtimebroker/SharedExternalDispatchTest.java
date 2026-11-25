@@ -60,15 +60,15 @@ class SharedExternalDispatchTest {
         // writer and refused while a read runs on the same binding.
         try (var connection = source.getConnection();
                 var statement = connection.prepareStatement("UPDATE ma_tool_execution SET dispatch_lease_until = 1"
-                        + " WHERE execution_call_id_hash = ?")) {
-            statement.setString(1, JdbcRepositorySupport.valueKey(second.getExecutionCallId()));
+                        + " WHERE execution_call_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, second.getExecutionCallId());
             statement.executeUpdate();
         }
         assertNotNull(executions.claimDispatch(second.getExecutionCallId(), "owner-takeover", lease));
         try (var connection = source.getConnection();
                 var statement = connection.prepareStatement("UPDATE ma_tool_execution SET execution_state = 'UNKNOWN'"
-                        + " WHERE execution_call_id_hash = ?")) {
-            statement.setString(1, JdbcRepositorySupport.valueKey(first.getExecutionCallId()));
+                        + " WHERE execution_call_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, first.getExecutionCallId());
             statement.executeUpdate();
         }
         assertNull(executions.claimValidatedDispatch(third.getExecutionCallId(), "owner-c", lease, read));
@@ -110,8 +110,8 @@ class SharedExternalDispatchTest {
         // Once the writer settles, a read claims again.
         try (var connection = source.getConnection();
                 var statement = connection.prepareStatement("UPDATE ma_tool_execution SET execution_state = 'SETTLED'"
-                        + " WHERE execution_call_id_hash = ?")) {
-            statement.setString(1, JdbcRepositorySupport.valueKey(writer.getExecutionCallId()));
+                        + " WHERE execution_call_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, writer.getExecutionCallId());
             statement.executeUpdate();
         }
         assertNotNull(executions.claimValidatedDispatch(lateReader.getExecutionCallId(), "owner-r2", lease, read));

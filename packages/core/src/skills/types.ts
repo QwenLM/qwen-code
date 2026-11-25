@@ -96,6 +96,9 @@ export interface SkillConfig {
    */
   extensionName?: string;
 
+  /** Discovery parser used for an Agent Plugins v1 Skill. */
+  extensionSkillFormat?: 'agent-plugins-v1';
+
   /**
    * For extension-level skills: the localized display name of the providing
    * extension. Presentation only; never use this field as an identity.

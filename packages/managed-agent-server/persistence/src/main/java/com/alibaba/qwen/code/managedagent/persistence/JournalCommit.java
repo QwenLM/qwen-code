@@ -10,9 +10,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -67,7 +66,7 @@ final class JournalCommit {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         ValidatedCommit validated = validateCommit(request);
         if (HostedCleanupReferences.containsCleanup(validated.recordBytes())) {
             fencing.lockPlacementBounded(tenantId);
@@ -117,8 +116,7 @@ final class JournalCommit {
         validateHead(head, request);
         long revision = JournalStoreRows.increment(head.journalRevision(),
                 "journal revision");
-        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        resourceWrites.commitResources(scopeKey, tenantId, sessionId, request, revision,
+        resourceWrites.commitResources(tenantId, sessionId, request, revision,
                 now, validated.resources());
         Set<String> declaredResources = new HashSet<>();
         for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
@@ -127,7 +125,7 @@ final class JournalCommit {
         var resourceCache = new HashMap<String, StoredResource>();
         var hostedReferences = new HashMap<String, JsonNode>();
         java.util.function.Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
-                id -> storeRows.storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, id));
+                id -> storeRows.storedResource(tenantId, request.workspaceId(), sessionId, id));
         ManagedHostedRecoveryRecords.HistoricalResources closureReader = new ManagedHostedRecoveryRecords.HistoricalResources() {
             @Override
             public StoredResource apply(String resourceId) {
@@ -213,7 +211,7 @@ final class JournalCommit {
         }
         jdbc.update("INSERT INTO ma_session_journal_tx"
                         + " (tenant_id, workspace_id, session_id,"
-                        + " journal_revision, command_key_hash,"
+                        + " journal_revision, command_ref,"
                         + " transaction_id, operation, command_id,"
                         + " content_digest, first_sequence, last_sequence,"
                         + " event_count, events_digest,"
@@ -227,7 +225,7 @@ final class JournalCommit {
                         + " ?,"
                         + " 'identity', ?, ?, ?, ?)",
                 tenantId, request.workspaceId(), sessionId, revision,
-                JournalStoreRows.commandKeyHash(request.operation(), request.commandId()),
+                ManagedSchemaKeys.identity(JournalStoreRows.commandKeyHash(request.operation(), request.commandId())),
                 request.transactionId(), request.operation(),
                 request.commandId(), request.contentDigest(),
                 request.firstSequence(), request.lastSequence(),
@@ -264,8 +262,8 @@ final class JournalCommit {
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
                         + " activation_head_revision = ?, has_activity_diagnostics = has_activity_diagnostics OR ?, gmt_modified = ?"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                        + " AND session_id = ?",
+                        + " WHERE tenant_id = ? AND"
+                        + " harness_session_id = ?",
                 revision, request.lastSequence(),
                 wakeInput,
                 head.journalRevision(), revision, head.journalRevision(), revision, request.commitDigest(),
@@ -279,7 +277,7 @@ final class JournalCommit {
                         : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
                         : activation.expiresAt(),
-                activationHeadRevision, activityDiagnostics, now.getTime(), RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
+                activationHeadRevision, activityDiagnostics, now.getTime(), tenantId, sessionId);
         if (toolResults != null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
@@ -315,9 +313,13 @@ final class JournalCommit {
 
     static ValidatedCommit validateCommit(
             CommitTransactionRequest request) {
-        JournalStoreRows.validateStableId(request.transactionId(), "transactionId");
+        JournalStoreRows.validateStableId(request.transactionId(), "transactionId", 128);
         JournalStoreRows.validateText(request.operation(), "operation", JournalStoreRows.MAX_TEXT_BYTES);
-        JournalStoreRows.validateStableId(request.commandId(), "commandId");
+        JournalStoreRows.validateStableId(request.commandId(), "commandId", 128);
+        // Encode the command reference at admission, before any lock or INSERT,
+        // so an over-budget operation/commandId is a named 400 here rather than
+        // a raw overflow on the commit or replay path.
+        JournalStoreRows.commandKeyHash(request.operation(), request.commandId());
         JournalStoreRows.validateDigest(request.contentDigest(), "contentDigest", false);
         JournalStoreRows.validateDigest(request.eventsDigest(), "eventsDigest", true);
         JournalStoreRows.validateDigest(request.previousCommitDigest(),
@@ -388,7 +390,7 @@ final class JournalCommit {
             if (resource == null) {
                 throw JournalStoreRows.invalid("resources must not contain null entries.");
             }
-            JournalStoreRows.validateStableId(resource.resourceId(), "resourceId");
+            JournalStoreRows.validateStableId(resource.resourceId(), "resourceId", 256);
             JournalStoreRows.validateStableId(resource.kind(), "resource kind");
             if (ManagedNativeJournalSnapshots.isSnapshotKind(resource.kind())
                     || ManagedNativeJournalSnapshots.isSnapshotId(resource.resourceId())) {

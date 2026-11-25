@@ -23,6 +23,7 @@ import { MANAGED_TASK_MESSAGES_ZH } from './components/managed/managed-task-mess
 import { BROWSER_NOTIFICATION_MESSAGES_ZH } from './browser-notifications/messages.js';
 import { WORKSPACE_REGISTRATION_MESSAGES_ZH } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/managed/managed-artifact-library-messages.js';
+import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/artifacts/workspace-artifact-library-messages.js';
 import { MANAGED_MCP_MESSAGES_ZH } from './components/managed/managed-mcp-messages.js';
 import type { Messages, MessageValue } from './i18n.js';
 import { WEB_SHELL_LANGUAGES } from './i18n-language.js';
@@ -1266,6 +1267,12 @@ export const ZH: Messages = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜索命令',
   'composerMobile.history': '输入历史',
+  'composerMobile.acceptFollowup': '接受建议',
+  'composerMobile.dismissFollowup': '忽略建议',
+  'composerMobile.caretUp': '光标上移',
+  'composerMobile.caretDown': '光标下移',
+  'composerMobile.caretRight': '光标右移',
+  'composerMobile.insertSlash': '插入斜杠',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已添加附件/图片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此处没有可用的添加操作',
@@ -1429,6 +1436,12 @@ export const ZH: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
   'askUser.typePlaceholder': '输入内容...',
+  'chat.promptNotConfirmed': '提示词未确认',
+  'chat.promptNotAdmitted': '提示词未被接受',
+  'chat.failedToSend': '发送消息失败',
+  'chat.approvalNotAccepted': '审批未被接受',
+  'chat.acknowledgeUnknown': '我已检查会话',
+  'chat.stopNotConfirmed': '停止请求未确认',
   'askUser.shortcuts.previous': '← 上一步',
   'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交',
   'askUser.shortcuts.optionsNext': '↑↓ 选择 · Enter 下一步',
@@ -2694,6 +2707,8 @@ export const ZH: Messages = {
   'sidebar.sessionIssueStateNotPlanned': '未计划',
   'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.userInputNeededShort': '需输入',
+  'sidebar.continuationNeeded': '需要继续执行',
+  'sidebar.continuationNeededShort': '待继续',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.selectSessions': '多选对话',
@@ -2746,11 +2761,6 @@ export const ZH: Messages = {
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
   'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
-  'queue.restoreUnknown': '恢复本地副本',
-  'queue.discardUnknown': '丢弃本地副本',
-  'queue.continueEditing': '继续编辑',
-  'queue.continueEditingConfirm':
-    '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.commandGoalBlocked':
     'Goal 正在占用会话或状态仍在加载，暂时无法执行 Slash 命令。',
@@ -2765,7 +2775,8 @@ export const ZH: Messages = {
   'queue.insertTip': '插入当前回合',
   'queue.insertCommandDisabled': '命令不能插入当前回合',
   'queue.sendNow': '立即发送',
-  'queue.sendNowTip': '立即发送排队的消息。模型正在回复或调用工具时会打断它',
+  'queue.sendNowTip':
+    '立即发送排队的消息。可能打断当前回复或工具调用。可转后台的 shell 命令会继续运行。',
   'queue.sendNowFailed': '立即发送排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
@@ -4177,8 +4188,10 @@ export const ZH: Messages = {
   'rightPanel.restoreFailed': (v) => `面板恢复失败：${v?.error ?? '未知错误'}`,
   'userMessage.showMore': '显示更多',
   'userMessage.showLess': '收起',
-  'userMessage.sendFailed': '发送失败',
-  'userMessage.retrySend': '重新发送消息',
+  'userMessage.automatic.title': '自动触发',
+  'userMessage.retrySend': '重发',
+  'userMessage.retryUncertain': '可能未送达，点击重发',
+  'userMessage.deliveryUncertain': '消息可能未送达，点击左侧感叹号重发',
   'userMessage.edit': '编辑消息',
   'message.moreActions': '更多操作',
   ...MESSAGE_DELETION_MESSAGES_ZH,
@@ -5113,6 +5126,7 @@ export const ZH: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...ARTIFACT_LIBRARY_MESSAGES_ZH,
+  ...WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH,
   ...MANAGED_MCP_MESSAGES_ZH,
   ...MANAGED_EXTENSION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,

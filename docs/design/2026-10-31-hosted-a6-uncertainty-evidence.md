@@ -145,7 +145,7 @@ guarded and tested, while the first clause has three concrete evidence gaps:
 - `packages/cli/src/serve/hosted-child-wait-recovery.test.ts` (G3 fill-level cases)
 - `packages/cli/src/serve/hosted-background-launch-recovery.test.ts` (the
   journal-only workflow/ledger refusal)
-- `packages/cli/src/serve/hosted-harness-session.test.ts` (G3 route-level cases)
+- `packages/cli/src/serve/hosted-harness-session.takeover-child-waits.test.ts` (G3 route-level cases)
 - `packages/cli/src/serve/hosted-approval-continuation.test.ts` (G1/G2 matrix)
 - this design doc (both languages); the parent §9.1 status note is updated when
   the focused evidence lands.

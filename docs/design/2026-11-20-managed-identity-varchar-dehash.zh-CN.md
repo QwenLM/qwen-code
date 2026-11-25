@@ -4,10 +4,12 @@
 
 ## 状态与范围
 
-- 状态：**提案**。本文不改动任何代码或 schema。实施需要各自的改动、基线复现与 MySQL 证据。
+- 状态：**实施中（核心迁移已落地，待 CI 全量验证）**。混合身份表示已获维护者确认；DDL、生产 SQL、verification fixtures 已完成去哈希迁移，本地 focused H2 与双 Checkstyle 通过，MySQL/全量 H2/性能证据待 CI。
 - 修订（2026-11-20）：对"与同表另一唯一键重复的哈希键"做了后续调研，修正了 `workspace_id`
   预算，补充了回执、operation、Session 哈希列与 read lease 的约束，并对调研提出的三个
   问题作出决定（见[重复业务键](#重复业务键)）。
+- 修订（2026-11-21）：增量 2 在 VARCHAR 转换之前，先删除只复述本行原始列的哈希键（见
+  [增量 2](#增量-2同行冗余哈希键)）。
 - 日期：2026-11-20。源码基线：`origin/main` 的 `7ef9d6decb`。分析在 `f10299764e` 上
   执行；其间 3 个提交不触及任何 `packages/managed-agent-server` 文件，共享 V1 schema
   与 `ManagedSchemaKeys` 在两者间逐字节相同（`git diff` 核实），故全部计数与宽度在
@@ -218,10 +220,10 @@ resource_key`）、`JdbcHostedCleanupDebtStore`（`owner_key > ?`）、
   又作一致的 `FOR UPDATE` 获取顺序（防死锁）。替换它需要复合元组序（如
   `(tenant_id, session_id, resource_id)`）加字典序 row-value 游标比较，且所有锁这些
   行的事务必须保持同一全序。
-- **压在哈希键上的生成列。** `ma_request_receipt.decision_scope_key`
-  （`GENERATED … RTRIM(scope_key)`，V1:681）与 `ma_side_query.active_slot`
-  （`GENERATED … actor_scope_key`，V1:1333）由哈希列派生；二者必须在原始 scope 列上
-  重定义，或连同其消费方一起删除。
+- **压在哈希键上的生成列。** `ma_side_query.active_slot`
+  （`GENERATED … actor_scope_key`，V1:1333）由哈希列派生；必须在原始 scope 列上
+  重定义，或连同其消费方一起删除。`ma_request_receipt.decision_scope_key` 已由
+  [删除无用 schema 对象](2026-11-21-managed-schema-dead-objects.zh-CN.md)移除。
 - **压在哈希键上的 CHECK 约束。** `ck_ma_resource_capture`（scope_key/slot_key 空值
   耦合，V1:508）、`ck_ma_ref_binding`（runtime_binding_key，V1:536）、
   `ck_ma_storage_registered`（physical_key，V1:989）引用哈希列，必须在原始列上重写。
@@ -285,6 +287,60 @@ resource_key`）、`JdbcHostedCleanupDebtStore`（`owner_key > ?`）、
    未经证明的 id 唯一性，就能精确保持现有约束。kind 清单写在 DDL 里，新增按 tenant 定位的
    kind 时必须同步加入。
 
+## 增量 2：同行冗余哈希键
+
+若一个哈希列只由本行原始列派生、没有其他表在它上面 join、也不生成任何标识，它就是冗余的。
+增量 2 删除这些列，在原始列上按相同列序重建它们的唯一键与索引，并把所有查询改为过滤原始列。
+VARBINARY 类型不变；VARCHAR 转换、跨表引用与上文各项决策仍属于
+[实施计划](../plans/2026-11-20-managed-identity-dehash-cluster-impl.zh-CN.md)描述的原子簇。
+
+| 表                                                           | 删除                               | 替代为                                                           |
+| ------------------------------------------------------------ | ---------------------------------- | ---------------------------------------------------------------- |
+| `ma_session_head`                                            | `tenant_key`、`harness_key`        | `UNIQUE (tenant_id, harness_session_id)`                         |
+| `ma_session_record`、`ma_resource`、`ma_resource_ref`        | `session_scope_key`                | `(tenant_id, session_id)` 前缀                                   |
+| `ma_operation`、`ma_journal_pack`、`ma_client_files_binding` | `session_scope_key`                | `(tenant_id, session_id)` 前缀                                   |
+| `ma_client_files_request`                                    | `session_scope_key`、`request_key` | `UNIQUE (tenant_id, session_id, binding_generation, request_id)` |
+| `ma_side_query`                                              | `session_scope_key`、`query_key`   | `UNIQUE (tenant_id, query_id)`；session 索引改用原始列           |
+| `ma_memory_entry`                                            | `entry_key`                        | `UNIQUE (tenant_id, memory_store_id, memory_id)`                 |
+| `ma_extension_package`、`_settings`、`_operation`            | `scope_key`                        | `(tenant_id, workspace_id, extension_id, …)`                     |
+| `ma_output_capture`                                          | `tenant_key`                       | `idx_ma_capture_tenant (tenant_id, state)`                       |
+
+宽度。有几处原始替代之所以能放下，是因为把子表身份列收窄到了父表宽度 512 字节：
+`ma_session_head.tenant_id` 与 `workspace_id`，`ma_session_record`、`ma_resource`、
+`ma_resource_ref` 的 `session_id`，以及 `ma_operation.tenant_id`。这些列的租户与 Session id
+取自 `ma_session` 与 `ma_workspace`（512 字节）；而 journal writer 是唯一写入 workspace 的
+head 写入方，它本就拒绝超过 128 字节的租户 id 和超过 512 字节的 workspace 与 Session id，
+因此不会丢失任何已接受的值。这取代上表 `ma_session` 一行中关于 Session head 的部分：head 的
+租户收窄到 512 字节后，原始 head 键为 2560 字节。三个非唯一索引使用键前缀：
+`idx_ma_record_identity`、`idx_ma_ref_journal` 与 `idx_ma_delivery_source`
+（`record_id`、`resource_id` 与 `delivery_id` 限 1024 字节，仅 MySQL）；所有唯一键都用完整列。最宽的重建键 `uk_ma_resource_id` 与 `idx_ma_head_workspace`
+正好 3072 字节，InnoDB 接受。
+
+保留（因为不冗余）：
+
+- `ma_session.tenant_key`、`session_key` 与 `session_scope_key` 是发布保留 CONTROL upsert
+  写入的登记标记。所有迁离它们的 join 都改为 join 原始列，并保留
+  `s.session_scope_key IS NOT NULL`，因此该路径从未登记的 Session 仍不会匹配。
+- `ma_output_capture.scope_key` 是 `ma_operation`、`ma_resource` 与 `ma_artifact` 引用的
+  发布 scope 锚点。
+- `resource_key`、`record_key`、`operation_key`、`target_key`、delivery 键、actor 键、storage
+  键以及 runtime request 与 scope 键属于跨表引用、生成的标识或非统一派生（见上文）。
+- `ma_request_receipt.tenant_key`：它在 ingress 键集索引中的原始替代为 3208 字节。
+  `ma_read_lease` 不存原始身份。
+
+查询规则：
+
+- 每个 Session head 写入方都令 `session_id` 等于 `harness_session_id`，因此原来的
+  `tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?` 查找改为
+  `tenant_id = ? AND harness_session_id = ?`：同一唯一行、同一 `FOR UPDATE` 锁。
+- 原先比较哈希列的跨表 join，要么绑定派生值（`l.source_scope_key = ?`），要么经索引路径
+  join 原始列。Session 消息交接 join 需要新增一个索引
+  `idx_ma_delivery_source (delivery_kind, tenant_id, source_session_id, delivery_id)`。
+- Session 退役按重建唯一键的顺序（`query_id`；`binding_generation, request_id`）而非哈希序
+  锁 side query 与 client-files 请求。它是唯一按序锁这些多行的路径，另一处多行锁（按状态锁
+  活跃 side query）保持其索引序，故不引入锁环。
+- 针对已删哈希的碰撞复核随之删除；容量日志仍打印租户哈希，从不打印原始租户 id。
+
 ## 保留的不变量
 
 - 租户/actor/workspace 鉴权先于 LIMIT 与分页；无跨请求鉴权缓存。
@@ -341,3 +397,164 @@ resource_key`）、`JdbcHostedCleanupDebtStore`（`owner_key > ?`）、
 - 是否有 TypeScript 消费方派生身份哈希（须同步移动）。
 - 生产 tenant/actor 注入：在定死 `VARCHAR(36)` 前确认十进制串契约与各部署最大位数。
 - 是否有外部平台 id 可能超 512 字符（残留压缩情形）。
+
+## 2026-11-21 实施补充（维护者已确认）
+
+### 混合身份表示
+
+简单身份（tenant/session/actor 等）使用有界 `VARCHAR` 与显式 `utf8mb4_0900_bin`。
+过宽或多态的跨表身份不再复制大量可空原始列，而是使用**可逆 canonical readable
+reference**；它不是 SHA-256，不丢失组件信息。所有索引按 **<= 3072 字节**验收，
+编码长度 fail closed。
+
+`ManagedIdentityRef` 的编码格式为：
+
+```text
+v1|<component-count>|<component>|...
+component := "-" | <utf8-byte-length>:<escaped-payload>
+```
+
+- `null` 组件编码为 `-`；空字符串编码为 `0:`。
+- payload 按 UTF-8 字节百分号转义；仅 ASCII 字母数字与 `. _ ~ : -` 保持字面量。
+- 解码严格校验版本、数量、长度、转义规范与 UTF-8 良构，并拒绝非规范编码。
+- `encode(maximumBytes, components...)` 在写入前强制最终 ASCII 字节预算。
+
+### 表级决策
+
+- `ma_session` 新增单调布尔列 `is_publication_retention_registered`，由
+  publication-retention CONTROL upsert 设置；原 `session_scope_key IS NOT NULL`
+  过滤改为该标记。旧哈希列在完整原子簇中删除。
+- `ma_operation` 增加原始 `scope_kind/scope_id`；跨表引用使用 `operation_ref`。
+  tenant-addressed operation 的唯一性由同一 reference 机制保留，不再需要额外
+  `tenant_operation_id` 生成列。
+- `ma_resource_ref` 的 owner 是多态身份，使用非空 `owner_ref`；资源侧优先使用
+  原始 `(tenant_id, session_id, resource_id)`，过宽时退回 `resource_ref`。
+- Runtime request/scope 使用 `request_id/scope_id` canonical reference，原始组件
+  保留在权威表用于校验；`ma_tool_execution.runtime_session_key` 只是单值哈希，
+  直接由原始 `runtime_session_id` 替代。
+- delivery 增加 `source_scope_id`；channel segment 增加原始 `delivery_id`；
+  `ma_delivery.source_record_key` 无生产消费者，已删除。
+- 子 Session 的合成 actor 使用有界派生 ID `ChildActorId.of(parentSessionId)`：
+  `c:` + parentSessionId UTF-8 SHA-256 的前 32 hex（34 字符），保持 actor 36
+  预算；persistence 与 control-plane 共用同一派生。
+- 保留 `receipt_key`、workspace/storage 生成身份、extension/automation/CSI 协议
+  派生 ID、内容/提交/token 摘要与二进制 payload。
+
+### 当前检查点
+
+已完成并验证：
+
+- tenant/actor 36 字符/code-point admission 边界；
+- `ma_session` publication-retention 登记标记及四处过滤迁移；
+- 全部基线 `tenant_id`/`session_id`（含 session 族列）转换为
+  `VARCHAR(36)/VARCHAR(64)` 与 NO PAD collation；
+- Runtime Broker 身份绑定按 JDBC 参数类型区分文本/字节；
+- `ManagedIdentityRef` codec 与单测；
+- `ma_delivery.source_record_key` 删除及 projection 同步；
+- 子 Session 合成 actor 有界派生（`ChildActorId`）与相关回归修复；
+- H2 schema/catalog/projection、核心 business/session/retention/side-query/
+  client-files/channel/workspace/SSH store、Runtime Broker 失败回归套件；
+- 两个 Checkstyle execution；
+- 规范化可读引用层（`operation_ref`/`scope_ref`/`owner_ref`、`request_id`/`scope_id`）
+  取代身份哈希键列，以及跨表 SQL/锁序迁移；
+- 准入处的规范化引用预算校验（RuntimeScope 与 RuntimeProvisionRequest 构造、
+  journal command 与 owner 引用），超预算元组在边界即为具名 4xx，而非 INSERT/重放
+  处的原始错误；
+- 按列宽约束的 Harness/Runtime Session 准入（`VARCHAR(64)`/`VARCHAR(128)`）；
+- Tier B 身份列 `resource_id`/`record_id`/`child_run_id`/`execution_call_id`
+  `VARCHAR(256)`；
+- 重复索引清理（删除 `idx_ma_operation_target_raw` 与 `idx_ma_resource_scope_page`）
+  及 resource-GC 分页索引路径；
+- retention 登记标记的行解码与按字节约束的 recovery work-key 守卫。
+
+未完成：完整 MySQL 8.4 类型/collation/索引宽度门与竞态/性能证据（本地无 MySQL，
+pending CI）、完整 H2 套件（本地 10 分钟预算内未跑完）、SQL 性能基准与 TypeScript
+消费者同步。canonical `*_ref`、`record_resource_id` 与
+`ma_runtime_stage.execution_call_id` 按设计保留 `VARBINARY`，并非待转换项。
+
+## 2026-11-22 最终策略（取代早期 NO PAD 提案）
+
+本节记录维护者最终确认并已落地的策略，取代上文「NO PAD / `utf8mb4_0900_bin` /
+尾随空格字节精确」的早期提案，以及 actor 列暂留 `VARBINARY(144)` 的 interim 决策。
+
+### Collation 与尾随空格
+
+- 移除所有列级 `COLLATE utf8mb4_0900_bin`，身份列继承表默认 `utf8mb4_bin`（PAD SPACE）。
+- 统一策略：**所有身份准入拒绝尾随空格**（`requireActor` 及
+  `requireBindingId/requireOperationId/requireShortId/requireWorkspaceId/requireStorageId/requireInstanceId/requireWorkerOwner`）。
+  准入既不允许尾随空格进入系统，PAD SPACE 折叠就不会发生在合法身份上。
+- 「等值精确含尾随空格」不再由 collation 保证，而由准入保证；大小写敏感仍由
+  `utf8mb4_bin` 保持。早期「尾随空格区分」测试改为「尾随空格拒绝」测试，大小写区分保留。
+
+### actor 列
+
+- raw actor（≤36 个 UTF-16 单元）授权/幂等键列统一 `VARCHAR(36)`：ma_user_message、
+  ma_user_message_command、ma_workspace_access、ma_schedule、ma_client_files_binding，
+  以及既有 ma_session.creator/owner_actor_key、ma_operation、ma_session_record、
+  extension、delivery、memory_store、session_worktree。
+- `ma_channel_instance.actor_id` 为 `VARCHAR(512)`（adapter 契约 `@Size(max=512)`，
+  register 拒绝尾随空格）。不再保留 actor 二进制/文本混用。
+
+### 已完成的 Tier A 转换
+
+- operation 家族 + `publication_command_id` `VARCHAR(128)`（`uk_ma_publication_operation`
+  3136→1600B）；短铸造 ID `VARCHAR(64)`（`decision_receipt_id` 128）；
+  action/run/channel/route/artifact/publication/capture/task/stream/instance/creation/worker-owner
+  `VARCHAR(128)`；`memory_id` `VARCHAR(256)`；`slot_key`/`occurrence_key` `VARCHAR(144)`；
+  workspace/storage/extension 按 registry 128 / runtime 512 / storage 256。
+- canonical ref、摘要、密文、对象键、`source_key` 等保留 `VARBINARY`。
+
+### 跨引擎注意
+
+- H2 2.3.232 的 `VARCHAR(n)` 按 UTF-16 单元计长，MySQL 按码点计长。actor 准入上限为
+  36 个 UTF-16 单元，确保值可存入两种数据库。边界测试验证 36 个 BMP 字符或 18 个补充平面字符
+  可以通过，两种情况各多一个字符都会被拒绝。
+
+### 仍未完成
+
+- Tier B 核心身份（`resource_id`/`record_id`/`child_run_id`/`execution_call_id`）
+  已落地 `VARCHAR(256)`；其余 Tier B/C 身份及其准入/索引设计仍待完成。
+- 早期 wenshao 阻塞已解决：record_id 1024B prefix（已删除）、Action owner_ref
+  退役泄漏（共享三元组 owner 引用）、Hook 列宽（128 字符准入）与 PAD SPACE
+  （统一拒绝尾随空格）、N9 schema gate 空匹配。N7 `lockPlacementDomain` 锁序已实现，
+  其 MySQL 死锁/竞态证据 pending CI。
+- 与 #18048 语义合并冲突；完整 H2、MySQL 8.4 门/竞态/性能 pending CI。
+
+## 2026-11-23 跟进：身份列的混合类型连接
+
+MySQL 比较 `VARCHAR` 与 `VARBINARY` 操作数时按二进制串比较。用二进制值去探测
+`VARBINARY` 列的索引不受影响；用二进制值去探测 `VARCHAR` 列的索引时，该列会退出
+索引查找：连接只剩前导的 tenant/Session 前缀，并扫描其下的全部行。常量不受影响，
+包括绑定到 `VARCHAR` 列的 `byte[]` 参数；外层行经唯一键解析为单个常量行时同样不受影响。
+基于 V1 DDL 在 MySQL 8.4 上的实测：
+
+| 连接                                                                                                   | 修复前                                                             | 修复后                                 |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ | -------------------------------------- |
+| `ma_resource.resource_id = ma_session_record.record_resource_id`（MCP 引用、Session 列表的模型上下文） | 仅用前缀 `(tenant_id, session_id)`；50 条记录 × 2 万资源耗时 2.8 s | 完整 `uk_ma_resource_id`，2.7 ms       |
+| `ma_operation.operation_id = ma_artifact.result_id`（artifact 分页）                                   | 先读取全部 `TOOL_RESULT_PROJECTION` 行                             | 每个 artifact 单行查找                 |
+| `CAST(target_id AS BINARY(512)) = CAST(binding_id AS BINARY(512))`（恢复候选）                         | 丢失 `idx_ma_operation_target` 查找，物化全部 operator recovery    | `idx_ma_operation_target` 覆盖索引查找 |
+
+决策：
+
+- `ma_session_record.record_resource_id` 改为 `VARCHAR(256)`，`ma_artifact.result_id`
+  改为 `VARCHAR(128)`，即它们所引用身份（`ma_resource.resource_id`、
+  `ma_operation.operation_id`）的宽度。每个写入方写入的 id 都已存在于被引用列中，
+  因此不会丢失任何已接受的值。本节取代前文“`record_resource_id` 保留 `VARBINARY`”的表述。
+- `ma_operation.target_id` 保持 `VARBINARY(512)`：它是多态的（Turn、binding、storage、
+  Workspace、item 与 execution 目标），改为 `VARCHAR(512)` 会使
+  `uk_ma_operation_request` 超过 3072 字节。连接让二进制一侧作为被探测方
+  （`binaryIdentity`）；唯一一处用它探测 `VARCHAR` 键的连接（cancel evidence → `ma_turn`）
+  改为把目标转换为文本。
+- 从不与 `VARCHAR` 列比较的列在本次变更中保持原类型：canonical ref（按设计）、
+  `ma_runtime_stage`（单独的去哈希跟进）、receipt、Session 记录与工具执行中的
+  `turn_id`，以及 checkpoint/admission/terminal/side query 输入的资源 id。转换最后
+  一组还需要收紧准入上限。
+- 列与参数之间的 `CAST(column AS BINARY(n))` 比较是 PAD SPACE 下的字节精确保护，
+  不是类型转换，予以保留。每个被保护的列还需要一个普通等值条件，索引才能生效。
+  Runtime retention guard 中的 settled child run 检查丢失了 `record_key` 查找，
+  `domain` 与 `record_id` 只出现在 cast 中，因而扫描父 Session 的全部记录
+  （5 千条记录：3 ms，并随 Session 增长）；补上普通等值条件后变为唯一键查找。
+
+验收：`IdentityJoinScaleMySqlIT` 在 MySQL 上断言完整资源键、有界的 artifact 分页、
+`idx_ma_operation_target` 探测，以及 settled child run 检查使用完整记录键；schema 门
+与受影响的 H2 测试保持通过。

@@ -194,15 +194,23 @@ class ExternalWorkspaceOwnershipTest {
     void sharedExternalDrainStopsOnTheStorageFenceAlone() throws Exception {
         prepareBinding("workspace", null, "shared-member-1");
         ownership.claim(context, session, binding, bindings);
+        var second = readyMember("shared-member-2");
+        ownership.claim(context, second, binding, bindings);
         binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
         binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now())
                 .withState(RuntimeBindingRecord.State.DRAINING, binding.getLease(), Instant.now()));
+        assertThat(ownership.canStopExternalDrained(binding, bindings)).isFalse();
+        jdbc.update("UPDATE ma_storage SET fence_operation_id = ?", "retire");
         assertThat(ownership.canStopExternalDrained(binding, bindings)).isTrue();
         executions.findOrCreate(com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord.prepared(
                 "execution", "tenant", binding.getBindingId(), binding.getGeneration(), "harness",
                 session.getRuntimeSessionId(), "turn", "call", "digest", Map.of("sessionId", session.getRuntimeSessionId(),
                         "promptId", "turn", "callId", "call", "argsDigest", "digest")));
         assertThat(ownership.canStopExternalDrained(binding, bindings)).isFalse();
+        jdbc.update("UPDATE ma_runtime_session SET runtime_generation = runtime_generation - 1 WHERE runtime_session_id = ?",
+                second.getRuntimeSessionId());
+        assertThatThrownBy(() -> ownership.canStopExternalDrained(binding, bindings))
+                .isInstanceOf(RuntimeBrokerException.class);
     }
 
     @ParameterizedTest
@@ -228,7 +236,7 @@ class ExternalWorkspaceOwnershipTest {
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
         binding = bindings.compareAndSet(binding, binding.withDrainReceipt(receipt));
         release.accept(binding);
-        assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id FROM ma_storage_owner").values())
+        assertThat(jdbc.queryForMap("SELECT holder_id, binding_id, runtime_generation, runtime_session_id FROM ma_storage_owner").values())
                 .containsOnlyNulls();
         assertThat(bindings.findById(binding.getBindingId()).getDrainReceipt()).isEqualTo(receipt);
         if (throughBroker) {
@@ -301,11 +309,11 @@ class ExternalWorkspaceOwnershipTest {
         releaseStoppedMember(throughBroker, first);
         assertThat(memberStorageKey(first)).isNull();
         assertThat(memberStorageKey(second)).isNotNull();
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner", String.class)).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT holder_id FROM ma_storage_owner", String.class)).isNotNull();
 
         releaseStoppedMember(throughBroker, second);
         assertThat(memberStorageKey(second)).isNull();
-        assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
+        assertThat(jdbc.queryForMap("SELECT holder_id, binding_id, runtime_generation, runtime_session_id"
                 + " FROM ma_storage_owner").values()).containsOnlyNulls();
     }
 
@@ -318,7 +326,7 @@ class ExternalWorkspaceOwnershipTest {
     }
 
     private String memberStorageKey(RuntimeSessionRecord member) {
-        return jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?",
+        return jdbc.queryForObject("SELECT execution_storage_id FROM ma_runtime_session WHERE runtime_session_id = ?",
                 String.class, member.getRuntimeSessionId());
     }
 
@@ -359,7 +367,7 @@ class ExternalWorkspaceOwnershipTest {
         assertThat(owner).containsEntry("mount_revision", 7L).containsEntry("mount_state", "UNVERIFIED");
         assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage", Long.class)).isZero();
         ownership.release(context, session, binding, bindings);
-        assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session", String.class)).isNull();
+        assertThat(jdbc.queryForObject("SELECT execution_storage_id FROM ma_runtime_session", String.class)).isNull();
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
         ownership.assertOriginalExternal(context, session, binding, bindings);
         assertThat(new JdbcWorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(jdbc.getDataSource())).hasHolder(binding)).isTrue();
@@ -372,8 +380,8 @@ class ExternalWorkspaceOwnershipTest {
                     assertThat(error.getCode()).isEqualTo("workspace_busy");
                     assertThat(error.isRetryable()).isTrue();
                 });
-        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?",
-                owner.get("storage_key"), competitor.getRuntimeSessionId());
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = ? WHERE runtime_session_id = ?",
+                owner.get("physical_id"), competitor.getRuntimeSessionId());
         assertThatThrownBy(() -> ownership.assertHeld(context, session, binding, bindings))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("workspace_busy");
@@ -409,9 +417,9 @@ class ExternalWorkspaceOwnershipTest {
         binding = bindings.compareAndSet(binding, unpersisted);
         jdbc.update("DELETE FROM ma_workspace_access");
         ownership.releaseStopped(context, session, binding, bindings);
-        assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id FROM ma_storage_owner").values())
+        assertThat(jdbc.queryForMap("SELECT holder_id, binding_id, runtime_generation, runtime_session_id FROM ma_storage_owner").values())
                 .containsOnlyNulls();
-        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, storage_key, mount_root, mount_revision FROM ma_storage_owner"))
+        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, physical_id, mount_root, mount_revision FROM ma_storage_owner"))
                 .containsEntry("mount_revision", 7L).containsEntry("mount_root", "/remote/workspace");
         ownership.releaseStopped(context, session, binding, bindings);
     }
@@ -427,7 +435,7 @@ class ExternalWorkspaceOwnershipTest {
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
         ownership.releaseStopped(context, session, binding, bindings);
         var released = new java.util.HashMap<>(owner);
-        for (String column : java.util.List.of("holder_key", "binding_id", "runtime_generation", "runtime_session_id")) {
+        for (String column : java.util.List.of("holder_id", "binding_id", "runtime_generation", "runtime_session_id")) {
             released.put(column, null);
         }
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(released);
@@ -438,9 +446,9 @@ class ExternalWorkspaceOwnershipTest {
     void retiredNonHolderStillRefusesSplitOrForeignPhysicalMembership() {
         var nonHolder = retireWithNonHolder();
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
-        for (var invalid : Map.of((String) owner.get("storage_key"), "workspace_busy",
+        for (var invalid : Map.of((String) owner.get("physical_id"), "workspace_busy",
                 "foreign-physical-owner", "workspace_close_identity_unverified").entrySet()) {
-            jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?",
+            jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = ? WHERE runtime_session_id = ?",
                     invalid.getKey(), nonHolder.getRuntimeSessionId());
             assertThatThrownBy(() -> ownership.releaseStopped(context, nonHolder, binding, bindings))
                     .isInstanceOfSatisfying(RuntimeBrokerException.class, failure -> {

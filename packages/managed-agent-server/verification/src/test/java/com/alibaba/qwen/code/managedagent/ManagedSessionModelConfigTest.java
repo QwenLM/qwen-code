@@ -76,7 +76,7 @@ class ManagedSessionModelConfigTest {
 
     @BeforeEach
     void setup() {
-        tenant = "model-config-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
                 + "display_name,config_ref,policy_ref,state) VALUES (?,'ws',1,'storage','Workspace',?,?,'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);

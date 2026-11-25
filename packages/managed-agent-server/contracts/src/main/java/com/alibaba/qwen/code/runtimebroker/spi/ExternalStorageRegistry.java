@@ -105,10 +105,12 @@ public interface ExternalStorageRegistry {
 
         public String ownerKey() {
             if (ephemeral()) {
-                return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+                return com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                        com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.PHYSICAL_REF_BYTES,
                         "ephemeral-workspace/1", providerId, ephemeralTenantId, tenantWorkspaceId);
             }
-            return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+            return com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.PHYSICAL_REF_BYTES,
                     "external-storage/1", providerId, physicalKey);
         }
 

@@ -269,6 +269,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
                     transport, bindingRepository, sessionRepository,
                     executionRepository, UUID.randomUUID().toString(), LEASE,
                     LEASE, verifier, v3ResultWindow);
+            if (jdbc != null) {
+                this.service.configureStageStore(
+                        new com.alibaba.qwen.code.managedagent.persistence.JdbcRuntimeStageStore(jdbc));
+            }
         } catch (RuntimeException | Error failure) {
             provisioner.close();
             throw failure;

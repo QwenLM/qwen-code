@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtecto
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -64,12 +65,12 @@ public class RuntimeMaintenanceRecoveryTest {
         var expected = candidates.keySet().stream().sorted().toList();
         try (var connection = source.getConnection();
                 var insert = connection.prepareStatement(
-                        "INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id,"
+                        "INSERT INTO ma_runtime_binding (binding_id, request_id, scope_id, tenant_id,"
                                 + " workspace_id, workspace_generation, canonical_cwd, capability_digest,"
                                 + " isolation_class, isolation_key, provisioner_kind, storage_id,"
                                 + " runtime_generation, binding_state, resource_handle_version, resource_handle_json,"
                                 + " attestation_generation, is_drain_requested, operation_generation, record_version,"
-                                + " last_active_at) SELECT ?, request_key, scope_key, tenant_id, workspace_id,"
+                                + " last_active_at) SELECT ?, request_id, scope_id, tenant_id, workspace_id,"
                                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class,"
                                 + " isolation_key, provisioner_kind, storage_id, ?, ?, ?,"
                                 + " CASE WHEN ? IS NULL THEN NULL ELSE resource_handle_json END, 0, FALSE, 0, 0,"
@@ -117,28 +118,30 @@ public class RuntimeMaintenanceRecoveryTest {
 
         String target = "a-candidate";
         long generation = bindings.findById(target).getGeneration();
-        String operationKey = "f".repeat(64);
-        jdbc.update("INSERT INTO ma_operation (operation_key, operation_id, scope_key, operation_kind, tenant_id,"
-                        + " target_kind, target_key, target_id, target_revision, state, phase, request_digest, request_json,"
-                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'WORKSPACE_OPERATOR_RECOVERY', ?, 'RUNTIME_BINDING',"
-                        + " ?, ?, ?, 'DRAINING', 'DRAINING', ?, '{}', 1, 1)",
-                operationKey, "recovery".getBytes(StandardCharsets.UTF_8), "a".repeat(64),
-                first.getRequest().getScope().getTenantId().getBytes(StandardCharsets.UTF_8), "b".repeat(64),
+        String operationRef = ManagedIdentityRefs.tenantOperationRef("WORKSPACE_OPERATOR_RECOVERY",
+                first.getRequest().getScope().getTenantId(), "recovery");
+        jdbc.update("INSERT INTO ma_operation (operation_ref, operation_id, scope_kind, scope_id, operation_kind, tenant_id,"
+                        + " target_kind, target_id, target_revision, state, phase, request_digest, request_json,"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, 'TENANT', ?, 'WORKSPACE_OPERATOR_RECOVERY', ?,"
+                        + " 'RUNTIME_BINDING', ?, ?, 'DRAINING', 'DRAINING', ?, '{}', 1, 1)",
+                operationRef, "recovery".getBytes(StandardCharsets.UTF_8),
+                first.getRequest().getScope().getTenantId(),
+                first.getRequest().getScope().getTenantId(),
                 target.getBytes(StandardCharsets.UTF_8), generation, "c".repeat(64));
         var withoutTarget = expected.stream().filter(id -> !id.equals(target)).toList();
         assertEquals(withoutTarget, recoveryIds(bindings, null, 100));
         int targetIndex = expected.indexOf(target);
         assertEquals(List.of(expected.get(targetIndex + 1)),
                 recoveryIds(bindings, expected.get(targetIndex - 1), 1));
-        jdbc.update("UPDATE ma_operation SET target_revision = ? WHERE operation_key = ?", generation + 1, operationKey);
+        jdbc.update("UPDATE ma_operation SET target_revision = ? WHERE operation_ref = ?", generation + 1, operationRef);
         assertEquals(expected, recoveryIds(bindings, null, 100));
-        jdbc.update("UPDATE ma_operation SET target_revision = ?, state = 'FAILED' WHERE operation_key = ?",
-                generation, operationKey);
+        jdbc.update("UPDATE ma_operation SET target_revision = ?, state = 'FAILED' WHERE operation_ref = ?",
+                generation, operationRef);
         assertEquals(withoutTarget, recoveryIds(bindings, null, 100));
-        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED' WHERE operation_key = ?", operationKey);
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED' WHERE operation_ref = ?", operationRef);
         assertEquals(expected, recoveryIds(bindings, null, 100));
         jdbc.update("UPDATE ma_operation SET state = 'DRAINING', operation_kind = 'WORKSPACE_RETIREMENT'"
-                + " WHERE operation_key = ?", operationKey);
+                + " WHERE operation_ref = ?", operationRef);
         assertEquals(expected, recoveryIds(bindings, null, 100));
         jdbc.update("UPDATE ma_runtime_binding SET binding_state = 'RELEASED' WHERE binding_id = ?",
                 target.getBytes(StandardCharsets.UTF_8));

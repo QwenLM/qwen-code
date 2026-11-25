@@ -72,6 +72,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_sub_session_send: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_turn_status: { since: 'v1' },
+  // `POST /session/:id/feedback` records a per-turn satisfied/not-satisfied
+  // mark into the owning session's telemetry pipeline (`user_feedback`).
+  // Clients pre-flight this tag before offering the marks; older daemons
+  // keep the answer footer unchanged.
+  session_turn_feedback: { since: 'v1' },
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
@@ -242,6 +247,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `workspace_file_read`). The advertised upload byte cap is surfaced via
   // `limits.maxWorkspaceFileUploadBytes`.
   workspace_file_upload: { since: 'v1' },
+  turn_skill_file_snapshot: { since: 'v1' },
+  turn_skill_session_effects_check: { since: 'v1' },
+  turn_extension_store_lease: { since: 'v1' },
+  session_retire_if_idle: { since: 'v1' },
   // Qualified-only deletion of regular files in trusted local workspaces.
   workspace_file_delete: { since: 'v1' },
   workspace_directory_create: { since: 'v1' },

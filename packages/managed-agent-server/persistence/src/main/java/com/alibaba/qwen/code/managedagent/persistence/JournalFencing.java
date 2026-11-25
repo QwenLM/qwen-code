@@ -3,9 +3,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
@@ -191,9 +190,9 @@ final class JournalFencing {
     // established and the classification costs one lock-free session-scoped
     // range scan on the caller's own connection.
     void requireNoLifecycleClaim(String tenantId, String sessionId) {
-        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_key = ?"
+        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ?"
                 + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ?"
-                + " AND lifecycle_protocol_version = 2", ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId).isEmpty()) {
+                + " AND lifecycle_protocol_version = 2", ManagedSchemaKeys.identity(sessionId), tenantId, sessionId).isEmpty()) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
     }
@@ -208,11 +207,9 @@ final class JournalFencing {
 
     boolean lifecycleFenced(String tenantId, String sessionId) {
         return !jdbc.queryForList(
-                        "SELECT phase FROM ma_session_head WHERE phase <> 'OPEN' AND tenant_key = ?"
-                            + " AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
+                        "SELECT phase FROM ma_session_head WHERE phase <> 'OPEN' AND"
+                            + " tenant_id = ? AND harness_session_id = ?"
                             + " FOR UPDATE",
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId)
                 .isEmpty();
@@ -220,11 +217,9 @@ final class JournalFencing {
 
     boolean lifecycleProtocolFenced(String tenantId, String sessionId) {
         return !jdbc.queryForList(
-                        "SELECT operation_id FROM ma_session_head WHERE tenant_key = ? AND"
-                            + " harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND"
+                        "SELECT operation_id FROM ma_session_head WHERE"
+                            + " tenant_id = ? AND harness_session_id = ? AND"
                             + " operation_id IS NOT NULL FOR UPDATE",
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId)
                 .isEmpty();

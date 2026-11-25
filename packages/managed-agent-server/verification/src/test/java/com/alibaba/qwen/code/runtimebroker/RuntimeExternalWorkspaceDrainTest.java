@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess;
 import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalWorkspaceProvisioner;
@@ -628,10 +627,10 @@ class RuntimeExternalWorkspaceDrainTest {
          */
         void claimLifecycle() {
             jdbc.update("UPDATE ma_session_head SET operation_id = ?, claim_generation = ?, claim_lease_until = ?"
-                    + " WHERE tenant_key = ? AND harness_key = ?",
+                    + " WHERE tenant_id = ? AND harness_session_id = ?",
                     authority.operationId(), authority.claimGeneration(),
                     clock.instant().plus(Duration.ofDays(1)).toEpochMilli(),
-                    RuntimeAdmissionFences.harnessDrainKey("tenant"), RuntimeAdmissionFences.harnessDrainKey("harness"));
+                    "tenant", "harness");
         }
         public void close() {
             service.close();

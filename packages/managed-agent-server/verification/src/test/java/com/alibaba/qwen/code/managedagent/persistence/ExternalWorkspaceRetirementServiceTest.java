@@ -136,7 +136,7 @@ class ExternalWorkspaceRetirementServiceTest {
         var runtime = claimExactHolder(runtimeSession(RuntimeSessionRecord.State.READY));
         settleTool(runtime);
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
-        assertThat(owner.get("holder_key")).isNotNull();
+        assertThat(owner.get("holder_id")).isNotNull();
         assertThat(owner.get("binding_id")).isEqualTo(original.getBindingId());
         assertThat(owner.get("runtime_generation")).isEqualTo(original.getGeneration());
 
@@ -149,13 +149,13 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(first.resumed()).isFalse();
         assertThat(bindings.findById(original.getBindingId()).getState())
                 .isEqualTo(RuntimeBindingRecord.State.RELEASED);
-        assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
+        assertThat(jdbc.queryForMap("SELECT holder_id, binding_id, runtime_generation, runtime_session_id"
                 + " FROM ma_storage_owner").values()).containsOnlyNulls();
-        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, storage_key, mount_root, mount_revision"
+        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, physical_id, mount_root, mount_revision"
                 + " FROM ma_storage_owner")).isEqualTo(Map.of(
                         "tenant_id", owner.get("tenant_id"),
                         "storage_id", owner.get("storage_id"),
-                        "storage_key", owner.get("storage_key"),
+                        "physical_id", owner.get("physical_id"),
                         "mount_root", owner.get("mount_root"),
                         "mount_revision", owner.get("mount_revision")));
         assertThat(executions.findByIdempotencyKey("tool-key").getState())
@@ -325,9 +325,9 @@ class ExternalWorkspaceRetirementServiceTest {
             String order = switch (table) {
                 case "ma_workspace" -> "workspace_id";
                 case "ma_runtime_binding", "ma_runtime_session", "ma_storage_owner" -> "binding_id";
-                case "ma_runtime_slot" -> "request_key";
-                case "ma_tool_execution" -> "execution_call_id_hash";
-                case "ma_operation" -> "operation_key";
+                case "ma_runtime_slot" -> "request_id";
+                case "ma_tool_execution" -> "execution_call_id";
+                case "ma_operation" -> "operation_ref";
                 default -> throw new IllegalArgumentException(table);
             };
             result.put(table, WorkspaceOperations.rows(jdbc, "SELECT * FROM " + table + " ORDER BY " + order));
@@ -337,12 +337,12 @@ class ExternalWorkspaceRetirementServiceTest {
 
     @Test
     void terminalFailedOperationWithBlockedDeliveryDoesNotFenceRetirement() {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', 'FAILED', 'FAILED', 'BLOCKED', 1, 1)",
-                "a".repeat(64), "b".repeat(64), "turn-op".getBytes(),
-                "tenant".getBytes(), "c".repeat(64));
+                "turn-op-ref", "user-session", "turn-op",
+                "tenant", "c".repeat(64));
 
         var receipt = service.retire(request, this::terminated);
 
@@ -392,24 +392,21 @@ class ExternalWorkspaceRetirementServiceTest {
         makeReady();
         // An unsettled journal entry makes requireIdleJournal refuse with its
         // own code; retirement must answer its documented refusal instead.
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key,"
-                + " tenant_id, session_id, harness_session_id, head_kind,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, head_kind,"
                 + " state, writer_generation,"
                 + " journal_revision, committed_sequence, activation_epoch,"
                 + " compacted_through_revision, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, 'tenant', 'user-session', 'user-session', 'MANAGED_SESSION', 'ACTIVE', 1, 1, 1, 0,"
-                + " 0, 0, 0)",
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("tenant"),
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("user-session"));
+                + " VALUES ('tenant', 'user-session', 'user-session', 'MANAGED_SESSION', 'ACTIVE', 1, 1, 1, 0,"
+                + " 0, 0, 0)");
         byte[] journalBytes = "{\"managedSession\":{\"kind\":\"input.accepted\",\"payload\":{\"turnId\":\"active-turn\",\"source\":\"user\"}}}"
                 .getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
-                + " command_key_hash, transaction_id, operation, command_id,"
+                + " command_ref, transaction_id, operation, command_id,"
                 + " content_digest, first_sequence, last_sequence, event_count, writer_generation,"
                 + " writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes,"
                 + " byte_length, record_digest, gmt_create) VALUES ('tenant', 'workspace', 'user-session', 1,"
                 + " ?, 'tx', 'op', 'command', ?, 1, 1, 1, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?, 1)",
-                "6".repeat(64), "7".repeat(64), "0".repeat(64),
+                "6".repeat(64).getBytes(StandardCharsets.UTF_8), "7".repeat(64), "0".repeat(64),
                 journalBytes, journalBytes.length, "8".repeat(64));
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
@@ -426,13 +423,12 @@ class ExternalWorkspaceRetirementServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"READY", "SUCCEEDED", "RETURNED", "SUPPRESSED", "REMOVED"})
     void permanentSuccessOperationDoesNotFenceRetirement(String state) {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'TOOL_RESULT_PROJECTION', ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'TOOL_RESULT_PROJECTION', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', ?, ?, 'DONE', 1, 1)",
-                (state + "-key").repeat(10).substring(0, 64), "b".repeat(64),
-                (state + "-op").getBytes(StandardCharsets.UTF_8),
-                "tenant".getBytes(StandardCharsets.UTF_8), "c".repeat(64), state, state);
+                state + "-op-ref", "user-session", state + "-op",
+                "tenant", "c".repeat(64), state, state);
 
         var receipt = service.retire(request, this::terminated);
 
@@ -443,12 +439,12 @@ class ExternalWorkspaceRetirementServiceTest {
 
     @Test
     void aPendingOperationStillFencesRetirement() {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', 'PENDING', 'PENDING', 'PENDING', 1, 1)",
-                "d".repeat(64), "e".repeat(64), "pending-op".getBytes(StandardCharsets.UTF_8),
-                "tenant".getBytes(StandardCharsets.UTF_8), "f".repeat(64));
+                "pending-op-ref", "user-session", "pending-op",
+                "tenant", "f".repeat(64));
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
                 .isInstanceOf(RuntimeBrokerException.class)
@@ -462,22 +458,18 @@ class ExternalWorkspaceRetirementServiceTest {
         // approval was decided. None of that is live work: the operation fence
         // proves the named operation terminal, so the head shape must not
         // fence retirement of the lost Worker.
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'RENAME', ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'RENAME', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', 'SUPERSEDED', 'COMPLETED', 'BLOCKED', 1, 1)",
-                "d".repeat(64), "e".repeat(64), "settled-drain-op".getBytes(StandardCharsets.UTF_8),
-                "tenant".getBytes(StandardCharsets.UTF_8), "f".repeat(64));
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id, harness_session_id,"
+                "settled-drain-op-ref", "user-session", "settled-drain-op",
+                "tenant", "f".repeat(64));
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id,"
                 + " head_kind, phase, operation_id, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'user-session', 'user-session', 'HARNESS', 'DRAINING', ?, 1, 1)",
-                "1".repeat(64), "2".repeat(64), "tenant".getBytes(StandardCharsets.UTF_8),
-                "settled-drain-op".getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, session_id,"
+                + " VALUES ('tenant', 'user-session', 'user-session', 'HARNESS', 'DRAINING', 'settled-drain-op', 1, 1)");
+        jdbc.update("INSERT INTO ma_session_record (tenant_id, session_id,"
                 + " domain, record_id, revision, gmt_create, record_kind, state, action_id, action_version, options_json)"
-                + " VALUES (?, ?, ?, 'user-session', 'action', 'action', 1, 1, 'ACTION', 'decided', 'action', 1, '{}')",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "user-session"),
-                "3".repeat(64), "tenant".getBytes(StandardCharsets.UTF_8));
+                + " VALUES ('tenant', 'user-session', 'action', 'action', 1, 1, 'ACTION', 'decided', 'action', 1, '{}')");
 
         var receipt = service.retire(request, this::terminated);
 
@@ -496,12 +488,12 @@ class ExternalWorkspaceRetirementServiceTest {
         "CHILD_SESSION_START:unknown", "CHILD_SESSION_CLOSE:done"})
     void settledChildRelayOperationDoesNotFenceRetirement(String kindAndState) {
         String[] parts = kindAndState.split(":");
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, ?, ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, ?, ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', ?, 'PENDING', 'PENDING', 1, 1)",
-                "a".repeat(64), "b".repeat(64), "child-op".getBytes(StandardCharsets.UTF_8), parts[0],
-                "tenant".getBytes(StandardCharsets.UTF_8), "c".repeat(64), parts[1]);
+                "child-op-ref", "user-session", "child-op", parts[0],
+                "tenant", "c".repeat(64), parts[1]);
 
         var receipt = service.retire(request, this::terminated);
 
@@ -515,12 +507,12 @@ class ExternalWorkspaceRetirementServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"creating", "binding", "watching", "delivering", "close_debt"})
     void liveChildRelayOperationStillFencesRetirement(String state) {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'CHILD_SESSION_CLOSE', ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'CHILD_SESSION_CLOSE', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', ?, 'PENDING', 'PENDING', 1, 1)",
-                "a".repeat(64), "b".repeat(64), "child-op".getBytes(StandardCharsets.UTF_8),
-                "tenant".getBytes(StandardCharsets.UTF_8), "c".repeat(64), state);
+                "child-op-ref", "user-session", "child-op",
+                "tenant", "c".repeat(64), state);
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
                 .isInstanceOf(RuntimeBrokerException.class)
@@ -568,13 +560,11 @@ class ExternalWorkspaceRetirementServiceTest {
     // not swallow it.
     @Test
     void orphanManagedSessionHeadFencesRetirement() {
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id, session_id,"
                 + " harness_session_id, head_kind, state, phase, writer_generation, journal_revision,"
                 + " committed_sequence, activation_epoch, compacted_through_revision, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, 'tenant', 'workspace', 'orphan-head', 'orphan-head', 'MANAGED_SESSION', 'DELETED',"
-                + " 'DRAINING', 1, 1, 1, 1, 1, 1, 1)",
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("tenant"),
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("orphan-head"));
+                + " VALUES ('tenant', 'workspace', 'orphan-head', 'orphan-head', 'MANAGED_SESSION', 'DELETED',"
+                + " 'DRAINING', 1, 1, 1, 1, 1, 1, 1)");
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
                 .isInstanceOf(RuntimeBrokerException.class)
@@ -589,13 +579,11 @@ class ExternalWorkspaceRetirementServiceTest {
     private void reclaimDeletedHead(long compactedThroughRevision) {
         jdbc.update("UPDATE ma_session SET status = 'DELETED' WHERE tenant_id = ? AND session_id = ?",
                 "tenant", "user-session");
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id, session_id,"
                 + " harness_session_id, head_kind, state, phase, writer_generation, journal_revision,"
                 + " committed_sequence, activation_epoch, compacted_through_revision, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, 'tenant', 'workspace', 'user-session', 'user-session', 'MANAGED_SESSION', 'DELETED',"
+                + " VALUES ('tenant', 'workspace', 'user-session', 'user-session', 'MANAGED_SESSION', 'DELETED',"
                 + " 'DRAINING', 1, 5, 5, 1, ?, 1, 1)",
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("tenant"),
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("user-session"),
                 compactedThroughRevision);
     }
 }

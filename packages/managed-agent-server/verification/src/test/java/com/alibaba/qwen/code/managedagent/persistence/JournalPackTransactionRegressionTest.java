@@ -2,9 +2,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
@@ -105,13 +104,12 @@ class JournalPackTransactionRegressionTest {
     }
 
     private void insertHead(String session, long journalRevision) {
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id,"
                 + " workspace_id, session_id, harness_session_id, head_kind, state,"
                 + " writer_generation, journal_revision, committed_sequence,"
                 + " last_commit_digest, activation_epoch, packed_through_revision, gmt_create,"
-                + " gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'MANAGED_SESSION', 'ACTIVE', 1,"
+                + " gmt_modified) VALUES (?, ?, ?, ?, 'MANAGED_SESSION', 'ACTIVE', 1,"
                 + " ?, ?, 'digest', 0, 0, 0, 0)",
-                ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(session),
                 TENANT, WORKSPACE, session, session, journalRevision, journalRevision);
     }
 
@@ -121,14 +119,14 @@ class JournalPackTransactionRegressionTest {
 
     private void insertTransaction(String session, long revision, byte[] value) {
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
-                + " journal_revision, transaction_id, operation, command_id, command_key_hash,"
+                + " journal_revision, transaction_id, operation, command_id, command_ref,"
                 + " content_digest, first_sequence, last_sequence, event_count, events_digest,"
                 + " commit_digest, writer_generation, writer_id, writer_token_hash,"
                 + " activation_epoch, record_encoding, record_bytes, byte_length, record_digest,"
                 + " gmt_create) VALUES (?, ?, ?, ?, ?, 'turn.start', ?, ?, 'content', ?, ?, 1,"
                 + " 'events', ?, 1, 'writer', 'hash', 0, 'identity', ?, ?, ?, 0)",
                 TENANT, WORKSPACE, session, revision, "tx-" + revision, "cmd-" + revision,
-                "cmdkey-" + revision, revision, revision, "commit-" + revision, value,
+                ManagedIdentityRefs.commandRef("turn.start", "cmd-" + revision), revision, revision, "commit-" + revision, value,
                 value.length, JournalStoreRows.sha256(value));
     }
 
@@ -414,15 +412,14 @@ class JournalPackTransactionRegressionTest {
             insertHead(2);
             insertTransaction(1, bytes(4096));
             insertTransaction(2, bytes(8192));
-            String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
             long now = System.currentTimeMillis();
-            transactions.insertBuilding("pack-A", scope, TENANT, WORKSPACE, SESSION, 1, 2,
+            transactions.insertBuilding("pack-A", TENANT, WORKSPACE, SESSION, 1, 2,
                     "key-A", 100, "sha", now, "builder-A", now - 1);
-            transactions.markPutClosed("pack-A", scope, TENANT, SESSION, "key-A");
-            transactions.retireBuilding("pack-A", scope, TENANT, SESSION);
+            transactions.markPutClosed("pack-A", TENANT, SESSION, "key-A");
+            transactions.retireBuilding("pack-A", TENANT, SESSION);
             // Publication must fail closed: the VERIFIED update matches no row, so the watermark
             // must never advance to a covered range that has no published pack.
-            assertThatThrownBy(() -> transactions.publish("pack-A", scope, TENANT, WORKSPACE,
+            assertThatThrownBy(() -> transactions.publish("pack-A", TENANT, WORKSPACE,
                     SESSION, 1, 2, "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
                     .isInstanceOf(ManagedAgentException.class);
             assertThat(watermark()).isZero();
@@ -440,22 +437,21 @@ class JournalPackTransactionRegressionTest {
             JournalPackTransactions transactions = context.getBean(JournalPackTransactions.class);
             insertHead(1);
             insertTransaction(1, bytes(4096));
-            String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
             long now = System.currentTimeMillis();
             long liveCutoff = now - 1;
-            transactions.insertBuilding("pack-A", scope, TENANT, WORKSPACE, SESSION, 1, 1,
+            transactions.insertBuilding("pack-A", TENANT, WORKSPACE, SESSION, 1, 1,
                     "key-A", 100, "shaA", now, "builder-A", liveCutoff);
             // Another replica's live build (different owner, within its lease) must not be
             // displaced: the INSERT collides on uk_ma_journal_pack_scope_from rather than deleting
             // A's in-flight row and object.
-            assertThatThrownBy(() -> transactions.insertBuilding("pack-B", scope, TENANT,
+            assertThatThrownBy(() -> transactions.insertBuilding("pack-B", TENANT,
                     WORKSPACE, SESSION, 1, 1, "key-B", 100, "shaB", now, "builder-B", liveCutoff))
                     .isInstanceOf(DuplicateKeyException.class);
             assertThat(packCount("BUILDING")).isEqualTo(1);
             assertThat(jdbc.queryForObject("SELECT pack_id FROM ma_journal_pack WHERE state ="
                     + " 'BUILDING'", String.class)).isEqualTo("pack-A");
             // A second call on the same replica is not evidence that its first PUT has stopped.
-            assertThatThrownBy(() -> transactions.insertBuilding("pack-A2", scope, TENANT,
+            assertThatThrownBy(() -> transactions.insertBuilding("pack-A2", TENANT,
                     WORKSPACE, SESSION, 1, 1, "key-A2", 100, "shaA2", now, "builder-A", liveCutoff))
                     .isInstanceOf(DuplicateKeyException.class);
             assertThat(packCount("BUILDING")).isEqualTo(1);
@@ -708,13 +704,12 @@ class JournalPackTransactionRegressionTest {
             insertHead(1);
             insertTransaction(1, bytes(4096));
             JournalPackTransactions transactions = context.getBean(JournalPackTransactions.class);
-            String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
-            transactions.insertBuilding("open", scope, TENANT, WORKSPACE, SESSION, 1, 1,
+            transactions.insertBuilding("open", TENANT, WORKSPACE, SESSION, 1, 1,
                     "open", 1, JournalStoreRows.sha256(new byte[1]), 1, "builder", 0);
-            assertThatThrownBy(() -> transactions.publish("open", scope, TENANT, WORKSPACE, SESSION,
+            assertThatThrownBy(() -> transactions.publish("open", TENANT, WORKSPACE, SESSION,
                     1, 1, new byte[0])).isInstanceOf(ManagedAgentException.class);
             assertThat(watermark()).isZero();
-            transactions.retireBuilding("open", scope, TENANT, SESSION);
+            transactions.retireBuilding("open", TENANT, SESSION);
             JdbcJournalPacks packs = context.getBean(JdbcJournalPacks.class);
             assertThat(packs.compactOnce(TENANT, WORKSPACE, SESSION)).isTrue();
             jdbc.update("UPDATE ma_session_head SET packed_through_revision = 0");
@@ -744,15 +739,14 @@ class JournalPackTransactionRegressionTest {
     }
 
     private void insertDebt(JournalPackTransactions transactions, String id, boolean closed) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
         byte[] value = new byte[1];
-        transactions.insertBuilding(id, scope, TENANT, WORKSPACE, SESSION, 1, 1, id,
+        transactions.insertBuilding(id, TENANT, WORKSPACE, SESSION, 1, 1, id,
                 value.length, JournalStoreRows.sha256(value), 1, "builder", 0);
         if (closed) {
             objects.putIfAbsent(id, value);
-            transactions.markPutClosed(id, scope, TENANT, SESSION, id);
+            transactions.markPutClosed(id, TENANT, SESSION, id);
         }
-        transactions.retireBuilding(id, scope, TENANT, SESSION);
+        transactions.retireBuilding(id, TENANT, SESSION);
     }
 
     private void failNextUpdate(String prefix) {

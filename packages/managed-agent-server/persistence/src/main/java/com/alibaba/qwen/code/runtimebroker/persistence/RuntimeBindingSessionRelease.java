@@ -20,7 +20,6 @@ import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFe
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.localStorageOwnerKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requireHarnessAdmission;
-import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageAliasKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.unverifiedWorkspaceHolder;
 
 /**
@@ -87,14 +86,44 @@ final class RuntimeBindingSessionRelease {
                     : repository.selectById(connection, expected.getBindingId(), true);
             String physical = external ? null : localStorageOwnerKey(connection, claim.getRequest().getScope().getTenantId(),
                     claim.getRequest().getStorageId(), true);
+            if (physical == null && !external) {
+                String member = null;
+                try (var pinned = connection.prepareStatement(
+                        "SELECT execution_storage_id FROM ma_runtime_session WHERE binding_id = ?"
+                                + " AND runtime_generation = ? AND runtime_session_id = ? FOR UPDATE")) {
+                    JdbcRepositorySupport.setIdentity(pinned, 1, expected.getBindingId());
+                    pinned.setLong(2, expected.getRuntimeGeneration());
+                    pinned.setString(3, expected.getRuntimeSessionId());
+                    try (var rows = pinned.executeQuery()) {
+                        if (rows.next()) {
+                            member = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "execution_storage_id");
+                        }
+                    }
+                }
+                if (member != null) {
+                    try (var alias = connection.prepareStatement(
+                            "SELECT tenant_id, storage_id FROM ma_storage WHERE physical_id = ?"
+                                    + " AND tenant_id = ? AND storage_id = ? FOR UPDATE")) {
+                        JdbcRepositorySupport.setIdentity(alias, 1, member);
+                        JdbcRepositorySupport.setIdentity(alias, 2, claim.getRequest().getScope().getTenantId());
+                        JdbcRepositorySupport.setIdentity(alias, 3, claim.getRequest().getStorageId());
+                        try (var rows = alias.executeQuery()) {
+                            if (!rows.next()) {
+                                throw unverifiedWorkspaceHolder();
+                            }
+                        }
+                    }
+                }
+            }
             if (physical != null) {
-                try (var lock = connection.prepareStatement("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?"
-                        + " AND storage_kind = (SELECT storage_kind FROM ma_storage WHERE alias_key = ?)"
+                try (var lock = connection.prepareStatement("SELECT physical_id FROM ma_storage_owner WHERE physical_id = ?"
+                        + " AND storage_kind = (SELECT storage_kind FROM ma_storage WHERE tenant_id = ? AND storage_id = ?)"
                         + " FOR UPDATE")) {
-                    lock.setString(1, physical);
-                    lock.setString(2, storageAliasKey(claim.getRequest().getScope().getTenantId(), claim.getRequest().getStorageId()));
+                    JdbcRepositorySupport.setIdentity(lock, 1, physical);
+                    JdbcRepositorySupport.setIdentity(lock, 2, claim.getRequest().getScope().getTenantId());
+                    JdbcRepositorySupport.setIdentity(lock, 3, claim.getRequest().getStorageId());
                     try (var rows = lock.executeQuery()) {
-                        if (!rows.next() || !physical.equals(rows.getString(1))
+                        if (!rows.next() || !physical.equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "physical_id"))
                                 || !com.alibaba.qwen.code.managedagent.persistence.StorageOwnerMembership.membersAllowed(connection, physical, true)) {
                             throw unverifiedWorkspaceHolder();
                         }
@@ -122,21 +151,25 @@ final class RuntimeBindingSessionRelease {
     }
 
     static void clearStoppedMember(Connection connection, String key, RuntimeSessionRecord session) throws SQLException {
-        try (var read = connection.prepareStatement("SELECT execution_storage_key FROM ma_runtime_session"
+        try (var read = connection.prepareStatement("SELECT execution_storage_id FROM ma_runtime_session"
                 + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(read, 1, session.getBindingId());
             read.setLong(2, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(read, 3, session.getRuntimeSessionId());
             try (var rows = read.executeQuery()) {
-                if (!rows.next() || rows.getString(1) != null && !key.equals(rows.getString(1))) {
+                if (!rows.next()) {
+                    throw unverifiedWorkspaceHolder();
+                }
+                String stored = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "execution_storage_id");
+                if (stored != null && !key.equals(stored)) {
                     throw unverifiedWorkspaceHolder();
                 }
             }
         }
-        try (var clear = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = NULL,"
-                + " is_rewind_pending = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
+        try (var clear = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_id = NULL,"
+                + " is_rewind_pending = FALSE WHERE execution_storage_id = ? AND binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_id = ?")) {
-            clear.setString(1, key);
+            JdbcRepositorySupport.setIdentity(clear, 1, key);
             JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
             clear.setLong(3, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(clear, 4, session.getRuntimeSessionId());

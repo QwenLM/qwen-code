@@ -237,6 +237,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/retirements/:operationId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/retirements/:operationId',
+  },
+  {
+    method: 'PUT',
+    path: '/session/:id/retirements/:operationId',
+    attribution: 'handler_resolved',
+    route: 'PUT /session/:id/retirements/:operationId',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/resources',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/resources',
@@ -462,6 +474,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/model',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/model',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/feedback',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/feedback',
   },
   {
     method: 'POST',
