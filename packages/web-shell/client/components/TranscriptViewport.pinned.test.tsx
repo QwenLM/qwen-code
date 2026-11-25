@@ -216,6 +216,46 @@ describe('TranscriptViewport pinned prompt', () => {
     expect(pinnedText()).toBe('First prompt');
   });
 
+  it.each(['goal_runtime', 'goal_control'])(
+    'keeps the label across a %s row inside a known turn',
+    (source) => {
+      const goal = {
+        ...message('goal-0'),
+        role: 'user',
+        source,
+      } as Message;
+      observed.rows = [{ id: 'output-0b', top: -10, bottom: 300 }];
+      renderViewport({
+        messages: [
+          message('prompt-0'),
+          message('output-0a'),
+          goal,
+          message('output-0b'),
+          message('prompt-1'),
+        ],
+      });
+      expect(pinnedText()).toBe('First prompt');
+    },
+  );
+
+  it('renders nothing for a scheduled turn the index does not know yet', () => {
+    const cron = {
+      ...message('cron-0'),
+      role: 'user',
+      source: 'cron',
+    } as Message;
+    observed.rows = [{ id: 'output-cron', top: -10, bottom: 300 }];
+    renderViewport({
+      messages: [
+        message('prompt-0'),
+        message('output-0a'),
+        cron,
+        message('output-cron'),
+      ],
+    });
+    expect(pinnedText()).toBeUndefined();
+  });
+
   it('keeps the label when the prompt row has left the virtualizer window', () => {
     observed.rows = [{ id: 'output-0b', top: -10, bottom: 300 }];
     renderViewport();

@@ -26,7 +26,11 @@ import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
 import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
-import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
+import {
+  isTurnCallsPrompt,
+  TurnCallsProvider,
+  useOpenTurnCalls,
+} from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
 import {
   indexedEntries,
@@ -248,10 +252,15 @@ export const TranscriptViewport = forwardRef<
       for (const id of ids) mapped = blockOrdinal.get(id) ?? mapped;
       if (mapped !== undefined) ordinal = mapped;
       // A `!command` row is not a turn in the index, so it stays in the
-      // turn before it, as on the rail. An agent's @-mention or message is a
-      // user-role row inside a turn, never a turn head in the index, so it
-      // keeps the turn too.
-      else if (message.role === 'user' && !message.agentMessage) ordinal = null;
+      // turn before it, as on the rail. An agent's @-mention or message and a
+      // goal row are user-role rows inside a turn, never turn heads in the
+      // index, so they keep the turn too.
+      else if (
+        message.role === 'user' &&
+        !message.agentMessage &&
+        isTurnCallsPrompt(message.source, message.content)
+      )
+        ordinal = null;
       if (ordinal !== undefined) for (const id of ids) map.set(id, ordinal);
     }
     return map;
