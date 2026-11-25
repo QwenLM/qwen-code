@@ -66,6 +66,10 @@ vi.mock('@qwen-code/resource', async (importOriginal) => {
 
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })),
+  isWorkspaceTrustedForProviders: vi.fn(() => ({
+    isTrusted: true,
+    source: undefined,
+  })),
 }));
 
 afterEach(() => {

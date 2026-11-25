@@ -78,7 +78,10 @@ import { type Settings } from './settings.js';
 
 import * as settingsModule from '../test-utils/resolveSettings.js';
 
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  isWorkspaceTrusted,
+  isWorkspaceTrustedForProviders,
+} from './trustedFolders.js';
 import { handleRootCommand } from '../startup/rootCommandHandler.js';
 import { createAppPluginFixture } from '../test-utils/appPluginFixture.js';
 import type { FrameworkFixture as AppFramework } from '../test-utils/frameworkFixture.js';
@@ -210,6 +213,10 @@ const { writeToStderrMock } = vi.hoisted(() => ({
 
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
+  isWorkspaceTrustedForProviders: vi.fn(() => ({
+    isTrusted: true,
+    source: undefined,
+  })),
 }));
 
 vi.mock('../utils/exitCli.js', () => ({
@@ -287,6 +294,7 @@ function createLoadedSettingsFromSources(
   },
   isTrusted: boolean = true,
   userSettingsLoadRejected: boolean = false,
+  rawUserSettings?: Partial<Settings>,
 ): LoadedSettings {
   const userSettings = (sources.user ?? {}) as Settings;
   const projectSettings = (sources.project ?? {}) as Settings;
@@ -298,7 +306,7 @@ function createLoadedSettingsFromSources(
       // 此夹具验证配置组装；磁盘事务由 settingsPersistence 用真实临时文件覆盖。
       path: '',
       settings: userSettings,
-      originalSettings: userSettings,
+      originalSettings: (rawUserSettings ?? userSettings) as Settings,
     },
     {
       path: '',
@@ -3299,6 +3307,202 @@ describe('loadCliConfig', () => {
         'inactive',
       );
       config.deactivateCustomProviders('not_authenticated');
+    },
+  );
+
+  it.each([
+    {
+      hostHeadless: false,
+      sessionPrint: false,
+      folderTrusted: false,
+      admits: false,
+    },
+    {
+      hostHeadless: true,
+      sessionPrint: false,
+      folderTrusted: false,
+      admits: true,
+    },
+    {
+      hostHeadless: false,
+      sessionPrint: true,
+      folderTrusted: false,
+      admits: true,
+    },
+    {
+      hostHeadless: false,
+      sessionPrint: false,
+      folderTrusted: true,
+      admits: true,
+    },
+    {
+      // An untrusted workspace .env expanded the user's trust rule: the
+      // projection trusts the workspace, and the provider admission must not.
+      hostHeadless: false,
+      sessionPrint: false,
+      folderTrusted: true,
+      loadedFolderTrusted: true,
+      providerFolderTrusted: false,
+      processHeadless: false,
+      admits: false,
+    },
+    {
+      // Headless detection unchanged with a workspace-expanded rule: the
+      // independent folder check still gates raw provider admission.
+      hostHeadless: false,
+      sessionPrint: false,
+      folderTrusted: true,
+      loadedFolderTrusted: true,
+      providerFolderTrusted: false,
+      processHeadless: true,
+      admits: false,
+    },
+    {
+      // Host-selected headless keeps admitting raw providers even when the
+      // loaded folder match needed workspace-origin values.
+      hostHeadless: true,
+      sessionPrint: false,
+      folderTrusted: true,
+      loadedFolderTrusted: true,
+      providerFolderTrusted: false,
+      processHeadless: true,
+      admits: true,
+    },
+    {
+      // Session flags select headless while the process stays interactive:
+      // the folder-rule exclusion still applies to the loaded trust.
+      hostHeadless: false,
+      sessionPrint: true,
+      folderTrusted: true,
+      loadedFolderTrusted: true,
+      providerFolderTrusted: false,
+      processHeadless: false,
+      admits: false,
+    },
+    {
+      // A literal or shell-resolved rule survives recomputation.
+      hostHeadless: false,
+      sessionPrint: false,
+      folderTrusted: true,
+      loadedFolderTrusted: true,
+      providerFolderTrusted: true,
+      processHeadless: false,
+      admits: true,
+    },
+  ])(
+    'uses the scoped startup decision for raw providers (%j)',
+    async ({
+      hostHeadless,
+      sessionPrint,
+      folderTrusted,
+      admits: admitsWorkspace,
+      loadedFolderTrusted = folderTrusted,
+      providerFolderTrusted = folderTrusted,
+      processHeadless = true,
+    }) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArgsForRootCommand();
+      argv.print = sessionPrint;
+      // The expanded user layer carries the resolved rule; the raw layer the
+      // environment reference a workspace .env could have supplied.
+      const loadedSettings = createLoadedSettingsFromSources(
+        {
+          user: {
+            permissions: { trustDirectories: [process.cwd()] },
+          },
+        },
+        true,
+        false,
+        {
+          permissions: { trustDirectories: ['$QWEN_R9_TRUST_DIR'] },
+        },
+      );
+      const service = createCliSettingsService({
+        environmentPolicy: 'session',
+      });
+      const headless = vi
+        .mocked(ServerConfig.isHeadlessMode)
+        .mockImplementation(
+          (options, readEnvironment?: (name: string) => string | undefined) =>
+            readEnvironment
+              ? hostHeadless || !!options?.print
+              : processHeadless,
+        );
+      const workspaceTrust = vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: loadedFolderTrusted,
+        source: undefined,
+      });
+      const providerFolderTrust = vi
+        .mocked(isWorkspaceTrustedForProviders)
+        .mockReturnValue({
+          isTrusted: providerFolderTrusted,
+          source: undefined,
+        });
+      // Each case states its expected admission directly: the loaded trust
+      // must not depend on a workspace-expanded folder match, and a workspace
+      // value that changed headless detection still requires independent
+      // folder trust.
+      vi.spyOn(service, 'resolve').mockReturnValue(loadedSettings);
+      const layer = (id: string) =>
+        JSON.stringify({
+          providers: {
+            [id]: {
+              baseUrl: 'https://fixture.invalid/v1',
+              apiKey: '',
+              models: [{ model: 'sample' }],
+            },
+          },
+        });
+      const project = vi.fn(() => layer('projectFixture'));
+      const local = vi.fn(() => layer('localFixture'));
+      const sources = service.getProjectSettingsSources(
+        loadedSettings.project.path,
+        loadedSettings.local.path,
+      );
+      vi.spyOn(service, 'getProjectSettingsSources').mockReturnValue({
+        project: Object.assign(sources.project, { read: project }),
+        local: Object.assign(sources.local, { read: local }),
+      });
+      let config: Awaited<ReturnType<typeof loadCliConfig>> | undefined;
+      try {
+        config = await loadCliConfig(loadedSettings, 'provider-startup', argv, {
+          settingsService: service,
+        });
+        const manager = config.getModelProviderManager();
+        await manager.start();
+        const keys = (await manager.listModels()).map(({ key }) => key);
+        const layerKeys = keys.filter((key) => key.endsWith('Fixture/sample'));
+        expect(layerKeys.sort()).toEqual(
+          admitsWorkspace
+            ? ['localFixture/sample', 'projectFixture/sample']
+            : [],
+        );
+        if (!admitsWorkspace) {
+          expect(project).not.toHaveBeenCalled();
+          expect(local).not.toHaveBeenCalled();
+        }
+        if (!hostHeadless && !sessionPrint && !providerFolderTrusted) {
+          expect(workspaceTrust).toHaveBeenCalledWith(
+            loadedSettings.user.settings,
+            process.cwd(),
+            undefined,
+            undefined,
+            false,
+          );
+        }
+        expect(providerFolderTrust).toHaveBeenCalledWith(
+          loadedSettings.user.originalSettings,
+          process.cwd(),
+          expect.any(Function),
+        );
+        expect(loadedSettings.isTrusted).toBe(true);
+      } finally {
+        headless.mockReset();
+        workspaceTrust.mockReset();
+        providerFolderTrust.mockReset();
+        await config?.dispose();
+        await service.dispose();
+      }
     },
   );
 

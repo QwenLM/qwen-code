@@ -45,6 +45,18 @@ describe('isHeadlessMode', () => {
     expect(isHeadlessMode()).toBe(false);
   });
 
+  it('preserves the original argument tuple for typed forwarding', () => {
+    const args: Parameters<typeof isHeadlessMode> = [{ print: true }];
+    expect(isHeadlessMode(...args)).toBe(true);
+  });
+
+  it('remains usable as a callback that receives an array index', () => {
+    expect([{ print: true }, { print: false }].map(isHeadlessMode)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
   it('should return true if CI environment variable is "true"', () => {
     vi.stubEnv('CI', 'true');
     expect(isHeadlessMode()).toBe(true);
@@ -53,6 +65,17 @@ describe('isHeadlessMode', () => {
   it('should return true if GITHUB_ACTIONS environment variable is "true"', () => {
     vi.stubEnv('GITHUB_ACTIONS', 'true');
     expect(isHeadlessMode()).toBe(true);
+  });
+
+  it('uses the caller-supplied environment without changing the process environment', () => {
+    const readEnvironment = vi.fn(() => undefined);
+    expect(isHeadlessMode(undefined, readEnvironment)).toBe(false);
+    expect(readEnvironment).toHaveBeenCalled();
+    expect(process.env['CI']).toBe('');
+  });
+
+  it('keeps explicit host mode with a filtered environment', () => {
+    expect(isHeadlessMode({ print: true }, () => undefined)).toBe(true);
   });
 
   it('should return true if stdout is not a TTY', () => {

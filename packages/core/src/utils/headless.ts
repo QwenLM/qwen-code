@@ -40,12 +40,25 @@ export interface HeadlessModeOptions {
  * 4. SDK-style input/output flags.
  *
  * @param options - Optional flags and arguments from the CLI.
+ * @param readEnvironment - Environment lookup for callers with a scoped view.
  * @returns true if the environment is considered headless.
  */
-export function isHeadlessMode(options?: HeadlessModeOptions): boolean {
-  if (readBrandEnv(ENV_INTEGRATION_TEST) !== 'true') {
-    const isCI =
-      process.env['CI'] === 'true' || process.env['GITHUB_ACTIONS'] === 'true';
+export function isHeadlessMode(
+  options: HeadlessModeOptions | undefined,
+  readEnvironment: (name: string) => string | undefined,
+): boolean;
+// Keep the unscoped signature last so utility types see the original tuple.
+export function isHeadlessMode(options?: HeadlessModeOptions): boolean;
+export function isHeadlessMode(
+  options?: HeadlessModeOptions,
+  readEnvironment: (name: string) => string | undefined = readBrandEnv,
+): boolean {
+  // Existing callers can pass this detector directly as an array callback.
+  // Only a callable second argument is a scoped environment lookup.
+  const read =
+    typeof readEnvironment === 'function' ? readEnvironment : readBrandEnv;
+  if (read(ENV_INTEGRATION_TEST) !== 'true') {
+    const isCI = read('CI') === 'true' || read('GITHUB_ACTIONS') === 'true';
     if (isCI) {
       return true;
     }

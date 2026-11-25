@@ -64,6 +64,10 @@ import {
   type SettingsFile,
   getDefaultsFromSchema,
   loadEnvironment,
+  getRejectedProviderEnvKeys,
+  getProviderStartupEnvironment,
+  getWorkspaceEnvInjections,
+  restoreLoadedEnvironment,
   migrateDeprecatedSettings,
   saveModelChange,
   SettingScope,
@@ -1850,6 +1854,182 @@ describe('Settings Loading and Merging', () => {
       loadEnvironment(settings, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
 
       expect(process.env['TESTTEST']).toEqual('1234');
+    });
+
+    it('records the workspace trust decision for project env injections', () => {
+      setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: false });
+      const settings = {
+        security: { folderTrust: { enabled: true } },
+      } as Settings;
+      loadEnvironment(settings, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
+
+      expect(getWorkspaceEnvInjections().get('TESTTEST')).toBe(false);
+      expect(getWorkspaceEnvInjections().get('TEST_API_KEY')).toBe(false);
+    });
+
+    it('marks trusted project env injections as trusted', () => {
+      setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: true });
+      const settings = {
+        security: { folderTrust: { enabled: true } },
+      } as Settings;
+      loadEnvironment(settings, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
+
+      expect(getWorkspaceEnvInjections().get('TESTTEST')).toBe(true);
+    });
+
+    it('rejects workspace keys by trust and selection', () => {
+      setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: false });
+      const settings = {
+        security: { folderTrust: { enabled: true } },
+      } as Settings;
+      loadEnvironment(settings, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
+
+      expect(getRejectedProviderEnvKeys(['user'])).toContain('TESTTEST');
+      expect(getRejectedProviderEnvKeys(['user', 'project'])).toContain(
+        'TESTTEST',
+      );
+    });
+
+    it('keeps trusted workspace keys only while a project layer is selected', () => {
+      setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: true });
+      const settings = {
+        security: { folderTrust: { enabled: true } },
+      } as Settings;
+      loadEnvironment(settings, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
+
+      expect(getRejectedProviderEnvKeys(['user'])).toContain('TESTTEST');
+      expect(getRejectedProviderEnvKeys(['user', 'project'])).not.toContain(
+        'TESTTEST',
+      );
+      expect(getRejectedProviderEnvKeys(['user', 'local'])).not.toContain(
+        'TESTTEST',
+      );
+    });
+
+    it.each([false, true])(
+      'keeps user-global env available (discovered from the user directory: %s)',
+      (fromUserDir) => {
+        setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: false });
+        const userDir = path.dirname(USER_SETTINGS_PATH);
+        const userEnvPath = path.join(userDir, '.env');
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => path.resolve(p.toString()) === userEnvPath,
+        );
+        (fs.readFileSync as Mock).mockReturnValue('TESTTEST=1234');
+        const cwd = fromUserDir ? path.dirname(userDir) : MOCK_WORKSPACE_DIR;
+
+        loadEnvironment({}, cwd, isWorkspaceTrusted);
+
+        expect(process.env['TESTTEST']).toBe('1234');
+        expect(getProviderStartupEnvironment()('TESTTEST')).toBe('1234');
+        expect(getRejectedProviderEnvKeys(['user'])).not.toContain('TESTTEST');
+      },
+    );
+
+    it.skipIf(process.platform !== 'darwin')(
+      'keeps distinct POSIX path spellings separate in provider provenance',
+      () => {
+        setup({ isWorkspaceTrustedValue: false });
+        const userDir = path.dirname(USER_SETTINGS_PATH);
+        const cwd = path.dirname(userDir).toUpperCase();
+        const workspaceEnvPath = path.join(cwd, CONFIG_DIR, '.env');
+        const userEnvPath = path.join(userDir, '.env');
+        expect(workspaceEnvPath).not.toBe(userEnvPath);
+        expect(Core.normalizePath(workspaceEnvPath)).toBe(
+          Core.normalizePath(userEnvPath),
+        );
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => path.resolve(p.toString()) === workspaceEnvPath,
+        );
+        (fs.readFileSync as Mock).mockReturnValue('TESTTEST=1234');
+
+        loadEnvironment({}, cwd, isWorkspaceTrusted);
+
+        expect(process.env['TESTTEST']).toBe('1234');
+        expect(getProviderStartupEnvironment()('TESTTEST')).toBeUndefined();
+        expect(getRejectedProviderEnvKeys(['user'])).toContain('TESTTEST');
+      },
+    );
+
+    it.each([
+      { sameWorkspace: true, isTrusted: true, rejected: false },
+      { sameWorkspace: true, isTrusted: false, rejected: true },
+      { sameWorkspace: false, isTrusted: true, rejected: true },
+      { sameWorkspace: false, isTrusted: false, rejected: true },
+    ])(
+      'limits trusted injections to their selected workspace: %j',
+      ({ sameWorkspace, isTrusted, rejected }) => {
+        setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: true });
+        loadEnvironment({}, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
+
+        const keys = getRejectedProviderEnvKeys(['user', 'project'], {
+          cwd: sameWorkspace
+            ? MOCK_WORKSPACE_DIR
+            : `${MOCK_WORKSPACE_DIR}-other`,
+          isTrusted,
+        });
+        expect(keys.has('TESTTEST')).toBe(rejected);
+        expect(process.env['TESTTEST']).toBe('1234');
+      },
+    );
+
+    it('excludes workspace values from the startup view without changing dotenv', () => {
+      setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: true });
+      vi.stubEnv('TEST_API_KEY', 'host-value');
+      try {
+        loadEnvironment({}, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
+        const readEnvironment = getProviderStartupEnvironment();
+        expect(readEnvironment('TESTTEST')).toBeUndefined();
+        expect(process.env['TESTTEST']).toBe('1234');
+        expect(readEnvironment('TEST_API_KEY')).toBe('host-value');
+      } finally {
+        restoreLoadedEnvironment();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('does not attribute a replaced or removed value to a previous injection', () => {
+      setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: false });
+      loadEnvironment({}, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
+      try {
+        process.env['TESTTEST'] = 'host-update';
+        delete process.env['TEST_API_KEY'];
+
+        expect(getWorkspaceEnvInjections().has('TESTTEST')).toBe(false);
+        expect(getRejectedProviderEnvKeys(['user'])).not.toContain('TESTTEST');
+        expect(getRejectedProviderEnvKeys(['user'])).not.toContain('TEST_API_KEY');
+        restoreLoadedEnvironment();
+        expect(process.env['TESTTEST']).toBe('host-update');
+      } finally {
+        delete process.env['TESTTEST'];
+      }
+    });
+
+    it('does not report provenance from a replaced process environment', () => {
+      setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: false });
+      loadEnvironment({}, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
+      const previous = process.env;
+      try {
+        process.env = { ...previous };
+        expect(getWorkspaceEnvInjections().size).toBe(0);
+      } finally {
+        process.env = previous;
+        restoreLoadedEnvironment();
+      }
+    });
+
+    it('clears the workspace injection view on restore', () => {
+      setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: false });
+      const settings = {
+        security: { folderTrust: { enabled: true } },
+      } as Settings;
+      loadEnvironment(settings, MOCK_WORKSPACE_DIR, isWorkspaceTrusted);
+      expect(getWorkspaceEnvInjections().has('TESTTEST')).toBe(true);
+
+      restoreLoadedEnvironment();
+
+      expect(getWorkspaceEnvInjections().has('TESTTEST')).toBe(false);
+      expect(process.env['TESTTEST']).toBeUndefined();
     });
 
   });

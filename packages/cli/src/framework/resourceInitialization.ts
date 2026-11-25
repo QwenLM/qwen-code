@@ -28,6 +28,10 @@ import type {
 } from '@qwen-code/core';
 import { initializeUserResources } from '../config/config.js';
 import type { LoadedSettings } from '../config/settings.js';
+import {
+  getEffectiveSettingSources,
+  getRejectedProviderEnvKeys,
+} from '../config/settings.js';
 import type { AppPluginRegistry } from '../app-plugins/registry.js';
 import type { SettingsService } from '@qwen-code/resource';
 import {
@@ -71,22 +75,32 @@ export function createPublicProviders(
   qoderRegion?: string,
 ): readonly ModelProvider[] {
   const providers: ModelProvider[] = [];
-  try {
-    const source = settings.peekUserSettingsSource(
-      Storage.getGlobalSettingsPath(),
-    );
-    providers.push(
-      ...createCustomModelProvidersFromSettingsTexts(
-        [source?.read()],
-        transports,
-        settings,
-        'user',
-      ),
-    );
-  } catch (error) {
-    runLogger.warn(
-      `[app-framework] build user-level custom providers failed: ${error}`,
-    );
+  // Consult the effective source selection before reading raw user settings
+  // texts: a layer the resolver excludes must not feed provider assembly here,
+  // since environment-reference expansion happens on the raw text.
+  const sources = getEffectiveSettingSources();
+  if (sources.includes('user')) {
+    try {
+      const source = settings.peekUserSettingsSource(
+        Storage.getGlobalSettingsPath(),
+      );
+      // Workspace .env keys the trust and source boundary rejects must not
+      // resolve environment references in the raw user settings text.
+      providers.push(
+        ...createCustomModelProvidersFromSettingsTexts(
+          [source?.read()],
+          transports,
+          settings,
+          'user',
+          undefined,
+          getRejectedProviderEnvKeys(sources),
+        ),
+      );
+    } catch (error) {
+      runLogger.warn(
+        `[app-framework] build user-level custom providers failed: ${error}`,
+      );
+    }
   }
   try {
     providers.push(...createQwenSubscriptionProviders(settings, transports));

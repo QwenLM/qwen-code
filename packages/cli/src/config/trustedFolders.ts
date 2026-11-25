@@ -13,6 +13,7 @@ import {
   type HeadlessModeOptions,
 } from '@qwen-code/core';
 import type { Settings } from './settings.js';
+import { resolveEnvVarsInStringWithView } from '../utils/envVarResolver.js';
 
 export interface TrustResult {
   isTrusted: boolean | undefined;
@@ -107,4 +108,59 @@ export function isWorkspaceTrusted(
     workspaceDir,
     settings,
   );
+}
+
+function expandTrustDirectoryRules(
+  directories: unknown,
+  readEnvironment: (name: string) => string | undefined,
+): string[] | undefined {
+  // The user layer's raw texts predate schema validation: a malformed rule
+  // container or entry was rejected or sanitized by the ordinary settings
+  // loader, so it is ineligible here instead of reaching path handling.
+  if (!Array.isArray(directories)) {
+    return undefined;
+  }
+  const rules: string[] = [];
+  for (const directory of directories) {
+    if (typeof directory === 'string') {
+      rules.push(resolveEnvVarsInStringWithView(directory, readEnvironment));
+    }
+  }
+  return rules;
+}
+
+/**
+ * Folder-trust decision for raw provider admission, resolved from the user
+ * layer's unexpanded settings. Environment references in the user-configured
+ * trust-directory rules resolve through `readEnvironment`, which the caller
+ * supplies as a view that excludes workspace-origin dotenv values: a
+ * workspace .env file must not be able to expand a user rule into covering
+ * the workspace itself. Shell and user-global values still resolve, literal
+ * rules keep their exact text, and the folder-trust toggle keeps its effect;
+ * only the rule resolution differs from {@link isWorkspaceTrusted}.
+ */
+export function isWorkspaceTrustedForProviders(
+  userSettings: Settings,
+  workspaceDir: string = process.cwd(),
+  readEnvironment: (name: string) => string | undefined,
+): TrustResult {
+  const permissions = userSettings.permissions;
+  const settings: Settings = {
+    ...userSettings,
+    permissions: {
+      ...permissions,
+      trustDirectories: expandTrustDirectoryRules(
+        permissions?.trustDirectories,
+        readEnvironment,
+      ),
+      additionalDirectories: expandTrustDirectoryRules(
+        permissions?.additionalDirectories,
+        readEnvironment,
+      ),
+    },
+  };
+  if (!isFolderTrustEnabled(settings)) {
+    return { isTrusted: true, source: undefined };
+  }
+  return getWorkspaceTrustFromLocalConfig(workspaceDir, settings);
 }

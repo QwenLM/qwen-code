@@ -306,6 +306,7 @@ import {
   type ProjectResource,
   type ProjectResourceOptions,
   type ResourceHandle,
+  type SettingsSource,
   type SkillResourceView,
   type UserResource,
 } from '@qwen-code/resource';
@@ -863,6 +864,13 @@ export interface ConfigParameters {
   accessibility?: AccessibilitySettings;
   /** Caller-owned settings instance; Config does not load or copy it. */
   loadedSettings: LoadedSettings;
+  /**
+   * Optional further restriction on raw project/local provider reads.
+   * Layers excluded by the loaded settings projection remain excluded.
+   */
+  providerSettingsSources?: readonly SettingsSource[];
+  /** Environment keys unavailable to raw project/local provider interpolation. */
+  providerRejectedEnvKeys?: ReadonlySet<string>;
   /**
    * Reader for top-level settings sections, supplied at Config construction
    * by the CLI. Config forwards calls verbatim; it does not store its own
@@ -1726,6 +1734,11 @@ export class Config implements AgentLoopContext {
         ) ?? [],
     );
     this.pluginManagerFactory = params.pluginManagerFactory;
+    const providerSettingsSources = (['project', 'local'] as const).filter(
+      (source) =>
+        !params.loadedSettings[source].readOnly &&
+        (params.providerSettingsSources?.includes(source) ?? true),
+    );
     this.modelProviderManager = new ModelProviderManager({
       readAgentSelectionDefaults: (request, purpose) =>
         readAgentSelectionDefaults(this, request, purpose),
@@ -1735,6 +1748,10 @@ export class Config implements AgentLoopContext {
       modelTransportManager: this.modelTransportManager,
       projectPath: params.cwd,
       settingsService: this.settingsService,
+      // Use loaded settings' trust decision before reading raw project/local providers.
+      trustedProjectScope: params.loadedSettings.isTrusted,
+      providerSettingsSources,
+      providerRejectedEnvKeys: params.providerRejectedEnvKeys,
       onModelConfigChange: (model, next, previous) =>
         this.emitModelConfigChanges(model.key, next, previous),
     });

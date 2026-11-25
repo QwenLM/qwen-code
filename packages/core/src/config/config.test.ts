@@ -652,8 +652,13 @@ describe('Server Config (config.ts)', () => {
           },
           local: { read: () => undefined },
         } as never);
+        // Project providers require a selected source and a trusted workspace.
+        const loadedSettings = createEmptyLoadedSettings();
+        loadedSettings.isTrusted = true;
+        loadedSettings.project.readOnly = false;
         const config = new Config({
           ...baseParams,
+          loadedSettings,
           settingsService,
           modelTransportManager: undefined,
         });
@@ -6749,12 +6754,17 @@ describe('Config getHooks', () => {
           local: { read: () => undefined },
         } as never);
       const modelTransportManager = new ModelTransportManager([]);
+      // Project providers require a selected source and a trusted workspace.
+      const loadedSettings = createEmptyLoadedSettings();
+      loadedSettings.isTrusted = true;
+      loadedSettings.project.readOnly = false;
       for (const cwd of [
         '/tmp/provider-session-a',
         '/tmp/provider-session-b',
       ]) {
         const config = new Config({
           ...baseParams,
+          loadedSettings,
           cwd,
           settingsService,
           modelTransportManager,

@@ -6,6 +6,7 @@
  */
 
 import type { SettingsService } from '@qwen-code/resource';
+import type { SettingsSource } from '@qwen-code/resource';
 
 import { runLogger } from '../../utils/runLogger.js';
 import { ModelNotFoundError } from '../../utils/httpErrors.js';
@@ -62,6 +63,22 @@ export interface CreateModelProviderManagerOptions {
   projectPath?: string;
   /** 进程级 settings 服务：供锚点与 Custom Provider 的偏好存储使用。 */
   settingsService: SettingsService;
+  /**
+   * Pass the loaded settings' workspace trust decision to disable raw
+   * project/local provider reads for untrusted sessions. Omission preserves
+   * behavior for direct constructors without a loaded settings projection.
+   */
+  trustedProjectScope?: boolean;
+  /**
+   * Effective setting-source selection (same semantics as
+   * SettingsService.resolve options.sources): project/local provider texts
+   * are only read for layers this selection includes, so a layer the resolver
+   * excludes never reaches environment-reference expansion. Omission reads
+   * both layers, preserving behavior for direct constructors.
+   */
+  providerSettingsSources?: readonly SettingsSource[];
+  /** Environment keys unavailable to raw project/local provider interpolation. */
+  providerRejectedEnvKeys?: ReadonlySet<string>;
   /** 偏好写入后回调，携带该模型写入前后的完整偏好；会话装配方据此转发变更事件。 */
   onModelConfigChange?: (
     model: Model,
@@ -110,9 +127,15 @@ export class ModelProviderManager implements ModelProvider {
       projectPath: options.projectPath,
       settingsService: options.settingsService,
     });
-    this.localProviders = loadProjectCustomProviderConfigs(
-      options.settingsService,
-      options.projectPath,
+    // Apply the same workspace trust filter as reload before expanding raw settings.
+    this.localProviders = (options.trustedProjectScope === false
+      ? []
+      : loadProjectCustomProviderConfigs(
+          options.settingsService,
+          options.projectPath,
+          options.providerSettingsSources,
+          options.providerRejectedEnvKeys,
+        )
     ).map(
       (config) =>
         new CustomModelProvider({
