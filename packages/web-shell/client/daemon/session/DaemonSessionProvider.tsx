@@ -6343,7 +6343,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   >(() => {
     if (
       !appSession ||
-      appSession.restoreStrategy.kind !== 'workspace' ||
+      (appSession.restoreStrategy !== undefined &&
+        appSession.restoreStrategy.kind !== 'workspace') ||
       !appSession.workspaceCwd ||
       !generatedUiClientId ||
       connection.status !== 'connected' ||

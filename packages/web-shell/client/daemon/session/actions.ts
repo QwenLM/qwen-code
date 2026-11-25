@@ -534,7 +534,7 @@ export function createDaemonSessionActions({
 
   const adapterFor = (session: DaemonSessionClient) => {
     const adapter = getSessionAdapter ? getSessionAdapter() : sessionAdapter;
-    return adapter && session.restoreStrategy.kind === 'standalone'
+    return adapter && session.restoreStrategy?.kind === 'standalone'
       ? adapter
       : undefined;
   };
