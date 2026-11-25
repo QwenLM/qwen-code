@@ -92,6 +92,7 @@ class ManagedDefinitionPreparationMySqlIT {
             assertThat(saved.at("/input/toolPolicy/approvalMode").textValue()).isEqualTo(approvalMode);
             var definition = json.readTree(jdbc.queryForObject("SELECT definition_json FROM ma_agent_definition", String.class));
             assertThat(definition.at("/permission_policy/approval_mode").textValue()).isEqualTo(approvalMode);
+            assertThat(definition.at("/permission_policy/approval_mode").isMissingNode()).isEqualTo(approvalMode == null);
         }
     }
 
