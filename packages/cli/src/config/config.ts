@@ -2791,17 +2791,23 @@ export async function loadCliConfig(
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
-    onPersistPermissionRule: async (scope, ruleType, rule) => {
-      const currentSettings = loadSettings(cwd);
+    onPersistPermissionRule: async (scope, ruleType, rule, workspaceDir) => {
+      const currentSettings = loadSettings(workspaceDir, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: scope === 'user',
+      });
       const settingScope =
         scope === 'project' ? SettingScope.Workspace : SettingScope.User;
-      const key = `permissions.${ruleType}`;
-      const currentRules: string[] =
-        currentSettings.forScope(settingScope).settings.permissions?.[
-          ruleType
-        ] ?? [];
-      if (!currentRules.includes(rule)) {
-        currentSettings.setValue(settingScope, key, [...currentRules, rule]);
+      const file = currentSettings.forScope(settingScope);
+      const rawRules = file.originalSettings.permissions?.[ruleType] ?? [];
+      if (
+        !rawRules.includes(rule) &&
+        !file.settings.permissions?.[ruleType]?.includes(rule)
+      ) {
+        currentSettings.setValue(settingScope, `permissions.${ruleType}`, [
+          ...rawRules,
+          rule,
+        ]);
       }
     },
     toolDiscoveryCommand:

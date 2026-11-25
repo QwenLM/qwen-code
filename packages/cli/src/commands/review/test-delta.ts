@@ -47,7 +47,15 @@ import {
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
-import { refuseUnsandboxedPhase } from './lib/sandboxed-exec.js';
+import {
+  describeExecutionBoundary,
+  mountRootFor,
+  refuseUnsandboxedPhase,
+  sandboxPolicy,
+  sandboxVerdict,
+  trustInputFromPlan,
+  type ReviewExecutionBoundary,
+} from './lib/sandboxed-exec.js';
 import { failingFilesOf } from './lib/failing-files.js';
 import { foundNoTests, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
 
@@ -127,11 +135,15 @@ export interface TestDeltaReport {
    */
   skippedForBudget: string[];
   note: string;
+  /** Structured execution boundary metadata for the base-side rerun phase. */
+  executionBoundary?: ReviewExecutionBoundary;
 }
 
 export interface TestDeltaArgs {
   report: string;
   baseline: string;
+  /** Optional fetch-pr / capture-local plan file for tiered trust classification. */
+  plan?: string;
   out?: string;
   /**
    * The PR worktree the report's failures were produced in — its root is
@@ -207,7 +219,12 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // So the duplicate is gone rather than re-synchronised: one `run`, one place
   // where the boundary is decided, and no way for the two sides to drift again.
   // `kind` defaults to 'test', which is the restrictive shape (no network).
-  const exec = args.exec ?? runCommand;
+  const policy = sandboxPolicy();
+  const trustContext = args.plan ? trustInputFromPlan(args.plan) : undefined;
+  const exec =
+    args.exec ??
+    ((cmd: string, cwd: string, timeoutMs: number) =>
+      runCommand(cmd, cwd, timeoutMs, 'test', trustContext));
   const baseline = resolve(args.baseline);
   const empty = (note: string): TestDeltaReport => ({
     entries: [],
@@ -237,11 +254,30 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // is also the honest answer for the measurement itself: with containment
   // unavailable the PR side either refused too or ran somewhere else, and a
   // delta between two differently-shaped runs is worse than no delta.
-  const refusal = (args.refuse ?? refuseUnsandboxedPhase)(baseline);
+  const refusal = args.refuse
+    ? args.refuse(baseline)
+    : refuseUnsandboxedPhase(
+        baseline,
+        undefined,
+        undefined,
+        policy,
+        trustContext,
+      );
   if (refusal) {
-    return empty(
-      `the base-side rerun did not happen, so NOTHING was attributed — ${refusal}`,
-    );
+    const actionable =
+      policy === 'tiered' && !args.plan
+        ? `${refusal}; pass --plan <the Step 1 fetch plan> so a trusted PR can be classified for this rerun`
+        : refusal;
+    return {
+      ...empty(
+        `the base-side rerun did not happen, so NOTHING was attributed — ${actionable}`,
+      ),
+      executionBoundary: describeExecutionBoundary({
+        policy,
+        backend: 'refused',
+        trustContext,
+      }),
+    };
   }
 
   // Failed for real: a timeout is an infrastructure result and reruns as one.
@@ -441,12 +477,26 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       `${skippedForBudget.length} failed command(s) not rerun — the whole-command budget was exhausted (${skippedForBudget.join(', ')}); their failures stay unattributed, judge them by the diff`,
     );
   }
+  const verdict = sandboxVerdict(policy, undefined, undefined, trustContext);
+  const mountable = mountRootFor(baseline) !== null;
+  const effectiveBackend =
+    verdict.kind === 'container' && mountable ? 'container' : 'direct';
   return {
     entries,
     netNew,
     shared,
     skippedForBudget,
     note: parts.join('. ') || 'nothing to report',
+    executionBoundary: describeExecutionBoundary({
+      policy,
+      backend: effectiveBackend,
+      trustContext,
+      ...(verdict.kind === 'container' && !mountable
+        ? {
+            note: 'baseline tree is not under a review temp dir, so reruns executed directly rather than in a container',
+          }
+        : {}),
+    }),
   };
 }
 
@@ -466,6 +516,11 @@ export const testDeltaCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'The BUILT base tree from `qwen review base-tree`',
+      })
+      .option('plan', {
+        type: 'string',
+        describe:
+          'Optional review plan JSON for tiered sandbox trust classification',
       })
       .option('pr-worktree', {
         type: 'string',

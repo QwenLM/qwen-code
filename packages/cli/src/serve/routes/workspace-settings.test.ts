@@ -800,13 +800,16 @@ describe('POST /workspace/settings', () => {
   // a workspace-scope write persists a committable dead entry into the repo's
   // .qwen/settings.json and answers 200 + requiresRestart while the feature
   // never turns on. The TUI dialog already filters them; the API did not.
-  it('rejects a workspace-restricted key at workspace scope', async () => {
+  it.each([
+    ['tools.workflowsEnabled', true],
+    ['general.displayLanguage', 'zh-CN'],
+  ])('rejects the workspace-restricted setting %s', async (key, value) => {
     const { app, persistSetting } = makeApp();
 
     const res = await request(app).post('/workspace/settings').send({
       scope: 'workspace',
-      key: 'tools.workflowsEnabled',
-      value: true,
+      key,
+      value,
     });
 
     expect(res.status).toBe(400);

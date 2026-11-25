@@ -26,6 +26,7 @@ const observed = vi.hoisted(() => ({
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
+  useOptionalDaemonHistoryNavigationStore: () => observed.store,
 }));
 vi.mock('../i18n', () => {
   const t = (key: string) => key;

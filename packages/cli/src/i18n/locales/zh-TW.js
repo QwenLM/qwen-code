@@ -801,6 +801,7 @@ export default {
   'Debug Keystroke Logging': '調試按鍵記錄',
   'Language: UI': '語言：界面',
   'Language: Model': '語言：模型',
+  'Language: Display Translation': '語言：顯示翻譯',
   'Output Format': '輸出格式',
   'Hide Window Title': '隱藏窗口標題',
   'Show Status in Title': '在標題中顯示狀態',

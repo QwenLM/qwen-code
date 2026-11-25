@@ -640,6 +640,7 @@ export type ServerLlmCitationEvent = {
 export type ServerLlmHookSystemMessageEvent = {
   type: LlmEventType.HookSystemMessage;
   value: string;
+  isStopReason?: true;
 };
 
 export type ServerLlmGoalSettlementFailedEvent = {
@@ -817,6 +818,7 @@ export class Turn {
     private readonly isExplicitRetry?: boolean,
     private readonly isSessionTurn?: boolean,
     private readonly ledgerTurnKey?: string,
+    private readonly retractToolCallsOnRetry?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -849,6 +851,9 @@ export class Turn {
         ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
         ...(this.retractDeliveredOutputOnRetry
           ? { retractDeliveredOutputOnRetry: true }
+          : {}),
+        ...(this.retractToolCallsOnRetry
+          ? { retractToolCallsOnRetry: true }
           : {}),
         ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
         ...(this.ledgerTurnKey ? { ledgerTurnKey: this.ledgerTurnKey } : {}),

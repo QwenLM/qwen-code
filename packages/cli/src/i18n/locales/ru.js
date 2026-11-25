@@ -480,6 +480,7 @@ export default {
   'Debug Keystroke Logging': 'Логирование нажатий клавиш для отладки',
   'Language: UI': 'Язык: интерфейс',
   'Language: Model': 'Язык: модель',
+  'Language: Display Translation': 'Язык: перевод отображения',
   'Output Format': 'Формат вывода',
   'Hide Window Title': 'Скрыть заголовок окна',
   'Show Status in Title': 'Показывать статус в заголовке',

@@ -774,4 +774,32 @@ describe('useDaemonChatController', () => {
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0]?.[1]).toBe('chat.stopNotConfirmed');
   });
+
+  it('does not seed a prompt that already settled before submitPrompt resolved', async () => {
+    mountReact(<Probe />);
+    let resolveSubmit!: (value: { promptId: string }) => void;
+    harness.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise<{ promptId: string }>((resolve) => {
+          resolveSubmit = resolve;
+        }),
+    );
+    const pending = controller!.submit({ text: 'fast turn' });
+    // Terminal settlement arrives while the submit POST is still in flight.
+    harness.promptSettledListener?.({
+      sessionId: 's1',
+      promptId: 'p-fast',
+      outcome: 'completed',
+    });
+    resolveSubmit({ promptId: 'p-fast' });
+    await pending;
+    // Round-trip s1 -> s2 -> s1: p-fast must NOT be seeded into the rebuilt
+    // controller (dropping !settledDuringSubmit.has(accepted.promptId) latches
+    // p-fast permanently as activeTurnId).
+    harness.connection.sessionId = 's2';
+    forceRerender!();
+    harness.connection.sessionId = 's1';
+    forceRerender!();
+    expect(controller!.activeTurnId).toBeUndefined();
+  });
 });

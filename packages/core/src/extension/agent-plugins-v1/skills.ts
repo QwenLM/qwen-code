@@ -118,6 +118,7 @@ export function parseAgentPluginSkill(
     skillRoot: path.dirname(filePath),
     body: match[2].trim(),
     level: 'extension',
+    extensionSkillFormat: 'agent-plugins-v1',
   };
 }
 

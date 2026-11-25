@@ -583,7 +583,7 @@ class ExternalWorkspaceMaterializationTest {
             register("tenant", "healthy");
             store.materialize("tenant", "healthy", "Healthy", "owner", "healthy-key");
             jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = ?",
-                    "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    "workspace");
 
             assertThat(registry.listReadable("tenant", "owner", null, 10))
                     .hasSize(2)
@@ -636,13 +636,13 @@ class ExternalWorkspaceMaterializationTest {
 
     @Test
     void rejectsPersistedTupleDriftAndBusyOwnersWithoutPartialMaterialization() {
-        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage", String.class);
+        String physical = jdbc.queryForObject("SELECT physical_id FROM ma_storage", String.class);
         for (String mutation : List.of("storage_kind = 'LOCAL'", "registration_state = 'RETIRING'",
-                "registration_revision = 2", "physical_key = 'wrong'")) {
+                "registration_revision = 2", "physical_id = 'wrong'")) {
             jdbc.update("UPDATE ma_storage SET " + mutation);
             conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
             jdbc.update("UPDATE ma_storage SET storage_kind = 'EXTERNAL', registration_state = 'REGISTERED',"
-                    + " registration_revision = 1, physical_key = ?", physical);
+                    + " registration_revision = 1, physical_id = ?", physical);
         }
         String registration = jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class);
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration.replace("\"tenantWorkspaceId\":\"workspace\"",
@@ -658,10 +658,10 @@ class ExternalWorkspaceMaterializationTest {
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration);
         new TransactionTemplate(manager).executeWithoutResult(status ->
                 conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "workspace_unavailable"));
-        for (String mutation : List.of("mount_root = '/other'", "mount_revision = 2", "holder_key = 'held'", "maintenance_id = 'maintenance'")) {
+        for (String mutation : List.of("mount_root = '/other'", "mount_revision = 2", "holder_id = 'held'", "maintenance_id = 'maintenance'")) {
             jdbc.update("UPDATE ma_storage_owner SET " + mutation);
             conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
-            jdbc.update("UPDATE ma_storage_owner SET mount_root = '/worker/workspace', mount_revision = 1, holder_key = NULL, maintenance_id = NULL");
+            jdbc.update("UPDATE ma_storage_owner SET mount_root = '/worker/workspace', mount_revision = 1, holder_id = NULL, maintenance_id = NULL");
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace_access", Integer.class)).isZero();
@@ -675,7 +675,7 @@ class ExternalWorkspaceMaterializationTest {
                 + " 'Existing', ?, ?, 'REMOVED')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
         register("tenant", "second");
-        jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_id, scope_id, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, provisioner_kind,"
                 + " storage_id, runtime_generation, binding_state, attestation_generation, is_drain_requested,"
                 + " operation_generation, record_version, last_active_at)"

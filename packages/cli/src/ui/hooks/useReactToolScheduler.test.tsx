@@ -7,7 +7,10 @@
 
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { InteractiveModToolScheduler } from '../../services/interactive-mod-tool-scheduler.js';
+import { getToolCallRuntime } from '@qwen-code/qwen-code-core/code-mode/tool-call-runtime.js';
 import { getHookExecutionOwner } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
+import * as loggers from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import { ToolRegistry } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
@@ -16,6 +19,7 @@ import type { Config, ToolResult } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   CoreToolScheduler,
+  makeFakeConfig,
   MockTool,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -229,7 +233,10 @@ describe('useReactToolScheduler', () => {
     scheduleSpy.mockRestore();
   });
 
-  it('keeps the same scheduler so a later tool queues after callback identities change', async () => {
+  it.each([
+    { abandon: false, outcome: 'settles' },
+    { abandon: true, outcome: 'is abandoned' },
+  ])('drains queued tools when a batch $outcome', async ({ abandon }) => {
     let resolveFirst: ((result: ToolResult) => void) | undefined;
     const execute = vi.fn(
       (params: { [key: string]: unknown }): Promise<ToolResult> => {
@@ -314,7 +321,9 @@ describe('useReactToolScheduler', () => {
       },
     );
 
-    const signal = new AbortController().signal;
+    const firstBatch = new AbortController();
+    const abandonment = new AbortController();
+    const onAbandoned = vi.fn(async (_tools: InteractiveToolCall[]) => {});
     act(() => {
       result.current[1](
         {
@@ -324,7 +333,10 @@ describe('useReactToolScheduler', () => {
           isClientInitiated: false,
           prompt_id: 'prompt-1',
         },
-        signal,
+        firstBatch.signal,
+        undefined,
+        abandon ? onAbandoned : undefined,
+        abandon ? abandonment.signal : undefined,
       );
     });
 
@@ -349,7 +361,7 @@ describe('useReactToolScheduler', () => {
           isClientInitiated: false,
           prompt_id: 'prompt-2',
         },
-        signal,
+        new AbortController().signal,
       );
     });
     await act(async () => {
@@ -359,26 +371,138 @@ describe('useReactToolScheduler', () => {
 
     expect(execute).toHaveBeenCalledTimes(1);
 
-    await act(async () => {
-      resolveFirst!({
-        llmContent: 'first',
-        returnDisplay: 'first',
+    const releaseFirst = () =>
+      act(async () => {
+        resolveFirst!({ llmContent: 'first', returnDisplay: 'first' });
       });
-    });
+    if (abandon) {
+      await act(async () => {
+        firstBatch.abort();
+        abandonment.abort();
+      });
+      expect(onAbandoned).toHaveBeenCalledExactlyOnceWith([]);
+    } else {
+      await releaseFirst();
+    }
 
     await waitFor(() => {
       expect(execute).toHaveBeenCalledTimes(2);
     });
     await waitFor(() => {
-      expect(latestOnComplete).toHaveBeenCalled();
+      expect(latestOnComplete).toHaveBeenCalledTimes(abandon ? 1 : 2);
     });
+    if (abandon) await releaseFirst();
     const reportedCallIds = latestOnComplete.mock.calls
       .flat(2)
       .map((call) => call.request.callId);
     expect(reportedCallIds).toEqual(
-      expect.arrayContaining(['call-1', 'call-2']),
+      abandon ? ['call-2'] : ['call-1', 'call-2'],
     );
+    expect(result.current[0]).toEqual([]);
     expect(firstOnComplete).not.toHaveBeenCalled();
+  });
+
+  it('clears abandoned nested tools and excludes their late telemetry after a session switch', async () => {
+    const config = makeFakeConfig({
+      approvalMode: ApprovalMode.YOLO,
+      interactive: true,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    const sessionId = vi.spyOn(config, 'getSessionId').mockReturnValue('old');
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const turn = new AbortController();
+    const abandonment = new AbortController();
+    let releaseNested!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseNested = resolve;
+    });
+    registry.registerTool(
+      new MockTool({
+        name: 'exec',
+        execute: async () => {
+          await getToolCallRuntime()!.dispatch('read_file', {}, turn.signal);
+          return { llmContent: 'old', returnDisplay: 'old' };
+        },
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: 'read_file',
+        execute: async (args) => {
+          if (!args['fresh']) await held;
+          return { llmContent: 'read', returnDisplay: 'read' };
+        },
+      }),
+    );
+    const completed = vi.fn(async (_calls: InteractiveToolCall[]) => {});
+    const onAbandoned = vi.fn(async (_calls: InteractiveToolCall[]) => {});
+    const schedule = vi.spyOn(CoreToolScheduler.prototype, 'schedule');
+    const logToolCall = vi.spyOn(loggers, 'logToolCall');
+    const { result } = renderHook(() =>
+      useReactToolScheduler(completed, config, () => undefined, vi.fn()),
+    );
+
+    try {
+      act(() => {
+        result.current[1](
+          {
+            callId: 'outer',
+            name: 'exec',
+            args: {},
+            prompt_id: 'old-prompt',
+            isClientInitiated: false,
+          },
+          turn.signal,
+          undefined,
+          onAbandoned,
+          abandonment.signal,
+        );
+      });
+      await waitFor(() => {
+        expect(result.current[0]).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              status: 'executing',
+              request: expect.objectContaining({ parentCallId: 'outer' }),
+            }),
+          ]),
+        );
+      });
+      await act(async () => {
+        turn.abort();
+        abandonment.abort();
+      });
+      expect(result.current[0]).toEqual([]);
+      expect(onAbandoned).toHaveBeenCalledExactlyOnceWith([]);
+
+      sessionId.mockReturnValue('new');
+      act(() => {
+        result.current[1](
+          {
+            callId: 'fresh',
+            name: 'read_file',
+            args: { fresh: true },
+            prompt_id: 'new-prompt',
+            isClientInitiated: false,
+          },
+          new AbortController().signal,
+        );
+      });
+      await waitFor(() => expect(completed).toHaveBeenCalledOnce());
+      await act(async () => {
+        releaseNested();
+        await Promise.all(schedule.mock.results.map(({ value }) => value));
+      });
+      expect(logToolCall.mock.calls.map(([, event]) => event.call_id)).toEqual([
+        'fresh',
+      ]);
+    } finally {
+      releaseNested();
+      logToolCall.mockRestore();
+      schedule.mockRestore();
+    }
   });
 
   it('captures session and hook owner before asynchronous full-turn model resolution', async () => {
