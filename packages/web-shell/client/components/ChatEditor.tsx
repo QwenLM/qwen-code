@@ -136,6 +136,7 @@ import {
   ArrowDownIcon,
   ArrowRightIcon,
   ArrowUpIcon,
+  BlocksIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ChevronUpIcon,
@@ -1584,6 +1585,63 @@ function ModelReasoningControls({
   );
 }
 
+function resolveSlashItemDisplay(
+  item: SlashMenuState['items'][number],
+  menuKind: SlashMenuState['kind'],
+  commandsByName: ReadonlyMap<string, CommandInfo>,
+  skillsByName: ReadonlyMap<string, SkillInfo>,
+): {
+  menuLabel: string;
+  detailLabel: string;
+  extensionName?: string;
+} {
+  if (menuKind === 'subcommand' && item.type !== 'skill') {
+    return {
+      menuLabel: item.label,
+      detailLabel: item.label,
+    };
+  }
+  const name = item.type === 'skill' ? item.label : item.id;
+  const skill = skillsByName.get(name);
+  const isSkill =
+    Boolean(skill) || item.type === 'skill' || item.category === 'skill';
+  const rawExtensionName =
+    skill?.extensionName ??
+    (isSkill &&
+    commandsByName.get(name)?.source === 'plugin-command' &&
+    name.includes(':')
+      ? name.slice(0, name.indexOf(':'))
+      : undefined);
+  const extensionName = rawExtensionName?.trim() || undefined;
+  const prefix = extensionName ? `${extensionName}:` : undefined;
+
+  let detailLabel = isSkill ? name : item.label;
+  if (
+    prefix &&
+    detailLabel.startsWith(prefix) &&
+    detailLabel.length > prefix.length
+  ) {
+    detailLabel = detailLabel.slice(prefix.length);
+  }
+
+  let menuLabel = item.label;
+  if (prefix) {
+    if (
+      menuLabel.startsWith(`/${prefix}`) &&
+      menuLabel.length > prefix.length + 1
+    ) {
+      menuLabel = `/${menuLabel.slice(prefix.length + 1)}`;
+    } else if (
+      menuLabel.startsWith(prefix) &&
+      menuLabel.length > prefix.length
+    ) {
+      menuLabel = menuLabel.slice(prefix.length);
+    }
+  }
+
+  return { menuLabel, detailLabel, extensionName };
+}
+
 function SlashCommandPanel({
   menu,
   commands,
@@ -1619,9 +1677,23 @@ function SlashCommandPanel({
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
     extensionName?: string;
-    detail: string;
+    detail?: string;
     side: 'top' | 'right' | 'bottom' | 'left';
   } | null>(null);
+  const skillsByName = useMemo(() => {
+    const map = new Map<string, SkillInfo>();
+    for (const skill of skills) {
+      if (!map.has(skill.name)) map.set(skill.name, skill);
+    }
+    return map;
+  }, [skills]);
+  const commandsByName = useMemo(() => {
+    const map = new Map<string, CommandInfo>();
+    for (const command of commands) {
+      if (!map.has(command.name)) map.set(command.name, command);
+    }
+    return map;
+  }, [commands]);
 
   useEffect(() => {
     itemRefs.current[menu.selectedIndex]?.scrollIntoView({
@@ -1735,6 +1807,12 @@ function SlashCommandPanel({
               >
                 {menu.items.map((item, index) => {
                   const plan = rowPlans[index];
+                  const display = resolveSlashItemDisplay(
+                    item,
+                    menu.kind,
+                    commandsByName,
+                    skillsByName,
+                  );
                   return (
                     <div
                       key={`${item.id}:${index}`}
@@ -1770,7 +1848,10 @@ function SlashCommandPanel({
                         }`}
                         onMouseEnter={(event) => {
                           onSelect(index);
-                          if (!item.detail || compact) {
+                          const detail = item.detail?.trim()
+                            ? item.detail
+                            : undefined;
+                          if ((!detail && !display.extensionName) || compact) {
                             setHoverDetail(null);
                             return;
                           }
@@ -1794,32 +1875,10 @@ function SlashCommandPanel({
                                 : rowRect.top - top >= bottom - rowRect.bottom
                                   ? 'top'
                                   : 'bottom';
-                          const name =
-                            item.type === 'skill' ? item.label : item.id;
-                          const skill = skills.find((s) => s.name === name);
-                          const isSkill =
-                            skill ||
-                            item.type === 'skill' ||
-                            item.category === 'skill';
-                          const extensionName =
-                            skill?.extensionName ??
-                            (isSkill &&
-                            commands.find((c) => c.name === name)?.source ===
-                              'plugin-command' &&
-                            name.includes(':')
-                              ? name.slice(0, name.indexOf(':'))
-                              : undefined);
-                          let label = isSkill ? name : item.label;
-                          if (
-                            extensionName &&
-                            label.startsWith(`${extensionName}:`)
-                          ) {
-                            label = label.slice(extensionName.length + 1);
-                          }
                           setHoverDetail({
-                            label,
-                            extensionName,
-                            detail: item.detail,
+                            label: display.detailLabel,
+                            extensionName: display.extensionName,
+                            detail,
                             side,
                           });
                         }}
@@ -1830,7 +1889,7 @@ function SlashCommandPanel({
                         }}
                       >
                         <span className={styles.slashCommand}>
-                          {item.label}
+                          {display.menuLabel}
                           {item.argumentHint && (
                             <span className={styles.slashArgumentHint}>
                               {' '}
@@ -1891,11 +1950,24 @@ function SlashCommandPanel({
                 {hoverDetail.label}
               </div>
               {hoverDetail.extensionName && (
-                <div className={styles.slashDetailText}>
-                  {t('skills.extension')}: {hoverDetail.extensionName}
+                <div className={styles.slashDetailExtension}>
+                  <span className={styles.slashDetailExtensionLabel}>
+                    <BlocksIcon
+                      className={styles.slashDetailExtensionIcon}
+                      aria-hidden="true"
+                    />
+                    {t('skills.extension')}
+                  </span>
+                  <span className={styles.slashDetailExtensionName}>
+                    {hoverDetail.extensionName}
+                  </span>
                 </div>
               )}
-              <div className={styles.slashDetailText}>{hoverDetail.detail}</div>
+              {hoverDetail.detail && (
+                <div className={styles.slashDetailText}>
+                  {hoverDetail.detail}
+                </div>
+              )}
             </div>
           </PopoverContent>
         )}

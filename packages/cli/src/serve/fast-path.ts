@@ -99,6 +99,7 @@ const BOOLEAN_OPTION_BY_FLAG = new Map<
   ['experimental-lsp', 'experimentalLsp'],
   ['restore-ask-user-question', 'restoreAskUserQuestion'],
   ['rate-limit', 'rateLimit'],
+  ['load-admission', 'loadAdmission'],
 ]);
 
 function invertOptionMap<T extends string>(

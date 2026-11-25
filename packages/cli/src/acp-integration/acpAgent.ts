@@ -238,7 +238,10 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { pickAuthMethodsForAuthRequired } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
-import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import {
+  DAEMON_ACP_NDJSON_LIMITS,
+  ndJsonStream,
+} from '@qwen-code/acp-bridge/ndJsonStream';
 import { createAcpOutput } from './acp-output.js';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
@@ -1263,6 +1266,11 @@ function mapSessionRestoreRequestError(
       sessionId,
       snapshotSize: error.snapshotSize,
       maxBytes: error.maxBytes,
+      ...(error.dimension !== 'snapshot' ? { dimension: error.dimension } : {}),
+      ...(error.measuredBytes !== undefined
+        ? { measuredBytes: error.measuredBytes }
+        : {}),
+      ...(error.retryable !== undefined ? { retryable: error.retryable } : {}),
     });
   }
   if (error instanceof SessionTranscriptPageTooLargeError) {
@@ -1293,12 +1301,32 @@ function mapSessionRestoreRequestError(
   return error;
 }
 
+// Unpaged bulk session/load envelopes (`replay.kind === 'all'`) have no page
+// size and historically relied on the 64 MiB NDJSON frame ceiling
+// (`DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes`). Keep only a small wrapper margin
+// here; the complete response (including artifactSnapshot and config data) is
+// checked against the same frame ceiling before it is returned.
+const LOAD_RESPONSE_FRAME_MARGIN_BYTES = 4 * 1024;
+export const UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES =
+  DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - LOAD_RESPONSE_FRAME_MARGIN_BYTES;
+
+function assertLoadResponseFitsFrame(
+  sessionId: string,
+  response: LoadSessionResponse,
+): void {
+  const frameBytes = Buffer.byteLength(JSON.stringify(response), 'utf8');
+  const limit =
+    DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - LOAD_RESPONSE_FRAME_MARGIN_BYTES;
+  if (frameBytes > limit) {
+    throw new HistoryReplayLimitError(sessionId, 'bytes', frameBytes, limit);
+  }
+}
+
 function validateLoadReplayEnvelope(
   sessionId: string,
   envelope: BridgeLoadReplayEnvelope,
-  enforceLimits: boolean,
+  maxBytes: number = LOAD_REPLAY_MAX_BYTES,
 ): void {
-  if (!enforceLimits) return;
   if (envelope.updates.length > LOAD_REPLAY_MAX_UPDATES) {
     throw new HistoryReplayLimitError(
       sessionId,
@@ -1308,13 +1336,8 @@ function validateLoadReplayEnvelope(
     );
   }
   const pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
-  if (pageBytes > LOAD_REPLAY_MAX_BYTES) {
-    throw new HistoryReplayLimitError(
-      sessionId,
-      'bytes',
-      pageBytes,
-      LOAD_REPLAY_MAX_BYTES,
-    );
+  if (pageBytes > maxBytes) {
+    throw new HistoryReplayLimitError(sessionId, 'bytes', pageBytes, maxBytes);
   }
 }
 
@@ -1328,7 +1351,7 @@ function appendGoalUpdatesWithinLimits(
   sessionId: string,
   envelope: BridgeLoadReplayEnvelope,
   goalUpdates: readonly SessionUpdate[],
-  enforceLimits: boolean,
+  maxBytes: number = LOAD_REPLAY_MAX_BYTES,
 ): boolean {
   if (goalUpdates.length === 0) return true;
   const withGoal = {
@@ -1336,7 +1359,7 @@ function appendGoalUpdatesWithinLimits(
     updates: [...envelope.updates, ...goalUpdates],
   };
   try {
-    validateLoadReplayEnvelope(sessionId, withGoal, enforceLimits);
+    validateLoadReplayEnvelope(sessionId, withGoal, maxBytes);
   } catch (error) {
     if (!(error instanceof HistoryReplayLimitError)) throw error;
     debugLogger.debug(
@@ -6340,10 +6363,16 @@ class QwenAgent implements Agent {
             );
             const replayPage = projection?.replay;
             if (!replayPage || replayPage.records.length === 0) {
-              return withRestoreHint(liveSession, response);
+              const loadResponse = withRestoreHint(liveSession, response);
+              assertLoadResponseFitsFrame(sessionId, loadResponse);
+              return loadResponse;
             }
 
             const bulkReplay = isBulkLoadReplayRequest(params);
+            const maxReplayBytes =
+              restoreOptions.replay.kind === 'recent'
+                ? LOAD_REPLAY_MAX_BYTES
+                : UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES;
             const replay = await profiler.time('history_replay', () =>
               collectHistoryReplayUpdates({
                 sessionId,
@@ -6367,10 +6396,10 @@ class QwenAgent implements Agent {
                 // under the gate: isTurnIdle() is structurally false while
                 // the close gate is held (#9704).
                 finalizeDangling: true,
-                ...(restoreOptions.replay.kind === 'recent'
+                ...(bulkReplay
                   ? {
                       limits: {
-                        maxBytes: LOAD_REPLAY_MAX_BYTES,
+                        maxBytes: maxReplayBytes,
                         maxUpdates: LOAD_REPLAY_MAX_UPDATES,
                       },
                     }
@@ -6434,10 +6463,17 @@ class QwenAgent implements Agent {
                   );
                 }
               }
+              // Paginated live loads already streamed their replay updates;
+              // this response carries only bounded modes/models/configOptions
+              // plus the statically capped artifactSnapshot, so it cannot
+              // exceed the frame ceiling and must not throw after streaming.
               return withRestoreHint(liveSession, response);
             }
 
-            const enforceLimits = restoreOptions.replay.kind === 'recent';
+            // Every bulk load replay travels in a single NDJSON response frame
+            // that the bridge validates against LOAD_REPLAY_MAX_UPDATES and
+            // DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes, so enforce envelope limits
+            // even when the caller omitted `historyPageSize`.
             const envelope: BridgeLoadReplayEnvelope = {
               v: LOAD_REPLAY_VERSION,
               updates: replay.updates,
@@ -6452,23 +6488,23 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
-            if (enforceLimits) {
-              degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
-            }
-            validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
+            degradeReplayEnvelopeAppHtml(envelope, maxReplayBytes);
+            validateLoadReplayEnvelope(sessionId, envelope, maxReplayBytes);
             // The card is presentation: a full page simply goes without it.
             appendGoalUpdatesWithinLimits(
               sessionId,
               envelope,
               renderGoalUpdates(),
-              enforceLimits,
+              maxReplayBytes,
             );
-            return withRestoreHint(liveSession, {
+            const loadResponse = withRestoreHint(liveSession, {
               ...response,
               _meta: {
                 [LOAD_REPLAY_META_KEY]: envelope,
               },
             });
+            assertLoadResponseFitsFrame(sessionId, loadResponse);
+            return loadResponse;
           },
         );
       });
@@ -6556,24 +6592,28 @@ class QwenAgent implements Agent {
       let streamGoalUpdates: SessionUpdate[] = [];
       let response: LoadSessionResponse | undefined;
       const buildResponse = () =>
-        profiler.timeSync('response_build', () => ({
-          modes: this.buildModesData(config),
-          models: this.buildAvailableModels(config),
-          configOptions: this.buildConfigOptions(
-            config,
-            getDefaultReasoningConfig(config, settings),
-          ),
-          ...(projection?.runtime.artifactSnapshot
-            ? { artifactSnapshot: projection.runtime.artifactSnapshot }
-            : {}),
-          ...(replayEnvelope
-            ? {
-                _meta: {
-                  [LOAD_REPLAY_META_KEY]: replayEnvelope,
-                },
-              }
-            : {}),
-        })) as LoadSessionResponse;
+        profiler.timeSync('response_build', () => {
+          const result = {
+            modes: this.buildModesData(config),
+            models: this.buildAvailableModels(config),
+            configOptions: this.buildConfigOptions(
+              config,
+              getDefaultReasoningConfig(config, settings),
+            ),
+            ...(projection?.runtime.artifactSnapshot
+              ? { artifactSnapshot: projection.runtime.artifactSnapshot }
+              : {}),
+            ...(replayEnvelope
+              ? {
+                  _meta: {
+                    [LOAD_REPLAY_META_KEY]: replayEnvelope,
+                  },
+                }
+              : {}),
+          } as LoadSessionResponse;
+          assertLoadResponseFitsFrame(sessionId, result);
+          return result;
+        });
       try {
         if (!provisionalStandalone) {
           await restoreModel();
@@ -6595,6 +6635,10 @@ class QwenAgent implements Agent {
             ),
             replayHistory: false,
             prepareBeforeSessionCreate: async () => {
+              const maxReplayBytes =
+                restoreOptions.replay.kind === 'recent'
+                  ? LOAD_REPLAY_MAX_BYTES
+                  : UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES;
               if (bulkReplay && projection?.replay) {
                 const replay = await profiler.time('history_replay', () =>
                   collectHistoryReplayUpdates({
@@ -6612,14 +6656,10 @@ class QwenAgent implements Agent {
                             projection.replay!.branchPointsByAssistantUuid,
                         }
                       : {}),
-                    ...(restoreOptions.replay.kind === 'recent'
-                      ? {
-                          limits: {
-                            maxBytes: LOAD_REPLAY_MAX_BYTES,
-                            maxUpdates: LOAD_REPLAY_MAX_UPDATES,
-                          },
-                        }
-                      : {}),
+                    limits: {
+                      maxBytes: maxReplayBytes,
+                      maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                    },
                     logger: debugLogger,
                   }),
                 );
@@ -6641,16 +6681,11 @@ class QwenAgent implements Agent {
                     : {}),
                   ...(projection.replay.hasMore ? { hasMore: true } : {}),
                 };
-                if (restoreOptions.replay.kind === 'recent') {
-                  degradeReplayEnvelopeAppHtml(
-                    replayEnvelope,
-                    LOAD_REPLAY_MAX_BYTES,
-                  );
-                }
+                degradeReplayEnvelopeAppHtml(replayEnvelope, maxReplayBytes);
                 validateLoadReplayEnvelope(
                   sessionId,
                   replayEnvelope,
-                  restoreOptions.replay.kind === 'recent',
+                  maxReplayBytes,
                 );
               }
               const goalBootstrap = replayGoalBootstrap(projection);
@@ -6694,7 +6729,7 @@ class QwenAgent implements Agent {
                   sessionId,
                   replayEnvelope,
                   rendered.updates,
-                  restoreOptions.replay.kind === 'recent',
+                  maxReplayBytes,
                 );
                 // What a full page cannot carry is the recovered Goal
                 // state, which the client must still get: it is sent as
@@ -11058,6 +11093,15 @@ class QwenAgent implements Agent {
               sessionId,
               snapshotSize: error.snapshotSize,
               maxBytes: error.maxBytes,
+              ...(error.dimension !== 'snapshot'
+                ? { dimension: error.dimension }
+                : {}),
+              ...(error.measuredBytes !== undefined
+                ? { measuredBytes: error.measuredBytes }
+                : {}),
+              ...(error.retryable !== undefined
+                ? { retryable: error.retryable }
+                : {}),
             });
           }
           if (error instanceof SessionTranscriptPageTooLargeError) {
@@ -11178,6 +11222,15 @@ class QwenAgent implements Agent {
               sessionId,
               snapshotSize: error.snapshotSize,
               maxBytes: error.maxBytes,
+              ...(error.dimension !== 'snapshot'
+                ? { dimension: error.dimension }
+                : {}),
+              ...(error.measuredBytes !== undefined
+                ? { measuredBytes: error.measuredBytes }
+                : {}),
+              ...(error.retryable !== undefined
+                ? { retryable: error.retryable }
+                : {}),
             });
           }
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -14758,6 +14811,15 @@ class QwenAgent implements Agent {
                 sessionId,
                 snapshotSize: error.snapshotSize,
                 maxBytes: error.maxBytes,
+                ...(error.dimension !== 'snapshot'
+                  ? { dimension: error.dimension }
+                  : {}),
+                ...(error.measuredBytes !== undefined
+                  ? { measuredBytes: error.measuredBytes }
+                  : {}),
+                ...(error.retryable !== undefined
+                  ? { retryable: error.retryable }
+                  : {}),
               });
             }
             if (error instanceof SessionTranscriptPageTooLargeError) {
