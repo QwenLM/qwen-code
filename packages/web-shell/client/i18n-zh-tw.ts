@@ -5799,6 +5799,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.scope.workspace': '工作區',
   'settings.value.on': '開',
   'settings.value.off': '關',
+  'settings.value.unset': '未設定',
   'settings.action.edit': '編輯',
   'settings.action.select': '選擇',
   'settings.action.save': '儲存',
