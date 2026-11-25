@@ -161,12 +161,17 @@ export async function readWorkspaceInputHistory(
   workspaceCwd: string,
   kind: WorkspaceInputHistoryKind,
   limit = MAX_WORKSPACE_INPUT_HISTORY_ENTRIES,
+  waitForPendingWrite = false,
 ): Promise<WorkspaceInputHistorySnapshot> {
   const effectiveLimit = Math.max(
     1,
     Math.min(MAX_WORKSPACE_INPUT_HISTORY_ENTRIES, Math.floor(limit)),
   );
   const filePath = getWorkspaceInputHistoryFilePath(workspaceCwd, kind);
+  if (waitForPendingWrite) {
+    const pendingWrite = writeQueueByPath.get(filePath);
+    await pendingWrite;
+  }
   const { entries } = await readRawEntriesOldestFirst(filePath, kind);
   const bounded =
     entries.length > effectiveLimit

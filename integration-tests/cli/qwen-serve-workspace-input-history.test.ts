@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -347,6 +348,61 @@ describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
       });
     });
   }, 90_000);
+
+  it('persists a shared shell entry after a producer dies holding its lock', async () => {
+    await fs.writeFile(shellFile, JSON.stringify(['from-before-crash']));
+    const holder = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        `
+          import lockfile from 'proper-lockfile';
+          await lockfile.lock(process.argv.at(-1), {
+            realpath: false,
+            stale: 10_000,
+            retries: 0,
+            onCompromised: () => {},
+          });
+          process.send('locked');
+          setInterval(() => {}, 60_000);
+        `,
+        shellFile,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
+    );
+    try {
+      const errors: Buffer[] = [];
+      holder.stderr?.on('data', (chunk: Buffer) => errors.push(chunk));
+      const holderExit = once(holder, 'exit');
+      const earlyFailure = holderExit.then(([code, signal]) => {
+        throw new Error(
+          `holder exited before locking (${code}/${signal}): ${Buffer.concat(errors)}`,
+        );
+      });
+      await Promise.race([once(holder, 'message'), earlyFailure]);
+      holder.kill('SIGKILL');
+      const [, signal] = await holderExit;
+      expect(signal).toBe('SIGKILL');
+      expect((await fs.stat(`${shellFile}.lock`)).isDirectory()).toBe(true);
+
+      const started = performance.now();
+      await append('after-producer-crash', 'shell');
+      expect(performance.now() - started).toBeGreaterThan(8_000);
+      await expect(get('shell')).resolves.toMatchObject({
+        entries: ['from-before-crash', 'after-producer-crash'],
+      });
+      expect(JSON.parse(await fs.readFile(shellFile, 'utf8'))).toEqual([
+        'from-before-crash',
+        'after-producer-crash',
+      ]);
+      await expect(fs.stat(`${shellFile}.lock`)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      if (!holder.killed) holder.kill('SIGKILL');
+    }
+  }, 60_000);
 
   it('enforces auth, workspace ownership and trust, bounded validation, and cache contracts', async () => {
     const unauthenticated = await fetch(

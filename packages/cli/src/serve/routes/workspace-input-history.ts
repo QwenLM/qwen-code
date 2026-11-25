@@ -133,7 +133,12 @@ async function handleGetInputHistory(
   if (limit === null) return;
   try {
     assertGenerationOpen();
-    const snapshot = await readWorkspaceInputHistory(workspaceCwd, kind, limit);
+    const snapshot = await readWorkspaceInputHistory(
+      workspaceCwd,
+      kind,
+      limit,
+      req.header('if-none-match') !== undefined,
+    );
     assertGenerationOpen();
     const etag = formatEtag(snapshot.revision);
     res.setHeader('ETag', etag);

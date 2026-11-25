@@ -10,6 +10,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import request from 'supertest';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
@@ -17,7 +19,11 @@ import {
   WorkspaceGenerationClosedError,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { MAX_WORKSPACE_INPUT_HISTORY_ENTRY_CHARS } from '../workspace-input-history.js';
+import {
+  appendWorkspaceInputHistory,
+  MAX_WORKSPACE_INPUT_HISTORY_ENTRY_CHARS,
+} from '../workspace-input-history.js';
+import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 import { registerWorkspaceInputHistoryRoutes } from './workspace-input-history.js';
 
 function safeBody(req: Request): Record<string, unknown> {
@@ -173,6 +179,66 @@ describe('workspace-input-history routes', () => {
     expect(afterShell.status).toBe(200);
     expect(afterShell.body.entries).toEqual(['git status']);
   });
+
+  it('waits for an admitted append before evaluating a conditional read', async () => {
+    const app = createApp();
+    const empty = await request(app).get('/workspace/input-history?kind=shell');
+    const filePath = new Storage(primaryCwd, primaryCwd).getHistoryFilePath();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, JSON.stringify(['from-before-crash']));
+    const holder = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        `
+          import lockfile from 'proper-lockfile';
+          await lockfile.lock(process.argv.at(-1), {
+            realpath: false,
+            stale: 10_000,
+            retries: 0,
+            onCompromised: () => {},
+          });
+          process.send('locked');
+          setInterval(() => {}, 60_000);
+        `,
+        filePath,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
+    );
+    try {
+      const errors: Buffer[] = [];
+      holder.stderr?.on('data', (chunk: Buffer) => errors.push(chunk));
+      const holderExit = once(holder, 'exit');
+      const earlyFailure = holderExit.then(([code, signal]) => {
+        throw new Error(
+          `holder exited before locking (${code}/${signal}): ${Buffer.concat(errors)}`,
+        );
+      });
+      await Promise.race([once(holder, 'message'), earlyFailure]);
+      holder.kill('SIGKILL');
+      const [, signal] = await holderExit;
+      expect(signal).toBe('SIGKILL');
+      const started = performance.now();
+      const write = runWithWorkspaceRuntimeStorage(
+        fakeRuntime({ id: 'primary', cwd: primaryCwd, primary: true }),
+        () => appendWorkspaceInputHistory(primaryCwd, 'shell', 'from desktop'),
+      );
+      const conditional = request(app)
+        .get('/workspace/input-history?kind=shell')
+        .set('If-None-Match', empty.headers['etag'] as string);
+      const refreshed = await conditional;
+      expect(refreshed.status).toBe(200);
+      expect(refreshed.body.entries).toEqual([
+        'from-before-crash',
+        'from desktop',
+      ]);
+      expect(performance.now() - started).toBeGreaterThan(8_000);
+      await write;
+    } finally {
+      if (!holder.killed) holder.kill('SIGKILL');
+    }
+  }, 60_000);
 
   it('rejects invalid query and body inputs with 400', async () => {
     const app = createApp();

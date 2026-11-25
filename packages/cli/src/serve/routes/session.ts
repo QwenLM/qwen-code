@@ -9800,6 +9800,38 @@ export function registerSessionRoutes(
         res.once('finish', onResFinish);
 
         let admission: SessionPromptAdmission;
+        let historyRecorded: Promise<void> | undefined;
+        const recordInputHistory = () => {
+          if (
+            historyRecorded ||
+            body['suppressInputHistory'] === true ||
+            classification.channelPrompt ||
+            classification.requestedChannelPrompt
+          ) {
+            return;
+          }
+          const historyText = extractPromptHistoryText(
+            prompt,
+            classification.submittedPrompt,
+          );
+          if (!historyText) return;
+          historyRecorded = runWithWorkspaceRuntimeStorage(runtime, () =>
+            appendWorkspaceInputHistory(
+              runtime.workspaceCwd,
+              'prompt',
+              historyText,
+            )
+              .then(() => undefined)
+              .catch((err) => {
+                daemonLog?.warn('failed to record workspace input history', {
+                  sessionId,
+                  kind: 'prompt' satisfies WorkspaceInputHistoryKind,
+                  workspaceCwd: runtime.workspaceCwd,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }),
+          );
+        };
         try {
           admission = admitSessionPrompt(
             {
@@ -9821,7 +9853,10 @@ export function registerSessionRoutes(
               signal: abort.signal,
               onPromptId: (promptId) =>
                 addDaemonRequestAttribute('qwen-code.prompt_id', promptId),
-              onPromptAdmitted,
+              onPromptAdmitted: () => {
+                onPromptAdmitted?.();
+                recordInputHistory();
+              },
             },
           );
         } catch (err) {
@@ -9844,32 +9879,8 @@ export function registerSessionRoutes(
           });
           return;
         }
-        if (
-          body['suppressInputHistory'] !== true &&
-          !classification.channelPrompt &&
-          !classification.requestedChannelPrompt
-        ) {
-          const historyText = extractPromptHistoryText(
-            prompt,
-            classification.submittedPrompt,
-          );
-          if (historyText) {
-            void runWithWorkspaceRuntimeStorage(runtime, () =>
-              appendWorkspaceInputHistory(
-                runtime.workspaceCwd,
-                'prompt',
-                historyText,
-              ),
-            ).catch((err) => {
-              daemonLog?.warn('failed to record workspace input history', {
-                sessionId,
-                kind: 'prompt' satisfies WorkspaceInputHistoryKind,
-                workspaceCwd: runtime.workspaceCwd,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            });
-          }
-        }
+        recordInputHistory();
+        await historyRecorded;
         res.status(202).json({
           promptId: admission.promptId,
           lastEventId: admission.lastEventId,
