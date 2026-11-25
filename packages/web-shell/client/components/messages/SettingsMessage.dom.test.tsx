@@ -770,7 +770,7 @@ describe('SettingsMessage user-scope editing', () => {
     const control = switchButton(container);
     const badge = container.querySelector('[data-slot="badge"]');
 
-    expect(badge?.textContent).toBe('Not set (each surface uses its default)');
+    expect(badge?.textContent).toBe('Not set');
     expect(badge?.id).toBeTruthy();
     expect(control.getAttribute('aria-describedby')).toBe(badge?.id);
     expect(control.getAttribute('data-state')).toBe('unchecked');
