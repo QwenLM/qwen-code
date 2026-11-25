@@ -7208,34 +7208,98 @@ describe('Session', () => {
       expect(send).toHaveBeenCalledOnce();
     });
 
-    it('ends the turn and shows the reason when a tool hook stops it', async () => {
-      useTool(core.Kind.Read, 'read_file');
-      runAcpToolBatchSpy.mockImplementation(
-        async (
-          host: unknown,
-          options: { requests: core.ToolCallRequestInfo[] },
-        ) => ({
-          ...(await runEachTool(host, options)),
-          stop: 'hook_stopped',
-          hookStopReason: 'budget spent',
-        }),
-      );
-      const send = useSharedRounds([readCall('call-read'), finished()]);
-
-      const result = await prompt();
-
-      expect(result.stopReason).toBe('end_turn');
-      expect(send).toHaveBeenCalledOnce();
-      expect(updates()).toContainEqual({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: '' },
-        _meta: {
-          source: 'stop_hook_notice',
-          qwenDiscreteMessage: true,
-          stopReason: 'budget spent',
+    it.each([
+      {
+        name: 'tool hook',
+        stop: 'hook_stopped',
+        extra: {},
+        refuseNotice: false,
+      },
+      {
+        name: 'undeliverable stop notice',
+        stop: 'hook_stopped',
+        extra: {},
+        refuseNotice: true,
+      },
+      {
+        name: 'channel turn with a terminating tool',
+        stop: 'tool_ended_turn',
+        extra: { _meta: { 'qwen.channel.prompt': true } },
+        refuseNotice: false,
+      },
+      {
+        name: 'requested delivery with a terminating tool',
+        stop: 'tool_ended_turn',
+        extra: {
+          _meta: {
+            'qwen.daemon.channelDelivery': {
+              deliveryId: 'hook-stop',
+              target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+            },
+          },
         },
-      });
-    });
+        refuseNotice: false,
+      },
+    ])(
+      'ends the turn and keeps the tool response on a $name',
+      async ({ stop, extra, refuseNotice }) => {
+        useTool(core.Kind.Read, 'read_file');
+        runAcpToolBatchSpy.mockImplementation(
+          async (
+            host: unknown,
+            options: { requests: core.ToolCallRequestInfo[] },
+          ) => ({
+            ...(await runEachTool(host, options)),
+            stop,
+            hookStopReason: 'budget spent',
+          }),
+        );
+        const send = useSharedRounds([readCall('call-read'), finished()]);
+
+        if (refuseNotice) {
+          vi.mocked(mockClient.sessionUpdate).mockImplementation(
+            async ({ update }) => {
+              if (update._meta?.['source'] === 'stop_hook_notice') {
+                throw new Error('notice transport failed');
+              }
+            },
+          );
+        }
+        const result = await prompt(extra);
+
+        expect(result.stopReason).toBe('end_turn');
+        expect(send).toHaveBeenCalledOnce();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-read',
+                name: 'read_file',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        });
+        expect(updates()).toContainEqual({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            source: 'stop_hook_notice',
+            qwenDiscreteMessage: true,
+            stopReason: 'budget spent',
+          },
+        });
+        if (extra._meta?.['qwen.daemon.channelDelivery']) {
+          await vi.waitFor(() =>
+            expect(mockClient.extMethod).toHaveBeenCalledWith(
+              'qwen/control/channel-delivery',
+              expect.objectContaining({ deliveryId: 'hook-stop', text: '' }),
+            ),
+          );
+        }
+      },
+    );
 
     it('refuses a Goal approval the turn cannot own', async () => {
       useTool(core.Kind.Read, 'read_file');

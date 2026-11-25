@@ -12219,10 +12219,8 @@ export class Session implements SessionContext {
    * queued for the next continuation rather than drained into a turn that is
    * already over.
    *
-   * Channel turns and requested channel deliveries keep the loop alive for
-   * their final tool-free response; ending on the tool batch would return or
-   * submit an empty response because only a tool-free response is committed
-   * as the channel final.
+   * Channels normally need a final tool-free response for delivery. A hook
+   * stop ends the turn even when a channel is waiting for that response.
    */
   async #endTurnAfterToolRun(
     toolRun: RunToolResult,
@@ -12232,7 +12230,6 @@ export class Session implements SessionContext {
   ): Promise<boolean> {
     // Loop protection keeps its own stop path, with the telemetry and the
     // context message that go with it, so it wins a batch that trips both.
-    // A hook stop ends channel turns too: the hook asked for it.
     const hookStop = toolRun.hookStopReason;
     if (
       toolRun.loopDetected ||
@@ -12240,9 +12237,6 @@ export class Session implements SessionContext {
         (toolRun.terminateTurn !== true || channelTurn || hasChannelDelivery))
     ) {
       return false;
-    }
-    if (hookStop !== undefined) {
-      await this.messageEmitter.emitStopHookNotice(hookStop);
     }
     this.todoStopGuard.suspend();
     this.#preserveUnsentMessageHistory(
@@ -12253,6 +12247,15 @@ export class Session implements SessionContext {
       goalTurn.endingToolCallId = toolRun.parts.findLast(
         (part) => part.functionResponse?.id,
       )?.functionResponse?.id;
+    }
+    if (hookStop !== undefined) {
+      try {
+        await this.messageEmitter.emitStopHookNotice(hookStop);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to emit tool hook stop notice: ${this.#formatError(error)}`,
+        );
+      }
     }
     return true;
   }
@@ -16845,7 +16848,7 @@ export class Session implements SessionContext {
       stopAfterPermissionCancel: batch.stopAfterPermissionCancel,
       ...(toolLoopState.loopDetected ? { loopDetected: true } : {}),
       ...(batch.stop === 'tool_ended_turn' ? { terminateTurn: true } : {}),
-      ...(batch.stop === 'hook_stopped' && batch.hookStopReason !== undefined
+      ...(batch.hookStopReason !== undefined
         ? { hookStopReason: batch.hookStopReason }
         : {}),
       repeatedToolFailureBatch: {

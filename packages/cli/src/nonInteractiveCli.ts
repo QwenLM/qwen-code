@@ -2871,9 +2871,10 @@ export async function runNonInteractive(
           // The turn ends here, so the results answer the calls in history.
           llmClient.addHistory({ role: 'user', parts: result.parts ?? [] });
           if (outputFormat === OutputFormat.TEXT) {
-            process.stderr.write(
-              `A hook stopped the turn: ${sanitizeTerminalText(result.hookStopReason ?? '')}\n`,
-            );
+            const notice = t('A hook stopped the turn: {{reason}}', {
+              reason: sanitizeTerminalText(result.hookStopReason ?? ''),
+            });
+            process.stderr.write(`${notice}\n`);
           }
           return result;
         };

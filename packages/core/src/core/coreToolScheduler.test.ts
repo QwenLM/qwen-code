@@ -53,6 +53,7 @@ import * as fsSync from 'node:fs';
 import { writeFile as fsWriteFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
+import { captureFixedPolicyHookStopReporter } from '../omni/policy/fixed-policy-hook-stop.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
@@ -12243,6 +12244,35 @@ describe('CoreToolScheduler telemetry spans', () => {
     expectStatus(call, 'error');
     expect(call.response.error?.message).toContain('boom');
     expect(call.response.hookStopReason).toBe('same failure again');
+    expect(definedHookSpan('PostToolUseFailure').hookMetadata).toMatchObject({
+      shouldStop: true,
+      blockType: 'stop',
+    });
+  });
+
+  it('carries the first fixed-policy hook stop on the owning tool result', async () => {
+    let report: ReturnType<typeof captureFixedPolicyHookStopReporter>;
+    const { call } = await runSingleTool({
+      execute: async () => {
+        report = captureFixedPolicyHookStopReporter();
+        expect(report?.('first media')).toBe(true);
+        expect(report?.('second media')).toBe(true);
+        return textResult('both results');
+      },
+    });
+    expectStatus(call, 'success');
+    expect(call.response.hookStopReason).toBe('first media');
+    expect(JSON.stringify(call.response.responseParts)).toContain(
+      'both results',
+    );
+    const next = await runSingleTool({
+      execute: async () => {
+        expect(report?.('late')).toBe(false);
+        return textResult('next');
+      },
+    });
+    expectStatus(next.call, 'success');
+    expect(next.call.response.hookStopReason).toBeUndefined();
   });
 
   it('marks toolResult.error with a sanitized failure kind', async () => {

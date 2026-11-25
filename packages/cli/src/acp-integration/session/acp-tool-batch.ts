@@ -118,7 +118,7 @@ export interface AcpToolBatchHost {
 export interface AcpToolBatchResult {
   parts: Part[];
   stop?: AgentLoopStopReason;
-  /** With `stop: 'hook_stopped'`, the reason to show. */
+  /** The hook reason to show, including when a tool also ended the turn. */
   hookStopReason?: string;
   /** A permission request was cancelled: the turn stops after the batch. */
   stopAfterPermissionCancel: boolean;

@@ -1105,6 +1105,7 @@ export default {
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
   Hooks: 'Hook',
+  'A hook stopped the turn: {{reason}}': 'Hook 已結束本輪對話：{{reason}}',
   'Loading hooks...': '正在加載 Hook...',
   'Error loading hooks:': '加載 Hook 出錯：',
   'Press Escape to close': '按 Escape 關閉',

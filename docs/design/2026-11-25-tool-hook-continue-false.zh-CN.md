@@ -32,10 +32,11 @@
 
 ## 目标与范围
 
-- 在 PreToolUse、PostToolUse、PostToolUseFailure 和 PostToolBatch 上，不带阻断决定的 `continue: false` 会在当前这批工具结束后结束 turn，用户能看到 `stopReason`。
+- 在 PreToolUse、PostToolUse、PostToolUseFailure 和 PostToolBatch 上，不带阻断决定的 `continue: false` 会在当前这批工具结束后结束 turn。交互式会话和 headless 文本模式会显示原因。
 - 主会话，即运行在共享 agent loop 上的这些界面：Ink TUI、OpenTUI、headless（text、JSON、stream-json）、ACP/daemon 会话（Web Shell、IDE、SDK）。
 - 子代理：以一种新的结束方式结束运行，父代理能看到原因。
 - Code Mode：`exec` 脚本里嵌套调用发出的停止，同样结束 turn。
+- 工具执行或处理结果时，Omni 媒体策略会将其工具调用收到的 hook 停止原因传回外层工具。当前批次保留成功生成的媒体结果并结束这一轮。策略报错时仍按配置处理失败。展开用户输入的 `@file` 或重试提供方请求时，策略调用没有所属的工具批次。此时，成功的策略调用若触发 PostToolUse 或 PostToolBatch 停止，就按该策略步骤失败处理。
 - 不在范围内（这些地方 turn 照常继续）：
   - 旧的（非共享）循环。它们是可以手动切回的旧路径，#17045 会移除。它们用的是同一个调度器，所以 PreToolUse 拒绝该调用，PostToolUse 保留结果，PostToolBatch 保留所有结果。
   - 在共享批处理之外运行的 ACP 工具调用：daemon 重启后恢复的 `ask_user_question` 调用，以及关闭统一循环时的所有 ACP turn。这条工具路径保持旧的效果（PreToolUse 拒绝该调用，PostToolUse 的停止把结果替换成错误）。cron、后台通知和 Stop hook 续写的 turn 默认走共享批处理，已经覆盖。
@@ -69,12 +70,9 @@ hook 输出照旧合并，然后：
 
 ### 各界面
 
-各界面处理 `hook_stopped` 的方式，与处理"工具结束 turn"的情况相同：把这一批的 function response 加入历史，显示提示，然后以正常结束（`ok`，不是错误）收尾这一轮。在 Goal turn 里，Goal turn 的收尾和工具结束它时一样，由 Goal 运行时决定接下来做什么。ACP 的 channel turn 同样结束，尽管它的 channel 因此收不到最终回复：hook 要求停止。
+各界面把这一批工具的响应加入历史并正常结束本轮。Goal 运行时结算当前 Goal turn，再决定是否开始下一轮。同一批次中即使有工具也要求结束本轮，ACP 仍保留 hook 的停止原因，优先结算 Goal。channel turn 也在 hook 要求停止时结束，无需再请求模型生成最终回复。
 
-- **提示**：文案为 "A hook stopped the turn: <stopReason>"。
-  - Ink 和 OpenTUI 两个 TUI：一行 info。Stop hook 的 "Stop says:" 那一行会把事件名说错，所以不用它；
-  - headless text：写到 stderr；JSON 和 stream-json 输出不带它，和不带 Stop hook 的原因一样；
-  - ACP：A1 的 `emitStopHookNotice`（`_meta.source: "stop_hook_notice"`），SDK、Web Shell 和 VS Code 已经能显示。
+- Ink 和 OpenTUI 按界面语言显示停止提示，简体中文为“Hook 已结束本轮对话：<stopReason>”。headless 文本模式将提示写到 stderr，JSON 和 stream-json 直接结束本轮。ACP 先保存工具响应，再向 SDK、Web Shell 或 VS Code 发送 `stop_hook_notice`。即使客户端未能收到提示，本轮仍正常结束。
 - **子代理**：新增 `AgentTerminateMode.HOOK_STOPPED`。
   - 这一批的结果写入子代理的历史，子代理被恢复时能看到它们。
   - 它的最终文本是 "A hook stopped the agent: <stopReason>"，父代理拿到的工具结果带着这段文本。
@@ -135,7 +133,7 @@ hook 输出照旧合并，然后：
 
 ## 验收标准
 
-- PreToolUse、PostToolUse、PostToolUseFailure 或 PostToolBatch hook 返回 `{"continue": false, "stopReason": "…"}` 时，在每个主界面上都能结束 turn、显示原因，并且会话仍能接受下一条 prompt。
+- 在共享循环中，PreToolUse、PostToolUse、PostToolUseFailure 或 PostToolBatch hook 返回 `{"continue": false, "stopReason": "…"}` 时，本轮结束，会话仍能接受下一条 prompt。交互式会话和 headless 文本模式会显示原因。
 - 子代理以 `HOOK_STOPPED` 结束，父代理能看到原因。
 - 阻断式输出的行为与以前相同。
 

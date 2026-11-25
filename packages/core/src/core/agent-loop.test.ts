@@ -725,6 +725,7 @@ describe('runAgentLoop', () => {
     });
 
     expect(result.reason).toBe('tool_ended_turn');
+    expect(result.hookStopReason).toBe('stop');
   });
 
   it('ends after the batch when a result callback asks', async () => {

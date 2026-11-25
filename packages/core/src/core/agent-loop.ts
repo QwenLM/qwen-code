@@ -524,7 +524,7 @@ export interface ToolBatchResult {
     record?: () => void;
   }>;
   stop?: AgentLoopStopReason;
-  /** With `stop: 'hook_stopped'`, the first stopping call's reason. */
+  /** The first hook stop in request order, even if a tool also ended the turn. */
   hookStopReason?: string;
 }
 
@@ -793,7 +793,12 @@ export async function runToolBatch(
   if (aborted && !ended) return { parts, responses, stop: 'cancelled' };
   if (ended) return { parts, responses, stop: 'surface_ended' };
   if (terminateTurn && (host.endsOnTerminateTurn?.() ?? true)) {
-    return { parts, responses, stop: 'tool_ended_turn' };
+    return {
+      parts,
+      responses,
+      stop: 'tool_ended_turn',
+      ...(hookStopReason !== undefined && { hookStopReason }),
+    };
   }
   if (hookStopReason !== undefined) {
     return { parts, responses, stop: 'hook_stopped', hookStopReason };

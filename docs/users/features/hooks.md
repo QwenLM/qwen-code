@@ -535,7 +535,13 @@ Hook output supports three categories of fields:
 2. **Top-level Decision**: `decision`, `reason` (used by some events)
 3. **Event-specific Control**: `hookSpecificOutput` (must include `hookEventName`)
 
-On the tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`), `continue: false` ends the turn. The calls of the current batch finish, their results are kept in the conversation, the model gets no further request in this turn, and `stopReason` (or `reason`) is shown to the user. In a subagent, the subagent stops and its parent is told why. When the same output also blocks (`decision: "block"` or `"deny"`, a PreToolUse `permissionDecision: "deny"`, or exit code 2), the block wins and the turn goes on, as on `Stop`.
+On the shared agent loop, `continue: false` on `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, or `PostToolBatch` ends the current turn. The batch finishes, its results stay in the conversation, and the model receives no further request in that turn. In a subagent, the parent receives the reason and can continue. An autonomous Goal can start another turn. To suspend the Goal, pause it.
+
+Interactive terminals and ACP clients show `stopReason` (or `reason`). Headless text mode prints the notice to stderr. Headless `json` and `stream-json` finish the turn without a stop notice.
+
+When the same hook output also blocks (`decision: "block"` or `"deny"`, a PreToolUse `permissionDecision: "deny"`, or exit code 2), the blocking decision takes precedence and the turn can continue. The turn can also continue on legacy loops (`experimental.unifiedAgentLoop: false`), in the Hosted Harness, and for an ACP `ask_user_question` call restored after a daemon restart. Those paths have their own continuation handling.
+
+If a tool uses an Omni media policy while running or preparing its result, a hook on the policy's tool call can end the enclosing turn after the batch. A policy can also run while expanding a user's `@file` or retrying a provider request, before any tool batch owns the call. In those cases, a stop on the policy call follows the policy's failure handling.
 
 ```json
 {

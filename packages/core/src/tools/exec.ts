@@ -149,16 +149,19 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
               }
             },
           );
-          const result = await pending.finally(() => {
-            // A rejected tool call can carry the same stop signal.
-            if (turnEnded()) throw new CodeModeTurnTerminated();
-          });
-          if (isSkill) skillOutputs.push(result.output);
-          if (name === 'capture_screen_context') {
-            const { content: _content, ...textResult } = result;
-            return textResult;
-          }
-          return result;
+          return pending
+            .then((result) => {
+              if (isSkill) skillOutputs.push(result.output);
+              if (name === 'capture_screen_context') {
+                const { content: _content, ...textResult } = result;
+                return textResult;
+              }
+              return result;
+            })
+            .finally(() => {
+              // A rejected tool call can carry the same stop signal.
+              if (turnEnded()) throw new CodeModeTurnTerminated();
+            });
         })();
         active.add(task);
         const release = () => active.delete(task);

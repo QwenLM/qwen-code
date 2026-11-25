@@ -206,6 +206,24 @@ describe('exec context tool results', () => {
     expect(result.terminateTurn).toBeUndefined();
   });
 
+  it('keeps a skill reloadable when a hook stops the script before it can print the body', async () => {
+    const { run, registry } = setup(
+      ToolNames.SKILL,
+      { hookStopReason: 'halt' },
+      'skill instructions',
+    );
+    const clearLoadedSkills = vi.fn();
+    Object.assign(registry.getTool(ToolNames.SKILL)!, { clearLoadedSkills });
+
+    const result = await run(
+      "text((await tools.skill({skill: 'test'})).output)",
+    );
+
+    expect(result.hookStopReason).toBe('halt');
+    expect(outputText(result)).toBe('');
+    expect(clearLoadedSkills).toHaveBeenCalledOnce();
+  });
+
   it('clears loaded skill tracking if cancellation prevents delivery', async () => {
     const { run, dispatch, registry } = setup(
       ToolNames.SKILL,

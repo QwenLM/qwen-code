@@ -53,6 +53,7 @@ import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
+import { withFixedPolicyHookStop } from '../omni/policy/fixed-policy-hook-stop.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
@@ -2849,6 +2850,7 @@ export class CoreToolScheduler {
       : {
           success: true,
           hasAdditionalContext: !!r.additionalContext,
+          ...(r.endsTurn && { shouldStop: true, blockType: 'stop' }),
         };
   };
 
@@ -6063,8 +6065,27 @@ export class CoreToolScheduler {
       this.toolSpans.set(callId, toolSpan);
     }
     try {
-      await runInToolSpanContext(toolSpan, () =>
-        this._executeToolCallBody(scheduledCall, signal, toolSpan),
+      await withFixedPolicyHookStop(
+        (reason) => {
+          if (
+            signal.aborted ||
+            !this.toolCalls.some(
+              (call) =>
+                call.request === scheduledCall.request &&
+                call.status === 'executing',
+            )
+          ) {
+            return false;
+          }
+          if (!this.hookStopReasons.has(callId)) {
+            this.hookStopReasons.set(callId, reason);
+          }
+          return true;
+        },
+        () =>
+          runInToolSpanContext(toolSpan, () =>
+            this._executeToolCallBody(scheduledCall, signal, toolSpan),
+          ),
       );
     } catch (error) {
       // _executeToolCallBody records the span outcome only AFTER its main

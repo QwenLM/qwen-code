@@ -28,10 +28,11 @@ So a hook cannot stop the agent at a tool boundary. A hook that notices a loop (
 
 ## Goals and scope
 
-- On PreToolUse, PostToolUse, PostToolUseFailure and PostToolBatch, `continue: false` without a blocking decision ends the turn after the current batch, and the user sees `stopReason`.
+- On PreToolUse, PostToolUse, PostToolUseFailure and PostToolBatch, `continue: false` without a blocking decision ends the turn after the current batch. Interactive sessions and headless text mode show the reason.
 - Main sessions on the shared agent loop: the Ink TUI, the OpenTUI, headless (text, JSON, stream-json), and ACP/daemon sessions (Web Shell, IDEs, SDK).
 - Subagents: the run ends with a new terminate mode, and the parent sees the reason.
 - Code Mode: a stop from a call nested in an `exec` script ends the turn too.
+- Omni media policy calls made during tool execution or result processing carry a hook stop back to the enclosing tool. The batch keeps a successful derivative and ends the turn. Policy errors still follow the configured failure handling. When a policy runs during user `@file` expansion or a provider retry, it has no enclosing tool batch. A PostToolUse or PostToolBatch stop on a successful policy call then fails that policy step.
 - Out of scope, and the turn goes on there:
   - The legacy (non-shared) loops, opt-out paths that #17045 removes. They use the same scheduler, so PreToolUse refuses the call, PostToolUse keeps the result and PostToolBatch keeps every result.
   - ACP tool calls that run outside the shared batch: a restored `ask_user_question` call after a daemon restart, and, with the unified loop turned off, every ACP turn. That tool path keeps the old effect (PreToolUse refuses the call, a PostToolUse stop replaces the result with an error). Cron, background-notification and Stop-hook continuation turns use the shared batch by default and are covered.
@@ -61,9 +62,9 @@ The hook outputs are merged as today. Then:
 
 ### Surfaces
 
-Each surface handles `hook_stopped` like a tool that ends the turn: it adds the batch's function responses to history, shows the notice, and finishes the turn as a normal end (`ok`, not an error). Inside a Goal turn the Goal turn is finished as it is when a tool ends it, and the Goal runtime decides what comes next. An ACP channel turn ends too, although its channel then gets no final reply: the hook asked to stop.
+Each surface adds the batch's function responses to history and finishes the turn normally. Inside a Goal turn the Goal runtime settles the turn and decides what comes next. ACP preserves the hook reason even when a tool in the same batch also ends the turn. Goal settlement takes priority, and a channel turn ends at the hook without requesting a final reply.
 
-- **Notice**: "A hook stopped the turn: <stopReason>". In the Ink and OpenTUI TUIs it is an info line; a Stop hook's "Stop says:" line would name the wrong event. In headless text it goes to stderr; JSON and stream-json output do not carry it, as they do not carry a Stop hook's reason. In ACP it is A1's `emitStopHookNotice` (`_meta.source: "stop_hook_notice"`), which the SDK, Web Shell and VS Code already render.
+- Ink and OpenTUI display the localized notice “A hook stopped the turn: <stopReason>”. Headless text mode prints it to stderr. Headless JSON and stream-json finish without a notice. ACP saves the tool responses before sending the `stop_hook_notice` update to the SDK, Web Shell or VS Code. The turn stays finished if the client cannot receive the update.
 - **Subagents**: `AgentTerminateMode.HOOK_STOPPED`. The batch's results are added to the subagent's history, so a resumed subagent sees them. Its final text is "A hook stopped the agent: <stopReason>", which the parent's tool result carries. The status line says "Agent stopped by a hook.", and telemetry counts it like the other non-goal modes.
 - **Code Mode**: `exec` treats a nested result with `hookStopReason` like `terminateTurn`. The script stops, and the `exec` result carries `hookStopReason` to the outer scheduler.
 
@@ -121,7 +122,7 @@ The tool span keeps `post_hook_stopped` for the blocking PostToolUse path only. 
 
 ## Acceptance
 
-- A PreToolUse, PostToolUse, PostToolUseFailure or PostToolBatch hook returning `{"continue": false, "stopReason": "…"}` ends the turn on every main surface, shows the reason, and leaves a session that accepts the next prompt.
+- On the shared loop, a PreToolUse, PostToolUse, PostToolUseFailure or PostToolBatch hook returning `{"continue": false, "stopReason": "…"}` ends the turn and leaves a session that accepts the next prompt. Interactive sessions and headless text mode show the reason.
 - A subagent ends with `HOOK_STOPPED`, and the parent sees the reason.
 - Blocking outputs behave as before.
 
