@@ -6668,7 +6668,7 @@ export function replayUiTelemetryFromConversation(
       | undefined;
     const uiEvent = payload?.uiEvent;
     if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
-      uiTelemetryService.addEvent(uiEvent as UiEvent, sessionId);
+      uiTelemetryService.addReplayedEvent(uiEvent as UiEvent, sessionId);
     }
   }
 

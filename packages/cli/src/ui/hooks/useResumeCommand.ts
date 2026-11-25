@@ -29,6 +29,7 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -255,6 +256,7 @@ export function useResumeCommand(
           computeResumedUserTurnCount(sessionData.conversation.messages),
         );
         uiSwapped = true;
+        flushRunUsageOnSessionSwap(config, oldSessionId);
         config.getLlmClient()?.commitTelemetrySwap?.();
         await getInteractiveModSession(config)?.syncSession('resume');
         setSessionName?.(customTitle ?? null);

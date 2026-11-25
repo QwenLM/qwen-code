@@ -4144,7 +4144,17 @@ export function createServeApp(
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
   // usage only; open GET like /daemon/status, with its own short TTL cache.
-  registerUsageStatsRoutes(app);
+  registerUsageStatsRoutes(app, {
+    getLedgerRuntimeBaseDirs: () => [
+      ...workspaceRegistry
+        .listManaged()
+        .filter((runtime) => runtime.trusted)
+        .map((runtime) => runtime.sessionRuntimeBaseDir),
+      // This is the default CLI's shared ledger, not whichever runtime root
+      // happens to be ambient in this daemon process.
+      Storage.getGlobalQwenDir(),
+    ],
+  });
 
   // Resident management of scheduled-task-owned sessions — opt-in, so tests and
   // embeds that call createServeApp neither spawn sessions on boot nor hold a
