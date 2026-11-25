@@ -103,6 +103,21 @@ export class HookAggregator {
     const success = errors.length === 0;
     const finalOutput = this.mergeOutputs(allOutputs, eventName);
 
+    // Tool triggers see the merged output without the command exit status.
+    // Preserve exit code 2 when it would otherwise become a turn stop.
+    if (
+      finalOutput?.continue === false &&
+      finalOutput.decision !== 'block' &&
+      finalOutput.decision !== 'deny' &&
+      (eventName === HookEventName.PreToolUse ||
+        eventName === HookEventName.PostToolUse ||
+        eventName === HookEventName.PostToolUseFailure ||
+        eventName === HookEventName.PostToolBatch) &&
+      results.some((result) => result.exitCode === 2)
+    ) {
+      finalOutput.decision = 'deny';
+    }
+
     return {
       success,
       allOutputs,
@@ -187,14 +202,14 @@ export class HookAggregator {
       }
 
       // Collect reasons
-      if (output.reason) {
+      if (typeof output.reason === 'string' && output.reason.trim()) {
         reasons.push(output.reason);
       }
 
       // Check continue flag
       if (output.continue === false) {
         hasContinueFalse = true;
-        if (output.stopReason) {
+        if (typeof output.stopReason === 'string' && output.stopReason.trim()) {
           stopReason = output.stopReason;
         }
       }

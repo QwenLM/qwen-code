@@ -238,6 +238,44 @@ describe('toolHookTriggers', () => {
       });
     });
 
+    it('stops before asking for confirmation when the hook also ends the turn', async () => {
+      const result = await pre(
+        busWithOutput({
+          continue: false,
+          stopReason: 'Budget spent',
+          hookSpecificOutput: {
+            permissionDecision: 'ask',
+            updatedInput: { file_path: '/b.txt' },
+          },
+        }),
+      );
+
+      expect(result).toEqual({
+        shouldProceed: false,
+        blockReason: 'Budget spent',
+        blockType: 'stop',
+      });
+    });
+
+    it('keeps an explicit deny ahead of a turn stop', async () => {
+      const result = await pre(
+        busWithOutput({
+          continue: false,
+          stopReason: 'Budget spent',
+          hookSpecificOutput: {
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'Tool not allowed',
+          },
+        }),
+      );
+
+      expect(result).toEqual({
+        shouldProceed: false,
+        blockReason: 'Tool not allowed',
+        blockType: 'denied',
+      });
+    });
+
     it('returns a detached updatedInput that replaces the whole input', async () => {
       const updatedInput = { file_path: '/b.txt' };
       const result = await pre(
@@ -494,6 +532,18 @@ describe('toolHookTriggers', () => {
         stopReason: 'Execution stopped by policy',
       });
     });
+
+    it.each([
+      [{ stopReason: 42, reason: 'Budget spent' }, 'Budget spent'],
+      [{ stopReason: '   ', reason: [] }, 'No reason provided'],
+    ])(
+      'uses a nonempty string for the turn stop reason %#',
+      async (output, reason) => {
+        expect(
+          await post(busWithOutput({ continue: false, ...output })),
+        ).toEqual({ shouldStop: false, endsTurn: true, stopReason: reason });
+      },
+    );
 
     it('keeps a blocking continue: false as a call stop', async () => {
       // The prompt and function runners write both fields when they block.

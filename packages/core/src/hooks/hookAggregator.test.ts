@@ -20,7 +20,10 @@ describe('HookAggregator', () => {
   const aggregator = new HookAggregator();
 
   type ResultFields = Partial<
-    Pick<HookExecutionResult, 'success' | 'output' | 'error' | 'duration'>
+    Pick<
+      HookExecutionResult,
+      'success' | 'output' | 'error' | 'duration' | 'exitCode'
+    >
   > & { command?: string };
 
   /** Aggregates `event` results; defaults: `echo test`, success, 100ms. */
@@ -53,6 +56,43 @@ describe('HookAggregator', () => {
     createHookOutput(event, aggregate(event, outputs).finalOutput ?? {}) as T;
 
   describe('aggregateResults', () => {
+    it.each([
+      HookEventName.PreToolUse,
+      HookEventName.PostToolUse,
+      HookEventName.PostToolUseFailure,
+      HookEventName.PostToolBatch,
+    ])(
+      'preserves an exit-code-2 block when a %s hook requests a turn stop',
+      (event) => {
+        const stop = { continue: false, stopReason: 'Budget spent' };
+
+        expect(
+          aggregateAll(event, { success: false, exitCode: 2, output: stop })
+            .finalOutput,
+        ).toMatchObject({ ...stop, decision: 'deny' });
+        expect(
+          aggregateAll(event, { success: false, exitCode: 2 }, { output: stop })
+            .finalOutput,
+        ).toMatchObject({ ...stop, decision: 'deny' });
+        expect(
+          aggregateAll(event, { output: stop }).finalOutput,
+        ).not.toMatchObject({ decision: 'deny' });
+      },
+    );
+
+    it('does not add a new PostToolUse decision for exit code 2 alone', () => {
+      const { finalOutput } = aggregateAll(HookEventName.PostToolUse, {
+        success: false,
+        exitCode: 2,
+        output: { reason: 'Blocking error' },
+      });
+
+      expect(finalOutput).toMatchObject({
+        decision: 'allow',
+        reason: 'Blocking error',
+      });
+    });
+
     it.each([HookEventName.SessionStart, HookEventName.FileChanged])(
       'ignores watchPaths from a failed %s hook without mutating its other fields',
       (eventName) => {
@@ -145,6 +185,19 @@ describe('HookAggregator', () => {
         { continue: false, stopReason: 'second stop' },
       ]);
       expect(result.finalOutput?.stopReason).toBe('second stop');
+    });
+
+    it('ignores malformed reason fields when combining matching hooks', () => {
+      const invalid = JSON.parse(
+        '{"continue":false,"stopReason":44,"reason":{"toString":null}}',
+      ) as HookOutput;
+      const output = accessorsFor(HookEventName.PreToolUse, [
+        { continue: false, stopReason: 'first stop', reason: 'Valid reason' },
+        invalid,
+      ]);
+
+      expect(output.reason).toBe('Valid reason');
+      expect(output.getEffectiveReason()).toBe('first stop');
     });
 
     it('keeps the last updatedInput in hook order as a whole object', () => {

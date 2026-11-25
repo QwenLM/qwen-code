@@ -7025,11 +7025,33 @@ export const useLlmStream = (
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
-      const hookStopReason = shared
-        ? llmTools.find(
-            (toolCall) => toolCall.response.hookStopReason !== undefined,
-          )?.response.hookStopReason
-        : undefined;
+      const toolEndsTurn =
+        (shared !== undefined || toolGoalBinding !== undefined) &&
+        llmTools.some((toolCall) => toolCall.response.terminateTurn === true);
+      const quotaSwitchStopsTurn =
+        !toolEndsTurn && modelSwitchedFromQuotaErrorRef.current;
+      // Recheck capacity when the continuation would send. A slot can free
+      // up after the shared batch settled. Scheduler-owned calls can also
+      // be drained with the shared batch and report launches in their results.
+      const backgroundLaunchExhaustedCapacity =
+        !toolEndsTurn &&
+        !quotaSwitchStopsTurn &&
+        llmTools.some((toolCall) =>
+          sharedResultsByCallId.has(toolCall.request.callId)
+            ? shared?.backgroundLaunchCallIds.has(toolCall.request.callId) ===
+              true
+            : launchedBackgroundAgent(toolCall.request, toolCall.response),
+        ) &&
+        backgroundSlotsSpent(config);
+      const hookStopReason =
+        shared &&
+        !toolEndsTurn &&
+        !quotaSwitchStopsTurn &&
+        !backgroundLaunchExhaustedCapacity
+          ? llmTools.find(
+              (toolCall) => toolCall.response.hookStopReason !== undefined,
+            )?.response.hookStopReason
+          : undefined;
       if (hookStopReason !== undefined) {
         addItem(
           {
@@ -7042,9 +7064,7 @@ export const useLlmStream = (
         );
       }
       // A tool hook's stop ends the turn as a tool that ends it does.
-      const terminatesTurn =
-        hookStopReason !== undefined ||
-        llmTools.some((toolCall) => toolCall.response.terminateTurn === true);
+      const terminatesTurn = toolEndsTurn || hookStopReason !== undefined;
       if (terminatesTurn && toolGoalBinding) {
         llmClient.addHistory({ role: 'user', parts: responsesToSend });
         let goalFinishFailed = false;
@@ -7205,7 +7225,7 @@ export const useLlmStream = (
       // Don't continue if model was switched due to quota error. On the
       // shared loop the results answer the calls in history, as in a Goal
       // turn.
-      if (modelSwitchedFromQuotaErrorRef.current) {
+      if (quotaSwitchStopsTurn) {
         if (shared || toolGoalBinding) {
           llmClient?.addHistory({ role: 'user', parts: responsesToSend });
         }
@@ -7220,16 +7240,6 @@ export const useLlmStream = (
         return;
       }
 
-      // The shared batch noted the launches of the calls it executed; calls
-      // the scheduler ran alone, drained with it, are read from their
-      // results. The slots are checked now, as the continuation would wait.
-      const backgroundLaunchExhaustedCapacity =
-        llmTools.some((toolCall) =>
-          sharedResultsByCallId.has(toolCall.request.callId)
-            ? shared?.backgroundLaunchCallIds.has(toolCall.request.callId) ===
-              true
-            : launchedBackgroundAgent(toolCall.request, toolCall.response),
-        ) && backgroundSlotsSpent(config);
       if (backgroundLaunchExhaustedCapacity) {
         llmClient?.addHistory({ role: 'user', parts: responsesToSend });
         if (toolGoalBinding) {

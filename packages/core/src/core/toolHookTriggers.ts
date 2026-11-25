@@ -196,37 +196,28 @@ export async function firePreToolUseHook(
     // Read once so every decision branch carries the same sanitized value.
     const additionalContext = preToolOutput.getAdditionalContext();
 
-    // Check if execution was denied
-    if (preToolOutput.isDenied()) {
+    const denied = preToolOutput.isDenied();
+    if (denied || preToolOutput.shouldStopExecution()) {
       return {
         shouldProceed: false,
         blockReason:
-          preToolOutput.getPermissionDecisionReason() ||
+          (denied && preToolOutput.getPermissionDecisionReason()) ||
           preToolOutput.getEffectiveReason(),
-        blockType: 'denied',
+        blockType:
+          denied || preToolOutput.isBlockingDecision() ? 'denied' : 'stop',
         additionalContext,
       };
     }
 
-    const stopResult = (): PreToolUseHookResult => ({
-      shouldProceed: false,
-      blockReason: preToolOutput.getEffectiveReason(),
-      blockType: 'stop',
-      additionalContext,
-    });
-
-    // An explicit but unusable replacement must not fall back to the
-    // original input; a stop still stops.
+    // An explicit but unusable replacement must not fall back to the original input.
     const updatedInput = preToolOutput.getUpdatedInput();
     if (updatedInput === null) {
-      return preToolOutput.shouldStopExecution()
-        ? stopResult()
-        : {
-            shouldProceed: false,
-            blockReason: INVALID_UPDATED_INPUT_REASON,
-            blockType: 'denied',
-            additionalContext,
-          };
+      return {
+        shouldProceed: false,
+        blockReason: INVALID_UPDATED_INPUT_REASON,
+        blockType: 'denied',
+        additionalContext,
+      };
     }
 
     // Check if user confirmation is required
@@ -240,11 +231,6 @@ export async function firePreToolUseHook(
         additionalContext,
         ...(updatedInput && { updatedInput }),
       };
-    }
-
-    // Check if execution should stop
-    if (preToolOutput.shouldStopExecution()) {
-      return stopResult();
     }
 
     return {

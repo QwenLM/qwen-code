@@ -95,7 +95,7 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
           if (turnEnded()) throw new CodeModeTurnTerminated();
           if (nestedSignal.aborted) throw nestedSignal.reason;
           if (isSkill) skillAttempted = true;
-          const result = await runtime.dispatch(
+          const pending = runtime.dispatch(
             name,
             args,
             nestedSignal,
@@ -149,7 +149,10 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
               }
             },
           );
-          if (turnEnded()) throw new CodeModeTurnTerminated();
+          const result = await pending.finally(() => {
+            // A rejected tool call can carry the same stop signal.
+            if (turnEnded()) throw new CodeModeTurnTerminated();
+          });
           if (isSkill) skillOutputs.push(result.output);
           if (name === 'capture_screen_context') {
             const { content: _content, ...textResult } = result;

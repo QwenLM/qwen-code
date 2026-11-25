@@ -185,10 +185,12 @@ describe('exec context tool results', () => {
   ])('ends the script and carries a nested hook stop: %o', async (response) => {
     const { run, dispatch } = setup(ToolNames.READ_FILE, response, 'read');
     const result = await run(
-      'try { await tools.write_file({}); } catch {} await tools.write_file({});',
+      'text("before stop"); try { await tools.read_file({}); } catch {} text("after stop"); await tools.write_file({});',
     );
     expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch.mock.calls[0][0]).toBe(ToolNames.READ_FILE);
     expect(result.hookStopReason).toBe('halt');
+    expect(outputText(result)).toBe('before stop');
   });
 
   it('keeps nonterminal goal proposals callable without ending the script', async () => {
