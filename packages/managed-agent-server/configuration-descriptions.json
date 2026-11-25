@@ -393,6 +393,36 @@
       "en": "How long one Session event stream (SSE) connection may stay open before the server ends it; the client must reconnect to keep receiving events. A plain number is seconds.",
       "zh": "单个 Session 事件流（SSE）连接可保持打开的最长时间，到时服务端结束连接，客户端需重新连接才能继续接收事件。不带单位的数字按秒计。"
     },
+    "qwen.managed-agent.definition-input.mode": {
+      "en": "How immutable AgentDefinitions are obtained. Defaults to `PRE_REGISTERED`, preserving the existing public definition API, JDBC store and native Session admission. `SPI` requires a registered ManagedAgentDefinitionSource provider and MA-authorized execution scope; host sources are called only during authorized preparation, never on demand from Node's agent-loop. No fallback to a different store or latest object is performed.",
+      "zh": "获取不可变 AgentDefinition 的方式。默认 `PRE_REGISTERED`，保持现有公开 definition API、JDBC store 与原生 Session 准入行为。选择 `SPI` 时，必须注册 ManagedAgentDefinitionSource provider，并通过 MA 对执行 Workspace 的授权校验；授权准备阶段才调用宿主 Source，绝不由 Node agent-loop 动态回调。不会回退到其他存储或 latest 对象。",
+      "type": "string"
+    },
+    "qwen.managed-agent.definition-input.download.allowed-hosts": {
+      "en": "Comma-separated exact HTTPS hostnames from which a missing bootstrap bundle may be downloaded. Matching ignores case and trims whitespace. Empty rejects downloads; matching native archives may still be replayed. Signed URLs with userinfo are refused, redirects are not followed, and the URI's expiry caps the request deadline. Host and signed-URI authorization do not replace the Source provider's exact-ref authorization or establish that a Worker applied the package.",
+      "zh": "允许下载缺失初始化包的精确 HTTPS hostname 列表，以逗号分隔；比较时忽略大小写及两侧空白。为空时拒绝下载，但仍能回放匹配的 native 制品。带 userinfo 的签名地址会被拒绝，不跟随重定向，URI 过期时间同时约束请求 deadline。主机与签名 URI 授权不能代替 Source provider 对精确引用的授权，也不表示 Worker 已应用包。",
+      "type": "list"
+    },
+    "qwen.managed-agent.definition-input.download.max-bytes": {
+      "en": "Maximum raw bootstrap archive bytes accepted per download, counting bytes actually read rather than trusting `Content-Length`. Defaults to `104857600` (100 MiB), and must be between 1 and 104857600. Recipients copy to private staging in 64 KiB chunks and verify length and SHA-256 before publishing; no whole-package byte array is used.",
+      "zh": "单次初始化包下载允许的最大原始字节数，按实际读取字节统计，而不是只信任 `Content-Length`。默认 `104857600`（100 MiB），取值范围 1 到 104857600。接收方以 64 KiB 分块写入私有暂存区，发布前校验实际长度和 SHA-256，不使用整包 byte 数组。",
+      "type": "integer"
+    },
+    "qwen.managed-agent.definition-input.download.max-concurrency": {
+      "en": "Maximum concurrent bootstrap download/staging operations in this MA process. Defaults to `4`, with an allowed range of 1 to 16. Excess attempts fail rather than creating an unbounded queue. Source authorization and native-archive reuse do not imply that Runtime settings were applied.",
+      "zh": "本 MA 进程允许同时进行的最大初始化包下载/暂存数，默认 `4`，取值范围 1 到 16。超限尝试直接失败，不创建无界队列。Source 授权及 native 制品复用不表示 Runtime 配置已经应用。",
+      "type": "integer"
+    },
+    "qwen.managed-agent.definition-input.download.connect-timeout": {
+      "en": "HTTP connection timeout used for bootstrap downloads. Defaults to `10s` and must be positive. The overall deadline is narrowed by the Source Context and the signed URI expiry as well as `request-timeout`. HTTP redirects are not followed.",
+      "zh": "初始化包下载使用的 HTTP 连接超时，默认 `10s`，必须为正数。总截止时间还会同时受 Source Context、签名 URI 过期时间和 `request-timeout` 约束。不跟随 HTTP 重定向。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.definition-input.download.request-timeout": {
+      "en": "Per-request maximum used for response-header waits and body read cancellation during bootstrap downloading. Defaults to `120s` and must be positive. It is combined with the Source Context deadline and the signed URI expiry; a rejected or expired response does not replace an existing native archive.",
+      "zh": "初始化包下载时，用于等待响应头和中断 body 读取的单次请求时限，默认 `120s`，必须为正数。它与 Source Context deadline、签名 URI 过期时间共同生效；被拒绝或过期的响应不会替换已有 native 制品。",
+      "type": "duration"
+    },
     "qwen.managed-agent.extensions.allowed-actors": {
       "en": "The actor IDs allowed to publish extension packages, save their settings, and select or apply them for Sessions, as a comma-separated list; `*` allows every actor. The actor also needs Workspace OPERATOR access. Empty allows nobody.",
       "zh": "允许发布扩展包、保存其设置以及为 Session 选择或应用扩展包的 actor ID，以逗号分隔；`*` 表示允许所有 actor。该 actor 还需具备 Workspace OPERATOR 权限。为空时不允许任何人。"

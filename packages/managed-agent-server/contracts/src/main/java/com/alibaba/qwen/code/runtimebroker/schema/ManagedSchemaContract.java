@@ -95,6 +95,7 @@ public final class ManagedSchemaContract {
         SESSION_CREATE_MODE,
         SESSION_CREATE_ACTOR,
         AGENT_DEFINITION,
+        SOURCE_DEFINITION_PREPARATION,
         AUTOMATION,
         CHANNEL_INGRESS,
         PR_WATCH_INJECT,

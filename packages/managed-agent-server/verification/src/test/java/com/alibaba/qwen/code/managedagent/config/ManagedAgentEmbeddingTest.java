@@ -77,6 +77,7 @@ class ManagedAgentEmbeddingTest {
         runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
             assertThat(context).hasNotFailed();
             assertThat(context.getBean(ManagedAgentService.class)).isNotNull();
+            assertThat(context.getBean(com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionPreparation.class)).isNotNull();
             var host = context.getBean(HostDependencies.class);
             assertThat(host.source()).isSameAs(context.getBean("businessSource"));
             assertThat(host.jdbc()).isSameAs(context.getBean("businessJdbc"));

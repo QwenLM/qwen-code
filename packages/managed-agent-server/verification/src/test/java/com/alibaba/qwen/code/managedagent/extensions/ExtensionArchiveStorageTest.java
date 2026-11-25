@@ -101,6 +101,12 @@ class ExtensionArchiveStorageTest {
         private final Map<Key, byte[]> objects = new ConcurrentHashMap<>();
         private boolean failAfterPut;
         public void validateConfiguration() { }
+        @Override
+        public java.util.Optional<Info> stat(Key key) {
+            return objects.containsKey(key) ? java.util.Optional.of(new Info(objects.get(key).length))
+                    : java.util.Optional.empty();
+        }
+
         public void putIfAbsent(Key key, long length, InputStream content) throws IOException {
             objects.putIfAbsent(key, content.readAllBytes());
             if (failAfterPut) {
