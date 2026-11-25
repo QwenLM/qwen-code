@@ -21,6 +21,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -33,6 +34,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /** Explicit offline establishment of a stable identity for an unchanged legacy root. */
 public final class WorkspaceIdentityReattestationStore {
@@ -125,8 +127,8 @@ public final class WorkspaceIdentityReattestationStore {
             Path readyFile = container.resolve(plan.worktreeId() + ".ready");
             check(JSON.readTree(read(planFile)).equals(JSON.valueToTree(plan))
                     && JSON.readTree(read(readyFile)).equals(JSON.readTree(savedIdentity)), "marker_conflict");
-            changes.add(change(planFile, read(planFile), newPlan.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-            changes.add(change(readyFile, read(readyFile), newIdentity.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            changes.add(change(planFile, read(planFile), newPlan.getBytes(StandardCharsets.UTF_8)));
+            changes.add(change(readyFile, read(readyFile), newIdentity.getBytes(StandardCharsets.UTF_8)));
         }
         request.put("inventoryDigest", WorkspaceEvidenceResources.digest(JSON.writeValueAsBytes(inventory)));
         return request;
@@ -150,7 +152,7 @@ public final class WorkspaceIdentityReattestationStore {
             check(jdbc.queryForList("SELECT 1 FROM ma_storage WHERE physical_id = ? AND fence_operation_id IS NOT NULL",
                     Integer.class, text(request, "physicalKey")).isEmpty(), "storage_fenced");
             operations.create(KIND, id, WorkspaceOperations.values("storage_id", text(request, "storageId"),
-                    "state", "RETIRING", "phase", PHASE, "request_json", new String(bytes, java.nio.charset.StandardCharsets.UTF_8),
+                    "state", "RETIRING", "phase", PHASE, "request_json", new String(bytes, StandardCharsets.UTF_8),
                     "request_digest", WorkspaceEvidenceResources.digest(bytes)));
             jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE physical_id = ?", id, text(request, "physicalKey"));
             check(jdbc.update("UPDATE ma_storage_owner SET mount_state = 'FENCED', mount_operation_id = ?,"
@@ -193,7 +195,7 @@ public final class WorkspaceIdentityReattestationStore {
         check(claimed != null && claimed.getGeneration() == binding.getGeneration(), "runtime_claim_changed");
         try {
             var observation = observer.reconcile(claimed.getRequest(), claimed.getProvisionSeed(),
-                    claimed.getResourceHandle(), claimed.getLease()).toCompletableFuture().orTimeout(15, java.util.concurrent.TimeUnit.SECONDS).join();
+                    claimed.getResourceHandle(), claimed.getLease()).toCompletableFuture().orTimeout(15, TimeUnit.SECONDS).join();
             check(observation.getOutcome() == RuntimeObservation.Outcome.NOT_FOUND && observation.getLossEvidence() != null
                     && observation.getStopEvidence() != null && observation.getLossEvidence().fact() == RuntimeRecoveryEvidence.Fact.JOURNAL_LOST
                     && observation.getStopEvidence().fact() == RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED

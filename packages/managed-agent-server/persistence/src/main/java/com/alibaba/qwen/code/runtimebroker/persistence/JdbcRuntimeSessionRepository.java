@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 
 import javax.sql.DataSource;
 
@@ -16,7 +17,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 
 /** JDBC logical Runtime Session repository. */
 public final class JdbcRuntimeSessionRepository
@@ -95,7 +101,7 @@ public final class JdbcRuntimeSessionRepository
             statement.setLong(2, binding.getGeneration());
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
-                    if (binding.getBindingId().equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "binding_id"))) {
+                    if (binding.getBindingId().equals(ManagedSchemaRows.identity(result, "binding_id"))) {
                         return true;
                     }
                 }
@@ -187,10 +193,10 @@ public final class JdbcRuntimeSessionRepository
 
     @Override
     public List<RuntimeSessionRecord> findHistoricalByIds(String tenantId,
-            String harnessSessionId, java.util.Collection<String> runtimeSessionIds) {
+            String harnessSessionId, Collection<String> runtimeSessionIds) {
         String tenant = BrokerValues.requireId(tenantId, "tenantId");
         String harness = BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
-        java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>();
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
         for (String runtimeSessionId : runtimeSessionIds) {
             ids.add(BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId"));
         }
@@ -199,12 +205,12 @@ public final class JdbcRuntimeSessionRepository
         }
         List<String> ordered = List.copyOf(ids);
         return JdbcRepositorySupport.read(dataSource, connection -> {
-            java.util.Map<String, RuntimeSessionRecord> found = new java.util.HashMap<>();
+            Map<String, RuntimeSessionRecord> found = new HashMap<>();
             for (int from = 0; from < ordered.size(); from += 100) {
                 List<String> chunk = ordered.subList(from,
                         Math.min(from + 100, ordered.size()));
                 String placeholders = String.join(", ",
-                        java.util.Collections.nCopies(chunk.size(), "?"));
+                        Collections.nCopies(chunk.size(), "?"));
                 String sql = "SELECT " + SESSION_COLUMNS
                         + " FROM ma_runtime_session WHERE tenant_id = ?"
                         + " AND harness_session_id = ? AND runtime_session_id IN ("
@@ -374,7 +380,7 @@ public final class JdbcRuntimeSessionRepository
                 statement.setLong(2, runtimeGeneration);
                 try (ResultSet result = statement.executeQuery()) {
                     while (result.next()) {
-                        if (id.equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "binding_id"))) {
+                        if (id.equals(ManagedSchemaRows.identity(result, "binding_id"))) {
                             count++;
                         }
                     }
@@ -450,12 +456,12 @@ public final class JdbcRuntimeSessionRepository
             throws SQLException {
         RuntimeScope scope = new RuntimeScope(result.getString("tenant_id"),
                 result.getString("workspace_id"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "workspace_generation"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "canonical_cwd"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "capability_digest"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "isolation_class"));
+                ManagedSchemaRows.identity(result, "workspace_generation"),
+                ManagedSchemaRows.identity(result, "canonical_cwd"),
+                ManagedSchemaRows.identity(result, "capability_digest"),
+                ManagedSchemaRows.identity(result, "isolation_class"));
         if (!JdbcRepositorySupport.scopeKey(scope).equals(
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "scope_id"))) {
+                ManagedSchemaRows.identity(result, "scope_id"))) {
             throw new IllegalStateException(
                     "Runtime Session scope hash is invalid");
         }
@@ -464,7 +470,7 @@ public final class JdbcRuntimeSessionRepository
                 result.getString("runtime_session_id"),
                 result.getString("turn_kind"), scope);
         return new RuntimeSessionRecord(session,
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "binding_id"),
+                ManagedSchemaRows.identity(result, "binding_id"),
                 result.getLong("runtime_generation"),
                 RuntimeSessionRecord.State.valueOf(
                         result.getString("session_state")),

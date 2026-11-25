@@ -59,7 +59,6 @@ import {
   type StructuredError,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
-import { buildSyntheticToolResponseParts } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
@@ -93,6 +92,8 @@ import {
   hasUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
 } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
+import { runUserPromptSubmit } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit.js';
+import { getChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   appendAsyncHookContextPart,
   drainAsyncHookContextPart,
@@ -399,6 +400,7 @@ import {
   DAEMON_ATTACHMENT_CONTEXT_META_KEY,
   IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -1126,9 +1128,6 @@ const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
 // returning (the shell tool on user cancel) instead of throwing.
 const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
   'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.';
-const USER_PROMPT_BLOCKED_TOOL_RESULT =
-  'A UserPromptSubmit hook blocked this tool result from reaching the model. Do not rerun the tool to get it.';
-
 type ManagedConversationBinding = {
   expectation: BridgeConversationDirectoryExpectation;
   assertIdentity: () => Promise<void>;
@@ -1773,6 +1772,7 @@ type DrainedMidTurnMessage =
       kind: 'structured';
       content: ContentBlock[];
       displayText: string;
+      queueOnly?: true;
       attachmentReferences?: SessionAttachmentReference[];
     };
 
@@ -2083,6 +2083,9 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               item['displayText'],
               willPersistReferences,
             ),
+            ...(item['queueOnly'] === true && getInvocationContext()
+              ? { queueOnly: true }
+              : {}),
             ...(attachmentReferences ? { attachmentReferences } : {}),
           },
         ];
@@ -8053,17 +8056,8 @@ export class Session implements SessionContext {
               );
             }
 
-            // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
             const hooksEnabled = !this.config.getDisableAllHooks?.();
             const messageBus = this.config.getMessageBus?.();
-            // A runtime continuation is machine-generated, not a user
-            // submission — the same reason `isContinue` is exempt. Firing
-            // the hook on one is also unrecoverable: a block returns before
-            // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
-            // branch, which re-queues the identical continuation. Nothing in
-            // that cycle can change the goal state, so it spins — no model
-            // call, one persisted transcript record per lap — until someone
-            // pauses or clears the goal.
             const isRuntimeContinuation = goalTurn?.origin === 'runtime';
             const isFreshUserTurn =
               !isRetry &&
@@ -8092,10 +8086,17 @@ export class Session implements SessionContext {
                   )
                 ? lastStrippedId
                 : undefined;
-            // Channel markers cover both automated and human messages. Keep
-            // that class excluded until its producers distinguish them; see
-            // docs/design/daemon-user-prompt-submit-provenance.md.
+            // Channel prompts still omit the submitted_prompt provenance field.
             const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
+            const isNewUserPrompt =
+              isFreshUserTurn &&
+              (channelTurn
+                ? getChannelWorkflowOrigin()?.userInitiated === true
+                : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false);
+            const hookSubmittedPrompt =
+              isUserSubmissionTurn && submittedPrompt.trim().length > 0
+                ? submittedPrompt
+                : undefined;
             // `experimental.unifiedAgentLoop`: a prompt sends its model rounds
             // through `LlmClient` on the shared agent loop's round: a fresh
             // prompt, a channel's or a Goal turn's included, as a UserQuery,
@@ -8134,21 +8135,11 @@ export class Session implements SessionContext {
             // guard or reminder can run twice.
             const sharedToolBatch = sharedModelRound;
             let promptAdmission: UserPromptAdmission | undefined;
-            // A continue, a restore or a runtime continuation runs no
-            // UserPromptSubmit hook.
-            if (
-              sharedModelRound &&
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              !isRuntimeContinuation
-            ) {
+            if (sharedModelRound && isNewUserPrompt) {
               promptAdmission = await this.config
                 .getLlmClient()
                 .admitUserPrompt(promptText, promptId, {
-                  submittedPrompt:
-                    isUserSubmissionTurn && submittedPrompt.trim().length > 0
-                      ? submittedPrompt
-                      : undefined,
+                  submittedPrompt: hookSubmittedPrompt,
                   signal: pendingSend.signal,
                 });
               if (promptAdmission.blocked) {
@@ -8185,45 +8176,16 @@ export class Session implements SessionContext {
                 });
                 return { stopReason: 'end_turn' };
               }
-            } else if (
-              !sharedModelRound &&
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              !isRuntimeContinuation &&
-              hooksEnabled &&
-              messageBus &&
-              this.config.hasHooksForEvent?.('UserPromptSubmit')
-            ) {
-              const response = await messageBus.request<
-                HookExecutionRequest,
-                HookExecutionResponse
-              >(
-                {
-                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
-                  owner: captureHookExecutionOwner(this.config),
-                  eventName: 'UserPromptSubmit',
-                  input: {
-                    prompt: promptText,
-                    ...(isUserSubmissionTurn &&
-                    submittedPrompt.trim().length > 0
-                      ? { submitted_prompt: submittedPrompt }
-                      : {}),
-                  },
-                  signal: pendingSend.signal,
-                },
-                MessageBusType.HOOK_EXECUTION_RESPONSE,
+            } else if (isNewUserPrompt) {
+              const decision = await runUserPromptSubmit(
+                this.config,
+                promptText,
+                hookSubmittedPrompt,
+                pendingSend.signal,
               );
-              const hookOutput = response.output
-                ? createHookOutput('UserPromptSubmit', response.output)
-                : undefined;
-
-              if (
-                hookOutput?.isBlockingDecision() ||
-                hookOutput?.shouldStopExecution()
-              ) {
-                // Hook blocked the prompt - send notification to UI and return
+              if (decision?.blockReason !== undefined) {
                 await this.messageEmitter.emitAgentMessage(
-                  userPromptBlockedNotice(hookOutput?.getEffectiveReason()),
+                  userPromptBlockedNotice(decision.blockReason),
                 );
                 return { stopReason: 'end_turn' };
               }
@@ -8235,7 +8197,7 @@ export class Session implements SessionContext {
               // the same reason as there — but never when the prompt resolved
               // to no parts, where the append is the only thing keeping the
               // request non-empty (`toParts` rejects an empty array).
-              const additionalContext = hookOutput?.getAdditionalContext();
+              const additionalContext = decision?.additionalContext;
               if (additionalContext) {
                 const alreadyDelivered =
                   parts.length > 0 &&
@@ -8930,6 +8892,9 @@ export class Session implements SessionContext {
                       ...(roundType === SendMessageType.UserQuery && {
                         workflowModeEligible,
                         promptAdmission,
+                        ...(!isNewUserPrompt && {
+                          skipUserPromptSubmit: true as const,
+                        }),
                         // Recall searches the user's words, as the current
                         // path does, not the resolved files and notices
                         // `parts` carries.
@@ -8946,7 +8911,6 @@ export class Session implements SessionContext {
                         ...(historyPromptId !== undefined && {
                           historyPromptId,
                         }),
-                        ...(promptAdmission && { promptAdmission }),
                       }),
                       ...(goalTurn &&
                         !goalPermitReleasedByClient &&
@@ -9698,7 +9662,6 @@ export class Session implements SessionContext {
                 loopStop = event.value;
                 break;
               case LlmEventType.UserPromptSubmitBlocked:
-                // A tool-result round runs UserPromptSubmit too.
                 await this.messageEmitter.emitAgentMessage(
                   userPromptBlockedNotice(event.value.reason),
                 );
@@ -9737,10 +9700,7 @@ export class Session implements SessionContext {
     } catch (error) {
       streamFailed = true;
       if (!cutForInput()) {
-        // A round that threw before its request pushed the
-        // message, such as on a tool-result round whose
-        // UserPromptSubmit hook timed out, keeps it as the stops
-        // below do.
+        // Keep an unsent round's message as the stops below do.
         if (requestUnsent()) {
           if (signal.aborted) {
             markApiHistoryPrompt(message, responseCapture.turnId);
@@ -9797,35 +9757,6 @@ export class Session implements SessionContext {
     }
     if (roundStop === 'user_prompt_blocked') {
       this.todoStopGuard.suspend();
-      // A tool-result round the hook blocked closes its calls
-      // with the block, not with the results it withheld from
-      // the model, nor with the repair's "retry if needed".
-      const blockedCalls = (message.parts ?? []).flatMap(
-        ({ functionResponse }) =>
-          functionResponse?.id
-            ? [
-                {
-                  callId: functionResponse.id,
-                  name: functionResponse.name ?? '',
-                },
-              ]
-            : [],
-      );
-      // Input taken with the results, already shown as
-      // delivered, stays in history with the closed calls, as a
-      // stopped tool run keeps it.
-      if (!pushed && blockedCalls.length > 0) {
-        this.#getCurrentChat().addHistory({
-          role: 'user',
-          parts: [
-            ...buildSyntheticToolResponseParts(
-              blockedCalls,
-              USER_PROMPT_BLOCKED_TOOL_RESULT,
-            ),
-            ...(message.parts ?? []).filter((part) => !part.functionResponse),
-          ],
-        });
-      }
       return { ended: { stopReason: 'end_turn' } };
     }
     if (
@@ -10109,7 +10040,10 @@ export class Session implements SessionContext {
     ) {
       hookSystem
         .fireStopFailureEvent(
-          classifyApiError({ message: errorMessage, status: errorStatus }),
+          classifyApiError(
+            { message: errorMessage, status: errorStatus },
+            error,
+          ),
           errorMessage,
         )
         .catch((err) => {
@@ -11140,10 +11074,10 @@ export class Session implements SessionContext {
         this.todoStopGuard.pauseForTrustedRetry();
         const errorStatus = getErrorStatus(error);
         const errorMessage = getErrorMessage(error);
-        const errorType = classifyApiError({
-          message: errorMessage,
-          status: errorStatus,
-        });
+        const errorType = classifyApiError(
+          { message: errorMessage, status: errorStatus },
+          error,
+        );
         const hookSystem = this.config.getHookSystem?.();
         if (
           !this.config.getDisableAllHooks?.() &&
@@ -13206,7 +13140,7 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       preserveFallbackOnAbort?: boolean;
       prefix?: string;
-      /** Also ends resolution, which then falls back to the message text. */
+      /** Limits attachment resolution while preserving unsent input. */
       deadline?: AbortSignal;
     } = {},
   ): Promise<Part[]> {
@@ -13282,6 +13216,54 @@ export class Session implements SessionContext {
         displayText,
         options.prefix,
       );
+      // Only live input admission can start a prompt hook.
+      if (
+        !abortSignal.aborted &&
+        options.deadline === undefined &&
+        (message.kind !== 'structured' || !message.queueOnly)
+      ) {
+        let decision;
+        try {
+          decision = await runUserPromptSubmit(
+            this.config,
+            message.kind === 'text'
+              ? message.message
+              : message.content
+                  .flatMap((block) =>
+                    block.type === 'text' ? [block.text] : [],
+                  )
+                  .join(' '),
+            undefined,
+            abortSignal,
+          );
+          abortSignal.throwIfAborted();
+        } catch (error) {
+          if (abortSignal.aborted) {
+            // The host already settled these queue IDs. The finalizer keeps
+            // the unsent input without starting another hook check.
+            const unsent = messages.slice(index);
+            for (const item of unsent)
+              this.earlyDrainedMidTurnMessages.add(item);
+            this.midTurnRecoveredMessages.unshift(...unsent);
+            return parts;
+          }
+          await this.messageEmitter.emitAgentMessage(
+            userPromptBlockedNotice(this.#formatError(error)),
+          );
+          continue;
+        }
+        if (decision?.blockReason !== undefined) {
+          await this.messageEmitter.emitAgentMessage(
+            userPromptBlockedNotice(decision.blockReason),
+          );
+          continue;
+        }
+        if (decision?.additionalContext) {
+          built.push(
+            createUserPromptSubmitContextPart(decision.additionalContext),
+          );
+        }
+      }
       const recorder = this.config.getChatRecordingService();
       if (message.kind === 'structured' && message.attachmentReferences) {
         const everyAttachmentBlockHasAReference =
@@ -14237,6 +14219,7 @@ export class Session implements SessionContext {
                 `[${item.source} error] ${msg}`,
               );
             } finally {
+              await this.#keepUnsentEarlyMidTurnInput(ac.signal);
               this.config.endAutomaticActiveTodoWorkChain(promptId);
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
@@ -15276,6 +15259,7 @@ export class Session implements SessionContext {
           reason: PromptResponse['stopReason'],
           partial = false,
         ): Promise<void> => {
+          await this.#keepUnsentEarlyMidTurnInput(ac.signal);
           if (responseSegmentEmitted && !responseTurnComplete) {
             try {
               await this.#emitBackgroundNotificationResponse(

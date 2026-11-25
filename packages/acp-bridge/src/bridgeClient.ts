@@ -1861,6 +1861,7 @@ export class BridgeClient implements Client {
       messageId: string;
       displayText: string;
       content: ContentBlock[];
+      queueOnly?: true;
       _meta?: Record<string, unknown>;
       attachmentReferences?: SessionAttachmentReference[];
     }> = [];
@@ -1912,6 +1913,7 @@ export class BridgeClient implements Client {
           messageId: item.messageId,
           displayText: item.text,
           content,
+          ...(item.queueOnly ? { queueOnly: true } : {}),
           ...(attachmentReferences.length > 0 ? { attachmentReferences } : {}),
         });
       }

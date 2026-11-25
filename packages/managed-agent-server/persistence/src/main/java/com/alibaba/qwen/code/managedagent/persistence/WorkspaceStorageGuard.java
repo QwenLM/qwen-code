@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader.Identity;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageMarkers.Marker;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -15,6 +16,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
@@ -27,12 +29,15 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 @Component
@@ -166,8 +171,8 @@ public class WorkspaceStorageGuard {
         });
     }
 
-    private <T> T authorityRead(java.util.function.Supplier<T> action) {
-        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+    private <T> T authorityRead(Supplier<T> action) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
             return action.get();
         }
         return transaction.execute(status -> action.get());
@@ -379,7 +384,7 @@ public class WorkspaceStorageGuard {
         if (alias == null || !physical.equals(alias.get("physical_id")) || !"LOCAL".equals(alias.get("storage_kind"))
                 || !List.of("FENCE_ONLY", "REGISTERED").contains(alias.get("registration_state"))
                 || alias.get("fence_operation_id") != null
-                || !operation.equals(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse((String) alias.get("registration_json")).path("operationId").asText())) {
+                || !operation.equals(WorkspaceRecoveryProtocol.parse((String) alias.get("registration_json")).path("operationId").asText())) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
@@ -403,7 +408,7 @@ public class WorkspaceStorageGuard {
             if (migration != null) {
                 var saved = new WorkspaceOperations(jdbc, tenantId).find(
                         WorkspaceOperations.Kind.STORAGE_MIGRATION, migration, false);
-                if (saved == null || !operationId.equals(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse((String) saved.get("request_json"))
+                if (saved == null || !operationId.equals(WorkspaceRecoveryProtocol.parse((String) saved.get("request_json"))
                         .path("fenceOperationId").asText())) {
                     throw WorkspaceExecutionStore.unavailable();
                 }
@@ -660,7 +665,7 @@ public class WorkspaceStorageGuard {
                 throw WorkspaceExecutionStore.unavailable();
             }
             byte[] partial = Files.readAllBytes(temporary);
-            if (!java.util.Arrays.equals(partial, java.util.Arrays.copyOf(expected, partial.length))) {
+            if (!Arrays.equals(partial, Arrays.copyOf(expected, partial.length))) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             Files.delete(temporary);
@@ -694,7 +699,7 @@ public class WorkspaceStorageGuard {
                 if (!Files.isRegularFile(temporary, LinkOption.NOFOLLOW_LINKS)
                         || ((Number) Files.getAttribute(temporary, "unix:nlink", LinkOption.NOFOLLOW_LINKS)).longValue() != 1
                         || Files.size(temporary) != expectedBytes.length
-                        || !java.util.Arrays.equals(Files.readAllBytes(temporary), expectedBytes)) {
+                        || !Arrays.equals(Files.readAllBytes(temporary), expectedBytes)) {
                     throw WorkspaceExecutionStore.unavailable();
                 }
             } else {
@@ -712,8 +717,8 @@ public class WorkspaceStorageGuard {
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
                 channel.force(true);
             }
-            Files.move(temporary, root.resolve(WorkspaceStorageMarkers.FILE_NAME), java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            Files.move(temporary, root.resolve(WorkspaceStorageMarkers.FILE_NAME), StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
             try (FileChannel directory = FileChannel.open(root, StandardOpenOption.READ)) {
                 directory.force(true);
             }
@@ -767,7 +772,7 @@ public class WorkspaceStorageGuard {
     private void requireNonOverlapping(Identity identity) {
         try {
             LocalStorageOwners.requireNonOverlapping(jdbc, identity);
-        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException conflict) {
+        } catch (RuntimeBrokerException conflict) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }

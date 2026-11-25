@@ -29,6 +29,9 @@
     "integrations/external-context-mem0",
     "integrations/test-failure-explorer",
     "integrations/generated-ui",
+    "packages/harness/cli",
+    "packages/harness/core",
+    "packages/harness/resource",
     "!packages/desktop",
     "!packages/live-host",
     "!packages/mobile-shell"

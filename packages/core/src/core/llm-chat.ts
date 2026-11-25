@@ -203,6 +203,7 @@ import {
   isRetryableStatuslessUpstreamError,
   isRetryableStreamTransportError,
 } from './stream-transport-retry.js';
+import { StreamInactivityTimeoutError } from './stream-guards.js';
 import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
@@ -949,7 +950,24 @@ const STREAM_RETRY_CONFIG = {
    * the replay budget.
    */
   maxContinuationRetries: 3,
+  /**
+   * Shared budget for replays and continuations after an inactivity timeout
+   * that hit while a tool call's arguments were still open. Providers that
+   * withhold arguments until they are complete go silent for exactly that
+   * stretch, so the same request tends to stall the same way again; one retry
+   * covers a transient cut without spending every budget on a repeat.
+   */
+  maxToolArgumentStallRetries: 1,
 };
+
+function getToolArgumentStallRetryError(error: unknown) {
+  // Classify the local timeout code so the diagnostic tool name cannot be
+  // mistaken for a provider error.
+  return error instanceof StreamInactivityTimeoutError &&
+    error.openToolCallName !== undefined
+    ? { code: error.code }
+    : undefined;
+}
 
 /**
  * Pad added when sizing the output clamp from an estimate-derived prompt
@@ -4527,6 +4545,7 @@ export class LlmChat {
           }
         };
         let streamReplayRetryCount = 0;
+        let toolArgumentStallRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
         // send has already handed to callers across all continuation attempts,
@@ -4806,13 +4825,16 @@ export class LlmChat {
             // boundary, which is the only place a replay can occur.
             foldTransportAttemptText();
 
+            const toolArgumentStall = getToolArgumentStallRetryError(error);
+            const retryError = toolArgumentStall ?? error;
+
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
             // Classify once per failed attempt; reused by the rate-limit
             // diagnostics below and the transport-retry decision further down.
-            const classification = classifyRetryError(error, {
+            const classification = classifyRetryError(retryError, {
               authType: cgConfig?.authType,
               extraRetryErrorCodes,
             });
@@ -4825,7 +4847,7 @@ export class LlmChat {
             // minute delay on an error that cannot succeed until the reset
             // time. Throws a plain Error (no .status) and skips model
             // fallback, matching the retryWithBackoff fast-fail.
-            if (isQuotaExhaustedError(error)) {
+            if (isQuotaExhaustedError(retryError)) {
               debugLogger.warn('Quota exhausted mid-stream, fast-failing', {
                 retryPath: 'stream',
                 retryDecision: 'fail-fast',
@@ -4843,7 +4865,10 @@ export class LlmChat {
             ) {
               throw error;
             }
-            const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
+            const isRateLimit = isRateLimitError(
+              retryError,
+              extraRetryErrorCodes,
+            );
             if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
               // The classifier is observation-only here; stream retry control
@@ -4915,8 +4940,9 @@ export class LlmChat {
             // endpoint can reject the serialized request with a bare HTTP 413
             // (no token wording) even below the token-based compaction
             // threshold; it recovers through the same one-shot path (#10380).
-            const contextOverflow = getContextLengthExceededInfo(error);
-            const requestPayloadOverflow = getRequestPayloadTooLargeInfo(error);
+            const contextOverflow = getContextLengthExceededInfo(retryError);
+            const requestPayloadOverflow =
+              getRequestPayloadTooLargeInfo(retryError);
 
             // HTTP establishment failures already exhausted retryWithBackoff;
             // only server errors raised while reading the stream join replay.
@@ -4948,6 +4974,10 @@ export class LlmChat {
             // ask the model to resume from.
             const isReplayableStreamError =
               isContinuableStreamCut || isServerStreamError;
+            const toolArgumentStallBudgetLeft =
+              !toolArgumentStall ||
+              toolArgumentStallRetryCount <
+                STREAM_RETRY_CONFIG.maxToolArgumentStallRetries;
 
             // Replay transient server errors and curated socket-level failures
             // before any content (non-thought output) has reached callers.
@@ -4985,10 +5015,12 @@ export class LlmChat {
             if (
               isReplayableStreamError &&
               canReplayAttempt &&
-              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
+              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries &&
+              toolArgumentStallBudgetLeft
             ) {
               self.popPendingPartialAssistantTurn();
               streamReplayRetryCount++;
+              if (toolArgumentStall) toolArgumentStallRetryCount++;
               const delayMs =
                 STREAM_RETRY_CONFIG.initialDelayMs * streamReplayRetryCount;
               debugLogger.warn(
@@ -5083,10 +5115,12 @@ export class LlmChat {
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
-                STREAM_RETRY_CONFIG.maxContinuationRetries;
+                STREAM_RETRY_CONFIG.maxContinuationRetries &&
+              toolArgumentStallBudgetLeft;
             if (canContinueAfterTransportCut) {
               self.popPendingPartialAssistantTurn();
               transportContinuationCount++;
+              if (toolArgumentStall) toolArgumentStallRetryCount++;
               // Everything delivered so far — across earlier continuation
               // attempts too, since `transportContinuationText` accumulates
               // and is never reset while continuing. Each attempt's own text
@@ -5136,11 +5170,13 @@ export class LlmChat {
                   : 'Transport stream retry not taken',
                 {
                   retryPath: 'stream',
-                  retryDecision: canReplayAttempt
-                    ? 'exhausted'
-                    : attemptClosedWithOwnOutput
-                      ? 'skipped_terminal_finish_reason'
-                      : 'skipped_after_content',
+                  retryDecision: !toolArgumentStallBudgetLeft
+                    ? 'tool_argument_stall_exhausted'
+                    : canReplayAttempt
+                      ? 'exhausted'
+                      : attemptClosedWithOwnOutput
+                        ? 'skipped_terminal_finish_reason'
+                        : 'skipped_after_content',
                   attempts: streamReplayRetryCount,
                   maxRetries: STREAM_RETRY_CONFIG.maxRetries,
                   continuationAttempts: transportContinuationCount,
@@ -5969,10 +6005,10 @@ export class LlmChat {
             !isUnattendedMode() &&
             !streamYieldedAnyChunk
           ) {
-            let currentErrorClassification = classifyRetryError(lastError, {
-              authType: cgConfig?.authType,
-              extraRetryErrorCodes,
-            });
+            let currentErrorClassification = classifyRetryError(
+              getToolArgumentStallRetryError(lastError) ?? lastError,
+              { authType: cgConfig?.authType, extraRetryErrorCodes },
+            );
 
             if (isFallbackEligible(currentErrorClassification)) {
               let fallbackSucceeded = false;
@@ -6158,7 +6194,8 @@ export class LlmChat {
                   // Classify the fallback error to decide whether to continue
                   // to the next fallback or give up
                   const fallbackClassification = classifyRetryError(
-                    fallbackError,
+                    getToolArgumentStallRetryError(fallbackError) ??
+                      fallbackError,
                     {
                       authType: fallbackRetryAuthType,
                       extraRetryErrorCodes: fallbackRetryErrorCodes,
@@ -7891,7 +7928,7 @@ export class LlmChat {
       // status, so without that context it reads as a status-less upstream
       // frame — the one class this gate accepts.
       const trailingErrorClassification = classifyRetryError(
-        streamError,
+        getToolArgumentStallRetryError(streamError) ?? streamError,
         retryClassificationContext,
       );
       if (
