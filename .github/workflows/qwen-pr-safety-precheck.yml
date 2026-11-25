@@ -62,16 +62,25 @@ jobs:
               > "$RUNNER_TEMP/pr-precheck.json"
             : > "$RUNNER_TEMP/pr-precheck.diff"
             echo "diff_truncated=false" >> "$GITHUB_OUTPUT"
+            echo "metadata_unavailable=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          # An unreadable title/body must not read as an empty one: the body is
+          # a payload channel of its own (#18364 carried its instructions there
+          # and shipped a harmless docs diff), so a metadata API failure would
+          # otherwise turn a held PR back into an admitted one.
+          metadata_unavailable=false
           if ! gh pr view "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --json title,body,headRefOid \
             > "$RUNNER_TEMP/pr-precheck.json"; then
             printf '{"headRefOid":"%s","title":"","body":""}\n' "$HEAD_SHA" \
               > "$RUNNER_TEMP/pr-precheck.json"
+            metadata_unavailable=true
+            echo "PR metadata unavailable; precheck will fail closed." >&2
           fi
+          echo "metadata_unavailable=$metadata_unavailable" >> "$GITHUB_OUTPUT"
 
           # Read one byte past the cap: a full cap-sized read is
           # indistinguishable from a complete diff of exactly that size, and
@@ -104,6 +113,7 @@ jobs:
             --diff "$RUNNER_TEMP/pr-precheck.diff" \
             --trusted-author "${{ steps.author_permission.outputs.trusted_author }}" \
             --diff-truncated "${{ steps.collect.outputs.diff_truncated }}" \
+            --metadata-unavailable "${{ steps.collect.outputs.metadata_unavailable }}" \
             --comment "$RUNNER_TEMP/pr-precheck-comment.md"
 
       - name: 'Upsert manual approval comment'

@@ -343,7 +343,9 @@ for (const path of [
   'scripts/tests/foo.test.js',
   '.agents/reviewer.md',
   '.qwen/skills/probe/SKILL.md',
+  '.qwen/rules/injected.md',
   '.qwen/settings.json',
+  '.qwen/QWEN.local.md',
   'AGENTS.md',
   'packages/core/src/ui/AGENTS.md',
   'packages/core/src/ui/QWEN.md',
@@ -461,6 +463,42 @@ for (const [label, payload, code] of [
   ['environment dump', envDump, 'ambient_credential:env_dump'],
   ['printenv', 'printenv HOME', 'ambient_credential:env_dump'],
   ['export dump', 'export -p', 'ambient_credential:env_dump'],
+  ['bare export dump', 'export', 'ambient_credential:env_dump'],
+  ['bare declare dump', 'declare', 'ambient_credential:env_dump'],
+  ['bare typeset dump', 'typeset', 'ambient_credential:env_dump'],
+  ['declare print dump', 'declare -p', 'ambient_credential:env_dump'],
+  [
+    'thread-self process environment',
+    'cat /proc/thread-self/environ',
+    'ambient_credential:proc_environ',
+  ],
+  ['null-separated env dump', 'env -0', 'ambient_credential:env_dump'],
+  ['long-form null env dump', 'env --null', 'ambient_credential:env_dump'],
+  ['bare set dump', 'set', 'ambient_credential:env_dump'],
+  ['declare exported dump', 'declare -x', 'ambient_credential:env_dump'],
+  ['typeset exported dump', 'typeset -x', 'ambient_credential:env_dump'],
+  ['env inside a bash -c', 'bash -c "env"', 'ambient_credential:env_dump'],
+  ['set inside an sh -c', "sh -c 'set'", 'ambient_credential:env_dump'],
+  [
+    'env behind combined shell flags',
+    'bash -lc "env"',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'set behind combined shell flags',
+    'bash -ec "set"',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'home credential file',
+    'cat ~/.credentials',
+    'ambient_credential:credential_file',
+  ],
+  [
+    'relative credential file',
+    'cat .credentials',
+    'ambient_credential:credential_file',
+  ],
   [
     'aws credential file',
     'cat ~/.aws/credentials',
@@ -488,10 +526,59 @@ for (const [label, payload, code] of [
   });
 }
 
-test('does not gate an env prefix that sets one variable for a command', () => {
+for (const [label, payload] of [
+  ['env prefix', 'env NODE_ENV=test vitest run'],
+  ['env with a cleared environment', 'env -i FOO=bar node x.mjs'],
+  ['shell option string', 'set -euo pipefail'],
+  ['single shell option', 'set -o pipefail'],
+  ['declare that assigns one variable', 'declare -x FOO=bar'],
+  ['shell -c running an ordinary command', 'bash -c "npm test"'],
+  ['property access named credentials', 'const x = obj.credentials;'],
+  ['export that assigns one variable', 'export FOO=bar'],
+  ['declare with a non-printing flag', 'declare -i n=5'],
+  ['typeset with a non-printing flag', 'typeset -i n=5'],
+]) {
+  test(`does not gate an ordinary form: ${label}`, () => {
+    const result = assessPullRequestSafety({
+      pr: pr(),
+      diff: diffFor('docs/note.md', payload),
+    });
+
+    assert.equal(result.decision, 'allow_triage');
+    assert.deepEqual(result.reason_codes, []);
+  });
+}
+
+test('does not gate an object spread that copies credentials in memory', () => {
   const result = assessPullRequestSafety({
     pr: pr(),
-    diff: diffFor('docs/note.md', 'env NODE_ENV=test vitest run'),
+    diff: diffFor(
+      'packages/channels/msteams/src/ingress.ts',
+      '  const config = { ...credentials };',
+    ),
+  });
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
+});
+
+test('fails closed when PR metadata could not be read', () => {
+  const result = assessPullRequestSafety({
+    pr: pr({ title: '', body: '' }),
+    diff: diffFor('docs/note.md', 'Some prose.'),
+    metadataUnavailable: true,
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('input:metadata_unavailable'));
+});
+
+test('leaves an unreadable-metadata PR to trusted authors', () => {
+  const result = assessPullRequestSafety({
+    pr: pr({ title: '', body: '' }),
+    diff: diffFor('docs/note.md', 'Some prose.'),
+    trustedAuthor: true,
+    metadataUnavailable: true,
   });
 
   assert.equal(result.decision, 'allow_triage');

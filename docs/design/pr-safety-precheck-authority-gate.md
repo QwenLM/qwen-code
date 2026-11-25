@@ -95,11 +95,11 @@ instructions, yields `protected_path:authority_surface`.
 
 Directory prefixes: `.github/`, `.agents/`, `scripts/`, `.qwen/skills/`,
 `.qwen/commands/`, `.qwen/agents/`, `.qwen/workflows/`, `.qwen/extensions/`,
-`.qwen/scripts/`.
+`.qwen/scripts/`, `.qwen/rules/`.
 
 File names at any depth, because context files load hierarchically:
-`AGENTS.md`, `QWEN.md`, `CLAUDE.md`, `package.json`, `pnpm-lock.yaml`,
-`pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.mjs`.
+`AGENTS.md`, `QWEN.md`, `QWEN.local.md`, `CLAUDE.md`, `package.json`,
+`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.mjs`.
 
 Exact paths: `.qwen/settings.json`.
 
@@ -117,15 +117,24 @@ added as `.github/workflows/evil<TAB>.yml` returned `allow_triage`.
 
 The source itself is the signal; no sink pairing is required.
 
-| Reason code                          | Matches                                                                                                                                |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `ambient_credential:cloud_metadata`  | `100.100.100.200`, `169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.goog`                    |
-| `ambient_credential:proc_environ`    | `/proc/<self\|pid\|$$\|$VAR>/environ`                                                                                                  |
-| `ambient_credential:env_dump`        | `env` in command position followed by a pipe, redirect, separator or end of line; `printenv`; `export -p`                              |
-| `ambient_credential:credential_file` | `.aws/credentials`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, `.credentials` |
+| Reason code                          | Matches                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ambient_credential:cloud_metadata`  | `100.100.100.200`, `169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.goog`                                                                                                                                                                                        |
+| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>/environ`                                                                                                                                                                                                                                                         |
+| `ambient_credential:env_dump`        | `env`, `env -0`, `env --null`, bare `set`, bare `export`, `export -p`, bare `declare`/`typeset` and their `-x`/`-p` forms, in command position followed by a pipe, redirect, separator or end of line; `printenv`; a dump command inside `bash/sh/zsh/dash -c '…'`, including combined flags such as `-lc` |
+| `ambient_credential:credential_file` | `.aws/credentials`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, and `.credentials` **only at a path boundary**                                                                                                                                     |
 
 These run over the PR title, body and added lines, so an instruction carried
 only by the body is caught even when the diff is a single harmless docs file.
+
+Two boundaries keep the rules from gating ordinary work. Every dump form keeps
+the terminator lookahead, so an option-taking prefix — `set -euo pipefail`,
+`env FOO=bar cmd`, `env -i FOO=bar node x.mjs`, `declare -x FOO=bar` — stays
+ungated. And `.credentials` requires a preceding path separator or line start:
+without that boundary the pattern also matched the object spread
+`{ ...credentials }`, which copies an in-memory object and appears in ordinary
+product code (`packages/channels/msteams/src/ingress.ts`). Both were measured as
+real false positives before the fix.
 
 ### 3. Truncation fails closed
 
@@ -133,6 +142,17 @@ The collect step reads one byte past the cap. A read of exactly the cap is
 indistinguishable from a complete diff of that size, so the extra byte is the
 truncation witness. When the file exceeds the cap the step emits
 `diff_truncated=true`, and the script adds `input:diff_truncated`.
+
+### 4. Unreadable PR metadata fails closed
+
+When the metadata call fails, the collect step used to substitute an empty title
+and body while keeping a valid head SHA. The body is a payload channel of its
+own, so that substitution silently stopped scanning it: a body-only probe with a
+harmless docs diff went back to being admitted whenever the API call failed. The
+step now reports `metadata_unavailable=true` and the script adds
+`input:metadata_unavailable`. A distinct code is used rather than reusing
+`input:diff_unavailable`, because the maintainer-facing reason must say which
+input was missing.
 
 ## Design decisions and rationale
 
@@ -150,11 +170,24 @@ to judge "this pull request changes a CI script", not to spot malicious wording
 that a human reads as routine diagnostics.
 
 **Protect the agent instruction surface, not only `.github`.** #18364 changes no
-`.github` path, so a `.github`-only rule misses it. Project context files are a
-stronger channel than a docs file: the CLI loads `QWEN.md` and `AGENTS.md` from
-the checked-out head, and the review workflow's generated `settings.json` sets
-a shell timeout and, when configured, a reasoning effort — it does not disable
-context loading.
+`.github` path, so a `.github`-only rule misses it. Instruction files are a
+stronger channel than a docs page whenever they are loaded, because they enter
+the system prompt rather than being read as evidence.
+
+**The path rule is deliberately broader than the channel live today.** An
+earlier revision of this design claimed the reviewer loads `QWEN.md` and
+`AGENTS.md` from the checked-out contribution. That is not true of the review
+lane at this head, and the claim is withdrawn: the review job checks out the
+repository's default branch, and workspace memory discovery is gated on folder
+trust (`packages/core/src/memory/memoryDiscovery.ts`), whose setting defaults to
+false (`packages/cli/src/config/config.ts`) and which the review workflow never
+enables. The project-local slot additionally needs implicit discovery and a
+resolved project root, and `.qwen/rules/` needs folder trust as well
+(`packages/core/src/config/rulesDiscovery.ts`). So `QWEN.local.md` and
+`.qwen/rules/` are **latent** instruction slots, not live ones. They are
+protected anyway: a lane that later turns trust on — the natural configuration
+for interactive use — must not silently widen what an outside contribution can
+inject, and a path list is cheap to keep ahead of that change.
 
 **Narrow `.qwen/` to authority-bearing subdirectories.** Working artifacts such
 as `.qwen/e2e-tests/` carry no authority; gating them would add noise without
@@ -182,9 +215,16 @@ content rules, as before. Only a missing head SHA still fails closed for them.
   `packages/network-policy/src/network-policy.test.ts` and
   `packages/core/src/utils/fetch.test.ts` include the IMDS literals, so an
   outside pull request editing them is gated. Accepted for the same reason.
+- **A bare `set` line in non-shell code is gated.** The dump rule cannot tell a
+  shell `set` from a lone `set` identifier on its own line, so a destructuring
+  pattern written as `const {` / `set` / `} = obj` is held. Accepted: narrowing
+  it by surrounding braces would hand an attacker a trivial wrapper, and the
+  cost is one maintainer opt-in.
 - **Detection remains defence in depth.** #18364 shows an attacker need not
   touch any protected path. Only the out-of-scope credential hardening removes
-  the payoff.
+  the payoff. The env-dump rule enumerates the shapes a shell prints the
+  environment with; a shape it does not enumerate still passes, which is why
+  the rule is a list of forms rather than a claim of completeness.
 
 ## Validation plan
 
@@ -195,8 +235,10 @@ content rules, as before. Only a missing head SHA still fails closed for them.
   require the corresponding tests to fail, including a whole-file revert to the
   pre-change module. Every arm must assert its anchor matched, so a drifted
   anchor cannot report a silent skip as a kill.
-- Shell decision table: drive the real collect step with a stubbed `gh` across
-  the cap boundary, because a text pin cannot verify a numeric threshold.
+- Workflow end-to-end table: drive the real collect and assess `run:` blocks
+  with a stubbed `gh` and assert the final decision, across the cap boundary and
+  the metadata-failure arm. A text pin can verify neither a numeric threshold nor
+  a fail-open branch.
 - Repository gates: `prettier --check`, `eslint`, `actionlint`, and
   `node --test .github/scripts/ci/classify-profile.test.mjs`.
 
@@ -206,21 +248,32 @@ content rules, as before. Only a missing head SHA still fails closed for them.
   reason codes.
 - A diff truncated at the cap yields `input:diff_truncated` even when the
   visible portion is clean.
-- An `env VAR=value command` prefix is not gated.
+- An `env VAR=value command` prefix is not gated, nor is `set -euo pipefail`,
+  `declare -x FOO=bar`, or an object spread copying credentials.
+- Every enumerated dump form is held, including combined shell flags and a
+  relative `.credentials` read.
+- A metadata read failure yields `input:metadata_unavailable` even when the diff
+  is fetched successfully and looks ordinary.
 - Trusted authors are unaffected.
 - Every mutation arm is killed, with no skipped arm.
 - The cap boundary behaves correctly at exactly 2 MiB and at 2 MiB plus one byte.
 
-## Verified results (2026-11-25)
+## Verified results (2026-11-26)
 
-- Unit suite: 61 passed, 0 failed.
+- Unit suite: 91 passed, 0 failed.
 - #18362: `protected_path:authority_surface`,
   `ambient_credential:cloud_metadata`, `ambient_credential:env_dump`.
 - #18364: `ambient_credential:cloud_metadata`,
   `ambient_credential:proc_environ`.
-- Mutation witness: 8 arms, all killed, none skipped. One arm widens the `env`
-  rule instead of removing it, so the false-positive guard is pinned too.
-- Shell decision table: 6 cases passed, including exactly-cap and cap-plus-one.
+- Mutation witness: 21 arms, all killed, none skipped. Five arms widen or
+  narrow a rule instead of removing it, so both the false-positive and the
+  false-negative direction are pinned; two arms revert the whole file, to the
+  first hardening round and to the pre-PR module.
+- Workflow end-to-end table: 9 cases passed. It executes the real collect and
+  assess `run:` blocks under their own bash contract with a stubbed `gh`, and
+  asserts the final decision rather than an intermediate flag. Covers
+  exactly-cap, cap-plus-one, a failing diff call, a trusted author, and a
+  hostile body with the metadata call both succeeding and failing.
 - `prettier --check`, `eslint`, `actionlint`: clean. Both `eslint` and
   `actionlint` were first proven live against a deliberately invalid input.
 - `classify-profile.test.mjs`: 27 passed, 0 failed.
@@ -234,6 +287,19 @@ Three pre-existing tests asserted that untrusted `.github` and `scripts/`
 changes are allowed. They were retargeted to the new policy rather than deleted,
 and one fixture was corrected to carry a real diff header so it exercises the
 path rule instead of passing vacuously.
+
+A second round followed review at the first commit. It closed four reported
+gaps — the missing dump forms, the unanchored `.credentials`, the two latent
+instruction slots, and the metadata fail-open — and withdrew the context-loading
+rationale corrected above. An adversarial pass over that round then found three
+problems in the round's own fix, all now closed and pinned: combined shell flags
+(`bash -lc "env"`) were still admitted; the new `.credentials` boundary had
+introduced a **regression** by no longer matching a relative `cat .credentials`;
+and a lone `set` identifier in non-shell code is gated, which is recorded as an
+accepted false positive rather than narrowed. A further sibling sweep closed
+bare `export`, bare `declare`/`typeset` and their `-p` form, and
+`/proc/thread-self/environ`, each of which dumps the same environment as a form
+already covered.
 
 ## Open questions
 

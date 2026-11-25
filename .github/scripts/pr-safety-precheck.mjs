@@ -31,11 +31,17 @@ const PROTECTED_DIR_PREFIXES = [
   '.qwen/workflows/',
   '.qwen/extensions/',
   '.qwen/scripts/',
+  '.qwen/rules/',
 ];
 // Context files load hierarchically, so a nested copy steers the agent too.
+// QWEN.local.md is the project-local slot the memory loader appends; both it
+// and .qwen/rules/ are read only under folder trust, so they are latent
+// channels today rather than live ones. Protected anyway: a lane that turns
+// trust on must not silently widen what an outside PR can inject.
 const PROTECTED_FILE_NAMES = new Set([
   'AGENTS.md',
   'QWEN.md',
+  'QWEN.local.md',
   'CLAUDE.md',
   'package.json',
   'pnpm-lock.yaml',
@@ -56,15 +62,25 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   ],
   [
     'ambient_credential:proc_environ',
-    /\/proc\/(?:self|\d+|\$\$|\$\{?\w+\}?)\/environ/,
+    /\/proc\/(?:self|thread-self|\d+|\$\$|\$\{?\w+\}?)\/environ/,
   ],
+  // Every shape that prints the whole environment, not just `env`. `set`,
+  // `declare -x` and `env -0` dump the same variables, and a shell `-c` wrapper
+  // hides the command from the command-position anchor. Each dump form keeps
+  // the terminator lookahead so an option-taking prefix (`set -euo pipefail`,
+  // `env FOO=bar cmd`, `declare -x FOO=bar`) stays ungated.
   [
     'ambient_credential:env_dump',
-    /(?:^|[;&|(`]|\$\()\s*(?:env(?=\s*(?:\||;|&|>|$))|printenv\b|export\s+-p\b)/m,
+    /(?:^|[;&|(`]|\$\()\s*(?:env(?:\s+(?:-0|--null))?(?=\s*(?:\||;|&|>|$))|printenv\b|export(?:\s+-p)?(?=\s*(?:\||;|&|>|$))|set(?=\s*(?:\||;|&|>|$))|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?(?=\s*(?:\||;|&|>|$)))|\b(?:bash|sh|zsh|dash)\s+-[a-z]*c[a-z]*\s*["']\s*(?:env|printenv|set|export|declare|typeset)\b/m,
   ],
+  // `.credentials` needs a boundary that still admits a bare relative read
+  // (`cat .credentials`): whitespace counts, a preceding dot does not. Without
+  // any boundary the pattern also matches the object spread
+  // `{ ...credentials }`, which copies an in-memory object and appears in
+  // ordinary product code.
   [
     'ambient_credential:credential_file',
-    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|\.credentials\b/,
+    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s])\.credentials\b/,
   ],
 ];
 
@@ -164,6 +180,7 @@ export function assessPullRequestSafety({
   diff,
   trustedAuthor = false,
   diffTruncated = false,
+  metadataUnavailable = false,
 }) {
   const reasons = [];
   const headSha = typeof pr?.headRefOid === 'string' ? pr.headRefOid : '';
@@ -183,6 +200,10 @@ export function assessPullRequestSafety({
   // A capped diff hides whatever sits past the cap, so a partial read must not
   // be reported as a clean one.
   if (diffTruncated) addReason(reasons, 'input:diff_truncated');
+
+  // Without the title and body the body-only channel is simply not scanned, so
+  // an API failure would silently reopen the exact hole this gate closes.
+  if (metadataUnavailable) addReason(reasons, 'input:metadata_unavailable');
 
   if (!diffText) {
     addReason(reasons, 'input:diff_unavailable');
@@ -256,11 +277,13 @@ function main() {
   const diff = readFileSync(args.diff, 'utf8');
   const trustedAuthor = args['trusted-author'] === 'true';
   const diffTruncated = args['diff-truncated'] === 'true';
+  const metadataUnavailable = args['metadata-unavailable'] === 'true';
   const result = assessPullRequestSafety({
     pr,
     diff,
     trustedAuthor,
     diffTruncated,
+    metadataUnavailable,
   });
 
   if (args.comment) {

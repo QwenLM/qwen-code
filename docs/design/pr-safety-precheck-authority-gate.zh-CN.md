@@ -52,9 +52,9 @@
 
 改动「决定 CI 执行什么」或「agent 把什么当指令读」的路径，产出 `protected_path:authority_surface`。
 
-目录前缀：`.github/`、`.agents/`、`scripts/`、`.qwen/skills/`、`.qwen/commands/`、`.qwen/agents/`、`.qwen/workflows/`、`.qwen/extensions/`、`.qwen/scripts/`。
+目录前缀：`.github/`、`.agents/`、`scripts/`、`.qwen/skills/`、`.qwen/commands/`、`.qwen/agents/`、`.qwen/workflows/`、`.qwen/extensions/`、`.qwen/scripts/`、`.qwen/rules/`。
 
-任意深度的文件名（上下文文件按层级加载，嵌套副本同样能操纵 agent）：`AGENTS.md`、`QWEN.md`、`CLAUDE.md`、`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`.npmrc`、`.pnpmfile.mjs`。
+任意深度的文件名（上下文文件按层级加载，嵌套副本同样能操纵 agent）：`AGENTS.md`、`QWEN.md`、`QWEN.local.md`、`CLAUDE.md`、`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`.npmrc`、`.pnpmfile.mjs`。
 
 精确路径：`.qwen/settings.json`。
 
@@ -66,18 +66,24 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 **源本身就是信号**，不需要与 sink 配对。
 
-| Reason code                          | 匹配                                                                                                                                   |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `ambient_credential:cloud_metadata`  | `100.100.100.200`、`169.254.169.254`、`169.254.170.2`、`fd00:ec2::254`、`metadata.google.internal`、`metadata.goog`                    |
-| `ambient_credential:proc_environ`    | `/proc/<self\|pid\|$$\|$VAR>/environ`                                                                                                  |
-| `ambient_credential:env_dump`        | 处于命令位置、后接管道／重定向／分隔符／行尾的 `env`；`printenv`；`export -p`                                                          |
-| `ambient_credential:credential_file` | `.aws/credentials`、`.docker/config.json`、`.config/gcloud`、`.kube/config`、`.ssh/id_*`、`.netrc`、`.git-credentials`、`.credentials` |
+| Reason code                          | 匹配                                                                                                                                                                                                                                               |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ambient_credential:cloud_metadata`  | `100.100.100.200`、`169.254.169.254`、`169.254.170.2`、`fd00:ec2::254`、`metadata.google.internal`、`metadata.goog`                                                                                                                                |
+| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>/environ`                                                                                                                                                                                                 |
+| `ambient_credential:env_dump`        | 处于命令位置、后接管道／重定向／分隔符／行尾的 `env`、`env -0`、`env --null`、裸 `set`、裸 `export`、`export -p`、裸 `declare`/`typeset` 及其 `-x`/`-p` 形态；`printenv`；以及包在 `bash/sh/zsh/dash -c '…'` 里的导出命令（含 `-lc` 这类组合旗标） |
+| `ambient_credential:credential_file` | `.aws/credentials`、`.docker/config.json`、`.config/gcloud`、`.kube/config`、`.ssh/id_*`、`.netrc`、`.git-credentials`，以及**仅出现在路径边界处**的 `.credentials`                                                                                |
 
 这些规则作用于 PR 标题、正文与新增行，因此即使 diff 只是一个无害的 docs 文件，仅由正文承载的指令也会被抓到。
+
+两条边界防止规则误拦正常工作。每种导出形态都保留终止符前瞻，因此带选项的前缀——`set -euo pipefail`、`env FOO=bar cmd`、`env -i FOO=bar node x.mjs`、`declare -x FOO=bar`——不被扣住。而 `.credentials` 要求前面是路径分隔符或行首：没有该边界时，它也会命中对象展开 `{ ...credentials }`，那只是复制内存对象、且出现在普通产品代码里（`packages/channels/msteams/src/ingress.ts`）。两者在修复前都实测为真实误报。
 
 ### 3. 截断即 fail closed
 
 采集步骤多读一个字节。**恰好等于上限**的读取与「一个正好这么大的完整 diff」无法区分，所以那多出的一个字节就是截断见证。文件超过上限时步骤输出 `diff_truncated=true`，脚本追加 `input:diff_truncated`。
+
+### 4. 元数据读不到即 fail closed
+
+元数据调用失败时，采集步骤原本用空标题空正文替代、同时保留有效 head SHA。正文本身就是一条载荷通道，所以这种替代等于**静默停止扫描它**：一个带无害 docs diff 的「仅正文」探针，只要该 API 调用失败就重新被放行。现在步骤输出 `metadata_unavailable=true`，脚本追加 `input:metadata_unavailable`。用独立 code 而非复用 `input:diff_unavailable`，因为面向维护者的理由必须说清缺的是哪一份输入。
 
 ## 设计决策与理由
 
@@ -85,7 +91,9 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 **给人看能力事实，不是 diff 散文。** 人工审批评论列出的是 `protected_path:authority_surface` 这样的 reason code。请维护者判断的是「这个 PR 改了 CI 脚本」，而不是去辨读一段人眼会当成例行诊断的恶意措辞。
 
-**保护 agent 指令面，不只保护 `.github`。** #18364 没有改动任何 `.github` 路径，所以「只挡 `.github`」的规则会漏掉它。项目上下文文件是比 docs 文件更强的通道：CLI 会从检出的 head 加载 `QWEN.md` 与 `AGENTS.md`，而 review workflow 生成的 `settings.json` 设的是 shell 超时、以及在有配置时的 reasoning effort，**并未关闭上下文加载**。
+**保护 agent 指令面，不只保护 `.github`。** #18364 没有改动任何 `.github` 路径，所以「只挡 `.github`」的规则会漏掉它。指令文件一旦被加载就是比 docs 页更强的通道——它进入系统提示，而不是作为证据被阅读。
+
+**路径规则刻意比「今天真正活着的通道」更宽。** 本设计的早期版本声称评审器会从检出的贡献里加载 `QWEN.md` 与 `AGENTS.md`。这在本 head 的评审车道上**不成立，该主张撤回**：review job 检出的是仓库默认分支，而工作区记忆发现受 folder trust 门控（`packages/core/src/memory/memoryDiscovery.ts`），该设置默认 false（`packages/cli/src/config/config.ts`），且 review workflow 从不启用它。项目本地槽位还额外要求隐式发现与已解析的项目根，`.qwen/rules/` 同样需要 folder trust（`packages/core/src/config/rulesDiscovery.ts`）。因此 `QWEN.local.md` 与 `.qwen/rules/` 是**潜在**指令槽而非现行通道。仍然把它们纳入保护：某条车道日后打开 trust（交互式使用的自然配置）时，不能静默扩大外部贡献可注入的面，而让路径清单提前覆盖这一变化成本很低。
 
 **把 `.qwen/` 收窄到承载权限的子目录。** `.qwen/e2e-tests/` 这类工作产物不承载权限；把它们纳入只增加噪声、不减少暴露面。
 
@@ -101,37 +109,42 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 - **误报会拦住合法贡献。** 2026-11-25 取样 80 个开放 PR（当时开放总数 578）：67 个作者无 write 权限，其中 7 个触及受保护路径。该取样**不是全仓比率**。每次命中的代价是维护者显式放行一次，不是拒绝贡献者。
 - **仓库自己的夹具就含元数据地址。** `packages/network-policy/src/network-policy.test.ts` 与 `packages/core/src/utils/fetch.test.ts` 含 IMDS 字面量，因此外部 PR 编辑它们会被拦。基于同样的理由接受。
-- **检测仍属防御纵深。** #18364 表明攻击者无需触碰任何受保护路径。只有「范围之外」的凭据加固才能消除收益。
+- **非 shell 代码里单独一行的 `set` 会被扣住。** 导出规则无法区分 shell 的 `set` 与独占一行的 `set` 标识符，因此写成 `const {` / `set` / `} = obj` 的解构会被扣住。接受：靠 surrounding 花括号来收窄等于给攻击者一个 trivial 包装，而代价只是维护者放行一次。
+- **检测仍属防御纵深。** #18364 表明攻击者无需触碰任何受保护路径。只有「范围之外」的凭据加固才能消除收益。env 导出规则枚举的是 shell 打印环境的那些形态；未被枚举的形态仍会通过——这也是它写成「形态清单」而非「完备性主张」的原因。
 
 ## 验证计划
 
 - 单元套件：`node --test .github/scripts/pr-safety-precheck.test.mjs`。
 - 真实载荷：用 #18362 与 #18364 捕获的标题、正文、diff 跑脚本，要求 `manual_required`。
 - 变异见证：在模块的**临时副本**上逐条移除新规则，要求对应用例转红，并包含一条「整文件回退到改动前模块」的臂。每个臂都必须断言其锚点命中，避免锚点漂移把静默跳过报成击杀。
-- bash 决策表：用打桩 `gh` 驱动真实采集步骤跨上限边界——文本钉验不了数值阈值。
+- workflow 端到端决策表：用打桩 `gh` 驱动**真实的** collect 与 assess `run:` 块并断言最终决策，覆盖上限边界与元数据失败臂。文本钉既验不了数值阈值，也验不了 fail-open 分支。
 - 仓库门禁：`prettier --check`、`eslint`、`actionlint`，以及 `node --test .github/scripts/ci/classify-profile.test.mjs`。
 
 ## 验收标准
 
 - 两个探针载荷都判 `manual_required`，且各自命中至少两条**独立** reason code。
 - 在上限处被截断的 diff 产出 `input:diff_truncated`，即使可见部分干净。
-- `env VAR=value command` 前缀不被拦。
+- `env VAR=value command` 前缀不被拦，`set -euo pipefail`、`declare -x FOO=bar`、以及复制 credentials 的对象展开同样不被拦。
+- 每一种被枚举的导出形态都被扣住，含组合 shell 旗标与相对路径的 `.credentials` 读取。
+- 元数据读取失败产出 `input:metadata_unavailable`，即使 diff 取成功且看起来普通。
 - 可信作者不受影响。
 - 每个变异臂都被击杀，且无跳过臂。
 - 上限边界在「恰好 2 MiB」与「2 MiB 加一字节」两处行为正确。
 
-## 已验证结果（2026-11-25）
+## 已验证结果（2026-11-26）
 
-- 单元套件：61 通过、0 失败。
+- 单元套件：91 通过、0 失败。
 - #18362：`protected_path:authority_surface`、`ambient_credential:cloud_metadata`、`ambient_credential:env_dump`。
 - #18364：`ambient_credential:cloud_metadata`、`ambient_credential:proc_environ`。
-- 变异见证：8 个臂，全部击杀，无跳过。其中一个臂是把 `env` 规则**放宽**而非移除，因此误报防护也被钉住。
-- bash 决策表：6 个用例通过，含恰好等于上限与上限加一。
+- 变异见证：21 个臂，全部击杀，无跳过。其中五个臂是把规则**放宽或收窄**而非移除，因此误报与漏报两个方向都被钉住；另有两个臂做整文件回退，分别回到第一轮加固与 PR 前的模块。
+- workflow 端到端决策表：9 个用例通过。它用打桩 `gh`、在步骤自身的 bash 契约下执行**真实的** collect 与 assess `run:` 块，断言最终决策而非中间旗标。覆盖恰好等于上限、上限加一、diff 调用失败、可信作者，以及「敌意正文 + 元数据调用成功／失败」两臂。
 - `prettier --check`、`eslint`、`actionlint`：干净。`eslint` 与 `actionlint` 均先用一个故意非法的输入证明过是活的。
 - `classify-profile.test.mjs`：27 通过、0 失败。
 - `scripts/tests/qwen-autofix-workflow.test.js`：57 失败、287 通过、13 跳过——把本次改动 stash 后计数相同，且 57 条失败用例名**集合完全一致**。每条失败都是该 harness 自己的临时 `typescript.cjs` 的 `ENOENT`，属 worktree 前置缺口，与本改动无关。
 
 三条既有用例原先断言「放行不可信作者对 `.github` 与 `scripts/` 的改动」。它们被**改靶**到新策略而非删除；另有一条夹具被修正为携带真实 diff 头，使其真正走到路径规则而不是空过。
+
+第一个提交经评审后进行了第二轮：关闭四条被报告的缺口（缺失的导出形态、无锚点的 `.credentials`、两个潜在指令槽、元数据 fail-open），并撤回上文那条被纠正的上下文加载理由。随后对该轮做对抗审计，又在**该轮自身的修复里**发现三个问题，现均已关闭并钉住：组合 shell 旗标（`bash -lc "env"`）仍被放行；新的 `.credentials` 边界引入了**回归**——不再匹配相对路径的 `cat .credentials`；以及非 shell 代码里单独的 `set` 标识符会被扣住，这一条记录为「接受的误报」而非去收窄。随后一轮同族清扫又关闭了裸 `export`、裸 `declare`/`typeset` 及其 `-p` 形态、以及 `/proc/thread-self/environ`——它们导出的环境与已覆盖形态完全相同。
 
 ## 未决问题
 
