@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.external;
 
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
@@ -35,11 +36,12 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         ExternalRuntimeClient client = dependencies.externalRuntime().orElseGet(() -> new ExternalHttpRuntimeClient(
                 URI.create(broker.getExternalProviderUrl()), broker.getExternalProviderToken(),
                 broker.getExternalRequestTimeout()));
+        var externalTransport = dependencies.externalRuntimeTransport().orElseGet(HttpRuntimeTransport::new);
         return workspace
                 ? new ExternalWorkspaceProvisioner(client, storage, broker.getExternalProviderId(),
-                        broker.getExternalStartupTimeout())
+                        broker.getExternalStartupTimeout(), externalTransport)
                 : new ExternalRuntimeProvisioner(client, broker.getExternalProviderId(),
-                        broker.getExternalStartupTimeout());
+                        broker.getExternalStartupTimeout(), externalTransport);
     }
 
     @Override

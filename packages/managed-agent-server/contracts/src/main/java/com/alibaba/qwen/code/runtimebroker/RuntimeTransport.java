@@ -241,6 +241,22 @@ public interface RuntimeTransport {
     public CompletionStage<Boolean> release(RuntimeLease lease,
             RuntimeSession session);
 
+    /** Checks the external publication lane for the original lease and registered storage revision. */
+    public default CompletionStage<Boolean> externalPublicationReady(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(503,
+                "runtime_broker_attestation_unavailable",
+                "Runtime transport does not support external publication attestation.", false));
+    }
+
+    /** Stops only the attested original external Workspace, after the Broker has admitted its drain. */
+    public default CompletionStage<Void> stopExternalWorkspaceDrained(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_external_drain_unsupported",
+                "Runtime transport does not support external Workspace drain.", false));
+    }
+
     /**
      * Frees only the Workspace execution mount the Session holds, leaving
      * the Session itself — its READY identity, its renewals and every later

@@ -92,12 +92,14 @@ public class RuntimeBrokerConfiguration {
             @Qualifier("managedAgentTransactionManager") org.springframework.transaction.PlatformTransactionManager manager,
             com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService ssh,
             org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient> externalRuntime,
+            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.runtimebroker.RuntimeTransport> externalRuntimeTransport,
             com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService extensions,
             com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionCommandVerifier extensionCommands) {
         var broker = new EmbeddedRuntimeBroker(store, properties,
                 bindingRepository, sessionRepository, executionRepository,
                 workspaceExecutionStore, publications.getIfAvailable(),
-                publicationData.getIfAvailable(), jdbc, manager, ssh, externalRuntime.getIfAvailable());
+                publicationData.getIfAvailable(), jdbc, manager, ssh, externalRuntime.getIfAvailable(),
+                externalRuntimeTransport.getIfAvailable());
         broker.configureExtensions(extensions);
         broker.service().configureExtensionCommandVerifier(extensionCommands);
         return broker;

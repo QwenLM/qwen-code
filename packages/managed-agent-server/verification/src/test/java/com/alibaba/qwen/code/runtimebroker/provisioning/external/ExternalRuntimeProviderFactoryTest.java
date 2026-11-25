@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.external;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
@@ -46,6 +47,31 @@ class ExternalRuntimeProviderFactoryTest {
         settings.getRuntimeBroker().setExternalProviderUrl(null);
         settings.getRuntimeBroker().setExternalProviderToken(null);
         assertThrows(IllegalStateException.class, () -> factory.validate(settings));
+    }
+
+    @Test
+    void embedsAHostRuntimeTransport() {
+        RuntimeTransport selected = mock(RuntimeTransport.class);
+        var dependencies = new RuntimeProviderDependencies() {
+            @Override
+            public Optional<ExternalRuntimeClient> externalRuntime() {
+                return Optional.of(mock(ExternalRuntimeClient.class));
+            }
+
+            @Override
+            public java.util.Optional<RuntimeTransport> externalRuntimeTransport() {
+                return Optional.of(selected);
+            }
+
+            @Override
+            public ExternalStorageRegistry externalStorage() {
+                return mock(ExternalStorageRegistry.class);
+            }
+        };
+        var factory = new ExternalRuntimeProviderFactory();
+        try (var provisioner = factory.create(settings(), null, dependencies)) {
+            assertSame(selected, ReflectionTestUtils.getField(provisioner, "transport"));
+        }
     }
 
     @Test

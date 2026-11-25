@@ -56,6 +56,8 @@ Managed catalog 与宿主业务 catalog 不同。其表结构和应用账号由�
 
 宿主可提供唯一的 `ExternalRuntimeClient` Bean，选择同进程的外部 Runtime placement。`RuntimeProviderDependencies.externalRuntime()` 以 `Optional` 暴露该端口；`ExternalRuntimeProviderFactory` 仍负责原有 `ExternalRuntimeProvisioner` / `ExternalWorkspaceProvisioner` 及其 binding、attest、reattach 语义。注入客户端后，不再要求外部 provider URL/token；没有客户端时，URL/token 校验与 HTTP 行为保持不变。`RuntimeProviderFactory.validate(settings)` 的旧 SPI 继续有效，宿主依赖感知的校验通过新的缺省重载传递。该注入不创建业务身份、不授权 Workspace 访问、不替代 MA 数据源，也不把宿主内部服务暴露成 Servlet。
 
+宿主还可经 `RuntimeProviderDependencies.externalRuntimeTransport()` 为外部 Worker 提供一个 `RuntimeTransport`，在保留官方 Runtime 协议的前提下接入自有传输；缺省仍是 `HttpRuntimeTransport`。传输不负责资源分配，必须沿用原 boot/lease 与 attest，不能把资源已分配当作 Worker READY。
+
 
 ## 验证
 

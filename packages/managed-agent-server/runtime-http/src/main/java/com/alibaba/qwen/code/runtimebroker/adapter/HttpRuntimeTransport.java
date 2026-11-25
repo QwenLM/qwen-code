@@ -340,6 +340,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     }
 
     /** Attests and retires only the saved external worker; the private proof bytes are not fetched. */
+    @Override
     public CompletionStage<Void> stopExternalWorkspaceDrained(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
         requireExternalPublicationIdentity(lease, request, seed, registrationRevision);
@@ -498,6 +499,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
      * transport, identity or protocol failure is absence of evidence, never
      * evidence that the worker is gone.
      */
+    @Override
     public CompletionStage<Boolean> externalPublicationReady(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
         try {

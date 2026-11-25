@@ -56,6 +56,8 @@ A host that wants no controllers uses the default Java surface. The standalone a
 
 A host may provide one `ExternalRuntimeClient` bean for same-process external Runtime placement. `RuntimeProviderDependencies.externalRuntime()` exposes this optional port. `ExternalRuntimeProviderFactory` continues to create the established `ExternalRuntimeProvisioner` / `ExternalWorkspaceProvisioner` with their binding, attestation and reattachment semantics. An injected client replaces the external provider URL/token requirement; without one, URL/token validation and HTTP behavior are unchanged. Existing `RuntimeProviderFactory.validate(settings)` plugins remain valid, while a default overload receives host dependencies for configuration-only validation. Neither this SPI nor an injected client creates business identity, authorizes Workspace access, replaces the Managed database, or exposes host services as a servlet.
 
+A host may additionally provide one `RuntimeTransport` for external workers through `RuntimeProviderDependencies.externalRuntimeTransport()`. It retains the official Runtime protocol while supplying its own transport; the default remains `HttpRuntimeTransport`. This transport does not allocate resources, and it must preserve the original boot/lease and attestation path instead of assuming that an allocated resource is ready.
+
 
 ## Validation
 

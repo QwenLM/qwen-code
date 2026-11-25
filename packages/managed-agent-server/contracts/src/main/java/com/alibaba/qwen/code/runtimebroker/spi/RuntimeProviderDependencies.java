@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.spi;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 
 import java.util.Optional;
 
@@ -10,6 +11,11 @@ public interface RuntimeProviderDependencies {
 
     public default RuntimeBindingRepository bindings() {
         throw new IllegalStateException("Runtime binding repository is unavailable");
+    }
+
+    /** Optional transport for the external Runtime protocol; absence retains direct HTTP. */
+    public default Optional<RuntimeTransport> externalRuntimeTransport() {
+        return Optional.empty();
     }
 
     /** Optional same-process placement port; absence retains the external HTTP transport. */

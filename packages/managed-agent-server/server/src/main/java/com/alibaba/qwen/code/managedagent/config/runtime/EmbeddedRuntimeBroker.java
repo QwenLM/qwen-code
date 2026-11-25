@@ -129,6 +129,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh,
             com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository, workspaceExecutionStore,
+                publications, publicationData, jdbc, manager, ssh, externalRuntime, null);
+    }
+
+    public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository, JdbcWorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications, ToolPublicationDataStore publicationData,
+            org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh,
+            com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime,
+            RuntimeTransport externalRuntimeTransport) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -182,6 +194,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             @Override
             public java.util.Optional<com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient> externalRuntime() {
                 return java.util.Optional.ofNullable(externalRuntime);
+            }
+
+            @Override
+            public java.util.Optional<RuntimeTransport> externalRuntimeTransport() {
+                return java.util.Optional.ofNullable(externalRuntimeTransport);
             }
 
             @Override
