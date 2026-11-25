@@ -167,6 +167,7 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   SessionResetPendingError,
+  SystemOverloadedError,
   TotalSessionLimitExceededError,
   WorkspaceDrainingError,
   WorkspaceMismatchError,
@@ -919,6 +920,15 @@ const EXPECTED_REGISTERED_FEATURES = [
         feature,
         'hosted_harness_private_v1',
         'managed_session_journal_delta_v1',
+      ];
+    }
+    if (feature === 'workspace_file_upload') {
+      return [
+        feature,
+        'turn_skill_file_snapshot',
+        'turn_skill_session_effects_check',
+        'turn_extension_store_lease',
+        'session_retire_if_idle',
       ];
     }
     if (feature === 'workspace_skills') {
@@ -3747,6 +3757,38 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'session_retire_if_idle') {
+          expect(predicate({ sessionRetireIfIdleAvailable: true })).toBe(true);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              sessionRetireIfIdleAvailable: true,
+            }),
+          ).toContain(feature);
+          continue;
+        }
+        if (feature === 'turn_extension_store_lease') {
+          expect(predicate({ turnExtensionStoreLeaseAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({})).toBe(false);
+          continue;
+        }
+        if (
+          feature === 'turn_skill_file_snapshot' ||
+          feature === 'turn_skill_session_effects_check'
+        ) {
+          expect(predicate({ turnSkillFileSnapshotAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              turnSkillFileSnapshotAvailable: true,
+            }),
+          ).toContain(feature);
           continue;
         }
         if (feature === 'require_auth') {
@@ -16055,6 +16097,64 @@ describe('createServeApp', () => {
       }
     });
 
+    it('refuses a fresh worktree session before creating a worktree while overloaded', async () => {
+      const createUserWorktree = vi.fn().mockResolvedValue({
+        success: true,
+        worktree: {
+          path: `${WS_BOUND}/.qwen/worktrees/overloaded`,
+          branch: '',
+        },
+      });
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new SystemOverloadedError('cpu_load', 2.5, 20);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          getLoadAdmissionSnapshot: () => ({
+            enabled: true,
+            overloaded: true,
+            reason: 'cpu_load',
+            loadRatio: 2.5,
+            eventLoopLagP99Ms: 20,
+            sampledAtMs: 1_000,
+          }),
+        },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree,
+        removeUserWorktree: () => Promise.resolve(),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'overloaded' } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 20,
+        });
+        expect(createUserWorktree).not.toHaveBeenCalled();
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
     it('500 when worktree creation fails without a typed code (R12-1)', async () => {
       // A genuine environment fault carries no code and stays a 500: the
       // merge-state 409 must not swallow real daemon failures.
@@ -17209,6 +17309,66 @@ describe('createServeApp', () => {
         expect(bridge.calls[0].worktree).toBeUndefined();
       } finally {
         mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('refuses a fresh branch before git mutation while overloaded', async () => {
+      const rollbackCalls: string[] = [];
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new SystemOverloadedError('cpu_load', 2.5, 20);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          getLoadAdmissionSnapshot: () => ({
+            enabled: true,
+            overloaded: true,
+            reason: 'cpu_load',
+            loadRatio: 2.5,
+            eventLoopLagP99Ms: 20,
+            sampledAtMs: 1_000,
+          }),
+        },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+      mockBranchOps.checkoutRef = () => {
+        rollbackCalls.push('checkout');
+        return Promise.resolve();
+      };
+      mockBranchOps.deleteBranch = () => {
+        rollbackCalls.push('delete');
+        return Promise.resolve();
+      };
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/overloaded' } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 20,
+        });
+        expect(rollbackCalls).toEqual([]);
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        mockBranchOps.checkoutRef = undefined;
+        mockBranchOps.deleteBranch = undefined;
       }
     });
 
@@ -21490,6 +21650,307 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(2);
       // The key is route-level admission metadata, never prompt content.
       expect(bridge.promptCalls[0]?.req).not.toHaveProperty('idempotencyKey');
+    });
+
+    it('requires proof from the admission runtime before accepting the skill effects check', async () => {
+      const bridge = fakeBridge();
+      bridge.updateTurnSkillLease = vi.fn(async () => ({
+        digest: 'd'.repeat(64),
+      }));
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const submit = (pinSkills: boolean) =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'guarded' }],
+            pinSkills,
+            requireSessionSkillEffects: true,
+          });
+      expect((await submit(false)).status).toBe(400);
+      const declined = await submit(true);
+      expect(declined.status).toBe(409);
+      expect(declined.body).toMatchObject({
+        code: 'turn_skill_session_effects_unavailable',
+        sessionId: 'session-A',
+        definitivelyNotStarted: true,
+      });
+      expect(bridge.updateTurnSkillLease).toHaveBeenLastCalledWith(
+        'session-A',
+        expect.any(String),
+        'release',
+      );
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it('admits only a confirmed extension generation and binds retries to it', async () => {
+      const bridge = fakeBridge();
+      const digest = 'c'.repeat(64);
+      bridge.updateTurnSkillLease = vi.fn(
+        async (_session, _key, action, _digest, generation) => {
+          if (action === 'prepare' && generation === 7)
+            return { digest, extensionGeneration: 7 };
+          if (action === 'prepare' && generation === 5)
+            return { unsupportedExtensionComponent: true as const };
+          return {};
+        },
+      );
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const sid = 'session-A';
+      const submit = (generation: number, idempotencyKey: string) =>
+        request(app)
+          .post(`/session/${sid}/prompt`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'extension prompt' }],
+            pinSkills: true,
+            pinExtensions: true,
+            expectedExtensionGeneration: generation,
+            idempotencyKey,
+          });
+      const unmanaged = await submit(5, 'unmanaged');
+      expect(unmanaged.status).toBe(409);
+      expect(unmanaged.body).toMatchObject({
+        code: 'turn_extension_component_unsupported',
+        sessionId: sid,
+        definitivelyNotStarted: true,
+      });
+      const unavailable = await submit(6, 'not-admitted');
+      expect(unavailable.status).toBe(409);
+      expect(unavailable.body).toMatchObject({
+        code: 'turn_extension_generation_unavailable',
+        sessionId: sid,
+        definitivelyNotStarted: true,
+      });
+      expect(bridge.promptCalls).toHaveLength(0);
+      const first = await submit(7, 'same');
+      expect(first.status).toBe(202);
+      expect(first.body.extensionGeneration).toBe(7);
+      expect((await submit(7, 'same')).body).toMatchObject({
+        extensionGeneration: 7,
+        promptId: first.body.promptId,
+        deduplicated: true,
+      });
+      expect((await submit(8, 'same')).status).toBe(409);
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('replays the pinned admission cursor after later events and fences an epoch change', async () => {
+      let cursor = 3;
+      let epoch = 'first-epoch';
+      const bridge = fakeBridge({
+        getSessionLastEventIdImpl: () => cursor,
+        getSessionEventEpochImpl: () => epoch,
+      });
+      bridge.updateTurnSkillLease = vi.fn(async () => ({
+        digest: 'a'.repeat(64),
+      }));
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const submit = () =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            pinSkills: true,
+            idempotencyKey: 'pin-replay-cursor',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+      const first = await submit();
+      expect(first.status).toBe(202);
+      cursor = 10;
+      const replay = await submit();
+      expect(replay.body).toMatchObject({
+        promptId: first.body.promptId,
+        lastEventId: 3,
+        eventEpoch: epoch,
+        deduplicated: true,
+      });
+      epoch = 'another-epoch';
+      const stale = await submit();
+      expect(stale.status).toBe(409);
+      expect(stale.body.code).toBe('turn_skill_receipt_conflict');
+      expect(stale.body.definitivelyNotStarted).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('pins one skill snapshot for concurrent retries and returns its original receipt', async () => {
+      const digest = 'a'.repeat(64);
+      const bridge = fakeBridge();
+      let completeCapture!: () => void;
+      const capturing = new Promise<void>((resolve) => {
+        completeCapture = resolve;
+      });
+      const update = vi.fn(
+        async (_session: string, _key: string, action: string) => {
+          if (action === 'prepare') {
+            await capturing;
+            return { digest };
+          }
+          return {};
+        },
+      );
+      bridge.updateTurnSkillLease = update;
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const capability = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(capability.body.features).toContain('turn_skill_file_snapshot');
+      const body = {
+        prompt: [{ type: 'text', text: 'pinned' }],
+        pinSkills: true,
+        idempotencyKey: 'pin-1',
+        expectedSkillDigest: digest,
+      };
+      const submit = (params = body) =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send(params);
+      const first = submit().then((response) => response);
+      const retry = submit().then((response) => response);
+      try {
+        await vi.waitFor(() => expect(update).toHaveBeenCalled());
+      } finally {
+        completeCapture();
+      }
+      const receipts = await Promise.all([first, retry]);
+      expect(receipts.map((r) => r.status)).toEqual([202, 202]);
+      expect(receipts.map((r) => r.body.skillDigest)).toEqual([digest, digest]);
+      expect(new Set(receipts.map((r) => r.body.promptId)).size).toBe(1);
+      expect(receipts.filter((r) => r.body.deduplicated)).toHaveLength(1);
+      expect(
+        update.mock.calls.filter(([, , action]) => action === 'prepare'),
+      ).toHaveLength(1);
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('pinSkills');
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty(
+        'expectedSkillDigest',
+      );
+
+      const wrong = await submit({
+        ...body,
+        expectedSkillDigest: 'b'.repeat(64),
+      });
+      expect(wrong.status).toBe(409);
+      expect(wrong.body.code).toBe('turn_skill_receipt_conflict');
+      const differentPayload = await submit({
+        ...body,
+        prompt: [{ type: 'text', text: 'other' }],
+      });
+      expect(differentPayload.status).toBe(409);
+      const mismatchedNew = await submit({
+        ...body,
+        idempotencyKey: 'pin-other',
+        expectedSkillDigest: 'b'.repeat(64),
+      });
+      expect(mismatchedNew.status).toBe(409);
+      expect(mismatchedNew.body.code).toBe('turn_skill_digest_mismatch');
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('returns exact retirement identities, busy refusal, and the stored receipt', async () => {
+      const sessionId = 'session-A';
+      const eventEpoch = '869de41b-bf9e-44ee-aa21-ab64a3af220a';
+      const operationId = '4279fbbe-7845-49a8-87fe-9cd4cc61b19c';
+      const pathName = `/session/${sessionId}/retirements/${operationId}`;
+      const bridge = fakeBridge({
+        getSessionEventEpochImpl: () => eventEpoch,
+        summaryImpl: () => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-11-01T00:00:00Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      let busy = true;
+      let fsyncPending = true;
+      let received:
+        | Awaited<ReturnType<NonNullable<typeof bridge.retireSessionIfIdle>>>
+        | undefined;
+      bridge.getSessionRetirement = (id, operation) =>
+        id === sessionId && (!operation || operation === operationId)
+          ? received
+          : undefined;
+      bridge.retireSessionIfIdle = vi.fn(async (identity) => {
+        if (busy)
+          throw Object.assign(new Error('held'), {
+            code: 'session_retire_busy',
+          });
+        received = fsyncPending
+          ? { ...identity, state: 'retiring', awaitingFenceSync: true }
+          : { ...identity, state: 'retired' };
+        return received;
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const host = `127.0.0.1:${baseOpts.port}`;
+      const caps = await request(app).get('/capabilities').set('Host', host);
+      expect(caps.body.features).toContain('session_retire_if_idle');
+      const status = await request(app)
+        .get(`/session/${sessionId}/status`)
+        .set('Host', host);
+      expect(status.status).toBe(200);
+      expect(status.body).toMatchObject({ sessionId, eventEpoch });
+      const put = () =>
+        request(app)
+          .put(pathName)
+          .set('Host', host)
+          .send({ expectedEventEpoch: eventEpoch });
+      const refused = await put();
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({
+        sessionId,
+        eventEpoch,
+        operationId,
+        definitivelyNotStarted: true,
+        code: 'session_retire_busy',
+      });
+      expect((await request(app).get(pathName).set('Host', host)).status).toBe(
+        404,
+      );
+      busy = false;
+      const pending = await put();
+      expect(pending.status).toBe(202);
+      expect(pending.body).toEqual({
+        sessionId,
+        eventEpoch,
+        operationId,
+        state: 'retiring',
+        awaitingFenceSync: true,
+      });
+      expect((await request(app).get(pathName).set('Host', host)).body).toEqual(
+        pending.body,
+      );
+      expect(bridge.retireSessionIfIdle).toHaveBeenCalledTimes(2);
+      fsyncPending = false;
+      const accepted = await put();
+      expect(accepted.status).toBe(200);
+      expect(accepted.body).toEqual({
+        sessionId,
+        eventEpoch,
+        operationId,
+        state: 'retired',
+      });
+      expect((await put()).body).toEqual(accepted.body);
+      expect((await request(app).get(pathName).set('Host', host)).body).toEqual(
+        accepted.body,
+      );
+      expect(bridge.retireSessionIfIdle).toHaveBeenCalledTimes(3);
     });
 
     it('scopes idempotency keys per session (W4)', async () => {
@@ -30591,6 +31052,233 @@ describe('createServeApp', () => {
             entry.startsWith('.branch-worktree-'),
           ),
         ).toEqual([]);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses a worktree branch with 503 system_overloaded before creating a worktree or committing when overloaded', async () => {
+      const repo = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-overload-pre-'),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-overload-rt-'),
+      );
+      const slug = 'overload-pre';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const baseCommit = stdout.trim();
+        mockBranchOps.getHeadCommit = async () => baseCommit;
+        const createUserWorktree = vi.fn();
+        mockWt.impl = () => ({
+          isGitRepository: async () => true,
+          getRepoTopLevel: async () => repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree,
+        });
+        const branchSession = vi.fn();
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: repo,
+        });
+        bridge.branchSession = branchSession;
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-overload-pre',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          {
+            workspaceRegistry: createWorkspaceRegistry([runtime]),
+            getLoadAdmissionSnapshot: () => ({
+              enabled: true,
+              overloaded: true,
+              reason: 'cpu_load',
+              loadRatio: 2.6,
+              eventLoopLagP99Ms: 18,
+              sampledAtMs: 1_000,
+            }),
+          },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.6,
+          eventLoopLagP99Ms: 18,
+        });
+        expect(createUserWorktree).not.toHaveBeenCalled();
+        expect(branchSession).not.toHaveBeenCalled();
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('preserves 503 system_overloaded when loadSession refuses after worktree branch publication', async () => {
+      const repo = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-overload-race-'),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-overload-race-rt-'),
+      );
+      const slug = 'overload-race';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const baseCommit = stdout.trim();
+        mockBranchOps.getHeadCommit = async () => baseCommit;
+        mockWt.impl = () => ({
+          isGitRepository: async () => true,
+          getRepoTopLevel: async () => repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree: async () => {
+            await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
+            await execFileAsync(
+              'git',
+              ['worktree', 'add', '--detach', worktreePath, baseCommit],
+              { cwd: repo },
+            );
+            return {
+              success: true,
+              worktree: { slug, path: worktreePath, branch: '' },
+            };
+          },
+        });
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+          loadImpl: async () => {
+            throw new SystemOverloadedError('cpu_load', 2.8, 30);
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: repo,
+        });
+        bridge.branchSession = vi.fn(async (_src, req) => ({
+          sessionId: req.targetSessionId!,
+          workspaceCwd: repo,
+          displayName: 'Branched',
+          forkedFrom: 'source-session',
+        })) as unknown as AcpSessionBridge['branchSession'];
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-overload-race',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.8,
+          eventLoopLagP99Ms: 30,
+          // The branch + worktree are committed before the refusing
+          // loadSession; the body must expose the branched id so the
+          // caller can rehydrate the same child once load subsides
+          // (retrying the slug would otherwise hit worktree_exists).
+          sessionId: expect.any(String),
+        });
+        expect(res.body.sessionId).not.toBe('source-session');
       } finally {
         mockWt.impl = undefined;
         mockBranchOps.getHeadCommit = undefined;
@@ -41979,6 +42667,47 @@ describe('createServeApp', () => {
           route: 'POST /session',
           limit: 10,
           scope: 'total',
+        }),
+      );
+    });
+
+    it('503 + Retry-After 15 + readings and daemon log when bridge throws SystemOverloadedError', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw Object.assign(new SystemOverloadedError('cpu_load', 2.5, 120), {
+            operation: 'spawn',
+            workspaceCwd: '/work/a',
+            sourceSessionId: 'sess-src',
+          });
+        },
+      });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        daemonLog,
+      });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('15');
+      expect(res.body).toMatchObject({
+        code: 'system_overloaded',
+        reason: 'cpu_load',
+        loadRatio: 2.5,
+        eventLoopLagP99Ms: 120,
+      });
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'load admission rejected',
+        expect.objectContaining({
+          route: 'POST /session',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 120,
+          operation: 'spawn',
+          workspaceCwd: '/work/a',
+          sourceSessionId: 'sess-src',
         }),
       );
     });

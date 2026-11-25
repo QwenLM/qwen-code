@@ -281,6 +281,7 @@ interface ServeArgs {
   token?: string;
   'max-sessions'?: number;
   'max-total-sessions'?: number;
+  'load-admission': boolean;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'max-sse-connections'?: number;
@@ -417,6 +418,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Non-negative integer cap on concurrent live sessions across all ' +
           'workspace runtimes. Set to 0 to disable.',
+      })
+      .option('load-admission', {
+        type: 'boolean',
+        default: true,
+        description:
+          'Refuse new sessions with 503 system_overloaded while host load ' +
+          'or daemon event-loop lag stays saturated. Live sessions and the ' +
+          'control plane are never gated. Use --no-load-admission to disable.',
       })
       .option('max-pending-prompts-per-session', {
         type: 'number',
@@ -1248,6 +1257,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['max-total-sessions'] !== undefined
           ? { maxTotalSessions: argv['max-total-sessions'] }
           : {}),
+        loadAdmission: argv['load-admission'],
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         ...(argv['max-sse-connections'] !== undefined

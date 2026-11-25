@@ -23,6 +23,7 @@ export type ExtensionRuntimeRefreshConfig = Pick<
 
 export async function refreshExtensionRuntime(
   config: ExtensionRuntimeRefreshConfig | undefined,
+  onIncomplete?: () => void,
 ): Promise<void> {
   if (!config) return;
 
@@ -63,6 +64,7 @@ export async function refreshExtensionRuntime(
 
   settled.forEach((result, index) => {
     if (result.status === 'rejected') {
+      onIncomplete?.();
       debugLogger.warn(
         `refreshExtensionRuntime: ${refreshLegs[index].name} failed:`,
         result.reason,
@@ -85,6 +87,7 @@ export async function refreshExtensionRuntime(
   try {
     await config.refreshHierarchicalMemory();
   } catch (err) {
+    onIncomplete?.();
     debugLogger.warn(
       'refreshExtensionRuntime: refreshHierarchicalMemory failed:',
       err,

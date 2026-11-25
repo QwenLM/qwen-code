@@ -316,6 +316,94 @@ describe('withChildAgentConsumption', () => {
   });
 });
 
+describe('interrupted approval resume', () => {
+  function attempted() {
+    const { session, agents } = world();
+    session.managed.sink.project.mockResolvedValue([
+      { daemonPromptId: TURN.turnId } as unknown as ChatRecord,
+    ]);
+    return { session, agents };
+  }
+
+  function resuming(
+    session: ReturnType<typeof world>['session'],
+    resume: (abort: AbortController) => Promise<unknown>,
+    cancelled = false,
+  ) {
+    const fresh = vi.fn();
+    const runTurn = createMonitorWakeRunTurn({
+      session,
+      sessionId: 'session-1',
+      cwd: '/work',
+      executeHostedTurn: fresh,
+      busy: () => false,
+      cancelled: async () => cancelled,
+      needsRecovery: (cause) =>
+        cause instanceof HostedToolRecoveryRequiredError,
+      resumeInterrupted: async () => resume,
+      writeStderr: () => {},
+    });
+    return { runTurn, fresh };
+  }
+
+  it('runs the saved continuation instead of the crash path and consumes on completion', async () => {
+    const { session, agents } = attempted();
+    let active: unknown;
+    const { runTurn, fresh } = resuming(session, async () => {
+      active = (session as { active?: { promptId: string } }).active;
+      return { systemPayload: { state: 'completed' } };
+    });
+    await expect(
+      withChildAgentConsumption(runTurn, session)(TURN),
+    ).resolves.toBe('settled');
+    expect(active).toMatchObject({ promptId: TURN.turnId });
+    expect(fresh).not.toHaveBeenCalled();
+    expect(session.blocked).toBe(false);
+    expect(agents.markConsumed).toHaveBeenCalledOnce();
+  });
+
+  it('resumes a cancelled source already aborted and blocks a resume that needs recovery again', async () => {
+    const cancelled = attempted();
+    let aborted: boolean | undefined;
+    await expect(
+      resuming(
+        cancelled.session,
+        async (abort) => {
+          aborted = abort.signal.aborted;
+          return { systemPayload: { state: 'cancelled' } };
+        },
+        true,
+      ).runTurn(TURN),
+    ).resolves.toBe('settled_incomplete');
+    expect(aborted).toBe(true);
+    const lost = attempted();
+    await expect(
+      resuming(lost.session, async () => {
+        throw new HostedToolRecoveryRequiredError(new Error('tool lost'));
+      }).runTurn(TURN),
+    ).resolves.toBe('recovery');
+    expect(lost.session.blocked).toBe(true);
+  });
+
+  it('retries on the busy cadence when the continuation cannot be read', async () => {
+    const { session } = attempted();
+    const runTurn = createMonitorWakeRunTurn({
+      session,
+      sessionId: 'session-1',
+      cwd: '/work',
+      executeHostedTurn: vi.fn(),
+      busy: () => false,
+      needsRecovery: () => false,
+      resumeInterrupted: async () => {
+        throw new Error('Store offline');
+      },
+      writeStderr: () => {},
+    });
+    await expect(runTurn(TURN)).resolves.toBe('busy');
+    expect(session.blocked).toBe(false);
+  });
+});
+
 describe('loop fire-time delivery path', () => {
   const LOOP_TURN: HostedMonitorWakeTurn = {
     turnId: 'loop:wakeup-1',

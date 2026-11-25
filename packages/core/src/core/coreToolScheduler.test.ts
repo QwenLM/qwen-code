@@ -1331,6 +1331,7 @@ describe('CoreToolScheduler', () => {
     approvalMode?: ApprovalMode;
     getApprovalMode?: () => ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
+    persistPermissionRule?: ReturnType<typeof vi.fn>;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     hookSystem?: { runtimeId?: string; firePermissionDeniedEvent: Mock };
     disableHooks?: boolean;
@@ -1364,7 +1365,10 @@ describe('CoreToolScheduler', () => {
       Partial<
         Pick<
           PermissionManager,
-          'hasRelevantRules' | 'hasMatchingAskRule' | 'evaluate'
+          | 'hasRelevantRules'
+          | 'hasMatchingAskRule'
+          | 'evaluate'
+          | 'addSessionAllowRule'
         >
       >;
     deferredHiddenNames?: ReadonlySet<string>;
@@ -1415,6 +1419,7 @@ describe('CoreToolScheduler', () => {
           setApprovalMode: options.setApprovalMode ?? vi.fn(),
           getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
           getPermissionManager: () => options.permissionManager,
+          getOnPersistPermissionRule: () => options.persistPermissionRule,
           getEffectiveInputModalities: () =>
             options.visionBridge || options.visionAgent ? {} : { image: true },
           getDefaultVisionBridgeModel: () =>
@@ -5818,24 +5823,37 @@ describe('CoreToolScheduler', () => {
         ['an allow', { behavior: 'allow' }, { value: 'a' }],
         [
           'an allow with a replacement',
-          { behavior: 'allow', updatedInput: { value: 'c' } },
+          {
+            behavior: 'allow',
+            updatedInput: { value: 'c' },
+            updatedPermissions: [
+              {
+                type: 'addRules',
+                rules: [{ toolName: 'WebFetch' }],
+                behavior: 'allow',
+                destination: 'projectSettings',
+              },
+            ],
+          },
           { value: 'c' },
         ],
       ])(
         'still asks the user after %s',
         async (_label, decision, expectedArgs) => {
           const execute = vi.fn().mockResolvedValue(textResult('ran'));
+          const persistPermissionRule = vi.fn().mockResolvedValue(undefined);
           const messageBus = rewriteHookBus(ask, decision);
           const { onToolCallsUpdate, onAllToolCallsComplete } = await runOne(
             askTool(execute),
             messageBus,
             { value: 'a' },
-            { approvalMode: ApprovalMode.YOLO },
+            { approvalMode: ApprovalMode.YOLO, persistPermissionRule },
           );
 
           const waiting = await waitForApproval(onToolCallsUpdate);
           expect(waiting.request.args).toEqual(expectedArgs);
           expect(execute).not.toHaveBeenCalled();
+          expect(persistPermissionRule).not.toHaveBeenCalled();
           await waiting.confirmationDetails.onConfirm(
             ToolConfirmationOutcome.ProceedOnce,
           );
@@ -5844,6 +5862,7 @@ describe('CoreToolScheduler', () => {
             'success',
           );
           expect(execute.mock.calls).toEqual([[expectedArgs]]);
+          expect(persistPermissionRule).not.toHaveBeenCalled();
           expect(hookEvents(messageBus, 'PreToolUse')).toHaveLength(1);
           expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
         },
@@ -6841,6 +6860,63 @@ describe('CoreToolScheduler', () => {
     expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState());
     expect(execute).toHaveBeenCalledOnce();
   });
+
+  it.each([false, true])(
+    'adds the rules a PermissionRequest hook returns with its allow (replacement: %s)',
+    async (replaceInput) => {
+      const addSessionAllowRule = vi.fn();
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+
+      await scheduleAndSettle(
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(
+            askingTool({
+              kind: Kind.Execute,
+              getConfirmationDetails: vi
+                .fn()
+                .mockResolvedValue(
+                  execDetails(
+                    'Run command',
+                    'npm test',
+                    'npm',
+                    vi.fn().mockResolvedValue(undefined),
+                  ),
+                ),
+              execute,
+            }),
+          ),
+          approvalMode: ApprovalMode.DEFAULT,
+          permissionManager: {
+            isToolEnabled: vi.fn().mockResolvedValue(true),
+            findMatchingDenyRule: () => undefined,
+            hasRelevantRules: () => false,
+            evaluate: vi.fn().mockResolvedValue('default'),
+            hasMatchingAskRule: () => false,
+            addSessionAllowRule,
+          },
+          messageBus: permissionRequestHookBus({
+            behavior: 'allow',
+            ...(replaceInput && { updatedInput: { command: 'npm test' } }),
+            updatedPermissions: [
+              {
+                type: 'addRules',
+                rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
+                behavior: 'allow',
+                destination: 'session',
+              },
+            ],
+          }),
+          disableHooks: false,
+        }),
+        shellRequest('hook-permission-updates', 'npm test'),
+      );
+
+      expect(addSessionAllowRule).toHaveBeenCalledExactlyOnceWith(
+        'Bash(npm test)',
+      );
+      expect(execute).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each(['permission-request', 'execution-guard'] as const)(
     'blocks a current-workspace ask added at %s',
@@ -10957,6 +11033,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
     interactive?: boolean;
     ideMode?: boolean;
     permissionManager?: unknown;
+    persistPermissionRule?: ReturnType<typeof vi.fn>;
     messageBus?: MessageBus;
     disableHooks?: boolean;
     avoidPermissionPrompts?: boolean;
@@ -10994,7 +11071,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
           getDisableAllHooks: () => options.disableHooks ?? true,
           getShouldAvoidPermissionPrompts: () =>
             options.avoidPermissionPrompts ?? false,
-          getOnPersistPermissionRule: () => undefined,
+          getOnPersistPermissionRule: () => options.persistPermissionRule,
           getToolInvocationGuard: () => options.toolInvocationGuard,
         },
       ),
@@ -11531,6 +11608,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
   it('rejects PermissionRequest hook parameter rewrites', async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     const execute = vi.fn();
+    const persistPermissionRule = vi.fn().mockResolvedValue(undefined);
     const messageBus = {
       request: vi.fn().mockResolvedValue(
         hookResponse('permission-hook', {
@@ -11538,6 +11616,14 @@ describe('CoreToolScheduler Plan shell routing', () => {
             decision: {
               behavior: 'allow',
               updatedInput: { command: 'touch changed.txt' },
+              updatedPermissions: [
+                {
+                  type: 'addRules',
+                  rules: [{ toolName: 'WebFetch' }],
+                  behavior: 'allow',
+                  destination: 'projectSettings',
+                },
+              ],
             },
           },
         }) satisfies HookExecutionResponse,
@@ -11550,6 +11636,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
         ],
         messageBus,
         disableHooks: false,
+        persistPermissionRule,
       },
       request('hook-rewrite', PYTHON),
     );
@@ -11559,6 +11646,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       expect.stringContaining('exact invocation changed'),
     );
     expect(execute).not.toHaveBeenCalled();
+    expect(persistPermissionRule).not.toHaveBeenCalled();
   });
 
   it('revalidates Plan shell context after a pending permission hook', async () => {
@@ -12739,6 +12827,61 @@ describe('CoreToolScheduler telemetry spans', () => {
       expect(responseText).not.toContain('User intentionally cancelled');
     },
   );
+
+  describe('a result kept when its call is cancelled', () => {
+    const moved: ToolResult = {
+      ...textResult('moved as bg_0123abcd'),
+      keptWhenCancelled: true,
+    };
+    const expectKept = (
+      call: ToolCall,
+      executionStatus: ToolExecutionStatus,
+    ) => {
+      const completedCall = expectSettled(call, 'cancelled', executionStatus);
+      expect(completedCall.response.responseParts).toMatchObject([
+        {
+          functionResponse: {
+            id: completedCall.request.callId,
+            name: 'mockTool',
+            response: { output: 'moved as bg_0123abcd' },
+          },
+        },
+      ]);
+    };
+
+    it('survives a cancellation that lands while PostToolUse runs', async () => {
+      const abort = new AbortController();
+      const entered = deferred<HookRequest>();
+      const releaseHook = deferred<HookExecutionResponse>();
+      const { scheduler, onAllToolCallsComplete } = buildScheduler({
+        hooks: hookBus((request) => {
+          if (request.eventName === 'PostToolUse') {
+            entered.resolve(request);
+            return releaseHook.promise;
+          }
+          return hookResponse(request.eventName, {});
+        }),
+        execute: vi.fn().mockResolvedValue(moved),
+      });
+      const scheduled = scheduler.schedule(
+        mockToolRequest('cancelled-during-post-hook'),
+        abort.signal,
+      );
+      await entered.promise;
+      abort.abort();
+      releaseHook.resolve(hookResponse('PostToolUse', {}));
+      await scheduled;
+
+      const [call] = await settledLastBatch(onAllToolCallsComplete);
+      expectKept(call, 'success');
+    });
+
+    it('survives a cancellation that lands before the result', async () => {
+      const { call } = await runAbortedDuringExecution({}, moved);
+
+      expectKept(call, 'cancelled');
+    });
+  });
 
   it.each([
     {
@@ -17092,7 +17235,7 @@ describe('CoreToolScheduler activation wiring', () => {
 });
 
 describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => {
-  it('stashes promoteAbortController on the executing tool call when shell.ts fires the callback', async () => {
+  it('publishes the foreground process and clears it when the shell releases it', async () => {
     // PR-3's Ctrl+B keybind aborts the executing shell call's
     // `promoteAbortController`; if the scheduler stops populating it the keybind
     // silently breaks, which direct ShellToolInvocation tests cannot see.
@@ -17102,14 +17245,16 @@ describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => 
         _signal: AbortSignal,
         _updateOutput?: (output: ToolResultDisplay) => void,
         _shellExecutionConfig?: ShellExecutionConfig,
-        _setPidCallback?: (pid: number) => void,
-        setPromoteAbortControllerCallback?: (ac: AbortController) => void,
+        setPidCallback?: (pid: number) => void,
+        setPromoteAbortControllerCallback?: (
+          ac: AbortController | undefined,
+        ) => void,
       ): Promise<ToolResult> {
-        // Like foreground shell.ts: fire the callback right after spawn, then
-        // (here, immediately) complete with a benign success.
         const ac = new AbortController();
         exposedAc = ac;
+        setPidCallback?.(12345);
         setPromoteAbortControllerCallback?.(ac);
+        setPromoteAbortControllerCallback?.(undefined);
         return textResult('ok');
       }
     }
@@ -17151,16 +17296,24 @@ describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => 
 
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
 
-    // Update ordering varies, but at SOME point while 'executing' the field must
-    // be populated, or PR-3's Ctrl+B keybind has nothing to abort.
-    const sawPromoteAcWhileExecuting = reportedCalls(onToolCallsUpdate).some(
-      (tc) =>
-        tc.request.callId === 'shell-1' &&
-        tc.status === 'executing' &&
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (tc as any).promoteAbortController === exposedAc,
+    const executing = reportedCalls(onToolCallsUpdate).filter(
+      (call) =>
+        call.request.callId === 'shell-1' && call.status === 'executing',
     );
-    expect(sawPromoteAcWhileExecuting).toBe(true);
+    // The exact controller the shell combined into its signal, not a copy.
+    expect(exposedAc).toBeInstanceOf(AbortController);
+    expect(
+      executing.some(
+        (call) =>
+          call.status === 'executing' &&
+          call.pid === 12345 &&
+          call.promoteAbortController === exposedAc,
+      ),
+    ).toBe(true);
+    expect(executing.at(-1)).toMatchObject({
+      pid: undefined,
+      promoteAbortController: undefined,
+    });
   });
 });
 

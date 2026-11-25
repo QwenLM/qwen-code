@@ -30,13 +30,17 @@ import { isolateOperatorReviewSettings } from './test-utils.js';
 import * as environment from '../../../config/environment.js';
 import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from '../../../config/shared-env-keys.js';
 import {
+  CONTAINER_PIDS_LIMIT,
   containerCommand,
   containerCommandEnv,
+  describeExecutionBoundary,
   firstAnsweringRuntime,
   killContainer,
+  reapContainer,
   containerPathFor,
   hasRootlessMarker,
   readInfoDocument,
+  refuseHostExecutionPhase,
   runtimeIsRootless,
   boxedRunLeftContainer,
   CONTAINER_HOME,
@@ -1113,5 +1117,245 @@ describe('reviewSandboxImage', () => {
     ) as { config?: { sandboxImageUri?: string } };
     expect(manifest.config?.sandboxImageUri).toBeTruthy();
     expect(reviewSandboxImage({})).toBe(manifest.config?.sandboxImageUri);
+  });
+});
+
+describe('tiered sandbox, container hardening, and verifiable reap', () => {
+  it('ranks tiered stricter than required and blocks repository env keys in hardcoded exclusions', () => {
+    expect(
+      sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'tiered' }, { sandbox: 'required' }),
+    ).toBe('tiered');
+    expect(
+      sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'required' }, { sandbox: 'tiered' }),
+    ).toBe('tiered');
+    for (const key of [
+      'QWEN_REVIEW_SANDBOX',
+      'QWEN_REVIEW_SANDBOX_IMAGE',
+      'QWEN_REVIEW_SANDBOX_BACKEND',
+      'QWEN_REVIEW_FORCE_HARDWARE',
+      'QWEN_REVIEW_VM_KERNEL',
+      'QWEN_REVIEW_VM_ROOTFS',
+      'QWEN_REVIEW_PROVIDER_VM_DRIVER',
+      'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
+      'QWEN_REVIEW_FCSANDBOX_TEMPLATE',
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
+  it('adds least-privilege hardening flags to every containerCommand', () => {
+    const { args } = containerCommand('npm test', {
+      cwd: join(sep, 'repo', '.qwen', 'tmp', 'review-pr-1'),
+      tmpDir: join(sep, 'repo', '.qwen', 'tmp'),
+      kind: 'test',
+      runtime: 'docker',
+      image: 'example/image:tag',
+      rootless: false,
+      name: 'qwen-review-hardened',
+    });
+    expect(args).toContain('--cap-drop=ALL');
+    expect(args).toContain('--security-opt=no-new-privileges:true');
+    expect(args).toContain(`--pids-limit=${CONTAINER_PIDS_LIMIT}`);
+  });
+
+  it('reapContainer verifies container absence/stop and flags still-running containers as failed', () => {
+    const cleanRemoved = reapContainer('docker', 'c1', ((
+      _cmd: string,
+      a: string[],
+    ) =>
+      a[0] === 'rm'
+        ? { status: 0, stdout: '', stderr: '' }
+        : {
+            status: 1,
+            stdout: '',
+            stderr: 'No such container',
+          }) as typeof spawnSync);
+    expect(cleanRemoved.status).toBe('clean');
+
+    const cleanStopped = reapContainer('docker', 'c2', ((
+      _cmd: string,
+      a: string[],
+    ) =>
+      a[0] === 'rm'
+        ? { status: 0, stdout: '', stderr: '' }
+        : { status: 0, stdout: 'false\n', stderr: '' }) as typeof spawnSync);
+    expect(cleanStopped.status).toBe('clean');
+
+    const leaked = reapContainer('docker', 'c3', ((
+      _cmd: string,
+      a: string[],
+    ) =>
+      a[0] === 'rm'
+        ? { status: 0, stdout: '', stderr: '' }
+        : { status: 0, stdout: 'true\n', stderr: '' }) as typeof spawnSync);
+    expect(leaked.status).toBe('failed');
+    expect(leaked.detail).toContain('still running');
+
+    const throwing = reapContainer('docker', 'c4', (() => {
+      throw new Error('daemon gone');
+    }) as unknown as typeof spawnSync);
+    expect(throwing.status).toBe('failed');
+    expect(throwing.detail).toContain('daemon gone');
+
+    const daemonDown = reapContainer('docker', 'c5', ((
+      _cmd: string,
+      a: string[],
+    ) =>
+      a[0] === 'rm'
+        ? {
+            status: 1,
+            stdout: '',
+            stderr: 'Cannot connect to the Docker daemon',
+          }
+        : {
+            status: 1,
+            stdout: '',
+            stderr: 'Cannot connect to the Docker daemon',
+          }) as typeof spawnSync);
+    expect(daemonDown.status).toBe('failed');
+    expect(daemonDown.detail).toContain('Cannot connect to the Docker daemon');
+  });
+
+  it('tiered sandboxVerdict allows hardened container for low-risk collaborator PRs and refuses external/high-risk PRs even when Docker answers', () => {
+    const trusted = sandboxVerdict('tiered', {}, () => 'docker', {
+      isLocal: false,
+      isCrossRepository: false,
+      authorAssociation: 'COLLABORATOR',
+      changedFiles: [{ path: 'packages/cli/src/foo.ts' }],
+    });
+    expect(trusted).toEqual({ kind: 'container', runtime: 'docker' });
+
+    const external = sandboxVerdict('tiered', {}, () => 'docker', {
+      isLocal: false,
+      isCrossRepository: true,
+      authorAssociation: 'NONE',
+      changedFiles: [{ path: 'packages/cli/src/foo.ts' }],
+    });
+    expect(external.kind).toBe('refused');
+    if (external.kind === 'refused') {
+      expect(external.reason).toContain('hardware-isolated');
+      expect(external.reason).toContain('cross-repository-pr');
+    }
+
+    const highRisk = sandboxVerdict('tiered', {}, () => 'docker', {
+      isLocal: false,
+      isCrossRepository: false,
+      authorAssociation: 'OWNER',
+      changedFiles: [{ path: 'package.json' }],
+    });
+    expect(highRisk.kind).toBe('refused');
+    if (highRisk.kind === 'refused') {
+      expect(highRisk.reason).toContain('dependency-manifest:package.json');
+    }
+
+    const forced = sandboxVerdict(
+      'off',
+      { QWEN_REVIEW_FORCE_HARDWARE: '1' },
+      () => 'docker',
+      { isLocal: true, changedFiles: [{ path: 'src/a.ts' }] },
+      undefined,
+      () => false,
+    );
+    expect(forced.kind).toBe('refused');
+  });
+
+  it('refuseHostExecutionPhase allows off/auto and refuses required/tiered/forceHardware', () => {
+    expect(
+      refuseHostExecutionPhase({
+        policy: 'off',
+        env: {},
+        fileSourced: () => false,
+      }),
+    ).toBeNull();
+    expect(
+      refuseHostExecutionPhase({
+        policy: 'auto',
+        env: {},
+        fileSourced: () => false,
+      }),
+    ).toBeNull();
+    const reqMsg = refuseHostExecutionPhase({
+      policy: 'required',
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(reqMsg).toContain('review.sandbox is "required"');
+    expect(reqMsg).not.toContain('unknown-pr-trust');
+
+    const withTrustMsg = refuseHostExecutionPhase({
+      policy: 'tiered',
+      env: {},
+      trustContext: {
+        isLocal: false,
+        isCrossRepository: true,
+        changedFiles: [{ path: 'src/a.ts' }],
+      },
+      fileSourced: () => false,
+    });
+    expect(withTrustMsg).toContain('external -> hardware-isolated');
+    expect(withTrustMsg).toContain('cross-repository-pr');
+
+    expect(
+      refuseHostExecutionPhase({
+        policy: 'tiered',
+        env: {},
+        fileSourced: () => false,
+      }),
+    ).toContain('review.sandbox is "tiered"');
+    expect(
+      refuseHostExecutionPhase({
+        policy: 'off',
+        env: { QWEN_REVIEW_FORCE_HARDWARE: '1' },
+        fileSourced: () => false,
+      }),
+    ).toContain('QWEN_REVIEW_FORCE_HARDWARE=1');
+
+    const boundary = describeExecutionBoundary({
+      policy: 'tiered',
+      verdict: { kind: 'refused', reason: 'no hardware backend' },
+      trustContext: {
+        isLocal: false,
+        isCrossRepository: true,
+        changedFiles: [{ path: 'src/a.ts' }],
+      },
+      teardownStatus: 'not-applicable',
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(boundary).toEqual({
+      policy: 'tiered',
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      backend: 'refused',
+      escalationReasons: ['cross-repository-pr'],
+      teardownStatus: 'not-applicable',
+    });
+
+    const unclassified = describeExecutionBoundary({
+      policy: 'off',
+      backend: 'direct',
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(unclassified).toEqual({
+      policy: 'off',
+      prTrust: 'unknown',
+      executionClass: 'unclassified',
+      backend: 'direct',
+      escalationReasons: [],
+    });
+  });
+
+  it('handOffRefused also rejects unsupported hand-offs under tiered and forceHardware', () => {
+    expect(handOffRefused('unsupported', 'tiered', {}, () => false)).toBe(true);
+    expect(
+      handOffRefused(
+        'unsupported',
+        'off',
+        { QWEN_REVIEW_FORCE_HARDWARE: '1' },
+        () => false,
+      ),
+    ).toBe(true);
+    expect(handOffRefused('unsupported', 'auto', {}, () => false)).toBe(false);
   });
 });

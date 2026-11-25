@@ -43,12 +43,16 @@ final class ChildResultRelayQueries {
     // finished child where close is unavailable, and ahead of the page
     // they would keep a newer launch from ever being reached.
     // H2 otherwise retains the first branch limit across repeated executions.
-    static final String PENDING_SQL =
-            "SELECT pending.tenant_id, pending.session_id, pending.record_id, pending.revision, pending.delivery_state, pending.record_resource_id FROM ("
+    // The ledger's operation_id and the record_id it mirrors are both VARCHAR
+    // under utf8mb4_bin, so plain equality is byte-exact (admission bans the
+    // trailing spaces a PAD SPACE collation would fold).
+    static String pendingSql() {
+        return "SELECT pending.tenant_id, pending.session_id, pending.record_id, pending.revision, pending.delivery_state, pending.record_resource_id FROM ("
                     + " SELECT tenant_id, session_id, record_id, revision, delivery_state, record_resource_id, priority, gmt_create"
                     + " FROM (SELECT r.tenant_id, r.session_id, r.record_id, r.revision, r.delivery_state, r.record_resource_id,"
                     + " 0 AS priority, r.gmt_create FROM ma_session_record r LEFT JOIN ma_operation l"
-                    + " ON l.tenant_id = r.tenant_id AND l.session_id = r.session_id AND l.operation_id = r.record_id"
+                    + " ON l.tenant_id = r.tenant_id AND l.session_id = r.session_id AND "
+                    + "l.operation_id = r.record_id"
                     + " AND l.operation_kind = 'CHILD_SESSION_START' WHERE r.domain = 'child_run'"
                     + " AND r.task_kind IN " + CHILD_SESSION_KINDS_SQL
                     + " AND NOT EXISTS (SELECT 1 FROM ma_operation c WHERE c.tenant_id = r.tenant_id AND c.session_id = r.session_id"
@@ -71,4 +75,5 @@ final class ChildResultRelayQueries {
                     + " AND (o.claim_until IS NULL OR o.claim_until <= ? OR o.claim_owner = ?)"
                     + " ORDER BY o.gmt_create, o.session_id, o.operation_id LIMIT ?) close_work"
                     + " ) pending ORDER BY pending.priority, pending.gmt_create, pending.session_id, pending.record_id LIMIT ?";
+    }
 }

@@ -22,6 +22,7 @@ import {
   extractJsonStringField,
   unescapeJsonString,
 } from '../utils/sessionStorageUtils.js';
+import { isLifecycleUiTelemetryEvent } from '../utils/transcript-records.js';
 
 const debugLogger = createDebugLogger('USAGE_HISTORY');
 
@@ -409,9 +410,7 @@ async function summarizeTranscriptFile(
                 | undefined;
               if (
                 payload?.uiEvent &&
-                payload.uiEvent['event.name'] !== 'request_lifecycle' &&
-                payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
-                payload.uiEvent['event.name'] !== 'hook_lifecycle'
+                !isLifecycleUiTelemetryEvent(payload.uiEvent)
               ) {
                 telemetry.addEvent(payload.uiEvent);
                 hasEvents = true;
