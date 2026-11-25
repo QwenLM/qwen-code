@@ -12,17 +12,21 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @Repository
@@ -237,7 +241,7 @@ public class JdbcSshWorkspaceStore
     }
 
     /** A parked registration, or empty once it left the parked state. */
-    public java.util.Optional<Parked> parked(String tenant, String operationId) {
+    public Optional<Parked> parked(String tenant, String operationId) {
         return parkedRow(tenant, operationId, false);
     }
 
@@ -288,13 +292,13 @@ public class JdbcSshWorkspaceStore
                 Math.max(0, delayMillis), bytes(operationKey(tenant, operationId))) == 1;
     }
 
-    private java.util.Optional<Parked> parkedRow(String tenant, String operationId, boolean lock) {
+    private Optional<Parked> parkedRow(String tenant, String operationId, boolean lock) {
         var rows = WorkspaceOperations.rows(jdbc, "SELECT * FROM ma_operation WHERE operation_ref = ?"
                         + " AND operation_kind = 'WORKSPACE_CREATE' AND tenant_id = ? AND state = 'RECOVERY_BLOCKED'"
                         + (lock ? " FOR UPDATE" : ""),
                 bytes(operationKey(tenant, operationId)), tenant);
-        return rows.isEmpty() ? java.util.Optional.empty()
-                : java.util.Optional.of(new Parked(intent(operationId, tenant, rows.getFirst()),
+        return rows.isEmpty() ? Optional.empty()
+                : Optional.of(new Parked(intent(operationId, tenant, rows.getFirst()),
                         (String) rows.getFirst().get("failure_code")));
     }
 
@@ -378,7 +382,7 @@ public class JdbcSshWorkspaceStore
     private static Operation operation(Map<String, Object> row, boolean replayed) {
         var request = decode((String) row.get("request_json"));
         String state = (String) row.get("state");
-        return new Operation((String) row.get("operation_id"), "workspace_create", state.toLowerCase(java.util.Locale.ROOT),
+        return new Operation((String) row.get("operation_id"), "workspace_create", state.toLowerCase(Locale.ROOT),
                 "COMPLETED".equals(state) ? SshWorkspaceStore.string(request, "workspaceId") : null, (String) row.get("failure_code"), replayed);
     }
 
@@ -392,7 +396,7 @@ public class JdbcSshWorkspaceStore
     }
 
     static String physicalKey(JdbcTemplate jdbc, String tenant, String storage) {
-        String lock = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "";
+        String lock = TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "";
         var rows = jdbc.queryForList("SELECT tenant_id, storage_id, storage_kind, registration_state, physical_id, fence_operation_id"
                 + " FROM ma_storage WHERE tenant_id = ? AND storage_id = ?" + lock,
                 tenant, storage);
@@ -437,7 +441,7 @@ public class JdbcSshWorkspaceStore
     private static String encode(Map<String, Object> value) {
         try {
             return JSON.writeValueAsString(value);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(error);
         }
     }
@@ -445,7 +449,7 @@ public class JdbcSshWorkspaceStore
     private static Map<String, Object> decode(String value) {
         try {
             return value == null ? new LinkedHashMap<>() : JSON.readValue(value, MAP);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(error);
         }
     }
