@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.Sessio
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -99,6 +100,31 @@ final class RuntimeDrainCoordinator {
         }
         return drainBindings(tenantId, harnessSessionId, null)
                 .thenCompose(ignored -> settleHarnessSessions(tenantId, harnessSessionId, null, true, null));
+    }
+
+    CompletionStage<List<RuntimeDrainReceipt>> drainHarnessReceipts(String tenantId, String harnessSessionId) {
+        requireOpen(closed);
+        List<RuntimeDrainReceipt> receipts = new ArrayList<>();
+        String cursor = null;
+        for (int page = 0; page < 10; page++) {
+            var batch = bindingRepository.findByHarnessSession(tenantId, harnessSessionId, cursor, 50);
+            for (var binding : batch) {
+                if (!tenantId.equals(binding.getRequest().getScope().getTenantId())
+                        || !harnessSessionId.equals(binding.getRequest().getIsolationKey())) {
+                    return failed(conflict("workspace_close_identity_unverified", "Saved drainage scope differs"));
+                }
+                if (binding.getState() != RuntimeBindingRecord.State.RELEASED || binding.getDrainReceipt() == null
+                        || !binding.getDrainReceipt().matches(binding)) {
+                    return failed(conflict("workspace_close_identity_unverified", "Original binding has no matching drain proof"));
+                }
+                receipts.add(binding.getDrainReceipt());
+            }
+            if (batch.size() < 50) {
+                return CompletableFuture.completedFuture(List.copyOf(receipts));
+            }
+            cursor = batch.getLast().getBindingId();
+        }
+        return failed(conflict("workspace_close_identity_unverified", "Drain proof inventory exceeded its read budget"));
     }
 
     CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,

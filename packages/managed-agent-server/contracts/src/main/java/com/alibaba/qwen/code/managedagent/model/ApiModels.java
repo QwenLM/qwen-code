@@ -256,6 +256,11 @@ public final class ApiModels {
         }
     }
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicSessionCloseProof(PublicCommandOperation operation,
+            @JsonProperty("drain_receipts") List<com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt> drainReceipts) {
+    }
+
     public record PublicList<T>(String object, List<T> data,
             @JsonProperty("has_more") boolean hasMore,
             @JsonProperty("next_cursor") String nextCursor) {

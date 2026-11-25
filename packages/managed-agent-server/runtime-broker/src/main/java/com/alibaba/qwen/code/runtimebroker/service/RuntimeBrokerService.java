@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeExtensionCommandVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
@@ -344,6 +345,11 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public CompletionStage<Void> drainHarnessSession(String tenantId, String harnessSessionId) {
         return drainCoordinator.drainHarnessSession(tenantId, harnessSessionId);
+    }
+
+    @Override
+    public CompletionStage<List<RuntimeDrainReceipt>> drainHarnessReceipts(String tenantId, String harnessSessionId) {
+        return drainCoordinator.drainHarnessReceipts(tenantId, harnessSessionId);
     }
 
     public CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,

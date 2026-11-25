@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionCloseProof;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCwdOperation;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -17,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -135,6 +137,19 @@ public class SessionLifecycleService {
         return operation.kind() == OperationKind.CWD_CHANGE
                 ? publicCwdOperation(operation, false)
                 : publicOperation(operation, false);
+    }
+
+    public PublicSessionCloseProof getPublicCloseProof(SessionPrincipal principal, String sessionId, String operationId) {
+        String tenantId = principal == null ? null : principal.tenantId();
+        OperationRecord operation = operation(tenantId, principal,
+                principal == null ? null : principal.userId(), sessionId, operationId);
+        List<com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt> receipts = List.of();
+        if ("COMPLETED".equals(operation.state())
+                && (operation.kind() == OperationKind.CLOSE || operation.kind() == OperationKind.DELETE)
+                && runtimeWarmer != null) {
+            receipts = runtimeWarmer.drainHarnessReceipts(tenantId, sessionId).toCompletableFuture().join();
+        }
+        return new PublicSessionCloseProof(publicOperation(operation, false), receipts);
     }
 
     public Object getWebShellOperation(String tenantId, String actorId,
