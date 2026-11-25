@@ -17,6 +17,9 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.Instant;
@@ -33,8 +36,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ManagedDefinitionPreparationMySqlIT {
-    @Test
-    void concurrentPreparationConvergesOnOneNativeDefinition() throws Exception {
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = "default")
+    void concurrentPreparationConvergesOnOneNativeDefinition(String approvalMode) throws Exception {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
             var jdbc = new ManagedSchemaJdbcTemplate(database.source());
@@ -43,7 +48,7 @@ class ManagedDefinitionPreparationMySqlIT {
             var definitions = transactionalDefinitions(database.source(), jdbc, digests, json);
             var reference = new SourceRef("catalog", "agent-1", "release-1", "a".repeat(64), "workspace");
             var input = new ManagedAgentDefinitionSource.Definition(reference, "qwen-test", "Review.",
-                    new ToolPolicy("hosted-workspace-files/1", "default"), List.of(), List.of(), List.of());
+                    new ToolPolicy("hosted-workspace-files/1", approvalMode), List.of(), List.of(), List.of());
             ManagedAgentDefinitionSource source = new ManagedAgentDefinitionSource() {
                 @Override
                 public String id() {
@@ -82,6 +87,11 @@ class ManagedDefinitionPreparationMySqlIT {
                     + " WHERE namespace = 'SOURCE_DEFINITION_PREPARATION'", Integer.class)).isOne();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt"
                     + " WHERE namespace = 'AGENT_DEFINITION'", Integer.class)).isOne();
+            var saved = json.readTree(jdbc.queryForObject("SELECT result_json FROM ma_request_receipt"
+                    + " WHERE namespace = 'SOURCE_DEFINITION_PREPARATION'", String.class));
+            assertThat(saved.at("/input/toolPolicy/approvalMode").textValue()).isEqualTo(approvalMode);
+            var definition = json.readTree(jdbc.queryForObject("SELECT definition_json FROM ma_agent_definition", String.class));
+            assertThat(definition.at("/permission_policy/approval_mode").textValue()).isEqualTo(approvalMode);
         }
     }
 
