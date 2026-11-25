@@ -977,7 +977,7 @@ export async function executeHostedTurn(
                   agentDefinition: session.agentDefinition,
                   modelConfig: session.modelConfig,
                   memory: session.memory,
-                  recallUserInput: authority
+                  userPrompt: authority
                     .eventsInSequenceRange(1, authority.committedSequence)
                     .some(
                       (event) =>
