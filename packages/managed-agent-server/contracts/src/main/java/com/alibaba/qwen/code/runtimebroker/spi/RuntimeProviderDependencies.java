@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.spi;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport;
 
 import java.util.Optional;
 
@@ -13,8 +13,8 @@ public interface RuntimeProviderDependencies {
         throw new IllegalStateException("Runtime binding repository is unavailable");
     }
 
-    /** Optional transport for the external Runtime protocol; absence retains direct HTTP. */
-    public default Optional<RuntimeTransport> externalRuntimeTransport() {
+    /** Optional transport for external Runtime and Workspace operations; absence retains direct HTTP. */
+    public default Optional<WorkspacePhysicalTransport> externalRuntimeTransport() {
         return Optional.empty();
     }
 

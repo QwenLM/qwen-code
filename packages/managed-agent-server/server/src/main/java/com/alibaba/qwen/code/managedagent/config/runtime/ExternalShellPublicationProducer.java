@@ -8,9 +8,9 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
+import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalShellPublication;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -77,7 +77,7 @@ public final class ExternalShellPublicationProducer
             "managed_tool_publication_storage_denied",
             "managed_tool_publication_quota_exhausted");
     private static final ObjectMapper JSON = new ObjectMapper();
-    private final HttpRuntimeTransport transport;
+    private final RuntimeTransport transport;
     private final ToolPublicationDataStore publications;
     private final ExternalStorageRegistrationStore registrations;
     // Same virtual-thread rule as the other guarded repository lanes: a JDBC
@@ -86,7 +86,7 @@ public final class ExternalShellPublicationProducer
             java.util.concurrent.Executors.newThreadPerTaskExecutor(
                     Thread.ofVirtual().name("external-shell-publication-", 0).factory());
 
-    public ExternalShellPublicationProducer(HttpRuntimeTransport transport,
+    public ExternalShellPublicationProducer(RuntimeTransport transport,
             ToolPublicationDataStore publications,
             ExternalStorageRegistrationStore registrations) {
         this.transport = Objects.requireNonNull(transport, "transport");

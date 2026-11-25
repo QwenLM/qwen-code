@@ -24,6 +24,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -140,7 +141,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh,
             com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime,
-            RuntimeTransport externalRuntimeTransport) {
+            WorkspacePhysicalTransport externalRuntimeTransport) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -197,7 +198,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             }
 
             @Override
-            public java.util.Optional<RuntimeTransport> externalRuntimeTransport() {
+            public java.util.Optional<WorkspacePhysicalTransport> externalRuntimeTransport() {
                 return java.util.Optional.ofNullable(externalRuntimeTransport);
             }
 
@@ -249,8 +250,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
                 primaryProvisioner instanceof ExternalWorkspaceAcquisitionVerifier verifier ? verifier
                         : ignored -> CompletableFuture.failedFuture(
                                 com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
-        var workerTransport = (com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport) dependencies
-                .externalRuntimeTransport().orElse(http);
+        WorkspacePhysicalTransport workerTransport = dependencies.externalRuntimeTransport().orElse(http);
         RuntimeTransport transport = workspaces == null ? workerTransport
                 : new WorkspaceRuntimeTransport(workerTransport, workspaces, workspaceExecutionStore,
                         bindingRepository, sessionRepository, workspaceVerifier::verifyAcquisition);
@@ -266,8 +266,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         this.externalShellProducer = publicationData == null || externalRegistrations == null
                 || !RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(broker.getProvisioner())
                         ? null
-                        : new ExternalShellPublicationProducer(
-                                (HttpRuntimeTransport) workerTransport, publicationData, externalRegistrations);
+                        : new ExternalShellPublicationProducer(workerTransport, publicationData, externalRegistrations);
         com.alibaba.qwen.code.runtimebroker.spi.ExternalShellPublication externalShell =
                 externalShellProducer;
         RuntimePublicationVerifier verifier = publications == null || publicationData == null

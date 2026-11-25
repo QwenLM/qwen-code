@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.external;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
@@ -50,8 +50,8 @@ class ExternalRuntimeProviderFactoryTest {
     }
 
     @Test
-    void embedsAHostRuntimeTransport() {
-        RuntimeTransport selected = mock(RuntimeTransport.class);
+    void embedsAHostWorkspacePhysicalTransport() {
+        WorkspacePhysicalTransport selected = mock(WorkspacePhysicalTransport.class);
         var dependencies = new RuntimeProviderDependencies() {
             @Override
             public Optional<ExternalRuntimeClient> externalRuntime() {
@@ -59,7 +59,7 @@ class ExternalRuntimeProviderFactoryTest {
             }
 
             @Override
-            public java.util.Optional<RuntimeTransport> externalRuntimeTransport() {
+            public java.util.Optional<WorkspacePhysicalTransport> externalRuntimeTransport() {
                 return Optional.of(selected);
             }
 

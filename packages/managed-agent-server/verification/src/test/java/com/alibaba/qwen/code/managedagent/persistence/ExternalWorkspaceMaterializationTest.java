@@ -131,7 +131,9 @@ class ExternalWorkspaceMaterializationTest {
 
     @Test
     void readsTheExistingWorkspaceByItsActualPhysicalKey() {
-        store.materialize("tenant", "workspace", "Name", "owner-user", "key");
+        store.materialize("tenant", "workspace", "Name", "owner-user", "key-a");
+        register("tenant", "healthy");
+        store.materialize("tenant", "healthy", "Healthy", "owner-user", "key-b");
 
         var stored = store.findByPhysicalKey("tenant", "provider", "tenant-workspace");
 
@@ -141,9 +143,11 @@ class ExternalWorkspaceMaterializationTest {
             assertThat(receipt.workspaceGeneration()).isEqualTo(1);
             assertThat(receipt.storageId()).isEqualTo("workspace");
         });
+        assertThat(store.findByPhysicalKey("tenant", "provider", "tenant-healthy")).isPresent().get()
+                .extracting(ExternalWorkspaceMaterializationStore.Receipt::workspaceId).isEqualTo("healthy");
         assertThat(store.findByPhysicalKey("tenant", "provider", "another-key")).isEmpty();
         assertThat(store.findByPhysicalKey("other-tenant", "provider", "tenant-workspace")).isEmpty();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(2);
     }
 
     @Test

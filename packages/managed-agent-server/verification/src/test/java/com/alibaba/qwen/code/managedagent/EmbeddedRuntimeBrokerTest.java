@@ -44,8 +44,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EmbeddedRuntimeBrokerTest {
-    @Test
-    void externalTransportIsSharedByWorkspaceOperationsAndPublication() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("externalTransports")
+    void externalTransportIsSharedByWorkspaceOperationsAndPublication(
+            com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport transport) throws Exception {
         var properties = properties();
         var settings = properties.getRuntimeBroker();
         settings.setProvisioner("external-workspace");
@@ -55,7 +57,6 @@ class EmbeddedRuntimeBrokerTest {
         settings.setWorkspaceCwd("/worker/workspace");
         properties.getHarness().setEnabled(true);
         properties.getToolPublication().setEnabled(true);
-        var transport = mock(HttpRuntimeTransport.class);
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:embedded-transport-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
@@ -74,6 +75,11 @@ class EmbeddedRuntimeBrokerTest {
             assertThat(ReflectionTestUtils.getField(actual, "delegate")).isSameAs(transport);
             assertThat(ReflectionTestUtils.getField(broker, "externalShellProducer")).extracting("transport").isSameAs(transport);
         }
+    }
+
+    private static java.util.stream.Stream<com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport> externalTransports() {
+        return java.util.stream.Stream.of(mock(com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport.class),
+                mock(HttpRuntimeTransport.class));
     }
 
     @Test

@@ -116,7 +116,7 @@ public class ManagedAgentConfiguration {
 
     private static com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies externalDependencies(
             com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime,
-            com.alibaba.qwen.code.runtimebroker.RuntimeTransport externalRuntimeTransport) {
+            com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport externalRuntimeTransport) {
         return new com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies() {
             @Override
             public java.util.Optional<com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient> externalRuntime() {
@@ -124,7 +124,7 @@ public class ManagedAgentConfiguration {
             }
 
             @Override
-            public java.util.Optional<com.alibaba.qwen.code.runtimebroker.RuntimeTransport> externalRuntimeTransport() {
+            public java.util.Optional<com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport> externalRuntimeTransport() {
                 return java.util.Optional.ofNullable(externalRuntimeTransport);
             }
         };
@@ -173,7 +173,7 @@ public class ManagedAgentConfiguration {
     @org.springframework.beans.factory.annotation.Autowired
     public ManagedAgentConfiguration(ManagedAgentProperties properties,
             @org.springframework.lang.Nullable com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime,
-            @org.springframework.lang.Nullable com.alibaba.qwen.code.runtimebroker.RuntimeTransport externalRuntimeTransport) {
+            @org.springframework.lang.Nullable com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport externalRuntimeTransport) {
         properties.validateRuntimeProvider(externalDependencies(externalRuntime, externalRuntimeTransport));
         BrokerSecurity.checkPublicationTransport(properties, new java.util.ArrayList<>());
     }

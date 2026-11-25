@@ -241,6 +241,33 @@ public interface RuntimeTransport {
     public CompletionStage<Boolean> release(RuntimeLease lease,
             RuntimeSession session);
 
+    /** Opens the original external worker's capture channel for one foreground Shell execution. */
+    public default CompletionStage<String> externalPublicationBegin(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision,
+            Map<String, Object> reference, Map<String, Object> capture, long expiresAt, String captureId) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_external_publication_unsupported",
+                "Runtime transport does not support external Shell publication.", false));
+    }
+
+    /** Renews an external capture channel to the granted execution horizon. */
+    public default CompletionStage<Void> externalPublicationRenew(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision,
+            String channelId, long expiresAt) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_external_publication_unsupported",
+                "Runtime transport does not support external Shell publication.", false));
+    }
+
+    /** Reads one bounded capture block and acknowledges sequences through the supplied cursor. */
+    public default CompletionStage<Map<String, Object>> externalPublicationRead(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision,
+            String channelId, String streamId, long sequence, long acknowledgedSequence) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_external_publication_unsupported",
+                "Runtime transport does not support external Shell publication.", false));
+    }
+
     /** Checks the external publication lane for the original lease and registered storage revision. */
     public default CompletionStage<Boolean> externalPublicationReady(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {

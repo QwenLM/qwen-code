@@ -121,10 +121,11 @@ public final class ExternalWorkspaceMaterializationStore {
             Receipt receipt = new Receipt(receiptKey, registeredAliasId, registeredAliasId, 1,
                     displayName, ownerActorId, "ACTIVE", now);
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
-                    + " display_name, config_ref, policy_ref, state, workspace_kind, is_default, gmt_create, gmt_modified)"
-                    + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE', 'ROOT', FALSE, ?, ?)", tenant,
+                    + " display_name, config_ref, policy_ref, materialization_receipt_key,"
+                    + " state, workspace_kind, is_default, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'ACTIVE', 'ROOT', FALSE, ?, ?)", tenant,
                     registeredAliasId, registeredAliasId, displayName, WorkspaceExecutionProfile.CONFIG_REF,
-                    WorkspaceExecutionProfile.POLICY_REF, now, now);
+                    WorkspaceExecutionProfile.POLICY_REF, receiptKey, now, now);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, ?, ?, 'OWNER')", tenant, registeredAliasId, ownerActorId);
             ManagedReceipts.insert(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant, idempotencyKey,
@@ -138,7 +139,8 @@ public final class ExternalWorkspaceMaterializationStore {
         String owner = new ExternalStorageIdentity(providerId, physicalKey, 1).ownerKey();
         return transaction.execute(status -> {
             List<String> records = jdbc.queryForList("SELECT r.result_json FROM ma_workspace w"
-                    + " JOIN ma_request_receipt r ON r.tenant_id = w.tenant_id AND r.namespace = ? AND r.scope_kind = ?"
+                    + " JOIN ma_request_receipt r ON r.receipt_key = w.materialization_receipt_key"
+                    + " AND r.tenant_id = w.tenant_id AND r.namespace = ? AND r.scope_kind = ?"
                     + " JOIN ma_storage_owner o ON o.tenant_id = w.tenant_id AND o.storage_id = w.workspace_id"
                     + " WHERE o.physical_id = ? AND w.tenant_id = ? AND w.state = 'ACTIVE' AND w.workspace_kind = 'ROOT'",
                     String.class, NAMESPACE.name(), ReceiptScope.TENANT.name(), owner, tenant);
