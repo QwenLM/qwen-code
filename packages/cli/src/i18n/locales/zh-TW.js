@@ -1104,6 +1104,7 @@ export default {
     '您的終端已配置為支持多行輸入（Shift+Enter 和 Ctrl+Enter）的最佳體驗。',
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
+  'No hooks were loaded.': '未載入任何 Hook。',
   Hooks: 'Hook',
   'Loading hooks...': '正在加載 Hook...',
   'Error loading hooks:': '加載 Hook 出錯：',

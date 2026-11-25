@@ -1184,6 +1184,7 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
   'List all configured hooks': 'List all configured hooks',
+  'No hooks were loaded.': 'No hooks were loaded.',
   // Hooks - Dialog
   Hooks: 'Hooks',
   'Loading hooks...': 'Loading hooks...',

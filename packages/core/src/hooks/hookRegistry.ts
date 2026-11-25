@@ -14,7 +14,6 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('HOOK_REGISTRY');
-const HOOK_EVENT_LABEL_LIMIT = 60;
 
 export function hasUnsupportedCommandHookArgs(
   config: Record<string, unknown>,
@@ -356,11 +355,11 @@ export class HookRegistry {
       }
 
       if (!this.isValidEventName(eventName)) {
-        const eventLabel = stripAnsiAndControl(eventName);
-        const displayEvent =
-          eventLabel.length > HOOK_EVENT_LABEL_LIMIT
-            ? `${eventLabel.slice(0, HOOK_EVENT_LABEL_LIMIT)}...`
-            : eventLabel;
+        // Match Unicode code points so the limit cannot split a surrogate pair.
+        const displayEvent = stripAnsiAndControl(eventName).replace(
+          /^(.{60}).+/su,
+          '$1...',
+        );
         this.warn(
           `Hook event "${displayEvent}" from ${sourceLabel} is not supported and was skipped.`,
         );
@@ -487,14 +486,22 @@ export class HookRegistry {
       return false;
     }
 
-    const ignored = ['onFailure', 'asyncRewake', 'if', 'once'].filter(
-      (field) =>
-        raw[field] !== undefined &&
-        !(field === 'once' && config.type === 'http'),
-    );
+    const ignored = Object.entries({
+      onFailure: undefined,
+      asyncRewake: false,
+      if: '',
+      once: false,
+    })
+      .filter(
+        ([field, noOp]) =>
+          raw[field] !== undefined &&
+          raw[field] !== noOp &&
+          !(field === 'once' && config.type === 'http'),
+      )
+      .map(([field]) => `"${field}"`);
     if (ignored.length > 0) {
       this.warn(
-        `${where} sets ${ignored.map((f) => `"${f}"`).join(', ')}, which Qwen Code does not support yet; ignored.`,
+        `${where} sets ${ignored.join(', ')}, which Qwen Code does not support yet; ignored.`,
       );
     }
 

@@ -187,6 +187,14 @@ const listCommand: SlashCommand = {
     const totalHooks = configHooks.length + sessionHooks.length + withheldCount;
 
     if (totalHooks === 0) {
+      const warnings = hookSystem.getConfigWarnings();
+      if (warnings.length > 0) {
+        return {
+          type: 'message',
+          messageType: 'warning',
+          content: [t('No hooks were loaded.'), ...warnings].join('\n'),
+        };
+      }
       return {
         type: 'message',
         messageType: 'info',

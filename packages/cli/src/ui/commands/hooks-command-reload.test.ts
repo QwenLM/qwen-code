@@ -407,6 +407,44 @@ describe('/hooks reload with real settings files', () => {
     expect(config.getWarnings()).toContain(warning);
   });
 
+  it('distinguishes an empty configuration from a skipped hook in the text listing', async () => {
+    const { settings, context } = await setup();
+    fs.writeFileSync(settings.workspace.path, '{}');
+    fs.writeFileSync(settings.user.path, '{}');
+    await hooksCommand.action!(context, '');
+
+    const textContext = {
+      ...context,
+      executionMode: 'non_interactive' as const,
+    };
+    expect(await hooksCommand.action!(textContext, '')).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('No hooks configured.'),
+    });
+
+    fs.writeFileSync(
+      settings.user.path,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              hooks: [{ type: 'command', command: 'node', args: ['check.js'] }],
+            },
+          ],
+        },
+      }),
+    );
+    await hooksCommand.action!(context, '');
+
+    expect(await hooksCommand.action!(textContext, '')).toEqual({
+      type: 'message',
+      messageType: 'warning',
+      content:
+        'No hooks were loaded.\nHook #1 in entry #1 for PreToolUse from user config uses "args", which Qwen Code does not support yet, and was skipped.',
+    });
+  });
+
   it('removes deleted project hooks from the live registry', async () => {
     const { settings, context, entries } = await setup();
     fs.writeFileSync(settings.workspace.path, '{}');

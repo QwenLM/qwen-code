@@ -497,11 +497,26 @@ describe('HookRegistry', () => {
         expect(JSON.stringify(debugWarn.mock.calls)).not.toContain(secret);
       });
 
-      it('sanitizes and bounds an unknown event name', async () => {
-        const event = `Unknown\u0007${'x'.repeat(80)}`;
+      it('accepts explicit no-op defaults without warning', async () => {
+        const registry = await register([
+          {
+            type: HookType.Command,
+            command: 'guard.sh',
+            asyncRewake: false,
+            if: '',
+            once: false,
+          },
+        ]);
+        expect(registry.getAllHooks()).toHaveLength(1);
+        expect(warnings()).toEqual([]);
+      });
+
+      it('sanitizes and bounds an unknown event name without splitting an emoji', async () => {
+        const prefix = `Unknown${'x'.repeat(52)}😀`;
+        const event = `\u0007${prefix}${'x'.repeat(80)}`;
         await init({ user: { [event]: [] } as HooksMap }, mockFeedbackEmitter);
         expect(warnings()).toEqual([
-          `Hook event "Unknown${'x'.repeat(53)}..." from user config is not supported and was skipped.`,
+          `Hook event "${prefix}..." from user config is not supported and was skipped.`,
         ]);
       });
     });
