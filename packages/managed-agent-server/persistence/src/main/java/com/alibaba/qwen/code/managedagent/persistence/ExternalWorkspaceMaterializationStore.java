@@ -1,11 +1,14 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -45,7 +48,7 @@ public final class ExternalWorkspaceMaterializationStore {
             }
             // The grantee is the operator's actor, not an authenticated
             // request actor; it passes the same identity admission.
-            com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, ownerActorId);
+            ManagedWorkspaceRegistry.actorKey(tenant, ownerActorId);
         } catch (IllegalArgumentException error) {
             throw new RuntimeBrokerException(400, "invalid_external_workspace_materialization",
                     "Invalid external Workspace materialization.", false);
@@ -72,9 +75,9 @@ public final class ExternalWorkspaceMaterializationStore {
             // The shared strict decoder is the one every other reader of this
             // column uses; a lenient scalar coercion here would commit an
             // ACTIVE Workspace that every later consumer permanently refuses.
-            final com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage registration;
+            final ExternalStorageRegistry.RegisteredExternalStorage registration;
             try {
-                registration = com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry
+                registration = ExternalStorageRegistry
                         .decodeRegistration(registrations.getFirst());
             } catch (RuntimeException unreadable) {
                 throw conflict("external_workspace_conflict");
@@ -126,7 +129,7 @@ public final class ExternalWorkspaceMaterializationStore {
         try {
             return json.writeValueAsString(value);
         } catch (JsonProcessingException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore
+            throw WorkspaceExecutionStore
                     .unavailable();
         }
     }

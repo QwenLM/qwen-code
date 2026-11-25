@@ -18,6 +18,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.IOException;
+
 @RestController
 public class WorkspaceFileController {
     private final WorkspaceFileStore files;
@@ -72,7 +74,7 @@ public class WorkspaceFileController {
     public ResponseEntity<WorkspaceFileUploadStore.UploadResult> upload(TenantContext tenant,
             @RequestParam(required = false) String sessionId, @RequestParam(required = false) String workspaceId,
             @RequestParam(required = false) String cwdRelative, @RequestParam String path,
-            @RequestParam String expectedScopeRevision, @RequestParam String uploadId, HttpServletRequest request) throws java.io.IOException {
+            @RequestParam String expectedScopeRevision, @RequestParam String uploadId, HttpServletRequest request) throws IOException {
         String actor = tenant.requireActorId();
         String encoding = request.getHeader("Content-Encoding");
         if (encoding != null && !"identity".equalsIgnoreCase(encoding)) {

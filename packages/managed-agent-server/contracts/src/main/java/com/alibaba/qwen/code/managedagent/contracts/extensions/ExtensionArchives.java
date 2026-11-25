@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.contracts.extensions;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public interface ExtensionArchives {
     public boolean configured();
@@ -12,7 +13,7 @@ public interface ExtensionArchives {
     final class Archive implements AutoCloseable {
         private final Path path;
         private final Runnable release;
-        private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+        private final AtomicBoolean closed = new AtomicBoolean();
         public Archive(Path path, Runnable release) {
             this.path = path;
             this.release = release;
