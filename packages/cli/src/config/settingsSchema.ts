@@ -1956,7 +1956,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: -1,
         description:
-          'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
+          'Wall-clock budget per headless interaction, in seconds (fresh for each user turn and notification batch in stream-json input sessions). -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
         showInDialog: false,
       },
       goalTokenBudget: {
@@ -2014,7 +2014,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: -1,
         description:
-          'Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
+          'Tool-call budget per headless interaction (fresh for each user turn and notification batch in stream-json input sessions; counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
         showInDialog: false,
       },
       maxSubagentDepth: {

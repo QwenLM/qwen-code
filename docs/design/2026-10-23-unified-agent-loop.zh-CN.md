@@ -221,25 +221,25 @@ if (config.isUnifiedAgentLoopEnabled('headless')) {
 
 ### Headless 迁到共享 loop（PR 1）
 
-| headless 现状                                                            | 设置开启后                                                                             |
-| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
-| `while (true)` 轮次循环，`drainBatch` 中还有第二份副本                   | 每次交互调用一次 loop；每个 drain 条目是另一次调用，使用各自的发送类型                 |
-| `limitedTurnCount` 门限（退出码 53）                                     | 不变；client 发出的 `MaxSessionTurns` 现在以同样的方式结束运行，而不是假成功（#15325） |
-| 遇到 `Retry` / `ModelFallback` 时的 `discardAbandonedAttempt`            | 由 loop 丢弃调用；入口重启本次尝试并写出 retry 帧                                      |
-| `processToolCallBatch` 的重复调用与重放处理                              | 由 loop 负责                                                                           |
-| `structured_output` 预扫描与首次成功即结束                               | 入口策略：调用选择，加上一个可以结束 loop 的结果回调                                   |
-| 进入 plan mode 时跳过同批调用                                            | 由 scheduler 对整批处理；逐个调用的 Mod 执行器自己处理                                 |
-| 每个调用一次 `executeToolCall`、`partitionHeadlessToolCalls`、并发上限   | 每轮一个 scheduler，分批规则与上限相同                                                 |
-| 启动前计数                                                               | `beforeToolLaunch`                                                                     |
-| 审批：stream-json 的 `can_use_tool`，一次一个调用                        | 同一个回调，在整批执行前为整批请求                                                     |
-| Mod 带工具 hook 时串行执行                                               | 用逐个调用的 Mod 执行器作为批次 scheduler                                              |
-| 按序收尾、`finalizeToolResponses`、带 Goal 来源信息的 `recordToolResult` | 由 loop 负责                                                                           |
-| 模型覆盖的优先级（内联 `/model` > 整轮视觉 > `\0` 哨兵）                 | 入口策略                                                                               |
-| teammate 文本合并进工具结果轮                                            | 工具边界处的输入，以 `Teammate` 类型发送                                               |
-| Goal 的 `terminateTurn`                                                  | 停止原因 `tool_ended_turn`                                                             |
-| `LoopDetected` → 退出码 1；重复出现的 provider id → loop-detected 结果   | 停止原因 `loop_detected`、`duplicate_provider_call`                                    |
-| 中止 → `routeAbort`（55 / 130）                                          | 停止原因 `cancelled`；中止仍由入口路由                                                 |
-| 空闲阶段：下一个 Goal、teammate、cron、后台任务等待、记忆、最终结果      | 不变，留在 loop 之外                                                                   |
+| headless 现状                                                            | 设置开启后                                                                                          |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `while (true)` 轮次循环，`drainBatch` 中还有第二份副本                   | 每次交互调用一次 loop；每个 drain 条目是另一次调用，使用各自的发送类型                              |
+| `limitedTurnCount` 门限（退出码 53）                                     | 单次运行退出 53；stream-json 输出当轮错误、保留累计计数并继续接收消息，不再重复上一条回答（#15325） |
+| 遇到 `Retry` / `ModelFallback` 时的 `discardAbandonedAttempt`            | 由 loop 丢弃调用；入口重启本次尝试并写出 retry 帧                                                   |
+| `processToolCallBatch` 的重复调用与重放处理                              | 由 loop 负责                                                                                        |
+| `structured_output` 预扫描与首次成功即结束                               | 入口策略：调用选择，加上一个可以结束 loop 的结果回调                                                |
+| 进入 plan mode 时跳过同批调用                                            | 由 scheduler 对整批处理；逐个调用的 Mod 执行器自己处理                                              |
+| 每个调用一次 `executeToolCall`、`partitionHeadlessToolCalls`、并发上限   | 每轮一个 scheduler，分批规则与上限相同                                                              |
+| 启动前计数                                                               | `beforeToolLaunch`                                                                                  |
+| 审批：stream-json 的 `can_use_tool`，一次一个调用                        | 同一个回调，在整批执行前为整批请求                                                                  |
+| Mod 带工具 hook 时串行执行                                               | 用逐个调用的 Mod 执行器作为批次 scheduler                                                           |
+| 按序收尾、`finalizeToolResponses`、带 Goal 来源信息的 `recordToolResult` | 由 loop 负责                                                                                        |
+| 模型覆盖的优先级（内联 `/model` > 整轮视觉 > `\0` 哨兵）                 | 入口策略                                                                                            |
+| teammate 文本合并进工具结果轮                                            | 工具边界处的输入，以 `Teammate` 类型发送                                                            |
+| Goal 的 `terminateTurn`                                                  | 停止原因 `tool_ended_turn`                                                                          |
+| `LoopDetected` → 退出码 1；重复出现的 provider id → loop-detected 结果   | 停止原因 `loop_detected`、`duplicate_provider_call`                                                 |
+| 中止 → `routeAbort`（55 / 130）                                          | 停止原因 `cancelled`；中止仍由入口路由                                                              |
+| 空闲阶段：下一个 Goal、teammate、cron、后台任务等待、记忆、最终结果      | 不变，留在 loop 之外                                                                                |
 
 ### ACP prompt 轮次迁到共享模型轮（PR 2a）
 
@@ -703,7 +703,7 @@ PR 6b 是 speculation 的工具步决策（保留自有工具步）；PR 6c 是�
 
 - 设置关闭时，任何入口都不变。共享代码的改动都是增量的：scheduler 的可选项 `beforeToolLaunch`、从 PR 2a 起上文所列的 `Turn` 事件字段和发送选项，从 PR 2b 起导出的 `runToolBatch` 和 scheduler 的 `refuseToolCall`、`onPermissionPromptTerminalSequence`，从 PR 2c-1 起的 `stopPolicies`，从 PR 3b-1 起已完成调用的 `recorded`、工具批的 `responses` 和工具批选项 `deferRecording`，从 PR 5b 起工具批可选的 `client`，以及从 PR 5c 起 loop 的工具批选项、按调用返回的结果、代替 client 的轮次来源和 `onRoundEnd` 返回的停止，不使用它们的调用方不受影响。
 - 设置开启时，headless 与现在相比有以下有意的差异。其中大多数源于把一批调用作为一个整体调度，这也是 TUI 现在的做法：
-  - 在 stream-json 中，超过 `--max-session-turns` 的消息会在会话轮数上限处结束运行，与 `-p` 相同（错误写到 stderr，退出码 53），而不是返回一个重复上一条回答的成功结果（#15325）；
+  - 在 stream-json 中，超过 `--max-session-turns` 的消息输出当轮错误结果，不再重复上一条回答（#15325）。计数仍按会话累计，因此耗尽后后续消息也会失败；会话继续接收消息，正常 EOF 退出码为 0。单次 `-p` 运行仍退出 53；
   - 通知轮次（cron、monitor 等排队条目）的每一轮模型调用都计入 `--max-session-turns`，与主轮次相同，而不是整个条目只计一轮，因此通知轮次中调用工具的运行可能更早到达上限；
   - 一批调用的 PreToolUse hook 和审批（stream-json 的 `can_use_tool`）会在这一批的任何调用启动之前为所有调用执行，而不是一次一个调用；在 `--max-tool-calls` 下，超出预算的调用可能先被审批通过，然后在执行前被停下；需要审批的写操作在请求审批时检查文件是否读过，所以同一批里先读后写同一个文件时，写会因为文件没读过而失败，和 TUI 相同；
   - PostToolBatch hook 每批触发一次，带上这一批的所有调用，批次输出预算也按整批计算；现在每个调用都是单独的一批；

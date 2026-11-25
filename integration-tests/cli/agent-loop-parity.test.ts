@@ -12,7 +12,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { cpSync, readdirSync, rmSync } from 'node:fs';
+import {
+  cpSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -234,6 +240,7 @@ function streamFrames(stdout: string, dir: string): unknown[] {
               type: 'result',
               subtype: frame['subtype'],
               is_error: frame['is_error'],
+              error: frame['error'],
               result: frame['result'],
               num_turns: frame['num_turns'],
             },
@@ -296,6 +303,28 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         : undefined;
       return scenario.reply(messages, dir, subagentRequest);
     }, fakeServerHostOptions());
+    const settingsPath = join(dir, '.qwen', 'settings.json');
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    settings.modelProviders = {
+      openai: [
+        {
+          id: 'fake-model',
+          baseUrl: server.baseUrl,
+          envKey: 'PARITY_FAKE_API_KEY',
+          generationConfig: {
+            modalities: {
+              image: false,
+              audio: false,
+              video: false,
+              pdf: false,
+            },
+          },
+        },
+      ],
+    };
+    settings.fastModel = 'openai:fake-model';
+    settings.compactionModel = 'openai:fake-model';
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
     // Outside the project, so the folder structure in the requests does not
     // list the session's debug log or background housekeeping markers in
     // QWEN_HOME (#16710).
@@ -325,6 +354,9 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       env: {
         ...process.env,
         QWEN_DEBUG_LOG_FILE: '1',
+        PARITY_FAKE_API_KEY: 'fake-key',
+        QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
+        QWEN_CODE_MODELS_DEV_REFRESH: 'off',
         QWEN_HOME: runtimeDir,
         QWEN_RUNTIME_DIR: runtimeDir,
       },
@@ -386,7 +418,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const count = (line: RegExp) => log.match(line)?.length ?? 0;
     // AgentCore's rounds on the kernel are `runAgentLoop` calls too.
     const kernelSubagentRounds = count(KERNEL_SUBAGENT_ROUND);
-    return {
+    const result = {
       exitCode,
       requests: modelRequests(server, dir),
       frames: streamFrames(stdout, dir),
@@ -398,6 +430,25 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       kernelSubagentRounds,
       kernelMainRounds: count(KERNEL_RUN) - kernelSubagentRounds,
     };
+    const requestModels = server.requests.map(({ body }) => body['model']);
+    expect(new Set(requestModels)).toEqual(new Set(['fake-model']));
+    writeFileSync(
+      join(dir, 'parity-receipt.json'),
+      JSON.stringify(
+        {
+          scenario: scenario.name,
+          shared,
+          kernel,
+          inputModalities:
+            settings.modelProviders.openai[0].generationConfig.modalities,
+          requestModels,
+          ...result,
+        },
+        null,
+        2,
+      ),
+    );
+    return result;
   }
 
   /** The current loop, the shared loop, and the shared loop on the kernel. */
@@ -745,6 +796,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'session turn cap',
       messages: [message('first question'), message('second question')],
       args: ['--input-format', 'stream-json', '--max-session-turns', '1'],
+      mainRounds: 2,
       reply: (messages) => ({ content: `answer ${userTurns(messages)}` }),
     };
 
@@ -752,51 +804,71 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const results = (frames: unknown[]) =>
       frames.filter((frame) => (frame as JsonObject)['type'] === 'result');
 
-    // The current loop reports the second message as a success that repeats
-    // the first answer, without asking the model.
     expect(current.exitCode).toBe(0);
     expect(current.requests).toHaveLength(1);
     expect(results(current.frames)).toMatchObject([
       { is_error: false, result: 'answer 1' },
-      { is_error: false, result: 'answer 1' },
+      {
+        is_error: true,
+        error: {
+          message: expect.stringContaining('Reached max session turns'),
+        },
+      },
     ]);
-    // The shared loop ends the run at the limit the way headless reports its
-    // own limit: the error on stderr and exit code 53.
-    expect(shared.exitCode).toBe(53);
-    expect(shared.requests).toHaveLength(1);
-    expect(results(shared.frames)).toMatchObject([
-      { is_error: false, result: 'answer 1' },
-    ]);
-    expect(shared.stderr).toContain('Reached max session turns');
+    expect(shared.exitCode).toBe(current.exitCode);
+    expect(shared.requests).toEqual(current.requests);
+    expect(shared.frames).toEqual(current.frames);
     expect(kernel.exitCode).toBe(shared.exitCode);
     expect(kernel.requests).toEqual(shared.requests);
     expect(kernel.frames).toEqual(shared.frames);
-    expect(kernel.stderr).toContain('Reached max session turns');
   }, 240_000);
 
   it('asks for approval of a whole batch before the tool budget stops it', async () => {
     const scenario: Scenario = {
       name: 'approvals at the tool budget edge',
-      messages: [message('Write both files.')],
+      messages: [
+        message('Write both files.'),
+        message('Spend one fresh tool call.'),
+      ],
       args: ['--input-format', 'stream-json', '--max-tool-calls', '1'],
       approve: true,
-      reply: (messages, dir) =>
-        toolResults(messages) === 0
-          ? {
-              toolCalls: [
-                fakeToolCall(
-                  'write_file',
-                  { file_path: join(dir, 'one.txt'), content: 'one\n' },
-                  'call_one',
-                ),
-                fakeToolCall(
-                  'write_file',
-                  { file_path: join(dir, 'two.txt'), content: 'two\n' },
-                  'call_two',
-                ),
-              ],
-            }
-          : { content: 'Both written.' },
+      reply: (messages, dir) => {
+        const resumed = messages.some(
+          (item) =>
+            item['role'] === 'user' &&
+            JSON.stringify(item['content']).includes(
+              'Spend one fresh tool call.',
+            ),
+        );
+        if (!resumed) {
+          return {
+            toolCalls: [
+              fakeToolCall(
+                'write_file',
+                { file_path: join(dir, 'one.txt'), content: 'one\n' },
+                'call_one',
+              ),
+              fakeToolCall(
+                'write_file',
+                { file_path: join(dir, 'two.txt'), content: 'two\n' },
+                'call_two',
+              ),
+            ],
+          };
+        }
+        if (!messages.some((item) => item['tool_call_id'] === 'call_three')) {
+          return {
+            toolCalls: [
+              fakeToolCall(
+                'write_file',
+                { file_path: join(dir, 'three.txt'), content: 'three\n' },
+                'call_three',
+              ),
+            ],
+          };
+        }
+        return { content: 'Turn accepted after budget failure.' };
+      },
     };
 
     const { current, shared, kernel } = await arms(scenario);
@@ -805,15 +877,47 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         (frame) => (frame as JsonObject)['type'] !== 'control_request',
       );
 
-    expect(current.exitCode).toBe(55);
-    expect(shared.exitCode).toBe(55);
+    expect(current.exitCode).toBe(0);
+    expect(shared.exitCode).toBe(0);
+    expect(
+      output(current.frames).filter(
+        (frame) => (frame as JsonObject)['type'] === 'result',
+      ),
+    ).toMatchObject([
+      {
+        is_error: true,
+        error: { message: expect.stringContaining('--max-tool-calls') },
+      },
+      { is_error: false, result: 'Turn accepted after budget failure.' },
+    ]);
     expect(shared.requests).toEqual(current.requests);
     expect(output(shared.frames)).toEqual(output(current.frames));
     // The current loop asks for each call right before it runs, so the call
     // past the budget is never asked. The shared loop asks for the whole batch
     // first, and the budget then stops the second call before it runs.
-    expect(current.approvals).toEqual(['call_one']);
-    expect(shared.approvals).toEqual(['call_one', 'call_two']);
+    expect(current.approvals).toEqual(['call_one', 'call_three']);
+    expect(shared.approvals).toEqual(['call_one', 'call_two', 'call_three']);
+    const firstTerminal = current.frames.findIndex(
+      (frame) => (frame as JsonObject)['type'] === 'result',
+    );
+    const freshResult = current.frames.findIndex((frame) => {
+      const item = frame as JsonObject;
+      return (
+        item['type'] === 'user' &&
+        (item['content'] as JsonObject[]).some(
+          (block) =>
+            block['type'] === 'tool_result' &&
+            block['tool_use_id'] === 'call_three' &&
+            block['is_error'] === false,
+        )
+      );
+    });
+    const secondTerminal = current.frames.findIndex(
+      (frame, index) =>
+        index > firstTerminal && (frame as JsonObject)['type'] === 'result',
+    );
+    expect(freshResult).toBeGreaterThan(firstTerminal);
+    expect(secondTerminal).toBeGreaterThan(freshResult);
     expect(kernel.exitCode).toBe(shared.exitCode);
     expect(kernel.requests).toEqual(shared.requests);
     expect(output(kernel.frames)).toEqual(output(shared.frames));
