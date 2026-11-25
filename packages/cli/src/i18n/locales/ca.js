@@ -534,6 +534,7 @@ export default {
   'Debug Keystroke Logging': 'Registre de tecles per a depuració',
   'Language: UI': 'Idioma: Interfície',
   'Language: Model': 'Idioma: Model',
+  'Language: Display Translation': 'Idioma: Traducció de la visualització',
   'Output Format': 'Format de sortida',
   'Hide Window Title': 'Amaga el títol de la finestra',
   'Show Status in Title': "Mostra l'estat al títol",

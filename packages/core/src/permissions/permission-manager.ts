@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
+import { getTurnSkillSourcePath } from '../skills/turn-skill-snapshot.js';
 import {
   parseRules,
   parseRule,
@@ -470,19 +472,8 @@ export class PermissionManager {
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
-    const {
-      toolName,
-      toolAliases,
-      mcpIdentity,
-      command,
-      cwd,
-      filePath,
-      domain,
-      specifier,
-      toolParams,
-    } = ctx;
+    const { toolName, mcpIdentity, command, cwd } = ctx;
 
-    // Build path context for resolving relative path patterns
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
@@ -491,16 +482,7 @@ export class PermissionManager {
           }
         : undefined;
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-      toolParams,
-      toolAliases,
-    ] as const;
+    const matches = this.createRuleMatcher(ctx, pathCtx);
 
     // Compute the base decision from explicit Bash/file/domain rules.
     // Using an IIFE to keep the priority-cascade logic clean.
@@ -512,16 +494,14 @@ export class PermissionManager {
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
-          return 'deny';
+        if (matches(rule, true)) return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
-          return 'ask';
+        if (matches(rule, true)) return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
@@ -529,7 +509,7 @@ export class PermissionManager {
         ...this.persistentRules.allow,
       ]) {
         if (
-          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
+          matches(rule) &&
           !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity)
         ) {
           return 'allow';
@@ -570,6 +550,45 @@ export class PermissionManager {
     }
 
     return baseDecision;
+  }
+
+  private createRuleMatcher(
+    ctx: PermissionCheckContext,
+    pathCtx: PathMatchContext | undefined,
+  ): (rule: PermissionRule, restrictive?: boolean) => boolean {
+    const {
+      toolName,
+      command,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+      toolAliases,
+      mcpIdentity,
+    } = ctx;
+    const sourcePath =
+      filePath &&
+      getTurnSkillSourcePath(
+        path.resolve(pathCtx?.cwd ?? process.cwd(), filePath),
+      );
+    const filePaths = sourcePath ? [filePath, sourcePath] : [filePath];
+    return (rule, restrictive = false) =>
+      filePaths.some((permissionPath) =>
+        matchesRule(
+          rule,
+          toolName,
+          command,
+          permissionPath,
+          domain,
+          pathCtx,
+          specifier,
+          toolParams,
+          toolAliases,
+          restrictive ? 'canonical' : 'lexical',
+          mcpIdentity,
+          restrictive,
+        ),
+      );
   }
 
   /**
@@ -1193,17 +1212,7 @@ export class PermissionManager {
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
-    const {
-      toolName,
-      toolAliases,
-      mcpIdentity,
-      command,
-      cwd,
-      filePath,
-      domain,
-      specifier,
-      toolParams,
-    } = ctx;
+    const { toolName, mcpIdentity, command, cwd } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -1242,27 +1251,17 @@ export class PermissionManager {
             return true;
           }
 
-          const opMatchArgs = [
-            op.virtualTool,
-            undefined,
-            op.filePath,
-            op.domain,
+          const matches = this.createRuleMatcher(
+            {
+              toolName: op.virtualTool,
+              filePath: op.filePath,
+              domain: op.domain,
+            },
             pathCtx,
-            undefined,
-          ] as const;
+          );
           return (
-            restrictiveRules.some((rule) =>
-              matchesRule(
-                rule,
-                ...opMatchArgs,
-                undefined,
-                undefined,
-                'canonical',
-              ),
-            ) ||
-            allowRules.some((rule) =>
-              matchesRule(rule, ...opMatchArgs, undefined),
-            )
+            restrictiveRules.some((rule) => matches(rule, true)) ||
+            allowRules.some((rule) => matches(rule))
           );
         })
       ) {
@@ -1279,24 +1278,12 @@ export class PermissionManager {
       }
     }
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-      toolParams,
-      toolAliases,
-    ] as const;
-
+    const matches = this.createRuleMatcher(ctx, pathCtx);
     return (
-      restrictiveRules.some((rule) =>
-        matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
-      ) ||
+      restrictiveRules.some((rule) => matches(rule, true)) ||
       allowRules.some(
         (rule) =>
-          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
+          matches(rule) &&
           !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity),
       )
     );
@@ -1313,17 +1300,7 @@ export class PermissionManager {
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
-    const {
-      toolName,
-      toolAliases,
-      mcpIdentity,
-      command,
-      cwd,
-      filePath,
-      domain,
-      specifier,
-      toolParams,
-    } = ctx;
+    const { toolName, command, cwd } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -1351,23 +1328,15 @@ export class PermissionManager {
             return true;
           }
 
-          const opMatchArgs = [
-            op.virtualTool,
-            undefined,
-            op.filePath,
-            op.domain,
+          const matches = this.createRuleMatcher(
+            {
+              toolName: op.virtualTool,
+              filePath: op.filePath,
+              domain: op.domain,
+            },
             pathCtx,
-            undefined,
-          ] as const;
-          return askRules.some((rule) =>
-            matchesRule(
-              rule,
-              ...opMatchArgs,
-              undefined,
-              undefined,
-              'canonical',
-            ),
           );
+          return askRules.some((rule) => matches(rule, true));
         })
       ) {
         return true;
@@ -1383,20 +1352,8 @@ export class PermissionManager {
       }
     }
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-      toolParams,
-      toolAliases,
-    ] as const;
-
-    return askRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
-    );
+    const matches = this.createRuleMatcher(ctx, pathCtx);
+    return askRules.some((rule) => matches(rule, true));
   }
 
   private hasAskRuleForTool(toolName: string): boolean {

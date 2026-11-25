@@ -541,6 +541,7 @@ export default {
   'Debug Keystroke Logging': 'Journalisation des frappes de débogage',
   'Language: UI': 'Langue : Interface',
   'Language: Model': 'Langue : Modèle',
+  'Language: Display Translation': "Langue : Traduction de l'affichage",
   'Output Format': 'Format de sortie',
   'Hide Window Title': 'Masquer le titre de la fenêtre',
   'Show Status in Title': 'Afficher le statut dans le titre',

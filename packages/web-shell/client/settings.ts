@@ -11,6 +11,7 @@ const SETTING_KEYS = {
   'setting:git-pr-co-author': 'general.gitCoAuthor.pr',
   'setting:language': 'general.language',
   'setting:output-language': 'general.outputLanguage',
+  'setting:display-language': 'general.displayLanguage',
   'setting:prevent-system-sleep': 'general.preventSystemSleep',
   'setting:review-attribution': 'review.attribution',
   'setting:review-sandbox': 'review.sandbox',

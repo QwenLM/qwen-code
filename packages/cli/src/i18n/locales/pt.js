@@ -480,6 +480,7 @@ export default {
   'Debug Keystroke Logging': 'Log de Depuração de Teclas',
   'Language: UI': 'Idioma: Interface',
   'Language: Model': 'Idioma: Modelo',
+  'Language: Display Translation': 'Idioma: Tradução da exibição',
   'Output Format': 'Formato de Saída',
   'Hide Window Title': 'Ocultar Título da Janela',
   'Show Status in Title': 'Mostrar Status no Título',

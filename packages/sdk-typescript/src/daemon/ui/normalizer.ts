@@ -1059,6 +1059,19 @@ function normalizeSessionUpdate(
       const agent = extractAgentIdentity(update);
       const meta = extractUpdateMeta(update);
       if (
+        meta?.['source'] === 'stop_hook_notice' &&
+        typeof meta['stopReason'] === 'string'
+      ) {
+        return [
+          {
+            ...base,
+            type: 'status',
+            source: meta['source'],
+            text: meta['stopReason'],
+          },
+        ];
+      }
+      if (
         meta?.['source'] === 'background_task_completed' ||
         meta?.['source'] === 'background_notification_turn_started'
       ) {
