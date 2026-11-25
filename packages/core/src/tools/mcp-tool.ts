@@ -172,7 +172,12 @@ function isExecutionTimeoutFailure(
   // raced with a cancel. Classifying it as EXECUTION_TIMEOUT would count a
   // user cancellation against the timeout SLI, so the abort side wins.
   if (signal.aborted) return false;
-  if (!isMcpRequestTimeout(error)) return false;
+  // The v2 SDK rejects with SdkError(REQUEST_TIMEOUT) when the `timeout`
+  // passed to callTool (mcpTimeout) runs out; -32001 now only comes from a
+  // server. Both mean the call got no answer in time.
+  if (!isMcpRequestTimeout(error) && !isMcpSdkRequestTimeout(error)) {
+    return false;
+  }
   // `-32001` doubles as the server's dead-session response code when it no
   // longer recognizes our `mcp-session-id` (typical right after an HTTP
   // server restart). That is a dead connection `handleReconnectOnError` can

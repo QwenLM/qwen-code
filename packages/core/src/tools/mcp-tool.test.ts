@@ -3042,6 +3042,44 @@ describe('DiscoveredMCPTool', () => {
       });
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
+
+    it('reconnects on the SDK’s own request timeout when the server is known disconnected', async () => {
+      await expectReconnect(
+        new SdkError(SdkErrorCode.RequestTimeout, 'Request timed out', {
+          timeout: 1,
+        }),
+        MCPServerStatus.DISCONNECTED,
+      );
+    });
+
+    it('reports the SDK’s own request timeout as a timeout when the server is connected', async () => {
+      // `timeout: mcpTimeout` makes the v2 SDK reject with
+      // SdkError(REQUEST_TIMEOUT), never with JSON-RPC -32001.
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const client: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockRejectedValue(
+            new SdkError(SdkErrorCode.RequestTimeout, 'Request timed out', {
+              timeout: 1,
+            }),
+          ),
+      };
+      const mockConfig = {
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+
+      await expect(
+        exec(mkTool({ config: mockConfig, client })),
+      ).rejects.toMatchObject({
+        errorType: ToolErrorType.EXECUTION_TIMEOUT,
+      });
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
   });
 
   describe('MCP Tool Idle Timeout', () => {
