@@ -30,7 +30,7 @@ Starter 不实现宿主身份认证、业务 Session 路由、定义或材料所
 
 `ManagedAgentAutoConfiguration` 位于 `com.alibaba.qwen.code.managedagent.starter` 包。Maven 模块位于 `packages/managed-agent-server/qwen-managed-agent-spring-boot-starter/`，目录名与 artifactId 保持一致。Starter POM 依赖普通 server library 和直接使用的 Boot 自动配置 API，并注册到 `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`。
 
-启动失败隔离目前仍是实现候选，不是已经验收的结果。注册器将 Managed 初始化延后到宿主 Bean 实例化阶段，此时 Boot 已注册所需自动配置 Bean。`EmbeddedManagedAgentBootstrap` 使用宿主作为父上下文并复用宿主 `Environment`，在子上下文中初始化 `ManagedAgentConfiguration`。透传保留原 Bean 名称、声明类型及非默认候选规则，不覆盖宿主已有定义。成功初始化时暴露真实子上下文服务和资源，由子上下文负责关闭。初始化失败时关闭子上下文并暴露失败代理，普通调用抛出带原始初始化 cause 的 `IllegalStateException`；不依赖 Managed 的宿主 Bean 仍可启动并对外服务。任何失败路径均不放行不兼容 schema，也不把执行改派到其它 Provider。直接组件扫描绕过 Starter 边界，不属于本设计覆盖范围。
+启动失败隔离目前仍是实现候选，不是已经验收的结果。受支持的宿主 Java 面是 `ManagedAgentService`、`ManagedAgentDefinitionPreparation` 和 `ManagedAgentBootstrapPreparation`，并沿用原 Spring Bean 名称。内部配置、持久化对象、调度器、执行线程及辅助类留在隔离的 Managed 上下文中，不作为宿主注入契约。`EmbeddedManagedAgentBootstrap` 通过 `SmartInitializingSingleton` 初始化 `ManagedAgentConfiguration`，此时宿主已注册 BeanPostProcessor 并创建普通 singleton。宿主的三个服务代理到子上下文：正常调用转发给真实 Managed 服务，宿主 consumer 可以在 Managed 资源启动之前完成构造注入。初始化失败关闭子上下文，记录并输出原始异常，后续服务调用抛出带该 cause 的 `IllegalStateException`。Bootstrap 负责关闭子上下文一次，代理不在宿主重复执行 Managed 初始化、调度或销毁。`isAvailable()` 只报告 Managed 可用状态，不是宿主就绪状态。任何失败路径均不放行不兼容 schema，也不把执行改派到其它 Provider。显式导入及独立部署保留既有生命周期与启动失败行为。
 
 `ManagedAgentProperties` 拥有新增的 `enabled`、`schema.initialize-enabled` 属性。`ManagedAgentPersistenceConfiguration.managedJdbcTemplate` 在关闭初始化时调用 `ManagedSchema.validate(source)`，否则保留 `ManagedSchema.initialize(source)`。两条路径都使用现有公开 `ManagedSchema` 方法，不增加绕过、修复或放宽的数据库准入。
 
