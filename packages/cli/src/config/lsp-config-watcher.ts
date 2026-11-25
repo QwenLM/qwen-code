@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { stripUtf8Bom } from './execution-sandbox-settings.js';
 
 const debugLogger = createDebugLogger('LSP_CONFIG_WATCHER');
 
@@ -110,7 +112,7 @@ export class LspConfigWatcher {
     this.listener = undefined;
 
     try {
-      await this.watcher?.close();
+      await closeFileWatcher(this.watcher);
     } catch (error) {
       debugLogger.warn('LSP config watcher close error:', error);
     }
@@ -227,7 +229,7 @@ export class LspConfigWatcher {
     }
 
     try {
-      const parsed = JSON.parse(raw) as unknown;
+      const parsed = JSON.parse(stripUtf8Bom(raw)) as unknown;
       return { exists: true, canonical: canonicalize(parsed) };
     } catch (error) {
       debugLogger.warn('Failed to parse .lsp.json:', error);

@@ -11,6 +11,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { PermissionRequest } from '../../adapters/types';
 import { AskUserQuestion } from './AskUserQuestion';
+import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -93,11 +94,14 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  vi.unstubAllGlobals();
 });
 
 function rerender(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  onAskDetails?: () => void,
+  disabled?: boolean,
 ): void {
   act(() =>
     root!.render(
@@ -107,6 +111,8 @@ function rerender(
           onConfirm={onConfirm}
           onError={onError}
           keyboardActive={keyboardActive}
+          onAskDetails={onAskDetails}
+          disabled={disabled}
         />
       </I18nProvider>,
     ),
@@ -116,11 +122,13 @@ function rerender(
 function render(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  onAskDetails?: () => void,
+  disabled?: boolean,
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req);
+  rerender(keyboardActive, req, onAskDetails, disabled);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -1089,6 +1097,8 @@ describe('AskUserQuestion multiple questions', () => {
       '[aria-label="Collapse"]',
     )!;
 
+    expect(collapse.textContent).toBe('Collapse');
+    expect(collapse.getAttribute('aria-expanded')).toBe('true');
     act(() => collapse.click());
 
     expect(panel.getAttribute('aria-labelledby')).toBeNull();
@@ -1096,6 +1106,8 @@ describe('AskUserQuestion multiple questions', () => {
     const expand = container!.querySelector<HTMLButtonElement>(
       '[aria-label="Expand"]',
     )!;
+    expect(expand.textContent).toBe('Expand');
+    expect(expand.getAttribute('aria-expanded')).toBe('false');
     act(() => expand.click());
     expect(container!.textContent).toContain('Enter submit');
   });
@@ -1202,6 +1214,118 @@ describe('AskUserQuestion multiple questions', () => {
 });
 
 describe('AskUserQuestion multi-select', () => {
+  it('keeps selected option ids separate from custom text while retaining legacy answers', () => {
+    const structuredRequest: PermissionRequest = {
+      ...multiRequest,
+      rawInput: {
+        questions: [
+          {
+            id: 'notes',
+            question: 'Pick options',
+            header: 'Options',
+            options: [
+              { id: 'dry', label: 'Dry run', description: '' },
+              { id: 'verbose', label: 'Verbose', description: '' },
+            ],
+            multiSelect: true,
+          },
+        ],
+      },
+    };
+    render(undefined, structuredRequest);
+    act(() => optionButtons()[0]!.click());
+    act(() => optionButtons()[2]!.click());
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Verbose');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => submitButton()!.click());
+
+    expect(onConfirm).toHaveBeenCalledWith(
+      'req-multi',
+      'submit',
+      { '0': 'Dry run, Verbose' },
+      [
+        {
+          questionId: 'notes',
+          value: 'Dry run, Verbose',
+          optionIds: ['dry'],
+          text: 'Verbose',
+        },
+      ],
+    );
+  });
+
+  it('toggles same-labelled and id-colliding options independently', () => {
+    const duplicateLabels: PermissionRequest = {
+      ...multiRequest,
+      rawInput: {
+        questions: [
+          {
+            id: 'q',
+            question: 'Pick options',
+            header: 'Options',
+            options: [
+              { id: 'one', label: 'Same, label', description: '' },
+              { id: 'two', label: 'Same, label', description: 'duplicate' },
+              { id: 'three', label: 'one', description: 'id collision' },
+            ],
+            multiSelect: true,
+          },
+        ],
+      },
+    };
+    render(undefined, duplicateLabels);
+    const options = optionButtons();
+    act(() => options[0]!.click());
+    act(() => options[1]!.click());
+    act(() => options[2]!.click());
+    expect(options[0]!.getAttribute('aria-pressed')).toBe('true');
+    expect(options[1]!.getAttribute('aria-pressed')).toBe('true');
+    expect(options[2]!.getAttribute('aria-pressed')).toBe('true');
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledWith(
+      'req-multi',
+      'submit',
+      { '0': 'Same, label, Same, label, one' },
+      [
+        {
+          questionId: 'q',
+          value: 'Same, label, Same, label, one',
+          optionIds: ['one', 'two', 'three'],
+        },
+      ],
+    );
+  });
+
+  it('retains the legacy three-argument submission when identifiers are incomplete', () => {
+    const partialIds: PermissionRequest = {
+      ...request,
+      rawInput: {
+        questions: [
+          {
+            id: 'color',
+            question: 'Pick a color',
+            header: 'Color',
+            options: [
+              { id: 'red', label: 'Red', description: 'warm' },
+              { label: 'Blue', description: 'cool' },
+            ],
+          },
+        ],
+      },
+    };
+    render(undefined, partialIds);
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', {
+      '0': 'Red',
+    });
+  });
+
   it('describes moving when the empty custom row is focused', () => {
     render(undefined, multiRequest);
     pressKey(optionButtons()[0]!, 'End');
@@ -1477,5 +1601,442 @@ describe('AskUserQuestion multi-select', () => {
     expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('true');
     expect(onConfirm).not.toHaveBeenCalled();
     expect(submitButton()!.disabled).toBe(true);
+  });
+});
+
+function renderNotificationQuestion() {
+  vi.stubGlobal('isSecureContext', true);
+  vi.stubGlobal(
+    'Notification',
+    Object.assign(vi.fn(), { permission: 'granted' }),
+  );
+  render();
+  act(() =>
+    root!.render(
+      <I18nProvider language="en">
+        <BrowserTurnNotifications language="en">
+          <AskUserQuestion
+            request={request}
+            onConfirm={onConfirm}
+            onError={onError}
+          />
+        </BrowserTurnNotifications>
+      </I18nProvider>,
+    ),
+  );
+  const option = optionButtons()[0];
+  act(() => option.focus());
+  const bell = container!.querySelector<HTMLButtonElement>(
+    '[aria-label="Task notifications"]',
+  )!;
+  act(() =>
+    bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+  );
+  return { bell, option };
+}
+
+it.each(['Escape', 'Control+Enter'])(
+  'isolates %s from the focused question under hover-opened notification help',
+  (key) => {
+    const { option } = renderNotificationQuestion();
+    expect(document.activeElement).toBe(option);
+    expect(
+      document.querySelector('[data-web-shell-notification-help]'),
+    ).not.toBeNull();
+    pressKey(option, key === 'Escape' ? 'Escape' : 'Enter', {
+      cancelable: true,
+      ctrlKey: key === 'Control+Enter',
+    });
+    expect(onConfirm).not.toHaveBeenCalled();
+    if (key === 'Escape') {
+      expect(
+        document.querySelector('[data-web-shell-notification-help]'),
+      ).toBeNull();
+      expect(document.activeElement).toBe(option);
+    } else {
+      expect(
+        document.querySelector('[data-web-shell-notification-help]'),
+      ).not.toBeNull();
+      expect(document.activeElement).toBe(option);
+    }
+  },
+);
+
+it('preserves navigation and collapse controls under hover-opened notification help', () => {
+  const { bell, option } = renderNotificationQuestion();
+  pressKey(option, 'ArrowDown', { cancelable: true });
+  expect(document.activeElement).toBe(optionButtons()[1]);
+  const collapse = container!.querySelector<HTMLButtonElement>(
+    '[aria-label="Collapse"]',
+  )!;
+  act(() => collapse.focus());
+  act(() =>
+    bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+  );
+  expect(
+    document.querySelector('[data-web-shell-notification-help]'),
+  ).not.toBeNull();
+  for (const key of ['Enter', ' ']) {
+    expect(pressKey(collapse, key, { cancelable: true }).defaultPrevented).toBe(
+      false,
+    );
+  }
+  act(() => collapse.click());
+  expect(collapse.getAttribute('aria-expanded')).toBe('false');
+  expect(onConfirm).not.toHaveBeenCalled();
+});
+
+it('allows spaces in a custom answer while blocking modifier-Enter under hover-opened help', () => {
+  const { bell, option } = renderNotificationQuestion();
+  pressKey(option, 'Escape', { cancelable: true });
+  act(() => optionButtons().at(-1)!.click());
+  const input = container!.querySelector<HTMLInputElement>('input')!;
+  act(() => input.focus());
+  act(() =>
+    bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+  );
+  expect(pressKey(input, ' ', { cancelable: true }).defaultPrevented).toBe(
+    false,
+  );
+  expect(
+    pressKey(input, 'Enter', { ctrlKey: true, cancelable: true })
+      .defaultPrevented,
+  ).toBe(true);
+  expect(onConfirm).not.toHaveBeenCalled();
+});
+
+describe('ask-for-details action', () => {
+  function detailsButton(): HTMLButtonElement | null {
+    return (
+      Array.from(container!.querySelectorAll<HTMLButtonElement>('button')).find(
+        (b) => b.textContent === 'Ask for details',
+      ) ?? null
+    );
+  }
+
+  it('stays hidden when the host provides no details callback', () => {
+    render();
+    expect(detailsButton()).toBeNull();
+  });
+
+  it('opens the details side task without answering the question', () => {
+    const onAskDetails = vi.fn();
+    render(undefined, request, onAskDetails);
+    const button = detailsButton();
+    expect(button).not.toBeNull();
+    expect(button!.title).toBe(
+      'Open a side task that explains this question before you answer',
+    );
+
+    act(() => button!.click());
+
+    expect(onAskDetails).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(submitButton()!.disabled).toBe(false);
+  });
+
+  it('stays out of the option group and its digit shortcuts', () => {
+    const onAskDetails = vi.fn();
+    render(undefined, request, onAskDetails);
+    const button = detailsButton()!;
+    expect(optionButtons()).not.toContain(button);
+
+    // Move the committed answer off the default (option 0) so a leaked digit
+    // would observably rewrite it; asserting option 0 stays selected otherwise
+    // passes even when the digit leaks, because '1' maps to the default.
+    const opts = optionButtons();
+    act(() => opts[0]!.focus());
+    pressKey(opts[0]!, 'ArrowDown'); // Red -> Blue
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+
+    act(() => button.focus());
+    pressKey(button, '1', { cancelable: true });
+
+    expect(onAskDetails).not.toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
+    // The digit did not leak into the option group's shortcuts: the committed
+    // answer is still Blue, not reset to option 0.
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('is disabled while a submission is in flight', async () => {
+    const pending = deferred<boolean>();
+    onConfirm.mockReturnValue(pending.promise);
+    const onAskDetails = vi.fn();
+    render(undefined, request, onAskDetails);
+
+    act(() => submitButton()!.click());
+    expect(detailsButton()!.disabled).toBe(true);
+
+    await act(async () => {
+      pending.resolve(true);
+      await pending.promise;
+    });
+    expect(onAskDetails).not.toHaveBeenCalled();
+  });
+});
+
+describe('managed question contract parity', () => {
+  function ignoreButton(): HTMLButtonElement | null {
+    return (
+      Array.from(container!.querySelectorAll<HTMLButtonElement>('button')).find(
+        (b) => b.textContent === 'Ignore',
+      ) ?? null
+    );
+  }
+
+  function nextButton(): HTMLButtonElement {
+    return Array.from(
+      container!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((b) => b.textContent === 'next')!;
+  }
+
+  const managedOnlyOptions: PermissionRequest['options'] = [
+    { id: 'submit', label: 'Submit', kind: 'allow_once' },
+  ];
+
+  it('hides the Ignore button and ignores Escape when no reject option exists', () => {
+    render(undefined, {
+      ...request,
+      options: managedOnlyOptions,
+    });
+    expect(ignoreButton()).toBeNull();
+    const ev = pressKey(optionButtons()[0]!, 'Escape', { cancelable: true });
+    expect(ev.defaultPrevented).toBe(false);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('leaves optional single-select unselected, supports click-to-clear, arrow focus without commit, and omits unanswered optional entries from structured answers', () => {
+    const req: PermissionRequest = {
+      id: 'req-opt',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Optional single choice',
+            header: 'q1',
+            required: false,
+            allowText: true,
+            options: [
+              { id: 'a', label: 'Alpha', description: '' },
+              { id: 'b', label: 'Beta', description: '' },
+            ],
+          },
+          {
+            id: 'q2',
+            question: 'Required strict choice',
+            header: 'q2',
+            required: true,
+            allowText: false,
+            options: [
+              { id: 'x', label: 'X', description: '' },
+              { id: 'y', label: 'Y', description: '' },
+            ],
+          },
+        ],
+      },
+    };
+    render(true, req);
+    // Optional Q1 must NOT auto-select option 0.
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+    // Required Q2 is not yet answered, so submit stays disabled.
+    expect(submitButton()!.disabled).toBe(true);
+
+    // ArrowDown moves roving focus only — does NOT fabricate a selection.
+    act(() => optionButtons()[0]!.focus());
+    pressKey(optionButtons()[0]!, 'ArrowDown', { cancelable: true });
+    expect(document.activeElement).toBe(optionButtons()[1]);
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+
+    // Click selects and a second click clears the optional single-select.
+    act(() => optionButtons()[1]!.click());
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('true');
+    act(() => optionButtons()[1]!.click());
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+
+    // Visit Q2 (required, allowText: false): auto-selects X, hides custom row.
+    act(() => nextButton().click());
+    expect(optionButtons()).toHaveLength(2);
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('true');
+    expect(submitButton()!.disabled).toBe(false);
+
+    // Submit with Q1 skipped: structured answers omit unanswered optional Q1.
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-opt',
+      'submit',
+      { '0': '', '1': 'X' },
+      [{ questionId: 'q2', value: 'X', optionIds: ['x'] }],
+    );
+  });
+
+  it('commits focused option on Enter for optional single-select without stale-state lag on the final question', () => {
+    const req: PermissionRequest = {
+      id: 'req-opt-enter',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Optional single',
+            header: 'q1',
+            required: false,
+            allowText: false,
+            options: [
+              { id: 'a', label: 'Alpha', description: '' },
+              { id: 'b', label: 'Beta', description: '' },
+            ],
+          },
+        ],
+      },
+    };
+    render(true, req);
+    expect(submitButton()!.disabled).toBe(false);
+    act(() => optionButtons()[0]!.focus());
+    pressKey(optionButtons()[0]!, 'ArrowDown', { cancelable: true });
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+    pressKey(optionButtons()[1]!, 'Enter', { cancelable: true });
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-opt-enter',
+      'submit',
+      { '0': 'Beta' },
+      [{ questionId: 'q1', value: 'Beta', optionIds: ['b'] }],
+    );
+  });
+
+  it('enforces allowText: false across rendering, Arrow/End wrapping, and digit shortcuts', () => {
+    const req: PermissionRequest = {
+      id: 'req-no-text',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'strict',
+            question: 'Choose strictly',
+            header: 'strict',
+            required: true,
+            allowText: false,
+            options: [
+              { id: 'one', label: 'One', description: '' },
+              { id: 'two', label: 'Two', description: '' },
+            ],
+          },
+        ],
+      },
+    };
+    render(true, req);
+    const opts = optionButtons();
+    expect(opts).toHaveLength(2);
+    expect(container!.querySelector('input')).toBeNull();
+
+    // End lands on the last real option (index 1), not a non-existent custom row.
+    pressKey(opts[0]!, 'End', { cancelable: true });
+    expect(document.activeElement).toBe(opts[1]);
+    // ArrowDown wraps back to index 0.
+    pressKey(opts[1]!, 'ArrowDown', { cancelable: true });
+    expect(document.activeElement).toBe(opts[0]);
+    // Digit '3' is out of bounds and does not open an input.
+    const ev = pressKey(opts[0]!, '3', { cancelable: true });
+    expect(ev.defaultPrevented).toBe(false);
+    expect(container!.querySelector('input')).toBeNull();
+  });
+
+  it('handles empty-option questions safely for both allowText: true (text-only) and allowText: false', () => {
+    const textOnlyReq: PermissionRequest = {
+      id: 'req-text-only',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'free',
+            question: 'Write a note',
+            header: 'free',
+            required: true,
+            allowText: true,
+            maxTextLength: 8192,
+            options: [],
+          },
+        ],
+      },
+    };
+    render(true, textOnlyReq);
+    expect(optionButtons()).toHaveLength(1);
+    expect(document.activeElement).toBe(optionButtons()[0]);
+    expect(submitButton()!.disabled).toBe(true);
+
+    act(() => optionButtons()[0]!.click());
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    expect(input).not.toBeNull();
+    expect(input.maxLength).toBe(8192);
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Only text');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(submitButton()!.disabled).toBe(false);
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-text-only',
+      'submit',
+      { '0': 'Only text' },
+      [{ questionId: 'free', value: 'Only text', text: 'Only text' }],
+    );
+
+    // Defensive empty question (options: [] and allowText: false): no NaN crash.
+    onConfirm.mockClear();
+    rerender(true, {
+      id: 'req-empty-strict',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'empty',
+            question: 'No choices',
+            header: 'empty',
+            required: false,
+            allowText: false,
+            options: [],
+          },
+        ],
+      },
+    });
+    expect(optionButtons()).toHaveLength(0);
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    expect(() => {
+      pressKey(panel, 'ArrowDown', { cancelable: true });
+      pressKey(panel, 'End', { cancelable: true });
+    }).not.toThrow();
+  });
+
+  it('disables answering and keyboard shortcuts when disabled is true while keeping question navigation inspectable', () => {
+    render(true, multipleQuestionsRequest, undefined, true);
+    expect(submitButton()!.disabled).toBe(true);
+    expect(ignoreButton()!.disabled).toBe(true);
+    for (const button of optionButtons()) {
+      expect(button.disabled).toBe(true);
+    }
+
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    pressKey(panel, 'Enter', { ctrlKey: true, cancelable: true });
+    pressKey(panel, 'Escape', { cancelable: true });
+    pressKey(optionButtons()[0]!, '2', { cancelable: true });
+    pressKey(optionButtons()[0]!, 'Enter', { cancelable: true });
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // Navigating to Q2 stays available so a read-only viewer can inspect all questions.
+    expect(nextButton().disabled).toBe(false);
+    act(() => nextButton().click());
+    expect(container!.textContent).toContain('Pick a size');
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

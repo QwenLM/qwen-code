@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolOutputSize } from './tool-output-size.js';
+import type { ApprovalMode } from '../config/approval-mode.js';
+import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
+import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
@@ -30,6 +34,14 @@ export interface ToolInvocation<
   readonly permissionAliases?: readonly string[];
 
   /**
+   * Producer-carried MCP identity (server name + tool name on that server),
+   * set by MCP tool invocations. Permission matchers read the server
+   * boundary from here instead of re-deriving it from a flattened
+   * `mcp__<server>__<tool>` spelling, which cannot tell `foo` from `foo_`.
+   */
+  readonly mcpIdentity?: { serverName: string; serverToolName: string };
+
+  /**
    * Gets a pre-execution description of the tool operation.
    *
    * @returns A markdown string describing what the tool will do.
@@ -53,7 +65,7 @@ export interface ToolInvocation<
    * The coreToolScheduler uses this as the *default* permission which may be
    * overridden by PermissionManager rules at L4.
    */
-  getDefaultPermission(): Promise<PermissionDecision>;
+  getDefaultPermission(signal?: AbortSignal): Promise<PermissionDecision>;
 
   /**
    * Whether this invocation must be approved through an explicit host/user
@@ -63,6 +75,16 @@ export interface ToolInvocation<
   requiresUserInteraction?(): boolean;
 
   /**
+   * Parameters that permission rules match against, when they differ from
+   * `params`. Called after {@link getDefaultPermission} resolves, so an
+   * invocation can derive values from work done there, such as the digest of
+   * the file a name resolves to. A derived key must overwrite any value the
+   * model supplied under it: a rule scoped by that key must never match a
+   * value the model chose.
+   */
+  getPermissionMatchParams?(): Record<string, unknown>;
+
+  /**
    * Whether a host-level allow decision may be confirmed without forwarding
    * an interaction payload. Tools that collect data through their approval
    * surface should return false so the host-provided payload is preserved.
@@ -70,9 +92,15 @@ export interface ToolInvocation<
   canAutoApproveOnAllow?(): boolean;
 
   /**
-   * Constructs the confirmation dialog details for this invocation.
-   * Only called when the final permission decision is `'ask'` and the user
-   * needs to be prompted interactively.
+   * Whether an allow decision must still be reviewed by AUTO mode.
+   * This is independent of host interaction-payload forwarding.
+   */
+  requiresAutoReviewOnAllow?(): boolean;
+
+  /**
+   * Constructs confirmation details and optional automatic-approval hooks.
+   * A host may call this after a real automatic decision even when no human
+   * interaction is required.
    *
    * @param abortSignal Signal to cancel the operation.
    * @returns The confirmation details for the UI to display.
@@ -92,6 +120,9 @@ export interface ToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<TResult>;
+
+  /** Release prepared resources when the scheduler finalizes the call. */
+  release?(): Promise<void>;
 }
 
 /**
@@ -124,6 +155,10 @@ export abstract class BaseToolInvocation<
 
   canAutoApproveOnAllow(): boolean {
     return true;
+  }
+
+  requiresAutoReviewOnAllow(): boolean {
+    return false;
   }
 
   /**
@@ -162,6 +197,62 @@ export abstract class BaseToolInvocation<
  * A type alias for a tool invocation where the specific parameter and result types are not known.
  */
 export type AnyToolInvocation = ToolInvocation<object, ToolResult>;
+
+/** One declared output of a media-policy tool (see
+ * {@link MediaPolicyToolDescriptor}). */
+export interface MediaPolicyToolOutputSpec {
+  /** What the output is: a derived media artifact, a disclosure text, or
+   * a non-media file artifact (e.g. a `role: 'transcript'` UTF-8
+   * text/plain file — policy design §6.2). */
+  kind: 'media' | 'text' | 'file';
+  /** Role label for text/file outputs (e.g. 'disclosure', 'transcript'). */
+  role?: string;
+  /** MIME types the output may carry (media and file outputs). */
+  mimeTypes?: string[];
+  /** Whether a successful run MUST produce this output. */
+  required: boolean;
+  /** Whether the output is a lossy transformation of its input. A lossy
+   * media output obligates a disclosure text alongside it. */
+  lossy?: boolean;
+}
+
+/**
+ * Code-registration fact marking a tool as an omni media-policy tool —
+ * declared by the tool class itself, immutable at runtime, and never
+ * configurable. Its presence is what the scheduler's modelAccess gate,
+ * the declaration surfaces, and the fixed-policy orchestrator key off:
+ * config can never turn an ordinary tool into a policy tool (or the
+ * reverse).
+ */
+export interface MediaPolicyToolDescriptor {
+  kind: 'media_policy';
+  /** Media modalities the tool accepts as input. */
+  inputMediaTypes: Array<'image' | 'audio' | 'video'>;
+  /** Outputs a successful run may/must produce. */
+  outputs: MediaPolicyToolOutputSpec[];
+  /** JSON schema for `omni.processing.policyTools.<name>.settings`. */
+  settingsSchema?: object;
+  /**
+   * Parameter names only the OPERATOR may set — via
+   * `policyTools.<name>.settings` or `modelAccess.defaultArguments` /
+   * `lockedArguments` — never the caller of a gated model/client call.
+   * For endpoint/credential selectors (e.g. a request base URL plus the
+   * NAME of the env var read for its bearer token): a model-controlled
+   * pair would let injected content exfiltrate arbitrary environment
+   * secrets to an attacker host. The modelAccess gate rejects gated calls
+   * that name these keys, and the declaration projection hides them from
+   * the model. Fixed-policy arguments (operator-authored settings.json)
+   * are unaffected.
+   */
+  operatorOnlyParams?: readonly string[];
+  /**
+   * Transform-semantics version, part of the degradation-cache
+   * fingerprint (decision D2). Bump it whenever the tool starts producing
+   * different bytes for the same input and arguments (encoder change,
+   * default pipeline change), so stale cached derivatives are not reused.
+   */
+  version?: string;
+}
 
 /**
  * Interface for a tool builder that validates parameters and creates invocations.
@@ -233,9 +324,9 @@ export abstract class DeclarativeTool<
     /**
      * When true, this tool is hidden from the initial function-declaration list
      * sent to the model to save tokens. The model discovers it on-demand via the
-     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
-     * subsequent API requests. Mirrors the `shouldDefer` field described in
-     * Claude Code's tool framework.
+     * {@link ToolNames.TOOL_SEARCH} tool and invokes it through
+     * {@link ToolNames.TOOL_CALL}, keeping the declaration list stable. Mirrors
+     * the `shouldDefer` field described in Claude Code's tool framework.
      */
     readonly shouldDefer: boolean = false,
     /**
@@ -257,6 +348,16 @@ export abstract class DeclarativeTool<
       description: this.description,
       parametersJsonSchema: this.parameterSchema,
     };
+  }
+
+  /**
+   * Present iff this tool is an omni media-policy tool. A code-level fact
+   * of the tool class (not configuration): the scheduler's modelAccess
+   * gate, the declaration surfaces, and the fixed-policy orchestrator all
+   * key off it. Default: not a media-policy tool.
+   */
+  get mediaPolicyDescriptor(): MediaPolicyToolDescriptor | undefined {
+    return undefined;
   }
 
   /**
@@ -492,9 +593,19 @@ export interface ToolArtifact {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  /** Only refresh an artifact the session already has; never create one. */
+  updateOnly?: boolean;
 }
 
 export interface ToolResult {
+  /** Numeric size before a producer reduces its semantic result. */
+  rawOutputSize?: ToolOutputSize | null;
+  /**
+   * Set when the producer bounded its own render: the returned body is
+   * shortened. `rawOutputSize` may still be `null` (the pre-reduction size is
+   * unrecoverable), but the truncation fact itself is known here.
+   */
+  truncatedByProducer?: boolean;
   /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.
@@ -513,6 +624,36 @@ export interface ToolResult {
    */
   persistedOutputFiles?: string[];
 
+  /** Producer-owned reason and recovery handle, preserved as one unit. */
+  recoveryText?: string;
+
+  /**
+   * Internal runtime marker: the producer already sized `llmContent` against
+   * its own declared character budget, whether or not anything was cut. Records
+   * the size decision, where `persistedOutputFiles` records the persistence
+   * one. Set it only on paths that ran that check, never by tool identity: the
+   * scheduler's generic single-result gate stands down for a marked body. On
+   * the success path the per-tool budget still applies, and a timed-out call's
+   * detail is re-bounded at the producer's declared budget; the ordinary
+   * failure path has no per-tool pass, so a producer that marks a body there
+   * is bounding it alone. The aggregate batch budget applies on every path.
+   */
+  outputBudgetApplied?: boolean;
+
+  /**
+   * Set by a producer that knows its own work was cut short but reports that
+   * outcome as an ordinary result instead of throwing. The scheduler uses it to
+   * tell the model the call was interrupted rather than completed.
+   */
+  interruptedBeforeCompletion?: boolean;
+
+  /**
+   * Set when the result names work that keeps running after the call, such
+   * as a shell moved to the background for a user message. A call cancelled
+   * after this result keeps it, so the model still learns the task.
+   */
+  keptWhenCancelled?: boolean;
+
   /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
@@ -529,11 +670,22 @@ export interface ToolResult {
   resultFilePaths?: string[];
 
   /**
+   * The full collected set a result's count is computed over, before any
+   * display slice: glob's header certifies the collected count, so a
+   * containment check that reads only `resultFilePaths` would certify hits
+   * it never inspected.
+   */
+  collectedFilePaths?: string[];
+
+  /**
    * Structured artifacts produced by this tool call. Daemon/session surfaces
    * consume this as metadata only; the producer remains responsible for the
    * underlying file, URL, or managed resource lifecycle.
    */
   artifacts?: ToolArtifact[];
+
+  /** The tool returned a failure result. Its body is in llmContent. */
+  isError?: boolean;
 
   /**
    * If this property is present, the tool call is considered a failure.
@@ -728,6 +880,7 @@ export interface McpAppToolResult {
 /** A completed MCP tool call with an interactive MCP Apps resource. */
 export interface McpAppResultDisplay {
   type: 'mcp_app';
+  requiredFeature?: 'generated-ui';
   serverName: string;
   resourceUri: string;
   html: string;
@@ -794,8 +947,19 @@ export function isTerminalImageDisplay(
   );
 }
 
+export interface AskUserQuestionResultDisplay {
+  type: 'ask_user_question_answers';
+  text: string;
+  answers: Array<{ question: string; answer: string }>;
+}
+
 export type ToolResultDisplay =
+  | SubscriptionQuotaDisplay
+  | ShellResultDisplay
   | string
+  | AdvisorReviewDisplay
+  | AdvisorAdviceDisplay
+  | AskUserQuestionResultDisplay
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
@@ -809,6 +973,73 @@ export type ToolResultDisplay =
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;
+
+export interface AdvisorAdviceDisplay {
+  type: 'advisor_advice';
+  model?: string;
+  text: string;
+}
+
+export type AdvisorDisplay = AdvisorReviewDisplay | AdvisorAdviceDisplay;
+
+export function isAdvisorDisplay(display: unknown): display is AdvisorDisplay {
+  return (
+    isAdvisorReviewDisplay(display) ||
+    (typeof display === 'object' &&
+      display !== null &&
+      'type' in display &&
+      display.type === 'advisor_advice' &&
+      'text' in display &&
+      typeof display.text === 'string')
+  );
+}
+
+export function formatAdvisorDisplay(display: AdvisorDisplay): string {
+  return display.type === 'advisor_advice'
+    ? display.text
+    : formatAdvisorReview(display);
+}
+
+export interface AdvisorReviewDisplay {
+  type: 'advisor_review';
+  model?: string;
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
+}
+
+export function formatAdvisorReview(review: AdvisorReviewDisplay): string {
+  return [
+    '## Verdict',
+    review.verdict.trim(),
+    '## Risks',
+    review.risks.trim(),
+    '## Missing evidence',
+    review.missingEvidence.trim(),
+    '## Recommendation',
+    review.recommendation.trim(),
+  ].join('\n\n');
+}
+
+export function isAdvisorReviewDisplay(
+  display: unknown,
+): display is AdvisorReviewDisplay {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    display.type === 'advisor_review' &&
+    'verdict' in display &&
+    typeof display.verdict === 'string' &&
+    'risks' in display &&
+    typeof display.risks === 'string' &&
+    'missingEvidence' in display &&
+    typeof display.missingEvidence === 'string' &&
+    'recommendation' in display &&
+    typeof display.recommendation === 'string'
+  );
+}
 
 export interface TeamResultDisplay {
   type: 'team_result';
@@ -992,6 +1223,8 @@ export interface ToolExecuteConfirmationDetails {
   hideAlwaysAllow?: boolean;
   command: string;
   rootCommand: string;
+  /** Plain-text approval details for clients that render tool call content. */
+  approvalText?: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
   /**
@@ -1044,7 +1277,10 @@ export interface AutoModeFallbackConfirmation {
     | 'consecutive_block'
     | 'consecutive_unavailable'
     | 'total_denial'
-    | 'external_write';
+    | 'external_write'
+    | 'external_directory'
+    // A human-only safety floor, currently the `git commit --amend` guard.
+    | 'safety_check';
   message: string;
 }
 
@@ -1058,6 +1294,11 @@ export type ToolCallConfirmationDetails = (
 ) & {
   /** Explains why an AUTO-mode call was routed to manual confirmation. */
   autoModeFallback?: AutoModeFallbackConfirmation;
+  /**
+   * Called instead of onConfirm for an automatic permission grant. This lets
+   * tools distinguish it from an explicit human approval at execution time.
+   */
+  onAutoConfirm?: (approvalMode: ApprovalMode) => Promise<void>;
 };
 
 export interface ToolPlanConfirmationDetails {

@@ -12,6 +12,12 @@ import {
   parseAskUserQuestionParams,
   restorableAskUserQuestionCallIds,
 } from './ask-user-question-restore.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  modelText,
+} from '../test-utils/model-fixtures.js';
 
 const AUQ_ARGS = {
   questions: [
@@ -46,18 +52,7 @@ describe('findRestorableAskUserQuestion', () => {
   it('hits a trailing unanswered ask_user_question', () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'pick one' }] },
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: 'call-auq',
-              name: 'ask_user_question',
-              args: AUQ_ARGS,
-            },
-          },
-        ],
-      },
+      content('model', fnCall('ask_user_question', AUQ_ARGS, 'call-auq')),
     ];
     const restorable = findRestorableAskUserQuestion(history.at(-1));
     expect(restorable?.functionCalls).toEqual([
@@ -71,76 +66,47 @@ describe('findRestorableAskUserQuestion', () => {
   it('does not hit mixed dangling tools in the last model turn', () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'do both' }] },
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: 'call-bash',
-              name: 'run_shell_command',
-              args: { command: 'ls' },
-            },
-          },
-          {
-            functionCall: {
-              id: 'call-auq',
-              name: 'ask_user_question',
-              args: AUQ_ARGS,
-            },
-          },
-        ],
-      },
+      content(
+        'model',
+        fnCall('run_shell_command', { command: 'ls' }, 'call-bash'),
+        fnCall('ask_user_question', AUQ_ARGS, 'call-auq'),
+      ),
     ];
     expect(findRestorableAskUserQuestion(history.at(-1))).toBeUndefined();
   });
 
   it('does not hit when there is no dangling model turn', () => {
+    expect(findRestorableAskUserQuestion(modelText('done'))).toBeUndefined();
     expect(
-      findRestorableAskUserQuestion({
-        role: 'model',
-        parts: [{ text: 'done' }],
-      }),
-    ).toBeUndefined();
-    expect(
-      findRestorableAskUserQuestion({
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-auq',
-              name: 'ask_user_question',
-              response: { output: 'answered' },
-            },
-          },
-        ],
-      }),
+      findRestorableAskUserQuestion(
+        content(
+          'user',
+          fnResponse('ask_user_question', { output: 'answered' }, 'call-auq'),
+        ),
+      ),
     ).toBeUndefined();
     expect(findRestorableAskUserQuestion(undefined)).toBeUndefined();
   });
 
   it('does not hit a trailing ask_user_question with invalid params', () => {
-    const last: Content = {
-      role: 'model',
-      parts: [
+    const last: Content = content(
+      'model',
+      fnCall(
+        'ask_user_question',
         {
-          functionCall: {
-            id: 'call-auq',
-            name: 'ask_user_question',
-            args: {
-              questions: [
-                {
-                  question: 'Pick?',
-                  header: 'H',
-                  // fail-closed: a single-option question is invalid and
-                  // must degrade to the failed-tool-result fallback.
-                  options: [{ label: 'Only', description: 'one option' }],
-                },
-              ],
+          questions: [
+            {
+              question: 'Pick?',
+              header: 'H',
+              // fail-closed: a single-option question is invalid and
+              // must degrade to the failed-tool-result fallback.
+              options: [{ label: 'Only', description: 'one option' }],
             },
-          },
+          ],
         },
-      ],
-    };
+        'call-auq',
+      ),
+    );
     expect(findRestorableAskUserQuestion(last)).toBeUndefined();
     expect(restorableAskUserQuestionCallIds(last)).toBeUndefined();
   });
@@ -152,18 +118,10 @@ describe('lastHistoryContentFromRecords', () => {
       { type: 'user', message: { role: 'user', parts: [{ text: 'pick' }] } },
       {
         type: 'assistant',
-        message: {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call-auq',
-                name: 'ask_user_question',
-                args: AUQ_ARGS,
-              },
-            },
-          ],
-        },
+        message: content(
+          'model',
+          fnCall('ask_user_question', AUQ_ARGS, 'call-auq'),
+        ),
       },
       { type: 'system', message: { role: 'user', parts: [{ text: 'noise' }] } },
     ]);

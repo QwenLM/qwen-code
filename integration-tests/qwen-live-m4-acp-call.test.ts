@@ -20,6 +20,7 @@ import {
 import {
   bootAcpLiveStack,
   startLiveCall,
+  waitForLiveResponseAfter,
   type AcpLiveStack,
 } from './qwen-live-harness.js';
 
@@ -57,11 +58,12 @@ describeE2E('qwen-live M4 — ACP backend call loop', () => {
 
   it('hands off to the ACP backend and speaks the completion', async () => {
     const inboxIndex = stack.fakeDash.inbox.length;
-    conn.functionCall({
+    conn.queueFunctionCall({
       name: 'handoff',
       argumentsJson: JSON.stringify({ task: 'acp-call-task' }),
       callId: 'call-m4-1',
     });
+    conn.speakTranscript('Run acp-call-task.');
     const receiptMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === 'call-m4-1',
       {
@@ -86,18 +88,32 @@ describeE2E('qwen-live M4 — ACP backend call loop', () => {
       },
     );
     expect(contextTextOf(complete)).toContain('acp call task complete');
+    const spoken = await stack.fakeDash.waitForMessage(
+      (message) => {
+        const text = contextTextOf(message);
+        return (
+          text?.startsWith('[SPEAK_TO_USER] ') === true &&
+          text.includes('acp call task complete')
+        );
+      },
+      { fromIndex: stack.fakeDash.inbox.indexOf(complete) + 1 },
+    );
+    await waitForLiveResponseAfter(stack, spoken, 'backend_speech');
   });
 
   it('lists the acp session with its backend name', async () => {
-    conn.functionCall({
+    const fromIndex = stack.fakeDash.inbox.length;
+    conn.queueFunctionCall({
       name: 'session_list',
       argumentsJson: '{}',
       callId: 'call-m4-2',
     });
+    conn.speakTranscript('List my coding sessions.');
     const listMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === 'call-m4-2',
       {
         timeoutMs: 30_000,
+        fromIndex,
         description: 'the session_list receipt',
       },
     );
@@ -108,5 +124,6 @@ describeE2E('qwen-live M4 — ACP backend call loop', () => {
     const sessions = list['sessions'] as Array<Record<string, unknown>>;
     expect(sessions.length).toBeGreaterThanOrEqual(1);
     expect(sessions.every((row) => row['backend'] === 'qwen-acp')).toBe(true);
+    await waitForLiveResponseAfter(stack, listMessage, 'tool_continuation');
   });
 });

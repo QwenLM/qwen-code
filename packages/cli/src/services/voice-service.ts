@@ -10,6 +10,7 @@ import {
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.js';
+import { publicProviderBaseUrl } from '../utils/acpModelUtils.js';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import {
   isSelectableVoiceModel,
@@ -38,6 +39,9 @@ export const EMPTY_WORKSPACE_VOICE_UPDATE_ERROR =
   'At least one of `enabled`, `mode`, `language`, or `voiceModel` must be provided';
 
 export interface WorkspaceVoiceModelDescriptor {
+  name?: string;
+  baseUrl?: string;
+  contextWindow?: number;
   id: string;
   transport: Exclude<VoiceTransport, 'unsupported'>;
 }
@@ -172,6 +176,13 @@ export function listAvailableVoiceModels(
     .filter(isSelectableVoiceModel)
     .map((model) => ({
       id: model.id,
+      ...(model.label ? { name: model.label } : {}),
+      ...(model.baseUrl
+        ? { baseUrl: publicProviderBaseUrl(model.baseUrl) }
+        : {}),
+      ...(model.contextWindowSize
+        ? { contextWindow: model.contextWindowSize }
+        : {}),
       transport: resolveVoiceTransport(model.id),
     }))
     .filter(

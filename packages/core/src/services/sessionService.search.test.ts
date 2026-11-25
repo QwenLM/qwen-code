@@ -26,6 +26,7 @@ import {
 import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
+import { content } from '../test-utils/model-fixtures.js';
 
 let tmpRoot: string;
 let runtimeBaseDir: string;
@@ -112,11 +113,40 @@ function assistantText(
   });
 }
 
+function writeUser(
+  sessionId: string,
+  uuid: string,
+  text: string,
+  mtime?: Date,
+): void {
+  writeSession(sessionId, [userText(sessionId, uuid, text)], mtime);
+}
+
+const search = (
+  query: string,
+  options?: Parameters<SessionService['searchSessionContent']>[1],
+) => service.searchSessionContent(query, options);
+
+const idsOf = (hits: Array<{ sessionId: string }>) =>
+  hits.map((hit) => hit.sessionId);
+
+/** Asserts `query` yields exactly one hit whose snippet contains `expected`. */
+async function soleHit(query: string, expected: string) {
+  const hits = await search(query);
+  expect(hits).toHaveLength(1);
+  expect(hits[0].snippet).toContain(expected);
+  return hits[0];
+}
+
+// Lone lead surrogate, or lone trail surrogate.
+const LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 describe('SessionService.searchSessionContent', () => {
   it('returns no hits for an empty query or a missing chats dir', async () => {
-    await expect(service.searchSessionContent('')).resolves.toEqual([]);
-    await expect(service.searchSessionContent('  ')).resolves.toEqual([]);
-    await expect(service.searchSessionContent('anything')).resolves.toEqual([]);
+    await expect(search('')).resolves.toEqual([]);
+    await expect(search('  ')).resolves.toEqual([]);
+    await expect(search('anything')).resolves.toEqual([]);
   });
 
   it('matches user message text case-insensitively', async () => {
@@ -124,12 +154,10 @@ describe('SessionService.searchSessionContent', () => {
       userText(SESSION_A, 'a1', 'How do I configure OAuth providers?'),
       assistantText(SESSION_A, 'a2', 'You can configure them in settings.'),
     ]);
-    writeSession(SESSION_B, [userText(SESSION_B, 'b1', 'unrelated topic')]);
+    writeUser(SESSION_B, 'b1', 'unrelated topic');
 
-    const hits = await service.searchSessionContent('OAUTH');
-    expect(hits).toHaveLength(1);
-    expect(hits[0].sessionId).toBe(SESSION_A);
-    expect(hits[0].snippet).toContain('OAuth');
+    const hit = await soleHit('OAUTH', 'OAuth');
+    expect(hit.sessionId).toBe(SESSION_A);
   });
 
   it('matches assistant message text', async () => {
@@ -138,10 +166,8 @@ describe('SessionService.searchSessionContent', () => {
       assistantText(SESSION_A, 'a2', 'The debounce delay is 300ms.'),
     ]);
 
-    const hits = await service.searchSessionContent('debounce delay');
-    expect(hits).toHaveLength(1);
-    expect(hits[0].sessionId).toBe(SESSION_A);
-    expect(hits[0].snippet).toContain('debounce delay');
+    const hit = await soleHit('debounce delay', 'debounce delay');
+    expect(hit.sessionId).toBe(SESSION_A);
   });
 
   it('prefers the user prompt displayText payload when present', async () => {
@@ -157,9 +183,7 @@ describe('SessionService.searchSessionContent', () => {
       } as Partial<ChatRecord> & { uuid: string }),
     ]);
 
-    const hits = await service.searchSessionContent('qdrant');
-    expect(hits).toHaveLength(1);
-    expect(hits[0].snippet).toContain('qdrant indexing pipeline');
+    await soleHit('qdrant', 'qdrant indexing pipeline');
   });
 
   it('skips subtype records and non-message records', async () => {
@@ -178,7 +202,7 @@ describe('SessionService.searchSessionContent', () => {
       }),
     ]);
 
-    await expect(service.searchSessionContent('needle')).resolves.toEqual([]);
+    await expect(search('needle')).resolves.toEqual([]);
   });
 
   it('does not match sessions belonging to a different project', async () => {
@@ -191,166 +215,106 @@ describe('SessionService.searchSessionContent', () => {
       }),
     ]);
 
-    await expect(service.searchSessionContent('needle')).resolves.toEqual([]);
+    await expect(search('needle')).resolves.toEqual([]);
   });
 
   it('orders hits by recency and honors maxResults', async () => {
-    writeSession(
-      SESSION_A,
-      [userText(SESSION_A, 'a1', 'needle')],
-      new Date('2026-08-01T00:00:00Z'),
-    );
-    writeSession(
-      SESSION_B,
-      [userText(SESSION_B, 'b1', 'needle')],
-      new Date('2026-08-03T00:00:00Z'),
-    );
-    writeSession(
-      SESSION_C,
-      [userText(SESSION_C, 'c1', 'needle')],
-      new Date('2026-08-02T00:00:00Z'),
-    );
+    writeUser(SESSION_A, 'a1', 'needle', new Date('2026-08-01T00:00:00Z'));
+    writeUser(SESSION_B, 'b1', 'needle', new Date('2026-08-03T00:00:00Z'));
+    writeUser(SESSION_C, 'c1', 'needle', new Date('2026-08-02T00:00:00Z'));
 
-    const hits = await service.searchSessionContent('needle');
-    expect(hits.map((hit) => hit.sessionId)).toEqual([
-      SESSION_B,
-      SESSION_C,
-      SESSION_A,
-    ]);
+    const hits = await search('needle');
+    expect(idsOf(hits)).toEqual([SESSION_B, SESSION_C, SESSION_A]);
 
-    const limited = await service.searchSessionContent('needle', {
-      maxResults: 2,
-    });
-    expect(limited.map((hit) => hit.sessionId)).toEqual([SESSION_B, SESSION_C]);
+    const limited = await search('needle', { maxResults: 2 });
+    expect(idsOf(limited)).toEqual([SESSION_B, SESSION_C]);
   });
 
   it('honors maxFiles by scanning only the most recent sessions', async () => {
-    writeSession(
-      SESSION_A,
-      [userText(SESSION_A, 'a1', 'needle')],
-      new Date('2026-08-01T00:00:00Z'),
-    );
-    writeSession(
-      SESSION_B,
-      [userText(SESSION_B, 'b1', 'needle')],
-      new Date('2026-08-03T00:00:00Z'),
-    );
+    writeUser(SESSION_A, 'a1', 'needle', new Date('2026-08-01T00:00:00Z'));
+    writeUser(SESSION_B, 'b1', 'needle', new Date('2026-08-03T00:00:00Z'));
 
-    const hits = await service.searchSessionContent('needle', { maxFiles: 1 });
-    expect(hits.map((hit) => hit.sessionId)).toEqual([SESSION_B]);
+    const hits = await search('needle', { maxFiles: 1 });
+    expect(idsOf(hits)).toEqual([SESSION_B]);
   });
 
   it('ellipsizes the snippet around the match in long messages', async () => {
     const text = `${'lorem '.repeat(40)}needle${' ipsum'.repeat(40)}`;
-    writeSession(SESSION_A, [userText(SESSION_A, 'a1', text)]);
+    writeUser(SESSION_A, 'a1', text);
 
-    const hits = await service.searchSessionContent('needle');
-    expect(hits).toHaveLength(1);
-    const snippet = hits[0].snippet;
-    expect(snippet).toContain('needle');
+    const { snippet } = await soleHit('needle', 'needle');
     expect(snippet.startsWith('...')).toBe(true);
     expect(snippet.endsWith('...')).toBe(true);
     expect(snippet.length).toBeLessThan(text.length);
   });
 
   it('collapses whitespace in snippets to a single line', async () => {
-    writeSession(SESSION_A, [
-      userText(SESSION_A, 'a1', 'line one\n\nneedle   line\ttwo'),
-    ]);
+    writeUser(SESSION_A, 'a1', 'line one\n\nneedle   line\ttwo');
 
-    const hits = await service.searchSessionContent('needle');
+    const hits = await search('needle');
     expect(hits[0].snippet).toBe('line one needle line two');
   });
 
   it('normalizes whitespace runs in the query for both matching and the snippet', async () => {
     const longMessage = `${'lorem '.repeat(1000)}alpha beta${' ipsum'.repeat(1000)}`;
-    writeSession(SESSION_A, [userText(SESSION_A, 'a1', longMessage)]);
+    writeUser(SESSION_A, 'a1', longMessage);
 
     // A double-space query still matches the single-space text, and the
     // snippet stays a bounded excerpt instead of the whole message.
-    const hits = await service.searchSessionContent('alpha  beta');
-    expect(hits).toHaveLength(1);
-    expect(hits[0].snippet).toContain('alpha beta');
-    expect(hits[0].snippet.length).toBeLessThan(200);
+    const hit = await soleHit('alpha  beta', 'alpha beta');
+    expect(hit.snippet.length).toBeLessThan(200);
 
     // The other direction: a single-space query matches newline-separated text.
-    writeSession(SESSION_B, [userText(SESSION_B, 'b1', 'qdrant\npipeline')]);
-    const cross = await service.searchSessionContent('qdrant pipeline');
-    expect(cross.map((hit) => hit.sessionId)).toContain(SESSION_B);
+    writeUser(SESSION_B, 'b1', 'qdrant\npipeline');
+    const cross = await search('qdrant pipeline');
+    expect(idsOf(cross)).toContain(SESSION_B);
   });
 
   it('keeps the snippet window correct when lowercasing changes string length', async () => {
     // U+0130 folds to two UTF-16 code units, shifting a naive index.
-    writeSession(SESSION_A, [
-      userText(SESSION_A, 'a1', `${'İ'.repeat(50)} needle`),
-    ]);
-
-    const hits = await service.searchSessionContent('needle');
-    expect(hits).toHaveLength(1);
-    expect(hits[0].snippet).toContain('needle');
+    writeUser(SESSION_A, 'a1', `${'İ'.repeat(50)} needle`);
+    await soleHit('needle', 'needle');
   });
 
   it('matches supplementary-plane case pairs in both directions', async () => {
     // Deseret uppercase folds to supplementary-plane lowercase code points;
     // a per-UTF-16-unit fold would leave it unchanged and miss the match.
-    writeSession(SESSION_A, [userText(SESSION_A, 'a1', '𐐀𐐯𐑊𐐮𐐻𐐯𐐼')]);
+    writeUser(SESSION_A, 'a1', '𐐀𐐯𐑊𐐮𐐻𐐯𐐼');
 
-    await expect(
-      service.searchSessionContent('𐐀𐐯𐑊𐐮𐐻𐐯𐐼'.toLowerCase()),
-    ).resolves.toHaveLength(1);
+    await expect(search('𐐀𐐯𐑊𐐮𐐻𐐯𐐼'.toLowerCase())).resolves.toHaveLength(1);
 
-    writeSession(SESSION_B, [
-      userText(SESSION_B, 'b1', '𐐀𐐯𐑊𐐮𐐻𐐯𐐼'.toLowerCase()),
-    ]);
-    await expect(service.searchSessionContent('𐐀𐐯𐑊𐐮𐐻𐐯𐐼')).resolves.toHaveLength(
-      2,
-    );
+    writeUser(SESSION_B, 'b1', '𐐀𐐯𐑊𐐮𐐻𐐯𐐼'.toLowerCase());
+    await expect(search('𐐀𐐯𐑊𐐮𐐻𐐯𐐼')).resolves.toHaveLength(2);
   });
 
   it('matches Greek text ending in sigma for every sigma query form', async () => {
     // Whole-string lowercasing maps word-final Σ to ς while a per-code-point
     // fold yields σ — without unification, Greek text ending in sigma never
     // matches, not even a byte-identical query.
-    writeSession(SESSION_A, [userText(SESSION_A, 'a1', 'ΟΔΥΣΣΕΥΣ')]);
+    writeUser(SESSION_A, 'a1', 'ΟΔΥΣΣΕΥΣ');
     // Text-side ς (how Greek is normally written) exercises the fold loop's
     // own normalizeSigma: the uppercase fixture folds to σ without it.
-    writeSession(SESSION_B, [userText(SESSION_B, 'b1', 'οδυσσευς')]);
+    writeUser(SESSION_B, 'b1', 'οδυσσευς');
 
     for (const query of ['οδυσσευς', 'οδυσσευσ', 'ΟΔΥΣΣΕΥΣ']) {
-      const hits = await service.searchSessionContent(query);
-      expect(hits.map((hit) => hit.sessionId)).toEqual(
+      expect(idsOf(await search(query))).toEqual(
         expect.arrayContaining([SESSION_A, SESSION_B]),
       );
     }
   });
 
   it('never splits a surrogate pair at a snippet boundary', async () => {
-    writeSession(SESSION_A, [
-      userText(SESSION_A, 'a1', `${'🚀'.repeat(25)} needle`),
-    ]);
-
-    const hits = await service.searchSessionContent('needle');
-    expect(hits).toHaveLength(1);
-    expect(hits[0].snippet).toContain('needle');
-    expect(hits[0].snippet).not.toMatch(
-      // Lone lead surrogate, or lone trail surrogate.
-      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
-    );
+    writeUser(SESSION_A, 'a1', `${'🚀'.repeat(25)} needle`);
+    const hit = await soleHit('needle', 'needle');
+    expect(hit.snippet).not.toMatch(LONE_SURROGATE);
   });
 
   it('never ends the snippet window on a lone lead surrogate', async () => {
     // The match sits at the message start so the window end lands inside
     // the astral run, exercising the end-side clamp.
-    writeSession(SESSION_A, [
-      userText(SESSION_A, 'a1', `needle ${'🚀'.repeat(40)}`),
-    ]);
-
-    const hits = await service.searchSessionContent('needle');
-    expect(hits).toHaveLength(1);
-    expect(hits[0].snippet).toContain('needle');
-    expect(hits[0].snippet).not.toMatch(
-      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
-    );
+    writeUser(SESSION_A, 'a1', `needle ${'🚀'.repeat(40)}`);
+    const hit = await soleHit('needle', 'needle');
+    expect(hit.snippet).not.toMatch(LONE_SURROGATE);
   });
 
   it('does not match text stripped by the user-prompt display projection', async () => {
@@ -360,25 +324,17 @@ describe('SessionService.searchSessionContent', () => {
       recordFor(SESSION_A, {
         uuid: 'a1',
         type: 'user',
-        message: {
-          role: 'user',
-          parts: [
-            { text: 'visible prompt' },
-            {
-              text: wrapUserPromptSubmitContext(
-                'secret needle in hook context',
-              ),
-            },
-          ],
-        },
+        message: content(
+          'user',
+          { text: 'visible prompt' },
+          {
+            text: wrapUserPromptSubmitContext('secret needle in hook context'),
+          },
+        ),
       }),
     ]);
-    await expect(
-      service.searchSessionContent('secret needle'),
-    ).resolves.toEqual([]);
-    await expect(
-      service.searchSessionContent('visible prompt'),
-    ).resolves.toHaveLength(1);
+    await expect(search('secret needle')).resolves.toEqual([]);
+    await expect(search('visible prompt')).resolves.toHaveLength(1);
 
     // An authoritative empty displayText must not fall back to model-facing parts.
     writeSession(SESSION_B, [
@@ -389,9 +345,7 @@ describe('SessionService.searchSessionContent', () => {
         message: { role: 'user', parts: [{ text: 'model-facing needle' }] },
       } as Partial<ChatRecord> & { uuid: string }),
     ]);
-    await expect(
-      service.searchSessionContent('model-facing needle'),
-    ).resolves.toEqual([]);
+    await expect(search('model-facing needle')).resolves.toEqual([]);
   });
 
   it('aborts mid-scan when the signal fires during a large file', async () => {
@@ -413,7 +367,7 @@ describe('SessionService.searchSessionContent', () => {
     const timer = setTimeout(() => controller.abort(), 20);
     try {
       await expect(
-        service.searchSessionContent('needle', { signal: controller.signal }),
+        search('needle', { signal: controller.signal }),
       ).rejects.toThrow();
     } finally {
       clearTimeout(timer);
@@ -423,16 +377,14 @@ describe('SessionService.searchSessionContent', () => {
   it('yields and honors aborts while stat-ing a large chats dir', async () => {
     for (let i = 0; i < 130; i++) {
       const sessionId = `550e8400-e29b-41d4-a716-${String(100000000000 + i).slice(-12)}`;
-      writeSession(sessionId, [userText(sessionId, 'u1', 'needle')]);
+      writeUser(sessionId, 'u1', 'needle');
     }
     const statSpy = vi.spyOn(fs, 'statSync');
     try {
       const controller = new AbortController();
       setImmediate(() => controller.abort());
       await expect(
-        service.searchSessionContent('needle', {
-          signal: controller.signal,
-        }),
+        search('needle', { signal: controller.signal }),
       ).rejects.toThrow();
       expect(statSpy.mock.calls.length).toBeLessThan(130);
     } finally {
@@ -441,12 +393,12 @@ describe('SessionService.searchSessionContent', () => {
   });
 
   it('stops scanning when the signal aborts', async () => {
-    writeSession(SESSION_A, [userText(SESSION_A, 'a1', 'needle')]);
+    writeUser(SESSION_A, 'a1', 'needle');
     const controller = new AbortController();
     controller.abort();
 
     await expect(
-      service.searchSessionContent('needle', { signal: controller.signal }),
+      search('needle', { signal: controller.signal }),
     ).rejects.toThrow();
   });
 });

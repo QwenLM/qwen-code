@@ -6,6 +6,8 @@ node_modules
 dist
 **/dist
 **/tsconfig.tsbuildinfo
+target
+**/target
 
 # Version control
 # Both forms: the release workflow checks its trusted scripts out into

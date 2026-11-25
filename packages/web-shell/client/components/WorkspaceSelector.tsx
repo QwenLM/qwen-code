@@ -1,8 +1,10 @@
-import { useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   CircleDashedIcon,
   FolderClosedIcon,
   FolderPlusIcon,
+  Globe2Icon,
   LockIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -10,6 +12,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
@@ -24,6 +27,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from './ui/tooltip';
+import { HostLabel } from './workspaces/HostLabel';
 
 export interface WorkspaceSelectorOption {
   id: string;
@@ -31,6 +35,8 @@ export interface WorkspaceSelectorOption {
   label: string;
   primary: boolean;
   trusted: boolean;
+  /** Daemon host this workspace lives on; defaults to the page origin. */
+  hostOrigin?: string;
 }
 
 interface WorkspaceSelectorProps {
@@ -38,6 +44,8 @@ interface WorkspaceSelectorProps {
   selectedWorkspaceCwd?: string;
   disabled?: boolean;
   busy?: boolean;
+  alwaysVisible?: boolean;
+  menuItems?: ReactNode;
   scratchSupported: boolean;
   existingFolderSupported: boolean;
   /** Offer a projectless (standalone) target alongside the workspaces. */
@@ -45,9 +53,24 @@ interface WorkspaceSelectorProps {
   selectedStandalone?: boolean;
   className?: string;
   onSelectWorkspace: (cwd: string | undefined) => void;
+  /**
+   * Host-aware selection for multi-daemon pages. When provided it fires
+   * INSTEAD of `onSelectWorkspace`, with the option's host (page origin when
+   * unset); `undefined` cwd keeps marking the host's primary workspace.
+   */
+  onSelectHostedWorkspace?: (
+    hostOrigin: string,
+    cwd: string | undefined,
+  ) => void;
   onSelectStandalone?: () => void;
   onCreateScratch: () => void;
   onOpenExistingFolder: () => void;
+  /** Touch activation can otherwise release over a newly opened option. */
+  contentSide?: 'top' | 'bottom';
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  newWorkspaceOpen?: boolean;
+  onNewWorkspaceOpenChange?: (open: boolean) => void;
 }
 
 /** Radio-group value that stands for the projectless target. */
@@ -62,20 +85,54 @@ export function WorkspaceSelector({
   selectedWorkspaceCwd,
   disabled,
   busy,
+  alwaysVisible = false,
+  menuItems,
   scratchSupported,
   existingFolderSupported,
   standaloneSupported,
   selectedStandalone,
   className,
   onSelectWorkspace,
+  onSelectHostedWorkspace,
   onSelectStandalone,
   onCreateScratch,
   onOpenExistingFolder,
+  contentSide = 'top',
+  open: openProp,
+  onOpenChange,
+  newWorkspaceOpen: newWorkspaceOpenProp,
+  onNewWorkspaceOpenChange,
 }: WorkspaceSelectorProps) {
   const { t } = useI18n();
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [internalMenuOpen, setInternalMenuOpen] = useState(false);
+  const menuOpen = openProp ?? internalMenuOpen;
+  const setMenuOpen = (value: boolean) => {
+    setInternalMenuOpen(value);
+    onOpenChange?.(value);
+  };
+  const [internalNewWorkspaceOpen, setInternalNewWorkspaceOpen] =
+    useState(false);
+  const newWorkspaceOpen = newWorkspaceOpenProp ?? internalNewWorkspaceOpen;
+  const setNewWorkspaceOpen = (value: boolean) => {
+    setInternalNewWorkspaceOpen(value);
+    onNewWorkspaceOpenChange?.(value);
+  };
   const [tooltipOpen, setTooltipOpen] = useState(false);
-  const menuOpenRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const subMountSettledRef = useRef(false);
+  useEffect(() => {
+    let active = true;
+    subMountSettledRef.current = false;
+    queueMicrotask(() => {
+      if (active) subMountSettledRef.current = true;
+    });
+    return () => {
+      active = false;
+      subMountSettledRef.current = false;
+    };
+  }, []);
+  const menuOpenRef = useRef(menuOpen);
+  menuOpenRef.current = menuOpen;
   const suppressTooltipRef = useRef(false);
   const pointerDismissedRef = useRef(false);
   const selected = workspaces.find((workspace) =>
@@ -87,12 +144,33 @@ export function WorkspaceSelector({
   const standaloneSelectable = Boolean(
     standaloneSupported && onSelectStandalone,
   );
-  if (workspaces.length <= 1 && !canCreate && !standaloneSelectable) {
+  if (
+    !alwaysVisible &&
+    !menuItems &&
+    workspaces.length <= 1 &&
+    !canCreate &&
+    !standaloneSelectable
+  ) {
     return null;
   }
+  // Group by host in first-appearance order; a single-host list keeps the
+  // historic flat rendering (no group headers).
+  const pageOrigin =
+    typeof window === 'undefined' ? '' : window.location.origin;
+  const groups: { hostOrigin: string; items: WorkspaceSelectorOption[] }[] = [];
+  for (const workspace of workspaces) {
+    const hostOrigin = workspace.hostOrigin ?? pageOrigin;
+    const group = groups.find((entry) => entry.hostOrigin === hostOrigin);
+    if (group) {
+      group.items.push(workspace);
+    } else {
+      groups.push({ hostOrigin, items: [workspace] });
+    }
+  }
+  const groupedByHost = groups.length > 1;
   const triggerLabel = selectedStandalone
     ? t('sidebar.noWorkspace')
-    : (selected?.label ?? '');
+    : (selected?.label ?? t('sidebar.workspaceSelectLabel'));
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -102,6 +180,7 @@ export function WorkspaceSelector({
           if (open) pointerDismissedRef.current = false;
           menuOpenRef.current = open;
           setMenuOpen(open);
+          if (!open) setNewWorkspaceOpen(false);
           suppressTooltipRef.current = true;
           setTooltipOpen(false);
         }}
@@ -118,6 +197,7 @@ export function WorkspaceSelector({
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild disabled={disabled || busy}>
               <button
+                ref={triggerRef}
                 type="button"
                 className={className}
                 aria-label={t('sidebar.workspaceSelectLabel')}
@@ -148,6 +228,7 @@ export function WorkspaceSelector({
           <TooltipContent side="top">{triggerLabel}</TooltipContent>
         </Tooltip>
         <DropdownMenuContent
+          side={contentSide}
           align="start"
           className="min-w-56"
           onPointerDownCapture={() => {
@@ -167,32 +248,81 @@ export function WorkspaceSelector({
           <DropdownMenuRadioGroup
             value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
-              if (id === STANDALONE_OPTION_ID) {
+              if (standaloneSelectable && id === STANDALONE_OPTION_ID) {
                 onSelectStandalone?.();
                 return;
               }
               const next = workspaces.find((workspace) => workspace.id === id);
               if (!next?.trusted) return;
-              onSelectWorkspace(next.primary ? undefined : next.cwd);
+              const cwd = next.primary ? undefined : next.cwd;
+              if (onSelectHostedWorkspace) {
+                onSelectHostedWorkspace(next.hostOrigin ?? pageOrigin, cwd);
+              } else {
+                onSelectWorkspace(cwd);
+              }
             }}
           >
-            {workspaces.map((workspace) => (
-              <DropdownMenuRadioItem
-                key={workspace.id}
-                value={workspace.id}
-                disabled={!workspace.trusted}
-                title={workspace.cwd}
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {workspace.label}
-                </span>
-                {!workspace.trusted && (
-                  <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <LockIcon />
-                    {t('sidebar.workspaceUntrusted')}
-                  </span>
+            {groups.map((group) => (
+              <Fragment key={group.hostOrigin}>
+                {groupedByHost && (
+                  <DropdownMenuLabel
+                    className="flex items-center gap-1.5 text-[11px]"
+                    title={group.hostOrigin}
+                  >
+                    <HostLabel origin={group.hostOrigin} />
+                  </DropdownMenuLabel>
                 )}
-              </DropdownMenuRadioItem>
+                {group.items.map((workspace) => {
+                  const remoteHost =
+                    workspace.hostOrigin && workspace.hostOrigin !== pageOrigin
+                      ? workspace.hostOrigin
+                      : undefined;
+                  return (
+                    <DropdownMenuRadioItem
+                      key={workspace.id}
+                      value={workspace.id}
+                      disabled={!workspace.trusted}
+                      title={
+                        remoteHost
+                          ? `${remoteHost} — ${workspace.cwd}`
+                          : workspace.cwd
+                      }
+                    >
+                      <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate">
+                        {remoteHost && (
+                          <span
+                            className="relative inline-flex size-3.5 shrink-0 items-center justify-center"
+                            data-testid="remote-workspace-folder-icon"
+                          >
+                            <FolderClosedIcon
+                              className="size-3.5"
+                              strokeWidth={1.4}
+                              aria-hidden="true"
+                            />
+                            <Globe2Icon
+                              className="absolute -right-0.5 -bottom-0.5 size-2 rounded-full bg-popover text-[var(--agent-blue-500)]"
+                              strokeWidth={2}
+                              aria-hidden="true"
+                            />
+                          </span>
+                        )}
+                        {workspace.label}
+                      </span>
+                      {remoteHost && (
+                        <span className="max-w-[45%] truncate text-xs text-muted-foreground">
+                          {new URL(remoteHost).host}
+                        </span>
+                      )}
+                      {!workspace.trusted && (
+                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <LockIcon />
+                          {t('sidebar.workspaceUntrusted')}
+                        </span>
+                      )}
+                    </DropdownMenuRadioItem>
+                  );
+                })}
+              </Fragment>
             ))}
             {standaloneSelectable && (
               <DropdownMenuRadioItem value={STANDALONE_OPTION_ID}>
@@ -205,12 +335,41 @@ export function WorkspaceSelector({
           {canCreate && (
             <>
               <DropdownMenuSeparator />
-              <DropdownMenuSub>
+              <DropdownMenuSub
+                open={newWorkspaceOpen}
+                onOpenChange={(next) => {
+                  // Radix MenuSub fires onOpenChange(false) from its passive
+                  // cleanup on both responsive unmount and StrictMode's
+                  // synchronous mount check; ignore teardown while preserving
+                  // all interactive closes once mounted.
+                  if (
+                    !next &&
+                    (!triggerRef.current?.isConnected ||
+                      !subMountSettledRef.current)
+                  ) {
+                    return;
+                  }
+                  setNewWorkspaceOpen(next);
+                }}
+              >
                 <DropdownMenuSubTrigger disabled={busy}>
                   <FolderPlusIcon />
                   {t('sidebar.newWorkspace')}
                 </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent
+                  onFocusOutside={(event) => {
+                    // Remounting the open root menu auto-focuses its container;
+                    // ignore that focus so the open submenu stays open across
+                    // responsive tier switches while still closing on other
+                    // items or outside interactions.
+                    if (
+                      event.target instanceof Element &&
+                      event.target.getAttribute('data-slot') ===
+                        'dropdown-menu-content'
+                    ) {
+                      event.preventDefault();
+                    }
+                  }}
                   onPointerDownCapture={() => {
                     pointerDismissedRef.current = true;
                   }}
@@ -230,6 +389,12 @@ export function WorkspaceSelector({
                   )}
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
+            </>
+          )}
+          {menuItems && (
+            <>
+              <DropdownMenuSeparator />
+              {menuItems}
             </>
           )}
         </DropdownMenuContent>

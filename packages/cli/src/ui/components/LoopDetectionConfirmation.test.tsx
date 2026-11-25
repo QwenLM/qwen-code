@@ -30,14 +30,41 @@ describe('LoopDetectionConfirmation', () => {
     expect(output).toContain(
       'This can happen due to repetitive tool calls or other model behavior',
     );
-    // The note must scope skipLoopDetection to the heuristics, flag the
-    // always-on guards as unaffected by it, and point at the cap's own knob.
+    // The note must name model.loopProtection, scope skipLoopDetection to
+    // the heuristics, and point at the cap's own knob.
     // (Assertions stay within single rendered lines — the frame wraps text.)
-    expect(output).toContain('heuristic loop checks for future sessions');
-    expect(output).toContain('always-on guards');
+    expect(output).toContain('"model.loopProtection"');
+    expect(output).toContain('turns loop protection off');
     expect(output).toContain('model.skipLoopDetection');
     expect(output).toContain('model.maxToolCallsPerTurn');
-    expect(output).toContain('suppresses everything');
+    expect(output).toContain('Disabling for this session above suppresses');
     expect(output).toContain('settings.json');
+    expect(output).not.toContain('Cause:');
+  });
+
+  it('shows the cause of the stop when it is known', () => {
+    const { lastFrame } = renderWithProviders(
+      <LoopDetectionConfirmation
+        cause="the provider replayed a tool call id that had already run"
+        onComplete={onComplete}
+      />,
+    );
+    const output = lastFrame()!.toString();
+
+    expect(output).toContain('Cause: the provider replayed a tool call id');
+    expect(output).toContain('A potential loop was detected');
+  });
+
+  it('quotes setting names in the cause like the note does', () => {
+    const { lastFrame } = renderWithProviders(
+      <LoopDetectionConfirmation
+        cause="the turn reached the limit set by `model.maxToolCallsPerTurn` (3)"
+        onComplete={onComplete}
+      />,
+    );
+    const output = lastFrame()!.toString();
+
+    expect(output).toContain('"model.maxToolCallsPerTurn" (3).');
+    expect(output).not.toContain('`');
   });
 });

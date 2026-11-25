@@ -19,6 +19,16 @@ import {
  */
 export const BRANCH_POLL_INTERVAL_MS = 5_000;
 
+const primedBranchNames = new Map<string, string | undefined>();
+
+/**
+ * Resolves `cwd`'s branch ahead of the first frame, so the footer does not
+ * change (and the screen reflow) right after the prompt becomes usable.
+ */
+export async function primeGitBranchName(cwd: string): Promise<void> {
+  primedBranchNames.set(cwd, await resolveBranchName(cwd));
+}
+
 /**
  * Tracks the current git branch (or a short commit hash when detached) for
  * `cwd`, read directly from `.git` via core's gitDirect helpers — no `git`
@@ -27,7 +37,9 @@ export const BRANCH_POLL_INTERVAL_MS = 5_000;
  * where `fs.watch` is unreliable (#7828).
  */
 export function useGitBranchName(cwd: string): string | undefined {
-  const [branchName, setBranchName] = useState<string | undefined>(undefined);
+  const [branchName, setBranchName] = useState<string | undefined>(() =>
+    primedBranchNames.get(cwd),
+  );
   const branchNameRef = useRef(branchName);
   branchNameRef.current = branchName;
 

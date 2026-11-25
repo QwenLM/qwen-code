@@ -7,6 +7,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  cpSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -26,6 +27,10 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
   function runStepScript({ failCalls, elapsedSeconds }) {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-e2e-retry-'));
     try {
+      // Copy the whole scripts dir so any sibling the runner sources comes
+      // along, instead of hand-maintaining a per-file list (#16278 R2-2). The
+      // probe lands at dir/apt-mirror-probe.sh, where dirname BASH_SOURCE looks.
+      cpSync('.github/scripts', dir, { recursive: true });
       const callCountFile = join(dir, 'npm-call-count');
       const npmStub = join(dir, 'npm');
       writeFileSync(callCountFile, '0');

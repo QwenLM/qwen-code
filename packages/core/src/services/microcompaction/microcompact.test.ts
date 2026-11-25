@@ -7,8 +7,15 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
+import { enforceFunctionResponseBudget } from '../../tools/tool-response-finalizer.js';
+import { isPersistedOutputStub } from '../../tools/truncation.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../../tools/tool-output-recovery.js';
 
 import {
+  collectResidentMemoryBodies,
   evaluateTimeBasedTrigger,
   isClearedMediaPlaceholder,
   microcompactHistory,
@@ -38,6 +45,76 @@ function makeToolResult(name: string, output: string): Content {
   return {
     role: 'user',
     parts: [{ functionResponse: { name, response: { output } } }],
+  };
+}
+
+function makeMemoryResult(
+  ref: string,
+  content: string,
+  mtimeMs = 1,
+  range = { start: 0, end: content.length, total: content.length },
+): Content {
+  return makeToolResult(
+    'search_memory',
+    JSON.stringify({
+      mode: 'fetch',
+      results: [{ ref, version: mtimeMs, content, range }],
+    }),
+  );
+}
+
+function makeMemorySearchResult(
+  ref: string,
+  content: string,
+  range = { start: 0, end: content.length, total: content.length + 1 },
+): Content {
+  return makeToolResult(
+    'search_memory',
+    JSON.stringify({
+      mode: 'search',
+      results: [
+        {
+          ref,
+          version: 1,
+          content,
+          range,
+        },
+      ],
+    }),
+  );
+}
+
+function makeBridgedToolCall(
+  id: string,
+  name: string,
+  args: Record<string, unknown> = {},
+): Content {
+  return {
+    role: 'model',
+    parts: [
+      {
+        functionCall: {
+          id,
+          name: 'tool_call',
+          args: { name, arguments: args },
+        },
+      },
+    ],
+  };
+}
+
+function makeBridgedToolResult(id: string, output: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id,
+          name: 'tool_call',
+          response: { output },
+        },
+      },
+    ],
   };
 }
 
@@ -208,12 +285,62 @@ describe('microcompactHistory', () => {
 
   const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
 
+  function makePersistedOutputStub(path = '/tmp/tool-results/c1.txt'): string {
+    return `<persisted-output>
+Output too large (3000 KB). Full output saved to: ${path}
+Full output sha256: ${'a'.repeat(64)}
+Total characters: 3145728; total lines: 4000.
+Note: this file may be cleaned up after 24 hours.
+Page in with read_file using the absolute file_path above, offset (zero-based line) and limit (line count).
+
+Preview (up to 2000 chars):
+the first 2000 characters
+</persisted-output>`;
+  }
+
+  // `truncateAndSaveToFile`'s envelope: same saved-path reference, but it
+  // leads with the truncation sentinel instead of the stub tag.
+  function makeTruncationEnvelope(
+    path = '/tmp/tool-results/c2.output',
+  ): string {
+    return `Tool output was too large and has been truncated.
+The full output has been saved to: ${path}
+Total characters: 300000; total lines: 5000.
+Full output sha256: ${'b'.repeat(64)}
+Page in with read_file using the absolute file_path above, offset (zero-based line) and limit (line count). The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
+
+Truncated part of the output:
+the first characters
+... [CONTENT TRUNCATED] ...
+the last characters`;
+  }
+
   it('should return history unchanged when trigger does not fire', () => {
     const history: Content[] = [
       makeUserMessage('hello'),
       makeModelMessage('hi'),
     ];
     const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS);
+    expect(result.history).toBe(history);
+    expect(result.meta).toBeUndefined();
+  });
+
+  it.each([
+    'toString',
+    'constructor',
+    'valueOf',
+    'hasOwnProperty',
+    '__proto__',
+  ])('handles Object.prototype tool name %s', (name) => {
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'prototype-name', name, args: {} } }],
+      },
+    ];
+
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS);
+
     expect(result.history).toBe(history);
     expect(result.meta).toBeUndefined();
   });
@@ -839,6 +966,556 @@ describe('microcompactHistory', () => {
     expect(
       result.history.at(-1)!.parts![0]!.functionResponse!.response!['output'],
     ).toBe('Y'.repeat(25_500));
+  });
+
+  it('leaves persisted-output stubs intact even when the size trigger is over threshold', () => {
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', stub),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'g'.repeat(5_000)),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'r'.repeat(5_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    // The stub stays over threshold — its saved output is unrecoverable if the
+    // reference is blanked — but the plan must still clear what it can.
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+    });
+    expect(result.meta!.toolsCleared).toBeGreaterThan(0);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('counts a persisted-output stub in the size trigger even though it is never cleared', () => {
+    const stub = makePersistedOutputStub();
+    // Only the stub is compactable here, and it is over the threshold on its
+    // own. Reporting it as zero characters would make `totalChars` 0, the
+    // trigger would never fire, and the resident preview would sit outside the
+    // accounting the setting describes.
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', stub),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toMatchObject({ triggerReason: 'size' });
+    expect(result.meta!.toolResultCharsBefore).toBe(stub.length);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+  });
+
+  it('does not spend a keepRecent slot on a persisted-output stub', () => {
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'o'.repeat(5_000)),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', stub),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 1 },
+      { force: true },
+    );
+
+    // Idle-path clearing protects the most recent result that is actually at
+    // risk. The stub never is, so the slot belongs to the older ordinary
+    // result instead of being wasted on it.
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('o'.repeat(5_000));
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+  });
+
+  it('reclaims nested media from a persisted-output stub without blanking its text', () => {
+    // A heavy batch that also returns media (e.g. `read_mcp_resource`) gets its
+    // text persisted and keeps the inline bytes on `functionResponse.parts`.
+    // The saved-path reference must survive, but the media is not part of that
+    // reference — and it is the only reason the ref reaches the clear list — so
+    // leaving the whole part alone would strand the bytes for the rest of the
+    // conversation. The newest result below holds the single keepRecent slot.
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'c1',
+              name: 'run_shell_command',
+              response: { output: stub },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'BASE64IMAGE' } },
+              ],
+            } as unknown as NonNullable<
+              Content['parts']
+            >[number]['functionResponse'],
+          },
+        ],
+      },
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'r'.repeat(5_000)),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS, {
+      force: true,
+    });
+
+    const cleared = result.history[1]!.parts![0]!.functionResponse as {
+      response: { output: string };
+      parts?: unknown;
+    };
+    // Saved-path text survives; only the nested media is dropped.
+    expect(cleared.response.output).toBe(stub);
+    expect(cleared.parts).toBeUndefined();
+    expect(result.meta).toMatchObject({ mediaCleared: 1, toolsCleared: 0 });
+    expect(result.meta!.tokensSaved).toBeGreaterThan(0);
+  });
+
+  it('reclaims nested media from a persisted-output stub on the size path', () => {
+    // Same shape as the idle case above, reached through the size valve. The
+    // stub's own chars push the total over the threshold but are not
+    // spendable, so without the media-only refs this branch is unreachable
+    // here and the inline bytes ride along in every request until an idle
+    // pass. The newest result holds the single keepRecent slot.
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'c1',
+              name: 'run_shell_command',
+              response: { output: stub },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'BASE64IMAGE' } },
+              ],
+            } as unknown as NonNullable<
+              Content['parts']
+            >[number]['functionResponse'],
+          },
+        ],
+      },
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'r'.repeat(5_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 1,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    const cleared = result.history[1]!.parts![0]!.functionResponse as {
+      response: { output: string };
+      parts?: unknown;
+    };
+    expect(cleared.response.output).toBe(stub);
+    expect(cleared.parts).toBeUndefined();
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+      mediaCleared: 1,
+      toolsCleared: 0,
+    });
+    // The media-only refs are not spendable: the valve's own totals remain
+    // exactly the resident text counted before the strip, so the reclaimed
+    // media can never be double-charged as reclaimed chars.
+    expect(result.meta!.toolResultCharsBefore).toBe(stub.length + 5_000);
+    expect(result.meta!.toolResultCharsAfter).toBe(
+      result.meta!.toolResultCharsBefore,
+    );
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('r'.repeat(5_000));
+  });
+
+  it('leaves a truncate-and-save envelope intact on the size path too', () => {
+    const envelope = makeTruncationEnvelope();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', envelope),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'g'.repeat(5_000)),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'r'.repeat(5_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    // Same reference-to-the-saved-bytes contract as the stub tag, and the
+    // shape `run_shell_command` produces through `truncateToolOutput`.
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(envelope);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it.each([
+    {
+      name: 'finalizer saved artifact',
+      toolName: 'run_shell_command',
+      rawOutput: `retained output tail${'x'.repeat(2_000)}`,
+      expectedPreview: 'retained output tail',
+    },
+    {
+      name: 'web_fetch saved extracted text',
+      toolName: 'web_fetch',
+      rawOutput: `URL: https://example.com\nContent-Type: text/plain\nFull extracted text saved to: /tmp/tool-results/web-fetch.txt. Page in with read_file using file_path, offset and limit.\n\n${'web content '.repeat(200)}`,
+      expectedPreview: 'Full extracted text saved to:',
+    },
+  ])(
+    'preserves a real finalized $name part with recovery metadata',
+    ({ toolName, rawOutput, expectedPreview }) => {
+      const outputFile = '/tmp/tool-results/finalizer.output';
+      const [finalized] = enforceFunctionResponseBudget(
+        [
+          {
+            callId: 'finalizer-call',
+            toolName,
+            responseParts: makeToolResult(toolName, rawOutput).parts!,
+            persistedOutputFiles: [outputFile],
+          },
+        ],
+        900,
+      );
+      const part = finalized!.responseParts[0]!;
+      const output = part.functionResponse!.response!['output'] as string;
+      expect(output).toContain(
+        `Tool output truncated. Persisted tool-output artifact: ${outputFile}`,
+      );
+      expect(output).toContain(expectedPreview);
+      expect(getToolOutputRecovery(part)).toEqual({
+        persistedOutputFiles: [outputFile],
+      });
+      expect(isPersistedOutputStub(output)).toBe(true);
+
+      const resumed = JSON.parse(JSON.stringify(part)) as typeof part;
+      expect(getToolOutputRecovery(resumed)).toBeUndefined();
+      for (const candidate of [part, resumed]) {
+        const result = microcompactHistory(
+          [
+            makeToolCall(toolName),
+            { role: 'user', parts: [candidate] },
+            makeToolCall('run_shell_command'),
+            makeToolResult('run_shell_command', 'newest ordinary output'),
+          ],
+          twoHoursAgo,
+          { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+          { force: true },
+        );
+        expect(
+          result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+        ).toBe(output);
+      }
+    },
+  );
+
+  it('retains the recognized string fallback after recovery metadata is lost on resume', () => {
+    const stub = makePersistedOutputStub();
+    const part = makeToolResult('run_shell_command', stub).parts![0]!;
+    setToolOutputRecovery(part, {
+      persistedOutputFiles: ['/tmp/tool-results/resumed.output'],
+    });
+    const resumed = JSON.parse(
+      JSON.stringify({ role: 'user', parts: [part] }),
+    ) as Content;
+    expect(getToolOutputRecovery(resumed.parts![0]!)).toBeUndefined();
+
+    const result = microcompactHistory(
+      [
+        makeToolCall('run_shell_command'),
+        resumed,
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'newest ordinary output'),
+      ],
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+      { force: true },
+    );
+
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+  });
+
+  it('protects only non-empty recovery file lists during forced clearing', () => {
+    const outputFile = '/tmp/tool-results/protected.output';
+    const emptyRecovery = enforceFunctionResponseBudget(
+      [
+        {
+          callId: 'empty-recovery-call',
+          toolName: 'run_shell_command',
+          responseParts: makeToolResult('run_shell_command', 'x'.repeat(2_000))
+            .parts!,
+          persistedOutputFiles: [],
+        },
+      ],
+      300,
+    )[0]!.responseParts[0]!;
+    const protectedRecovery = enforceFunctionResponseBudget(
+      [
+        {
+          callId: 'protected-recovery-call',
+          toolName: 'run_shell_command',
+          responseParts: makeToolResult('run_shell_command', 'y'.repeat(2_000))
+            .parts!,
+          persistedOutputFiles: [outputFile],
+        },
+      ],
+      300,
+    )[0]!.responseParts[0]!;
+    expect(getToolOutputRecovery(emptyRecovery)?.persistedOutputFiles).toEqual(
+      [],
+    );
+    expect(
+      getToolOutputRecovery(protectedRecovery)?.persistedOutputFiles,
+    ).toEqual([outputFile]);
+
+    const result = microcompactHistory(
+      [
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'ordinary control output'),
+        makeToolCall('run_shell_command'),
+        { role: 'user', parts: [emptyRecovery] },
+        makeToolCall('run_shell_command'),
+        { role: 'user', parts: [protectedRecovery] },
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'newest ordinary output'),
+      ],
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+      { force: true },
+    );
+
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(result.meta!.toolsCleared).toBe(2);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[5]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(protectedRecovery.functionResponse!.response!['output']);
+    expect(
+      result.history[7]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('newest ordinary output');
+  });
+
+  it('protects a part by the recovery handle alone', () => {
+    // The finalizer stamps the handle on every part of an entry, including one
+    // whose text the budget left intact. Such a part carries no recognized
+    // stub header, so only the Part-aware handle can keep the reference to the
+    // saved file alive — the string fallback would clear it as ordinary text.
+    const outputFile = '/tmp/tool-results/handle-only.output';
+    const [finalized] = enforceFunctionResponseBudget(
+      [
+        {
+          callId: 'handle-only-call',
+          toolName: 'run_shell_command',
+          responseParts: makeToolResult('run_shell_command', 'retained output')
+            .parts!,
+          persistedOutputFiles: [outputFile],
+        },
+      ],
+      1_000,
+    );
+    const part = finalized!.responseParts[0]!;
+    const output = part.functionResponse!.response!['output'] as string;
+    expect(output).toBe('retained output');
+    expect(isPersistedOutputStub(output)).toBe(false);
+    expect(getToolOutputRecovery(part)?.persistedOutputFiles).toEqual([
+      outputFile,
+    ]);
+
+    const result = microcompactHistory(
+      [
+        makeToolCall('run_shell_command'),
+        { role: 'user', parts: [part] },
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'older ordinary output'),
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'newest ordinary output'),
+      ],
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+      { force: true },
+    );
+
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('retained output');
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[5]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('newest ordinary output');
+  });
+
+  it('still clears a bounded envelope that could not save a file', () => {
+    const unsaved = `Tool output was too large and has been truncated.
+[Note: Full output could not be saved: session disk budget exhausted]
+Total characters: 300000; total lines: 5000.
+Full output sha256: ${'c'.repeat(64)}`;
+
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', unsaved),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'g'.repeat(1_000)),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 1 },
+      { force: true },
+    );
+
+    // No path, so no reference to orphan: this stays clearable, which is what
+    // the PR description already claimed for the no-saved-file sentinel.
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('size-compacts bridged tool results using the target tool identity', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('c1', 'WEB_FETCH'),
+      makeBridgedToolResult('c1', 'x'.repeat(1_000)),
+      makeBridgedToolCall('c2', 'web_fetch'),
+      makeBridgedToolResult('c2', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+      toolsCleared: 1,
+      toolResultCharsBefore: 1_006,
+    });
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not guess when a bridged call id maps to mixed tool names', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('reused', 'web_fetch'),
+      makeBridgedToolCall('reused', 'grep_search'),
+      makeBridgedToolResult('reused', 'ambiguous output'.repeat(100)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('does not throw on non-string tool names in unvalidated history', () => {
+    // Resumed or hand-edited session files can carry truthy non-string
+    // names; the identity resolution must not throw on them.
+    const history = [
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'n', name: 42, args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'n',
+              name: {},
+              response: { output: 'x'.repeat(5000) },
+            },
+          },
+        ],
+      },
+    ] as unknown as Content[];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('does not guess when a bridged call id has an unparseable sibling call', () => {
+    // The reused id pairs one well-formed bridged read_file with a call
+    // whose envelope target cannot be parsed; the safe outcome is refusal,
+    // not compaction on the one identity that did parse.
+    const malformedCall = {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'reused',
+            name: 'tool_call',
+            args: { name: 42 },
+          },
+        },
+      ],
+    } as unknown as Content;
+    const history: Content[] = [
+      makeBridgedToolCall('reused', 'read_file', { file_path: '/proj/a.ts' }),
+      malformedCall,
+      makeBridgedToolResult('reused', 'ambiguous output'.repeat(100)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
   });
 
   it('size-compacts old skill results and keeps the most recent result', () => {
@@ -1798,11 +2475,38 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
       toolResultsNumToKeep: 1,
     });
 
+    expect(result.history[1]).not.toBe(history[1]);
+    expect(result.history[1].parts?.[0]?.functionResponse).toMatchObject({
+      id: 'c0',
+      response: { output: MICROCOMPACT_CLEARED_MESSAGE },
+    });
     expect(result.meta).toBeDefined();
     expect(result.meta!.toolsCleared).toBe(1);
     // Only the blanked (oldest) file is reported; the kept one is not.
     expect(result.meta!.evictedReadPaths).toEqual(['/proj/old.ts']);
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('reports the inner file path of a blanked bridged read_file result', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('c0', 'read_file', {
+        file_path: '/proj/old.ts',
+      }),
+      makeBridgedToolResult('c0', 'old long content '.repeat(50)),
+      makeBridgedToolCall('c1', 'web_fetch'),
+      makeBridgedToolResult('c1', 'recent content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toMatchObject({
+      toolsCleared: 1,
+      evictedReadPaths: ['/proj/old.ts'],
+      unresolvedEvictedReads: 0,
+    });
   });
 
   it('does not let a kept read_file result vouch for residency (issue #4239)', () => {
@@ -1932,7 +2636,7 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
         pendingContent: fileResult(
           'rf2',
           'read_file',
-          '[File big.ts unchanged since last read in this session]',
+          'Wasted call — file big.ts unchanged since it was last read in this conversation.',
         ),
       },
     );
@@ -2098,6 +2802,184 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
 
     // No trigger → no meta at all (and therefore no eviction data).
     expect(result.meta).toBeUndefined();
+  });
+});
+
+describe('microcompactHistory memory body eviction', () => {
+  const settings: ClearContextOnIdleSettings = {
+    toolResultsThresholdMinutes: 60,
+    toolResultsNumToKeep: 1,
+  };
+
+  it.each([false, true])(
+    'reports a cleared memory ref through the tool bridge: %s',
+    (bridged) => {
+      const history = [
+        makeMemoryResult('project:old.md', 'old body'),
+        makeMemoryResult('project:new.md', 'new body'),
+      ];
+      if (bridged) {
+        const output = history[0]!.parts![0]!.functionResponse!.response![
+          'output'
+        ] as string;
+        history.splice(
+          0,
+          1,
+          makeBridgedToolCall('memory-call', 'search_memory'),
+          makeBridgedToolResult('memory-call', output),
+        );
+      }
+      expect(collectResidentMemoryBodies(history)).toContainEqual({
+        memoryRef: 'project:old.md',
+        mtimeMs: 1,
+      });
+
+      const result = microcompactHistory(history, Date.now(), settings, {
+        force: true,
+      });
+
+      expect(result.meta?.evictedMemoryBodies).toEqual([
+        { memoryRef: 'project:old.md', mtimeMs: 1 },
+      ]);
+    },
+  );
+
+  it('reports an unresolved memory body when result JSON is not intact', () => {
+    const corrupted = makeMemoryResult('project:old.md', 'old body');
+    const response = corrupted.parts?.[0]?.functionResponse?.response;
+    if (response) {
+      response['output'] =
+        `${response['output']}\n\n<system-reminder>hook</system-reminder>`;
+    }
+
+    const result = microcompactHistory(
+      [corrupted, makeMemoryResult('project:new.md', 'new body')],
+      Date.now(),
+      settings,
+      { force: true },
+    );
+
+    expect(result.meta?.unresolvedEvictedMemoryBodies).toBe(1);
+  });
+
+  it('keeps a ref resident when another body result remains in history', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'old window'),
+      makeMemoryResult('project:same.md', 'new window'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), settings, {
+      force: true,
+    });
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([]);
+  });
+
+  it('distinguishes old and current versions of the same ref', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'old version', 1),
+      makeMemoryResult('project:same.md', 'current version', 2),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), settings, {
+      force: true,
+    });
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('does not count an uncommitted pending body result as resident', () => {
+    const old = makeMemoryResult('project:same.md', 'x'.repeat(100), 1);
+    const pending = makeMemoryResult('project:same.md', 'current body', 1);
+
+    const result = microcompactHistory(
+      [old, makeMemoryResult('project:other.md', 'recent body', 1)],
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 10,
+      },
+      { sizeOnly: true, pendingContent: pending },
+    );
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('does not treat a search window as a resident full body', () => {
+    const result = microcompactHistory(
+      [
+        makeMemoryResult('project:same.md', 'full body'),
+        makeMemorySearchResult('project:same.md', 'search window'),
+      ],
+      Date.now(),
+      settings,
+      { force: true },
+    );
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('requires resident fetch windows to cover the complete body', () => {
+    const result = microcompactHistory(
+      [
+        makeMemoryResult('project:same.md', 'first', 1, {
+          start: 0,
+          end: 5,
+          total: 10,
+        }),
+        makeMemoryResult('project:other.md', 'recent'),
+      ],
+      Date.now(),
+      settings,
+      { force: true },
+    );
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('combines contiguous fetch windows into a resident body', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'first', 1, {
+        start: 0,
+        end: 5,
+        total: 10,
+      }),
+      makeMemoryResult('project:same.md', 'second', 1, {
+        start: 5,
+        end: 10,
+        total: 10,
+      }),
+    ];
+
+    expect(collectResidentMemoryBodies(history)).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('does not combine fetch windows with a gap', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'first', 1, {
+        start: 0,
+        end: 4,
+        total: 10,
+      }),
+      makeMemoryResult('project:same.md', 'second', 1, {
+        start: 5,
+        end: 10,
+        total: 10,
+      }),
+    ];
+
+    expect(collectResidentMemoryBodies(history)).toEqual([]);
   });
 });
 

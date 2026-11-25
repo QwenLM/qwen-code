@@ -8,6 +8,13 @@ connection, and what it sends back. Everything here is what the code
 does today at schema version 1 and frame version 1; the last section
 says what may change and how you will know.
 
+For a Node program, `@qwen-code/sdk/peer` implements the joining side of
+this page — the record, the inbox, the auth line, frames and receipts — with
+nothing but Node, and its tests run it against Qwen Code's own implementation
+in both directions. It applies none of §6 to its own inbox: a program that
+needs rate limits, holds or a duplicate window applies them itself. Use it, or
+read on to write your own.
+
 Every value that crosses a process boundary is untrusted on arrival and
 validated by the reader. Where this page says a field "must" have some
 shape, a value that does not is dropped, never rejected with an error.
@@ -17,12 +24,16 @@ shape, a value that does not is dropped, never rejected with an error.
 A running session publishes one record:
 
 ```
-$QWEN_HOME/sessions/<pid>.json        (directory 0700, file 0600)
+$QWEN_HOME/sessions/<pid>.json            (directory 0700, file 0600)
+$QWEN_HOME/sessions/<pid>-<8 hex>.json    (a process hosting several sessions)
 ```
 
-`$QWEN_HOME` defaults to `~/.qwen`. The file name is the writer's PID
-and nothing else; a record whose `pid` field disagrees with its file
-name is ignored.
+`$QWEN_HOME` defaults to `~/.qwen`. The file name is keyed by the
+writer's PID — either the bare PID, or the PID, a dash, and eight
+lowercase hex characters minted at registration (see "Several records
+from one process" below). A record whose `pid` field disagrees with the
+PID prefix of its file name — compared in canonical decimal form, so a
+zero-padded name agrees with nothing — is ignored.
 
 ```json
 {
@@ -44,7 +55,7 @@ name is ignored.
 | Field           | Meaning                                                                                                                                                                                                                                                                                               |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `schemaVersion` | Always `1`. A reader skips a record with a higher version and never deletes it.                                                                                                                                                                                                                       |
-| `pid`           | The writer's process id. Must equal the file name.                                                                                                                                                                                                                                                    |
+| `pid`           | The writer's process id. Must equal the PID the file name is keyed by: the whole name for the bare form, the digits before the `-<8 hex>` suffix for the minted one.                                                                                                                                  |
 | `procStart`     | `<boot id>:<process start ticks>` on Linux (`/proc/sys/kernel/random/boot_id` and field 22 of `/proc/<pid>/stat`); `null` elsewhere. Guards against PID reuse, and against records written on another machine that shares this home directory.                                                        |
 | `pidNs`         | Inode number of `/proc/self/ns/pid` on Linux; `null` elsewhere. A reader only lists and sweeps records from its own namespace.                                                                                                                                                                        |
 | `sessionId`     | The session's id. `/clear` and `/resume` swap it under the same PID, so re-read the record before each send.                                                                                                                                                                                          |
@@ -69,19 +80,31 @@ able to receive receipts — writes the same record for itself: its own
 `pid`, `procStart` and `pidNs` computed the same way, a `sessionId` it
 mints (any UUID), `kind: "external"`, a `name` (yours, or derived the
 same way; it is flattened to one line and bounded when displayed), and
-`ipcPath` + `ipcToken` for an inbox it binds itself (§2). Write to a
-temp file in the same directory and `rename` over the target; create the
-file 0600; refuse to write through a symlink. Remove the record on exit.
-A record whose process is gone is swept by the next session that lists,
-but only when `procStart` proves the PID is not merely reused.
+`ipcPath` + `ipcToken` for an inbox it binds itself (§2). On Linux,
+`pidNs` is required: every reader compares it with its own, so a record
+without one is never listed — and never swept. `procStart` is required too,
+for a different reason: without it a reader falls back to plain PID liveness
+and cannot tell a recycled PID from the process that wrote the record. Write
+to a temp file in the same directory and `rename` over the target; create
+the file 0600; refuse to write through a symlink. If `<pid>.json` already
+holds something you cannot prove was left by an earlier process with your
+PID — same `pidNs`, same boot id, different start ticks — write
+`<pid>-<8 hex>.json` instead of replacing it: readers accept both names,
+and the record there may belong to a live process in another namespace or
+on another machine. Remove the record on exit. A record whose process is
+gone is swept by the next session that lists, but only when `procStart`
+proves the PID is not merely reused. `PeerEndpoint.start()` in
+`@qwen-code/sdk/peer` does all of this, and removes the record again on
+`close()`.
 
 **Reading.** Anything that can read the directory can read every record,
 including tokens: being able to discover a session and being able to
 authenticate to it are one capability by design. Do not print
 `ipcToken` anywhere a model or a log can see it.
 
-**Liveness.** A record is live when all of these hold: the file name
-matches `pid`; `pidNs` equals the reader's; the boot id inside
+**Liveness.** A record is live when all of these hold: the file name is
+`<pid>.json` or `<pid>-<8 hex>.json` and its PID prefix equals `pid`;
+`pidNs` equals the reader's; the boot id inside
 `procStart` equals the reader's (or `procStart` is `null`); and the PID
 is alive with the same start ticks. A live record with an `ipcPath`
 still has to be dialed before it is advertised as reachable — a socket
@@ -91,6 +114,21 @@ file outlives a crash.
 sessions may share a `name`; the address grammar a sender types is
 `name`, `name [ref]`, `[ref]` or the bare `ref`, and an ambiguous
 `name` is an error rather than a guess.
+
+**Several records from one process.** Any `qwen --acp` child — spawned
+by the daemon, or driven directly by an editor or another client —
+writes one record per session, named `<pid>-<8 hex>.json`, from its
+first session on. The suffix is minted at
+registration and never changes; a session id swapped underneath is a
+patch to the record, not a rename of it. Every one of them carries the
+same `ipcPath`, because the process binds one inbox for all its sessions
+and tells them apart by the `toSessionId` on each frame — so **always
+send `toSessionId`**: a frame without one that reaches such a process is
+answered `misaddressed`, since there is no single session it could have
+meant. Liveness, sweeping and the namespace and boot guards read the
+record exactly as they do for the bare name; only the PID/filename
+agreement check differs, and only in comparing `pid` against the digits
+before the suffix rather than the whole name.
 
 ## 2. The inbox socket
 
@@ -133,6 +171,10 @@ saw:
 | The `ipcToken` from the target's registry record                              | an ordinary peer               | subject to policy and mode parity (§6)                                           |
 | `QWEN_CODE_MESSAGING_TOKEN` from the target's own environment                 | a process that session started | delivered under the parity default; `origin="own-process"`                       |
 | A controller token `qpc_<64 hex>` minted with `qwen sessions controllers add` | a program the user trusts      | delivered under the parity default; `origin="controller"` with the grant's label |
+
+A shared ACP inbox accepts the registry and controller credentials. The
+own-process credential is available only when the inbox belongs to one
+session.
 
 A first line that is not an auth line, or that presents a token matching
 none of the three, drops the connection silently. When the record has no
@@ -178,6 +220,11 @@ that is delivered and one that waits for review. Writing
 | `toSessionId` | The `sessionId` you read from the record. A receiver holding a different id answers `misaddressed`. Always send it.                                                                                                           |
 | `priority`    | `"now"` or `"next"`; anything else reads as `"next"`. Carried for a future interrupt path; today the receiver queues both for the next turn.                                                                                  |
 | `message`     | `role` must be `"user"`; `content` a non-empty string.                                                                                                                                                                        |
+
+After `/clear`, a shared ACP inbox also recognizes the session's original
+published ID as an alias when it resolves to exactly one registered
+session. An ID that matches multiple registered sessions receives
+`misaddressed`.
 
 Unknown fields are ignored.
 
@@ -242,8 +289,8 @@ In order:
 1. **Admission.** Per sender: a burst of 30, then one message every two seconds. All senders together: a burst of 32, then one a second — a sender names itself on the frame, so rotating that name buys a fresh allowance from the first limit but not the second. The same body from another session inside 30 seconds is a `duplicate`; a process the session started and a trusted controller are exempt from that check, and rate-limited like everyone else. A dropped message is never held, never delivered, and leaves no record, so a sender that waits out its burst and retries still lands.
 2. **Settled ids.** A `msgId` the gate already decided repeats its earlier verdict.
 3. **Policy.** `agents.crossSessionInbound` set to `accept`, `hold` or `refuse` wins. Unset: a process the session started or a trusted controller is accepted; otherwise a message is accepted only when `fromMode` names the same review class the receiver is in, and held in every other case, including when `fromMode` is absent.
-4. **Hold.** Up to 50 messages wait. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`; a mode change re-evaluates the backlog.
-5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers. A full queue is `dropped` with `queue-full` too.
+4. **Hold.** A session a program drives over ACP has nobody to review a hold, so it answers `refused` instead. Elsewhere, up to 50 messages wait. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`; a mode change re-evaluates the backlog.
+5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers. A session a program drives over ACP gives peer messages their own 20-slot allowance, separate from its 20 slots for background results. A full allowance is `dropped` with `queue-full`. The ACP host sends `expired` for unread peer messages detached when the conversation changes or closes.
 
 A sender does not have to discover the limits the hard way: a Qwen Code
 session mirrors them per address and refuses its own send before writing
@@ -285,7 +332,15 @@ that look like the envelope are defanged inside `content`.
   renamed itself, are both still to come.
 - **Same-name reporting.** `qwen sessions ps` and `list_agents` do not
   flag records that still collide.
-- **Daemon-managed sessions.** Only the interactive UI registers today, so
-  a session `qwen serve` drives is not in the registry, cannot be
-  addressed, and cannot send. The `serve` and `headless` kinds are
-  reserved for it.
+- **Held messages for ACP-driven sessions.** A session a program
+  drives over ACP (daemon-spawned or not) takes the messages its rules
+  accept, but it cannot present a held one, so a message that would be
+  held is answered `refused`. Where a held message should surface for
+  those sessions (its client, or the daemon's own API) is still open.
+- **Sessions behind one inbox are one sender to every peer.** A process
+  hosting several sessions sends with one `from` address, so a
+  receiver's per-sender budget and duplicate window (§6) are shared by
+  all of that process's sessions at once: a busy sibling can spend
+  another's allowance, and a body just sent to one cannot be repeated
+  to its sibling inside the window. Per-session accounting would have
+  to trust a frame-asserted field, which §3's trust model rules out.

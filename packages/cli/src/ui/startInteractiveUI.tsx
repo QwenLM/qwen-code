@@ -25,6 +25,10 @@ import {
   PeerMessagingContext,
 } from '../peerMessaging/PeerMessagingContext.js';
 import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
+import {
+  isCrossSessionMessagingActive,
+  isCrossSessionMessagingOptedIn,
+} from '../peerMessaging/enabled.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -65,6 +69,7 @@ import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
+import { primeGitBranchName } from './hooks/useGitBranchName.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -87,6 +92,9 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
   options: StartInteractiveUIOptions = {},
 ) {
+  const branchPrimed = primeGitBranchName(config.getTargetDir()).catch(
+    () => {},
+  );
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
 
@@ -182,7 +190,7 @@ export async function startInteractiveUI(
       ? installTerminalResizeReflow(process.stdout, { virtualViewport: useVP })
       : { restore: () => {}, repaint: () => {} };
 
-  // Cross-session messaging (experimental, off by default). The inbox is
+  // Cross-session messaging (on by default; see peerMessaging/enabled.ts). The inbox is
   // owned outside React — bound once per process by the block at the end of
   // this function — and this promise is how the bound instance (or null,
   // when the feature is off or the socket could not be bound) reaches the
@@ -213,13 +221,32 @@ export async function startInteractiveUI(
       void peerMessagingReady.then((messaging) => {
         if (!alive) return;
         setPeerMessaging(messaging);
-        // A null inbox with the feature on is a bind that failed; the
-        // cause is what the user needs, not the null.
+        // A null inbox for a session that takes part is a bind that failed;
+        // the cause is what the user needs, not the null. A session that
+        // does not take part — the setting off, or `--bare`/`--safe-mode` —
+        // publishes null on purpose and has no failure to explain.
         if (
           messaging === null &&
-          settings.merged.agents?.crossSessionMessaging === true
+          isCrossSessionMessagingActive(settings.merged, config)
         ) {
-          setPeerInboxFailure(getLastPeerInboxFailure());
+          const failure = getLastPeerInboxFailure();
+          // A different question from the helper above: not "is messaging
+          // on", which an unset key also answers yes, but "did a person
+          // write `true`" — in their user settings or this workspace's, not
+          // in an operator's defaults, which merged settings cannot tell
+          // apart. The switch is on by default, so a platform with no inbox
+          // transport would otherwise greet every one of its users with a
+          // failure about a feature they never asked for; that one is said
+          // only to someone who opted in by hand. A bind that failed where
+          // it should have worked is said to everyone: they are
+          // unreachable, and this line is the only place they learn it.
+          const optedInByHand = isCrossSessionMessagingOptedIn(settings);
+          if (
+            failure !== null &&
+            (failure.cause !== 'unsupported_platform' || optedInByHand)
+          ) {
+            setPeerInboxFailure(failure);
+          }
         }
       });
       return () => {
@@ -280,6 +307,7 @@ export async function startInteractiveUI(
     // coordinates even though these listeners are owned and cleaned up.
     process.stdout.setMaxListeners(0);
   }
+  await branchPrimed;
   const appTree = (
     <ErrorBoundary
       recordForExitEcho
@@ -452,7 +480,11 @@ export async function startInteractiveUI(
   // registry record, and `patchSessionRecord` no-ops when there is no record
   // yet, so binding any earlier would publish the socket path into nothing.
   // Not awaited — startup must never block on binding a socket.
-  if (settings.merged.agents?.crossSessionMessaging !== true) {
+  // Off when the setting says so, or when the session was started with it
+  // suppressed: `--bare` and `--safe-mode` turn messaging off whatever the
+  // setting says, and the same predicate answers for `/peers` and for the
+  // ACP agent's hosted sessions.
+  if (!isCrossSessionMessagingActive(settings.merged, config)) {
     publishPeerMessaging(null);
   } else {
     let exiting = false;

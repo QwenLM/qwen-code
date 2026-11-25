@@ -12,6 +12,8 @@ import {
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
   ChannelBase,
+  BackgroundOutputCoordinator,
+  parseChannelOutputMode,
   isTerminalTaskLifecycleType,
   sanitizeLogText,
   sanitizePromptText,
@@ -20,11 +22,13 @@ import {
 } from '@qwen-code/channel-base';
 import {
   DINGTALK_CHUNK_LIMIT,
+  DINGTALK_MAX_CHUNK_LENGTH,
   escapeDingTalkMarkdown,
   normalizeDingTalkMarkdown,
   extractTitle,
 } from './markdown.js';
 import { downloadMedia } from './media.js';
+import { withConnectLoggingSuppressed } from './connect-logging.js';
 import {
   DingTalkMediaUploadError,
   findImageMarkers,
@@ -48,6 +52,7 @@ import {
 import {
   DingtalkCardRequestError,
   DingtalkInteractiveCardClient,
+  isRetryableDingtalkStatus,
 } from './interactive-card-client.js';
 import {
   parseDingtalkCardActorId,
@@ -61,6 +66,8 @@ import { StatusCardController } from './status-card-controller.js';
 import {
   isChinesePresentationLanguage,
   lifecyclePresentationPhase,
+  markPartialOutput,
+  partialOutputLabel,
   presentationPhaseLabel,
   type DingtalkPresentationPhase,
 } from './presentation-phase.js';
@@ -69,6 +76,10 @@ import { PermissionCardController } from './permission-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
   BackgroundResponseContext,
+  BackgroundOutputDelivery,
+  BackgroundOutputPacket,
+  BackgroundOutputTarget,
+  ChannelOutputMode,
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
@@ -89,7 +100,9 @@ import type {
 
 interface DingTalkRichTextPart {
   type?: string;
+  msgType?: string;
   text?: string;
+  content?: string;
   downloadCode?: string;
   atName?: string;
 }
@@ -112,6 +125,12 @@ interface DingTalkRepliedMsg {
   msgType?: string;
   senderId?: string;
   content?: DingTalkMessageContent;
+}
+
+interface DingTalkQuotedMedia {
+  downloadCode: string;
+  mediaType: 'image' | 'file' | 'audio' | 'video';
+  fileName?: string;
 }
 
 interface DingTalkAtUser {
@@ -150,6 +169,10 @@ function nonEmptyString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function richTextPartType(part: DingTalkRichTextPart): string {
+  return part.type || part.msgType || 'text';
 }
 
 function parseJsonArray(value: unknown): unknown[] | undefined {
@@ -597,15 +620,11 @@ function formatChatRecord(
 
 /** Track seen msgIds to deduplicate retried callbacks. */
 const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const BACKGROUND_RESPONSE_AGGREGATION_TIMEOUT_MS = 10 * 60 * 1000;
-/**
- * A failed aggregation delivery is retried rather than dropped: aggregating
- * concentrates a whole turn into one send, and the burst that makes a send
- * fail (several agents finishing at once against one chat quota) is exactly
- * when the whole result would be lost.
- */
-const BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS = 30 * 1000;
-const BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES = 3;
+
+/** The charset ChannelBase's own slash classifier requires of a leading
+ * `/token`. Slash-prefixed prose — a path, a `//` or block comment — fails it
+ * and stays prose. */
+const SLASH_COMMAND_TOKEN_RE = /^[a-zA-Z0-9_:-]+$/;
 
 const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
@@ -624,9 +643,17 @@ const DIRECT_MSG_API =
   'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const PROACTIVE_FILE_MSG_KEY = 'sampleFile';
-const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
+// Exported so the managed card path's token provider shares one copy of the
+// endpoint and the load-bearing errcode set (H5e of #12827). Additive exports;
+// the Legacy getProactiveToken behavior is unchanged.
+export const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
-const ROBOT_MESSAGE_HOSTS = new Set(['api.dingtalk.com', 'oapi.dingtalk.com']);
+// Shared with the managed adapter's webhook send so both paths validate the
+// sessionWebhook host against the same allowlist.
+export const ROBOT_MESSAGE_HOSTS = new Set([
+  'api.dingtalk.com',
+  'oapi.dingtalk.com',
+]);
 const STATUS_CARD_ACTION_IDS = [
   'btn_stop',
   'btn_new_session',
@@ -648,7 +675,7 @@ function normalizeStatusCardActionId(actionId: string): string {
  * missing app. Any other errcode (-1 system busy, 88 throttled, ...) is
  * treated as transient so card recovery keeps retrying through it.
  */
-const PERMANENT_TOKEN_ERROR_CODES = new Set([
+export const PERMANENT_TOKEN_ERROR_CODES = new Set([
   40001, 40013, 40089, 40096, 90002, 90003,
 ]);
 const REPLY_FETCH_TIMEOUT_MS = 15_000;
@@ -900,107 +927,20 @@ type DingTalkClientInternals = DWClient & {
   onCallback(message: DWClientDownStream): void;
 };
 
-/* eslint-disable no-console -- swapping console.log out is the whole job here */
-let connectLogDepth = 0;
-let unsuppressedConsoleLog: typeof console.log | undefined;
-
-// Connects can overlap — a manager replacement starts while another is still
-// in flight, and either may settle first — so only the depth 1→0 transition
-// restores, to what the 0→1 transition saved. An inner scope restoring its own
-// capture would put the no-op back and leave logging off process-wide.
-async function withConnectLoggingSuppressed<T>(
-  connect: () => Promise<T>,
-): Promise<T> {
-  if (connectLogDepth++ === 0) {
-    unsuppressedConsoleLog = console.log;
-    console.log = () => {};
-  }
-  try {
-    return await connect();
-  } finally {
-    if (--connectLogDepth === 0 && unsuppressedConsoleLog) {
-      console.log = unsuppressedConsoleLog;
-      unsuppressedConsoleLog = undefined;
-    }
-  }
-}
-/* eslint-enable no-console */
-
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
   interactiveCards?: unknown;
-  aggregateBackgroundAgentResponses?: unknown;
 };
 
-interface BackgroundResponseAggregation {
-  key: string;
-  sessionId: string;
-  target: SessionTarget;
-  sourceLabel?: string;
-  status: string;
-  label?: string;
-  parts: string[];
-  timeoutTimer?: ReturnType<typeof setTimeout>;
-  retryTimer?: ReturnType<typeof setTimeout>;
-  turnComplete?: boolean;
-  completionPartial?: boolean;
-  retiring?: boolean;
-  flushing?: boolean;
-  delivered?: boolean;
-  /** Whether a card was already delivered after the turn completed. */
-  completionDelivered?: boolean;
-  /** Whether a give-up ever discarded buffered text for this turn. */
-  dropped?: boolean;
-  /** Whether target resolution discarded a segment before aggregation. */
-  resolutionDropped?: boolean;
-  delivery?: BackgroundResponseDelivery;
-}
-
-/** Background response segments waiting for target resolution. */
-interface PendingBackgroundResponseTerminal {
-  sessionId: string;
-  target: SessionTarget;
-  resolvers: number;
-  held: Array<{
-    text: string;
-    context: BackgroundResponseContext;
-  }>;
-  turnComplete?: boolean;
-  status?: string;
-  label?: string;
-  completionPartial?: boolean;
-  resolutionDropped?: boolean;
-  retryAttempts?: number;
-  retryTimer?: ReturnType<typeof setTimeout>;
-  retryInFlight?: boolean;
-  retiring?: boolean;
-  turnEnded?: boolean;
-}
-
-interface BackgroundResponseDelivery {
-  status: string;
-  label?: string;
-  parts: string[];
-  partial: boolean;
-  attempts: number;
-  composedTurnComplete?: boolean;
-  proactivePlan?: ProactiveTextDelivery;
-  replyPlan?: ReplyTextDelivery;
-  /**
-   * Reply-path body whose `[FILE: ...]` markers were already delivered. A
-   * retry must reuse it: `prepareReplyOutput` sends the file messages, so
-   * re-running it would post every file again.
-   */
-  preparedReplyBody?: string;
-}
-
 interface ProactiveTextDelivery {
+  sourceText: string;
   title: string;
   chunks: string[];
   nextChunk: number;
 }
 
 interface ReplyTextDelivery {
+  sourceText: string;
   title: string;
   chunks: string[];
   nextChunk: number;
@@ -1022,11 +962,16 @@ class ProactiveTextDeliveryError extends Error {
 }
 
 class ReplyTextDeliveryError extends Error {
+  readonly retryable?: boolean;
+
   constructor(
     readonly plan: ReplyTextDelivery,
     cause: unknown,
   ) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
+    if (cause instanceof DingtalkCardRequestError) {
+      this.retryable = cause.retryable;
+    }
   }
 }
 
@@ -1050,7 +995,7 @@ export class DingtalkChannel extends ChannelBase {
     string,
     Map<string, { messageId: string; chatId: string }>
   >();
-  /** Settles when the reaction cleanup queued by disconnect() has run. */
+  /** Settles after background output and reaction cleanup finish on disconnect. */
   private disconnectDrain: Promise<void> | undefined;
   /**
    * Real inbound message ids (insertion-ordered, size-capped). Unlike the
@@ -1064,7 +1009,7 @@ export class DingtalkChannel extends ChannelBase {
    */
   private proactiveToken?: { token: string; expiresAt: number };
   private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
-  private readonly aggregateBackgroundAgentResponses: boolean;
+  private readonly outputMode?: ChannelOutputMode;
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
@@ -1080,18 +1025,7 @@ export class DingtalkChannel extends ChannelBase {
     string,
     { sessionId: string; projector: OutboundFileProjector }
   >();
-  private readonly backgroundResponseAggregations = new Map<
-    string,
-    BackgroundResponseAggregation
-  >();
-  private readonly detachedBackgroundResponseAggregations =
-    new Set<BackgroundResponseAggregation>();
-  private readonly pendingBackgroundResponseTerminals = new Map<
-    string,
-    PendingBackgroundResponseTerminal
-  >();
-  private readonly detachedPendingBackgroundResponseTerminals =
-    new Set<PendingBackgroundResponseTerminal>();
+  private readonly backgroundOutputCoordinator: BackgroundOutputCoordinator;
 
   constructor(
     name: string,
@@ -1120,19 +1054,31 @@ export class DingtalkChannel extends ChannelBase {
     this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
       (config as DingtalkChannelConfig).interactiveCards,
     );
-    const rawAggregateBackgroundAgentResponses = (
-      config as DingtalkChannelConfig
-    ).aggregateBackgroundAgentResponses;
-    if (
-      rawAggregateBackgroundAgentResponses !== undefined &&
-      typeof rawAggregateBackgroundAgentResponses !== 'boolean'
-    ) {
-      throw new Error(
-        `Channel "${name}" aggregateBackgroundAgentResponses must be a boolean.`,
-      );
-    }
-    this.aggregateBackgroundAgentResponses =
-      rawAggregateBackgroundAgentResponses === true;
+    this.outputMode = parseChannelOutputMode(name, config.outputMode, true);
+    this.backgroundOutputCoordinator = new BackgroundOutputCoordinator({
+      outputMode: this.outputMode,
+      getTarget: (sessionId, workflowOrigin) =>
+        workflowOrigin
+          ? this.workflowTarget(sessionId, workflowOrigin)
+          : this.router.getTarget(sessionId),
+      getSourceLabel: (sessionId, workflowOrigin) =>
+        this.getBackgroundResponseSourceLabel(sessionId, workflowOrigin),
+      resolveDelivery: (sessionId, workflowOrigin) =>
+        workflowOrigin
+          ? this.resolveBackgroundResponseDelivery(sessionId, workflowOrigin)
+          : this.resolveBackgroundResponseDelivery(sessionId),
+      createDelivery: (sessionId, target) =>
+        this.createBackgroundOutputDelivery(sessionId, target),
+      isRetryableError: (error) =>
+        !(
+          (error instanceof ProactiveTextDeliveryError ||
+            error instanceof ReplyTextDeliveryError ||
+            error instanceof DingtalkCardRequestError) &&
+          error.retryable === false
+        ),
+      log: (message) =>
+        process.stderr.write(`[DingTalk:${this.name}] ${message}`),
+    });
 
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
@@ -1235,23 +1181,19 @@ export class DingtalkChannel extends ChannelBase {
           },
         });
       }
-      if (
-        this.statusCardController ||
-        this.questionCardController ||
-        this.permissionCardController
-      ) {
-        this.interactionPresenter = new DingtalkInteractionPresenter({
-          statusCards: this.statusCardController,
-          questionCards: this.questionCardController,
-          permissionCards: this.permissionCardController,
-          ...(options?.displayLanguage
-            ? { language: options.displayLanguage }
-            : {}),
-          sendFallback: (chatId, text, sessionId, sourceLabel) =>
-            this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
-        });
-      }
     }
+    this.interactionPresenter = new DingtalkInteractionPresenter({
+      outputMode: this.outputMode,
+      prepareOutput: (chatId, text) => this.prepareReplyOutput(chatId, text),
+      statusCards: this.statusCardController,
+      questionCards: this.questionCardController,
+      permissionCards: this.permissionCardController,
+      ...(options?.displayLanguage
+        ? { language: options.displayLanguage }
+        : {}),
+      sendFallback: (chatId, text, sessionId, sourceLabel) =>
+        this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
+    });
     if (useConnectionManager) {
       this.connectionManager = new DingtalkConnectionManager({
         initialClient: this.client,
@@ -1790,17 +1732,24 @@ export class DingtalkChannel extends ChannelBase {
       sourceLabel && outgoingText.trim().length > 0
         ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
         : '';
-    const contentLimit =
-      DINGTALK_CHUNK_LIMIT - mentionPrefix.length - sourcePrefix.length;
+    const overhead = mentionPrefix.length + sourcePrefix.length;
+    const contentLimit = DINGTALK_CHUNK_LIMIT - overhead;
+    const maxLength = DINGTALK_MAX_CHUNK_LENGTH - overhead;
     if (contentLimit <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
-    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+    const chunks = normalizeDingTalkMarkdown(
+      outgoingText,
+      contentLimit,
+      maxLength,
+      overhead,
+    ).map(
       (chunk, index) =>
         `${index === 0 ? mentionPrefix : ''}${sourcePrefix}${chunk}`,
     );
     return {
       title: extractTitle(outgoingText),
+      sourceText: outgoingText,
       chunks,
       nextChunk: 0,
       ...(atUserId ? { atUserId } : {}),
@@ -1875,8 +1824,9 @@ export class DingtalkChannel extends ChannelBase {
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
         if (failOnHttpError) {
-          throw new Error(
+          throw new DingtalkCardRequestError(
             `DingTalk reply send failed: HTTP ${resp.status} ${detail}`,
+            isRetryableDingtalkStatus(resp.status),
           );
         }
       } else if (failOnHttpError) {
@@ -1987,14 +1937,60 @@ export class DingtalkChannel extends ChannelBase {
     const sourcePrefix = sourceLabel
       ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
       : '';
+    const title = extractTitle(outgoingText);
+    return {
+      title,
+      sourceText: outgoingText,
+      chunks: this.createProactiveTextChunks(outgoingText, title, sourcePrefix),
+      nextChunk: 0,
+    };
+  }
+
+  private createProactiveTextChunks(
+    text: string,
+    title: string,
+    sourcePrefix: string,
+    header = '',
+  ): string[] {
     const contentLimit = DINGTALK_CHUNK_LIMIT - sourcePrefix.length;
+    const targetLength = Math.max(1, contentLimit - header.length);
+    const maxLength =
+      DINGTALK_MAX_CHUNK_LENGTH - sourcePrefix.length - header.length;
     if (contentLimit <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
-    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
-      (chunk) => `${sourcePrefix}${chunk}`,
+    const fits = (chunk: string) =>
+      Buffer.byteLength(
+        JSON.stringify({
+          title: `${title} (cont.)`,
+          text: sourcePrefix + header + chunk,
+        }),
+        'utf8',
+      ) <= 15_000;
+    if (!fits('')) {
+      throw new Error(
+        'DingTalk source label exceeds the proactive payload limit.',
+      );
+    }
+    let budget = maxLength;
+    let pieces = normalizeDingTalkMarkdown(
+      text,
+      targetLength,
+      budget,
+      sourcePrefix.length + header.length,
     );
-    return { title: extractTitle(outgoingText), chunks, nextChunk: 0 };
+    // Re-plan the whole batch from source before sending its first message.
+    // OpenAPI limits the serialized msgParam, not UTF-16 text length.
+    while (!pieces.every(fits)) {
+      budget = Math.floor(budget / 2);
+      pieces = normalizeDingTalkMarkdown(
+        text,
+        Math.min(targetLength, budget),
+        budget,
+        sourcePrefix.length + header.length,
+      );
+    }
+    return pieces.map((piece) => sourcePrefix + header + piece);
   }
 
   private async deliverProactiveText(
@@ -2174,8 +2170,9 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
         );
-        throw new Error(
+        throw new DingtalkCardRequestError(
           `DingTalk proactive send failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
+          isRetryableDingtalkStatus(resp.status),
         );
       }
       if (target.isGroup === true) {
@@ -2338,8 +2335,7 @@ export class DingtalkChannel extends ChannelBase {
     for (const state of reactionStates) {
       this.finishReaction(state.chatId, state.messageId, state.sessionId);
     }
-    this.statusCardController?.dispose();
-    this.drainBackgroundResponseAggregations();
+    const backgroundDrain = this.backgroundOutputCoordinator.drain();
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
     this.reactionStates.clear();
@@ -2349,9 +2345,12 @@ export class DingtalkChannel extends ChannelBase {
       this.client.disconnect();
     }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
-    this.disconnectDrain = Promise.allSettled(
-      reactionStates.map((state) => state.tail),
-    ).then(() => undefined);
+    this.disconnectDrain = Promise.allSettled([
+      backgroundDrain,
+      ...reactionStates.map((state) => state.tail),
+    ]).then(() => {
+      this.statusCardController?.dispose();
+    });
   }
 
   override waitForDisconnect(): Promise<void> {
@@ -2675,11 +2674,8 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
     this.sessionMentionTargets.delete(sessionId);
-    // A session dying after segments arrived but before the terminal signal is
-    // precisely the case the partial-card fallback exists for; dropping the
-    // buffer here would lose text the agent already produced, which the
-    // pre-aggregation code always delivered on arrival.
-    this.drainBackgroundResponseAggregations(sessionId);
+    // Preserve a pending background turn's latest result if its session dies.
+    this.backgroundOutputCoordinator.drain(sessionId);
     const cardRunId = this.cardRunBySession.get(sessionId);
     if (cardRunId) {
       this.cardRunBySession.delete(sessionId);
@@ -2704,6 +2700,7 @@ export class DingtalkChannel extends ChannelBase {
    * the sessions on a fresh bridge.
    */
   override onBridgeDisconnected(): void {
+    void this.backgroundOutputCoordinator.drain();
     for (const [sessionId, keys] of this.sessionReactionKeys) {
       this.sessionReactionKeys.delete(sessionId);
       for (const { messageId, chatId } of keys.values()) {
@@ -2718,7 +2715,7 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   protected override onSessionRetiring(sessionId: string): void {
-    this.drainBackgroundResponseAggregations(sessionId);
+    this.backgroundOutputCoordinator.drain(sessionId);
   }
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
@@ -2736,13 +2733,19 @@ export class DingtalkChannel extends ChannelBase {
         this.cardRuns.set(event.runId, inboundOwner);
         this.cardRunBySession.set(event.sessionId, event.runId);
         const sourceLabel = this.getResponseSourceLabel(event.sessionId);
+        const atUserId =
+          this.atSender && event.messageId
+            ? this.mentionTargets.get(event.messageId)
+            : undefined;
         this.interactionPresenter?.registerRun(
           event.runId,
           event.owner.id,
           inboundOwner.target,
           event.sessionId,
           inboundOwner.sender,
-          ...(sourceLabel ? [sourceLabel] : []),
+          sourceLabel,
+          (chatId, text, _sessionId, label) =>
+            this.sendReply(chatId, text, atUserId, label),
         );
         this.interactionPresenter?.startStatusCard(event.runId);
       }
@@ -2864,7 +2867,7 @@ export class DingtalkChannel extends ChannelBase {
         this.inboundCardOwners.delete(messageId);
         this.inboundCardOwners.set(messageId, {
           ownerId: envelope.senderId,
-          quoteContent: `${sanitizeSenderName(envelope.senderName || envelope.senderId)}：${(envelope.displayText ?? envelope.text).slice(0, 1800)}`,
+          quoteContent: `${sanitizeSenderName(envelope.senderName || envelope.senderId)}：${envelope.text.slice(0, 1800)}`,
           target: {
             chatId: envelope.chatId,
             isGroup: envelope.isGroup,
@@ -2922,835 +2925,284 @@ export class DingtalkChannel extends ChannelBase {
     this.stopReaction(chatId, messageId, sessionId);
   }
 
-  /** Deliver every Agent segment immediately unless aggregation is enabled. */
   override async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
     context?: BackgroundResponseContext,
   ): Promise<void> {
-    const target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      (context !== undefined && context.kind !== 'agent')
-    ) {
+    const workflowOrigin =
+      context?.kind === 'workflow' ? context.channelWorkflowOrigin : undefined;
+    if (context?.kind === 'workflow' && !workflowOrigin) return;
+    const getTarget = () =>
+      workflowOrigin
+        ? this.workflowTarget(sessionId, workflowOrigin)
+        : this.router.getTarget(sessionId);
+    const target = getTarget();
+    if (!target || target.channelName !== this.name) {
       return super.dispatchBackgroundResponse(sessionId, text, context);
     }
 
-    const canAggregate =
-      this.aggregateBackgroundAgentResponses &&
-      context?.kind === 'agent' &&
-      typeof context.turnComplete === 'boolean';
-    if (!canAggregate) {
-      if (text.trim().length === 0) {
-        return super.dispatchBackgroundResponse(sessionId, text, context);
-      }
-      return super.dispatchBackgroundResponse(
-        sessionId,
-        this.formatBackgroundAgentResponse(text, context?.label),
-        context,
-      );
-    }
-
-    const key = JSON.stringify([sessionId, context.taskId, context.turnId]);
-    let current = this.backgroundResponseAggregations.get(key);
-    let parked = this.pendingBackgroundResponseTerminals.get(key);
-    if (current?.turnComplete === true) {
-      this.detachedBackgroundResponseAggregations.add(current);
-      this.backgroundResponseAggregations.delete(key);
-      current = undefined;
-    }
     if (
-      !current &&
-      (parked?.turnEnded === true ||
-        (parked?.turnComplete === true &&
-          (parked.retryTimer || parked.retryInFlight || parked.resolvers > 0)))
+      await this.backgroundOutputCoordinator.dispatch(sessionId, text, context)
     ) {
-      if (!parked.turnEnded) {
-        this.detachedPendingBackgroundResponseTerminals.add(parked);
-      }
-      parked = { sessionId, target, resolvers: 0, held: [] };
-      this.pendingBackgroundResponseTerminals.set(key, parked);
-    }
-    if (!current && text.trim().length === 0) {
-      // The first segment's target resolution can suspend (named-session owner
-      // lock), so a turn's terminal marker may arrive before the aggregation
-      // exists. Park it instead of routing it to the empty-text early return,
-      // or the completed turn only surfaces via the bounded wait, mislabeled.
-      if (
-        !parked ||
-        (parked.resolvers === 0 &&
-          !parked.retryTimer &&
-          !parked.retryInFlight &&
-          !parked.resolutionDropped &&
-          !parked.turnComplete)
-      ) {
-        if (parked) this.pendingBackgroundResponseTerminals.delete(key);
-        return super.dispatchBackgroundResponse(sessionId, text, context);
-      }
-      if (context.turnComplete) {
-        parked.turnComplete = true;
-        parked.status = context.status;
-        parked.label = context.label ?? parked.label;
-        parked.completionPartial = context.partial === true;
-        if (
-          parked.resolvers === 0 &&
-          !parked.retryTimer &&
-          !parked.retryInFlight &&
-          (parked.retryAttempts ?? 0) >=
-            BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES
-        ) {
-          parked.turnEnded = true;
-          this.pendingBackgroundResponseTerminals.delete(key);
-        }
-      }
       return;
     }
-    if (!current) {
-      parked ??= { sessionId, target, resolvers: 0, held: [] };
-      this.pendingBackgroundResponseTerminals.set(key, parked);
-      this.holdPendingBackgroundResponse(parked, text, context);
-      parked.resolvers++;
+    if (!text.trim()) return;
+    const delivery = workflowOrigin
+      ? await this.resolveBackgroundResponseDelivery(sessionId, workflowOrigin)
+      : await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || getTarget() !== delivery.target) return;
+    await this.deliverBackgroundResponseToTarget(
+      sessionId,
+      text,
+      delivery,
+      false,
+      context,
+    );
+  }
+
+  private createBackgroundOutputDelivery(
+    sessionId: string,
+    target: BackgroundOutputTarget,
+  ): BackgroundOutputDelivery {
+    let proactivePlan: ProactiveTextDelivery | undefined;
+    let replyPlan: ReplyTextDelivery | undefined;
+    // Prepared output can already have sent attachment messages.
+    let preparedReplyBody: string | undefined;
+    let composedHeader: string | undefined;
+    let composedTurnComplete = false;
+    return async (output) => {
+      const header = this.formatBackgroundOutputHeader(output);
+      const body = [header, output.text].filter(Boolean).join('\n\n');
+      const plan = proactivePlan ?? replyPlan;
+      if (!plan || plan.nextChunk === 0) {
+        const replaceHeader = (text: string) => {
+          if (composedHeader === undefined || composedHeader === header) {
+            return text;
+          }
+          const separator = output.text ? '\n\n' : '';
+          const previous = composedHeader
+            ? `${composedHeader}${separator}`
+            : '';
+          const next = header ? `${header}${separator}` : '';
+          return text.startsWith(previous)
+            ? `${next}${text.slice(previous.length)}`
+            : text;
+        };
+        if (plan) {
+          plan.title = extractTitle(body);
+          const prefix =
+            (replyPlan?.atUserId ? `@${replyPlan.atUserId}\n\n` : '') +
+            (target.sourceLabel
+              ? `${escapeDingTalkMarkdown(target.sourceLabel)}\n\n`
+              : '');
+          plan.sourceText = replaceHeader(plan.sourceText);
+          const terminalHeader =
+            !output.text && plan.sourceText.startsWith(header) ? header : '';
+          const source = plan.sourceText.slice(terminalHeader.length);
+          if (replyPlan) {
+            const mentionLength = replyPlan.atUserId
+              ? `@${replyPlan.atUserId}\n\n`.length
+              : 0;
+            const reservedLength = prefix.length + terminalHeader.length;
+            replyPlan.chunks = normalizeDingTalkMarkdown(
+              source,
+              Math.max(1, DINGTALK_CHUNK_LIMIT - reservedLength),
+              DINGTALK_MAX_CHUNK_LENGTH - reservedLength,
+              reservedLength,
+            ).map(
+              (chunk, index) =>
+                (index === 0
+                  ? prefix + terminalHeader
+                  : prefix.slice(mentionLength)) + chunk,
+            );
+          }
+          if (proactivePlan) {
+            proactivePlan.chunks = this.createProactiveTextChunks(
+              source,
+              plan.title,
+              prefix,
+              terminalHeader,
+            ).map((piece, index) =>
+              index > 0
+                ? prefix + piece.slice(prefix.length + terminalHeader.length)
+                : piece,
+            );
+          }
+        }
+        if (preparedReplyBody) {
+          preparedReplyBody = replaceHeader(preparedReplyBody);
+        }
+        composedHeader = header;
+        composedTurnComplete = output.turnComplete;
+      }
       try {
-        let delivery: Awaited<
-          ReturnType<DingtalkChannel['resolveBackgroundResponseDelivery']>
-        >;
-        try {
-          delivery = await this.resolveBackgroundResponseDelivery(sessionId);
-        } catch (error) {
-          if (
-            parked.resolvers === 1 &&
-            !this.backgroundResponseAggregations.has(key)
-          ) {
-            this.scheduleBackgroundResponseResolutionRetry(
-              key,
-              sessionId,
-              parked,
-            );
-          } else {
-            const existing = this.backgroundResponseAggregations.get(key);
-            if (existing) {
-              if (parked.held.length > 0) {
-                this.applyHeldBackgroundResponses(existing, parked);
-              }
-              this.applyPendingBackgroundResponseTerminal(existing, parked);
-              if (parked.resolvers === 1) {
-                if (existing.turnComplete) {
-                  await this.completeBackgroundResponseAggregation(
-                    key,
-                    existing,
-                  );
-                } else {
-                  this.scheduleBackgroundResponseAggregationFlush(
-                    key,
-                    existing,
-                  );
-                }
-              }
-            }
-          }
-          throw error;
-        }
-        if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
-          if (
-            parked.resolvers === 1 &&
-            !this.backgroundResponseAggregations.has(key)
-          ) {
-            this.scheduleBackgroundResponseResolutionRetry(
-              key,
-              sessionId,
-              parked,
-            );
-          } else {
-            const existing = this.backgroundResponseAggregations.get(key);
-            if (existing) {
-              if (parked.held.length > 0) {
-                this.applyHeldBackgroundResponses(existing, parked);
-              }
-              this.applyPendingBackgroundResponseTerminal(existing, parked);
-              if (parked.resolvers === 1) {
-                if (existing.turnComplete) {
-                  await this.completeBackgroundResponseAggregation(
-                    key,
-                    existing,
-                  );
-                } else {
-                  this.scheduleBackgroundResponseAggregationFlush(
-                    key,
-                    existing,
-                  );
-                }
-              }
-            }
-          }
-          return;
-        }
-        if (
-          parked.retiring ||
-          this.pendingBackgroundResponseTerminals.get(key) !== parked
-        ) {
-          await this.flushDetachedBackgroundResponse(
-            key,
-            sessionId,
-            parked,
-            delivery,
-          );
-          return;
-        }
-        if (parked.retryTimer) {
-          clearTimeout(parked.retryTimer);
-          parked.retryTimer = undefined;
-        }
-        current =
-          this.backgroundResponseAggregations.get(key) ??
-          this.createBackgroundResponseAggregation(
-            key,
-            sessionId,
-            parked.held[0]?.context ?? context,
-            delivery.target,
-            delivery.sourceLabel,
-          );
-        this.applyHeldBackgroundResponses(current, parked);
-        this.applyPendingBackgroundResponseTerminal(current, parked);
-        if (parked.resolutionDropped) {
-          current.resolutionDropped = true;
-          parked.resolutionDropped = undefined;
-        }
-      } finally {
-        parked.resolvers--;
-        if (
-          this.pendingBackgroundResponseTerminals.get(key) === parked &&
-          parked.resolvers === 0 &&
-          !parked.retryTimer &&
-          parked.held.length === 0 &&
-          (!parked.resolutionDropped || parked.turnEnded)
-        ) {
-          this.pendingBackgroundResponseTerminals.delete(key);
-        }
-      }
-      if (!current) return;
-      if (current.turnComplete && parked.resolvers > 0) return;
-      if (!current.turnComplete) {
-        this.scheduleBackgroundResponseAggregationFlush(key, current);
-      } else {
-        await this.completeBackgroundResponseAggregation(key, current);
-      }
-      return;
-    }
-
-    current.status = context.status;
-    current.label = context.label ?? current.label;
-    if (text.trim().length > 0) current.parts.push(text);
-
-    if (context.turnComplete && parked && parked.resolvers > 0) {
-      parked.turnComplete = true;
-      parked.status = context.status;
-      parked.label = context.label ?? parked.label;
-      parked.completionPartial = context.partial === true;
-    } else if (context.turnComplete) {
-      current.turnComplete = true;
-      current.completionPartial = context.partial === true;
-    } else if (parked?.turnComplete && parked.resolvers === 0) {
-      current.turnComplete = true;
-      current.status = parked.status ?? current.status;
-      current.label = parked.label ?? current.label;
-      current.completionPartial = parked.completionPartial === true;
-    }
-    current.resolutionDropped ||= parked?.resolutionDropped;
-
-    if (!current.turnComplete) {
-      this.scheduleBackgroundResponseAggregationFlush(key, current);
-      return;
-    }
-
-    await this.completeBackgroundResponseAggregation(key, current);
-  }
-
-  private async flushBackgroundResponseAggregation(
-    key: string,
-    aggregation: BackgroundResponseAggregation,
-  ): Promise<void> {
-    if (
-      (this.backgroundResponseAggregations.get(key) !== aggregation &&
-        !this.detachedBackgroundResponseAggregations.has(aggregation)) ||
-      aggregation.flushing
-    ) {
-      return;
-    }
-    this.refreshBackgroundResponseDelivery(aggregation);
-    if (aggregation.retryTimer) clearTimeout(aggregation.retryTimer);
-    aggregation.retryTimer = undefined;
-
-    let delivery = aggregation.delivery;
-    if (!delivery) {
-      if (aggregation.parts.length === 0) {
-        // A turn whose text was already drained by the bounded wait still owes
-        // the user its completion: the last card it saw reads `（部分）`.
-        if (!this.owesTerminalBackgroundResponseCard(aggregation)) {
-          if (aggregation.retiring || aggregation.turnComplete) {
-            this.removeBackgroundResponseAggregation(key, aggregation);
-          } else {
-            this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-          }
-          return;
-        }
-      }
-      if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
-      aggregation.timeoutTimer = undefined;
-      const parts = aggregation.parts.splice(0);
-      delivery = {
-        status: aggregation.status,
-        label: aggregation.label,
-        parts,
-        partial: this.isPartialBackgroundResponseDelivery(
-          aggregation,
-          parts.length,
-        ),
-        attempts: 0,
-        composedTurnComplete: aggregation.turnComplete === true,
-      };
-      aggregation.delivery = delivery;
-    }
-
-    const body = this.formatBackgroundResponseAggregation(delivery);
-    aggregation.flushing = true;
-    let error: unknown;
-    try {
-      if (delivery.proactivePlan) {
-        await this.deliverProactiveText(
-          aggregation.target,
-          delivery.proactivePlan,
-        );
-      } else if (delivery.replyPlan) {
-        await this.deliverReplyText(
-          aggregation.target.chatId,
-          delivery.replyPlan,
-          true,
-        );
-      } else if (
-        this.supportsProactiveSend() &&
-        this.supportsProactiveTarget(aggregation.target)
-      ) {
-        await this.deliverBackgroundResponseToTarget(
-          aggregation.sessionId,
-          body,
-          {
-            target: aggregation.target,
-            sourceLabel: aggregation.sourceLabel,
-          },
-        );
-      } else {
-        delivery.preparedReplyBody ??= await this.prepareReplyOutput(
-          aggregation.target.chatId,
-          body,
-        );
-        await this.deliverBackgroundReply(
-          aggregation.target.chatId,
-          delivery.preparedReplyBody,
-          aggregation.sessionId,
-          aggregation.sourceLabel,
-          true,
-          true,
-        );
-      }
-    } catch (caught) {
-      error = caught;
-      if (caught instanceof ProactiveTextDeliveryError) {
-        delivery.proactivePlan = caught.plan;
-      } else if (caught instanceof ReplyTextDeliveryError) {
-        delivery.replyPlan = caught.plan;
-      }
-    } finally {
-      aggregation.flushing = false;
-    }
-
-    if (error === undefined) {
-      aggregation.delivery = undefined;
-      aggregation.delivered = true;
-      if (
-        delivery.composedTurnComplete === true &&
-        aggregation.turnComplete &&
-        delivery.partial !== true &&
-        !aggregation.retiring
-      ) {
-        aggregation.completionDelivered = true;
-      }
-      if (aggregation.retiring || aggregation.turnComplete) {
-        await this.flushBackgroundResponseAggregation(key, aggregation);
-      } else {
-        // The turn is still open: keep the entry so its later segments re-join
-        // this one (and stay labelled `（部分）`), and re-arm the bounded wait
-        // so a silent turn is still reaped.
-        this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-      }
-      return;
-    }
-
-    delivery.attempts++;
-    process.stderr.write(
-      `[DingTalk:${this.name}] background response delivery failed (attempt ${delivery.attempts}): ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-    );
-    if (
-      delivery.attempts >= BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES ||
-      // A permanently rejected send (an invalid appkey, a missing app) cannot
-      // succeed later; retrying it only spends the chat's send quota.
-      (error instanceof ProactiveTextDeliveryError && error.retryable === false)
-    ) {
-      aggregation.delivery = undefined;
-      aggregation.dropped = true;
-      if (aggregation.parts.length === 0) {
-        if (aggregation.retiring || aggregation.turnComplete) {
-          this.removeBackgroundResponseAggregation(key, aggregation);
+        if (proactivePlan) {
+          await this.deliverProactiveText(target.target, proactivePlan);
+        } else if (replyPlan) {
+          await this.deliverReplyText(target.target.chatId, replyPlan, true);
         } else {
-          this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-        }
-      } else if (aggregation.retiring || aggregation.turnComplete) {
-        await this.flushBackgroundResponseAggregation(key, aggregation);
-      } else {
-        this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-      }
-      return;
-    }
-
-    aggregation.retryTimer = setTimeout(() => {
-      aggregation.retryTimer = undefined;
-      void this.flushBackgroundResponseAggregation(key, aggregation);
-    }, BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS);
-    aggregation.retryTimer.unref?.();
-  }
-
-  /**
-   * A card carries `（部分）` whenever it is not the turn's whole output: the
-   * turn is still open, earlier text already went out (or was given up on),
-   * or the turn itself ended early.
-   */
-  private isPartialBackgroundResponseDelivery(
-    aggregation: BackgroundResponseAggregation,
-    partCount: number,
-  ): boolean {
-    return (
-      partCount > 0 &&
-      (aggregation.delivered === true ||
-        aggregation.dropped === true ||
-        aggregation.resolutionDropped === true ||
-        aggregation.retiring === true ||
-        aggregation.completionPartial === true ||
-        aggregation.turnComplete !== true)
-    );
-  }
-
-  /**
-   * A turn that outran the bounded wait had its text delivered under the
-   * `（部分）` label. When it then completes normally with nothing buffered,
-   * a header-only card is the only way the chat ever learns it finished.
-   */
-  private owesTerminalBackgroundResponseCard(
-    aggregation: BackgroundResponseAggregation,
-  ): boolean {
-    return (
-      aggregation.turnComplete === true &&
-      aggregation.delivered === true &&
-      aggregation.completionDelivered !== true &&
-      aggregation.retiring !== true &&
-      aggregation.completionPartial !== true &&
-      aggregation.dropped !== true &&
-      aggregation.resolutionDropped !== true
-    );
-  }
-
-  private refreshBackgroundResponseDelivery(
-    aggregation: BackgroundResponseAggregation,
-  ): void {
-    const delivery = aggregation.delivery;
-    if (!delivery || aggregation.flushing) return;
-    const plan = delivery.proactivePlan ?? delivery.replyPlan;
-    if (plan && plan.nextChunk > 0) return;
-
-    const body = this.formatBackgroundResponseAggregation(delivery);
-    const header = body.split('\n', 1)[0]!;
-    const replaceHeader = (text: string) =>
-      text.replace(/## (?:✅|❌|⏹️) Agent · [^\n]+/, () => header);
-    if (plan) {
-      plan.title = extractTitle(body);
-      plan.chunks[0] = replaceHeader(plan.chunks[0]!);
-    }
-    if (delivery.preparedReplyBody) {
-      delivery.preparedReplyBody = replaceHeader(delivery.preparedReplyBody);
-    }
-    delivery.composedTurnComplete = aggregation.turnComplete === true;
-  }
-
-  private removeBackgroundResponseAggregation(
-    key: string,
-    aggregation: BackgroundResponseAggregation,
-  ): void {
-    if (this.backgroundResponseAggregations.get(key) === aggregation) {
-      this.backgroundResponseAggregations.delete(key);
-    }
-    this.detachedBackgroundResponseAggregations.delete(aggregation);
-  }
-
-  private drainBackgroundResponseAggregations(sessionId?: string): void {
-    for (const [key, pending] of this.pendingBackgroundResponseTerminals) {
-      if (sessionId !== undefined && pending.sessionId !== sessionId) continue;
-      if (pending.retryTimer) clearTimeout(pending.retryTimer);
-      pending.retryTimer = undefined;
-      pending.retiring = true;
-      pending.turnComplete = true;
-      pending.completionPartial = true;
-      this.pendingBackgroundResponseTerminals.delete(key);
-      this.detachedPendingBackgroundResponseTerminals.add(pending);
-    }
-    for (const pending of this.detachedPendingBackgroundResponseTerminals) {
-      if (sessionId !== undefined && pending.sessionId !== sessionId) continue;
-      if (pending.retryTimer) clearTimeout(pending.retryTimer);
-      pending.retryTimer = undefined;
-      pending.retiring = true;
-      pending.turnComplete = true;
-      pending.completionPartial = true;
-      if (
-        pending.held.length > 0 &&
-        this.router.getTarget(pending.sessionId) === pending.target
-      ) {
-        void this.flushDetachedBackgroundResponse(
-          '',
-          pending.sessionId,
-          pending,
-          { target: pending.target },
-        ).catch((error) => {
-          process.stderr.write(
-            `[DingTalk:${this.name}] background response delivery failed during drain: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-          );
-        });
-      } else if (pending.held.length > 0) {
-        process.stderr.write(
-          `[DingTalk:${this.name}] background response target unavailable during drain; ${pending.held.length} buffered segment(s) discarded\n`,
-        );
-        pending.held.length = 0;
-        this.detachedPendingBackgroundResponseTerminals.delete(pending);
-      } else if (pending.held.length === 0) {
-        this.detachedPendingBackgroundResponseTerminals.delete(pending);
-      }
-    }
-    const aggregations = new Set([
-      ...this.backgroundResponseAggregations.values(),
-      ...this.detachedBackgroundResponseAggregations,
-    ]);
-    for (const aggregation of aggregations) {
-      if (sessionId !== undefined && aggregation.sessionId !== sessionId) {
-        continue;
-      }
-      if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
-      if (aggregation.retryTimer) clearTimeout(aggregation.retryTimer);
-      aggregation.timeoutTimer = undefined;
-      aggregation.retryTimer = undefined;
-      aggregation.retiring = true;
-      aggregation.turnComplete = true;
-      aggregation.completionPartial = true;
-      if (!aggregation.flushing) {
-        void this.flushBackgroundResponseAggregation(
-          aggregation.key,
-          aggregation,
-        );
-      }
-    }
-  }
-
-  private createBackgroundResponseAggregation(
-    key: string,
-    sessionId: string,
-    context: BackgroundResponseContext,
-    target: SessionTarget,
-    sourceLabel?: string,
-  ): BackgroundResponseAggregation {
-    const aggregation: BackgroundResponseAggregation = {
-      key,
-      sessionId,
-      target,
-      sourceLabel,
-      status: context.status,
-      label: context.label,
-      parts: [],
-    };
-    this.backgroundResponseAggregations.set(key, aggregation);
-    return aggregation;
-  }
-
-  private scheduleBackgroundResponseResolutionRetry(
-    key: string,
-    sessionId: string,
-    pending: PendingBackgroundResponseTerminal,
-  ): void {
-    if (pending.retiring) return;
-    if (pending.retryTimer) return;
-    pending.retryAttempts = (pending.retryAttempts ?? 0) + 1;
-    if (pending.retryAttempts >= BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES) {
-      pending.resolutionDropped = true;
-      pending.turnEnded = pending.turnComplete === true;
-      pending.held.length = 0;
-      pending.turnComplete = undefined;
-      pending.status = undefined;
-      pending.label = undefined;
-      pending.completionPartial = undefined;
-      if (pending.turnEnded) {
-        this.detachedPendingBackgroundResponseTerminals.delete(pending);
-      }
-      return;
-    }
-    pending.retryTimer = setTimeout(() => {
-      pending.retryTimer = undefined;
-      pending.retryInFlight = true;
-      void this.retryBackgroundResponseResolution(key, sessionId, pending)
-        .catch((error: unknown) => {
-          process.stderr.write(
-            `[DingTalk:${this.name}] background response target resolution failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-          );
-        })
-        .finally(() => {
-          pending.retryInFlight = false;
           if (
-            pending.retiring ||
-            (!pending.retryTimer && !pending.resolutionDropped)
+            this.statusCardController ||
+            !this.supportsProactiveSend() ||
+            !this.supportsProactiveTarget(target.target)
           ) {
-            this.detachedPendingBackgroundResponseTerminals.delete(pending);
+            preparedReplyBody ??= await this.prepareBackgroundOutput(
+              target,
+              body,
+            );
           }
-          if (
-            this.pendingBackgroundResponseTerminals.get(key) === pending &&
-            pending.resolvers === 0 &&
-            !pending.retryTimer &&
-            pending.held.length === 0 &&
-            (!pending.resolutionDropped || pending.turnEnded)
-          ) {
-            this.pendingBackgroundResponseTerminals.delete(key);
-          }
-        });
-    }, BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS);
-    pending.retryTimer.unref?.();
-    const active = this.pendingBackgroundResponseTerminals.get(key);
-    if (!active || active === pending) {
-      this.pendingBackgroundResponseTerminals.set(key, pending);
-    }
-  }
-
-  private async retryBackgroundResponseResolution(
-    key: string,
-    sessionId: string,
-    pending: PendingBackgroundResponseTerminal,
-  ): Promise<void> {
-    let delivery: Awaited<
-      ReturnType<DingtalkChannel['resolveBackgroundResponseDelivery']>
-    >;
-    try {
-      delivery = await this.resolveBackgroundResponseDelivery(sessionId);
-    } catch (error) {
-      if (
-        (this.pendingBackgroundResponseTerminals.get(key) === pending &&
-          !this.backgroundResponseAggregations.has(key)) ||
-        this.detachedPendingBackgroundResponseTerminals.has(pending)
-      ) {
-        this.scheduleBackgroundResponseResolutionRetry(key, sessionId, pending);
-      }
-      throw error;
-    }
-    if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
-      if (pending.retiring) {
-        if (pending.held.length > 0) {
-          process.stderr.write(
-            `[DingTalk:${this.name}] background response target unavailable during drain; ${pending.held.length} buffered segment(s) discarded\n`,
+          await this.deliverBackgroundResponseToTarget(
+            sessionId,
+            preparedReplyBody ?? body,
+            target,
+            preparedReplyBody !== undefined,
+            output,
           );
         }
-        pending.held.length = 0;
-        this.detachedPendingBackgroundResponseTerminals.delete(pending);
-        return;
+        return { turnComplete: composedTurnComplete };
+      } catch (error) {
+        if (error instanceof ProactiveTextDeliveryError) {
+          proactivePlan = error.plan;
+        } else if (error instanceof ReplyTextDeliveryError) {
+          replyPlan = error.plan;
+        }
+        throw error;
       }
-      if (
-        (this.pendingBackgroundResponseTerminals.get(key) === pending &&
-          !this.backgroundResponseAggregations.has(key)) ||
-        this.detachedPendingBackgroundResponseTerminals.has(pending)
-      ) {
-        this.scheduleBackgroundResponseResolutionRetry(key, sessionId, pending);
-      }
-      return;
-    }
-    if (
-      pending.retiring ||
-      this.pendingBackgroundResponseTerminals.get(key) !== pending ||
-      pending.turnComplete
-    ) {
-      await this.flushDetachedBackgroundResponse(
-        key,
-        sessionId,
-        pending,
-        delivery,
-      );
-      return;
-    }
-
-    const first = pending.held[0];
-    if (!first) return;
-    const aggregation = this.createBackgroundResponseAggregation(
-      key,
-      sessionId,
-      first.context,
-      delivery.target,
-      delivery.sourceLabel,
-    );
-    this.applyHeldBackgroundResponses(aggregation, pending);
-    if (pending.resolutionDropped) {
-      aggregation.resolutionDropped = true;
-      pending.resolutionDropped = undefined;
-    }
-    if (this.pendingBackgroundResponseTerminals.get(key) === pending) {
-      this.pendingBackgroundResponseTerminals.delete(key);
-    }
-    this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-  }
-
-  private holdPendingBackgroundResponse(
-    pending: PendingBackgroundResponseTerminal,
-    text: string,
-    context: BackgroundResponseContext,
-  ): void {
-    if (text.trim().length > 0) pending.held.push({ text, context });
-    if (context.turnComplete) {
-      pending.turnComplete = true;
-      pending.status = context.status;
-      pending.label = context.label ?? pending.label;
-      pending.completionPartial = context.partial === true;
-    }
-  }
-
-  private applyHeldBackgroundResponses(
-    aggregation: BackgroundResponseAggregation,
-    pending: PendingBackgroundResponseTerminal,
-  ): void {
-    for (const { text, context } of pending.held.splice(0)) {
-      aggregation.status = context.status;
-      aggregation.label = context.label ?? aggregation.label;
-      aggregation.parts.push(text);
-      if (context.turnComplete) {
-        aggregation.turnComplete = true;
-        aggregation.completionPartial = context.partial === true;
-      }
-    }
-  }
-
-  private applyPendingBackgroundResponseTerminal(
-    aggregation: BackgroundResponseAggregation,
-    pending: PendingBackgroundResponseTerminal,
-  ): void {
-    if (!pending.turnComplete) return;
-    aggregation.turnComplete = true;
-    aggregation.status = pending.status ?? aggregation.status;
-    aggregation.label = pending.label ?? aggregation.label;
-    aggregation.completionPartial = pending.completionPartial === true;
-    pending.turnComplete = undefined;
-    pending.status = undefined;
-    pending.label = undefined;
-    pending.completionPartial = undefined;
-  }
-
-  private async completeBackgroundResponseAggregation(
-    key: string,
-    aggregation: BackgroundResponseAggregation,
-  ): Promise<void> {
-    if (aggregation.delivery) {
-      aggregation.delivery.status = aggregation.status;
-      aggregation.delivery.label =
-        aggregation.label ?? aggregation.delivery.label;
-      aggregation.delivery.partial =
-        this.isPartialBackgroundResponseDelivery(
-          aggregation,
-          aggregation.delivery.parts.length,
-        ) || aggregation.parts.length > 0;
-    }
-    if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
-    aggregation.timeoutTimer = undefined;
-    await this.flushBackgroundResponseAggregation(key, aggregation);
-  }
-
-  private async flushDetachedBackgroundResponse(
-    key: string,
-    sessionId: string,
-    pending: PendingBackgroundResponseTerminal,
-    delivery: NonNullable<
-      Awaited<ReturnType<DingtalkChannel['resolveBackgroundResponseDelivery']>>
-    >,
-  ): Promise<void> {
-    const first = pending.held[0];
-    if (!first) {
-      this.detachedPendingBackgroundResponseTerminals.delete(pending);
-      return;
-    }
-    const aggregation: BackgroundResponseAggregation = {
-      key,
-      sessionId,
-      target: delivery.target,
-      sourceLabel: delivery.sourceLabel,
-      status: first.context.status,
-      label: first.context.label,
-      parts: [],
-      turnComplete: pending.turnComplete,
-      completionPartial: pending.completionPartial,
-      resolutionDropped: pending.resolutionDropped,
     };
-    this.applyHeldBackgroundResponses(aggregation, pending);
-    aggregation.status = pending.status ?? aggregation.status;
-    aggregation.label = pending.label ?? aggregation.label;
-    if (this.pendingBackgroundResponseTerminals.get(key) === pending) {
-      this.pendingBackgroundResponseTerminals.delete(key);
-    }
-    this.detachedPendingBackgroundResponseTerminals.delete(pending);
-    this.detachedBackgroundResponseAggregations.add(aggregation);
-    await this.flushBackgroundResponseAggregation(key, aggregation);
   }
 
-  private scheduleBackgroundResponseAggregationFlush(
-    key: string,
-    aggregation: BackgroundResponseAggregation,
-  ): void {
-    if (aggregation.timeoutTimer || aggregation.delivery) return;
-    aggregation.timeoutTimer = setTimeout(() => {
-      aggregation.timeoutTimer = undefined;
-      void this.flushBackgroundResponseAggregation(key, aggregation);
-    }, BACKGROUND_RESPONSE_AGGREGATION_TIMEOUT_MS);
-    aggregation.timeoutTimer.unref?.();
-  }
-
-  private formatBackgroundResponseAggregation(
-    delivery: Pick<
-      BackgroundResponseDelivery,
-      'status' | 'label' | 'parts' | 'partial'
-    >,
+  private formatBackgroundOutputHeader(
+    delivery: BackgroundOutputPacket,
   ): string {
+    const chinese = isChinesePresentationLanguage(this.displayLanguage);
+    const partialLabel = partialOutputLabel(this.displayLanguage);
     const icon =
       delivery.status === 'completed'
         ? '✅'
         : delivery.status === 'failed'
           ? '❌'
           : '⏹️';
-    const label = this.formatBackgroundAgentLabel(delivery.label);
-    const header = `## ${icon} Agent · ${label}${delivery.partial ? '（部分）' : ''}`;
-    if (delivery.parts.length === 0) return header;
-    return `${header}\n\n${delivery.parts.join('\n\n')}`;
+    if (delivery.kind === 'agent') {
+      if (delivery.text) return delivery.partial ? partialLabel : '';
+      const status =
+        delivery.status === 'completed'
+          ? chinese
+            ? '已完成'
+            : 'completed'
+          : delivery.status === 'failed'
+            ? chinese
+              ? '失败'
+              : 'failed'
+            : chinese
+              ? '已停止'
+              : 'stopped';
+      return chinese
+        ? `${icon} 后台任务${status}`
+        : `${icon} Background task ${status}`;
+    }
+    const label = this.formatBackgroundTaskLabel(delivery.label);
+    const kind = {
+      shell: 'Shell',
+      monitor: 'Monitor',
+      workflow: 'Workflow',
+      peer: 'Cross-session message',
+    }[delivery.kind];
+    return `## ${icon} ${kind} · ${label}${delivery.partial ? `${chinese ? '' : ' '}${partialLabel}` : ''}`;
   }
 
-  private formatBackgroundAgentResponse(text: string, label?: string): string {
-    return `## 🤖 Agent · ${this.formatBackgroundAgentLabel(label)}\n\n${text}`;
-  }
-
-  private formatBackgroundAgentLabel(label?: string): string {
+  private formatBackgroundTaskLabel(label?: string): string {
     const normalized = label
       ?.replace(/\p{Cc}+/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    return escapeDingTalkMarkdown(normalized || '后台任务');
+    return escapeDingTalkMarkdown(
+      normalized ||
+        (isChinesePresentationLanguage(this.displayLanguage)
+          ? '后台任务'
+          : 'Background task'),
+    );
+  }
+
+  private prepareBackgroundOutput(
+    { target, workflowOrigin }: BackgroundOutputTarget,
+    text: string,
+  ): Promise<string> {
+    const useProactive =
+      (workflowOrigin !== undefined && !workflowOrigin.userInitiated) ||
+      (this.supportsProactiveSend() && this.supportsProactiveTarget(target));
+    return useProactive
+      ? this.prepareFileOutput(text, (file, mediaId) =>
+          this.sendProactiveFile(target, file, mediaId),
+        )
+      : this.prepareReplyOutput(target.chatId, text);
+  }
+
+  protected override async deliverBackgroundResponseToTarget(
+    sessionId: string,
+    text: string,
+    delivery: BackgroundOutputTarget,
+    prepared = false,
+    result?: { status: string; partial?: boolean },
+  ): Promise<void> {
+    const { target, sourceLabel, workflowOrigin } = delivery;
+    const unattendedWorkflow =
+      workflowOrigin !== undefined && !workflowOrigin.userInitiated;
+    const resultChatId =
+      target.isGroup || unattendedWorkflow ? target.chatId : target.senderId;
+    if (
+      this.statusCardController &&
+      this.supportsProactiveDeliveryTarget(target) &&
+      this.isStableTargetId(resultChatId)
+    ) {
+      if (!prepared) {
+        text = await this.prepareBackgroundOutput(delivery, text);
+        prepared = true;
+      }
+      if (
+        await this.statusCardController.deliverCompletedResult(
+          {
+            chatId: resultChatId,
+            isGroup: target.isGroup === true,
+          },
+          text,
+          sourceLabel,
+          result,
+        )
+      ) {
+        return;
+      }
+    }
+    if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
+      return super.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+    }
+    if (workflowOrigin) {
+      if (unattendedWorkflow) {
+        return this.pushProactive(target, text, sourceLabel);
+      }
+      return this.sendReply(
+        target.chatId,
+        text,
+        undefined,
+        sourceLabel,
+        prepared,
+        true,
+      );
+    }
+    await this.deliverBackgroundReply(
+      target.chatId,
+      text,
+      sessionId,
+      sourceLabel,
+      prepared,
+      true,
+    );
   }
 
   /**
    * Body-identical to the base implementation — this override exists only to
    * widen the signature, which the base seam does not declare. The background
-   * aggregation flush passes `prepared` so the body it already projected isn't
+   * output delivery passes `prepared` so the body it already projected isn't
    * projected a second time (that would re-upload its files), and
    * `failOnHttpError` so a failed send throws instead of being swallowed,
    * letting the flush capture the delivery plan for the next retry.
@@ -3834,7 +3286,9 @@ export class DingtalkChannel extends ChannelBase {
     }
     await this.sendResponseMessage(
       chatId,
-      outgoingText,
+      segment?.partial
+        ? markPartialOutput(outgoingText, this.displayLanguage)
+        : outgoingText,
       sessionId,
       segment?.sourceLabel,
       true,
@@ -3916,11 +3370,7 @@ export class DingtalkChannel extends ChannelBase {
   private extractQuotedContext(data: DingTalkMessageData): {
     referencedText?: string;
     isReplyToBot: boolean;
-    media?: {
-      downloadCode: string;
-      mediaType: 'image' | 'file' | 'audio' | 'video';
-      fileName?: string;
-    };
+    media: DingTalkQuotedMedia[];
   } {
     // Newer format: text.repliedMsg
     if (data.text?.isReplyMsg && data.text.repliedMsg) {
@@ -3931,20 +3381,30 @@ export class DingtalkChannel extends ChannelBase {
       // Note: DingTalk doesn't include content for interactiveCard replies
       // (bot responses sent via webhook). Only user message quotes have text.
       const text = this.summarizeRepliedContent(replied);
-      const downloadCode = replied.content?.downloadCode;
-      const mediaType = this.mediaTypeFromMsgType(replied.msgType);
+      const media: DingTalkQuotedMedia[] = [];
+      const richText = replied.content?.richText;
+      if (Array.isArray(richText)) {
+        for (const part of richText) {
+          const mediaType = this.mediaTypeFromMsgType(richTextPartType(part));
+          if (part.downloadCode && mediaType) {
+            media.push({ downloadCode: part.downloadCode, mediaType });
+          }
+        }
+      } else {
+        const downloadCode = replied.content?.downloadCode;
+        const mediaType = this.mediaTypeFromMsgType(replied.msgType);
+        if (downloadCode && mediaType) {
+          media.push({
+            downloadCode,
+            mediaType,
+            fileName: replied.content?.fileName,
+          });
+        }
+      }
       return {
         referencedText: text || undefined,
         isReplyToBot,
-        ...(downloadCode && mediaType
-          ? {
-              media: {
-                downloadCode,
-                mediaType,
-                fileName: replied.content?.fileName,
-              },
-            }
-          : {}),
+        media,
       };
     }
 
@@ -3954,10 +3414,10 @@ export class DingtalkChannel extends ChannelBase {
       const isReplyToBot =
         !!data.chatbotUserId && quote.senderId === data.chatbotUserId;
       const text = quote.text?.content?.trim();
-      return { referencedText: text || undefined, isReplyToBot };
+      return { referencedText: text || undefined, isReplyToBot, media: [] };
     }
 
-    return { isReplyToBot: false };
+    return { isReplyToBot: false, media: [] };
   }
 
   /**
@@ -4009,9 +3469,11 @@ export class DingtalkChannel extends ChannelBase {
     if (content?.richText && Array.isArray(content.richText)) {
       const parts: string[] = [];
       for (const part of content.richText) {
-        const partType = part.type || 'text';
-        if (partType === 'text' && part.text) {
-          parts.push(part.text);
+        const partType = richTextPartType(part);
+        const partText =
+          typeof part.text === 'string' ? part.text : part.content;
+        if (partType === 'text' && partText) {
+          parts.push(partText);
         } else if (partType === 'picture') {
           parts.push('[image]');
         } else if (partType === 'at' && part.atName) {
@@ -4174,8 +3636,7 @@ export class DingtalkChannel extends ChannelBase {
    * this message's own media — `(audio)`, `(video)`, `(file: name)`. Only the
    * direct-media call site has one, and only that call may erase it: on the
    * quoted-media path `envelope.text` is the user's own reply, and a reply
-   * that happens to read exactly like a placeholder must survive (a group
-   * `@Bot (audio)` reaches here as exactly `(audio)` after mention removal).
+   * that happens to read exactly like a placeholder must survive.
    */
   private async attachMedia(
     envelope: Envelope,
@@ -4370,30 +3831,43 @@ export class DingtalkChannel extends ChannelBase {
 
       // Extract text and media info from message
       const content = this.extractContent(data);
-      let cleanText = content.text;
-
-      // Strip first @mention (the bot) from text, keep other @mentions intact.
-      // Anchor to start-of-string so @ symbols inside URLs or emails
-      // (e.g. git@host:path) are not accidentally stripped (#7402).
-      if (isMentioned) {
-        cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
-      }
 
       // Extract quoted message context
       const quoted = this.extractQuotedContext(data);
 
       const chatId = conversationId || sessionWebhook;
 
-      // After stripping the bot @mention, cleanText may legitimately be empty
-      // (user pinged the bot with no other text). Don't fall back to the
-      // original text in that case — it would re-introduce the @mention.
-      const messageText = isMentioned ? cleanText : cleanText || content.text;
       // Carry mention targets as a structured envelope field (like
       // referencedText) so ChannelBase renders the marker after prompt
-      // sanitization and slash-command parsing sees the body alone.
+      // sanitization.
       const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
+
+      // A user-scope 1:1 DM gets no [sender] tag from ChannelBase — that prefix
+      // needs isGroup or sessionScope 'single' — so neither the model nor the
+      // transcript (which renders exactly the prompt) would record who sent
+      // this. metadata is appended AFTER command parsing, so locally dispatched
+      // DM commands and `!` shell never see it; an agent-exposed command does,
+      // and its parser sweeps everything past the command path into `args`, so
+      // a DM opening on a bare command token gets no identity line. trimStart
+      // because the audio and chat-record branches hand back untrimmed text. It
+      // stays one line because that append folds CR/LF to spaces. The nick is
+      // attacker-controlled and the ID is platform-opaque, so both go through
+      // the shared name sanitizer. The ID is spelled out only next to a nick,
+      // otherwise the same value reads twice.
+      const dmSenderId =
+        senderNick && senderId
+          ? ` (sender ID: ${sanitizeSenderName(senderId)})`
+          : '';
+      const dmCommandToken =
+        content.text.trimStart().match(/^\/(\S+)/)?.[1] ?? '';
+      const dmSenderMetadata =
+        !isGroup &&
+        this.config.sessionScope !== 'single' &&
+        !SLASH_COMMAND_TOKEN_RE.test(dmCommandToken)
+          ? `Direct message from ${sanitizeSenderName(senderNick || senderId)}${dmSenderId}`
+          : undefined;
 
       const envelope: Envelope = {
         channelName: this.name,
@@ -4403,9 +3877,10 @@ export class DingtalkChannel extends ChannelBase {
         ...(isGroup && conversationTitle
           ? { chatName: conversationTitle }
           : {}),
-        text: messageText,
+        text: content.text,
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
+        ...(dmSenderMetadata ? { metadata: dmSenderMetadata } : {}),
         isGroup,
         isMentioned,
         isReplyToBot: quoted.isReplyToBot,
@@ -4421,7 +3896,7 @@ export class DingtalkChannel extends ChannelBase {
       }
 
       const processMessage =
-        content.downloadCodes.length > 0 || quoted.media
+        content.downloadCodes.length > 0 || quoted.media.length > 0
           ? this.prepareThenHandleInbound(envelope, async () => {
               // Download media in callback order.
               if (content.downloadCodes.length > 0 && content.mediaType) {
@@ -4435,12 +3910,12 @@ export class DingtalkChannel extends ChannelBase {
                   );
                 }
               }
-              if (quoted.media) {
+              for (const media of quoted.media) {
                 await this.attachMedia(
                   envelope,
-                  quoted.media.downloadCode,
-                  quoted.media.mediaType,
-                  quoted.media.fileName,
+                  media.downloadCode,
+                  media.mediaType,
+                  media.fileName,
                 );
               }
             })

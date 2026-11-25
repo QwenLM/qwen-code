@@ -11,6 +11,7 @@ directories:
 files:
   - 'dist/main.cjs'
   - 'dist/preload.cjs'
+  - 'dist/subagents-preload.cjs'
   - 'dist/renderer/**/*'
   - 'package.json'
 
@@ -20,6 +21,7 @@ extraMetadata:
 asar: true
 
 electronFuses:
+  resetAdHocDarwinSignature: true
   runAsNode: false
   enableNodeOptionsEnvironmentVariable: false
   enableNodeCliInspectArguments: false
@@ -34,8 +36,9 @@ mac:
   minimumSystemVersion: '12.0.0'
   extendInfo:
     LSUIElement: true
-    QwenLiveProtocolVersion: 6
+    QwenLiveProtocolVersion: 9
     NSMicrophoneUsageDescription: 'Qwen Live Host uses the microphone for live voice conversations with Qwen Code.'
+    NSCameraUsageDescription: 'Qwen Live Host uses the camera to share visual context with Qwen Live when you turn it on.'
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: 'build/entitlements.mac.plist'

@@ -33,8 +33,9 @@ function makeSession(
 
 const mounted: Array<{ container: HTMLElement; root: Root }> = [];
 
-async function renderDropdown() {
+async function renderDropdown(hasMore = false) {
   const onClose = vi.fn();
+  const onLoadMore = vi.fn();
   const onSelect = vi.fn();
   const onRename = vi.fn(async () => {});
   const container = document.createElement('div');
@@ -48,19 +49,19 @@ async function renderDropdown() {
         currentSessionId="s1"
         searchQuery=""
         loading={false}
-        hasMore={false}
+        hasMore={hasMore}
         onSearchChange={() => {}}
         onSelect={onSelect}
         onRename={onRename}
         onDelete={async () => {}}
-        onLoadMore={() => {}}
+        onLoadMore={onLoadMore}
         onClose={onClose}
       />,
     );
     await Promise.resolve();
   });
   mounted.push({ container, root });
-  return { container, onClose };
+  return { container, onClose, onLoadMore };
 }
 
 afterEach(() => {
@@ -158,5 +159,106 @@ describe('SessionHistoryDropdown focus management', () => {
     const dialog = document.getElementById('qwen-session-history');
     expect(dialog?.contains(document.activeElement)).toBe(true);
     outside.remove();
+  });
+});
+
+describe('SessionHistoryDropdown pagination', () => {
+  it('offers a focusable load-more control without requiring scroll overflow', async () => {
+    const { container, onLoadMore } = await renderDropdown(true);
+    expect(container.querySelector('[data-session-source]')).toBeNull();
+    const loadMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === t('session.loadMore'),
+    );
+    expect(loadMore).toBeDefined();
+    loadMore!.focus();
+    expect(document.activeElement).toBe(loadMore);
+    await act(async () => loadMore!.click());
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionHistoryDropdown calendar-week grouping', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function sessionAt(sessionId: string, updatedAt: Date): DaemonSessionSummary {
+    const stamp = updatedAt.toISOString();
+    return {
+      sessionId,
+      workspaceCwd: '/workspace',
+      displayName: sessionId,
+      createdAt: stamp,
+      updatedAt: stamp,
+    };
+  }
+
+  async function renderWithSessions(sessions: DaemonSessionSummary[]) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionHistoryDropdown
+          t={t}
+          sessions={sessions}
+          searchQuery=""
+          loading={false}
+          hasMore={false}
+          onSearchChange={() => {}}
+          onSelect={() => {}}
+          onRename={async () => {}}
+          onDelete={async () => {}}
+          onLoadMore={() => {}}
+          onClose={() => {}}
+        />,
+      );
+      await Promise.resolve();
+    });
+    mounted.push({ container, root });
+    return container;
+  }
+
+  function groupLabels(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll('[role="group"]')).map(
+      (group) => group.getAttribute('aria-label') ?? '',
+    );
+  }
+
+  it('buckets a Saturday session as older on the following Monday', async () => {
+    // Monday 2026-11-02: a rolling 168h window would still call last Saturday
+    // "this week", but the calendar week started today.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 2, 12));
+
+    const container = await renderWithSessions([
+      sessionAt('last-saturday', new Date(2026, 9, 31, 12)),
+    ]);
+
+    const labels = groupLabels(container);
+    expect(labels).not.toContain(t('group.thisWeek'));
+    expect(labels).toContain(t('group.older'));
+    const row = container.querySelector('[data-session-id="last-saturday"]');
+    expect(row?.closest('[role="group"]')?.getAttribute('aria-label')).toBe(
+      t('group.older'),
+    );
+  });
+
+  it('keeps a Wednesday session in this week on the following Friday', async () => {
+    // Positive control: the This Week bucket still exists mid-week, so the
+    // Monday assertion above cannot pass merely because the group never shows.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 6, 12));
+
+    const container = await renderWithSessions([
+      sessionAt('wednesday', new Date(2026, 10, 4, 12)),
+    ]);
+
+    const labels = groupLabels(container);
+    expect(labels).toContain(t('group.thisWeek'));
+    const row = container.querySelector('[data-session-id="wednesday"]');
+    expect(row?.closest('[role="group"]')?.getAttribute('aria-label')).toBe(
+      t('group.thisWeek'),
+    );
   });
 });

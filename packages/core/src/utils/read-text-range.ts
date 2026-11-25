@@ -7,7 +7,12 @@
 import { createReadStream, type Stats } from 'node:fs';
 import { stat, type FileHandle } from 'node:fs/promises';
 import { TextDecoder } from 'node:util';
-import { detectFileEncoding, readFileWithEncodingInfo } from './fileUtils.js';
+import {
+  decodeBufferWithEncodingInfoAsync,
+  detectFileEncoding,
+  readFileWithEncodingInfo,
+} from './fileUtils.js';
+import { readFileHandleBytes } from './file-read-source.js';
 import { isUtf8CompatibleEncoding } from './encoding.js';
 import {
   DEFAULT_RANGE_READ_BYTES,
@@ -217,6 +222,38 @@ export async function readTextRangeFromHandle(
     request.maxScanBytes,
     request.fileSize,
   );
+}
+
+export async function readTextContentRangeFromHandle(
+  fileHandle: FileHandle,
+  request: ReadTextRangeFromHandleRequest,
+): Promise<ReadTextRangeResult> {
+  request.signal?.throwIfAborted();
+  if (
+    request.fileSize < TEXT_RANGE_FAST_PATH_MAX_SIZE &&
+    request.fileSize <= request.maxScanBytes
+  ) {
+    const bytes = await readFileHandleBytes(
+      fileHandle,
+      request.fileSize,
+      request.signal,
+    );
+    const { content, encoding, bom } =
+      await decodeBufferWithEncodingInfoAsync(bytes);
+    request.signal?.throwIfAborted();
+    return {
+      ...sliceDecodedContent(
+        content,
+        request.offset,
+        request.limit,
+        normalizeMaxBytes(request.maxOutputBytes),
+      ),
+      encoding,
+      bom,
+      lineEnding: detectLineEndingFromContent(content),
+    };
+  }
+  return readTextRangeFromHandle(fileHandle, request);
 }
 
 /**

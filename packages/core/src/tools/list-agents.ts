@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { peerMessagingOffReason } from '../ipc/peer-messaging-guidance.js';
 import {
   advertisablePeerAddress,
   listMessageablePeers,
@@ -49,29 +50,52 @@ class ListAgentsInvocation extends BaseToolInvocation<
         status: entry.status,
         can_message:
           !entry.resumeBlockedReason &&
+          !entry.messagesBlockedReason &&
           (entry.status === 'running' ||
             entry.status === 'paused' ||
             entry.status === 'completed'),
-        ...(entry.resumeBlockedReason
-          ? { resume_blocked_reason: entry.resumeBlockedReason }
+        ...(entry.resumeBlockedReason || entry.messagesBlockedReason
+          ? {
+              resume_blocked_reason:
+                entry.resumeBlockedReason ?? entry.messagesBlockedReason,
+            }
           : {}),
       }));
 
     // Peer sessions are only listed once this session has an inbox of its
     // own: without one a message could be sent but never answered, and
     // advertising a one-way address invites exactly that.
-    // Every incarnation of this session is dropped, not just its own
-    // socket: `qwen --resume <id>` in a second pane runs the same id under
-    // another process, and a twin advertised here would be sent to as a
-    // peer — sendToPeer excludes by the same rule, so the listing never
-    // shows an address the send path treats as self.
-    const self = await getOwnPeerIdentity();
-    const peers = self
+    // Every incarnation of this session is dropped: `qwen --resume <id>`
+    // in a second pane runs the same id under another process, and a twin
+    // advertised here would be sent to as a peer — sendToPeer excludes by
+    // the same rule, so the listing never shows an address the send path
+    // treats as self.
+    //
+    // By session id alone. The reply address used to join the test, and
+    // stopped meaning "the same session" once a process could host
+    // several: they share one inbox, so filtering on it would hide every
+    // sibling of this session from the listing.
+    const slot = this.config.getSessionRegistrySlot();
+    const self = await getOwnPeerIdentity(slot);
+    let peers = self
       ? (await listMessageablePeers()).filter(
-          (peer) =>
-            peer.ipcPath !== self.ipcPath && peer.sessionId !== self.sessionId,
+          (peer) => peer.sessionId !== self.sessionId,
         )
       : [];
+    if (self && peers.some((peer) => peer.ipcPath === self.ipcPath)) {
+      // The id filter above can read this session's record from before
+      // a re-id patch landed (/clear, or a peer-driven re-assert); the
+      // address does not move on a re-id, so an entry on this session's
+      // own inbox is re-read before it is advertised as a sibling.
+      // sendToPeer applies the same re-read before sending.
+      const fresh = await getOwnPeerIdentity(slot);
+      if (fresh) {
+        peers = peers.filter(
+          (peer) =>
+            peer.ipcPath !== self.ipcPath || peer.sessionId !== fresh.sessionId,
+        );
+      }
+    }
 
     // send_message claims some addresses before it looks at peers — the
     // broadcast keyword, and with a team active the leader handle, the
@@ -108,7 +132,7 @@ class ListAgentsInvocation extends BaseToolInvocation<
         'No ordinary background subagents are available in this session' +
         (self
           ? ', and no other Qwen Code session on this machine is reachable. '
-          : '. ') +
+          : `. Other Qwen Code sessions cannot be discovered from this session (${peerMessagingOffReason(this.config)}). `) +
         'Named Agent Team teammates are not listed here; their results are ' +
         'delivered automatically through team messaging, so do not use ' +
         'list_agents to wait for a teammate.' +
@@ -152,10 +176,9 @@ export class ListAgentsTool extends BaseDeclarativeTool<
     super(
       ListAgentsTool.Name,
       ToolDisplayNames.LIST_AGENTS,
-      'List addressable ordinary background subagents in the current ' +
-        'session, including agents restored from a prior session run, and — ' +
-        'when cross-session messaging is enabled — the other Qwen Code ' +
-        "sessions running on this machine, plus this session's own name. " +
+      'List addressable ordinary background subagents in this session and, when cross-session messaging is on, the other Qwen Code sessions on this machine.\n\n' +
+        'Including agents restored from a prior session run, plus this ' +
+        "session's own name. " +
         'Named Agent Team teammates are NOT listed here: they have their own ' +
         'team lifecycle and deliver their final reports automatically, so do ' +
         'not use list_agents (or poll task_list) to wait for a teammate. Use ' +
@@ -174,6 +197,9 @@ export class ListAgentsTool extends BaseDeclarativeTool<
         properties: {},
         additionalProperties: false,
       },
+      true,
+      false,
+      true,
     );
   }
 

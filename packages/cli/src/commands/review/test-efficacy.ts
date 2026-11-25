@@ -72,14 +72,18 @@ import {
   containerCommand,
   containerName,
   containerPathFor,
-  killContainer,
+  describeExecutionBoundary,
   mountRootFor,
+  reapContainer,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeIsRootless,
   runtimeClientEnv,
   sandboxVerdict,
+  trustInputFromPlan,
   type ContainerRuntime,
+  type ReviewTeardownStatus,
+  type ReviewTrustInput,
 } from './lib/sandboxed-exec.js';
 import {
   checkoutFilterCommands,
@@ -88,6 +92,7 @@ import {
   exposeDependencies,
   redirectedAncestor,
   sanitizedGitEnv,
+  untrustedGitfile,
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
@@ -1573,13 +1578,14 @@ export function probeCleanupFailureDetail(
 function probeContainer(
   command: string,
   probeTree: string,
+  trustContext?: ReviewTrustInput,
 ): {
   file: string;
   args: string[];
   name: string;
   runtime: ContainerRuntime;
 } | null {
-  const verdict = sandboxVerdict();
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
   if (verdict.kind !== 'container') return null;
   const tmpDir = mountRootFor(probeTree);
   if (tmpDir === null) return null;
@@ -1645,6 +1651,13 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
     // and carries its `.git` as a gitfile; a plain checkout has a `.git`
     // DIRECTORY and no admin entry to round-trip, and demanding one there
     // would refuse every ordinary repository.
+    // Both mount-relative questions in one place — the shape of the `.git` and
+    // the location of what it names — so the probe tree and the review
+    // worktree that creates it are held to the same rule. Before the
+    // `isFile()` branch below, because every gate inside that branch is
+    // skipped by the very shape this refuses.
+    const untrusted = untrustedGitfile(probeTree);
+    if (untrusted !== null) return untrusted;
     if (lstatSync(join(probeTree, '.git')).isFile()) {
       const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
       if (
@@ -1766,6 +1779,8 @@ function runProbeSuite(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
 ): {
   perFile: ProbeResult[];
   ms: number;
@@ -1790,7 +1805,10 @@ function runProbeSuite(
   // statement about the PR's own suite. Canonicalise what crosses the
   // boundary, and only there — the direct path keeps the caller's spelling.
   let farmRoot = dependencyRoot;
-  if (sandboxVerdict().kind === 'container') {
+  if (
+    sandboxVerdict(undefined, undefined, undefined, trustContext).kind ===
+    'container'
+  ) {
     try {
       farmRoot = realpathSync(dependencyRoot);
     } catch {
@@ -1815,7 +1833,7 @@ function runProbeSuite(
   const suite = `node ${shellQuotePath(
     findVitestBin(dependencyRoot),
   )} run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
-  const boxed = probeContainer(suite, probeTree);
+  const boxed = probeContainer(suite, probeTree, trustContext);
   const r = boxed
     ? spawnSync(boxed.file, boxed.args, {
         cwd: probeTree,
@@ -1863,9 +1881,9 @@ function runProbeSuite(
   // which message wins.
   if (boxed && boxedRunLeftContainer(r.status)) {
     // The deadline killed the CLIENT; the container outlives it — `--rm` fires
-    // only on a self-exit. Reach the daemon before reporting, or a
-    // TERM-ignoring suite keeps this mount writable past the end of the review.
-    killContainer(boxed.runtime, boxed.name);
+    // only on a self-exit. Reach the daemon and verify teardown before reporting.
+    const reap = reapContainer(boxed.runtime, boxed.name);
+    onTeardown?.(reap.status);
   }
   if (r.error)
     throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
@@ -2137,6 +2155,8 @@ export function runOneHunkProbe(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
 ): HunkResult {
   const { patch: _patch, ...meta } = hunk;
   const abs = join(probeTree, hunk.file);
@@ -2223,6 +2243,8 @@ export function runOneHunkProbe(
         deadlineAt,
         now,
         dependencyRoot,
+        trustContext,
+        onTeardown,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2291,6 +2313,8 @@ export function runControlMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
 ): boolean | null {
   const abs = join(probeTree, probeFile);
   // A probe file reached through a symlink — at the leaf or an ancestor —
@@ -2326,6 +2350,8 @@ export function runControlMutant(
         deadlineAt,
         now,
         dependencyRoot,
+        trustContext,
+        onTeardown,
       );
       // `gated` is the runner's "went red" verdict; anything else — still
       // green, collected nothing, crashed — means the control did NOT
@@ -2358,6 +2384,8 @@ export function runOneMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   if (probeTargetEscapes(probeTree, mutant.file)) {
@@ -2427,6 +2455,8 @@ export function runOneMutant(
         deadlineAt,
         now,
         dependencyRoot,
+        trustContext,
+        onTeardown,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2610,7 +2640,29 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   // The probe tree this phase WOULD build, named before it exists — the gate
   // has to answer before anything is created, and `probeWorktreePath` is a
   // pure path function.
-  const sandboxRefusal = refuseUnsandboxedPhase(probeWorktreePath(worktree));
+  const trustContext = trustInputFromPlan(report);
+  const teardownState: { status: ReviewTeardownStatus } = {
+    status: 'not-applicable',
+  };
+  const recordTeardown = (status: ReviewTeardownStatus): void => {
+    if (status === 'failed') {
+      teardownState.status = 'failed';
+    } else if (status === 'partial' && teardownState.status !== 'failed') {
+      teardownState.status = 'partial';
+    } else if (
+      status === 'clean' &&
+      teardownState.status === 'not-applicable'
+    ) {
+      teardownState.status = 'clean';
+    }
+  };
+  const sandboxRefusal = refuseUnsandboxedPhase(
+    probeWorktreePath(worktree),
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
   if (sandboxRefusal) {
     noteMutants(
       `mutation probes did not run: ${sandboxRefusal}. Every probe executes ` +
@@ -2747,6 +2799,24 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // Clear a stale probe tree left by a crashed run — it would fail `add`.
       // Its stderr is kept to explain a subsequent `add` failure.
       sweep = discardWorktree(worktree, probeTree);
+      // The first host-side git write of this phase that CHECKS FILES OUT,
+      // and it resolves the repository through the REVIEW worktree's own
+      // gitfile — a second rewritable pointer inside the same read-write
+      // mount, written by the build/test phase that already ran the PR's code.
+      // Checking out is what runs `filter.<x>.smudge`, so this is where a
+      // planted pointer becomes host execution, before any gate inside the
+      // restore below could fire.
+      //
+      // Not "the first git write": `discardWorktree` above already runs
+      // `worktree remove --force` and `worktree unlock` with this same cwd.
+      // Those materialise nothing, so no filter and no hook runs — but the
+      // distinction is the whole reason this gate can sit here rather than
+      // above them, and a maintainer adding a checkout above it on the
+      // strength of a looser sentence would reopen the route.
+      const untrusted = untrustedGitfile(worktree);
+      if (untrusted !== null) {
+        throw new Error(`refusing to create a probe tree: ${untrusted}`);
+      }
       git(
         worktree,
         ...CHECKOUT_INERT,
@@ -2856,6 +2926,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           mutantDeadline,
           now,
           worktree,
+          trustContext,
+          recordTeardown,
         );
         noteDependencyFarm(baseline.exposed);
         // A mutant is only evidence against a probe file that is green WITHOUT
@@ -2910,6 +2982,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               // two are the same) — and the control is the run that decides
               // whether ANY mutant verdict is trusted.
               worktree,
+              trustContext,
+              recordTeardown,
             );
             if (harnessValidated === null) {
               // THREE causes share this `null` and the note must not name one:
@@ -2985,6 +3059,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
+                trustContext,
+                recordTeardown,
               ),
             );
           }
@@ -3036,6 +3112,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
+                trustContext,
+                recordTeardown,
               ),
             );
           }
@@ -3077,6 +3155,22 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             'the probe tree no longer resolves to itself (a symlink at its ' +
               'root), so the revert would run against whatever it points at',
           );
+        }
+        // ...and the tree's REPOSITORY must still be its own. The check above
+        // asks the same question of the directory and answers it with an
+        // lstat walk, which a rewritten gitfile passes untouched: no symlink
+        // is involved, the tree resolves to itself, and the `checkout` below
+        // still runs through whatever repository that pointer names —
+        // executing its filters on the host.
+        //
+        // This phase is reached PRECISELY WHEN the gates fired: a restore
+        // refusal becomes `inconclusive` without throwing, and the mutation
+        // phase's catch continues on purpose "so the revert probe below still
+        // runs". Guarding the first two writes and not this one leaves the
+        // route open exactly where the other two closed it.
+        const untrusted = untrustedGitfile(probeTree);
+        if (untrusted !== null) {
+          throw new Error(`refusing to revert: ${untrusted}`);
         }
         // "Revert to base" is two operations, confined to the throwaway tree. A
         // file the PR MODIFIED is checked out from base; a file the PR ADDED did
@@ -3172,6 +3266,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           startedAt + TOTAL_BUDGET_MS,
           now,
           worktree,
+          trustContext,
+          recordTeardown,
         );
         noteDependencyFarm(revertRun.exposed);
         results.push(...revertRun.perFile);
@@ -3340,6 +3436,30 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     },
     findings,
     cleanupFailure,
+    executionBoundary: (() => {
+      const verdict = sandboxRefusal
+        ? ({ kind: 'refused', reason: sandboxRefusal } as const)
+        : sandboxVerdict(undefined, undefined, undefined, trustContext);
+      const mountable = mountRootFor(probeWorktreePath(worktree)) !== null;
+      const effectiveBackend =
+        verdict.kind === 'refused'
+          ? 'refused'
+          : verdict.kind === 'container' && mountable
+            ? 'container'
+            : 'direct';
+      const boundaryNote =
+        teardownState.status === 'failed'
+          ? 'container teardown verification failed — a timed-out probe container may still be running'
+          : verdict.kind === 'container' && !mountable
+            ? 'probe tree is not under a review temp dir, so probes ran directly rather than in a container'
+            : undefined;
+      return describeExecutionBoundary({
+        backend: effectiveBackend,
+        trustContext,
+        teardownStatus: teardownState.status,
+        ...(boundaryNote !== undefined ? { note: boundaryNote } : {}),
+      });
+    })(),
   };
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, JSON.stringify(result, null, 2), 'utf8');

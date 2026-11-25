@@ -8,6 +8,73 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  user: 'user',
+  assistant: 'assistant',
+  thinking: 'thinking',
+  task: 'task',
+  compaction: 'compaction',
+  info: 'info',
+  warning: 'warning',
+  retry: 'retry',
+  'stop-hook': 'stop-hook',
+  'away-recap': 'away-recap',
+  'user-shell': 'user-shell',
+  advisor: 'advisor',
+  'arena-agent': 'arena-agent',
+  'arena-session': 'arena-session',
+  goal: 'goal',
+  'Protected input': 'Protected input',
+  'Focused input. Cursor: {{position}}': 'Focused input. Cursor: {{position}}',
+  'Unfocused input.': 'Unfocused input.',
+  'Focused Prompt: {{value}}': 'Focused Prompt: {{value}}',
+  'Prompt: {{value}}': 'Prompt: {{value}}',
+  'Focused Input: {{value}}': 'Focused Input: {{value}}',
+  'Input: {{value}}': 'Input: {{value}}',
+  'Placeholder: {{value}}': 'Placeholder: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Selected {{value}}',
+  'Disabled {{value}}': 'Disabled {{value}}',
+  'Focused Toggle on: {{value}}': 'Focused Toggle on: {{value}}',
+  'Focused Toggle off: {{value}}': 'Focused Toggle off: {{value}}',
+  'Toggle on: {{value}}': 'Toggle on: {{value}}',
+  'Toggle off: {{value}}': 'Toggle off: {{value}}',
+  'Conversation cleared.': 'Conversation cleared.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Revision {{value}}',
+  Dialog: 'Dialog',
+  'Dialog closed. Focus: prompt.': 'Dialog closed. Focus: prompt.',
+  'Dialog closed.': 'Dialog closed.',
+  'Waiting for confirmation': 'Waiting for confirmation',
+  'Working. Escape to cancel.': 'Working. Escape to cancel.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'History items {{start}}-{{end}} of {{total}}',
+  'Worktree: {{value}}': 'Worktree: {{value}}',
+  'Workflow mode: on': 'Workflow mode: on',
+  'Workflow mode: on (unavailable)': 'Workflow mode: on (unavailable)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.",
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    "You've used up your weekly credits.{{reset}} Please try again after the reset.",
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    "You've used up your credits.{{reset}} Please try again after the reset.",
+  ' Your credits are expected to reset in {{time}}.':
+    ' Your credits are expected to reset in {{time}}.',
+  '{{days}} and {{hours}}': '{{days}} and {{hours}}',
+  '1 day': '1 day',
+  '{{count}} days': '{{count}} days',
+  '1 hour': '1 hour',
+  '{{count}} hours': '{{count}} hours',
+  Retry: 'Retry',
+  'Connecting…': 'Connecting…',
+  'Loading models from provider…': 'Loading models from provider…',
+  'Recommended models · provider list unavailable, showing built-ins':
+    'Recommended models · provider list unavailable, showing built-ins',
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+
   'Cannot disable an extension-provided MCP server here.':
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':
@@ -23,6 +90,8 @@ export default {
   'Project level': 'Project level',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -151,6 +220,7 @@ export default {
   'from {{marketplace}}': 'from {{marketplace}}',
   installed: 'installed',
   '{{count}} Agents': '{{count}} Agents',
+  '{{count}} Workflows': '{{count}} Workflows',
   '{{count}} Commands': '{{count}} Commands',
   '{{count}} MCP': '{{count}} MCP',
   '{{count}} Skills': '{{count}} Skills',
@@ -177,6 +247,7 @@ export default {
   // self-mapping and returns the bare display name. Localized values live in
   // zh.js / zh-TW.js; other locales fall back to the English display name.
   // ============================================================================
+  'toolDisplayName.Exec': 'toolDisplayName.Exec',
   'toolDisplayName.Edit': 'toolDisplayName.Edit',
   'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',
   'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
@@ -190,9 +261,13 @@ export default {
   'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
   'toolDisplayName.ProposeGoal': 'toolDisplayName.ProposeGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
+  'toolDisplayName.ManageMemory': 'toolDisplayName.ManageMemory',
+  'toolDisplayName.SearchMemory': 'toolDisplayName.SearchMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
+  'toolDisplayName.Advisor': 'toolDisplayName.Advisor',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
+  'toolDisplayName.RecordSource': 'toolDisplayName.RecordSource',
   'toolDisplayName.ReportFindings': 'toolDisplayName.ReportFindings',
   'toolDisplayName.DisplayImage': 'toolDisplayName.DisplayImage',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
@@ -206,6 +281,7 @@ export default {
   'toolDisplayName.CronCreate': 'toolDisplayName.CronCreate',
   'toolDisplayName.CronList': 'toolDisplayName.CronList',
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
+  'toolDisplayName.AutofixPr': 'toolDisplayName.AutofixPr',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
   'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
   'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',
@@ -222,11 +298,30 @@ export default {
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
   'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
   'toolDisplayName.ToolSearch': 'toolDisplayName.ToolSearch',
+  'toolDisplayName.ToolCall': 'toolDisplayName.ToolCall',
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
+  'toolDisplayName.DownsampleImage': 'toolDisplayName.DownsampleImage',
+  'toolDisplayName.DownscaleVideo': 'toolDisplayName.DownscaleVideo',
+  'toolDisplayName.DownsampleAudio': 'toolDisplayName.DownsampleAudio',
+  'toolDisplayName.ExtractKeyframes': 'toolDisplayName.ExtractKeyframes',
+  'toolDisplayName.ExtractAudio': 'toolDisplayName.ExtractAudio',
+  'toolDisplayName.ClipVideo': 'toolDisplayName.ClipVideo',
+  'toolDisplayName.ClipImage': 'toolDisplayName.ClipImage',
+  'toolDisplayName.ClipAudio': 'toolDisplayName.ClipAudio',
+  'toolDisplayName.CaptionImage': 'toolDisplayName.CaptionImage',
+  'toolDisplayName.CaptionAudio': 'toolDisplayName.CaptionAudio',
+  'toolDisplayName.OcrImage': 'toolDisplayName.OcrImage',
+  'toolDisplayName.UnderstandVideoSegments':
+    'toolDisplayName.UnderstandVideoSegments',
+  'toolDisplayName.ConvertImage': 'toolDisplayName.ConvertImage',
+  'toolDisplayName.TranscribeAudio': 'toolDisplayName.TranscribeAudio',
+  'toolDisplayName.RecallMediaMemory': 'toolDisplayName.RecallMediaMemory',
+  '[fixed-only: runs via media policies, not the model]':
+    '[fixed-only: runs via media policies, not the model]',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -321,6 +416,7 @@ export default {
   Auth: 'Auth',
   Model: 'Model',
   'Fast Model': 'Fast Model',
+  'Agent Loop': 'Agent Loop',
   Sandbox: 'Sandbox',
   'Session ID': 'Session ID',
   'Base URL': 'Base URL',
@@ -339,6 +435,8 @@ export default {
     'Open the skills panel (browse, search, toggle, pick).',
   'Move this session to a new working directory':
     'Move this session to a new working directory',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    'Wait for background agents to finish or stop them in /tasks before changing directories.',
   // SkillsManagerDialog (the panel `/skills` opens)
   'Manage Skills': 'Manage Skills',
   'Skills configuration saved.': 'Skills configuration saved.',
@@ -361,11 +459,10 @@ export default {
   'Search:': 'Search:',
   'type to filter…': 'type to filter…',
   'No skills are currently available.': 'No skills are currently available.',
-  'All available skills are locked at a higher scope (see below).':
-    'All available skills are locked at a higher scope (see below).',
   'No skills match the search.': 'No skills match the search.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Locked by higher-scope settings (cannot toggle here):',
+  'Locked by settings entries you cannot toggle here:':
+    'Locked by settings entries you cannot toggle here:',
+  '{{count}} locked not shown': '{{count}} locked not shown',
   'higher scope': 'higher scope',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [locked: {{scope}}]',
@@ -415,6 +512,8 @@ export default {
     'Rewinding does not affect files edited manually or via shell commands.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -691,6 +790,14 @@ export default {
   active: 'active',
   disabled: 'disabled',
   enabled: 'enabled',
+  'disabled (bare mode)': 'disabled (bare mode)',
+  'disabled (safe mode)': 'disabled (safe mode)',
+  'disabled (disableAllHooks)': 'disabled (disableAllHooks)',
+  'disabled (not approved)': 'disabled (not approved)',
+  'disabled (rejected)': 'disabled (rejected)',
+  'disabled (folder not trusted)': 'disabled (folder not trusted)',
+  'disabled (turned off for this session)':
+    'disabled (turned off for this session)',
   'View Details': 'View Details',
   'Update failed:': 'Update failed:',
   'Updating {{name}}...': 'Updating {{name}}...',
@@ -720,6 +827,10 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
+  'Code Mode Only (Experimental)': 'Code Mode Only (Experimental)',
+  'Mods (Experimental)': 'Mods (Experimental)',
+  'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
+    'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.',
   'Vim Mode': 'Vim Mode',
   'Attribution: commit': 'Attribution: commit',
   'Terminal Bell Notification': 'Terminal Bell Notification',
@@ -730,6 +841,7 @@ export default {
   'Debug Keystroke Logging': 'Debug Keystroke Logging',
   'Language: UI': 'Language: UI',
   'Language: Model': 'Language: Model',
+  'Language: Display Translation': 'Language: Display Translation',
   'Output Format': 'Output Format',
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
@@ -905,6 +1017,10 @@ export default {
     'This extension will install the following skills:',
   'This extension will install the following subagents:':
     'This extension will install the following subagents:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'This extension will install the following workflows (JavaScript scripts that can start subagents):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'These workflow scripts changed since the installed version: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Installation cancelled for "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -984,6 +1100,7 @@ export default {
   'Context files:': 'Context files:',
   'Skills:': 'Skills:',
   'Agents:': 'Agents:',
+  'Workflows:': 'Workflows:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.': 'Link extension failed to install.',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1083,6 +1200,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configured',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Reopen this menu to reload hook definitions.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook controls and HTTP security settings require a restart.',
+  'Failed to reload hook definitions: {{error}}':
+    'Failed to reload hook definitions: {{error}}',
   'Enter to select · Esc to cancel': 'Enter to select · Esc to cancel',
   // Hooks - Detail Step
   'Exit codes:': 'Exit codes:',
@@ -1099,6 +1222,20 @@ export default {
   'No hook config selected': 'No hook config selected',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
+  'Safe mode is on, so no hooks run in this session.':
+    'Safe mode is on, so no hooks run in this session.',
+  'Bare mode is on, so no hooks run in this session.':
+    'Bare mode is on, so no hooks run in this session.',
+  'All hooks are disabled by the disableAllHooks setting.':
+    'All hooks are disabled by the disableAllHooks setting.',
+  'Timeout:': 'Timeout:',
+  'Status message:': 'Status message:',
+  'Condition:': 'Condition:',
+  'Options:': 'Options:',
+  'Skill:': 'Skill:',
+  'runs in background': 'runs in background',
+  'runs once': 'runs once',
+  sequential: 'sequential',
   // Hooks - Disabled Step
   'Hook Configuration - Disabled': 'Hook Configuration - Disabled',
   'All hooks are currently disabled. You have {{count}} that are not running.':
@@ -1154,8 +1291,8 @@ export default {
     'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Input to command is JSON with notification message and type.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Input to command is JSON with command_name, command_args, and expanded prompt text.',
   'Input to command is JSON with session start source.':
@@ -1342,6 +1479,26 @@ export default {
     'Usage: /forget <memory text to remove>',
   'No managed auto-memory entries matched: {{query}}':
     'No managed auto-memory entries matched: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Bind a GitHub pull request to this session',
+  'Usage: /pr <number | url>': 'Usage: /pr <number | url>',
+  'No PRs bound to this session.': 'No PRs bound to this session.',
+  'Bound PRs: {{list}}': 'Bound PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Invalid PR reference. Usage: /pr <number | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'Bound PR #{{number}} to this session: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} is already bound to this session: {{url}}',
+  'Failed to bind PR #{{number}}.': 'Failed to bind PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Failed to bind PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Could not read the PR bindings for this session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
   'Import MCP servers from Claude configs':
@@ -1629,6 +1786,8 @@ export default {
     'Could not compress chat history because the compression summary was truncated.',
   'Could not compress chat history due to an API error.':
     'Could not compress chat history due to an API error.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Could not compress chat history because it is too large for the context window.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1747,6 +1906,51 @@ export default {
     'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.',
+  'Qwen Subscription': 'Qwen Subscription',
+  'Qwen Account with Subscription': 'Qwen Account with Subscription',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.',
+  "If the browser didn't open, visit:": "If the browser didn't open, visit:",
+  'Waiting for sign-in…': 'Waiting for sign-in…',
+  'c to copy link · Esc to cancel': 'c to copy link · Esc to cancel',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    'Authentication timed out. Please try again or select a different authentication method.',
+  'Signed in as {{email}}': 'Signed in as {{email}}',
+  'Signed in successfully · {{email}}': 'Signed in successfully · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    'Current plan: Qwen {{plan}}. Qwen Code is ready.',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    'Common commands: /usage   /upgrade   /model   /effort   /status   /logout',
+  'Signed in as {{email}} (Qwen {{plan}})':
+    'Signed in as {{email}} (Qwen {{plan}})',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} is active · usage is included with your plan',
+  'Model: {{model}}': 'Model: {{model}}',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Code is included with Qwen Plus and Pro',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.",
+  'Waiting for your subscription to become active…':
+    'Waiting for your subscription to become active…',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    'Your Qwen session has expired. Run /auth to sign in again.',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    'Your login credentials are no longer valid. Run /auth to sign in again.',
+  'Checking your subscription…': 'Checking your subscription…',
+  'Retry Connection': 'Retry Connection',
+  'View Plans': 'View Plans',
+  'Opens the Qwen Code plans page in your browser':
+    'Opens the Qwen Code plans page in your browser',
+  'Switch Provider': 'Switch Provider',
+  'Use another account': 'Use another account',
+  'Choose another model provider': 'Choose another model provider',
+  'Sign out': 'Sign out',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    'Enter to select, ↑↓ to navigate · Esc to close',
   'Qwen OAuth Authentication': 'Qwen OAuth Authentication',
   'Please visit this URL to authorize:': 'Please visit this URL to authorize:',
   'Waiting for authorization': 'Waiting for authorization',
@@ -1803,6 +2007,18 @@ export default {
     'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    'Set the vision bridge timeout in seconds (use with --vision)',
+  '--timeout can only be used with --vision.':
+    '--timeout can only be used with --vision.',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.',
+  'Vision bridge timeout: {{timeout}}': 'Vision bridge timeout: {{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.',
+  '{{timeout}} (default)': '{{timeout}} (default)',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
@@ -2009,6 +2225,7 @@ export default {
   Reqs: 'Reqs',
   'Input Tokens': 'Input Tokens',
   'Output Tokens': 'Output Tokens',
+  'Output (incl. Reasoning)': 'Output (incl. Reasoning)',
   'Savings Highlight:': 'Savings Highlight:',
   'of input tokens were served from the cache, reducing costs.':
     'of input tokens were served from the cache, reducing costs.',
@@ -2055,6 +2272,11 @@ export default {
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
   'needs approval': 'needs approval',
+  'Large workflow': 'Large workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).',
   'rejected — edit config to re-approve':
     'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
@@ -2314,6 +2536,10 @@ export default {
   'API key cannot be empty.': 'API key cannot be empty.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.',
   'You can get your Coding Plan API key here':
     'You can get your Coding Plan API key here',
   'You can get your Token Plan API key here':
@@ -2341,6 +2567,17 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  QwenCloud: 'QwenCloud',
+  'QwenCloud · Access Method': 'QwenCloud · Access Method',
+  'Official recommended setup: Token Plan or Standard API Key':
+    'Official recommended setup: Token Plan or Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    'Pay-as-you-go · Connect with an existing platform API key',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)',
+  'China — 千问AI平台': 'China — 千问AI平台',
+  'International — QwenCloud': 'International — QwenCloud',
+  Platform: 'Platform',
   Custom: 'Custom',
   'Select Region for Coding Plan': 'Select Region for Coding Plan',
   'Choose based on where your account is registered':
@@ -2365,6 +2602,10 @@ export default {
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'No API response yet. Send a message to see actual usage.':
     'No API response yet. Send a message to see actual usage.',
+  'Estimated usage, including the conversation':
+    'Estimated usage, including the conversation',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'No provider usage yet. These are local estimates, including the conversation.',
   'Estimated pre-conversation overhead': 'Estimated pre-conversation overhead',
   'Context window': 'Context window',
   tokens: 'tokens',
@@ -2375,9 +2616,14 @@ export default {
   'System prompt': 'System prompt',
   'Built-in tools': 'Built-in tools',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Instruction files',
+  'Auto memory': 'Auto memory',
   'Memory files': 'Memory files',
   Skills: 'Skills',
   Messages: 'Messages',
+  'Startup context': 'Startup context',
+  Unattributed: 'Unattributed',
+  'Cached prefix': 'Cached prefix',
   'Run /context detail for per-item breakdown.':
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -2506,8 +2752,6 @@ export default {
     'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).',
   'It is saved but does not apply while this workspace is untrusted.':
     'It is saved but does not apply while this workspace is untrusted.',
-  'Set a goal — keep working until the condition is met':
-    'Set a goal — keep working until the condition is met',
   'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
@@ -2542,10 +2786,21 @@ export default {
     'Ask a quick side question without affecting the main conversation',
   'Get a second opinion on the current conversation from a reviewer model':
     'Get a second opinion on the current conversation from a reviewer model',
+  'Configure the Advisor model': 'Configure the Advisor model',
+  'Disable Advisor': 'Disable Advisor',
+  'Select Advisor Model': 'Select Advisor Model',
+  'Advisor disabled': 'Advisor disabled',
+  'Advisor set to {{model}}': 'Advisor set to {{model}}',
+  'Selected Advisor model is unavailable.':
+    'Selected Advisor model is unavailable.',
+  'Advisor configuration is unavailable.':
+    'Advisor configuration is unavailable.',
   'Consulting advisor...': 'Consulting advisor...',
   'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
   'No conversation context available for /advisor':
     'No conversation context available for /advisor',
+  'No conversation context available for /btw':
+    'No conversation context available for /btw',
   'Focus too long (max {{max}} chars)': 'Focus too long (max {{max}} chars)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Another operation is in progress, wait for it to complete before running /advisor',
@@ -2686,6 +2941,8 @@ export default {
   out: 'out',
 
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.',
   'Check for Qwen Code updates and install if available':
     'Check for Qwen Code updates and install if available',
   'Qwen Code update available! {{current}} → {{latest}}':
@@ -2761,6 +3018,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
@@ -2857,4 +3116,59 @@ export default {
   'Kept model as {{model}}': 'Kept model as {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
+  'Create a git commit with an AI-drafted message':
+    'Create a git commit with an AI-drafted message',
+  'Could not request an authorization link. Please try signing in again.':
+    'Could not request an authorization link. Please try signing in again.',
+  'Could not complete authorization. Please try signing in again.':
+    'Could not complete authorization. Please try signing in again.',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    'Could not read or save Qwen credentials. Check local file permissions and disk space.',
+  'Could not refresh your Qwen session. Please try again.':
+    'Could not refresh your Qwen session. Please try again.',
+  'You are signed out locally, but the remote session could not be revoked.':
+    'You are signed out locally, but the remote session could not be revoked.',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    'Could not remove local Qwen credentials. Check local file permissions.',
+  'Authorization or access was denied.': 'Authorization or access was denied.',
+  'Too many requests. Please try again later.':
+    'Too many requests. Please try again later.',
+  'The network request failed or timed out.':
+    'The network request failed or timed out.',
+  'The service returned an invalid response.':
+    'The service returned an invalid response.',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    'Model: {{model}} · Run /usage to see your plan usage',
+  'Type your request, or /usage': 'Type your request, or /usage',
+  'Try:': 'Try:',
+  'Open Qwen subscription plans': 'Open Qwen subscription plans',
+  'Could not open your browser. Visit {{url}}':
+    'Could not open your browser. Visit {{url}}',
+  'Qwen subscription plans: {{url}}': 'Qwen subscription plans: {{url}}',
+  'Sign out of your Qwen account': 'Sign out of your Qwen account',
+  'This connection does not require /logout. Use /auth to switch model providers.':
+    'This connection does not require /logout. Use /auth to switch model providers.',
+  'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.':
+    'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.',
+  'Wait for the current response to finish before signing out.':
+    'Wait for the current response to finish before signing out.',
+  'You are signed out, but the saved authentication selection could not be cleared.':
+    'You are signed out, but the saved authentication selection could not be cleared.',
+  'Signed out of Qwen. Use /auth to sign in with another account.':
+    'Signed out of Qwen. Use /auth to sign in with another account.',
+  'Tip: Run /usage to see your plan usage.':
+    'Tip: Run /usage to see your plan usage.',
+  'Copied to clipboard': 'Copied to clipboard',
+  'Copy failed': 'Copy failed',
+  '(API error: {{error}})': '(API error: {{error}})',
+  'API error': 'API error',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}',
+  '←/→ browse earlier answers': '←/→ browse earlier answers',
+  'c copy': 'c copy',
+  'x clear history': 'x clear history',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    'Tip: Use /btw to ask a quick side question without interrupting the current work',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)',
 };

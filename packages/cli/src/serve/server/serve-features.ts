@@ -42,8 +42,10 @@ interface CreateServeFeaturesDeps {
   opts: ServeOptions;
   boundWorkspace: string;
   persistSettingAvailable: boolean;
+  userSkillActivationAvailable?: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   sessionGenerationAvailable: () => boolean;
+  sessionBtwStreamAvailable: () => boolean;
   currentSessionSchedulingAvailable: boolean;
   workspaceGenerationAvailable: () => boolean;
   reloadAvailable: boolean;
@@ -52,19 +54,27 @@ interface CreateServeFeaturesDeps {
   channelManagementAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: () => boolean;
+  agentCollaborationEnabled: () => boolean;
   dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
   scratchWorkspaceRegistrationAvailable: () => boolean;
+  gitWorkspaceCloneAvailable?: boolean;
   realtimeVoiceEnabled: () => boolean;
+  realtimeVoiceWebEnabled?: () => boolean;
   standaloneSessionsAvailable?: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  workspaceDirectoriesAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable: () => boolean;
+  workspaceRuntimeStopAvailable?: () => boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
+  turnSkillFileSnapshotAvailable?: () => boolean;
+  turnExtensionStoreLeaseAvailable?: () => boolean;
+  sessionRetireIfIdleAvailable?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
   getEnv?: () => Readonly<Record<string, string | undefined>>;
 }
@@ -84,6 +94,7 @@ export function createServeFeatures(
     persistSettingAvailable,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable,
+    sessionBtwStreamAvailable,
     currentSessionSchedulingAvailable,
     workspaceGenerationAvailable,
     reloadAvailable,
@@ -92,15 +103,20 @@ export function createServeFeatures(
     channelManagementAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    agentCollaborationEnabled,
     dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
     scratchWorkspaceRegistrationAvailable,
+    gitWorkspaceCloneAvailable,
     realtimeVoiceEnabled,
+    realtimeVoiceWebEnabled,
     standaloneSessionsAvailable,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
+    workspaceDirectoriesAvailable,
     nativeDirectoryPickerAvailable,
     workspaceRuntimeAvailable,
+    workspaceRuntimeStopAvailable,
     localPathOpenAvailable,
     localTerminalOpenAvailable,
     workspaceTrustHotReloadAvailable,
@@ -129,7 +145,12 @@ export function createServeFeatures(
       const currentAcpHttpEnabled =
         acpHttpEnabled ?? resolveAcpHttpEnabled(env as NodeJS.ProcessEnv);
       return getAdvertisedServeFeatures(undefined, {
+        sessionRetireIfIdleAvailable: deps.sessionRetireIfIdleAvailable?.(),
+        hostedHarness: opts.profile === 'hosted-harness',
         requireAuth: opts.requireAuth === true,
+        turnSkillFileSnapshotAvailable: deps.turnSkillFileSnapshotAvailable?.(),
+        turnExtensionStoreLeaseAvailable:
+          deps.turnExtensionStoreLeaseAvailable?.(),
         mcpPoolActive: opts.mcpPoolActive !== false,
         allowOriginActive:
           opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
@@ -140,9 +161,11 @@ export function createServeFeatures(
           ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
           : {}),
         persistSettingAvailable,
+        userSkillActivationAvailable: deps.userSkillActivationAvailable,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
         sessionGenerationAvailable: sessionGenerationAvailable(),
+        sessionBtwStreamAvailable: sessionBtwStreamAvailable(),
         currentSessionSchedulingAvailable,
         workspaceGenerationAvailable: workspaceGenerationAvailable(),
         rateLimit: opts.rateLimit === true,
@@ -151,18 +174,24 @@ export function createServeFeatures(
         channelControlAvailable,
         channelManagementAvailable,
         multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        agentCollaborationEnabled: agentCollaborationEnabled(),
         dynamicWorkspaceRegistrationAvailable,
         persistentWorkspaceRegistrationAvailable,
         scratchWorkspaceRegistrationAvailable:
           scratchWorkspaceRegistrationAvailable(),
+        gitWorkspaceCloneAvailable: gitWorkspaceCloneAvailable === true,
         workspaceRuntimeRemovalAvailable,
+        workspaceDirectoriesAvailable,
         nativeDirectoryPickerAvailable,
         workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
+        workspaceRuntimeStopAvailable:
+          workspaceRuntimeStopAvailable?.() === true,
         localPathOpenAvailable,
         localTerminalOpenAvailable,
         workspaceTrustHotReloadAvailable,
         acpHttpEnabled: currentAcpHttpEnabled,
         realtimeVoiceEnabled: realtimeVoiceEnabled(),
+        realtimeVoiceWebEnabled: realtimeVoiceWebEnabled?.() === true,
         standaloneSessionsAvailable: standaloneSessionsAvailable?.() === true,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,

@@ -10,13 +10,44 @@ import {
 } from '../daemon/session/turn-navigation-store';
 import type { MessageListHandle, MessageListProps } from './MessageList';
 import type { Message } from '../adapters/types';
+import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
+
+vi.mock('../hooks/useMessageDeletion', () => ({
+  useMessageDeletion: (...args: unknown[]) => {
+    observed.deletionCalls += 1;
+    observed.deletionArgs = args;
+    return observed.deletion;
+  },
+}));
 
 const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
   props: undefined as MessageListProps | undefined,
+  transcript: { blocks: [] },
+  deletion: undefined as
+    | import('../hooks/useMessageDeletion').MessageDeletionControls
+    | undefined,
+  deletionArgs: [] as unknown[],
+  deletionCalls: 0,
+  requiredHistoryCalls: 0,
+  optionalHistoryCalls: 0,
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
-  useDaemonHistoryNavigationStore: () => observed.store,
+  useDaemonHistoryNavigationStore: () => {
+    observed.requiredHistoryCalls += 1;
+    return observed.store;
+  },
+  useOptionalDaemonHistoryNavigationStore: () => {
+    observed.optionalHistoryCalls += 1;
+    return observed.store;
+  },
+}));
+vi.mock('../daemon-react-sdk', () => ({
+  useConnection: () => ({ sessionId: 'session' }),
+  useTranscriptStore: () => ({
+    subscribe: () => () => {},
+    getSnapshot: () => observed.transcript,
+  }),
 }));
 vi.mock('../i18n', () => {
   const t = (key: string) => key;
@@ -26,6 +57,7 @@ vi.mock('./MessageList', () => ({
   MessageList: forwardRef<MessageListHandle, MessageListProps>(
     function List(props, ref) {
       observed.props = props;
+      const open = useOpenTurnCalls();
       useImperativeHandle(
         ref,
         () => ({ scrollToBottom: vi.fn(), scrollToMessage: () => true }),
@@ -33,12 +65,22 @@ vi.mock('./MessageList', () => ({
       );
       return (
         <div data-web-shell-message-list>
+          {!props.hideSessionTimeline && props.timelineAction}
           {props.messages.map((message) => (
             <div
               key={message.id}
               data-source-block-ids={message.sourceBlockIds?.join(',')}
             >
               {message.id}
+              {message.role === 'user' && (
+                <button
+                  onClick={() =>
+                    open?.(message.sourceBlockIds?.[0] ?? message.id)
+                  }
+                >
+                  Open calls
+                </button>
+              )}
               {message.role === 'tool_group' &&
                 message.tools.map((tool) => (
                   <div
@@ -57,11 +99,19 @@ vi.mock('./MessageList', () => ({
 }));
 
 const { TranscriptViewport } = await import('./TranscriptViewport');
+const { ConversationSearch } = await import('./ConversationSearch');
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 afterEach(() => {
   act(() => root?.unmount());
   root = undefined;
+  observed.store = undefined;
+  observed.props = undefined;
+  observed.deletion = undefined;
+  observed.deletionArgs = [];
+  observed.deletionCalls = 0;
+  observed.requiredHistoryCalls = 0;
+  observed.optionalHistoryCalls = 0;
   container?.remove();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -141,6 +191,21 @@ async function setup(supported = true, cursorOnly = false, turnCount = 4) {
     onReloadTranscript: vi.fn(),
     onLoadOlderHistory: legacyLoad,
     hasOlderHistory: true,
+    sourceEntries: [
+      {
+        type: 'source',
+        source: {
+          id: 'source',
+          title: 'Source',
+          kind: 'link',
+          locator: { type: 'url', url: 'https://example.com/source' },
+          createdAt: '2025-01-01',
+          updatedAt: '2025-01-01',
+        },
+      },
+    ],
+    sourceSessionId: 'session',
+    onSourceOpen: vi.fn(),
   };
   act(() => root!.render(<TranscriptViewport {...props} ref={ref} />));
   const click = async (key: string) => {
@@ -164,6 +229,139 @@ async function setup(supported = true, cursorOnly = false, turnCount = 4) {
 }
 
 describe('TranscriptViewport', () => {
+  it('centers navigation for approval footers without treating them as tool approvals', async () => {
+    const { props } = await setup(true, false, 6);
+    for (const approvalOverlayActive of [false, true, false]) {
+      act(() =>
+        root!.render(
+          <TranscriptViewport
+            {...props}
+            isResponding={false}
+            approvalOverlayActive={approvalOverlayActive}
+          />,
+        ),
+      );
+      expect(
+        container!.querySelector('[data-history-viewport]')?.classList,
+      ).toContain(approvalOverlayActive ? 'static' : 'relative');
+      expect(observed.deletionArgs[1]).toBe(false);
+      expect(observed.props!.pendingApproval).toBeNull();
+    }
+  });
+
+  it('hides deletion and marks it unavailable on a frozen history page', async () => {
+    observed.deletion = {
+      active: true,
+      busy: false,
+      disabled: false,
+      selected: new Set(['local']),
+      allowed: new Set(['local']),
+      groupByMessage: new Map(),
+      confirming: false,
+      canDelete: () => true,
+      start: vi.fn(),
+      toggle: vi.fn(),
+      cancel: vi.fn(),
+      setConfirming: vi.fn(),
+      submit: vi.fn(),
+    };
+    const { click } = await setup();
+    expect(
+      container!.querySelector('[data-web-shell-message-deletion]'),
+    ).not.toBeNull();
+    await click('history.openEarlier');
+    expect(observed.props!.deletion).toBeUndefined();
+    expect(
+      container!.querySelector('[data-web-shell-message-deletion]'),
+    ).toBeNull();
+    expect(observed.deletionArgs[2]).toBe(true);
+  });
+
+  it('passes the historical record UUID from its own page to the tool calls handler', async () => {
+    const { props, click } = await setup();
+    const onOpen = vi.fn();
+    act(() =>
+      root!.render(
+        <TurnCallsProvider onOpen={onOpen}>
+          <TranscriptViewport {...props} />
+        </TurnCallsProvider>,
+      ),
+    );
+    await click('history.openEarlier');
+    const historicalUser = observed.props!.messages.find(
+      (message) => message.role === 'user',
+    )!;
+    expect(historicalUser.sourceBlockIds?.[0]).not.toBe('old');
+    act(() =>
+      [...container!.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Open calls')!
+        .click(),
+    );
+    expect(onOpen).toHaveBeenCalledWith(
+      historicalUser.sourceBlockIds![0],
+      'old',
+    );
+  });
+  it('keeps an open search and its query when the navigation host changes', async () => {
+    const { store, props, ref } = await setup(true, false, 4);
+    const renderSearch = (hidden = false, sessionKey = 'session') =>
+      act(async () =>
+        root!.render(
+          <ConversationSearch
+            key={sessionKey}
+            threshold={0}
+            messageListRef={ref}
+          >
+            {(trigger) => (
+              <TranscriptViewport
+                {...props}
+                ref={ref}
+                hideSessionTimeline={hidden}
+                timelineAction={trigger}
+              />
+            )}
+          </ConversationSearch>,
+        ),
+      );
+    await renderSearch();
+    const trigger = container!.querySelector<HTMLButtonElement>(
+      'button[aria-label="chat.searchConversation"]',
+    )!;
+    expect(trigger).not.toBeNull();
+    await act(async () => trigger.click());
+    const input = document.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    await act(async () => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'typed query');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(input.value).toBe('typed query');
+    await act(async () =>
+      store.configure({ sessionId: 'session', supported: false }),
+    );
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(
+      document.querySelector<HTMLInputElement>('input[type="search"]')?.value,
+    ).toBe('typed query');
+    expect(document.activeElement).not.toBe(document.body);
+    await renderSearch(true);
+    expect(
+      container!.querySelector('button[aria-label="chat.searchConversation"]'),
+    ).toBeNull();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(
+      document.querySelector<HTMLInputElement>('input[type="search"]')?.value,
+    ).toBe('typed query');
+    expect(document.activeElement).not.toBe(document.body);
+    await renderSearch(false, 'other-session');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it.each([0, 3, 4])(
     'requires at least four indexed turns (count=%i)',
     async (count) => {
@@ -269,6 +467,9 @@ describe('TranscriptViewport', () => {
   it('switches only visible rows, disables historical mutations and returns live through the forwarded handle', async () => {
     const { props, ref, click } = await setup();
     expect(observed.props?.messages).toBe(live);
+    expect(observed.props?.sourceEntries).toBe(props.sourceEntries);
+    expect(observed.props?.sourceSessionId).toBe('session');
+    expect(observed.props?.onSourceOpen).toBe(props.onSourceOpen);
     await click('history.openEarlier');
     expect(
       container
@@ -285,6 +486,10 @@ describe('TranscriptViewport', () => {
     expect(observed.props?.onBranchSession).toBeUndefined();
     expect(observed.props?.onRetryClick).toBeUndefined();
     expect(observed.props?.onReloadTranscript).toBeUndefined();
+    expect(observed.props?.sourceEntries).toBeUndefined();
+    expect(observed.props?.sourceSessionId).toBeUndefined();
+    expect(observed.props?.hookStatisticsSessionId).toBe('session');
+    expect(observed.props?.onSourceOpen).toBeUndefined();
     const historical = observed.props?.messages;
     const nextLive: Message[] = [
       ...live,
@@ -299,6 +504,9 @@ describe('TranscriptViewport', () => {
     act(() => ref.current?.scrollToBottom());
     expect(observed.props?.messages).toBe(nextLive);
     expect(observed.props?.onEditUserMessage).toBe(props.onEditUserMessage);
+    expect(observed.props?.sourceEntries).toBe(props.sourceEntries);
+    expect(observed.props?.sourceSessionId).toBe('session');
+    expect(observed.props?.onSourceOpen).toBe(props.onSourceOpen);
   });
 
   it('preserves the original loader with turn navigation enabled', async () => {
@@ -336,5 +544,102 @@ describe('TranscriptViewport', () => {
     });
     expect(store.getViewportSnapshot().pages.size).toBe(0);
     expect(observed.props?.messages).toBe(live);
+  });
+
+  it('degrades to live MessageList without daemon hooks when no DaemonSessionProvider is mounted', () => {
+    observed.store = undefined;
+    const ref = createRef<MessageListHandle>();
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <TranscriptViewport
+          ref={ref}
+          messages={live}
+          sourceSessionId="managed-1"
+          pendingApproval={null}
+          sessionKey="managed-1"
+          loadingTranscript={false}
+          isResponding={false}
+          hasOlderHistory
+          onLoadOlderHistory={vi.fn()}
+        />,
+      ),
+    );
+    expect(
+      container.querySelector('[data-history-viewport="live"]'),
+    ).not.toBeNull();
+    expect(observed.optionalHistoryCalls).toBeGreaterThan(0);
+    expect(observed.requiredHistoryCalls).toBe(0);
+    expect(observed.deletionCalls).toBe(0);
+    expect(observed.props?.messages).toBe(live);
+    expect(observed.props?.deletion).toBeUndefined();
+    expect(observed.props?.hookStatisticsSessionId).toBe('managed-1');
+    expect(observed.props?.mcpAppSessionId).toBe('managed-1');
+    expect(ref.current?.scrollToMessage('any')).toBe(true);
+  });
+
+  it('skips daemon navigation and deletion entirely when sessionViewportEnabled is false even with an active store', async () => {
+    const store = createDaemonTurnNavigationStore({
+      captureLiveBoundary: () => ({
+        beforeRecordId: 'live',
+        reachable: true,
+        isCurrent: () => true,
+      }),
+    });
+    const client: DaemonTurnNavigationClient = {
+      owner: {},
+      getTurnIndexPage: vi.fn().mockResolvedValue({
+        v: 1,
+        sessionId: 'daemon-session',
+        snapshot: 'snap',
+        totalTurns: 5,
+        start: 0,
+        turns: Array.from({ length: 5 }, (_, ordinal) => ({
+          ordinal,
+          turnId: `turn-${ordinal}`,
+          kind: 'prompt' as const,
+          label: `turn ${ordinal}`,
+        })),
+      }),
+      getTranscriptPage: vi.fn(),
+      materializeTranscriptEvents: () => ({
+        blocks: [],
+        nextBlockOrdinal: 1,
+        encounteredRecordIds: [],
+      }),
+    };
+    store.configure({ sessionId: 'daemon-session', supported: true, client });
+    await vi.waitFor(() =>
+      expect(store.getSnapshot().mode).not.toBe('loading'),
+    );
+    observed.store = store;
+    const ref = createRef<MessageListHandle>();
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <TranscriptViewport
+          ref={ref}
+          sessionViewportEnabled={false}
+          messages={live}
+          pendingApproval={null}
+          sessionKey="managed-in-full-shell"
+          loadingTranscript={false}
+          isResponding={false}
+        />,
+      ),
+    );
+    expect(
+      container.querySelector('[data-history-viewport="live"]'),
+    ).not.toBeNull();
+    expect(observed.optionalHistoryCalls).toBe(0);
+    expect(observed.requiredHistoryCalls).toBe(0);
+    expect(observed.deletionCalls).toBe(0);
+    expect(observed.props?.messages).toBe(live);
+    expect(observed.props?.deletion).toBeUndefined();
+    expect(ref.current?.scrollToMessage('any')).toBe(true);
   });
 });

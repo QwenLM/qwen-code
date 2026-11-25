@@ -20,13 +20,16 @@ import {
   type DaemonStartupSnapshot,
   parseDaemonStatusDetail,
 } from '../daemon-status.js';
+import type { StreamOccupancySnapshot } from '../sse-occupancy.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
 import type { ServeOptions } from '../types.js';
 import type { ChannelWorkerSnapshot } from '../channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from '../channel-restore-failures.js';
 import type { ChannelWorkerGroupSnapshot } from '../channel-worker-group.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { TotalSessionAdmissionSnapshot } from '../total-session-admission.js';
+import type { LoadAdmissionSnapshot } from '../load-admission.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
 
@@ -42,6 +45,7 @@ interface RegisterDaemonStatusRoutesDeps {
   getAcpHandle: () => AcpHttpHandle | undefined;
   getRateLimiter: () => RateLimiterInstance | undefined;
   getRestSseActive: () => number;
+  getStreamOccupancy: () => StreamOccupancySnapshot;
   currentServeFeatures: () => ReturnType<
     typeof import('../capabilities.js').getAdvertisedServeFeatures
   >;
@@ -50,10 +54,15 @@ interface RegisterDaemonStatusRoutesDeps {
   sessionShellCommandEnabled: boolean;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
+  maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getLoadAdmissionSnapshot?: () => LoadAdmissionSnapshot;
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  getCommittedAcpChildCount?: () => number;
+  childAdmissionEnforced?: boolean;
 }
 
 export function registerDaemonStatusRoutes(
@@ -83,6 +92,7 @@ export function registerDaemonStatusRoutes(
           acpHandle: deps.getAcpHandle(),
           rateLimiter: deps.getRateLimiter(),
           getRestSseActive: deps.getRestSseActive,
+          getStreamOccupancy: deps.getStreamOccupancy,
           features: deps.currentServeFeatures(),
           protocolVersions: getServeProtocolVersions(),
           supportedDeviceFlowProviders: deps.getSupportedDeviceFlowProviders(),
@@ -90,11 +100,16 @@ export function registerDaemonStatusRoutes(
           sessionShellCommandEnabled: deps.sessionShellCommandEnabled,
           getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
           getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+          getChannelRestoreFailures: deps.getChannelRestoreFailures,
+          maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
           getPerfSnapshot: deps.getPerfSnapshot,
           getMetricsSeries: deps.getMetricsSeries,
           getTotalSessionAdmissionSnapshot:
             deps.getTotalSessionAdmissionSnapshot,
+          getLoadAdmissionSnapshot: deps.getLoadAdmissionSnapshot,
           getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
+          getCommittedAcpChildCount: deps.getCommittedAcpChildCount,
+          childAdmissionEnforced: deps.childAdmissionEnforced,
         }),
       );
     } catch (err) {

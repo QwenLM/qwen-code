@@ -41,6 +41,7 @@ const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   ? CONTAINER_SANDBOX_NO_PROXY
   : '127.0.0.1,localhost';
 const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
+let isolatedQwenHome: string;
 
 function fakeModelOptions(baseUrl: string) {
   return {
@@ -53,6 +54,7 @@ function fakeModelOptions(baseUrl: string) {
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
       QWEN_MODEL: 'fake-model',
+      QWEN_HOME: isolatedQwenHome,
     },
   };
 }
@@ -175,7 +177,22 @@ describe('Permission Control (E2E)', () => {
 
   beforeEach(async () => {
     helper = new SDKTestHelper();
-    testDir = await helper.setup('permission-control');
+    // This suite scripts the fake model server by request index, so nothing
+    // may issue a model request before the turn under test. Give the file its
+    // own QWEN_HOME and switch managed auto memory off: with the shared
+    // hermetic home, earlier files' memory extraction leaves docs that the
+    // pre-turn recall prefetch picks up, and that selector request consumes
+    // the scripted index-0 tool call (#11394).
+    testDir = await helper.setup('permission-control', {
+      settings: {
+        fastModel: 'openai:fake-model',
+        memory: {
+          enableManagedAutoMemory: false,
+          enableManagedAutoDream: false,
+        },
+      },
+    });
+    isolatedQwenHome = await helper.mkdir('global-qwen-home');
   });
 
   afterEach(async () => {
@@ -681,12 +698,19 @@ describe('Permission Control (E2E)', () => {
       }> = [];
       const firstFile = 'first.txt';
       const secondFile = 'second.txt';
-      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-        // Turn 1 consumes requests 0 (tool call) and 1 ('Done.'), so turn 2's
-        // tool call is request 2. Absolute indexing is deliberate: the fake
-        // server never retries, so an extra model request means the protocol
-        // sequence changed and this test should fail loudly rather than drift.
-        if (requestIndex === 0) {
+      let firstToolServed = false;
+      let secondToolServed = false;
+      const fakeServer = await startFakeOpenAIServer(({ body }) => {
+        const tools = body['tools'];
+        const advertisesWriteFile =
+          Array.isArray(tools) &&
+          tools.some(
+            (entry) =>
+              (entry as { function?: { name?: unknown } }).function?.name ===
+              'write_file',
+          );
+        if (!firstToolServed && advertisesWriteFile) {
+          firstToolServed = true;
           return {
             toolCalls: [
               fakeToolCall('write_file', {
@@ -696,7 +720,12 @@ describe('Permission Control (E2E)', () => {
             ],
           };
         }
-        if (requestIndex === 2) {
+        if (
+          !secondToolServed &&
+          advertisesWriteFile &&
+          userMessageContains(body, `Create ${secondFile}.`)
+        ) {
+          secondToolServed = true;
           return {
             toolCalls: [
               fakeToolCall('write_file', {
@@ -793,7 +822,6 @@ describe('Permission Control (E2E)', () => {
         ]);
 
         expect(secondResponseReceived).toBe(true);
-        expect(fakeServer.requests).toHaveLength(4);
         expect(toolCalls).toHaveLength(1);
         await expect(helper.readFile(secondFile)).resolves.toBe('second');
       } finally {

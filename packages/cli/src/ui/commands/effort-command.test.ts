@@ -103,11 +103,13 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
-  it.each(['high', 'max', 'low'] as const)(
+  it.each(['low', 'high', 'max'] as const)(
     'reports the effective state for saved %s without changing settings',
     async (effort) => {
+      // deepseek-v4-pro on Token Plan offers only high/max, so a saved low
+      // falls back to the provider default.
       const spec = tokenPlanProvider.models!.find(
-        (m) => m.id === 'qwen3.8-max',
+        (m) => m.id === 'deepseek-v4-pro',
       )!;
       Object.assign(context.services.config!, {
         getModel: () => spec.id,
@@ -121,8 +123,8 @@ describe('effortCommand', () => {
       );
       expect((res as { content: string }).content).toContain(
         effort === 'low'
-          ? 'Current reasoning effort:'
-          : 'using the model/provider default',
+          ? 'using the model/provider default'
+          : 'Current reasoning effort:',
       );
       expect(setValue).not.toHaveBeenCalled();
       expect(setReasoningEffort).not.toHaveBeenCalled();
@@ -254,6 +256,21 @@ describe('effortCommand', () => {
     const res = await effortCommand.action!(context, 'low');
     expect(res).toMatchObject({ messageType: 'error' });
     expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
+  it('rejects a tier the built-in table rules out, with no declaration', async () => {
+    // gpt-5-pro accepts only `high`, and the wire path already re-tiers anything
+    // else, so the command must not offer or persist it (#17411).
+    Object.assign(context.services.config!, {
+      getModel: () => 'gpt-5-pro',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => undefined,
+    });
+    const res = await effortCommand.action!(context, 'low');
+    expect(res).toMatchObject({ messageType: 'error' });
+    expect((res as { content: string }).content).toContain('Choose one of:');
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
   });
 
   it('does not offer tier autocompletion (tiers are hinted via argumentHint)', () => {

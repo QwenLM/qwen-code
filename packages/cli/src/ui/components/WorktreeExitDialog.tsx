@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { execFile } from 'node:child_process';
+import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core';
 import { Colors } from '../colors.js';
 import {
   RadioButtonSelect,
@@ -19,6 +20,14 @@ interface WorktreeExitDialogProps {
   branch: string;
   worktreePath: string;
   originalHeadCommit: string;
+  /**
+   * The commit the worktree was created at. Distinct from
+   * `originalHeadCommit` (the HEAD of the original checkout) when a branch
+   * worktree was created from a sibling managed worktree; the new-commit
+   * count must range from the creation base, not the original checkout's
+   * HEAD, or it includes commits the worktree never had.
+   */
+  worktreeBase?: string;
   onKeep: () => void;
   onRemove: () => void;
   onCancel: () => void;
@@ -43,7 +52,7 @@ function execGit(args: string[], cwd: string): Promise<GitResult> {
   return new Promise((resolve) => {
     execFile(
       'git',
-      args,
+      [...NO_EXEC_CONFIG, ...args],
       { cwd, timeout: 5000 },
       (error, stdout: string | Buffer) => {
         const out = typeof stdout === 'string' ? stdout : stdout.toString();
@@ -99,10 +108,14 @@ export function WorktreeExitDialog({
   branch,
   worktreePath,
   originalHeadCommit,
+  worktreeBase,
   onKeep,
   onRemove,
   onCancel,
 }: WorktreeExitDialogProps) {
+  // Count new commits from the worktree's creation base, falling back to
+  // originalHeadCommit for sidecars written before worktreeBase existed.
+  const creationBase = worktreeBase ?? originalHeadCommit;
   const [loading, setLoading] = useState(true);
   const [changedFilesCount, setChangedFilesCount] = useState(0);
   const [newCommitCount, setNewCommitCount] = useState(0);
@@ -119,10 +132,10 @@ export function WorktreeExitDialog({
     let cancelled = false;
     async function loadDirtyState() {
       const [statusRes, commitsRes] = await Promise.all<GitResult>([
-        execGit(['status', '--porcelain'], worktreePath),
-        originalHeadCommit
+        execGit(['--no-optional-locks', 'status', '--porcelain'], worktreePath),
+        creationBase
           ? execGit(
-              ['rev-list', '--count', `${originalHeadCommit}..HEAD`],
+              ['rev-list', '--count', `${creationBase}..HEAD`],
               worktreePath,
             )
           : Promise.resolve<GitResult>({ stdout: '0', code: 0 }),
@@ -154,7 +167,7 @@ export function WorktreeExitDialog({
     return () => {
       cancelled = true;
     };
-  }, [worktreePath, originalHeadCommit]);
+  }, [worktreePath, creationBase]);
 
   useKeypress(
     (key) => {
@@ -205,7 +218,7 @@ export function WorktreeExitDialog({
     >
       <Box flexDirection="column" marginBottom={1}>
         <Text color={Colors.AccentBlue} bold>
-          {`⎇ Active worktree: "${slug}" (${branch})`}
+          {`⎇ Active worktree: "${slug}" (${branch || 'detached HEAD'})`}
         </Text>
       </Box>
 
@@ -224,7 +237,7 @@ export function WorktreeExitDialog({
         <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
           {newCommitCount > 0 && (
             <Text color={Colors.Gray}>
-              {`• ${newCommitCount} new commit(s) on ${branch}`}
+              {`• ${newCommitCount} new commit(s) on ${branch || 'detached HEAD'}`}
             </Text>
           )}
           {changedFilesCount > 0 && (

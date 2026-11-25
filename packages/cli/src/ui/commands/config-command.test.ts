@@ -176,6 +176,15 @@ describe('configCommand', () => {
       },
     );
 
+    it('turns the unset unified agent loop setting on', async () => {
+      const { ctx, setValuesMock } = createMockContext({});
+      await configCommand.action!(ctx, 'experimental.unifiedAgentLoop');
+
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'experimental.unifiedAgentLoop', value: true },
+      ]);
+    });
+
     it('turns an unset tri-state web search setting off', async () => {
       const { ctx, setValuesMock } = createMockContext({});
       const result = await configCommand.action!(
@@ -471,6 +480,20 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('requires a restart'),
       });
+    });
+
+    it('shows restart warning for Goal cadence settings', async () => {
+      const { ctx, setValuesMock } = createMockContext({});
+      const result = await configCommand.action!(ctx, 'model.goalMaxTurns=20');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('requires a restart'),
+      });
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'model.goalMaxTurns', value: 20 },
+      ]);
     });
   });
 

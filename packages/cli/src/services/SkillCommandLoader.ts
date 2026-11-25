@@ -6,6 +6,8 @@
 
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  getTurnSkillSnapshot,
+  getSkillSource,
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
@@ -28,6 +30,7 @@ import type {
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
+import { extensionOwnerLabel } from './commandMetadata.js';
 
 const debugLogger = createDebugLogger('SKILL_COMMAND_LOADER');
 
@@ -36,7 +39,12 @@ export async function recordAutoSkillCommandUsage(
   command: SlashCommand,
 ): Promise<void> {
   const detail = command.skillDetail;
-  if (!config || detail?.level !== 'project' || !detail.filePath) {
+  if (
+    !config ||
+    config.getShellExecutionSandbox?.() ||
+    detail?.level !== 'project' ||
+    !detail.filePath
+  ) {
     return;
   }
   try {
@@ -112,7 +120,10 @@ export class SkillCommandLoader implements ICommandLoader {
             : true;
 
         const sourceLabel = isExtension
-          ? `${t('Extension:')} ${skill.extensionDisplayName ?? skill.extensionName ?? 'unknown'}`
+          ? extensionOwnerLabel({
+              name: skill.extensionName,
+              displayName: skill.extensionDisplayName,
+            })
           : skill.level === 'project'
             ? t('Project')
             : t('User');
@@ -142,11 +153,42 @@ export class SkillCommandLoader implements ICommandLoader {
             filePath: skill.filePath,
             level: skill.level,
             ...(isExtension && skill.extensionName
-              ? { extensionName: skill.extensionName }
+              ? {
+                  extensionName: skill.extensionName,
+                  authoredName: skill.authoredName,
+                }
               : {}),
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
-            if (this.config && !this.config.isSkillEnabled(skill)) {
+            const snapshot = getTurnSkillSnapshot();
+            const selected = snapshot
+              ? snapshot.skills.find(
+                  (candidate) =>
+                    candidate.name === skill.name &&
+                    candidate.level === skill.level &&
+                    candidate.extensionName === skill.extensionName,
+                )
+              : skill;
+            if (!selected || selected.userInvocable === false) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: `Skill "${skill.name}" is unavailable in this turn.`,
+              };
+            }
+
+            if (this.config?.getShellExecutionSandbox?.()) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content:
+                  'Skill commands are not yet supported with tools.executionSandbox.',
+              };
+            }
+            if (
+              this.config &&
+              !this.config.isSkillEnabled(getSkillSource(selected))
+            ) {
               return {
                 type: 'message',
                 messageType: 'error',
@@ -158,11 +200,11 @@ export class SkillCommandLoader implements ICommandLoader {
             // Skill tool does when the model invokes it. Registering only the
             // allowedTools here let a skill's PreToolUse gate silently fail
             // open on this path (#11067).
-            applySkillSideEffects(this.config, skill);
+            await applySkillSideEffects(this.config, selected);
 
             const body = buildSkillLlmContent(
-              dirname(skill.filePath),
-              skill.body,
+              dirname(selected.filePath),
+              selected.body,
             );
 
             // See BundledSkillLoader: the arguments are written down for the

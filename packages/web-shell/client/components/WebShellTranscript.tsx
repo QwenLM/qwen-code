@@ -1,3 +1,4 @@
+import { getSourceEntries } from './sources/sourceEntries';
 import '../styles/globals.css';
 import 'katex/dist/katex.min.css';
 import {
@@ -8,7 +9,11 @@ import {
   type CSSProperties,
   type ReactElement,
 } from 'react';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonTranscriptBlock,
+  SessionSource,
+  DaemonSessionAttachmentReference,
+} from '@qwen-code/sdk/daemon';
 import { CompactModeContext, TodoContextsProvider } from '../WebShellContexts';
 import {
   WebShellCustomizationProvider,
@@ -21,14 +26,17 @@ import {
   type UserMessageContentRenderer,
   type WebShellComposerTagIconMap,
   type WebShellMarkdownCustomization,
+  type WebShellSource,
+  type WebShellSourceReference,
+  type WebShellSourceIconResolver,
 } from '../customization';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageList } from './MessageList';
 import { RootErrorFallback } from './RootErrorFallback';
 import {
-  getTranslator,
   I18nProvider,
   normalizeLanguage,
+  useTranslator,
   type WebShellLanguage,
 } from '../i18n';
 import { transcriptBlocksToLocalizedMessages } from '../adapters/localizedMessages';
@@ -53,7 +61,21 @@ export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
   renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
+  language?:
+    | 'en'
+    | 'zh-CN'
+    | 'zh'
+    | 'zh-cn'
+    | 'zh-TW'
+    | 'zh-tw'
+    | 'zh-HK'
+    | 'zh-hk'
+    | 'zh-Hant'
+    | 'zh-hant'
+    | 'zh-MO'
+    | 'zh-mo'
+    | 'ru'
+    | 'ru-ru';
   className?: string;
   style?: CSSProperties;
   chatMaxWidth?: number;
@@ -63,7 +85,15 @@ export interface WebShellTranscriptProps {
   collapseCompletedTurns?: boolean;
   markdownTableMode?: MarkdownTableMode;
   virtualScrollThreshold?: number;
+  /** Extra transcript rows to render on each side of the viewport when virtualized. Defaults to 15. */
+  overscan?: number;
   markdown?: WebShellMarkdownCustomization;
+  sourceSessionId?: string;
+  sources?: readonly SessionSource[];
+  sourceAttachments?: readonly DaemonSessionAttachmentReference[];
+  sourceReferences?: readonly WebShellSourceReference[];
+  getAssistantSourcesIcon?: WebShellSourceIconResolver;
+  onSourceOpen?: (source: WebShellSource) => void;
   composerTagIcons?: WebShellComposerTagIconMap;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   artifact?: WebShellArtifactCustomization;
@@ -94,11 +124,15 @@ function getChatWidthStyle(chatMaxWidth: number | undefined): CSSProperties {
       ? chatMaxWidth
       : DEFAULT_CHAT_MAX_WIDTH;
   const contentWidth = `${width}px`;
-  const shellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  // Reserve timeline gutters where they fit without over-shrinking phone layouts.
+  const responsiveContentWidth = `min(${contentWidth}, clamp(440px, 85cqw, calc(100cqw - 128px)))`;
+  const regularShellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
-    '--chat-regular-shell-width': shellWidth,
+    '--chat-regular-shell-width': regularShellWidth,
     '--chat-content-width': contentWidth,
+    '--chat-responsive-content-width': responsiveContentWidth,
     '--chat-shell-width': shellWidth,
   } as CSSProperties;
 }
@@ -117,7 +151,14 @@ function WebShellTranscriptContent({
   collapseCompletedTurns,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
+  overscan,
   markdown,
+  sourceSessionId,
+  sources,
+  sourceAttachments,
+  sourceReferences,
+  getAssistantSourcesIcon,
+  onSourceOpen,
   composerTagIcons,
   artifact,
   renderToolHeaderExtra,
@@ -133,10 +174,14 @@ function WebShellTranscriptContent({
     !documentMode && (collapseCompletedTurns ?? true);
   const effectiveMarkdownTableMode = documentMode ? 'basic' : markdownTableMode;
   const resolvedLanguage = resolveLanguage(language);
-  const t = useMemo(() => getTranslator(resolvedLanguage), [resolvedLanguage]);
+  const t = useTranslator(resolvedLanguage);
   const messages = useMemo(
     () => transcriptBlocksToLocalizedMessages(blocks, t, documentMode),
     [blocks, documentMode, t],
+  );
+  const sourceEntries = useMemo(
+    () => getSourceEntries(sources ?? [], sourceAttachments ?? []),
+    [sources, sourceAttachments],
   );
   const todoDetails = useMemo(() => computeTodoDetails(messages), [messages]);
   const todoTimeline = useMemo(() => computeTodoTimeline(messages), [messages]);
@@ -153,7 +198,10 @@ function WebShellTranscriptContent({
       compactThinking,
       collapseCompletedTurns: effectiveCollapseCompletedTurns,
       markdownTableMode: effectiveMarkdownTableMode,
+      overscan,
       markdown,
+      sourceReferences,
+      getAssistantSourcesIcon,
     }),
     [
       artifact,
@@ -161,7 +209,10 @@ function WebShellTranscriptContent({
       compactThinking,
       composerTagIcons,
       markdown,
+      sourceReferences,
+      getAssistantSourcesIcon,
       effectiveMarkdownTableMode,
+      overscan,
       parseUserMessageContent,
       renderAssistantTurnFooter,
       renderComposerTag,
@@ -279,6 +330,11 @@ function WebShellTranscriptContent({
                         >
                           <MessageList
                             messages={messages}
+                            sourceSessionId={sourceSessionId}
+                            sourceEntries={
+                              documentMode ? undefined : sourceEntries
+                            }
+                            onSourceOpen={onSourceOpen}
                             pendingApproval={null}
                             isResponding={false}
                             workspaceCwd={workspaceCwd}

@@ -129,6 +129,20 @@ describe('loadProjectMcpServers', () => {
     expect(servers['a']).toMatchObject({ command: 'x', scope: 'project' });
   });
 
+  it('tolerates a UTF-8 BOM written by editors on Windows', () => {
+    write('\uFEFF' + JSON.stringify({ mcpServers: { a: { command: 'x' } } }));
+    const { servers, errors } = loadProjectMcpServers(dir);
+    expect(errors).toEqual([]);
+    expect(servers['a']).toMatchObject({ command: 'x', scope: 'project' });
+  });
+
+  it('tolerates a UTF-8 BOM in strict mode', () => {
+    write('\uFEFF' + JSON.stringify({ mcpServers: { a: { command: 'x' } } }));
+    const { servers, errors } = loadProjectMcpServers(dir, { strict: true });
+    expect(errors).toEqual([]);
+    expect(servers['a']).toMatchObject({ command: 'x', scope: 'project' });
+  });
+
   it('reports malformed JSON without throwing, and loads nothing', () => {
     write('{ not valid json');
     const result = loadProjectMcpServers(dir);

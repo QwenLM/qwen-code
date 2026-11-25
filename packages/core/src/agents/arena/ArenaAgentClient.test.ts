@@ -15,6 +15,20 @@ import { uiTelemetryService } from '../../telemetry/uiTelemetry.js';
 import type { SessionMetrics } from '../../telemetry/uiTelemetry.js';
 import { ToolCallDecision } from '../../telemetry/tool-call-decision.js';
 
+type ModelMetrics = SessionMetrics['models'][string];
+const modelEntry = (
+  totalRequests: number,
+  totalLatencyMs: number,
+  prompt: number,
+  candidates: number,
+  total: number,
+  totalErrors = 0,
+): ModelMetrics => ({
+  api: { totalRequests, totalErrors, totalLatencyMs },
+  tokens: { prompt, candidates, total, cached: 0, thoughts: 0 },
+  bySource: {},
+});
+
 const createMockMetrics = (
   overrides: Partial<{
     totalRequests: number;
@@ -25,30 +39,23 @@ const createMockMetrics = (
     totalCalls: number;
     totalSuccess: number;
     totalFail: number;
+    totalDurationMs: number;
   }> = {},
 ): SessionMetrics => ({
   models: {
-    'test-model': {
-      api: {
-        totalRequests: overrides.totalRequests ?? 0,
-        totalErrors: 0,
-        totalLatencyMs: overrides.totalLatencyMs ?? 0,
-      },
-      tokens: {
-        prompt: overrides.promptTokens ?? 0,
-        candidates: overrides.candidatesTokens ?? 0,
-        total: overrides.totalTokens ?? 0,
-        cached: 0,
-        thoughts: 0,
-      },
-      bySource: {},
-    },
+    'test-model': modelEntry(
+      overrides.totalRequests ?? 0,
+      overrides.totalLatencyMs ?? 0,
+      overrides.promptTokens ?? 0,
+      overrides.candidatesTokens ?? 0,
+      overrides.totalTokens ?? 0,
+    ),
   },
   tools: {
     totalCalls: overrides.totalCalls ?? 0,
     totalSuccess: overrides.totalSuccess ?? 0,
     totalFail: overrides.totalFail ?? 0,
-    totalDurationMs: 0,
+    totalDurationMs: overrides.totalDurationMs ?? 0,
     totalDecisions: {
       [ToolCallDecision.ACCEPT]: 0,
       [ToolCallDecision.REJECT]: 0,
@@ -62,6 +69,32 @@ const createMockMetrics = (
     totalLinesRemoved: 0,
   },
 });
+
+const ENV_KEYS = [
+  'ARENA_AGENT_ID',
+  'ARENA_SESSION_ID',
+  'ARENA_SESSION_DIR',
+] as const;
+type ArenaEnv = Partial<Record<(typeof ENV_KEYS)[number], string>>;
+
+/** Calls create() with exactly `env` set (others deleted), then restores. */
+function createWithEnv(env: ArenaEnv): ArenaAgentClient | null {
+  const saved = ENV_KEYS.map((k) => process.env[k]);
+  const apply = (values: Array<string | undefined>) =>
+    ENV_KEYS.forEach((k, i) => {
+      if (values[i] === undefined) delete process.env[k];
+      else process.env[k] = values[i];
+    });
+  apply(ENV_KEYS.map((k) => env[k]));
+  try {
+    return ArenaAgentClient.create();
+  } finally {
+    apply(saved);
+  }
+}
+
+const setMetrics = (metrics: SessionMetrics) =>
+  vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(metrics);
 
 describe('ArenaAgentClient', () => {
   let tempDir: string;
@@ -82,139 +115,66 @@ describe('ArenaAgentClient', () => {
     }
   });
 
+  const newReporter = async (agentId = 'model-a') => {
+    const reporter = new ArenaAgentClient(agentId, tempDir);
+    await reporter.init();
+    return reporter;
+  };
+  const filePath = (dir: 'agents' | 'control', agentId = 'model-a') =>
+    path.join(tempDir, dir, `${safeAgentId(agentId)}.json`);
+  const readStatus = async (agentId = 'model-a') =>
+    JSON.parse(await fs.readFile(filePath('agents', agentId), 'utf-8'));
+  const writeControl = (signal: ArenaControlSignal) =>
+    fs.writeFile(filePath('control'), JSON.stringify(signal), 'utf-8');
+
   describe('create() factory', () => {
     it('should return null when ARENA_AGENT_ID is not set', () => {
-      const original = process.env['ARENA_AGENT_ID'];
-      const originalSession = process.env['ARENA_SESSION_ID'];
-      const originalDir = process.env['ARENA_SESSION_DIR'];
-      delete process.env['ARENA_AGENT_ID'];
-      delete process.env['ARENA_SESSION_ID'];
-      delete process.env['ARENA_SESSION_DIR'];
-
-      const reporter = ArenaAgentClient.create();
-      expect(reporter).toBeNull();
-
-      // Restore
-      if (original !== undefined) {
-        process.env['ARENA_AGENT_ID'] = original;
-      }
-      if (originalSession !== undefined) {
-        process.env['ARENA_SESSION_ID'] = originalSession;
-      }
-      if (originalDir !== undefined) {
-        process.env['ARENA_SESSION_DIR'] = originalDir;
-      }
+      expect(createWithEnv({})).toBeNull();
     });
 
     it('should return null when ARENA_SESSION_ID is not set', () => {
-      const originalAgent = process.env['ARENA_AGENT_ID'];
-      const originalSession = process.env['ARENA_SESSION_ID'];
-      const originalDir = process.env['ARENA_SESSION_DIR'];
-
-      process.env['ARENA_AGENT_ID'] = 'test-agent';
-      delete process.env['ARENA_SESSION_ID'];
-      process.env['ARENA_SESSION_DIR'] = tempDir;
-
-      const reporter = ArenaAgentClient.create();
-      expect(reporter).toBeNull();
-
-      // Restore
-      if (originalAgent !== undefined) {
-        process.env['ARENA_AGENT_ID'] = originalAgent;
-      } else {
-        delete process.env['ARENA_AGENT_ID'];
-      }
-      if (originalSession !== undefined) {
-        process.env['ARENA_SESSION_ID'] = originalSession;
-      }
-      if (originalDir !== undefined) {
-        process.env['ARENA_SESSION_DIR'] = originalDir;
-      } else {
-        delete process.env['ARENA_SESSION_DIR'];
-      }
+      expect(
+        createWithEnv({
+          ARENA_AGENT_ID: 'test-agent',
+          ARENA_SESSION_DIR: tempDir,
+        }),
+      ).toBeNull();
     });
 
     it('should return null when ARENA_SESSION_DIR is not set', () => {
-      const originalAgent = process.env['ARENA_AGENT_ID'];
-      const originalSession = process.env['ARENA_SESSION_ID'];
-      const originalDir = process.env['ARENA_SESSION_DIR'];
-
-      process.env['ARENA_AGENT_ID'] = 'test-agent';
-      process.env['ARENA_SESSION_ID'] = 'test-session';
-      delete process.env['ARENA_SESSION_DIR'];
-
-      const reporter = ArenaAgentClient.create();
-      expect(reporter).toBeNull();
-
-      // Restore
-      if (originalAgent !== undefined) {
-        process.env['ARENA_AGENT_ID'] = originalAgent;
-      } else {
-        delete process.env['ARENA_AGENT_ID'];
-      }
-      if (originalSession !== undefined) {
-        process.env['ARENA_SESSION_ID'] = originalSession;
-      } else {
-        delete process.env['ARENA_SESSION_ID'];
-      }
-      if (originalDir !== undefined) {
-        process.env['ARENA_SESSION_DIR'] = originalDir;
-      } else {
-        delete process.env['ARENA_SESSION_DIR'];
-      }
+      expect(
+        createWithEnv({
+          ARENA_AGENT_ID: 'test-agent',
+          ARENA_SESSION_ID: 'test-session',
+        }),
+      ).toBeNull();
     });
 
     it('should return an instance when all env vars are set', () => {
-      const originalAgent = process.env['ARENA_AGENT_ID'];
-      const originalSession = process.env['ARENA_SESSION_ID'];
-      const originalDir = process.env['ARENA_SESSION_DIR'];
-
-      process.env['ARENA_AGENT_ID'] = 'test-agent';
-      process.env['ARENA_SESSION_ID'] = 'test-session';
-      process.env['ARENA_SESSION_DIR'] = tempDir;
-
-      const reporter = ArenaAgentClient.create();
+      const reporter = createWithEnv({
+        ARENA_AGENT_ID: 'test-agent',
+        ARENA_SESSION_ID: 'test-session',
+        ARENA_SESSION_DIR: tempDir,
+      });
       expect(reporter).toBeInstanceOf(ArenaAgentClient);
-
-      // Restore
-      if (originalAgent !== undefined) {
-        process.env['ARENA_AGENT_ID'] = originalAgent;
-      } else {
-        delete process.env['ARENA_AGENT_ID'];
-      }
-      if (originalSession !== undefined) {
-        process.env['ARENA_SESSION_ID'] = originalSession;
-      } else {
-        delete process.env['ARENA_SESSION_ID'];
-      }
-      if (originalDir !== undefined) {
-        process.env['ARENA_SESSION_DIR'] = originalDir;
-      } else {
-        delete process.env['ARENA_SESSION_DIR'];
-      }
     });
   });
 
   describe('init()', () => {
     it('should create the agents/ and control/ directories', async () => {
-      const reporter = new ArenaAgentClient('agent-1', tempDir);
-      await reporter.init();
+      await newReporter('agent-1');
 
-      const agentsDir = path.join(tempDir, 'agents');
-      const controlDir = path.join(tempDir, 'control');
-      const agentsStat = await fs.stat(agentsDir);
-      const controlStat = await fs.stat(controlDir);
+      const agentsStat = await fs.stat(path.join(tempDir, 'agents'));
+      const controlStat = await fs.stat(path.join(tempDir, 'control'));
       expect(agentsStat.isDirectory()).toBe(true);
       expect(controlStat.isDirectory()).toBe(true);
     });
 
     it('should be idempotent', async () => {
-      const reporter = new ArenaAgentClient('agent-1', tempDir);
-      await reporter.init();
+      const reporter = await newReporter('agent-1');
       await reporter.init(); // Should not throw
 
-      const agentsDir = path.join(tempDir, 'agents');
-      const stat = await fs.stat(agentsDir);
+      const stat = await fs.stat(path.join(tempDir, 'agents'));
       expect(stat.isDirectory()).toBe(true);
     });
   });
@@ -222,10 +182,8 @@ describe('ArenaAgentClient', () => {
   describe('updateStatus()', () => {
     it('should write per-agent status file with stats from telemetry', async () => {
       const agentId = 'model-a';
-      const reporter = new ArenaAgentClient(agentId, tempDir);
-      await reporter.init();
-
-      vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(
+      const reporter = await newReporter(agentId);
+      setMetrics(
         createMockMetrics({
           totalRequests: 3,
           totalTokens: 1500,
@@ -238,13 +196,7 @@ describe('ArenaAgentClient', () => {
       );
 
       await reporter.updateStatus('Editing files');
-
-      const statusPath = path.join(
-        tempDir,
-        'agents',
-        `${safeAgentId(agentId)}.json`,
-      );
-      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
+      const content = await readStatus(agentId);
 
       expect(content.agentId).toBe(agentId);
       expect(content.status).toBe('running');
@@ -262,35 +214,22 @@ describe('ArenaAgentClient', () => {
     });
 
     it('should perform atomic write (no partial reads)', async () => {
-      const agentId = 'model-a';
-      const reporter = new ArenaAgentClient(agentId, tempDir);
-      await reporter.init();
+      const reporter = await newReporter();
 
-      // Write status multiple times rapidly
-      const promises = [];
-      for (let i = 0; i < 10; i++) {
-        promises.push(reporter.updateStatus());
-      }
-      await Promise.all(promises);
-
-      // The file should be valid JSON (no corruption from concurrent writes)
-      const statusPath = path.join(
-        tempDir,
-        'agents',
-        `${safeAgentId(agentId)}.json`,
+      // Write status multiple times rapidly; the file must stay valid JSON.
+      await Promise.all(
+        Array.from({ length: 10 }, () => reporter.updateStatus()),
       );
-      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
-      expect(content.agentId).toBe(agentId);
+
+      const content = await readStatus();
+      expect(content.agentId).toBe('model-a');
       expect(content.status).toBe('running');
     });
 
     it('should reflect latest telemetry on each call', async () => {
-      const agentId = 'model-a';
-      const reporter = new ArenaAgentClient(agentId, tempDir);
-      await reporter.init();
+      const reporter = await newReporter();
 
-      // First update
-      vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(
+      setMetrics(
         createMockMetrics({
           totalRequests: 1,
           totalTokens: 100,
@@ -298,9 +237,7 @@ describe('ArenaAgentClient', () => {
         }),
       );
       await reporter.updateStatus();
-
-      // Second update with updated telemetry
-      vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(
+      setMetrics(
         createMockMetrics({
           totalRequests: 2,
           totalTokens: 200,
@@ -309,96 +246,57 @@ describe('ArenaAgentClient', () => {
       );
       await reporter.updateStatus();
 
-      const statusPath = path.join(
-        tempDir,
-        'agents',
-        `${safeAgentId(agentId)}.json`,
-      );
-      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
-
+      const content = await readStatus();
       expect(content.rounds).toBe(2);
       expect(content.stats.totalTokens).toBe(200);
       expect(content.stats.toolCalls).toBe(8);
     });
 
     it('should auto-initialize if not yet initialized', async () => {
-      const agentId = 'model-a';
-      const reporter = new ArenaAgentClient(agentId, tempDir);
       // Skip init() call
+      await new ArenaAgentClient('model-a', tempDir).updateStatus();
 
-      await reporter.updateStatus();
-
-      const statusPath = path.join(
-        tempDir,
-        'agents',
-        `${safeAgentId(agentId)}.json`,
-      );
-      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
-      expect(content.agentId).toBe(agentId);
+      const content = await readStatus();
+      expect(content.agentId).toBe('model-a');
     });
   });
 
   describe('checkControlSignal()', () => {
     it('should return null when no control file exists', async () => {
-      const agentId = 'model-a';
-      const reporter = new ArenaAgentClient(agentId, tempDir);
-      await reporter.init();
+      const reporter = await newReporter();
 
       const signal = await reporter.checkControlSignal();
       expect(signal).toBeNull();
     });
 
     it('should read and delete control file', async () => {
-      const agentId = 'model-a';
-      const reporter = new ArenaAgentClient(agentId, tempDir);
-      await reporter.init();
-
-      // Write a control signal
-      const controlSignal: ArenaControlSignal = {
+      const reporter = await newReporter();
+      await writeControl({
         type: 'shutdown',
         reason: 'User cancelled',
         timestamp: Date.now(),
-      };
-      const controlPath = path.join(
-        tempDir,
-        'control',
-        `${safeAgentId(agentId)}.json`,
-      );
-      await fs.writeFile(controlPath, JSON.stringify(controlSignal), 'utf-8');
+      });
 
-      // Read it
       const signal = await reporter.checkControlSignal();
       expect(signal).not.toBeNull();
       expect(signal!.type).toBe('shutdown');
       expect(signal!.reason).toBe('User cancelled');
 
       // File should be deleted (consumed)
-      await expect(fs.access(controlPath)).rejects.toThrow();
+      await expect(fs.access(filePath('control'))).rejects.toThrow();
     });
 
     it('should return null on subsequent reads (consume-once)', async () => {
-      const agentId = 'model-a';
-      const reporter = new ArenaAgentClient(agentId, tempDir);
-      await reporter.init();
-
-      // Write a control signal
-      const controlSignal: ArenaControlSignal = {
+      const reporter = await newReporter();
+      await writeControl({
         type: 'cancel',
         reason: 'Timeout',
         timestamp: Date.now(),
-      };
-      const controlPath = path.join(
-        tempDir,
-        'control',
-        `${safeAgentId(agentId)}.json`,
-      );
-      await fs.writeFile(controlPath, JSON.stringify(controlSignal), 'utf-8');
+      });
 
-      // First read should return the signal
       const first = await reporter.checkControlSignal();
       expect(first).not.toBeNull();
 
-      // Second read should return null
       const second = await reporter.checkControlSignal();
       expect(second).toBeNull();
     });
@@ -406,38 +304,20 @@ describe('ArenaAgentClient', () => {
 
   describe('reportCompleted()', () => {
     it('should write status with completed state and optional summary', async () => {
-      const agentId = 'model-a';
-      const reporter = new ArenaAgentClient(agentId, tempDir);
-      await reporter.init();
-
+      const reporter = await newReporter();
       await reporter.reportCompleted('Successfully implemented feature X');
 
-      const statusPath = path.join(
-        tempDir,
-        'agents',
-        `${safeAgentId(agentId)}.json`,
-      );
-      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
-
+      const content = await readStatus();
       expect(content.status).toBe('completed');
       expect(content.finalSummary).toBe('Successfully implemented feature X');
       expect(content.error).toBeNull();
     });
 
     it('should write status with idle state and no summary', async () => {
-      const agentId = 'model-a';
-      const reporter = new ArenaAgentClient(agentId, tempDir);
-      await reporter.init();
-
+      const reporter = await newReporter();
       await reporter.reportCompleted();
 
-      const statusPath = path.join(
-        tempDir,
-        'agents',
-        `${safeAgentId(agentId)}.json`,
-      );
-      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
-
+      const content = await readStatus();
       expect(content.status).toBe('completed');
       expect(content.finalSummary).toBeNull();
       expect(content.error).toBeNull();
@@ -446,65 +326,22 @@ describe('ArenaAgentClient', () => {
 
   describe('stats aggregation and wall-clock durationMs', () => {
     it('should aggregate multi-model stats and use wall-clock durationMs', async () => {
-      vi.mocked(uiTelemetryService.getMetrics).mockReturnValue({
-        models: {
-          'model-a': {
-            api: {
-              totalRequests: 3,
-              totalErrors: 0,
-              totalLatencyMs: 1000,
-            },
-            tokens: {
-              prompt: 100,
-              candidates: 50,
-              total: 150,
-              cached: 0,
-              thoughts: 0,
-            },
-            bySource: {},
-          },
-          'model-b': {
-            api: {
-              totalRequests: 2,
-              totalErrors: 1,
-              totalLatencyMs: 500,
-            },
-            tokens: {
-              prompt: 200,
-              candidates: 100,
-              total: 300,
-              cached: 0,
-              thoughts: 0,
-            },
-            bySource: {},
-          },
-        },
-        tools: {
+      setMetrics({
+        ...createMockMetrics({
           totalCalls: 10,
           totalSuccess: 8,
           totalFail: 2,
           totalDurationMs: 2000,
-          totalDecisions: {
-            [ToolCallDecision.ACCEPT]: 0,
-            [ToolCallDecision.REJECT]: 0,
-            [ToolCallDecision.MODIFY]: 0,
-            [ToolCallDecision.AUTO_ACCEPT]: 0,
-          },
-          byName: {},
+        }),
+        models: {
+          'model-a': modelEntry(3, 1000, 100, 50, 150),
+          'model-b': modelEntry(2, 500, 200, 100, 300, 1),
         },
-        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
       });
 
-      const reporter = new ArenaAgentClient('model-a', tempDir);
-      await reporter.init();
+      const reporter = await newReporter();
       await reporter.updateStatus();
-
-      const statusPath = path.join(
-        tempDir,
-        'agents',
-        `${safeAgentId('model-a')}.json`,
-      );
-      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
+      const content = await readStatus();
 
       expect(content.stats.rounds).toBe(5);
       expect(content.stats.totalTokens).toBe(450);
@@ -519,25 +356,11 @@ describe('ArenaAgentClient', () => {
     });
 
     it('should return zeros when no models exist', async () => {
-      vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(
-        createMockMetrics(),
-      );
-      // Override with empty models
-      vi.mocked(uiTelemetryService.getMetrics).mockReturnValue({
-        ...createMockMetrics(),
-        models: {},
-      });
+      setMetrics({ ...createMockMetrics(), models: {} });
 
-      const reporter = new ArenaAgentClient('model-a', tempDir);
-      await reporter.init();
+      const reporter = await newReporter();
       await reporter.updateStatus();
-
-      const statusPath = path.join(
-        tempDir,
-        'agents',
-        `${safeAgentId('model-a')}.json`,
-      );
-      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
+      const content = await readStatus();
 
       expect(content.stats.rounds).toBe(0);
       expect(content.stats.totalTokens).toBe(0);
@@ -549,20 +372,21 @@ describe('ArenaAgentClient', () => {
   });
 
   describe('safeAgentId()', () => {
-    it('should pass through typical model IDs unchanged', () => {
-      expect(safeAgentId('qwen-coder-plus')).toBe('qwen-coder-plus');
-    });
-
-    it('should handle IDs without unsafe characters', () => {
-      expect(safeAgentId('simple-id')).toBe('simple-id');
-    });
-
-    it('should replace slashes with double dashes', () => {
-      expect(safeAgentId('org/model-name')).toBe('org--model-name');
-    });
-
-    it('should handle multiple unsafe characters', () => {
-      expect(safeAgentId('a/b\\c:d')).toBe('a--b--c--d');
+    it.each([
+      [
+        'should pass through typical model IDs unchanged',
+        'qwen-coder-plus',
+        'qwen-coder-plus',
+      ],
+      ['should handle IDs without unsafe characters', 'simple-id', 'simple-id'],
+      [
+        'should replace slashes with double dashes',
+        'org/model-name',
+        'org--model-name',
+      ],
+      ['should handle multiple unsafe characters', 'a/b\\c:d', 'a--b--c--d'],
+    ])('%s', (_title, input, expected) => {
+      expect(safeAgentId(input)).toBe(expected);
     });
   });
 });

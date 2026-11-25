@@ -9,7 +9,9 @@ import type { Content, Part } from '@google/genai';
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
-import { ToolNames } from '../../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
+import { isPersistedOutputStub } from '../../tools/truncation.js';
+import { getToolOutputRecovery } from '../../tools/tool-output-recovery.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -48,7 +50,108 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
   ToolNames.SKILL,
+  ToolNames.SEARCH_MEMORY,
 ]);
+
+export interface MemoryBodyVersion {
+  memoryRef: string;
+  mtimeMs: number;
+}
+
+interface MemoryBodySlice extends MemoryBodyVersion {
+  start: number;
+  end: number;
+  total: number;
+}
+
+function getMemoryBodySlicesForResponse(
+  part: Part | undefined,
+  callIdentityById: ToolCallIdentityById,
+): MemoryBodySlice[] | undefined {
+  if (
+    getResponseToolIdentity(part, callIdentityById)?.name !==
+    ToolNames.SEARCH_MEMORY
+  )
+    return [];
+  const output = part?.functionResponse?.response?.['output'];
+  if (typeof output !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(output) as {
+      mode?: unknown;
+      results?: Array<{
+        ref?: unknown;
+        version?: unknown;
+        content?: unknown;
+        range?: { start?: unknown; end?: unknown; total?: unknown };
+      }>;
+    };
+    if (
+      (parsed.mode !== 'fetch' && parsed.mode !== 'search') ||
+      !Array.isArray(parsed.results)
+    ) {
+      return [];
+    }
+    return parsed.results
+      .filter(
+        (result) =>
+          typeof result.ref === 'string' &&
+          typeof result.version === 'number' &&
+          typeof result.content === 'string' &&
+          result.content.length > 0 &&
+          typeof result.range?.start === 'number' &&
+          typeof result.range.end === 'number' &&
+          typeof result.range.total === 'number',
+      )
+      .map((result) => ({
+        memoryRef: result.ref as string,
+        mtimeMs: result.version as number,
+        start: result.range!.start as number,
+        end: result.range!.end as number,
+        total: result.range!.total as number,
+      }));
+  } catch {
+    return undefined;
+  }
+}
+
+function memoryBodyVersionKey(body: MemoryBodyVersion): string {
+  return `${body.memoryRef}\0${body.mtimeMs}`;
+}
+
+export function collectResidentMemoryBodies(
+  history: Content[],
+): MemoryBodyVersion[] {
+  const slicesByVersion = new Map<string, MemoryBodySlice[]>();
+  const callIdentityById = buildToolCallIdentityById(history);
+  for (const content of history) {
+    for (const part of content.parts ?? []) {
+      for (const slice of getMemoryBodySlicesForResponse(
+        part,
+        callIdentityById,
+      ) ?? []) {
+        const key = memoryBodyVersionKey(slice);
+        const slices = slicesByVersion.get(key) ?? [];
+        slices.push(slice);
+        slicesByVersion.set(key, slices);
+      }
+    }
+  }
+  const complete: MemoryBodyVersion[] = [];
+  for (const slices of slicesByVersion.values()) {
+    const sorted = [...slices].sort((a, b) => a.start - b.start);
+    const first = sorted[0];
+    if (!first || first.start !== 0) continue;
+    let coveredUntil = 0;
+    for (const slice of sorted) {
+      if (slice.total !== first.total || slice.start > coveredUntil) break;
+      coveredUntil = Math.max(coveredUntil, slice.end);
+    }
+    if (coveredUntil >= first.total) {
+      complete.push({ memoryRef: first.memoryRef, mtimeMs: first.mtimeMs });
+    }
+  }
+  return complete;
+}
 
 /**
  * Tools whose blanked output drops a file's bytes from history. We
@@ -56,15 +159,110 @@ const COMPACTABLE_TOOLS = new Set<string>([
  * fast-path (issue #4239) instead of wiping the whole cache. All three
  * take the target as a `file_path` arg.
  */
-const FILE_PATH_TOOLS = new Set<string>([
+export const FILE_PATH_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
 ]);
 
+interface ToolCallIdentity {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+type ToolCallIdentityById = Map<string, ToolCallIdentity[]>;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function resolveTrackedToolName(name: string): string {
+  // History parts are unvalidated: a malformed bridged entry may carry a
+  // truthy non-string name, and canonical.toLowerCase() would throw on it.
+  if (typeof name !== 'string' || name === '') return name;
+  const canonical = canonicalToolName(name);
+  const lower = canonical.toLowerCase();
+  let match = canonical;
+  for (const candidate of [...COMPACTABLE_TOOLS, ToolNames.TOOL_CALL]) {
+    if (candidate.toLowerCase() === lower) {
+      match = candidate;
+    }
+  }
+  return match;
+}
+
+export function getFunctionCallIdentity(
+  call: NonNullable<Part['functionCall']>,
+): ToolCallIdentity | undefined {
+  if (!call.name) return undefined;
+  const name = resolveTrackedToolName(call.name);
+  const args = asRecord(call.args);
+  if (name !== ToolNames.TOOL_CALL) {
+    return { name, args };
+  }
+  const targetName = args['name'];
+  if (typeof targetName !== 'string') return undefined;
+  return {
+    name: resolveTrackedToolName(targetName),
+    args: asRecord(args['arguments']),
+  };
+}
+
+/**
+ * Recorded for a call that has an id but whose identity could not be parsed.
+ * Dropping it would let the unanimity check in getResponseToolIdentity pass
+ * on incomplete evidence; the sentinel makes the check fail closed instead,
+ * so a reused id with an unparseable sibling is never compacted on a guess
+ * (the over-disarm rule above, issue #4239).
+ */
+const UNPARSEABLE_CALL_IDENTITY: ToolCallIdentity = {
+  name: '__unparseable__',
+  args: {},
+};
+
+function buildToolCallIdentityById(history: Content[]): ToolCallIdentityById {
+  const map: ToolCallIdentityById = new Map();
+  for (const content of history) {
+    if (content.role !== 'model' || !content.parts) continue;
+    for (const part of content.parts) {
+      const call = part.functionCall;
+      if (!call?.id) continue;
+      const identity =
+        getFunctionCallIdentity(call) ?? UNPARSEABLE_CALL_IDENTITY;
+      const existing = map.get(call.id);
+      if (existing) existing.push(identity);
+      else map.set(call.id, [identity]);
+    }
+  }
+  return map;
+}
+
+function getResponseToolIdentity(
+  part: Part | undefined,
+  callIdentityById: ToolCallIdentityById,
+): ToolCallIdentity | undefined {
+  const response = part?.functionResponse;
+  if (!response?.name) return undefined;
+  const name = resolveTrackedToolName(response.name);
+  if (name !== ToolNames.TOOL_CALL) return { name, args: {} };
+  if (response.id) {
+    const identities = callIdentityById.get(response.id);
+    if (
+      identities?.length &&
+      identities.every((identity) => identity.name === identities[0]!.name)
+    ) {
+      return identities[identities.length - 1];
+    }
+  }
+  return undefined;
+}
+
 /**
  * Build a `callId → file_path[]` map for every file-tool call. The path
- * lives on the request-side `functionCall.args`, not on the
+ * lives on the request-side tool args (inside `tool_call.arguments` for a
+ * bridged call), not on the
  * `functionResponse` microcompaction blanks, so this is the only way
  * to recover which file a cleared result referred to. Calls missing an
  * id or file_path are absent (the caller treats that as unresolvable).
@@ -75,23 +273,18 @@ const FILE_PATH_TOOLS = new Set<string>([
  * costs at most a redundant re-read, whereas keeping the wrong file
  * armed would resurrect the dangling-placeholder hazard (issue #4239).
  */
-function buildCallIdToFilePath(history: Content[]): Map<string, string[]> {
+function buildCallIdToFilePath(
+  callIdentityById: ToolCallIdentityById,
+): Map<string, string[]> {
   const map = new Map<string, string[]>();
-  for (const content of history) {
-    // functionCall parts are always model-role; skip user/system turns
-    // (mirrors collectCompactablePartRefs' role short-circuit).
-    if (content.role !== 'model' || !content.parts) continue;
-    for (const part of content.parts) {
-      const call = part.functionCall;
-      if (!call?.id || !call.name || !FILE_PATH_TOOLS.has(call.name)) {
-        continue;
-      }
-      const filePath = (call.args as { file_path?: unknown } | undefined)
-        ?.file_path;
+  for (const [callId, identities] of callIdentityById) {
+    for (const identity of identities) {
+      if (!FILE_PATH_TOOLS.has(identity.name)) continue;
+      const filePath = identity.args['file_path'];
       if (typeof filePath === 'string' && filePath.length > 0) {
-        const existing = map.get(call.id);
+        const existing = map.get(callId);
         if (existing) existing.push(filePath);
-        else map.set(call.id, [filePath]);
+        else map.set(callId, [filePath]);
       }
     }
   }
@@ -175,6 +368,7 @@ function hasNestedMedia(part: Part): boolean {
  */
 function collectCompactablePartRefs(
   history: Content[],
+  callIdentityById: ToolCallIdentityById,
   preserveReadFileResult?: PreserveReadFileResult,
 ): CollectedRefs {
   const tool: PartRef[] = [];
@@ -185,7 +379,7 @@ function collectCompactablePartRefs(
     if (content.role !== 'user' || !content.parts) continue;
     for (let pi = 0; pi < content.parts.length; pi++) {
       const part = content.parts[pi]!;
-      const fnName = part.functionResponse?.name;
+      const fnName = getResponseToolIdentity(part, callIdentityById)?.name;
       if (fnName && COMPACTABLE_TOOLS.has(fnName)) {
         tool.push({ contentIndex: ci, partIndex: pi, kind: 'tool' });
       } else if (part.functionResponse && hasNestedMedia(part)) {
@@ -208,6 +402,7 @@ function collectCompactablePartRefs(
   const preservedRefs = buildPreservedReadRefs(
     history,
     tool,
+    callIdentityById,
     preserveReadFileResult,
   );
   return {
@@ -248,20 +443,27 @@ function estimatePartTokens(part: Part): number {
     }
     // Tool results may carry nested media on `functionResponse.parts`
     // (see `coreToolScheduler.createFunctionResponsePart`).
-    const nested = (part.functionResponse as { parts?: unknown }).parts;
-    if (Array.isArray(nested)) {
-      for (const inner of nested as Part[]) {
-        if (inner.inlineData || inner.fileData) {
-          total += MEDIA_PART_TOKEN_ESTIMATE;
-        }
-      }
-    }
+    total += estimateNestedMediaTokens(part);
     return total;
   }
   if (part.inlineData || part.fileData) {
     return MEDIA_PART_TOKEN_ESTIMATE;
   }
   return 0;
+}
+
+/** Token estimate for the media nested on `functionResponse.parts`, excluding the text output. */
+function estimateNestedMediaTokens(part: Part): number {
+  const nested = (part.functionResponse as { parts?: unknown } | undefined)
+    ?.parts;
+  if (!Array.isArray(nested)) return 0;
+  let total = 0;
+  for (const inner of nested as Part[]) {
+    if (inner.inlineData || inner.fileData) {
+      total += MEDIA_PART_TOKEN_ESTIMATE;
+    }
+  }
+  return total;
 }
 
 /** Defensive guard against re-clearing if a future change reshapes a cleared part into a collectable form. */
@@ -286,18 +488,54 @@ function getPart(history: Content[], ref: PartRef): Part | undefined {
   return history[ref.contentIndex]?.parts?.[ref.partIndex];
 }
 
-function getToolOutputChars(part: Part | undefined): number {
+/**
+ * The text output of a tool result this module may clear, and whether it is a
+ * persisted-output stub. `persisted` separates a stub the truncation path
+ * already paid to make small from an ordinary result: only the former is worth
+ * protecting from clearing on the idle path, because no `keepRecent` slot is
+ * reserved for it. Both kinds report their full resident length, so `chars` is
+ * only safe to read as "reclaimable" when `persisted` is false.
+ */
+function getClearableToolOutput(
+  part: Part | undefined,
+  callIdentityById: ToolCallIdentityById,
+): { chars: number; persisted: boolean } {
+  const toolName = getResponseToolIdentity(part, callIdentityById)?.name;
   if (
     !part ||
-    !part.functionResponse?.name ||
-    !COMPACTABLE_TOOLS.has(part.functionResponse.name) ||
+    !toolName ||
+    !COMPACTABLE_TOOLS.has(toolName) ||
     isErrorResponse(part) ||
     isAlreadyCleared(part)
   ) {
-    return 0;
+    return { chars: 0, persisted: false };
   }
-  const output = part.functionResponse.response?.['output'];
-  return typeof output === 'string' ? output.length : 0;
+  const output = part.functionResponse?.response?.['output'];
+  if (typeof output !== 'string') return { chars: 0, persisted: false };
+  // A persisted-output stub has already had its oversized content moved to
+  // a file; the model keeps recovering it by paging that file back in. Clearing
+  // the stub would destroy the only reference to the saved bytes, so its text
+  // is never clearable. Protection keys on that reference, not on the resident
+  // text being small: producers budget their own previews, and `web_fetch`'s
+  // failed-summarizer fallback keeps as much as ~98K chars behind its saved-path
+  // header. Whatever stays resident still joins the size trigger's total below,
+  // so an oversized preview keeps the valve honest instead of hiding from it.
+  // Truncations without a saved file keep no such reference and stay
+  // clearable. Prefer the Part-aware recovery handle because it covers
+  // every producer without recognizing their model-visible text. The string
+  // fallback remains necessary after JSON serialization or resume drops the
+  // non-enumerable handle.
+  if (
+    (getToolOutputRecovery(part)?.persistedOutputFiles?.length ?? 0) > 0 ||
+    isPersistedOutputStub(output)
+  ) {
+    // It is not free, though: the preview its producer budgeted stays resident
+    // in the prompt. Counting it as zero would take the largest results out of
+    // the size trigger's total and let the valve go blind to them, so the
+    // resident length is reported here and only the *clearability* differs.
+    return { chars: output.length, persisted: true };
+  }
+  return { chars: output.length, persisted: false };
 }
 
 function normalizePendingContent(
@@ -341,9 +579,11 @@ function buildClearMap(
 function getFilePathsForResponse(
   part: Part | undefined,
   callIdToFilePath: Map<string, string[]>,
+  callIdentityById: ToolCallIdentityById,
 ): string[] | undefined {
   const response = part?.functionResponse;
-  if (!response?.id || !response.name || !FILE_PATH_TOOLS.has(response.name)) {
+  const toolName = getResponseToolIdentity(part, callIdentityById)?.name;
+  if (!response?.id || !toolName || !FILE_PATH_TOOLS.has(toolName)) {
     return undefined;
   }
   const paths = callIdToFilePath.get(response.id);
@@ -353,19 +593,26 @@ function getFilePathsForResponse(
 function buildPreservedReadRefs(
   history: Content[],
   refs: PartRef[],
+  callIdentityById: ToolCallIdentityById,
   preserveReadFileResult: PreserveReadFileResult,
 ): Set<string> {
-  const callIdToFilePath = buildCallIdToFilePath(history);
+  const callIdToFilePath = buildCallIdToFilePath(callIdentityById);
   const preserved = new Set<string>();
   for (const ref of refs) {
     const part = getPart(history, ref);
     if (
-      part?.functionResponse?.name !== ToolNames.READ_FILE ||
+      !part ||
+      getResponseToolIdentity(part, callIdentityById)?.name !==
+        ToolNames.READ_FILE ||
       isErrorResponse(part)
     ) {
       continue;
     }
-    const paths = getFilePathsForResponse(part, callIdToFilePath);
+    const paths = getFilePathsForResponse(
+      part,
+      callIdToFilePath,
+      callIdentityById,
+    );
     if (
       paths &&
       paths.length > 0 &&
@@ -382,6 +629,7 @@ function buildKeptFilePaths(
   refs: PartRef[],
   keepRefs: Set<string>,
   callIdToFilePath: Map<string, string[]>,
+  callIdentityById: ToolCallIdentityById,
 ): Set<string> {
   const kept = new Set<string>();
   for (const ref of refs) {
@@ -394,10 +642,17 @@ function buildKeptFilePaths(
     // placeholders or partial slices, and edit results carry only an
     // old/new snippet while still setting the cache's sticky full-read
     // flags — neither proves the file stays resident (issue #4239).
-    if (part.functionResponse?.name !== ToolNames.WRITE_FILE) {
+    if (
+      getResponseToolIdentity(part, callIdentityById)?.name !==
+      ToolNames.WRITE_FILE
+    ) {
       continue;
     }
-    const paths = getFilePathsForResponse(part, callIdToFilePath);
+    const paths = getFilePathsForResponse(
+      part,
+      callIdToFilePath,
+      callIdentityById,
+    );
     // If an id maps to multiple possible paths, a kept result cannot prove
     // which file is still resident. Keep the #4239-safe behavior and do not
     // let it protect any candidate path from disarming.
@@ -440,15 +695,24 @@ function planSizeBasedClearing(
   const pending = normalizePendingContent(pendingContent);
   const virtualHistory =
     pending.length > 0 ? [...history, ...pending] : history;
-  const { tool } = collectCompactablePartRefs(virtualHistory);
+  const callIdentityById = buildToolCallIdentityById(virtualHistory);
+  const { tool } = collectCompactablePartRefs(virtualHistory, callIdentityById);
   const charsByRef = new Map<string, number>();
   let totalChars = 0;
   let pendingChars = 0;
   for (const ref of tool) {
-    const chars = getToolOutputChars(getPart(virtualHistory, ref));
+    const { chars, persisted } = getClearableToolOutput(
+      getPart(virtualHistory, ref),
+      callIdentityById,
+    );
     if (chars <= 0) continue;
-    charsByRef.set(refKey(ref), chars);
+    // A persisted-output stub occupies the prompt like any other result, so it
+    // joins the total the trigger reads; it just never joins `charsByRef`,
+    // which is the set the clearing loop can spend.
     totalChars += chars;
+    if (!persisted) {
+      charsByRef.set(refKey(ref), chars);
+    }
     if (ref.contentIndex >= history.length) {
       pendingChars += chars;
     }
@@ -458,7 +722,12 @@ function planSizeBasedClearing(
   }
 
   const preservedToolRefs = preserveReadFileResult
-    ? buildPreservedReadRefs(virtualHistory, tool, preserveReadFileResult)
+    ? buildPreservedReadRefs(
+        virtualHistory,
+        tool,
+        callIdentityById,
+        preserveReadFileResult,
+      )
     : new Set<string>();
   const compactableToolRefs = tool.filter(
     (ref) => !preservedToolRefs.has(refKey(ref)),
@@ -496,6 +765,24 @@ function planSizeBasedClearing(
 
     clearRefs.push(ref);
     remainingChars -= chars;
+  }
+
+  // Persisted stubs are not spendable — their text is the only reference to
+  // the saved bytes — but nested media on such a part is not part of that
+  // reference and is re-sent on every request. The idle path reaches the
+  // media-strip branch through the `hasNestedMedia` bypass; without these refs
+  // the size trigger would keep reporting a total it refuses to reduce and the
+  // inline bytes would stay resident until an idle pass. They add no
+  // reclaimable chars, so the spend accounting above (and the reported
+  // before/after totals) is unchanged; the clearing loop strips only the media
+  // and leaves the stub text intact.
+  for (const ref of compactableToolRefs) {
+    const key = refKey(ref);
+    if (ref.contentIndex >= history.length || keepToolRefs.has(key)) continue;
+    const part = getPart(virtualHistory, ref);
+    if (!part || !hasNestedMedia(part)) continue;
+    if (!getClearableToolOutput(part, callIdentityById).persisted) continue;
+    clearRefs.push(ref);
   }
 
   return {
@@ -542,6 +829,8 @@ export interface MicrocompactMeta {
   tokensSaved: number;
   /** Recovered paths of files whose read/edit/write result was blanked; the caller disarms their fast-path (issue #4239). */
   evictedReadPaths: string[];
+  /** Memory bodies whose last remaining search_memory result was blanked. */
+  evictedMemoryBodies?: MemoryBodyVersion[];
   /**
    * Count of blanked file results whose path could NOT be recovered
    * (e.g. provider didn't populate `functionCall.id`). Non-zero means
@@ -549,6 +838,8 @@ export interface MicrocompactMeta {
    * armed entry would serve a dangling placeholder.
    */
   unresolvedEvictedReads: number;
+  /** Count of blanked search_memory results whose body refs could not be recovered. */
+  unresolvedEvictedMemoryBodies: number;
 }
 
 /**
@@ -588,6 +879,7 @@ export function microcompactHistory(
   let toolResultsLowWatermark: number | undefined;
   let keptPathHistory = history;
   let keptPathRefs: PartRef[] = [];
+  let callIdentityById = buildToolCallIdentityById(history);
 
   if (opts?.force) {
     triggerReason = 'force';
@@ -605,6 +897,7 @@ export function microcompactHistory(
   if (triggerReason === 'force' || triggerReason === 'idle') {
     ({ tool, media, nestedMedia } = collectCompactablePartRefs(
       history,
+      callIdentityById,
       opts?.preserveReadFileResult,
     ));
     // Each kind gets its own keepRecent budget: setting
@@ -620,7 +913,14 @@ export function microcompactHistory(
     const keepToolRefs = buildKeepRefs(
       tool.filter((ref) => {
         const part = getPart(history, ref);
-        return getToolOutputChars(part) > 0 || (!!part && hasNestedMedia(part));
+        const output = getClearableToolOutput(part, callIdentityById);
+        // A persisted-output stub is never cleared, so spending a keepRecent
+        // slot on it would strand an older ordinary result that the very same
+        // pass then blanks.
+        return (
+          (output.chars > 0 && !output.persisted) ||
+          (!!part && hasNestedMedia(part))
+        );
       }),
       keepRecent,
     );
@@ -634,15 +934,21 @@ export function microcompactHistory(
     clearRefs = allRefs.filter((r) => {
       if (keepRefs.has(refKey(r))) return false;
       const part = getPart(history, r);
-      // Zero-character non-media tool refs are never clearable (mirrors the
-      // size path's `chars <= 0` skip). They are excluded from keepRecent
-      // candidates above, so without this guard they would be blanked here.
-      if (
-        toolKeys.has(refKey(r)) &&
-        getToolOutputChars(part) === 0 &&
-        !(part && hasNestedMedia(part))
-      ) {
-        return false;
+      // A persisted-output stub is resident but not reclaimable: clearing it
+      // would destroy the only reference to the saved bytes. Zero-character
+      // non-media tool refs are never clearable either (mirrors the size
+      // path's skip). Both are excluded from keepRecent candidates above, so
+      // without this guard they would be blanked here. The `hasNestedMedia`
+      // bypass keeps a stub whose media alone is reclaimable in the list; the
+      // clearing loop then drops the media and leaves the text untouched.
+      if (toolKeys.has(refKey(r)) && !(part && hasNestedMedia(part))) {
+        const { chars, persisted } = getClearableToolOutput(
+          part,
+          callIdentityById,
+        );
+        if (chars === 0 || persisted) {
+          return false;
+        }
       }
       return true;
     });
@@ -663,6 +969,7 @@ export function microcompactHistory(
     tool = sizePlan.toolRefs.filter((r) => r.contentIndex < history.length);
     keptPathHistory =
       pending.length > 0 ? [...history, ...pending] : keptPathHistory;
+    callIdentityById = buildToolCallIdentityById(keptPathHistory);
     keptPathRefs = sizePlan.toolRefs;
     keepRefs = sizePlan.keepToolRefs;
     clearRefs = sizePlan.clearRefs;
@@ -678,7 +985,9 @@ export function microcompactHistory(
   }
 
   const evictedReadPaths = new Set<string>();
+  const clearedMemoryBodies = new Map<string, MemoryBodyVersion>();
   let unresolvedEvictedReads = 0;
+  let unresolvedEvictedMemoryBodies = 0;
 
   let tokensSaved = 0;
   let toolsCleared = 0;
@@ -687,12 +996,13 @@ export function microcompactHistory(
 
   if (clearRefs.length > 0) {
     const clearMap = buildClearMap(clearRefs);
-    const callIdToFilePath = buildCallIdToFilePath(keptPathHistory);
+    const callIdToFilePath = buildCallIdToFilePath(callIdentityById);
     const keptFilePaths = buildKeptFilePaths(
       keptPathHistory,
       keptPathRefs,
       keepRefs,
       callIdToFilePath,
+      callIdentityById,
     );
 
     result = history.map((content, ci) => {
@@ -705,12 +1015,31 @@ export function microcompactHistory(
         if (kind === undefined) return part;
         if (isAlreadyCleared(part)) return part;
 
+        const toolName = getResponseToolIdentity(part, callIdentityById)?.name;
         if (
           kind === 'tool' &&
-          part.functionResponse?.name &&
-          COMPACTABLE_TOOLS.has(part.functionResponse.name) &&
+          part.functionResponse &&
+          toolName &&
+          COMPACTABLE_TOOLS.has(toolName) &&
           !isErrorResponse(part)
         ) {
+          // Same predicate the plan counted with. The plan only sees refs it
+          // can account for; re-checking here keeps a stub that reached the
+          // clear list some other way from losing its saved-output reference.
+          if (getClearableToolOutput(part, callIdentityById).persisted) {
+            // The saved-path text must survive, but the nested media is not
+            // part of that reference — and a stub only lands in the clear list
+            // through the `hasNestedMedia` bypass, so refusing the whole ref
+            // would leave the inline bytes resident for the rest of the
+            // conversation. Strip the media, keep the text.
+            if (!hasNestedMedia(part)) return part;
+            tokensSaved += estimateNestedMediaTokens(part);
+            mediaCleared++;
+            touched = true;
+            return {
+              functionResponse: stripNestedMedia(part.functionResponse),
+            };
+          }
           tokensSaved += estimatePartTokens(part);
           toolsCleared++;
           touched = true;
@@ -718,8 +1047,12 @@ export function microcompactHistory(
           // fast-path unless a kept result for the same path is still
           // quotable from history. If unrecoverable, count it so the
           // caller falls back to the blanket wipe (issue #4239).
-          if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
-            const filePaths = getFilePathsForResponse(part, callIdToFilePath);
+          if (FILE_PATH_TOOLS.has(toolName)) {
+            const filePaths = getFilePathsForResponse(
+              part,
+              callIdToFilePath,
+              callIdentityById,
+            );
             if (filePaths && filePaths.length > 0) {
               for (const p of filePaths) {
                 if (!keptFilePaths.has(p)) {
@@ -728,6 +1061,19 @@ export function microcompactHistory(
               }
             } else {
               unresolvedEvictedReads++;
+            }
+          }
+          if (toolName === ToolNames.SEARCH_MEMORY) {
+            const bodies = getMemoryBodySlicesForResponse(
+              part,
+              callIdentityById,
+            );
+            if (!bodies) {
+              unresolvedEvictedMemoryBodies++;
+            } else {
+              for (const body of bodies) {
+                clearedMemoryBodies.set(memoryBodyVersionKey(body), body);
+              }
             }
           }
           return {
@@ -786,6 +1132,9 @@ export function microcompactHistory(
     triggerReason === 'size'
       ? 0
       : Math.min(media.length + nestedMedia.length, keepRecent);
+  const residentMemoryBodies = new Set(
+    collectResidentMemoryBodies(result).map(memoryBodyVersionKey),
+  );
 
   return {
     history: result,
@@ -805,7 +1154,11 @@ export function microcompactHistory(
       keepRecent,
       tokensSaved,
       evictedReadPaths: [...evictedReadPaths],
+      evictedMemoryBodies: [...clearedMemoryBodies.values()]
+        .filter((body) => !residentMemoryBodies.has(memoryBodyVersionKey(body)))
+        .map(({ memoryRef, mtimeMs }) => ({ memoryRef, mtimeMs })),
       unresolvedEvictedReads,
+      unresolvedEvictedMemoryBodies,
     },
   };
 }

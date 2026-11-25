@@ -8,25 +8,15 @@
 
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { RELEASE_WORKSPACES } from './release-packages.mjs';
 
 export const PUBLISHED_PACKAGES = [
   '@qwen-code/qwen-code',
-  '@qwen-code/external-context-mem0',
-  '@qwen-code/audio-capture',
-  '@qwen-code/channel-base',
-  '@qwen-code/channel-dingtalk',
-  '@qwen-code/channel-dws',
-  '@qwen-code/channel-feishu',
-  '@qwen-code/channel-github',
-  '@qwen-code/channel-qqbot',
-  '@qwen-code/channel-telegram',
-  '@qwen-code/channel-wecom',
-  '@qwen-code/channel-weixin',
+  ...RELEASE_WORKSPACES,
 ];
 
 // Deliberately a copy of `scripts/lib/release-helpers.js`, not an import:
-// the workflow checks this file out alone (`/scripts/assert-release-version.mjs`
-// in release.yml's sparse-checkout set), so importing from `scripts/lib/`
+// the workflow's sparse checkout excludes `scripts/lib/`, so importing it
 // resolves in every test lane and throws ERR_MODULE_NOT_FOUND only in the
 // publish job. `scripts/tests/release-workflow.test.js` pins the two bodies
 // identical — widen or harden them together, and never widen this copy alone:
@@ -39,13 +29,11 @@ function isExpectedMissingGitHubRelease(error) {
   return message.includes('release not found') || message.includes('Not Found');
 }
 
+const RELEASE_VERSION_PATTERN =
+  /^\d+\.\d+\.\d+(?:-preview\.\d+|-nightly\.\d{8}\.[0-9a-f]+)?$/;
+
 export function assertVersionUnreleased(version) {
-  if (
-    typeof version !== 'string' ||
-    !/^\d+\.\d+\.\d+(?:-preview\.\d+|-nightly\.\d{8}\.[0-9a-f]+)?$/.test(
-      version,
-    )
-  ) {
+  if (typeof version !== 'string' || !RELEASE_VERSION_PATTERN.test(version)) {
     const error = new Error(
       'assert-unreleased requires a version in release format, e.g. --assert-unreleased=1.2.3',
     );
@@ -106,7 +94,7 @@ export function assertVersionUnreleased(version) {
 
   if (shippedTo.length > 0) {
     const error = new Error(
-      `Version ${version} has already shipped; refusing to force-push the release branch over it. Found on: ${shippedTo.join(', ')}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`,
+      `Version ${version} has already shipped; refusing to push the release branch over it. Found on: ${shippedTo.join(', ')}. If a previous attempt published only part of the release and its release branch still exists, re-run the failed job — the push step reuses the branch when its contents match and the publish step skips already-published packages. If the branch was deleted, restore it from the original release commit or recover the remaining packages manually.`,
     );
     error.code = 'VERSION_SHIPPED';
     throw error;
@@ -128,11 +116,128 @@ export function runAssertVersionCli(version) {
   return 0;
 }
 
+// Deliberately not `semver`: this guard rides the workflow-pinned checkout,
+// but a bare `require('semver')` resolves up into the release checkout's
+// `node_modules`, which the selected ref's lockfile installs — the ref would
+// then own the code that decides the resume verdict, in the first step that
+// carries a write-scoped token. Only release-format versions are compared,
+// so numeric core and prerelease fields are the whole precedence rule.
+// Returns null for anything outside that format, which the caller refuses.
+function compareReleaseVersions(left, right) {
+  if (
+    !RELEASE_VERSION_PATTERN.test(left) ||
+    !RELEASE_VERSION_PATTERN.test(right)
+  )
+    return null;
+  const [leftCore, leftPre] = left.split('-');
+  const [rightCore, rightPre] = right.split('-');
+  const leftNumbers = leftCore.split('.').map(Number);
+  const rightNumbers = rightCore.split('.').map(Number);
+  for (const [index, value] of leftNumbers.entries()) {
+    if (value !== rightNumbers[index])
+      return value < rightNumbers[index] ? -1 : 1;
+  }
+  if (!leftPre || !rightPre) {
+    if (leftPre === rightPre) return 0;
+    return leftPre ? -1 : 1;
+  }
+  const leftFields = leftPre.split('.');
+  const rightFields = rightPre.split('.');
+  for (const [index, field] of leftFields.entries()) {
+    const other = rightFields[index];
+    if (other === undefined) return 1;
+    if (field === other) continue;
+    const numeric = /^\d+$/.test(field) && /^\d+$/.test(other);
+    const ahead = numeric ? Number(field) > Number(other) : field > other;
+    return ahead ? 1 : -1;
+  }
+  return leftFields.length === rightFields.length ? 0 : -1;
+}
+
+/**
+ * Resume-time guard: pnpm re-points the dist-tag of every package it
+ * publishes, so any published package's channel tag ahead of the resuming
+ * version means a regression — the CLI's tag alone cannot speak for the
+ * workspace packages. Same-date nightlies carry unordered short SHAs and
+ * refuse conservatively.
+ * Exit codes: 0 safe to resume, 1 decisive channel refusal (the workflow
+ * marks version_refusal), 2 probe failure (retried), 4 malformed input.
+ */
+export function runAssertChannelResumableCli(version, tag) {
+  if (
+    typeof version !== 'string' ||
+    typeof tag !== 'string' ||
+    !RELEASE_VERSION_PATTERN.test(version) ||
+    !/^[a-z][a-z0-9-]*$/.test(tag)
+  ) {
+    console.log(
+      '::error::assert-channel-resumable requires a release version and a plain dist-tag, e.g. --version=1.2.3 --tag=latest',
+    );
+    return 4;
+  }
+  const nightly = /^(\d+\.\d+\.\d+-nightly\.\d{8})\.([0-9a-f]+)$/;
+  const targetNightly = nightly.exec(version);
+  for (const pkg of PUBLISHED_PACKAGES) {
+    let current;
+    try {
+      current = execSync(`npm view ${pkg} dist-tags.${tag}`).toString().trim();
+    } catch (error) {
+      if (!error.message?.includes('E404')) {
+        console.log(
+          `::error::Failed to verify ${pkg} dist-tags.${tag} on npm: ${error.message}`,
+        );
+        return 2;
+      }
+      // Never published: publishing it can only move the channel forward.
+      continue;
+    }
+    if (current === '') continue;
+    const order = compareReleaseVersions(current, version);
+    if (order === null) {
+      console.log(
+        `::error::Cannot compare npm ${tag} for ${pkg} (${current}) with ${version}; refusing to resume.`,
+      );
+      return 1;
+    }
+    if (order > 0) {
+      console.log(
+        `::error::npm ${tag} for ${pkg} is ${current}, past ${version}. Resuming would regress the dist-tag.`,
+      );
+      return 1;
+    }
+    const currentNightly = nightly.exec(current);
+    if (
+      targetNightly &&
+      currentNightly &&
+      currentNightly[1] === targetNightly[1] &&
+      currentNightly[2] !== targetNightly[2]
+    ) {
+      console.log(
+        `::error::npm ${tag} for ${pkg} is ${current}, a different same-day nightly than ${version}; short SHAs cannot prove publish order. Refusing to resume.`,
+      );
+      return 1;
+    }
+  }
+  return 0;
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const prefix = '--assert-unreleased=';
   const arg = process.argv[2] ?? '';
-  const exitCode = runAssertVersionCli(
-    arg.startsWith(prefix) ? arg.slice(prefix.length) : '',
-  );
+  let exitCode;
+  if (arg === '--assert-channel-resumable') {
+    const value = (prefix) =>
+      process.argv
+        .find((entry) => entry.startsWith(prefix))
+        ?.slice(prefix.length);
+    exitCode = runAssertChannelResumableCli(
+      value('--version='),
+      value('--tag='),
+    );
+  } else {
+    const prefix = '--assert-unreleased=';
+    exitCode = runAssertVersionCli(
+      arg.startsWith(prefix) ? arg.slice(prefix.length) : '',
+    );
+  }
   if (exitCode !== 0) process.exit(exitCode);
 }

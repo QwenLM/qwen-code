@@ -27,7 +27,9 @@ export function useDaemonProviders(options: DaemonResourceOptions = {}) {
   useWorkspaceEventReload(
     signals?.settingsVersion,
     result.reload,
-    options.autoLoad === true || result.data !== undefined,
+    options.enabled !== false &&
+      (options.autoLoad === true || result.data !== undefined),
+    options.autoLoad === true,
   );
   return {
     ...result,

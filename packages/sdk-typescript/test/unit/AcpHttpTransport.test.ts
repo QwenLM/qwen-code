@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
+import { DaemonClient } from '../../src/daemon/DaemonClient.js';
 import { DaemonTransportClosedError } from '../../src/daemon/DaemonTransport.js';
 
 // ---------------------------------------------------------------------------
@@ -134,6 +135,100 @@ function initAwareFetch(opts?: {
 // ---------------------------------------------------------------------------
 
 describe('AcpHttpTransport', () => {
+  it('routes public Workflow mode changes through ACP and normalizes the durable acknowledgement', async () => {
+    const configOptions = [
+      {
+        id: 'workflow_mode',
+        currentValue: 'off',
+        _meta: {
+          'qwen.workflowMode': {
+            available: true,
+            effective: false,
+          },
+        },
+      },
+    ];
+    const { fetch, calls } = initAwareFetch({
+      connectionIdHeader: 'connection-2',
+      subsequentReply: ({ body }) => {
+        const request = JSON.parse(body!);
+        return jsonResponse(200, {
+          jsonrpc: '2.0',
+          id: request.id,
+          result: { configOptions },
+        });
+      },
+    });
+    const transport = new AcpHttpTransport('http://d', 'secret', fetch);
+    const client = new DaemonClient({
+      baseUrl: 'http://d',
+      token: 'secret',
+      transport,
+    });
+    try {
+      await expect(
+        client.setSessionConfigOption('owner/B', 'workflow_mode', 'off', {
+          clientId: 'client-2',
+        }),
+      ).resolves.toEqual({ configOptions, persisted: true });
+      const call = calls.at(-1)!;
+      expect(call.url).toBe('http://d/acp');
+      expect(call.headers).toMatchObject({
+        authorization: 'Bearer secret',
+        'acp-connection-id': 'connection-2',
+        'x-qwen-client-id': 'client-2',
+      });
+      expect(JSON.parse(call.body!)).toMatchObject({
+        method: 'session/set_config_option',
+        params: {
+          sessionId: 'owner/B',
+          configId: 'workflow_mode',
+          value: 'off',
+        },
+      });
+    } finally {
+      transport.dispose();
+    }
+  });
+
+  it('preserves the HTTP ACP rejection for unsupported reasoning options', async () => {
+    const message =
+      'ConfigId not supported by this transport: reasoning_effort';
+    const { fetch, calls } = initAwareFetch({
+      subsequentReply: ({ body }) => {
+        const request = JSON.parse(body!);
+        return jsonResponse(200, {
+          jsonrpc: '2.0',
+          id: request.id,
+          error: { code: -32602, message },
+        });
+      },
+    });
+    const transport = new AcpHttpTransport('http://d', undefined, fetch);
+    const client = new DaemonClient({ baseUrl: 'http://d', transport });
+    try {
+      await expect(
+        client.setSessionConfigOption('owner-B', 'reasoning_effort', 'high', {
+          persist: false,
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringContaining(message),
+      });
+      expect(JSON.parse(calls.at(-1)!.body!)).toMatchObject({
+        method: 'session/set_config_option',
+        params: {
+          sessionId: 'owner-B',
+          configId: 'reasoning_effort',
+          value: 'high',
+          persist: false,
+        },
+      });
+    } finally {
+      transport.dispose();
+    }
+  });
+
   // ---- Static properties ------------------------------------------------
 
   describe('static properties', () => {
@@ -355,6 +450,46 @@ describe('AcpHttpTransport', () => {
       expect(parsed.params.model).toBe('test');
 
       transport.dispose();
+    });
+
+    it('overrides authorization case-insensitively at the request boundary', async () => {
+      const { fetch } = initAwareFetch({ connectionIdHeader: 'conn-1' });
+      let rawHeaders: Record<string, string> | undefined;
+      const captureFetch: typeof globalThis.fetch = async (input, init) => {
+        if (
+          typeof init?.body === 'string' &&
+          JSON.parse(init.body).method === 'session/new'
+        ) {
+          rawHeaders = init.headers as Record<string, string>;
+        }
+        return fetch(input, init);
+      };
+      const transport = new AcpHttpTransport(
+        'http://d',
+        'transport',
+        captureFetch,
+      );
+
+      try {
+        const response = await transport.fetch('http://d/session', {
+          method: 'POST',
+          headers: { authorization: 'Bearer caller' },
+          body: JSON.stringify({ model: 'test' }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(rawHeaders).toBeDefined();
+        const authorization = Object.entries(rawHeaders!).filter(
+          ([name]) => name.toLowerCase() === 'authorization',
+        );
+        expect(authorization).toHaveLength(1);
+        expect(authorization[0][1]).toBe('Bearer caller');
+        const headers = new Headers(rawHeaders);
+        expect(headers.get('authorization')).toBe('Bearer caller');
+        expect(headers.get('acp-connection-id')).toBe('conn-1');
+      } finally {
+        transport.dispose();
+      }
     });
 
     it('returns 404 for unknown routes', async () => {

@@ -141,6 +141,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionTaskRuntime: 'qwen/status/session/task_runtime',
   sessionAgents: 'qwen/status/session/agents',
   sessionAgentTrace: 'qwen/status/session/agent_trace',
   sessionStats: 'qwen/status/session/stats',
@@ -155,6 +156,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionSavedWorkflow: 'qwen/status/session/saved_workflow',
   sessionTranscript: 'qwen/status/session/transcript',
   sessionTurnIndex: 'qwen/status/session/turn_index',
+  sessionMessageGroups: 'qwen/status/session/message_groups',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
@@ -163,6 +165,30 @@ export const SERVE_STATUS_EXT_METHODS = {
   // the Daemon Status resource charts (workspace-scoped; no sessionId).
   workspaceResource: 'qwen/status/workspace/resource',
 } as const;
+
+/**
+ * The client capability (`clientCapabilities._meta`) naming the Mod row
+ * sites a client draws. The child then runs each session's Mods on the
+ * `desktop` surface and answers `sessionModRow` for those sites.
+ */
+export const MOD_ROWS_CLIENT_CAPABILITY = 'qwen.modRows';
+
+/** The Mod row sites the Web Shell draws, which the bridge declares. */
+export const WEB_SHELL_MOD_ROW_SITES: readonly string[] = [
+  'AssistantMessage',
+  'Thinking',
+];
+
+/**
+ * A session's answer for one row: no hook hears its site, so the client asks
+ * no more of the session; its hooks did not answer in time or the session
+ * moved on, so it may ask again; or their answer, with `props` to draw only
+ * where they rewrote the row.
+ */
+export type BridgeModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
 
 /**
  * Control-plane (mutation) ACP extMethods introduced in Mutation control.
@@ -178,11 +204,17 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionSideTask: 'qwen/control/session/side_task',
   sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
+  /**
+   * Ask a session's Mods for a transcript row the client draws. Params:
+   * `{ sessionId, component, props }`; result: `BridgeModRowAnswer`.
+   */
+  sessionModRow: 'qwen/control/session/mod_row',
   sessionGenerationStart: 'qwen/control/session/generation/start',
   sessionGenerationCancel: 'qwen/control/session/generation/cancel',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
   sessionLanguage: 'qwen/control/session/language',
+  sessionMessagesDelete: 'qwen/control/session/messages_delete',
   sessionRewind: 'qwen/control/session/rewind',
   sessionContinue: 'qwen/control/session/continue',
   sessionTitle: 'qwen/control/session/title',
@@ -191,18 +223,43 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionLiveConversation: 'qwen/control/session/live-conversation',
   sessionLiveTranscript: 'qwen/control/session/live-transcript',
   sessionBackgroundNotification: 'qwen/control/session/background_notification',
+  /**
+   * Session multi-agent: write an `agent_mention` / `agent_message` record
+   * into the chat session (durable record + main-model history, no turn).
+   * Params/result: `SessionExternalRecordRequest` / `SessionExternalRecordResponse`
+   * (core `agents/session-agents/contract.ts`).
+   */
+  sessionExternalRecord: 'qwen/control/session/external_record',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
   workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
+  /**
+   * Record the user's decision on the workspace's pending project hooks.
+   * A dedicated control route, not session/request_permission: permission
+   * prompts are auto-answered by automation clients, while this decision
+   * persists a hash-bound approval and must be an explicit user act.
+   * Params: `{ decision: 'approve' | 'reject' }`; result:
+   * `{ decision, reloaded }`.
+   */
+  projectHooksApprove: 'qwen/control/workspace/hooks/approve',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   workspaceGenerationStart: 'qwen/control/workspace/generation/start',
   workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
   workspaceSessionWorkflow: 'qwen/control/workspace/session-workflow',
+  /**
+   * Add or remove one extra directory in the workspace context. Applies to
+   * every live session of the runtime and persists the resulting list to the
+   * workspace setting `context.includeDirectories`. Params:
+   * `{ action: 'add' | 'remove', path }`; result:
+   * `{ primaryDirectory, directories, changed, warnings }`.
+   */
+  workspaceDirectories: 'qwen/control/workspace/directories',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
+  workspaceMemoryImportPlan: 'qwen/control/workspace/memory/import/plan',
   workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   /**
@@ -216,20 +273,35 @@ export const SERVE_CONTROL_EXT_METHODS = {
   userLanguage: 'qwen/control/user/language',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  /**
+   * Control a workflow run, delete its history, or start a new run from a
+   * saved definition or a caller-supplied script. Params:
+   * `{ sessionId, taskId, action }` plus the optional start input
+   * ({@link ServeWorkflowActionInput}) the two start actions read.
+   */
   sessionWorkflowTaskAction: 'qwen/control/session/task/workflow-action',
   sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
-   * Read a live session's `/goal` state. The active goal lives only in the
-   * child's in-memory store, so this is the sole authoritative source for the
-   * condition, its running turn count and the judge's last verdict. Params:
-   * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
+   * Read a live session's `/goal` state from the child's Goal runtime. Params:
+   * `{ sessionId }`; result: `BridgeSessionGoal` — the runtime's
+   * `GoalSnapshotV2` plus `active`, a projection of it for clients that still
+   * read the older shape.
    */
   sessionGoalGet: 'qwen/control/session/goal/get',
   sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
   sessionMcpRuntimeRemove: 'qwen/control/session/mcp/runtime-remove',
   /** Read a bounded settled `turn_result` from the active transcript. */
   sessionTurnStatus: 'qwen/control/session/turn_status',
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the session's
+   * telemetry pipeline. Params: `{ sessionId, promptId, rating: 'up' |
+   * 'down' }`; result: `{ recorded }` — false when the session workspace's
+   * `ui.enableUserFeedback` setting suppresses collection. The child maps
+   * the rating onto `UserFeedbackRating` and calls `logUserFeedback` with
+   * its own session Config.
+   */
+  sessionFeedback: 'qwen/control/session/feedback',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceModelProvidersReload:
@@ -237,6 +309,17 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceReload: 'qwen/control/workspace/reload',
   workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
+  /**
+   * A paired Bridge sends a session-affecting workspace change, already
+   * persisted by the workspace-control engine or the daemon, to every other
+   * live engine. Params: `{ v: 1, revision, kind, tightening, cwd }` plus
+   * `enabled` for `sessionWorkflow` and `reason` for `skills`. The engine
+   * re-reads that setting, applies it to every live session before the
+   * session's next prompt, model request or tool dispatch, cancels a turn it
+   * cannot revalidate, and only then answers `{ v: 1, revision,
+   * acknowledged: true }`. Any other answer is not an acknowledgement.
+   */
+  workspaceChange: 'qwen/control/workspace/change',
   /**
    * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
    * here — which the PARENT serve process calls DOWN into the `qwen --acp`
@@ -260,6 +343,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
     'qwen/control/session/managed-conversation-binding/commit',
   sessionManagedConversationBindingRelease:
     'qwen/control/session/managed-conversation-binding/release',
+  resolveSubSessionWorkspace: 'qwen/control/resolve-sub-session-workspace',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
    * `create_sub_session` tool, running inside a child's agent turn, asks the
@@ -550,6 +634,13 @@ export interface ServeWorkspaceSkillsStatus {
   runtimeEpoch?: number;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
+  /** Daemon observation metadata; omitted by direct runtime/config reads. */
+  snapshot?: {
+    observedAt: number;
+    ageMs: number;
+    stale: boolean;
+    refreshing: boolean;
+  };
 }
 
 /**
@@ -582,6 +673,7 @@ export interface ServeWorkspaceProviderCurrent {
 }
 
 export interface ServeWorkspaceProviderModel {
+  configurationKey?: string;
   modelId: string;
   baseModelId: string;
   name: string;
@@ -622,6 +714,17 @@ export interface ServeSessionContextStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /** Whether the session can durably accept a daemon completion notification. */
+  canAcceptBackgroundNotifications?: boolean;
+  recovery?: {
+    kind:
+      | 'clean'
+      | 'interrupted_prompt'
+      | 'interrupted_turn'
+      | 'degraded_history';
+    canContinue: boolean;
+    cancellationConfirmationId?: string;
+  };
   state: {
     models?: unknown;
     modes?: unknown;
@@ -630,13 +733,29 @@ export interface ServeSessionContextStatus {
   };
 }
 
+/** Local category estimates are independent of the reported totalTokens. */
 export interface ServeContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   skills: number;
+  /** Startup prelude outside the skill listing. Absent from older servers. */
+  startupContext?: number;
+  /**
+   * Independent conversation estimate after the startup prelude, never derived
+   * from or capped by totalTokens. When `totalTokens` is 0
+   * (no provider count yet: after a model switch, `/restore` or a resume) this
+   * is a local estimate of the history rather than 0, so the rows include the
+   * conversation. Older servers report 0 there.
+   */
   messages: number;
+  /** @deprecated Legacy residual; accepted from old servers but no longer emitted or displayed. */
+  unattributed?: number;
+  /** Cached prefix tokens; an annotation that overlaps categories. Absent from older servers. */
+  cachedTokens?: number;
   freeSpace: number;
   autocompactBuffer: number;
 }
@@ -649,6 +768,13 @@ export interface ServeContextToolDetail {
 export interface ServeContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and instruction files outside that readable
+   * scope (parent-directory or extension files). Absent from older servers.
+   */
+  absolutePath?: string;
 }
 
 export interface ServeContextSkillDetail {
@@ -665,6 +791,7 @@ export interface ServeSessionContextUsage {
   breakdown: ServeContextCategoryBreakdown;
   builtinTools: ServeContextToolDetail[];
   mcpTools: ServeContextToolDetail[];
+  instructionFiles?: ServeContextMemoryDetail[];
   memoryFiles: ServeContextMemoryDetail[];
   skills: ServeContextSkillDetail[];
   isEstimated?: boolean;
@@ -675,6 +802,14 @@ export interface ServeSessionContextUsageStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /**
+   * Stable workspace root the session was admitted under. Unlike
+   * `workspaceCwd` (the live target dir, which moves when a session enters a
+   * worktree or `cd`s into a subdirectory), this stays at the registered
+   * workspace root, so a client can resolve the owning workspace for file
+   * reads. Absent from older servers.
+   */
+  workspaceRoot?: string;
   usage: ServeSessionContextUsage;
   formattedText: string;
 }
@@ -686,10 +821,30 @@ export interface ServeSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  workflowToolFeatures?: {
+    sourceRef: boolean;
+    agentStepId: boolean;
+    workflowStepId: boolean;
+    /** Whether `run-saved` reads `args` and `sourceRef` from the request. */
+    runSavedArgs?: boolean;
+    /** Whether the `run-script` action exists. */
+    runScript?: boolean;
+    /**
+     * Whether the session's model may run named workflows only. The host's
+     * own `run-saved`, `run-script`, `retry` and `rerun` are not restricted.
+     */
+    nameOnly?: boolean;
+    /**
+     * Whether `retry` and `rerun` accept a run restored from history
+     * (`isHistorical`), such as one a daemon restart interrupted.
+     */
+    retryHistorical?: boolean;
+  };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
-    source: 'project' | 'user';
+    /** `extension` definitions are named `<extension>:<workflow>`. */
+    source: 'project' | 'user' | 'extension';
   }>;
 }
 
@@ -706,7 +861,7 @@ export interface ServeSessionSavedWorkflowDetail {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   name: string;
-  source: 'project' | 'user';
+  source: 'project' | 'user' | 'extension';
   /** Absolute path of the `.js` file the definition was read from. */
   scriptPath: string;
   /** Full script source, `export const meta` included. */
@@ -847,6 +1002,12 @@ export interface ServeWorkflowPhaseVisit {
   endedAt?: number;
 }
 
+/** A phase the script declares in `meta.phases`, reached or not. */
+export interface ServeWorkflowPlannedPhase {
+  title: string;
+  detail?: string;
+}
+
 export type ServeWorkflowDispatchStatus =
   | 'queued'
   | 'running'
@@ -856,6 +1017,8 @@ export type ServeWorkflowDispatchStatus =
   | 'cached';
 
 export interface ServeWorkflowDispatchStatusEntry {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   phaseVisitId: string | null;
   label: string;
@@ -920,15 +1083,110 @@ export type ServeWorkflowEvent =
       error: string;
     });
 
+/**
+ * A workflow run's large-run flag: the first threshold it crossed. Mirrors
+ * core's `WorkflowSizeWarning`.
+ */
+export interface ServeWorkflowSizeWarning {
+  axis: 'agents' | 'tokens';
+  /** Dispatches issued by the run, excluding journal replays. */
+  scheduledAgents: number;
+  totalTokens: number;
+  projectedTokens: number;
+  agentCap: number;
+  tokenCap: number;
+  /** Whether the agent threshold came from the size guideline setting. */
+  capFromGuideline: boolean;
+  at: number;
+}
+
+export interface ServeWorkflowCallTrace {
+  id: string;
+  stepId?: string;
+  workflowName?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+}
+
+/**
+ * Start input for the `run-saved` and `run-script` workflow actions: what to
+ * run beyond the definition itself. The control actions (`pause`, `resume`,
+ * `retry`, `rerun`, `delete-history`) ignore it — a retry or rerun replays the
+ * original run's own `args` and `sourceRef`, which is what makes it the same
+ * run rather than a new one.
+ */
+export interface ServeWorkflowActionInput {
+  /** Bound to the script's `args` global; any JSON value. */
+  args?: unknown;
+  /**
+   * The caller's own definition id and revision, recorded on the run, its
+   * journal and its snapshot so a host can tie a run back to what it built.
+   */
+  sourceRef?: { id: string; revision: string };
+  /** `run-script` only: the script source to run. */
+  script?: string;
+}
+
+/**
+ * The start input a workflow-action request carries, or `undefined` when it
+ * carries none — in which case the request reaching the session runtime is
+ * byte-identical to one sent before start input existed.
+ *
+ * Values are forwarded verbatim rather than checked here: the session runtime
+ * that starts the run validates them against the workflow tool's own rules, so
+ * every entry point refuses a malformed `sourceRef` with the same text.
+ */
+export function readServeWorkflowActionInput(
+  body: Record<string, unknown>,
+): ServeWorkflowActionInput | undefined {
+  const input: ServeWorkflowActionInput = {};
+  // `args` is any JSON value, `null` included, so presence decides.
+  if (Object.hasOwn(body, 'args')) input.args = body['args'];
+  if (Object.hasOwn(body, 'sourceRef')) {
+    input.sourceRef = body[
+      'sourceRef'
+    ] as ServeWorkflowActionInput['sourceRef'];
+  }
+  if (Object.hasOwn(body, 'script')) {
+    input.script = body['script'] as ServeWorkflowActionInput['script'];
+  }
+  return Object.keys(input).length > 0 ? input : undefined;
+}
+
 export interface ServeSessionWorkflowTaskStatus {
+  sourceRef?: { id: string; revision: string };
+  workflowCalls?: ServeWorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   kind: 'workflow';
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Chat that owns the workflow dispatch transcripts. */
+  parentSessionId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
-  /** Restored from the project snapshot store; controls are read-only. */
+  /**
+   * Restored from the project snapshot store. `pause` and `resume` do not
+   * apply; `delete-history` does, and so do `retry` and `rerun` when
+   * `workflowToolFeatures.retryHistorical` is reported.
+   */
   isHistorical?: boolean;
+  /**
+   * The run was launched with `args` too large for its snapshot to keep. It
+   * is one reason for {@link argsUnavailable}, reported separately so a
+   * client can say which.
+   */
+  argsOmitted?: true;
+  /**
+   * The run cannot be retried or rerun from history because its history does
+   * not have the `args` to start it with: they were too large to keep
+   * (`argsOmitted`), or the snapshot predates keeping them at all and so
+   * cannot say whether the run had any. Offer neither action when this is
+   * set -- the daemon answers both with `workflow_args_unavailable`.
+   */
+  argsUnavailable?: true;
   sourceRunId?: string;
   startMode?: 'retry' | 'rerun';
   label: string;
@@ -941,6 +1199,13 @@ export interface ServeSessionWorkflowTaskStatus {
   isBackgrounded: boolean;
   currentPhase: string | null;
   phaseVisits: ServeWorkflowPhaseVisit[];
+  /**
+   * The phases the script declares in `meta.phases`, in order. Present from
+   * the start of the run, so a client can show phases the script has not
+   * reached yet; absent when the script declares none, and on daemons that
+   * predate the field.
+   */
+  plannedPhases?: ServeWorkflowPlannedPhase[];
   dispatches: ServeWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;
@@ -950,6 +1215,11 @@ export interface ServeSessionWorkflowTaskStatus {
    * created before respawns were counted; treat as 0.
    */
   agentsRespawned?: number;
+  /**
+   * Present once the run crossed a large-run threshold; absent while it stays
+   * within bounds and on snapshots created before the flag existed.
+   */
+  sizeWarning?: ServeWorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   recentLogs: string[];
@@ -971,6 +1241,47 @@ export interface ServeSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: ServeSessionTaskStatus[];
+}
+
+/**
+ * Point-in-time detail for one running or retained shell task.
+ *
+ * The tasks list carries lifecycle facts only; this surface carries the
+ * things that need a filesystem read or an OS probe and are therefore fetched
+ * on demand by an open detail panel.
+ */
+export interface ServeSessionShellTaskRuntime {
+  /**
+   * Resident set size of the shell's process tree, in bytes. Absent when the
+   * pid is unknown, the process already exited, or the platform probe failed.
+   * Shared pages are counted once per process, so this is an upper bound for
+   * "how much this task holds".
+   */
+  memoryBytes?: number;
+  /** Size of the captured stdout/stderr file, in bytes. */
+  outputBytes?: number;
+  /** Epoch ms of the output file's last write. */
+  outputModifiedAt?: number;
+  /**
+   * Tail of the captured stdout/stderr, sanitized for display. Absent when
+   * the file is missing or empty.
+   */
+  outputTail?: string;
+  /** True when `outputTail` starts mid-file (the head was dropped). */
+  outputTailTruncated?: boolean;
+  /**
+   * Read failure message. Fields from a part that did succeed may still be
+   * present (the stat and the tail read fail independently).
+   */
+  outputError?: string;
+}
+
+export interface ServeSessionTaskRuntimeStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  taskId: string;
+  /** Null when the task is unknown/evicted or is not a shell task. */
+  runtime: ServeSessionShellTaskRuntime | null;
 }
 
 export interface ServeSessionAgentsStatus {
@@ -1019,6 +1330,64 @@ export interface ServeSessionStatsModelMetrics {
     cached: number;
     /** Reasoning tokens, shown as a subset of generated output. */
     thoughts: number;
+  };
+  /** Streaming timing; absent until a streamed request records its TTFT. */
+  generation?: {
+    /** Streamed requests with a recorded time to first token. */
+    timedRequests: number;
+    totalTtftMs: number;
+    /**
+     * Time from the first to the last visible output, summed over requests
+     * whose window is at least 100 ms. With `totalThroughputOutputTokens` it
+     * gives the generation-window rate that clients before
+     * `totalOutputSpeedDurationMs` show.
+     */
+    totalGenerationDurationMs: number;
+    /** Output tokens of the requests in `totalGenerationDurationMs`. */
+    totalThroughputOutputTokens: number;
+    /**
+     * Time from the first to the last visible output, summed over every timed
+     * request like `totalTtftMs`. Absent from older daemons.
+     */
+    totalTimedGenerationDurationMs?: number;
+    /**
+     * Output tokens, reasoning counted once, of the timed requests that
+     * reported any. Absent from older daemons.
+     */
+    totalOutputSpeedTokens?: number;
+    /**
+     * TTFT plus generation time of the requests in `totalOutputSpeedTokens`:
+     * output speed divides the tokens by it. Absent from older daemons.
+     */
+    totalOutputSpeedDurationMs?: number;
+  };
+  /**
+   * Most recent timed, non-internal responses (oldest first, at most 200).
+   * Absent until a streamed response records its timing, and from older
+   * daemons.
+   */
+  timingSamples?: Array<{
+    /** Event time, epoch ms. */
+    at: number;
+    ttftMs: number;
+    /**
+     * From the first to the last visible output. Output speed divides
+     * `outputTokens` by `ttftMs + generationMs`; for a daemon without
+     * `generation.totalOutputSpeedDurationMs`, by `generationMs` when it is at
+     * least 100 ms.
+     */
+    generationMs: number;
+    /** Reasoning counted once; older daemons sent the provider's count. */
+    outputTokens: number;
+    /** Subagent that issued the request; absent for the main conversation. */
+    source?: string;
+  }>;
+  /** Failed API calls; absent until the first failure, and from older daemons. */
+  failures?: {
+    /** Count per HTTP status code, else error type, else `unknown`. */
+    byKind: Record<string, number>;
+    /** Most recent failures, oldest first, at most 50. */
+    recent: Array<{ at: number; kind: string; source?: string }>;
   };
 }
 
@@ -1105,6 +1474,22 @@ export interface ServeWorkspaceMemoryFile {
   scope: ServeContextFileScope;
   /** Size in bytes of the file's serialized contents on disk. */
   bytes: number;
+  /**
+   * File text, present only when the caller asked for content
+   * (`GET /workspace/memory?content=true`), the read succeeded, and the
+   * on-disk bytes are valid BOM-free UTF-8. A `mode:'replace'` client may
+   * treat it as the file's full text. Absent for non-UTF-8 or BOM'd
+   * files (a lossy decode is never served as replaceable text) and for
+   * reads that raced a concurrent write.
+   */
+  content?: string;
+  /**
+   * Present and true when `content` stops at the daemon's read cap, the
+   * read raced a concurrent write, or the on-disk bytes are not BOM-free
+   * UTF-8. `content` is omitted for the latter two cases; retrying
+   * unchanged bytes cannot repair an encoding issue.
+   */
+  truncated?: boolean;
 }
 
 export interface ServeWorkspaceMemoryStatus {
@@ -1274,6 +1659,8 @@ export interface ServeHookEntry {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /** Why a disabled hook is off; absent when enabled or the reason is entry-local. */
+  disabledReason?: string;
   hookId?: string;
   skillRoot?: string;
 }
@@ -1285,6 +1672,21 @@ export interface ServeWorkspaceHooksStatus {
   disabled: boolean;
   hooks: ServeHookEntry[];
   events: Record<string, ServeHookEventMeta>;
+  /**
+   * The workspace's project hooks await the user's approval decision. A
+   * client renders its approval affordance from this flag and records the
+   * decision via SERVE_CONTROL_EXT_METHODS.projectHooksApprove.
+   */
+  pendingApproval?: boolean;
+  /** Sanitized display lines of the withheld hooks, for the approval prompt. */
+  pendingApprovalHooks?: string[];
+  /**
+   * The canonical hash of the block this prompt renders. The client echoes
+   * it back with the decision so the daemon binds that decision to the
+   * exact block the user reviewed; a block that changed since the render
+   * stays pending instead of being approved unseen.
+   */
+  pendingApprovalHash?: string;
   errors?: ServeStatusCell[];
 }
 
@@ -1361,6 +1763,10 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   TodoCompleted: { description: 'When a todo item is marked as completed' },
   InstructionsLoaded: {
     description: 'When an instruction or context file is loaded',
+    matcherKind: 'filePath',
+  },
+  FileChanged: {
+    description: 'When a watched file is added, changed, or deleted',
     matcherKind: 'filePath',
   },
 };
@@ -1444,6 +1850,16 @@ export interface ServeWorkspaceExtensionsStatus {
   extensions: ServeExtensionEntry[];
   errors?: ServeStatusCell[];
 }
+
+export type ServeExtensionSummary = Omit<
+  ServeExtensionEntry,
+  'capabilities' | 'details'
+>;
+
+export type ServeWorkspaceExtensionSummaries = Omit<
+  ServeWorkspaceExtensionsStatus,
+  'extensions'
+> & { extensions: ServeExtensionSummary[] };
 
 export function createIdleWorkspaceExtensionsStatus(
   workspaceCwd: string,

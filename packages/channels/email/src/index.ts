@@ -1,0 +1,165 @@
+import type { ChannelPlugin } from '@qwen-code/channel-base';
+import { EmailChannel } from './email-channel.js';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_MAILBOX_PORT,
+  MAX_MESSAGE_BYTES,
+  MAX_POLL_INTERVAL_MS,
+  MAX_TEXT_LENGTH,
+  emailSettings,
+} from './config.js';
+
+export { EmailChannel };
+export { ManagedEmailAdapter } from './managed-email-adapter.js';
+export { createManagedEmailDeps } from './managed-email-deps.js';
+export type {
+  EmailReplyContext,
+  ManagedChannelControlPlane,
+  ManagedChannelPolicy,
+  ManagedClaimedDelivery,
+  ManagedEmailAdapterDeps,
+  ManagedEmailAdapterOptions,
+  ManagedInboundEvent,
+  ManagedReceipt,
+} from './managed-email-adapter.js';
+
+const required = [
+  'address',
+  'imapHost',
+  'imapUser',
+  'imapPassword',
+  'smtpHost',
+  'smtpUser',
+  'smtpPassword',
+] as const;
+
+// Keyed by the tuple so adding a required field without a readable label is a
+// compile error: the descriptor is public, and a raw key would reach any client
+// that renders `label` without its own translation table.
+const requiredLabels: Record<(typeof required)[number], string> = {
+  address: 'Mailbox Address',
+  imapHost: 'IMAP Host',
+  imapUser: 'IMAP Username',
+  imapPassword: 'IMAP Password',
+  smtpHost: 'SMTP Host',
+  smtpUser: 'SMTP Username',
+  smtpPassword: 'SMTP Password',
+};
+
+export const plugin: ChannelPlugin = {
+  channelType: 'email',
+  displayName: 'Email',
+  defaultSessionScope: 'chat_thread',
+  requiredConfigFields: [...required],
+  envResolvableConfigFields: [...required, 'folder'],
+  management: {
+    fields: [
+      ...required.map((key) => ({
+        key,
+        label: requiredLabels[key],
+        kind: key.endsWith('Password')
+          ? ('secret' as const)
+          : ('string' as const),
+        required: true,
+        envResolvable: true,
+      })),
+      {
+        key: 'folder',
+        label: 'IMAP Folder',
+        kind: 'string',
+        default: 'INBOX',
+        envResolvable: true,
+      },
+      {
+        key: 'imapPort',
+        label: 'IMAP Port',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_MAILBOX_PORT,
+      },
+      {
+        key: 'smtpPort',
+        label: 'SMTP Port',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_MAILBOX_PORT,
+      },
+      {
+        key: 'imapSecure',
+        label: 'IMAP Implicit TLS',
+        kind: 'boolean',
+        default: 'true',
+        description: 'When disabled, STARTTLS is mandatory.',
+      },
+      {
+        key: 'smtpSecure',
+        label: 'SMTP Implicit TLS',
+        kind: 'boolean',
+        default: 'true',
+        description: 'When disabled, STARTTLS is mandatory.',
+      },
+      {
+        key: 'privatePolicy',
+        label: 'Private Policy',
+        kind: 'enum',
+        default: 'allowlist',
+        required: true,
+        options: [
+          { value: 'disabled', label: 'Disabled' },
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'open', label: 'Open' },
+        ],
+      },
+      {
+        key: 'proactiveRecipients',
+        label: 'Proactive Recipients',
+        kind: 'string-list',
+        description: 'Explicit bare addresses. Empty disables proactive email.',
+      },
+      {
+        key: 'pollInterval',
+        label: 'Poll Interval (ms)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_POLL_INTERVAL_MS,
+        default: '60000',
+      },
+      {
+        key: 'maxMessageBytes',
+        label: 'Message Size Limit (bytes)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_MESSAGE_BYTES,
+        default: '10485760',
+      },
+      {
+        key: 'maxAttachmentBytes',
+        label: 'Attachment Size Limit (bytes)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_ATTACHMENT_BYTES,
+        default: '5242880',
+      },
+      {
+        key: 'maxTextLength',
+        label: 'Text Character Limit',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_TEXT_LENGTH,
+        default: '32000',
+      },
+    ],
+    validateConfig(config) {
+      try {
+        emailSettings(config);
+        return undefined;
+      } catch (error) {
+        return error instanceof Error
+          ? error.message
+          : 'Invalid email configuration.';
+      }
+    },
+  },
+  createChannel: (name, config, bridge, options) =>
+    new EmailChannel(name, config, bridge, options),
+};

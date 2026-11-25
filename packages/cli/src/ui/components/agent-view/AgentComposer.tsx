@@ -18,12 +18,16 @@
  */
 
 import { Box, Text, useStdin } from 'ink';
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { AgentStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
 import {
   ApprovalMode,
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { AgentCore } from '@qwen-code/qwen-code-core/agents/runtime/agent-core.js';
+import { tokenLimit } from '@qwen-code/qwen-code-core/core/tokenLimits.js';
+import { runOutsideAgentContext } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import {
   useAgentViewState,
   useAgentViewActions,
@@ -34,6 +38,7 @@ import { StreamingState } from '../../types.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useAgentStreamingState } from '../../hooks/useAgentStreamingState.js';
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { useTextBuffer } from '../shared/text-buffer.js';
 import { calculatePromptWidths } from '../../utils/layoutUtils.js';
 import { BaseTextInput } from '../BaseTextInput.js';
@@ -52,6 +57,86 @@ interface AgentComposerProps {
   agentId: string;
 }
 
+// ─── Layout key ─────────────────────────────────────────────
+
+/**
+ * Build the layout key AppContainer's controls-height measure effect depends
+ * on to re-measure the agent footer. The footer's height shifts with the
+ * agent's streaming state (LoadingIndicator row), terminal status row
+ * (Completed/Failed/Cancelled), queued-message display, and input text
+ * wrapping — none of which AppContainer can observe through its own state.
+ * Syncing this key to AgentViewContext is what triggers the re-measure;
+ * mirrors getLiveAgentPanelLayoutKey for the LiveAgentPanel.
+ */
+export function getAgentComposerLayoutKey(parts: {
+  streamingState: StreamingState;
+  statusLabel: string;
+  queuedMessageCount: number;
+  inputText: string;
+}): string {
+  return [
+    parts.streamingState,
+    parts.statusLabel,
+    parts.queuedMessageCount,
+    parts.inputText,
+  ].join('|');
+}
+
+/**
+ * The context window the agent tab's usage line is sized against. An agent
+ * on the session's model shares the session's window. An agent on its own
+ * model gets that model's window: the one its registry entry declares, else
+ * the model's known limit. Its runtime config is no guide here, because a
+ * same-provider agent inherits the session's window when the registry
+ * declares none, and a cross-provider agent has no window at all.
+ */
+export function getAgentContextWindowSize(
+  config: Pick<
+    Config,
+    'getContentGeneratorConfig' | 'getModel' | 'getModelsConfig'
+  >,
+  core: Pick<AgentCore, 'modelConfig' | 'runtimeView'> | undefined,
+): number | undefined {
+  // The footer can render from inside the agent's own runtime frame, where
+  // these getters answer with the agent's config, so read them outside it.
+  const sessionConfig = runOutsideAgentContext(() =>
+    config.getContentGeneratorConfig(),
+  );
+  const agentModel = core?.modelConfig.model;
+  if (!agentModel) {
+    return sessionConfig?.contextWindowSize;
+  }
+  const sessionModel = runOutsideAgentContext(() => config.getModel());
+  const ownRoute = core?.runtimeView?.contentGeneratorConfig;
+  // The same model id on another provider or endpoint is a different model,
+  // so the session window only applies when the agent also shares its route.
+  const onSessionRoute =
+    !ownRoute ||
+    (ownRoute.authType === sessionConfig?.authType &&
+      ownRoute.baseUrl === sessionConfig?.baseUrl);
+  if (agentModel === sessionModel && onSessionRoute) {
+    return sessionConfig?.contextWindowSize;
+  }
+  const route = ownRoute ?? sessionConfig;
+  const modelsConfig = config.getModelsConfig();
+  // Look up the entry for the route's own endpoint, then the one declared
+  // without a base URL. `null` stops either lookup from taking an entry
+  // declared for some other endpoint.
+  const declared = route?.authType
+    ? (
+        modelsConfig.getResolvedModel(
+          route.authType,
+          agentModel,
+          route.baseUrl ?? null,
+        ) ?? modelsConfig.getResolvedModel(route.authType, agentModel, null)
+      )?.generationConfig.contextWindowSize
+    : undefined;
+  // A declared window of 0 would divide the usage by zero.
+  return declared !== undefined && declared > 0
+    ? declared
+    : tokenLimit(agentModel, 'input');
+}
+
 // ─── Component ──────────────────────────────────────────────
 
 // Shared empty queue identity so unregistered agents don't allocate on
@@ -68,6 +153,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   } = useAgentViewState();
   const {
     setAgentInputBufferText,
+    setAgentComposerLayoutKey,
     setAgentTabBarFocused,
     setAgentApprovalMode,
     appendToAgentMessageQueue,
@@ -89,6 +175,14 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     lastPromptTokenCount,
   } = useAgentStreamingState(interactiveAgent);
 
+  // An open right-click context menu owns the keyboard while it is up
+  // (mounted on this tab by AgentChatContent's ContentMouseController).
+  // KeypressContext broadcasts to every subscriber and discards return
+  // values, so the menu cannot consume a key for us — each consumer has to go
+  // quiet itself, exactly as InputPrompt does for the main view.
+  const { menu: contextMenu, closeMenu } = useContextMenu();
+  const inputDismissedMenuRef = useRef<typeof contextMenu>(null);
+
   // ── Escape to cancel the active agent round ──
 
   useKeypress(
@@ -102,7 +196,9 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     },
     {
       isActive:
-        streamingState === StreamingState.Responding && !agentShellFocused,
+        streamingState === StreamingState.Responding &&
+        !agentShellFocused &&
+        contextMenu === null,
     },
   );
 
@@ -126,7 +222,12 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         setAgentApprovalMode(agentId, APPROVAL_MODES[nextIndex]!);
       }
     },
-    { isActive: !agentShellFocused },
+    // Same broadcast rule as the Escape subscriber above: an open right-click
+    // menu cannot consume a key for us, so this subscriber has to go quiet
+    // itself. This one writes straight through to the agent runtime's
+    // tool-scheduling policy, so a Shift+Tab aimed at the menu would silently
+    // change the approval mode of the very teammate being decided about.
+    { isActive: !agentShellFocused && contextMenu === null },
   );
 
   // ── Input buffer (independent from main agent) ──
@@ -164,6 +265,29 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
 
   const handleKeypress = useCallback(
     (key: Key): boolean => {
+      // While the right-click context menu is open it owns the navigation
+      // keys (the overlay handles them); any other key closes the menu and is
+      // then processed normally, mirroring click-away dismissal. The
+      // dismissing key must fall through rather than be swallowed, since
+      // BaseTextInput still owns every non-navigation key.
+      if (
+        contextMenu !== null &&
+        inputDismissedMenuRef.current !== contextMenu
+      ) {
+        if (
+          key.name === 'up' ||
+          key.name === 'down' ||
+          key.name === 'return' ||
+          key.name === 'escape'
+        ) {
+          return true;
+        }
+        // Only input dismissal releases subsequent keys before a render.
+        // Menu activation must not also submit the draft on that same Enter.
+        inputDismissedMenuRef.current = contextMenu;
+        closeMenu();
+      }
+
       // When tab bar has focus, block all non-printable keys so they don't
       // act on the hidden buffer. Printable characters fall through to
       // BaseTextInput naturally; the tab bar handler releases focus on the
@@ -193,7 +317,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       }
       return false;
     },
-    [buffer, agentTabBarFocused, setAgentTabBarFocused],
+    [buffer, agentTabBarFocused, setAgentTabBarFocused, contextMenu, closeMenu],
   );
 
   // ── Message queue display ──
@@ -241,6 +365,22 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         return null;
     }
   }, [status, interactiveAgent]);
+
+  // Sync a layout key that changes whenever this footer's height can change
+  // (loading row toggling, status row appearing, queued messages growing,
+  // input wrapping). AppContainer's controls-height measure effect depends on
+  // it via AgentViewContext; without the sync, controlsHeight stays
+  // stale-high after the footer grows and the transcript viewport pushes the
+  // composer and tab bar past the terminal bottom (#9507).
+  const composerLayoutKey = getAgentComposerLayoutKey({
+    streamingState,
+    statusLabel: statusLabel?.text ?? '',
+    queuedMessageCount: messageQueue.length,
+    inputText: buffer.text,
+  });
+  useEffect(() => {
+    setAgentComposerLayoutKey(composerLayoutKey);
+  }, [composerLayoutKey, setAgentComposerLayoutKey]);
 
   // ── Approval-mode styling (mirrors main InputPrompt) ──
 
@@ -299,9 +439,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         <AgentFooter
           approvalMode={agentApprovalMode}
           promptTokenCount={lastPromptTokenCount}
-          contextWindowSize={
-            config.getContentGeneratorConfig()?.contextWindowSize
-          }
+          contextWindowSize={getAgentContextWindowSize(
+            config,
+            interactiveAgent?.getCore(),
+          )}
           terminalWidth={terminalWidth}
         />
       </Box>

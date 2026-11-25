@@ -2,7 +2,7 @@
 
 ## Problem
 
-`/goal <objective>` accepts any non-empty string. The objective is judged by an independent verifier that only sees transcript evidence (`goalJudge.ts`, `goal-verifier.ts`): printed text cannot prove that tests passed or files changed, claims about user actions need a real user message, and an objective nobody can evidence keeps the loop running until a limit stops it. Nothing in the product tells users this. The only guidance was the web-shell placeholder `all tests pass and the lint is clean`, which itself has no check attached.
+`/goal <objective>` accepts any non-empty string. The objective is judged by an independent verifier that only sees transcript evidence (`goal-verifier.ts`): printed text cannot prove that tests passed or files changed, claims about user actions need a real user message, and an objective nobody can evidence keeps the loop running until a limit stops it. Nothing in the product tells users this. The only guidance was the web-shell placeholder `all tests pass and the lint is clean`, which itself has no check attached.
 
 ## Survey
 

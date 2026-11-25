@@ -15,7 +15,9 @@ export function installJsonBodyParser(app: Application): void {
   app.use((req, res, next) => {
     if (
       req.method === 'POST' &&
-      /^\/session\/[^/]+\/attachments\/?$/i.test(req.path)
+      /^\/session\/[^/]+\/(?:attachments|attachment-uploads(?:\/[^/]+\/chunks)?)\/?$/i.test(
+        req.path,
+      )
     ) {
       next();
       return;

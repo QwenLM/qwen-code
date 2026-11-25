@@ -31,6 +31,7 @@ import {
 import {
   bootLiveStack,
   startLiveCall,
+  waitForLiveResponseAfter,
   type LiveStack,
 } from './qwen-live-harness.js';
 
@@ -88,25 +89,46 @@ describeE2E('qwen-live M2 — permission relay', () => {
 
   it('relays the permission ask to voice and delivers the allow vote', async () => {
     // Warmup: materialize the orchestrator's default serve session.
-    conn.functionCall({
+    const warmupIndex = stack.fakeDash.inbox.length;
+    conn.queueFunctionCall({
       name: 'handoff',
       argumentsJson: JSON.stringify({ task: 'perm-warmup' }),
       callId: 'call-w',
     });
+    conn.speakTranscript('Run perm-warmup.');
     const warmupReceiptMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === 'call-w',
-      { timeoutMs: 30_000, description: 'the warmup handoff receipt' },
+      {
+        fromIndex: warmupIndex,
+        timeoutMs: 30_000,
+        description: 'the warmup handoff receipt',
+      },
     );
     const warmupReceipt = JSON.parse(
       functionCallOutputOf(warmupReceiptMessage)!.output,
     ) as Record<string, unknown>;
     expect(warmupReceipt['status']).toBe('accepted');
     const warmupJob = String(warmupReceipt['job']);
-    await stack.fakeDash.waitForMessage(
+    const warmupComplete = await stack.fakeDash.waitForMessage(
       (message) =>
         contextTextOf(message)?.includes(`[COMPLETE ${warmupJob}]`) ?? false,
-      { timeoutMs: 30_000, description: 'the warmup [COMPLETE] injection' },
+      {
+        fromIndex: warmupIndex,
+        timeoutMs: 30_000,
+        description: 'the warmup [COMPLETE] injection',
+      },
     );
+    const warmupSpoken = await stack.fakeDash.waitForMessage(
+      (message) => {
+        const text = contextTextOf(message);
+        return (
+          text?.startsWith('[SPEAK_TO_USER] ') === true &&
+          text.includes('warmup done')
+        );
+      },
+      { fromIndex: stack.fakeDash.inbox.indexOf(warmupComplete) + 1 },
+    );
+    await waitForLiveResponseAfter(stack, warmupSpoken, 'backend_speech');
 
     // Pin the approval mode of the orchestrator-created session so the
     // write below deterministically raises a permission_request.
@@ -124,11 +146,12 @@ describeE2E('qwen-live M2 — permission relay', () => {
 
     // The permission-triggering handoff.
     const inboxIndex = stack.fakeDash.inbox.length;
-    conn.functionCall({
+    conn.queueFunctionCall({
       name: 'handoff',
       argumentsJson: JSON.stringify({ task: 'perm-write-task' }),
       callId: 'call-p',
     });
+    conn.speakTranscript('Run perm-write-task.');
     const receiptMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === 'call-p',
       {
@@ -173,18 +196,21 @@ describeE2E('qwen-live M2 — permission relay', () => {
       },
     );
     expect(contextTextOf(speakMessage)).toBeDefined();
+    await waitForLiveResponseAfter(stack, speakMessage, 'backend_speech');
 
     // The user says yes: respond_permission must deliver the vote to serve.
-    conn.functionCall({
+    const voteIndex = stack.fakeDash.inbox.length;
+    conn.queueFunctionCall({
       name: 'respond_permission',
       argumentsJson: '{"request_id":"req_1","decision":"allow"}',
       callId: 'call-2',
     });
+    conn.speakTranscript('Yes, allow it.');
     const voteReceiptMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === 'call-2',
       {
         timeoutMs: 15_000,
-        fromIndex: inboxIndex,
+        fromIndex: voteIndex,
         description: 'the respond_permission receipt',
       },
     );
@@ -192,6 +218,11 @@ describeE2E('qwen-live M2 — permission relay', () => {
       functionCallOutputOf(voteReceiptMessage)!.output,
     ) as Record<string, unknown>;
     expect(voteReceipt['status']).toBe('delivered');
+    await waitForLiveResponseAfter(
+      stack,
+      voteReceiptMessage,
+      'tool_continuation',
+    );
 
     // Serve accepted the vote: the tool ran and the turn completed.
     const completeMessage = await stack.fakeDash.waitForMessage(

@@ -9,27 +9,34 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openBrowserSecurely } from './secure-browser-launcher.js';
 
-// Create mock function using vi.hoisted
-const mockExecFile = vi.hoisted(() => vi.fn());
-const mockSpawn = vi.hoisted(() =>
-  vi.fn(() => {
-    const child: {
-      once: ReturnType<typeof vi.fn>;
-      unref: ReturnType<typeof vi.fn>;
-    } = {
-      once: vi.fn((event: string, callback: () => void) => {
-        if (event === 'spawn') {
-          callback();
+type FakeChild = {
+  once: ReturnType<typeof vi.fn>;
+  unref: ReturnType<typeof vi.fn>;
+};
+
+const { mockExecFile, mockSpawn, fakeChild } = vi.hoisted(() => {
+  // A spawned child that invokes the listener for `fires` ('spawn' with no
+  // arguments, 'error' with a spawn failure) as soon as it is registered.
+  const fakeChild = (fires: 'spawn' | 'error') => {
+    const child: FakeChild = {
+      once: vi.fn((event: string, callback: (error?: Error) => void) => {
+        if (event === fires) {
+          if (fires === 'error') callback(new Error('spawn failed'));
+          else callback();
         }
         return child;
       }),
       unref: vi.fn(),
     };
     return child;
-  }),
-);
+  };
+  return {
+    mockExecFile: vi.fn(),
+    mockSpawn: vi.fn(() => fakeChild('spawn')),
+    fakeChild,
+  };
+});
 
-// Mock modules
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
   spawn: mockSpawn,
@@ -44,21 +51,7 @@ describe('secure-browser-launcher', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockExecFile.mockResolvedValue({ stdout: '', stderr: '' });
-    mockSpawn.mockImplementation(() => {
-      const child: {
-        once: ReturnType<typeof vi.fn>;
-        unref: ReturnType<typeof vi.fn>;
-      } = {
-        once: vi.fn((event: string, callback: () => void) => {
-          if (event === 'spawn') {
-            callback();
-          }
-          return child;
-        }),
-        unref: vi.fn(),
-      };
-      return child;
-    });
+    mockSpawn.mockImplementation(() => fakeChild('spawn'));
     originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
     vi.stubEnv('BROWSER', '');
     vi.stubEnv('CI', '');
@@ -80,42 +73,74 @@ describe('secure-browser-launcher', () => {
     });
   }
 
+  const setLinuxDesktop = () => {
+    setPlatform('linux');
+    vi.stubEnv('DISPLAY', ':1');
+  };
+  const setHeadlessLinux = () => {
+    setPlatform('linux');
+    vi.stubEnv('DISPLAY', '');
+    vi.stubEnv('WAYLAND_DISPLAY', '');
+    vi.stubEnv('MIR_SOCKET', '');
+  };
+  const warnSpy = () => vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const expectWarned = (spy: ReturnType<typeof warnSpy>, text: string) =>
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining(text));
+
+  const expectOpened = (command: string, url = 'https://example.com') =>
+    expect(mockExecFile).toHaveBeenCalledWith(
+      command,
+      [url],
+      expect.any(Object),
+    );
+  const expectSpawned = (command: string, args: string[]) =>
+    expect(mockSpawn).toHaveBeenCalledWith(command, args, expect.any(Object));
+  const expectPowerShellOpened = () =>
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'powershell.exe',
+      expect.arrayContaining([
+        '-Command',
+        `Start-Process 'https://example.com'`,
+      ]),
+      expect.any(Object),
+    );
+  const expectPowerShellCommand = (command: string) =>
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-WindowStyle',
+        'Hidden',
+        '-Command',
+        command,
+      ],
+      expect.any(Object),
+    );
+
   describe('URL validation', () => {
+    // 'should allow valid HTTPS URLs' was an exact duplicate of
+    // 'Platform-specific behavior > should use correct command on macOS'.
     it('should allow valid HTTP URLs', async () => {
       setPlatform('darwin');
       await openBrowserSecurely('http://example.com');
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'open',
-        ['http://example.com'],
-        expect.any(Object),
-      );
-    });
-
-    it('should allow valid HTTPS URLs', async () => {
-      setPlatform('darwin');
-      await openBrowserSecurely('https://example.com');
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'open',
-        ['https://example.com'],
-        expect.any(Object),
-      );
+      expectOpened('open', 'http://example.com');
     });
 
     it('should reject non-HTTP(S) protocols', async () => {
-      await expect(openBrowserSecurely('file:///etc/passwd')).rejects.toThrow(
-        'Unsafe protocol',
-      );
-      await expect(openBrowserSecurely('javascript:alert(1)')).rejects.toThrow(
-        'Unsafe protocol',
-      );
-      await expect(openBrowserSecurely('ftp://example.com')).rejects.toThrow(
-        'Unsafe protocol',
-      );
+      for (const url of [
+        'file:///etc/passwd',
+        'javascript:alert(1)',
+        'ftp://example.com',
+      ]) {
+        await expect(openBrowserSecurely(url)).rejects.toThrow(
+          'Unsafe protocol',
+        );
+      }
     });
 
     it('should allow file URLs only when explicitly requested with an allow-list', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       const filePath = resolve('report.html');
       const fileUrl = pathToFileURL(filePath).href;
 
@@ -124,9 +149,7 @@ describe('secure-browser-launcher', () => {
       ).rejects.toThrow('Unsafe protocol');
 
       await expect(
-        openBrowserSecurely(fileUrl, {
-          allowFile: true,
-        }),
+        openBrowserSecurely(fileUrl, { allowFile: true }),
       ).rejects.toThrow('allowedFilePaths is required');
 
       await openBrowserSecurely(fileUrl, {
@@ -134,11 +157,7 @@ describe('secure-browser-launcher', () => {
         allowedFilePaths: [filePath],
       });
 
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'xdg-open',
-        [fileUrl],
-        expect.any(Object),
-      );
+      expectOpened('xdg-open', fileUrl);
     });
 
     it('should restrict file URLs to the caller allow-list when provided', async () => {
@@ -154,22 +173,21 @@ describe('secure-browser-launcher', () => {
     });
 
     it('should reject invalid URLs', async () => {
-      await expect(openBrowserSecurely('not-a-url')).rejects.toThrow(
-        'Invalid URL',
-      );
-      await expect(openBrowserSecurely('')).rejects.toThrow('Invalid URL');
+      for (const url of ['not-a-url', '']) {
+        await expect(openBrowserSecurely(url)).rejects.toThrow('Invalid URL');
+      }
     });
 
     it('should reject URLs with control characters', async () => {
-      await expect(
-        openBrowserSecurely('http://example.com\nmalicious-command'),
-      ).rejects.toThrow('invalid characters');
-      await expect(
-        openBrowserSecurely('http://example.com\rmalicious-command'),
-      ).rejects.toThrow('invalid characters');
-      await expect(
-        openBrowserSecurely('http://example.com\x00'),
-      ).rejects.toThrow('invalid characters');
+      for (const url of [
+        'http://example.com\nmalicious-command',
+        'http://example.com\rmalicious-command',
+        'http://example.com\x00',
+      ]) {
+        await expect(openBrowserSecurely(url)).rejects.toThrow(
+          'invalid characters',
+        );
+      }
     });
   });
 
@@ -182,17 +200,8 @@ describe('secure-browser-launcher', () => {
 
       await openBrowserSecurely(maliciousUrl);
 
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-WindowStyle',
-          'Hidden',
-          '-Command',
-          `Start-Process '${maliciousUrl.replace(/'/g, "''")}'`,
-        ],
-        expect.any(Object),
+      expectPowerShellCommand(
+        `Start-Process '${maliciousUrl.replace(/'/g, "''")}'`,
       );
     });
 
@@ -210,32 +219,19 @@ describe('secure-browser-launcher', () => {
 
       for (const url of urlsWithSpecialChars) {
         await openBrowserSecurely(url);
-        expect(mockExecFile).toHaveBeenCalledWith(
-          'open',
-          [url],
-          expect.any(Object),
-        );
+        expectOpened('open', url);
       }
     });
 
     it('should properly escape single quotes in URLs on Windows', async () => {
       setPlatform('win32');
 
-      const urlWithSingleQuotes =
-        "http://example.com/path?name=O'Brien&test='value'";
-      await openBrowserSecurely(urlWithSingleQuotes);
+      await openBrowserSecurely(
+        "http://example.com/path?name=O'Brien&test='value'",
+      );
 
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-WindowStyle',
-          'Hidden',
-          '-Command',
-          `Start-Process 'http://example.com/path?name=O''Brien&test=''value'''`,
-        ],
-        expect.any(Object),
+      expectPowerShellCommand(
+        `Start-Process 'http://example.com/path?name=O''Brien&test=''value'''`,
       );
     });
   });
@@ -244,35 +240,19 @@ describe('secure-browser-launcher', () => {
     it('should use correct command on macOS', async () => {
       setPlatform('darwin');
       await openBrowserSecurely('https://example.com');
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'open',
-        ['https://example.com'],
-        expect.any(Object),
-      );
+      expectOpened('open');
     });
 
     it('should use PowerShell on Windows', async () => {
       setPlatform('win32');
       await openBrowserSecurely('https://example.com');
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'powershell.exe',
-        expect.arrayContaining([
-          '-Command',
-          `Start-Process 'https://example.com'`,
-        ]),
-        expect.any(Object),
-      );
+      expectPowerShellOpened();
     });
 
     it('should use xdg-open on Linux', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       await openBrowserSecurely('https://example.com');
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'xdg-open',
-        ['https://example.com'],
-        expect.any(Object),
-      );
+      expectOpened('xdg-open');
     });
 
     it('should throw on unsupported platforms', async () => {
@@ -283,8 +263,7 @@ describe('secure-browser-launcher', () => {
     });
 
     it('should prefer BROWSER when it is configured', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       vi.stubEnv('BROWSER', 'firefox --new-tab');
 
       await openBrowserSecurely('https://example.com');
@@ -292,46 +271,32 @@ describe('secure-browser-launcher', () => {
       expect(mockSpawn).toHaveBeenCalledWith(
         'firefox',
         ['--new-tab', 'https://example.com'],
-        expect.objectContaining({
-          detached: true,
-          stdio: 'ignore',
-        }),
+        expect.objectContaining({ detached: true, stdio: 'ignore' }),
       );
       expect(mockExecFile).not.toHaveBeenCalled();
     });
 
     it('should substitute the BROWSER placeholder instead of appending the URL', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       vi.stubEnv('BROWSER', 'firefox --new-tab %s');
 
       await openBrowserSecurely('https://example.com');
 
-      expect(mockSpawn).toHaveBeenCalledWith(
-        'firefox',
-        ['--new-tab', 'https://example.com'],
-        expect.any(Object),
-      );
+      expectSpawned('firefox', ['--new-tab', 'https://example.com']);
     });
 
     it('should substitute BROWSER placeholders literally', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       vi.stubEnv('BROWSER', 'firefox --new-tab %s');
       const url = 'https://example.com/callback?code=$&state=abc';
 
       await openBrowserSecurely(url);
 
-      expect(mockSpawn).toHaveBeenCalledWith(
-        'firefox',
-        ['--new-tab', url],
-        expect.any(Object),
-      );
+      expectSpawned('firefox', ['--new-tab', url]);
     });
 
     it('should parse quoted arguments inside BROWSER tokens', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       vi.stubEnv(
         'BROWSER',
         'chromium --user-data-dir="/tmp/my profile" --new-tab %s',
@@ -339,90 +304,66 @@ describe('secure-browser-launcher', () => {
 
       await openBrowserSecurely('https://example.com');
 
-      expect(mockSpawn).toHaveBeenCalledWith(
-        'chromium',
-        ['--user-data-dir=/tmp/my profile', '--new-tab', 'https://example.com'],
-        expect.any(Object),
-      );
+      expectSpawned('chromium', [
+        '--user-data-dir=/tmp/my profile',
+        '--new-tab',
+        'https://example.com',
+      ]);
     });
 
     it('should parse quoted command paths in BROWSER', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       vi.stubEnv('BROWSER', '"/opt/my browser/chromium" --new-tab %s');
 
       await openBrowserSecurely('https://example.com');
 
-      expect(mockSpawn).toHaveBeenCalledWith(
-        '/opt/my browser/chromium',
-        ['--new-tab', 'https://example.com'],
-        expect.any(Object),
-      );
+      expectSpawned('/opt/my browser/chromium', [
+        '--new-tab',
+        'https://example.com',
+      ]);
       expect(mockExecFile).not.toHaveBeenCalled();
     });
 
     it('should let an explicit BROWSER override headless Linux detection', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', '');
-      vi.stubEnv('WAYLAND_DISPLAY', '');
-      vi.stubEnv('MIR_SOCKET', '');
+      setHeadlessLinux();
       vi.stubEnv('BROWSER', 'firefox');
 
       await openBrowserSecurely('https://example.com');
 
-      expect(mockSpawn).toHaveBeenCalledWith(
-        'firefox',
-        ['https://example.com'],
-        expect.any(Object),
-      );
+      expectSpawned('firefox', ['https://example.com']);
       expect(mockExecFile).not.toHaveBeenCalled();
     });
 
     it('should fall back to the platform opener for blocklisted BROWSER values', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       vi.stubEnv('BROWSER', 'www-browser --headless');
 
       await openBrowserSecurely('https://example.com');
 
       expect(mockSpawn).not.toHaveBeenCalled();
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'xdg-open',
-        ['https://example.com'],
-        expect.any(Object),
-      );
+      expectOpened('xdg-open');
     });
 
     it('should block BROWSER values by command basename before using the platform opener', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       vi.stubEnv('BROWSER', '/usr/bin/www-browser --headless');
 
       await openBrowserSecurely('https://example.com');
 
       expect(mockSpawn).not.toHaveBeenCalled();
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'xdg-open',
-        ['https://example.com'],
-        expect.any(Object),
-      );
+      expectOpened('xdg-open');
     });
 
     it('should still skip blocklisted BROWSER values in headless Linux', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', '');
-      vi.stubEnv('WAYLAND_DISPLAY', '');
-      vi.stubEnv('MIR_SOCKET', '');
+      setHeadlessLinux();
       vi.stubEnv('BROWSER', 'www-browser');
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const consoleSpy = warnSpy();
 
       await openBrowserSecurely('https://example.com');
 
       expect(mockSpawn).not.toHaveBeenCalled();
       expect(mockExecFile).not.toHaveBeenCalled();
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Please open this URL manually'),
-      );
+      expectWarned(consoleSpy, 'Please open this URL manually');
 
       consoleSpy.mockRestore();
     });
@@ -434,14 +375,7 @@ describe('secure-browser-launcher', () => {
       await openBrowserSecurely('https://example.com');
 
       expect(mockSpawn).not.toHaveBeenCalled();
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'powershell.exe',
-        expect.arrayContaining([
-          '-Command',
-          `Start-Process 'https://example.com'`,
-        ]),
-        expect.any(Object),
-      );
+      expectPowerShellOpened();
     });
 
     it('should ignore blocklisted BROWSER values on Windows', async () => {
@@ -451,92 +385,49 @@ describe('secure-browser-launcher', () => {
       await openBrowserSecurely('https://example.com');
 
       expect(mockSpawn).not.toHaveBeenCalled();
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'powershell.exe',
-        expect.arrayContaining([
-          '-Command',
-          `Start-Process 'https://example.com'`,
-        ]),
-        expect.any(Object),
-      );
+      expectPowerShellOpened();
     });
 
     it('should fall back to the platform opener for invalid BROWSER values', async () => {
       setPlatform('darwin');
       vi.stubEnv('BROWSER', '"');
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const consoleSpy = warnSpy();
 
       await openBrowserSecurely('https://example.com');
 
       expect(mockSpawn).not.toHaveBeenCalled();
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'open',
-        ['https://example.com'],
-        expect.any(Object),
-      );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Invalid BROWSER environment variable'),
-      );
+      expectOpened('open');
+      expectWarned(consoleSpy, 'Invalid BROWSER environment variable');
 
       consoleSpy.mockRestore();
     });
 
     it('should fall back to the platform opener when explicit BROWSER launch fails', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
+      setLinuxDesktop();
       vi.stubEnv('BROWSER', 'firefox --new-tab');
       mockExecFile.mockResolvedValueOnce({ stdout: '', stderr: '' });
-      mockSpawn.mockImplementationOnce(() => {
-        const child: {
-          once: ReturnType<typeof vi.fn>;
-          unref: ReturnType<typeof vi.fn>;
-        } = {
-          once: vi.fn((event: string, callback: (error?: Error) => void) => {
-            if (event === 'error') {
-              callback(new Error('spawn failed'));
-            }
-            return child;
-          }),
-          unref: vi.fn(),
-        };
-        return child;
-      });
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      mockSpawn.mockImplementationOnce(() => fakeChild('error'));
+      const consoleSpy = warnSpy();
 
       await expect(
         openBrowserSecurely('https://example.com'),
       ).resolves.toBeUndefined();
 
-      expect(mockSpawn).toHaveBeenCalledWith(
-        'firefox',
-        ['--new-tab', 'https://example.com'],
-        expect.any(Object),
-      );
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'xdg-open',
-        ['https://example.com'],
-        expect.any(Object),
-      );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to open BROWSER command firefox'),
-      );
+      expectSpawned('firefox', ['--new-tab', 'https://example.com']);
+      expectOpened('xdg-open');
+      expectWarned(consoleSpy, 'Failed to open BROWSER command firefox');
 
       consoleSpy.mockRestore();
     });
 
     it('should skip browser launch in headless Linux', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', '');
-      vi.stubEnv('WAYLAND_DISPLAY', '');
-      vi.stubEnv('MIR_SOCKET', '');
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      setHeadlessLinux();
+      const consoleSpy = warnSpy();
 
       await openBrowserSecurely('https://example.com');
 
       expect(mockExecFile).not.toHaveBeenCalled();
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Please open this URL manually'),
-      );
+      expectWarned(consoleSpy, 'Please open this URL manually');
 
       consoleSpy.mockRestore();
     });
@@ -546,16 +437,13 @@ describe('secure-browser-launcher', () => {
     it('should handle browser launch failures gracefully by logging instead of throwing', async () => {
       setPlatform('darwin');
       mockExecFile.mockRejectedValueOnce(new Error('Command not found'));
-
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const consoleSpy = warnSpy();
 
       await expect(
         openBrowserSecurely('https://example.com'),
       ).resolves.toBeUndefined();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to open browser automatically'),
-      );
+      expectWarned(consoleSpy, 'Failed to open browser automatically');
 
       consoleSpy.mockRestore();
     });
@@ -563,9 +451,7 @@ describe('secure-browser-launcher', () => {
 
   describe('Linux Fallback', () => {
     it('should try fallback browsers on Linux', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
-
+      setLinuxDesktop();
       mockExecFile.mockRejectedValueOnce(new Error('Command not found'));
       mockExecFile.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
@@ -587,9 +473,7 @@ describe('secure-browser-launcher', () => {
     });
 
     it('should detach real browser fallback commands', async () => {
-      setPlatform('linux');
-      vi.stubEnv('DISPLAY', ':1');
-
+      setLinuxDesktop();
       mockExecFile
         .mockRejectedValueOnce(new Error('xdg-open missing'))
         .mockRejectedValueOnce(new Error('gnome-open missing'))
@@ -597,11 +481,7 @@ describe('secure-browser-launcher', () => {
 
       await openBrowserSecurely('https://example.com');
 
-      expect(mockSpawn).toHaveBeenCalledWith(
-        'firefox',
-        ['https://example.com'],
-        expect.any(Object),
-      );
+      expectSpawned('firefox', ['https://example.com']);
     });
   });
 });

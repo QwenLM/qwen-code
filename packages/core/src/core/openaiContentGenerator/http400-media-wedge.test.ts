@@ -17,6 +17,7 @@ import type {
 import { AuthType } from '../../utils/auth-type.js';
 import type { Config } from '../../config/config.js';
 import { getErrorStatus } from '../../utils/errors.js';
+import { collect, userText } from '../../test-utils/model-fixtures.js';
 
 /**
  * End-to-end repro for #10693: an OpenAI-compatible route that serves
@@ -45,6 +46,8 @@ const GATEWAY_REJECTION = JSON.stringify({
 const TINY_JPEG_BASE64 =
   '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==';
 
+const MODEL = 'qwen3.8-max-dogfooding';
+const WIRE_MEDIA_TYPES = ['image_url', 'input_audio', 'video_url', 'file'];
 type WireMediaType = 'image_url' | 'input_audio' | 'video_url' | 'file';
 
 type MediaCase = {
@@ -54,31 +57,18 @@ type MediaCase = {
   wireType: WireMediaType;
 };
 
+const mediaCase = (
+  name: string,
+  mimeType: string,
+  modalities: InputModalities,
+  wireType: WireMediaType,
+): MediaCase => ({ name, mimeType, modalities, wireType });
+
 const MEDIA_CASES: MediaCase[] = [
-  {
-    name: 'image',
-    mimeType: 'image/jpeg',
-    modalities: { image: true },
-    wireType: 'image_url',
-  },
-  {
-    name: 'audio',
-    mimeType: 'audio/wav',
-    modalities: { audio: true },
-    wireType: 'input_audio',
-  },
-  {
-    name: 'video',
-    mimeType: 'video/mp4',
-    modalities: { video: true },
-    wireType: 'video_url',
-  },
-  {
-    name: 'pdf',
-    mimeType: 'application/pdf',
-    modalities: { pdf: true },
-    wireType: 'file',
-  },
+  mediaCase('image', 'image/jpeg', { image: true }, 'image_url'),
+  mediaCase('audio', 'audio/wav', { audio: true }, 'input_audio'),
+  mediaCase('video', 'video/mp4', { video: true }, 'video_url'),
+  mediaCase('pdf', 'application/pdf', { pdf: true }, 'file'),
 ];
 
 let server: Server;
@@ -92,15 +82,22 @@ function requestHasInlineMedia(body: Record<string, unknown>): boolean {
     const content = (message as { content?: unknown }).content;
     return (
       Array.isArray(content) &&
-      content.some(
-        (part) =>
-          (part as { type?: unknown }).type === 'image_url' ||
-          (part as { type?: unknown }).type === 'input_audio' ||
-          (part as { type?: unknown }).type === 'video_url' ||
-          (part as { type?: unknown }).type === 'file',
+      content.some((part) =>
+        WIRE_MEDIA_TYPES.includes((part as { type?: unknown }).type as string),
       )
     );
   });
+}
+
+/** A chat completion (or chunk) from the fake gateway answering `ok`. */
+function completion(object: string, choice: Record<string, unknown>) {
+  return {
+    id: 'chatcmpl-test',
+    object,
+    created: 1,
+    model: MODEL,
+    choices: [{ index: 0, ...choice, finish_reason: 'stop' }],
+  };
 }
 
 beforeAll(async () => {
@@ -118,57 +115,37 @@ beforeAll(async () => {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       receivedBodies.push(body as Record<string, unknown>);
       const serializedBody = JSON.stringify(body);
+      const respond = (status: number, contentType: string, text: string) => {
+        res.writeHead(status, { 'Content-Type': contentType });
+        res.end(text);
+      };
       const hasInlineMedia = requestHasInlineMedia(
         body as Record<string, unknown>,
       );
       if (hasInlineMedia || serializedBody.includes('REJECT_ALWAYS_MARKER')) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(GATEWAY_REJECTION);
-        return;
+        return respond(400, 'application/json', GATEWAY_REJECTION);
       }
       if (serializedBody.includes('RETRY_429_MARKER')) {
-        res.writeHead(429, { 'Content-Type': 'application/json' });
-        res.end(GATEWAY_REJECTION);
-        return;
+        return respond(429, 'application/json', GATEWAY_REJECTION);
       }
       if (body['stream'] === true) {
-        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-        res.end(
-          `data: ${JSON.stringify({
-            id: 'chatcmpl-test',
-            object: 'chat.completion.chunk',
-            created: 1,
-            model: 'qwen3.8-max-dogfooding',
-            choices: [
-              {
-                index: 0,
-                delta: { role: 'assistant', content: 'ok' },
-                finish_reason: 'stop',
-              },
-            ],
-          })}\n\ndata: [DONE]\n\n`,
+        const chunk = completion('chat.completion.chunk', {
+          delta: { role: 'assistant', content: 'ok' },
+        });
+        return respond(
+          200,
+          'text/event-stream',
+          `data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`,
         );
-        return;
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
+      respond(
+        200,
+        'application/json',
         JSON.stringify({
-          id: 'chatcmpl-test',
-          object: 'chat.completion',
-          created: 1,
-          model: 'qwen3.8-max-dogfooding',
-          choices: [
-            {
-              index: 0,
-              message: { role: 'assistant', content: 'ok' },
-              finish_reason: 'stop',
-            },
-          ],
-          usage: {
-            prompt_tokens: 10,
-            completion_tokens: 1,
-            total_tokens: 11,
-          },
+          ...completion('chat.completion', {
+            message: { role: 'assistant', content: 'ok' },
+          }),
+          usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 },
         }),
       );
     });
@@ -188,7 +165,7 @@ afterAll(async () => {
 
 function createGenerator(modalities?: InputModalities): OpenAIContentGenerator {
   const contentGeneratorConfig: ContentGeneratorConfig = {
-    model: 'qwen3.8-max-dogfooding',
+    model: MODEL,
     apiKey: 'test-key',
     baseUrl,
     authType: AuthType.USE_OPENAI,
@@ -210,6 +187,32 @@ function createGenerator(modalities?: InputModalities): OpenAIContentGenerator {
     provider,
   );
 }
+
+/** Clears the wire log, then sends one non-streaming request. */
+function generate(
+  modalities: InputModalities | undefined,
+  contents: Content[],
+  promptId: string,
+): Promise<GenerateContentResponse> {
+  receivedBodies.length = 0;
+  const generator = createGenerator(modalities);
+  return generator.generateContent({ model: MODEL, contents }, promptId);
+}
+
+/** Like `generate`, but returns what the request rejected with. */
+async function generateError(
+  ...args: Parameters<typeof generate>
+): Promise<unknown> {
+  try {
+    await generate(...args);
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+const hasOkText = (response: GenerateContentResponse) =>
+  response.candidates?.[0]?.content?.parts?.some((part) => part.text === 'ok');
 
 function mediaBearingContents(
   media: MediaCase = MEDIA_CASES[0]!,
@@ -250,22 +253,13 @@ describe('issue #10693: gateway 400 on media-bearing OpenAI-compatible requests'
   it.each(MEDIA_CASES)(
     'recovers $name by retrying once with the media degraded to a placeholder',
     async (media) => {
-      receivedBodies.length = 0;
-      const generator = createGenerator(media.modalities);
-
-      const response = await generator.generateContent(
-        {
-          model: 'qwen3.8-max-dogfooding',
-          contents: mediaBearingContents(media),
-        },
+      const response = await generate(
+        media.modalities,
+        mediaBearingContents(media),
         `prompt-10693-${media.name}`,
       );
 
-      expect(
-        response.candidates?.[0]?.content?.parts?.some(
-          (part) => part.text === 'ok',
-        ),
-      ).toBe(true);
+      expect(hasOkText(response)).toBe(true);
       expect(receivedBodies).toHaveLength(2);
       expect(bodyHasPartType(receivedBodies[0]!, media.wireType)).toBe(true);
       expect(requestHasInlineMedia(receivedBodies[1]!)).toBe(false);
@@ -283,19 +277,12 @@ describe('issue #10693: gateway 400 on media-bearing OpenAI-compatible requests'
     const generator = createGenerator({ image: true });
 
     const stream = await generator.generateContentStream(
-      { model: 'qwen3.8-max-dogfooding', contents: mediaBearingContents() },
+      { model: MODEL, contents: mediaBearingContents() },
       'prompt-10693-stream',
     );
-    const responses: GenerateContentResponse[] = [];
-    for await (const response of stream) responses.push(response);
+    const responses: GenerateContentResponse[] = await collect(stream);
 
-    expect(
-      responses.some((response) =>
-        response.candidates?.[0]?.content?.parts?.some(
-          (part) => part.text === 'ok',
-        ),
-      ),
-    ).toBe(true);
+    expect(responses.some(hasOkText)).toBe(true);
     expect(receivedBodies).toHaveLength(2);
     expect(requestHasInlineMedia(receivedBodies[0]!)).toBe(true);
     expect(requestHasInlineMedia(receivedBodies[1]!)).toBe(false);
@@ -308,21 +295,11 @@ describe('issue #10693: gateway 400 on media-bearing OpenAI-compatible requests'
   ] as const)(
     'surfaces %s when the degraded retry fails',
     async (_, marker, status) => {
-      receivedBodies.length = 0;
-      const generator = createGenerator({ image: true });
-
-      let caught: unknown;
-      try {
-        await generator.generateContent(
-          {
-            model: 'qwen3.8-max-dogfooding',
-            contents: mediaBearingContents(MEDIA_CASES[0]!, marker),
-          },
-          'prompt-10693-retry-failure',
-        );
-      } catch (error) {
-        caught = error;
-      }
+      const caught = await generateError(
+        { image: true },
+        mediaBearingContents(MEDIA_CASES[0]!, marker),
+        'prompt-10693-retry-failure',
+      );
 
       expect(getErrorStatus(caught)).toBe(status);
       expect(receivedBodies).toHaveLength(2);
@@ -332,69 +309,39 @@ describe('issue #10693: gateway 400 on media-bearing OpenAI-compatible requests'
   );
 
   it('keeps text-only requests on the single-attempt path', async () => {
-    receivedBodies.length = 0;
-    const generator = createGenerator({ image: true });
-
-    const response = await generator.generateContent(
-      {
-        model: 'qwen3.8-max-dogfooding',
-        contents: [{ role: 'user', parts: [{ text: 'plain text turn' }] }],
-      },
+    const response = await generate(
+      { image: true },
+      [{ role: 'user', parts: [{ text: 'plain text turn' }] }],
       'prompt-10693-text',
     );
 
-    expect(
-      response.candidates?.[0]?.content?.parts?.some(
-        (part) => part.text === 'ok',
-      ),
-    ).toBe(true);
+    expect(hasOkText(response)).toBe(true);
     expect(receivedBodies).toHaveLength(1);
   });
 
   it('leaves the explicit modality-off placeholder path unchanged', async () => {
-    receivedBodies.length = 0;
     // No modalities set → the converter's existing placeholder path fires
     // on the first attempt; the gateway never sees an image part.
-    const generator = createGenerator();
-
-    const response = await generator.generateContent(
-      { model: 'qwen3.8-max-dogfooding', contents: mediaBearingContents() },
+    const response = await generate(
+      undefined,
+      mediaBearingContents(),
       'prompt-10693-off',
     );
 
-    expect(
-      response.candidates?.[0]?.content?.parts?.some(
-        (part) => part.text === 'ok',
-      ),
-    ).toBe(true);
+    expect(hasOkText(response)).toBe(true);
     expect(receivedBodies).toHaveLength(1);
     expect(requestHasInlineMedia(receivedBodies[0]!)).toBe(false);
     expect(bodyHasPlaceholder(receivedBodies[0]!)).toBe(true);
   });
 
   it('surfaces non-media 400s unchanged, without a degradation retry', async () => {
-    receivedBodies.length = 0;
-    const generator = createGenerator({ image: true });
-
-    let caught: unknown;
-    try {
-      await generator.generateContent(
-        {
-          model: 'qwen3.8-max-dogfooding',
-          // No media in this request, so the gateway's 400 cannot be the
-          // media shape and must reach the user as before.
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: 'some REJECT_ALWAYS_MARKER request' }],
-            },
-          ],
-        },
-        'prompt-10693-non-media',
-      );
-    } catch (error) {
-      caught = error;
-    }
+    // No media in this request, so the gateway's 400 cannot be the media
+    // shape and must reach the user as before.
+    const caught = await generateError(
+      { image: true },
+      [userText('some REJECT_ALWAYS_MARKER request')],
+      'prompt-10693-non-media',
+    );
 
     expect(caught).toBeDefined();
     expect(getErrorStatus(caught)).toBe(400);

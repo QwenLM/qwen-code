@@ -19,19 +19,37 @@ interface SessionPrBadgeProps {
    * owns roving-tabindex keyboard navigation (e.g. picker dialogs).
    */
   tabIndex?: number;
+  /** Uses less spacing and no pill background in sidebar session rows. */
+  compact?: boolean;
+}
+
+/**
+ * The bound PRs the badge can open, in the order given. Bindings whose URL
+ * the external opener refuses are filtered out as a defense-in-depth measure
+ * on top of the daemon-side validators. Callers that lay out around the badge
+ * use this to know whether it renders, and the session details tooltip lists
+ * the same set.
+ */
+export function openableSessionPrs(
+  prs: DaemonSessionPrInfo[],
+): DaemonSessionPrInfo[] {
+  return prs.filter((pr) => isExternalOpenUrl(pr.url));
 }
 
 /**
  * The `#N (+M)` pull-request badge shared by the sidebar session row, the
  * session overview card, and the picker dialogs. Renders the latest bound
  * PR with an overflow count and opens it through the desktop-aware
- * external-link opener. Non-http(s) bindings are filtered out as a
- * defense-in-depth measure on top of the daemon-side validators.
+ * external-link opener.
  */
-export function SessionPrBadge({ prs, tabIndex }: SessionPrBadgeProps) {
+export function SessionPrBadge({
+  prs,
+  tabIndex,
+  compact = false,
+}: SessionPrBadgeProps) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
-  const openable = prs.filter((pr) => isExternalOpenUrl(pr.url));
+  const openable = openableSessionPrs(prs);
   if (openable.length === 0) return null;
   const latest = openable[openable.length - 1];
   const multiple = openable.length > 1;
@@ -44,7 +62,11 @@ export function SessionPrBadge({ prs, tabIndex }: SessionPrBadgeProps) {
   const stateSuffix = sessionPrStateLabel(t, latest.state);
   return (
     <a
-      className={styles.sessionPrBadge}
+      className={
+        compact
+          ? `${styles.sessionPrBadge} ${styles.sessionPrBadgeCompact}`
+          : styles.sessionPrBadge
+      }
       href={latest.url}
       target="_blank"
       rel="noreferrer"

@@ -861,6 +861,52 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
+  it('renders free-form Advisor guidance in its card', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="advisor"
+        description="advisor-model"
+        resultDisplay={{
+          type: 'advisor_advice',
+          model: 'advisor-model',
+          text: 'Check the retry boundary first.',
+        }}
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame()).toContain('Check the retry boundary first.');
+    expect(lastFrame()).not.toContain('"advisor_advice"');
+  });
+
+  it('renders structured Advisor feedback instead of JSON', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="advisor"
+        description="Consult Advisor"
+        resultDisplay={{
+          type: 'advisor_review',
+          verdict: 'Check the edge case.',
+          risks: 'Retries may be missing.',
+          missingEvidence: 'No failing test output.',
+          recommendation: 'Add a regression test.',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('/advisor');
+    expect(output).toContain('Consult Advisor');
+    expect(output).toContain('Verdict');
+    expect(output).toContain('Risks');
+    expect(output).toContain('Missing evidence');
+    expect(output).toContain('Recommendation');
+    expect(output).not.toContain('"advisor_review"');
+  });
+
   it('suppresses todo panel when resultDisplay has unchanged flag', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage
@@ -1912,6 +1958,52 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('- Step 2: Do another thing');
   });
 
+  it('renders structured shell results as their display text', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        forceShowResult
+        resultDisplay={{
+          type: 'shell_result',
+          version: 1,
+          text: 'Health check complete',
+          output: 'raw stdout must not replace display text',
+          directory: '/workspace',
+          exitCode: 0,
+          signal: null,
+          pid: 42,
+          error: null,
+          outcome: 'completed',
+          notices: [],
+          truncated: false,
+          outputFiles: [],
+        }}
+      />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Health check complete');
+    expect(lastFrame()).not.toContain('shell_result');
+    expect(lastFrame()).not.toContain('raw stdout');
+  });
+
+  it('renders structured question answers as their display text', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        forceShowResult
+        resultDisplay={{
+          type: 'ask_user_question_answers',
+          text: 'Selected Staging',
+          answers: [{ question: 'Deploy where?', answer: 'Staging' }],
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain('MockMarkdown:Selected Staging');
+    expect(lastFrame()).not.toContain('ask_user_question_answers');
+  });
+
   it('renders MCP App fallback text instead of stringifying HTML', () => {
     const html = `<main>PROBE_MCP_APP_HTML${'x'.repeat(200)}</main>`;
     const { lastFrame } = renderWithContext(
@@ -1981,6 +2073,40 @@ describe('<ToolMessage /> localized badge', () => {
     const { setLanguageAsync } = await import('../../../i18n/index.js');
     await setLanguageAsync('en');
   });
+
+  it.each([
+    ['Shell', 'zh'],
+    ['ReadFile', 'zh'],
+    ['Shell', 'zh-TW'],
+    ['ReadFile', 'zh-TW'],
+  ])(
+    'preserves literal successful %s output under %s',
+    async (name, language) => {
+      const { setLanguageAsync } = await import('../../../i18n/index.js');
+      await setLanguageAsync(language);
+      const literal =
+        "You've used up your weekly credits. Please try again after the reset.";
+      const { lastFrame, unmount } = renderWithContext(
+        <ToolMessage
+          {...localizedProps}
+          name={name}
+          resultDisplay={literal}
+          forceShowResult
+          renderOutputAsMarkdown={false}
+          config={{ getShouldUseNodePtyShell: () => false } as Config}
+        />,
+        StreamingState.Idle,
+      );
+      try {
+        const output = (lastFrame() ?? '').replace(/\s+/g, ' ');
+        expect(output).toContain(literal);
+        expect(output).not.toContain('周额度已用完');
+        expect(output).not.toContain('週額度已用完');
+      } finally {
+        unmount();
+      }
+    },
+  );
 
   it('shows the localized display name under the zh locale', async () => {
     const { setLanguageAsync } = await import('../../../i18n/index.js');

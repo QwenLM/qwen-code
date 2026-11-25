@@ -13,6 +13,7 @@
  */
 
 import * as path from 'node:path';
+import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from '../permissions/types.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
@@ -21,6 +22,9 @@ import type {
 } from '../tools/tools.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { buildPermissionRules } from '../permissions/rule-parser.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('PERMISSIONS');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Context building
@@ -37,6 +41,7 @@ export function buildPermissionCheckContext(
   toolParams: Record<string, unknown>,
   targetDir: string,
   toolAliases?: readonly string[],
+  mcpIdentity?: { serverName: string; serverToolName: string },
 ): PermissionCheckContext {
   const rawCommand =
     'command' in toolParams ? String(toolParams['command']) : undefined;
@@ -92,6 +97,7 @@ export function buildPermissionCheckContext(
   return {
     toolName,
     toolAliases,
+    mcpIdentity,
     command,
     cwd,
     filePath,
@@ -201,6 +207,7 @@ export async function persistPermissionOutcome(
     | undefined,
   pm: PermissionManager | null | undefined,
   payload?: ToolConfirmationPayload,
+  isActive: () => boolean = () => true,
 ): Promise<void> {
   if (
     confirmationDetails.type !== 'exec' &&
@@ -230,13 +237,103 @@ export async function persistPermissionOutcome(
 
   if (rules.length > 0) {
     for (const rule of rules) {
+      if (!isActive()) return;
       // 1. Persist to disk (settings.json)
       if (persistFn) {
         await persistFn(scope, 'allow', rule);
+        if (!isActive()) return;
       }
       // 2. Immediately update in-memory PermissionManager so the
       //    new rule takes effect without restart.
       pm?.addPersistentRule(rule, 'allow');
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PermissionRequest hook updates
+// ─────────────────────────────────────────────────────────────────────────────
+
+const HOOK_RULE_BEHAVIORS = ['allow', 'deny', 'ask'] as const;
+type HookRuleBehavior = (typeof HOOK_RULE_BEHAVIORS)[number];
+const HOOK_RULE_SCOPES = new Map<unknown, 'session' | 'project' | 'user'>([
+  ['session', 'session'],
+  ['projectSettings', 'project'],
+  ['localSettings', 'project'],
+  ['userSettings', 'user'],
+]);
+
+/**
+ * Apply the `updatedPermissions` entries an allowing PermissionRequest hook
+ * returned. Only `addRules` entries are applied: `session` adds in-memory
+ * rules, `projectSettings` and `localSettings` persist to the project scope
+ * (where "Always allow" for the project writes), and `userSettings` to the
+ * user scope. Other entries are skipped.
+ */
+export async function applyPermissionRequestHookUpdates(
+  updates: readonly unknown[],
+  config: Pick<
+    Config,
+    | 'getOnPersistPermissionRule'
+    | 'getPermissionManager'
+    | 'getSessionSourceType'
+  >,
+  signal: AbortSignal,
+): Promise<void> {
+  const persistFn = config.getOnPersistPermissionRule?.();
+  const pm = config.getPermissionManager?.();
+  for (const update of updates) {
+    const entry = (update ?? {}) as Record<string, unknown>;
+    const behavior = entry['behavior'] as HookRuleBehavior;
+    const scope = HOOK_RULE_SCOPES.get(entry['destination']);
+    if (
+      entry['type'] !== 'addRules' ||
+      !HOOK_RULE_BEHAVIORS.includes(behavior) ||
+      !scope ||
+      !Array.isArray(entry['rules'])
+    ) {
+      debugLogger.warn(
+        `Skipping unsupported PermissionRequest hook permission update: ${JSON.stringify(update)}`,
+      );
+      continue;
+    }
+    if (
+      scope === 'project' &&
+      config.getSessionSourceType?.() === 'standalone'
+    ) {
+      continue;
+    }
+    for (const rule of entry['rules'] as unknown[]) {
+      if (signal.aborted) return;
+      const { toolName, ruleContent } = (rule ?? {}) as Record<string, unknown>;
+      if (
+        typeof toolName !== 'string' ||
+        !toolName.trim() ||
+        /[()]/.test(toolName) ||
+        (ruleContent !== undefined &&
+          (typeof ruleContent !== 'string' || !ruleContent.trim()))
+      ) {
+        debugLogger.warn('Skipping malformed PermissionRequest hook rule.');
+        continue;
+      }
+      const raw =
+        ruleContent === undefined ? toolName : `${toolName}(${ruleContent})`;
+      if (scope === 'session') {
+        if (behavior === 'allow') pm?.addSessionAllowRule(raw);
+        else if (behavior === 'deny') pm?.addSessionDenyRule(raw);
+        else pm?.addSessionAskRule(raw);
+        continue;
+      }
+      try {
+        await persistFn?.(scope, behavior, raw);
+      } catch (error) {
+        debugLogger.warn(
+          `Could not persist PermissionRequest hook rule ${raw}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
+      if (signal.aborted) return;
+      pm?.addPersistentRule(raw, behavior);
     }
   }
 }

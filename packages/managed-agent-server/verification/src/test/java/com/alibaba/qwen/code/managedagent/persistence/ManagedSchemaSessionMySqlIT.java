@@ -1,0 +1,135 @@
+package com.alibaba.qwen.code.managedagent.persistence;
+
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
+    private IsolatedManagedSchemaMySqlTestDatabase database;
+
+    @Override
+    protected DataSource dataSource() {
+        database = new IsolatedManagedSchemaMySqlTestDatabase();
+        return database.source();
+    }
+
+    @AfterEach
+    void removeOwnedDatabase() {
+        if (database != null) {
+            database.close();
+        }
+    }
+
+    @Test
+    void tenfoldHistoryKeepsMessageBodyReadsBounded() {
+        var session =
+                jdbc.queryForMap(
+                        "SELECT tenant_id, session_id FROM ma_session WHERE session_kind ="
+                            + " 'PUBLIC'");
+        String tenant = (String) session.get("tenant_id");
+        String id = (String) session.get("session_id");
+        tx.executeWithoutResult(
+                status -> {
+                    store.appendPublicEventIfAbsent(
+                            tenant,
+                            id,
+                            "turn",
+                            "item.output_text.delta",
+                            Map.of("itemId", "item", "text", "x".repeat(70_000)),
+                            false,
+                            UUID.randomUUID().toString());
+                    store.materializeNextBatch(tenant, id, 100);
+                });
+        String resource =
+                jdbc.queryForObject(
+                        "SELECT body_resource_ref FROM ma_message WHERE tenant_id = ? AND"
+                            + " session_id = ?",
+                        String.class,
+                        tenant,
+                        id);
+        seedHistory(tenant, id, 0, 1000);
+        String body =
+                "SELECT inline_bytes, byte_length, sha256 FROM ma_resource WHERE tenant_id = ?"
+                        + " AND session_id = ? AND resource_id = ?"
+                        + " AND state = 'REFERENCED' AND deletion_operation_ref IS NULL";
+        var reads = scanned(body, tenant, id, bodyResourceId(resource));
+        seedHistory(tenant, id, 1000, 10_000);
+        assertThat(scanned(body, tenant, id, bodyResourceId(resource)).scannedRows()).isEqualTo(reads.scannedRows());
+        assertThat(tx.execute(status -> store.findMessagePage(tenant, id, null, 10, false)).items()).hasSize(1);
+        var recent = tx.execute(status -> store.findMessagePage(tenant, id, null, 1, true));
+        assertThat(recent.items()).hasSize(1);
+        assertThat(recent.items().getFirst().itemId()).isEqualTo("item");
+        assertThat(recent.hasMore()).isFalse();
+        assertThat(recent.nextCursor()).isNull();
+    }
+
+    private static String bodyResourceId(String resourceRef) {
+        return ManagedIdentityRef.decode(resourceRef.getBytes(StandardCharsets.US_ASCII)).get(2);
+    }
+
+    private ExecutedQueryPlan.Plan scanned(String sql, Object... arguments) {
+        var plan = ExecutedQueryPlan.explain(jdbc, sql, arguments);
+        assertThat(plan.tableScan()).as(plan.text()).isFalse();
+        assertThat(plan.scannedRows()).as(plan.text()).isBetween(0L, 10L);
+        assertThat(plan.preExecutionPageReads()).as(plan.text()).isBetween(0L, 10L);
+        assertThat(plan.scannedRows() > 0 || plan.preExecutionPageReads() > 0)
+                .as("Actual row or optimization-stage page reads: %s", plan.text()).isTrue();
+        return plan;
+    }
+
+    private void seedHistory(String tenant, String session, int first, int last) {
+        List<Object[]> operations = new ArrayList<>();
+        List<Object[]> resources = new ArrayList<>();
+        byte[] bytes = "history".getBytes(StandardCharsets.UTF_8);
+        String digest = WorkspaceEvidenceResources.digest(bytes);
+        for (int i = first; i < last; i++) {
+            String identity = "history-" + i;
+            operations.add(
+                    new Object[] {
+                        ManagedIdentityRefs.operationRef("RENAME", tenant, "SESSION", session, session, identity),
+                        "SESSION",
+                        session,
+                        identity,
+                        tenant,
+                        session,
+                        session,
+                        "digest",
+                        "{}",
+                        1,
+                        1
+                    });
+            resources.add(
+                    new Object[] {
+                        tenant,
+                        session,
+                        identity,
+                        bytes.length,
+                        digest,
+                        bytes,
+                        identity
+                    });
+        }
+        jdbc.batchUpdate(
+                "INSERT INTO ma_operation (operation_ref, scope_kind, scope_id,"
+                    + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
+                    + " target_id, request_digest, request_json, state, phase, delivery_state,"
+                    + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
+                    + " ?, ?, 'COMPLETED', 'COMPLETED', 'COMPLETED', ?, ?)",
+                operations);
+        jdbc.batchUpdate(
+                "INSERT INTO ma_resource (tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'managed-context', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                resources);
+    }
+}

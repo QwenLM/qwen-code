@@ -6,7 +6,7 @@
 
 /**
  * U-33: user-invoked shell execution for the OpenTUI `!` shell mode. Runs
- * the command directly through core's ShellExecutionService — no model turn
+ * the command through core's runtime shell executor — no model turn
  * and no approval dialog (ink shellCommandProcessor parity: typing the
  * command IS the consent) — and reports through the stream events the
  * transcript already folds: a `user-shell` command row plus a synthetic
@@ -15,14 +15,15 @@
  * ink's processor, which owns that copy).
  */
 
+import { executeRuntimeShell } from '@qwen-code/qwen-code-core/sandbox/runtime-shell.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  compactToolResultDisplayForHistory,
   isBinary,
   isSignalTermination,
-  ShellExecutionService,
   type Config,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
@@ -52,7 +53,7 @@ export async function executeUserShell(
   let commandToExecute = rawQuery;
   let pwdFilePath: string | undefined;
 
-  if (os.platform() !== 'win32') {
+  if (os.platform() !== 'win32' && !config.getShellExecutionSandbox?.()) {
     // Capture the child's final working directory so a `cd` can be warned
     // about (shell mode is stateless) — lifted from ink's processor.
     let command = rawQuery.trim();
@@ -87,7 +88,7 @@ export async function executeUserShell(
   const client = config.getGeminiClient();
   const chatAtStart = client.isInitialized() ? client.getChat() : undefined;
   let cumulative = '';
-  let emittedText = '';
+  let emittedLength = 0;
   let isBinaryStream = false;
   let lastUpdate = Date.now();
 
@@ -95,8 +96,9 @@ export async function executeUserShell(
     switch (event.type) {
       case 'data':
         // A pty delivers full screen states and a binary stream delivers
-        // bytes — neither replays as append deltas, so only child-process
-        // text accumulates; everything else lands once at completion.
+        // bytes — neither is text the card can show as it grows, so only
+        // child-process text accumulates; everything else lands once at
+        // completion.
         if (!isBinaryStream && !usePty && typeof event.chunk === 'string') {
           cumulative += event.chunk;
         }
@@ -113,11 +115,14 @@ export async function executeUserShell(
       !usePty &&
       !isBinaryStream &&
       Date.now() - lastUpdate > OUTPUT_UPDATE_INTERVAL_MS &&
-      cumulative.length > emittedText.length
+      cumulative.length > emittedLength
     ) {
-      const delta = cumulative.slice(emittedText.length);
-      emittedText += delta;
-      emit({ type: 'tool-output', id: callId, delta });
+      emittedLength = cumulative.length;
+      emit({
+        type: 'tool-output',
+        id: callId,
+        output: compactToolResultDisplayForHistory(cumulative),
+      });
       lastUpdate = Date.now();
     }
   };
@@ -128,7 +133,8 @@ export async function executeUserShell(
     }
   };
 
-  return ShellExecutionService.execute(
+  return executeRuntimeShell(
+    config,
     commandToExecute,
     targetDir,
     onOutputEvent,
@@ -177,25 +183,17 @@ export async function executeUserShell(
           ? '[Command produced binary output, which is not shown.]'
           : res.output.trim() || '(Command produced no output)';
 
-        // The streamed head is already on the card; the result event
-        // appends only what was not emitted yet (plus status prefixes).
-        // The stream tail usually carries the final newline the trimmed
-        // result drops, so compare against the trimmed emission.
-        const emittedTrimmed = emittedText.trimEnd();
-        const tail =
-          emittedTrimmed && mainContent.startsWith(emittedTrimmed)
-            ? mainContent.slice(emittedTrimmed.length)
-            : mainContent;
-        // When the output was already streamed as deltas, the card's last
-        // line is on screen and `tail` is empty — the status prefix must
-        // start its own row instead of gluing onto it.
-        const finalOutput = tail
-          ? `${prefixText}${tail}`
-          : prefixText
-            ? `\n${prefixText}`
-            : '';
+        // The result event replaces whatever streamed onto the card, so it
+        // carries the whole display. Ink splits the same string two ways here —
+        // compacted for the UI row, verbatim for the LLM history below — and
+        // this mirrors it: the card is a display, the model gets the output.
+        const finalOutput = `${prefixText}${mainContent}`;
 
-        emit({ type: 'tool-result', id: callId, display: finalOutput });
+        emit({
+          type: 'tool-result',
+          id: callId,
+          display: compactToolResultDisplayForHistory(finalOutput),
+        });
         emit({
           type: 'tool-end',
           id: callId,
@@ -206,7 +204,7 @@ export async function executeUserShell(
           addShellCommandToLlmHistory(
             config.getGeminiClient(),
             rawQuery,
-            `${prefixText}${mainContent}`,
+            finalOutput,
           );
         }
       }),

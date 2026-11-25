@@ -18,6 +18,7 @@ import {
   PlusIcon,
   RefreshCwIcon,
 } from 'lucide-react';
+import type { OpenSubagentDetails } from '../../subagentDetailsContext';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { formatTimestamp } from '../MessageTimestamp';
@@ -36,6 +37,7 @@ type SavedWorkflow = NonNullable<
 interface WorkflowRunsPageProps {
   onCreateViaChat: () => void;
   onWorkflowRunStarted?: () => void;
+  onOpenSubagent?: OpenSubagentDetails;
 }
 
 const RECENT_RUNS_LIMIT = 3;
@@ -55,6 +57,7 @@ function isActiveStatus(
 export function WorkflowRunsPage({
   onCreateViaChat,
   onWorkflowRunStarted,
+  onOpenSubagent,
 }: WorkflowRunsPageProps) {
   const { t } = useI18n();
   const actions = useActions();
@@ -387,14 +390,18 @@ export function WorkflowRunsPage({
                                 <span className={styles.savedDescription}>
                                   {workflow.source === 'project'
                                     ? t('workflowRuns.projectDescription')
-                                    : t('workflowRuns.userDescription')}
+                                    : workflow.source === 'extension'
+                                      ? t('workflowRuns.extensionDescription')
+                                      : t('workflowRuns.userDescription')}
                                 </span>
                               </span>
                             </button>
                             <Badge variant="outline">
                               {workflow.source === 'project'
                                 ? t('workflowRuns.project')
-                                : t('workflowRuns.user')}
+                                : workflow.source === 'extension'
+                                  ? t('workflowRuns.extension')
+                                  : t('workflowRuns.user')}
                             </Badge>
                             <Button
                               type="button"
@@ -448,6 +455,7 @@ export function WorkflowRunsPage({
                   hidden while inactive, so only the poller stays alive. */}
               <TabsContent forceMount value="active" className={styles.content}>
                 <TasksStatusMessage
+                  onOpenSubagent={onOpenSubagent}
                   message={{ snapshot }}
                   embedded
                   keyboardShortcuts={false}
@@ -465,6 +473,7 @@ export function WorkflowRunsPage({
                 className={styles.content}
               >
                 <TasksStatusMessage
+                  onOpenSubagent={onOpenSubagent}
                   message={{ snapshot }}
                   embedded
                   keyboardShortcuts={false}

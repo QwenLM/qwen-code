@@ -358,6 +358,37 @@ export class TaskOwnershipError extends Error {
   }
 }
 
+export class TaskSnapshotChangedError extends Error {
+  constructor(
+    readonly taskId: string,
+    readonly expectedOwner: string | undefined,
+    readonly actualOwner: string | undefined,
+    readonly expectedStatus: SwarmTaskStatus | undefined,
+    readonly actualStatus: SwarmTaskStatus | undefined,
+    checksExpectedOwner: boolean,
+    checksExpectedStatus: boolean,
+  ) {
+    const label = (owner: string | undefined) => owner ?? 'unassigned';
+    const changes: string[] = [];
+    if (checksExpectedOwner && expectedOwner !== actualOwner) {
+      changes.push(
+        `owner changed from "${label(expectedOwner)}" to "${label(actualOwner)}"`,
+      );
+    }
+    if (checksExpectedStatus && expectedStatus !== actualStatus) {
+      changes.push(
+        `status changed from "${expectedStatus}" to "${actualStatus}"`,
+      );
+    }
+    super(
+      `Task #${taskId} ${changes.join(' and ')} before this update committed. ` +
+        `Current state is owner "${label(actualOwner)}", status ` +
+        `"${actualStatus}". Re-read the task before retrying.`,
+    );
+    this.name = 'TaskSnapshotChangedError';
+  }
+}
+
 /**
  * Update fields on an existing task.
  * Uses file locking for safe concurrent updates.
@@ -369,6 +400,11 @@ export class TaskOwnershipError extends Error {
  * inside the lock — without that, two teammates can both pass a
  * pre-lock guard on an unowned task and have the second writer
  * silently overwrite the first one's claim.
+ *
+ * `opts.expectedOwner` and `opts.expectedStatus`, when present, add
+ * optimistic checks for leader-side assignment. `null` means the caller
+ * observed an unowned task. A stale assignment is rejected inside the
+ * same lock before any fields are changed.
  */
 export async function updateTask(
   teamName: string,
@@ -383,7 +419,11 @@ export async function updateTask(
     addBlocks?: string[];
     addBlockedBy?: string[];
   },
-  opts?: { callerName?: string },
+  opts?: {
+    callerName?: string;
+    expectedOwner?: string | null;
+    expectedStatus?: SwarmTaskStatus;
+  },
 ): Promise<SwarmTask | undefined> {
   const taskPath = getTaskPath(teamName, taskId);
 
@@ -402,6 +442,29 @@ export async function updateTask(
         throw err;
       }
       const task = JSON.parse(raw) as SwarmTask;
+
+      const checksExpectedOwner = opts !== undefined && 'expectedOwner' in opts;
+      const checksExpectedStatus = opts?.expectedStatus !== undefined;
+      if (checksExpectedOwner || checksExpectedStatus) {
+        const expectedOwner = opts.expectedOwner
+          ? sanitizeName(opts.expectedOwner)
+          : undefined;
+        const actualOwner = task.owner ? sanitizeName(task.owner) : undefined;
+        if (
+          (checksExpectedOwner && expectedOwner !== actualOwner) ||
+          (checksExpectedStatus && opts.expectedStatus !== task.status)
+        ) {
+          throw new TaskSnapshotChangedError(
+            taskId,
+            expectedOwner,
+            actualOwner,
+            opts.expectedStatus,
+            task.status,
+            checksExpectedOwner,
+            checksExpectedStatus,
+          );
+        }
+      }
 
       if (
         opts?.callerName !== undefined &&

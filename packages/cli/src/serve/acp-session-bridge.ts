@@ -115,8 +115,11 @@ export type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 
 export {
+  AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
   CdWhilePromptActiveError,
+  ManagedSessionBranchUnsupportedError,
+  RequestedSessionIdRejectedError,
   SessionNotFoundError,
   RestoreInProgressError,
   SessionArchivedError,
@@ -144,6 +147,7 @@ export {
   BridgeChannelQuarantinedError,
   InvalidRewindTargetError,
   TotalSessionLimitExceededError,
+  SystemOverloadedError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   // Multi-client permission coordination errors.
   CancelSentinelCollisionError,

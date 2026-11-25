@@ -51,7 +51,6 @@ export class AutoReconnectTransport implements DaemonTransport {
   /** Mutex: only one reconnect attempt at a time. */
   private reconnecting: Promise<void> | undefined;
 
-  readonly supportsReplay: boolean;
   readonly restFetch: typeof globalThis.fetch;
 
   constructor(opts: {
@@ -74,11 +73,14 @@ export class AutoReconnectTransport implements DaemonTransport {
     this.inner =
       opts.initial ??
       new RestSseTransport(this.baseUrl, this.token, this.fetchFn);
-    this.supportsReplay = this.inner.supportsReplay;
   }
 
   get type(): DaemonTransportType {
     return this.inner.type;
+  }
+
+  get supportsReplay(): boolean {
+    return this.inner.supportsReplay;
   }
 
   get connected(): boolean {
@@ -97,6 +99,7 @@ export class AutoReconnectTransport implements DaemonTransport {
     } catch (err) {
       if (err instanceof DaemonTransportClosedError && !this._disposed) {
         await this.reconnect();
+        if (this._disposed) throw new DaemonTransportClosedError();
         return this.inner.fetch(url, init, opts);
       }
       throw err;
@@ -114,6 +117,7 @@ export class AutoReconnectTransport implements DaemonTransport {
     } catch (err) {
       if (err instanceof DaemonTransportClosedError && !this._disposed) {
         await this.reconnect();
+        if (this._disposed) throw new DaemonTransportClosedError();
         yield* this.inner.subscribeEvents(sessionId, opts);
       } else {
         throw err;
@@ -148,16 +152,27 @@ export class AutoReconnectTransport implements DaemonTransport {
     }
 
     // Try preferred transport via factory.
+    let replacement: DaemonTransport | undefined;
     if (this.factory) {
       try {
-        this.inner = await this.factory(this.preferredType);
-        return;
+        replacement = await this.factory(this.preferredType);
       } catch {
         // Factory failed — fall back to REST.
       }
     }
 
-    // Fallback: create a fresh RestSseTransport.
-    this.inner = new RestSseTransport(this.baseUrl, this.token, this.fetchFn);
+    if (this._disposed) {
+      try {
+        replacement?.dispose();
+      } catch {
+        /* cleanup must not replace the closure error */
+      }
+      throw new DaemonTransportClosedError();
+    }
+
+    // Use the preferred transport, or fall back to REST.
+    this.inner =
+      replacement ??
+      new RestSseTransport(this.baseUrl, this.token, this.fetchFn);
   }
 }

@@ -344,6 +344,36 @@
   color: var(--error-color);
 }
 
+.routingFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+}
+
+.newGroupFields {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.4fr);
+  gap: 12px;
+}
+
+.inlineError {
+  grid-column: 1 / -1;
+  color: var(--error-color);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .routingFields,
+  .newGroupFields {
+    grid-template-columns: 1fr;
+  }
+}
+
 .scheduleRow {
   display: flex;
   flex-wrap: wrap;
@@ -589,37 +619,6 @@
   width: 12px;
   height: 12px;
   color: var(--primary);
-  stroke-width: 1.8;
-}
-
-/* Workspace tag on a card in the aggregated multi-workspace view. Bordered +
- * accent-tinted so it reads as an origin label, distinct from the plain muted
- * schedule pill. Truncates a long workspace name rather than wrapping the row. */
-.workspacePill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 180px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
-  border-radius: 999px;
-  padding: 2px 9px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.workspaceIcon {
-  display: inline-flex;
-  opacity: 0.85;
-}
-
-.workspaceIcon svg {
-  width: 12px;
-  height: 12px;
   stroke-width: 1.8;
 }
 

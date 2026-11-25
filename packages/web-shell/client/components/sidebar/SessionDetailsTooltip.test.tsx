@@ -1,12 +1,21 @@
 // @vitest-environment jsdom
 
-import { act, forwardRef, type ComponentProps } from 'react';
+import {
+  act,
+  createRef,
+  forwardRef,
+  useState,
+  type ComponentProps,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { Button } from '../ui/button';
+import { WebShellPortalRootContext } from '../../portalRoot';
 import styles from '../SessionPrStateIcon.module.css';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 
 const popoverContentProps = vi.hoisted(() => vi.fn());
 vi.mock('../ui/popover', async (importOriginal) => {
@@ -56,6 +65,537 @@ afterEach(() => {
 });
 
 describe('SessionDetailsTooltip', () => {
+  it.each([
+    [
+      {
+        hasActivePrompt: true,
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: true,
+      },
+      'Needs approval',
+    ],
+    [
+      { hasActivePrompt: true, isWaitingForUserQuestion: true },
+      'User input needed',
+    ],
+    [{ hasActivePrompt: true, activeWorkState: 'active' as const }, 'Running'],
+    // A plain running turn must not claim background work: `toContain` alone
+    // cannot catch an unconditional composition, so this row also rejects it.
+    [{ hasActivePrompt: true, hasRunningBackgroundTasks: false }, 'Running'],
+    [
+      { isWaitingForPermission: true, hasRunningBackgroundTasks: true },
+      'Needs approval · Background tasks running',
+    ],
+    [
+      { isWaitingForUserQuestion: true, hasRunningBackgroundTasks: true },
+      'User input needed · Background tasks running',
+    ],
+    [{ activeWorkState: 'active' as const }, 'Active work'],
+    [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
+  ])(
+    'prioritizes blocked states over an active prompt: %s',
+    async (flags, expected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'status',
+                  workspaceCwd: '/workspace',
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread={false}
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (expected !== 'Running')
+          expect(details?.textContent).not.toContain('Running');
+        if (flags.hasRunningBackgroundTasks === false)
+          expect(details?.textContent).not.toContain('Background');
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it.each([
+    // The row shows the unread dot instead of the running dot once a turn
+    // completes unread, even if a new prompt is already in flight.
+    [{ hasActivePrompt: true }, 'Finished', 'Running'],
+    [{ activeWorkState: 'active' as const }, 'Finished', 'Active work'],
+    [
+      { activeWorkState: 'unknown' as const },
+      'Finished',
+      'Background activity unknown',
+    ],
+    // The background dot outranks the unread dot on the row.
+    [
+      { hasRunningBackgroundTasks: true },
+      'Background tasks running',
+      'Finished',
+    ],
+    // Unread dot with a turn in flight: the hidden background dot is named
+    // by the suffix, exactly as in the running arm.
+    [
+      { hasActivePrompt: true, hasRunningBackgroundTasks: true },
+      'Finished · Background tasks running',
+      undefined,
+    ],
+    // Blocked states stay pinned above the unread dot.
+    [{ isWaitingForPermission: true }, 'Needs approval', 'Finished'],
+    [{ isWaitingForUserQuestion: true }, 'User input needed', 'Finished'],
+    [{}, 'Finished', 'Idle'],
+  ])(
+    'mirrors the row unread-dot precedence: %s',
+    async (flags, expected, rejected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'status',
+                  workspaceCwd: '/workspace',
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (rejected) expect(details?.textContent).not.toContain(rejected);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it.each([
+    [true, 'Custom · Background tasks running'],
+    [false, 'Custom'],
+  ])(
+    'override label keeps the hidden-background suffix (background=%s)',
+    async (background, expected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'override',
+                  workspaceCwd: '/workspace',
+                  hasRunningBackgroundTasks: background,
+                }}
+                label="Session"
+                time=""
+                completedUnread={false}
+                statusLabel="Custom"
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (!background)
+          expect(details?.textContent).not.toContain(
+            'Background tasks running',
+          );
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it('names the background-only arm exactly once', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'background-only',
+                workspaceCwd: '/workspace',
+                hasRunningBackgroundTasks: true,
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('Background tasks running');
+      expect(details?.textContent).not.toContain('· Background tasks running');
+      expect(
+        (details?.textContent ?? '').split('Background tasks running').length -
+          1,
+      ).toBe(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each([
+    [{ isWaitingForPermission: true }, false, 'Needs approval'],
+    [{ isWaitingForUserQuestion: true }, false, 'User input needed'],
+    [{ hasActivePrompt: true }, false, 'Running'],
+    [{ hasActivePrompt: true }, true, 'Finished'],
+  ])(
+    'composes the background suffix exactly once on every suffixed arm: %s',
+    async (flags, unread, label) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'suffix-count',
+                  workspaceCwd: '/workspace',
+                  hasRunningBackgroundTasks: true,
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread={unread}
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(
+          `${label} · Background tasks running`,
+        );
+        expect(
+          (details?.textContent ?? '').split('Background tasks running')
+            .length - 1,
+        ).toBe(1);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it('composes the background suffix exactly once under an override label', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'override-count',
+                workspaceCwd: '/workspace',
+                hasRunningBackgroundTasks: true,
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+              statusLabel="Custom"
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Custom · Background tasks running',
+      );
+      expect(
+        (details?.textContent ?? '').split('Background tasks running').length -
+          1,
+      ).toBe(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it('names background work alongside a running turn', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'status',
+                workspaceCwd: '/workspace',
+                hasActivePrompt: true,
+                hasRunningBackgroundTasks: true,
+                activeWorkState: 'active',
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Running · Background tasks running',
+      );
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it('supports a ref-forwarding click trigger, keyboard dismissal and the host portal', async () => {
+    const container = document.createElement('div');
+    container.setAttribute('data-web-shell-root', '');
+    const portal = document.createElement('div');
+    document.body.append(container, portal);
+    const root = createRoot(container);
+    const ref = createRef<HTMLButtonElement>();
+    const onRowClick = vi.fn();
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <WebShellPortalRootContext.Provider value={portal}>
+              <div onClick={onRowClick}>
+                <SessionDetailsTooltip
+                  session={{
+                    sessionId: 'click-details',
+                    workspaceCwd: '/workspace',
+                  }}
+                  label="Session"
+                  time=""
+                  completedUnread={false}
+                  openOnClick
+                >
+                  <Button ref={ref}>Details</Button>
+                </SessionDetailsTooltip>
+              </div>
+            </WebShellPortalRootContext.Provider>
+          </I18nProvider>,
+        ),
+      );
+      expect(ref.current).toBe(container.querySelector('button'));
+      expect(ref.current?.getAttribute('aria-expanded')).toBe('false');
+      await act(async () => ref.current!.click());
+      onRowClick.mockClear();
+      const details = portal.querySelector<HTMLElement>('[role="dialog"]')!;
+      expect(details).not.toBeNull();
+      expect(ref.current?.getAttribute('aria-expanded')).toBe('true');
+      const copy = details.querySelector<HTMLButtonElement>(
+        '[data-web-shell-session-id-copy]',
+      )!;
+      expect(copy.tabIndex).toBe(0);
+      expect(document.activeElement).toBe(copy);
+      await act(async () => {
+        details.dispatchEvent(new Event('pointerout', { bubbles: true }));
+        copy.click();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+      expect(writeText).toHaveBeenCalledExactlyOnceWith('click-details');
+      expect(onRowClick).not.toHaveBeenCalled();
+      expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
+      await act(async () => {
+        copy.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(portal.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.activeElement).toBe(ref.current);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it("leaves another owner's pinned details open and focused on hover", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{ sessionId: 'a', workspaceCwd: '/w' }}
+              label="Alpha"
+              time=""
+              completedUnread={false}
+              openOnClick
+            >
+              <button type="button">Alpha details</button>
+            </SessionDetailsTooltip>
+            <SessionDetailsTooltip
+              session={{ sessionId: 'b', workspaceCwd: '/w' }}
+              label="Bravo"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Bravo title</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      const [detailsButton, hoverTitle] = container.querySelectorAll('button');
+      await act(async () => detailsButton!.click());
+      const alpha = document.querySelector(
+        '[role="dialog"][aria-label="Alpha"]',
+      );
+      const copy = alpha?.querySelector('[data-web-shell-session-id-copy]');
+      expect(document.activeElement).toBe(copy);
+      await act(async () => {
+        hoverTitle!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => vi.advanceTimersByTime(0));
+      // A hover from a different owner must not steal focus from — or
+      // dismiss — this pinned popover.
+      expect(
+        document.querySelector('[role="dialog"][aria-label="Bravo"]'),
+      ).not.toBeNull();
+      expect(alpha?.getAttribute('data-state')).toBe('open');
+      expect(document.activeElement).toBe(copy);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it('suppresses stale focus restoration after reopening shared-owner details', async () => {
+    vi.useFakeTimers();
+    popoverContentProps.mockClear();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    function SharedDetails() {
+      const [open, setOpen] = useState<string | null>(null);
+      return (
+        <I18nProvider language="en">
+          {['Alpha', 'Bravo'].map((label) => (
+            <SessionDetailsTooltip
+              key={label}
+              session={{ sessionId: label, workspaceCwd: '/w' }}
+              label={label}
+              time=""
+              completedUnread={false}
+              ownerToken="overview"
+              openOnClick={label === 'Alpha'}
+              open={open === label}
+              onOpenChange={(next) =>
+                setOpen((current) =>
+                  next ? label : current === label ? null : current,
+                )
+              }
+            >
+              <button type="button">
+                {label === 'Alpha' ? 'Alpha details' : 'Bravo title'}
+              </button>
+            </SessionDetailsTooltip>
+          ))}
+        </I18nProvider>
+      );
+    }
+    try {
+      await act(async () => root.render(<SharedDetails />));
+      const [detailsButton, hoverTitle] = container.querySelectorAll('button');
+      await act(async () => detailsButton!.click());
+      const copy = document.querySelector<HTMLElement>(
+        '[role="dialog"] [data-web-shell-session-id-copy]',
+      )!;
+      expect(document.activeElement).toBe(copy);
+      await act(async () =>
+        copy.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        ),
+      );
+      await act(async () => vi.advanceTimersByTime(0));
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.activeElement).toBe(detailsButton);
+      await act(async () => detailsButton!.click());
+      expect(document.activeElement).toBe(
+        document.querySelector('[data-web-shell-session-id-copy]'),
+      );
+      const outgoingProps = popoverContentProps.mock.calls
+        .filter(([props]) => props['aria-label'] === 'Alpha')
+        .at(-1)![0];
+      // Check our cancellation independently of Radix's outside-focus guard.
+      const closeEvent = new Event('closeAutoFocus', { cancelable: true });
+      outgoingProps.onCloseAutoFocus(closeEvent);
+      expect(closeEvent.defaultPrevented).toBe(true);
+      await act(async () => {
+        hoverTitle!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => vi.advanceTimersByTime(0));
+      expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+      expect(
+        document.querySelector('[role="dialog"]')?.getAttribute('aria-label'),
+      ).toBe('Bravo');
+      expect(document.activeElement).toBe(hoverTitle);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('shows the same structured details on row hover', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
@@ -97,6 +637,77 @@ describe('SessionDetailsTooltip', () => {
     expect(details?.querySelector('svg path.fill-popover')).not.toBeNull();
 
     act(() => root.unmount());
+  });
+
+  it('shows the worktree slug when a detached worktree has no branch', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'session-wt',
+                workspaceCwd: '/work/repo',
+                worktree: {
+                  slug: 'swift-fox',
+                  path: '/wt/swift-fox',
+                  branch: '',
+                },
+              }}
+              label="Detached worktree"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Detached worktree</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        );
+      });
+
+      await openDetails(container);
+
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('swift-fox');
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it('preserves the standalone workspace label from the sidebar', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'standalone',
+                workspaceCwd: '/internal/fallback',
+              }}
+              label="Standalone"
+              time=""
+              completedUnread={false}
+              workspaceLabel="No workspace"
+            >
+              <button type="button">Standalone</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('No workspace');
+      expect(details?.textContent).not.toContain('/internal/fallback');
+    } finally {
+      act(() => root.unmount());
+    }
   });
 
   it('shows the bound pull request as a link', async () => {
@@ -392,6 +1003,78 @@ describe('SessionDetailsTooltip', () => {
     ]);
 
     act(() => root.unmount());
+  });
+
+  it('suppresses queued and existing hover without blocking click details', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = async (suppressed: boolean, clickTriggered = false) => {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <SidebarHoverSuppressionContext.Provider value={suppressed}>
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'hover-suppression',
+                  workspaceCwd: '/workspace',
+                }}
+                label="Session"
+                time=""
+                completedUnread={false}
+                openOnClick={clickTriggered}
+              >
+                <button type="button">Session row</button>
+              </SessionDetailsTooltip>
+            </SidebarHoverSuppressionContext.Provider>
+          </I18nProvider>,
+        ),
+      );
+    };
+    try {
+      await render(false);
+      const row = container.querySelector('button')!;
+      act(() => {
+        row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      });
+      await render(true);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+        await Promise.resolve();
+      });
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+      await render(false);
+      act(() => {
+        row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      });
+      await render(true);
+      await act(async () => {
+        vi.advanceTimersByTime(100);
+        await Promise.resolve();
+      });
+      await render(false);
+      await act(async () => {
+        vi.advanceTimersByTime(200);
+        await Promise.resolve();
+      });
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+      await openDetails(container);
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+      await render(true);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+      await render(true, true);
+      act(() => {
+        container.querySelector('button')!.click();
+      });
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    } finally {
+      act(() => root.unmount());
+    }
   });
 
   it('does not reopen after a row action opens its menu', async () => {

@@ -39,6 +39,8 @@ test('uses live-state instead of polling the full session catalog @smoke', async
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
   ).toBeVisible();
   await expect.poll(liveStateRequests).toBeGreaterThanOrEqual(2);
+  // StrictMode can start both live-state requests before catalog staging.
+  await expect.poll(fullCatalogRequests).toBeGreaterThan(0);
   const settledCatalogRequests = fullCatalogRequests();
   const settledLiveStateRequests = liveStateRequests();
   expect(settledCatalogRequests).toBe(1);
@@ -48,7 +50,7 @@ test('uses live-state instead of polling the full session catalog @smoke', async
     .toBeGreaterThan(settledLiveStateRequests);
   expect(fullCatalogRequests()).toBe(settledCatalogRequests);
 
-  await page.getByRole('tab', { name: 'Channels' }).click();
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
   await expect.poll(fullCatalogRequests).toBe(settledCatalogRequests + 1);
   const requestsAfterSourceChange = fullCatalogRequests();
   const liveRequestsAfterSourceChange = liveStateRequests();

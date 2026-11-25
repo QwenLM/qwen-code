@@ -10,5 +10,6 @@
     }
   },
   "include": ["index.ts", "src/**/*.ts", "src/**/*.json"],
-  "exclude": ["node_modules", "dist"]
+  "references": [{ "path": "../network-policy" }],
+  "exclude": ["node_modules", "dist", "src/skills/bundled/browser-use/runtime"]
 }

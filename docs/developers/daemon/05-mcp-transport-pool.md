@@ -313,9 +313,9 @@ ordering.
 ## Fingerprint and `canonicalOAuth` normalization
 
 The pool key comes from `fingerprint(cfg)` in `mcp-pool-key.ts`. The hash covers
-all transport-defining fields:
+all transport-defining and shared tool-snapshot fields:
 
-> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, versionNegotiation, oauth`
+> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, versionNegotiation, oauth, appResourceMaxBytes, appResourceTimeoutMs`
 
 Per-session filtering and metadata fields (`includeTools`, `excludeTools`,
 `trust`, `description`, `extensionName`, `discoveryTimeoutMs`) are excluded, so
@@ -335,6 +335,16 @@ Sorting `scopes` and `audiences` makes callsite order irrelevant. Explicit
 key does not include `discoveryTimeoutMs`; concurrent acquire calls with the
 same key but different timeouts are "first wins", matching the pre-F2
 per-session manager behavior.
+
+The App resource limits are the exception to that exclusion: they are consumed
+at discovery and stored in the shared tool snapshot without per-session
+re-projection, so they must be keyed — otherwise a second session would
+silently reuse the first session's limits. Any future field with the same
+lifecycle (consumed at discovery, never re-projected per session) belongs in
+the key even though it is not transport-defining. Both hash at their enforced
+(clamped, floored, defaulted) values — the same normalization the read site in
+`mcp-tool.ts` applies, shared via `mcp-app-resource-limits.ts` — so configs
+whose effective policy is byte-identical share one entry.
 
 `PoolEntry` keeps `cfg: MCPServerConfig` private. External code must use the
 `entry.transportKind` getter when it needs the transport family. That prevents

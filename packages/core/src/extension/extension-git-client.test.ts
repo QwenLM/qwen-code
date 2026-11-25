@@ -100,6 +100,39 @@ describe('createExtensionGitClient', () => {
       'credential helper',
       'https://git.example.com/owner/credential.helper.git',
     ],
+    // argv-parser 3.0.0 added these unanchored matchers; a URL containing one
+    // would fail the credentialed client pre-spawn unless the category is
+    // enabled for the product-generated extraHeader key.
+    ['include path', 'https://git.example.com/owner/include.path/repo.git'],
+    ['includeif', 'https://git.example.com/owner/includeif.x/repo.git'],
+    ['includeif without a dot', 'https://git.example.com/owner/includeifx'],
+    [
+      'submodule update',
+      'https://git.example.com/owner/submodule.update/repo.git',
+    ],
+    ['tar command', 'https://git.example.com/owner/tar.command/repo.git'],
+    ['trailer cmd', 'https://git.example.com/owner/trailer.cmd/repo.git'],
+    [
+      'trailer command',
+      'https://git.example.com/owner/trailer.command/repo.git',
+    ],
+    ['difftool cmd', 'https://git.example.com/owner/difftool.cmd/repo.git'],
+    ['difftool path', 'https://git.example.com/owner/difftool.path/repo.git'],
+    ['filter process', 'https://git.example.com/owner/filter.process/repo.git'],
+    [
+      'gpg default key command',
+      'https://git.example.com/owner/gpg.defaultkeycommand/repo.git',
+    ],
+    [
+      'interactive diff filter',
+      'https://git.example.com/owner/interactive.difffilter/repo.git',
+    ],
+    ['pager', 'https://git.example.com/owner/pagerx/repo.git'],
+    [
+      'uploadpack pack objects hook',
+      'https://git.example.com/owner/uploadpack.packobjectshook/repo.git',
+    ],
+    ['url insteadof', 'https://git.example.com/owner/urlxx.insteadof/repo.git'],
   ])(
     'runs authenticated Git commands when the URL contains %s text',
     async (_label, source) => {
@@ -192,5 +225,94 @@ describe('createExtensionGitClient', () => {
       'GIT_CONFIG_KEY_0',
       'http.https://git.example.com/owner/repo.git.extraHeader',
     );
+  });
+
+  // Regression for #13447: loading an extension whose Git source needs
+  // authentication hung every startup. Git reads its credential prompt from
+  // /dev/tty, which the Ink TUI already holds in raw mode, so the prompt can
+  // be neither answered nor dismissed and nothing upstream cancels it.
+  // GIT_CONFIG_GLOBAL=/dev/null also drops the user's credential helper, so
+  // there is no non-interactive fallback left. Pin the same guard the rest of
+  // the repo pins (review/lib/git.ts, review-worktree-lease.ts,
+  // team-memory-sync.ts, ssh-workspace-script.ts) so it fails fast instead.
+  it('disables terminal credential prompts in restricted environments', () => {
+    vi.stubEnv('PATH', '/stubbed/bin');
+    vi.stubEnv('TMPDIR', '/stubbed/tmp');
+    const environments: Array<Record<string, string>> = [];
+    const fakeGit = {
+      env: (environment: Record<string, string>) => {
+        environments.push(environment);
+        return fakeGit;
+      },
+    } as unknown as SimpleGit;
+    const factory = (() => fakeGit) as unknown as SimpleGitFactory;
+
+    createExtensionGitClient(factory, {
+      baseDir: tempDir,
+      networkPolicy: 'public',
+    });
+    createExtensionGitClient(factory, {
+      baseDir: tempDir,
+      networkPolicy: 'public',
+      authentication: {
+        source: 'https://git.example.com/owner/repo.git',
+        credential: { username: 'user', password: 'token' },
+      },
+    });
+
+    expect(environments).toHaveLength(2);
+    for (const environment of environments) {
+      expect(environment).toHaveProperty('GIT_TERMINAL_PROMPT', '0');
+      // The rest of the allowlist must be unchanged by adding the guard.
+      expect(environment).toHaveProperty('GIT_CONFIG_NOSYSTEM', '1');
+      expect(environment).toHaveProperty('GIT_CONFIG_GLOBAL', '/dev/null');
+      expect(environment).toHaveProperty('PATH', '/stubbed/bin');
+      expect(environment).toHaveProperty('TMPDIR', '/stubbed/tmp');
+    }
+    expect(environments[1]).toHaveProperty('GIT_CONFIG_COUNT', '1');
+    expect(environments[1]).toHaveProperty(
+      'GIT_CONFIG_VALUE_0',
+      `Authorization: Basic ${Buffer.from('user:token', 'utf8').toString('base64')}`,
+    );
+  });
+
+  it('allowlists every guarded key the restricted environment sets', () => {
+    // v4 throws when the task env names a guarded key the client did not opt
+    // into, so a key added to the environment without reaching the allow list
+    // fails every credentialed or public install before git spawns.
+    const allowlists: string[][] = [];
+    const environments: Array<Record<string, string>> = [];
+    const fakeGit = {
+      env: (environment: Record<string, string>) => {
+        environments.push(environment);
+        return fakeGit;
+      },
+    } as unknown as SimpleGit;
+    const factory = ((_baseDir: string, options?: SimpleGitOptions) => {
+      allowlists.push([...(options?.allowEnvironment ?? [])]);
+      return fakeGit;
+    }) as unknown as SimpleGitFactory;
+
+    createExtensionGitClient(factory, {
+      baseDir: tempDir,
+      networkPolicy: 'public',
+    });
+    createExtensionGitClient(factory, {
+      baseDir: tempDir,
+      networkPolicy: 'public',
+      authentication: {
+        source: 'https://git.example.com/owner/repo.git',
+        credential: { username: 'user', password: 'token' },
+      },
+    });
+
+    expect(environments).toHaveLength(2);
+    for (const [index, environment] of environments.entries()) {
+      const guarded = Object.keys(environment).filter((key) =>
+        key.toUpperCase().startsWith('GIT_'),
+      );
+      expect(guarded.length).toBeGreaterThan(0);
+      expect(allowlists[index]).toEqual(expect.arrayContaining(guarded));
+    }
   });
 });

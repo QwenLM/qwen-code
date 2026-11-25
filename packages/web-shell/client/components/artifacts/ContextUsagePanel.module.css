@@ -9,6 +9,23 @@
   gap: 8px;
   margin-bottom: 12px;
   font-weight: 600;
+  flex-wrap: wrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.feedback {
+  margin-bottom: 12px;
+  color: var(--chat-editor-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.feedback[role='alert'] {
+  color: var(--error-color);
 }
 
 .state {

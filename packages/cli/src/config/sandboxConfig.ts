@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import { getPackageJson } from '../utils/package.js';
 import type { Settings } from './settings.js';
+import { validateExecutionSandboxSelection } from './execution-sandbox-settings.js';
 
 // This is a stripped-down version of the CliArgs interface from config.ts
 // to avoid circular dependencies.
@@ -27,6 +28,19 @@ const VALID_SANDBOX_COMMANDS: ReadonlyArray<SandboxConfig['command']> = [
   'podman',
   'sandbox-exec',
 ];
+
+/**
+ * Backends that start a container and therefore need an image. The others
+ * confine the current process in place.
+ */
+const CONTAINER_SANDBOX_COMMANDS: ReadonlyArray<SandboxConfig['command']> = [
+  'docker',
+  'podman',
+];
+
+function isContainerSandboxCommand(command: SandboxConfig['command']): boolean {
+  return CONTAINER_SANDBOX_COMMANDS.includes(command);
+}
 
 function isSandboxCommand(value: string): value is SandboxConfig['command'] {
   return (VALID_SANDBOX_COMMANDS as readonly string[]).includes(value);
@@ -103,7 +117,8 @@ function runSandboxProbe(
     // control characters strips to '', which is falsy — return that and the
     // caller reads the broken runtime as usable, the very bug this guards.
     const stripped = firstLine ? stripAnsiAndControl(firstLine).trim() : '';
-    return stripped || `'${command} version' exited with ${result.status}`;
+    const probeLabel = `${command} version`;
+    return stripped || `'${probeLabel}' exited with ${result.status}`;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
@@ -220,6 +235,7 @@ export async function loadSandboxConfig(
   settings: Settings,
   argv: SandboxCliArgs,
 ): Promise<SandboxConfig | undefined> {
+  if (validateExecutionSandboxSelection(settings, argv)) return undefined;
   const sandboxOption = argv.sandbox ?? settings.tools?.sandbox;
   const command = getSandboxCommand(sandboxOption);
 
@@ -230,5 +246,15 @@ export async function loadSandboxConfig(
     settings.tools?.sandboxImage ??
     packageJson?.config?.sandboxImageUri;
 
-  return command && image ? { command, image } : undefined;
+  if (!command) {
+    return undefined;
+  }
+  // A container backend cannot start without an image, so a missing one still
+  // means "no sandbox" for it. The in-place backends never pull an image, and
+  // gating them on one would drop confinement the user explicitly asked for
+  // whenever the packaged image URI is unreadable — a silent fail-open.
+  if (isContainerSandboxCommand(command)) {
+    return image ? { command, image } : undefined;
+  }
+  return { command };
 }

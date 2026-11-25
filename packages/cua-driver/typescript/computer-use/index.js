@@ -1,95 +1,34 @@
-/**
- * Standalone Computer Use facade over the typed @qwen-code/cua-sdk API.
- * The facade owns revision cursors; CuaDriver owns native identity,
- * authorization, transport, and cleanup.
- */
-import { randomUUID } from "node:crypto";
+/** Thin session transport for the driver-owned Computer Use interface. */
+import { randomUUID } from 'node:crypto';
+import { ComputerUseApp } from './app.js';
+import manifest from './interface.json' with { type: 'json' };
 
-const OBSERVATION_REVISION_CAPABILITY = "accessibility.observation_revision.v1";
-const ACCESSIBILITY_SERIALIZER_VERSION = "accessibility-render-v1";
-const ACCESSIBILITY_PROJECTION_VERSION = "full-tree-v1";
 const DEFAULT_EXPLICIT_SESSION_TTL_SECONDS = 60 * 60;
 const DEFAULT_EXPLICIT_IDLE_TTL_SECONDS = 5 * 60;
-const DEFAULT_DELIVERY_MODE_ENV = "QWEN_CUA_SDK_DEFAULT_DELIVERY_MODE";
-const RECONNECTABLE_SESSION_CODES = new Set([
-  "authorization_context_expired",
-  "session_unavailable",
-]);
-
-async function loadCuaDriver() {
-  return import("@qwen-code/cua-sdk");
-}
+const RECONNECTABLE_SESSION_CODES = new Set(['authorization_context_expired', 'session_unavailable']);
+async function loadCuaDriver() { return import('@qwen-code/cua-sdk'); }
 
 export class ComputerUseError extends Error {
   constructor(message, info = {}) {
     super(message);
-    this.name = "ComputerUseError";
+    this.name = 'ComputerUseError';
     this.code = info.code;
+    this.reason = info.reason;
+    this.sent = info.sent;
+    this.next = info.next;
     this.details = info.details;
   }
 }
 
-function publicDeliveryModeGuidance(value) {
-  if (typeof value === "string") return value.replace(/\bdelivery_mode\b/g, "deliveryMode");
-  if (Array.isArray(value)) return value.map(publicDeliveryModeGuidance);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, publicDeliveryModeGuidance(entry)]),
-    );
-  }
-  return value;
-}
-
 function unwrapToolResult(tool, result, operation) {
-  let structured;
-  if (typeof result.structuredJson === "string" && result.structuredJson !== "") {
-    try {
-      structured = JSON.parse(result.structuredJson);
-    } catch {
-      structured = undefined;
-    }
-  }
+  const structured = result.structuredJson ? JSON.parse(result.structuredJson) : undefined;
   if (result.isError) {
-    const publicStructured = publicDeliveryModeGuidance(structured);
-    const code =
-      (structured && typeof structured.code === "string" && structured.code) ||
-      (structured && typeof structured.refusal?.code === "string" && structured.refusal.code) ||
-      result.errorCode ||
-      undefined;
-    throw new ComputerUseError(publicDeliveryModeGuidance(result.text) || `${tool} failed`, {
-      code,
-      details:
-        publicStructured && typeof publicStructured === "object"
-          ? { ...publicStructured, operation }
-          : { result: publicStructured, operation },
+    throw new ComputerUseError(result.text || `${tool} failed`, {
+      ...structured, code: structured?.code ?? result.errorCode,
+      details: { ...structured, operation },
     });
   }
-  return {
-    text: result.text,
-    structured,
-    images: result.images ?? [],
-    action: result.action,
-    verification: result.verification,
-    degraded: result.degraded === true,
-    rawJson: result.rawJson,
-    operation,
-  };
-}
-
-function actionResult(result) {
-  const value = result.structured ?? { text: result.text };
-  return {
-    ...value,
-    ...(result.action === undefined ? {} : { action: result.action }),
-    operation: result.operation,
-  };
-}
-
-function verificationResult(result) {
-  const value = result.structured ?? { status: "unknown", stable: false };
-  return result.verification === undefined
-    ? value
-    : { ...value, verification: result.verification };
+  return { text: result.text ?? '', structured, images: result.images ?? [], operation };
 }
 
 function requirePositiveInteger(name, value, { allowZero = false } = {}) {
@@ -179,64 +118,11 @@ function createTrustedSessionAsync(sdk, owner, options) {
   return sdk.createTrustedSessionAsync(owner, options);
 }
 
-function requirePid(value) {
-  return requireIntegerRange("pid", value, 1, 0xffffffff);
-}
-
-function requireStringList(name, value) {
-  if (!Array.isArray(value)) throw new ComputerUseError(`${name} must be an array`);
-  return value.map((entry, index) => requireNonEmptyString(`${name}[${index}]`, entry));
-}
-
 function requireNonEmptyString(name, value) {
   if (typeof value !== "string" || value.length === 0) {
     throw new ComputerUseError(`${name} must be a non-empty string`);
   }
   return value;
-}
-
-function observationDisablesDiff(options) {
-  const hasDisableDiff = options && Object.hasOwn(options, "disableDiff");
-  const hasForceFull = options && Object.hasOwn(options, "forceFull");
-  if (hasDisableDiff && hasForceFull) {
-    throw new ComputerUseError("disableDiff cannot be combined with forceFull", {
-      code: "observation_option_conflict",
-    });
-  }
-  const name = hasDisableDiff ? "disableDiff" : "forceFull";
-  const value = options?.[name];
-  if (value !== undefined && typeof value !== "boolean") {
-    throw new ComputerUseError(`${name} must be a boolean`);
-  }
-  return value === true;
-}
-
-function defaultDeliveryMode(environment) {
-  const value = environment?.[DEFAULT_DELIVERY_MODE_ENV];
-  if (value === undefined) return "background";
-  if (typeof value !== "string") {
-    throw new ComputerUseError(
-      `${DEFAULT_DELIVERY_MODE_ENV} must be background or foreground`,
-    );
-  }
-  const normalized = value.toLowerCase();
-  if (normalized !== "background" && normalized !== "foreground") {
-    throw new ComputerUseError(
-      `${DEFAULT_DELIVERY_MODE_ENV} must be background or foreground`,
-    );
-  }
-  return normalized;
-}
-
-function optionalWindowId(value) {
-  return value === undefined ? undefined : BigInt(requirePositiveInteger("windowId", value));
-}
-
-function exactWindow(pid, windowId) {
-  return {
-    pid: requirePid(pid),
-    windowId: BigInt(requirePositiveInteger("windowId", windowId)),
-  };
 }
 
 function sessionOptions(sdk, options) {
@@ -342,11 +228,8 @@ export class ComputerUse {
   #sessionFactory;
   #reconnectPromise;
   #connectionGeneration = 1;
-  #revisionCursors = new Map();
-  #observationQueues = new Map();
   #closed = false;
-  #revisionSupport;
-  #defaultDeliveryMode;
+  #apps = new Map();
 
   /** Internal injection seam for hermetic tests. Use create/connect in applications. */
   constructor(
@@ -357,10 +240,9 @@ export class ComputerUse {
       ownsSession = false,
       publicSession,
       sessionFactory,
-      environment = {},
     } = {},
   ) {
-    if (!driver || typeof driver.getWindowState !== "function") {
+    if (!driver || typeof driver.callTool !== "function") {
       throw new ComputerUseError("ComputerUse requires a typed driver session");
     }
     this.#driver = driver;
@@ -369,7 +251,6 @@ export class ComputerUse {
     this.#ownsSession = ownsSession;
     this.#publicSession = publicSession;
     this.#sessionFactory = sessionFactory;
-    this.#defaultDeliveryMode = defaultDeliveryMode(environment);
   }
 
   /** Create a same-process configured runtime and one bound standard session. */
@@ -403,7 +284,7 @@ export class ComputerUse {
     }
   }
 
-  /** Connect to a caller-selected daemon and bind a transport-owned session. */
+  /** Compatibility factory; ordinary serve daemons reject trusted session binding. */
   static async connect(options = {}) {
     const signal = options.signal;
     requireDispatchableSignal("createTrustedSession", signal);
@@ -469,7 +350,10 @@ export class ComputerUse {
       // Do not hand caller cancellation to UniFFI after dispatch. UniFFI drops
       // the Rust future immediately, while platform work may continue. Awaiting
       // the native terminal result is what prevents ambiguous late actions.
-      const value = await awaitNativeTerminal(call.call(driver, input), signal);
+      const pending = method === "callTool"
+        ? call.call(driver, input.name, JSON.stringify(input.args))
+        : call.call(driver, input);
+      const value = await awaitNativeTerminal(pending, signal);
       const refusedEffect = this.#sdk.ActionEffect?.Refused ?? 4;
       const refused =
         value?.action?.effect === refusedEffect || value?.action?.effect === "refused";
@@ -529,6 +413,31 @@ export class ComputerUse {
 
   get connectionGeneration() {
     return this.#connectionGeneration;
+  }
+
+  async getPlatform(options = {}) {
+    this.#requireOpen();
+    requireDispatchableSignal("getPlatform", options.signal);
+    if (typeof this.#owner?.listToolsJson !== "function") {
+      throw new ComputerUseError("the connected driver does not report its platform", {
+        code: "driver_platform_unavailable",
+      });
+    }
+    const raw = await awaitNativeTerminal(this.#owner.listToolsJson(), options.signal);
+    let platform;
+    try {
+      platform = JSON.parse(raw)?.platform;
+    } catch {
+      throw new ComputerUseError("the connected driver returned invalid platform metadata", {
+        code: "driver_platform_unavailable",
+      });
+    }
+    if (!["macos", "windows", "linux"].includes(platform)) {
+      throw new ComputerUseError("the connected driver did not report a supported platform; update the driver and SDK", {
+        code: "driver_platform_unavailable",
+      });
+    }
+    return platform;
   }
 
   async sessionInfo(options = {}) {
@@ -592,9 +501,7 @@ export class ComputerUse {
           this.#publicSession = replacementPublicSession;
         }
         this.#connectionGeneration += 1;
-        this.#revisionSupport = undefined;
-        this.#revisionCursors.clear();
-        lifecycle.operation.state = "committed";
+            lifecycle.operation.state = "committed";
         lifecycle.operation.committed = true;
         lifecycle.operation.state = "completed";
         return {
@@ -616,562 +523,29 @@ export class ComputerUse {
     return operation;
   }
 
-  #clickButton(value) {
-    if (value === undefined) return undefined;
-    const normalized = requireNonEmptyString("button", value).toLowerCase();
-    const values = {
-      left: this.#sdk.ClickButton?.Left ?? "left",
-      right: this.#sdk.ClickButton?.Right ?? "right",
-      middle: this.#sdk.ClickButton?.Middle ?? "middle",
-    };
-    if (!(normalized in values)) throw new ComputerUseError(`unsupported button: ${value}`);
-    return values[normalized];
+  async appCall(name, args = {}, { signal } = {}) {
+    const readOnly = manifest.tools.find((tool) => tool.name === name)?.read_only === true;
+    return this.#invoke('callTool', { name, args }, { signal, readOnly });
   }
 
-  #deliveryMode(value) {
-    if (value === undefined) return undefined;
-    const normalized = requireNonEmptyString("deliveryMode", value).toLowerCase();
-    const values = {
-      background: this.#sdk.DeliveryMode?.Background ?? "background",
-      foreground: this.#sdk.DeliveryMode?.Foreground ?? "foreground",
-    };
-    if (!(normalized in values)) {
-      throw new ComputerUseError(`unsupported deliveryMode: ${value}`);
-    }
-    return values[normalized];
+  async getState(options = {}) {
+    return this.appCall('get_state', {}, { ...options, readOnly: true });
   }
 
-  #actionDeliveryMode(options) {
-    if (options && Object.hasOwn(options, "delivery_mode")) {
-      throw new ComputerUseError("delivery_mode is not supported; use deliveryMode");
+  async getApp(selector, options = {}) {
+    const initial = await this.appCall('get_app', { app: selector }, options);
+    const id = initial.structured.app;
+    if (!this.#apps.has(id)) {
+      this.#apps.set(id, new ComputerUseApp(this, id, initial.structured.name));
     }
-    const value = options?.deliveryMode;
-    return this.#deliveryMode(value === undefined ? this.#defaultDeliveryMode : value);
-  }
-
-  #scrollDirection(value) {
-    const normalized = requireNonEmptyString("direction", value).toLowerCase();
-    const values = {
-      up: this.#sdk.ScrollDirection?.Up ?? "up",
-      down: this.#sdk.ScrollDirection?.Down ?? "down",
-      left: this.#sdk.ScrollDirection?.Left ?? "left",
-      right: this.#sdk.ScrollDirection?.Right ?? "right",
-    };
-    if (!(normalized in values)) throw new ComputerUseError(`unsupported direction: ${value}`);
-    return values[normalized];
-  }
-
-  #scrollBy(value) {
-    if (value === undefined) return undefined;
-    const normalized = requireNonEmptyString("by", value).toLowerCase();
-    const values = {
-      line: this.#sdk.ScrollBy?.Line ?? "line",
-      page: this.#sdk.ScrollBy?.Page ?? "page",
-    };
-    if (!(normalized in values)) throw new ComputerUseError(`unsupported scroll unit: ${value}`);
-    return values[normalized];
-  }
-
-  #windowAddress(options, { coordinates = true, tokenRequired = false } = {}) {
-    const { pid, windowId, elementToken, x, y } = options ?? {};
-    const input = {
-      pid: requirePid(pid),
-      windowId: optionalWindowId(windowId),
-    };
-    if (elementToken !== undefined) {
-      input.elementToken = requireNonEmptyString("elementToken", elementToken);
-      if (x !== undefined || y !== undefined) {
-        throw new ComputerUseError("elementToken cannot be combined with x/y");
-      }
-      return input;
-    }
-    if (tokenRequired) throw new ComputerUseError("elementToken is required");
-    if (!coordinates) {
-      if (input.windowId === undefined) {
-        throw new ComputerUseError("provide elementToken or windowId");
-      }
-      return input;
-    }
-    if (x === undefined || y === undefined) {
-      throw new ComputerUseError("provide elementToken or both x and y");
-    }
-    if (input.windowId === undefined) {
-      throw new ComputerUseError("windowId is required for window-local coordinates");
-    }
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      throw new ComputerUseError("x and y must be finite numbers");
-    }
-    input.x = x;
-    input.y = y;
-    return input;
-  }
-
-  async #supportsObservationRevision(options) {
-    this.#requireOpen();
-    if (this.#revisionSupport === undefined) {
-      let advertised = false;
-      const owner = this.#owner;
-      const listTools = owner?.listToolsJson;
-      if (typeof listTools === "function") {
-        const lifecycle = beginOperation("listToolsJson", options.signal);
-        try {
-          if (lifecycle.operation.cancellationRequested) {
-            cancelledBeforeDispatch("listToolsJson", lifecycle.operation);
-          }
-          lifecycle.operation.state = "dispatched";
-          lifecycle.operation.dispatched = true;
-          const listing = JSON.parse(
-            await awaitNativeTerminal(listTools.call(owner), options.signal),
-          );
-          lifecycle.operation.state = "completed";
-          const tools = Array.isArray(listing?.tools) ? listing.tools : [];
-          const entry = tools.find((tool) => tool?.name === "get_window_state");
-          advertised =
-            Array.isArray(entry?.capabilities) &&
-            entry.capabilities.includes(OBSERVATION_REVISION_CAPABILITY);
-        } catch (error) {
-          if (error?.code === "call_cancelled") {
-            throw error;
-          }
-          advertised = false;
-        } finally {
-          if (lifecycle.operation.state !== "completed") {
-            lifecycle.operation.state = "completed";
-          }
-          lifecycle.release();
-        }
-      }
-      this.#revisionSupport = advertised;
-    }
-    return this.#revisionSupport;
-  }
-
-  async supportsObservationRevision() {
-    return this.#supportsObservationRevision({});
-  }
-
-  async listApps(options = {}) {
-    const { structured } = await this.#invoke(
-      "listApps",
-      {},
-      {
-        readOnly: true,
-        signal: options.signal,
-      },
-    );
-    return structured?.apps ?? structured ?? [];
-  }
-
-  async listWindows({ pid, onScreenOnly, signal } = {}) {
-    const input = {};
-    if (pid !== undefined) input.pid = requirePid(pid);
-    if (onScreenOnly !== undefined) input.onScreenOnly = Boolean(onScreenOnly);
-    const { structured } = await this.#invoke("listWindows", input, {
-      readOnly: true,
-      signal,
-    });
-    return structured?.windows ?? structured ?? [];
-  }
-
-  async getWindow({ pid, windowId, signal }) {
-    const target = exactWindow(pid, windowId);
-    const windows = await this.listWindows({ pid: target.pid, signal });
-    const found = windows.find(
-      (window) => String(window.window_id ?? window.windowId) === String(target.windowId),
-    );
-    if (!found) {
-      throw new ComputerUseError(`window ${windowId} for pid ${pid} was not found`, {
-        code: "window_not_found",
-      });
-    }
-    return found;
-  }
-
-  async observeWindow(options) {
-    const cursorField = [
-      "baseRevisionId",
-      "revisionId",
-      "lineageId",
-      "observationRevision",
-    ].find((field) => options && Object.hasOwn(options, field));
-    if (cursorField) {
-      throw new ComputerUseError(`${cursorField} is managed by ComputerUse`, {
-        code: "revision_cursor_managed",
-      });
-    }
-    const target = exactWindow(options?.pid, options?.windowId);
-    const surface = `${target.pid}:${target.windowId}`;
-    const previous = this.#observationQueues.get(surface);
-    const queued = (async () => {
-      if (previous) {
-        await previous.catch(() => undefined);
-      }
-      return this.#observeWindow(options ?? {}, target, surface);
-    })();
-    this.#observationQueues.set(surface, queued);
-    try {
-      return await queued;
-    } finally {
-      if (this.#observationQueues.get(surface) === queued) {
-        this.#observationQueues.delete(surface);
-      }
-    }
-  }
-
-  async #observeWindow(options, target, surface) {
-    const {
-      pid,
-      windowId,
-      includeScreenshot = false,
-      screenshotOutFile,
-      maxElements,
-      maxDepth,
-      signal,
-    } = options;
-    const disableDiff = observationDisablesDiff(options);
-    const input = {
-      pid: target.pid,
-      windowId: target.windowId,
-      includeScreenshot,
-    };
-    if (screenshotOutFile !== undefined) input.screenshotOutFile = screenshotOutFile;
-    if (maxElements !== undefined) {
-      input.maxElements = requirePositiveInteger("maxElements", maxElements);
-    }
-    if (maxDepth !== undefined) input.maxDepth = requirePositiveInteger("maxDepth", maxDepth);
-    if (await this.#supportsObservationRevision({ signal })) {
-      const cursor = this.#revisionCursors.get(surface);
-      input.observationRevision = {
-        version: 1,
-        serializerVersion: ACCESSIBILITY_SERIALIZER_VERSION,
-        projectionVersion: ACCESSIBILITY_PROJECTION_VERSION,
-      };
-      if (disableDiff) {
-        input.observationRevision.forceFull = true;
-      } else if (cursor?.generation === this.#connectionGeneration) {
-        input.observationRevision.baseRevisionId = cursor.revisionId;
-      }
-    }
-    let activeInput = input;
-    let observed;
-    let retriedIncompleteCapture = false;
-    while (true) {
-      let observedGeneration;
-      observed = await this.#invoke("getWindowState", activeInput, {
-        readOnly: true,
-        signal,
-        afterReconnect: () => {
-          if (!activeInput.observationRevision) return activeInput;
-          return {
-            ...activeInput,
-            observationRevision: {
-              ...activeInput.observationRevision,
-              baseRevisionId: undefined,
-              forceFull: true,
-            },
-          };
-        },
-        onDispatch: (generation) => {
-          observedGeneration = generation;
-          const revision = activeInput.observationRevision;
-          const cursor = this.#revisionCursors.get(surface);
-          if (
-            revision?.baseRevisionId !== undefined &&
-            cursor?.generation !== generation
-          ) {
-            revision.baseRevisionId = undefined;
-            revision.forceFull = true;
-          }
-        },
-      });
-      const envelope = observed.structured?.observation_revision;
-      if (observedGeneration === this.#connectionGeneration) {
-        const revisionId = envelope?.revision_id;
-        const mode = envelope?.mode;
-        if (
-          typeof revisionId === "string" &&
-          revisionId.length > 0 &&
-          envelope?.stable_element_ids === true &&
-          ["full", "diff", "no_change"].includes(mode)
-        ) {
-          this.#revisionCursors.set(surface, {
-            generation: observedGeneration,
-            revisionId,
-          });
-        } else {
-          this.#revisionCursors.delete(surface);
-        }
-      }
-      if (
-        !retriedIncompleteCapture &&
-        observed.structured?.capture_complete === false &&
-        envelope?.resync_reason === "capture_incomplete" &&
-        activeInput.observationRevision
-      ) {
-        activeInput = {
-          ...activeInput,
-          observationRevision: {
-            version: 1,
-            serializerVersion: ACCESSIBILITY_SERIALIZER_VERSION,
-            projectionVersion: ACCESSIBILITY_PROJECTION_VERSION,
-          },
-        };
-        retriedIncompleteCapture = true;
-        continue;
-      }
-      break;
-    }
-    const { text, structured, images } = observed;
-    const envelope = structured?.observation_revision;
-    const captureComplete = structured?.capture_complete;
-    const treeText = structured?.tree_markdown ?? text;
-    const publicText =
-      captureComplete === false
-        ? "Accessibility capture is incomplete; this tree is observation-only. " +
-          "Do not reuse element tokens from an earlier observation. Call " +
-          "observeWindow(target) again without `disableDiff` after the UI settles, " +
-          "or use the screenshot.\n\n" +
-          treeText
-        : treeText;
-    return {
-      pid,
-      windowId,
-      mode: envelope?.mode ?? "full",
-      resyncReason: envelope?.resync_reason ?? undefined,
-      text: publicText,
-      elements: captureComplete === false ? [] : (structured?.elements ?? []),
-      screenshot:
-        structured?.screenshot_width !== undefined || structured?.screenshot_file_path
-          ? {
-              width: structured?.screenshot_width,
-              height: structured?.screenshot_height,
-              mimeType: structured?.screenshot_mime_type,
-              filePath: structured?.screenshot_file_path,
-              images,
-            }
-          : undefined,
-      diagnostics: {
-        revisionSupported: Boolean(envelope),
-        stableElementIds: envelope?.stable_element_ids === true,
-        captureComplete,
-        serializerVersion: envelope?.serializer_version,
-        projectionVersion: envelope?.projection_version,
-        selectedBytes: envelope?.selected_bytes,
-        fullBytes: envelope?.full_bytes,
-        estimatedTokens: envelope?.estimated_tokens,
-        serializerDurationUs: envelope?.serializer_duration_us,
-        cacheEstimateBytes: envelope?.cache_estimate_bytes,
-      },
-    };
-  }
-
-  async verifyState(options) {
-    const { pid, windowId, expect, timeoutMs, stableSamples, includeScreenshot, signal } =
-      options ?? {};
-    const target = exactWindow(pid, windowId);
-    if (!Array.isArray(expect) || expect.length === 0) {
-      throw new ComputerUseError("expect must contain at least one predicate");
-    }
-    const input = {
-      pid: BigInt(target.pid),
-      windowId: target.windowId,
-      expect,
-    };
-    if (timeoutMs !== undefined) {
-      input.timeoutMs = BigInt(requireIntegerRange("timeoutMs", timeoutMs, 0, 10000));
-    }
-    if (stableSamples !== undefined) {
-      input.stableSamples = BigInt(requireIntegerRange("stableSamples", stableSamples, 1, 5));
-    }
-    if (includeScreenshot !== undefined) input.includeScreenshot = includeScreenshot;
-    const result = await this.#invoke("verifyState", input, {
-      readOnly: true,
-      signal,
-    });
-    return verificationResult(result);
-  }
-
-  async click(options) {
-    const input = this.#windowAddress(options);
-    const { button, count, signal } = options ?? {};
-    if (button !== undefined) input.button = this.#clickButton(button);
-    if (count !== undefined) input.count = requireIntegerRange("count", count, 1, 3);
-    input.deliveryMode = this.#actionDeliveryMode(options);
-    return actionResult(await this.#invoke("windowClick", input, { signal }));
-  }
-
-  async doubleClick(options) {
-    const input = this.#windowAddress(options);
-    input.deliveryMode = this.#actionDeliveryMode(options);
-    return actionResult(
-      await this.#invoke("doubleClick", input, {
-        signal: options?.signal,
-      }),
-    );
-  }
-
-  async rightClick(options) {
-    const input = this.#windowAddress(options);
-    if (options?.modifier !== undefined) {
-      input.modifier = requireStringList("modifier", options.modifier);
-    }
-    input.deliveryMode = this.#actionDeliveryMode(options);
-    return actionResult(
-      await this.#invoke("rightClick", input, {
-        signal: options?.signal,
-      }),
-    );
-  }
-
-  async drag(options) {
-    const {
-      pid,
-      windowId,
-      fromX,
-      fromY,
-      toX,
-      toY,
-      durationMs,
-      steps,
-      button,
-      modifier,
-      signal,
-    } = options ?? {};
-    const target = exactWindow(pid, windowId);
-    for (const [name, value] of Object.entries({ fromX, fromY, toX, toY })) {
-      if (!Number.isFinite(value)) throw new ComputerUseError(`${name} must be a finite number`);
-    }
-    const input = {
-      fromX,
-      fromY,
-      toX,
-      toY,
-      pid: target.pid,
-      windowId: target.windowId,
-    };
-    if (durationMs !== undefined) {
-      input.durationMs = BigInt(requireIntegerRange("durationMs", durationMs, 0, 10000));
-    }
-    if (steps !== undefined) {
-      input.steps = BigInt(requireIntegerRange("steps", steps, 1, 200));
-    }
-    input.deliveryMode = this.#actionDeliveryMode(options);
-    if (button !== undefined) input.button = this.#clickButton(button);
-    if (modifier !== undefined) input.modifier = requireStringList("modifier", modifier);
-    return actionResult(await this.#invoke("windowDrag", input, { signal }));
-  }
-
-  async scroll(options) {
-    const input = this.#windowAddress(options);
-    input.direction = this.#scrollDirection(options?.direction);
-    if (options?.amount !== undefined) {
-      input.amount = BigInt(requireIntegerRange("amount", options.amount, 1, 50));
-    }
-    if (options?.by !== undefined) input.by = this.#scrollBy(options.by);
-    input.deliveryMode = this.#actionDeliveryMode(options);
-    return actionResult(
-      await this.#invoke("windowScroll", input, {
-        signal: options?.signal,
-      }),
-    );
-  }
-
-  async setValue(options) {
-    const input = this.#windowAddress(options, {
-      coordinates: false,
-      tokenRequired: true,
-    });
-    input.value = typeof options?.value === "string" ? options.value : undefined;
-    if (input.value === undefined) throw new ComputerUseError("value must be a string");
-    return actionResult(
-      await this.#invoke("setValue", input, {
-        signal: options?.signal,
-      }),
-    );
-  }
-
-  async typeText(options) {
-    const input = this.#windowAddress(options, { coordinates: false });
-    if (typeof options?.text !== "string") throw new ComputerUseError("text must be a string");
-    input.text = options.text;
-    if (options.delayMs !== undefined) {
-      input.delayMs = BigInt(
-        requireIntegerRange("delayMs", options.delayMs, 0, Number.MAX_SAFE_INTEGER),
-      );
-    }
-    input.deliveryMode = this.#actionDeliveryMode(options);
-    return actionResult(
-      await this.#invoke("windowTypeText", input, {
-        signal: options.signal,
-      }),
-    );
-  }
-
-  async pressKey(options) {
-    const input = this.#windowAddress(options, { coordinates: false });
-    input.key = requireNonEmptyString("key", options?.key);
-    if (options?.modifiers !== undefined) {
-      input.modifiers = requireStringList("modifiers", options.modifiers);
-    }
-    input.deliveryMode = this.#actionDeliveryMode(options);
-    return actionResult(
-      await this.#invoke("windowPressKey", input, {
-        signal: options?.signal,
-      }),
-    );
-  }
-
-  async hotkey(options) {
-    const input = this.#windowAddress(options, { coordinates: false });
-    if (!Array.isArray(options?.keys) || options.keys.length < 2) {
-      throw new ComputerUseError("keys must list modifiers plus one key");
-    }
-    input.keys = requireStringList("keys", options.keys);
-    input.deliveryMode = this.#actionDeliveryMode(options);
-    return actionResult(
-      await this.#invoke("windowHotkey", input, {
-        signal: options?.signal,
-      }),
-    );
-  }
-
-  async performSecondaryAction(options) {
-    const input = this.#windowAddress(options, {
-      coordinates: false,
-      tokenRequired: true,
-    });
-    input.action = requireNonEmptyString("action", options?.action);
-    return actionResult(
-      await this.#invoke("performSecondaryAction", input, {
-        signal: options?.signal,
-      }),
-    );
-  }
-
-  async actAndVerify({ action, verify } = {}) {
-    if (typeof action !== "function" || typeof verify !== "function") {
-      throw new ComputerUseError("actAndVerify requires action and verify functions");
-    }
-    const actionOutcome = await action();
-    const verification = await verify(actionOutcome);
-    const admissibleEffect = ["confirmed", "partial", "unverifiable"].includes(
-      actionOutcome?.effect,
-    );
-    const verified = verification?.status === "satisfied" && verification?.stable === true;
-    if (!admissibleEffect || !verified) {
-      throw new ComputerUseError("the action postcondition was not stably satisfied", {
-        code: "postcondition_not_satisfied",
-        details: { action: actionOutcome, verification },
-      });
-    }
-    return { action: actionOutcome, verification };
+    return { app: this.#apps.get(id), initial };
   }
 
   /** Close the bound session, then the owning runtime/client handle. */
   async close() {
     if (this.#closed) return;
     this.#closed = true;
-    this.#revisionCursors.clear();
+    this.#apps.clear();
     let failure;
     if (this.#ownsSession && typeof this.#driver?.endSession === "function") {
       try {

@@ -61,6 +61,7 @@ class FakeSocket extends EventEmitter {
           instanceNonce: 'host_instance_nonce_0001',
           permissions: {
             microphone: 'granted',
+            camera: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },

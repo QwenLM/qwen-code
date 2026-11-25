@@ -400,6 +400,43 @@ describe('LocalDirectory.write', () => {
     expect(root.files.has('out.txt')).toBe(false);
   });
 
+  it('writes content starting with a UTF-8 BOM verbatim', async () => {
+    const root = tree();
+    const bom = String.fromCodePoint(0xfeff);
+    const result = await new LocalDirectory(root).write(
+      'README.md',
+      `${bom}hello\n`,
+    );
+    expect(result).toEqual({ path: 'README.md', bytes: 9, created: false });
+    expect(root.files.get('README.md')?.file.content).toBe(`${bom}hello\n`);
+  });
+
+  it('writes content that is only a UTF-8 BOM', async () => {
+    const root = tree();
+    const bom = String.fromCodePoint(0xfeff);
+    const result = await new LocalDirectory(root).write('out.txt', bom);
+    expect(result).toEqual({ path: 'out.txt', bytes: 3, created: true });
+    expect(root.files.get('out.txt')?.file.content).toBe(bom);
+  });
+
+  it('writes content with an embedded BOM', async () => {
+    const root = tree();
+    const bom = String.fromCodePoint(0xfeff);
+    const result = await new LocalDirectory(root).write('out.txt', `a${bom}b`);
+    expect(result.bytes).toBe(5);
+    expect(root.files.get('out.txt')?.file.content).toBe(`a${bom}b`);
+  });
+
+  it('still refuses a lone surrogate hiding behind a leading BOM', async () => {
+    const root = tree();
+    const bom = String.fromCodePoint(0xfeff);
+    const lone = String.fromCharCode(0xd800);
+    await expect(
+      new LocalDirectory(root).write('out.txt', `${bom}a${lone}`),
+    ).rejects.toMatchObject({ code: 'invalid_path' });
+    expect(root.files.has('out.txt')).toBe(false);
+  });
+
   it('round-trips whitespace-padded names verbatim', async () => {
     const root = new FakeDir('root');
     root.withFile('notes.txt', 'A');
@@ -503,6 +540,38 @@ describe('LocalDirectory.search', () => {
     expect(result.filesSkipped).toBe(2);
     expect(result.truncatedBy).toBe('files');
     expect(result.hits).toEqual([]);
+  });
+
+  it('bounds directory skeletons with their own budget', async () => {
+    const root = new FakeDir('root');
+    // A huge near-file-less tree must not hang this one tool call.
+    for (const name of ['d1', 'd2', 'd3']) {
+      root.dirs.set(name, new FakeDir(name));
+    }
+    const dir = new LocalDirectory(root, {
+      ...DEFAULT_LOCAL_DIRECTORY_LIMITS,
+      maxSearchDirs: 2,
+    });
+    const result = await dir.search('x');
+    expect(result.truncatedBy).toBe('directories');
+    expect(result.dirsScanned).toBe(2);
+    expect(result.hits).toEqual([]);
+  });
+
+  it('keeps the file budget for files: the dir cap must not consume it or hide hits', async () => {
+    const root = new FakeDir('root');
+    // Five subdirectories each holding one matching file: the directory
+    // bound must not spend maxFiles, and the file budget must still cut in
+    // at its own cap without hiding the hits it did reach.
+    for (const name of ['d1', 'd2', 'd3', 'd4', 'd5']) {
+      root.dirs.set(name, new FakeDir(name).withFile('hit.txt', 'needle'));
+    }
+    const result = await new LocalDirectory(root).search('needle', {
+      maxFiles: 4,
+    });
+    expect(result.hits).toHaveLength(4);
+    expect(result.truncatedBy).toBe('files');
+    expect(result.dirsScanned).toBe(5);
   });
 
   it('skips undecodable files in search instead of scanning mojibake', async () => {

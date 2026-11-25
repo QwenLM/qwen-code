@@ -1,0 +1,145 @@
+package com.alibaba.qwen.code.managedagent.contracts.persistence;
+
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import java.util.List;
+import java.util.Set;
+import java.util.function.BooleanSupplier;
+
+/** Closed Hook domain bodies; TypeScript replays the same fixtures. */
+public final class ManagedHookRecords {
+    private static final Set<String> REGISTRATION_KEYS = Set.of("registrationId",
+            "catalogId", "catalogRevision", "catalogRef", "run");
+    private static final Set<String> EXECUTION_KEYS = Set.of("hookExecutionId",
+            "occurrenceId", "runtimeSessionId", "registrationId", "eventName", "ordinal", "hookId",
+            "planRef", "inputRef", "resultRef", "onceKey", "cancelRequested", "run");
+    /** The raw Hook identities project into VARCHAR(128) columns. */
+    private static final int MAXIMUM_HOOK_ID_LENGTH = 128;
+
+    private ManagedHookRecords() {
+    }
+
+    /**
+     * A Hook identity projected into an indexed VARCHAR(128) column: the
+     * shared id rules plus the column's length bound. MySQL counts code
+     * points and H2 counts UTF-16 units, so the UTF-16 length bounds both.
+     */
+    private static String hookId(JsonNode node, String label) {
+        String value = ManagedExtensionRecords.id(node, label);
+        require(value.length() <= MAXIMUM_HOOK_ID_LENGTH,
+                label + " exceeds " + MAXIMUM_HOOK_ID_LENGTH + " characters");
+        return value;
+    }
+
+    public static void requireRegistration(JsonNode record) {
+        ManagedExtensionRecords.closed(record, REGISTRATION_KEYS, "hookRegistration");
+        pinnedRun(record, "registrationId");
+        String catalogId = hookId(record.get("catalogId"), "catalogId");
+        long catalogRevision = ManagedExtensionRecords.count(record.get("catalogRevision"),
+                1, Long.MAX_VALUE, "catalogRevision");
+        ManagedExtensionRecords.durableRef(record.get("catalogRef"), "catalogRef");
+        JsonNode run = record.get("run");
+        JsonNode definition = run.get("definition");
+        require(catalogId.equals(definition.get("definitionId").textValue())
+                && catalogRevision == definition.get("definitionRevision").longValue()
+                && run.get("execution").isNull(),
+                "Hook registration must pin its catalog resource and have no execution");
+    }
+
+    public static void requireExecution(JsonNode record) {
+        ManagedExtensionRecords.closed(record, EXECUTION_KEYS, "hookExecution");
+        pinnedRun(record, "hookExecutionId");
+        hookId(record.get("occurrenceId"), "occurrenceId");
+        for (String key : List.of("runtimeSessionId", "registrationId", "eventName", "hookId")) {
+            ManagedExtensionRecords.id(record.get(key), key);
+        }
+        ManagedExtensionRecords.count(record.get("ordinal"), 0, Long.MAX_VALUE, "ordinal");
+        for (String key : List.of("planRef", "inputRef")) {
+            ManagedExtensionRecords.durableRef(record.get(key), key);
+        }
+        if (!record.get("onceKey").isNull()) {
+            hookId(record.get("onceKey"), "onceKey");
+        }
+        require(record.get("cancelRequested").isBoolean(), "Hook cancelRequested must be boolean");
+        JsonNode run = record.get("run");
+        require(!run.get("execution").isNull(), "Hook execution must have an execution state");
+        JsonNode result = record.get("resultRef");
+        if (!result.isNull()) {
+            ManagedExtensionRecords.durableRef(result, "resultRef");
+        }
+        require((!"settled".equals(run.get("state").textValue()) || !result.isNull())
+                && (result.isNull() || "settled".equals(run.get("execution").textValue())),
+                "Hook result requires a settled execution; successful executions need a result");
+    }
+
+    public static boolean isRegistrationStart(JsonNode record) {
+        return accepts(() -> {
+            requireRegistration(record);
+            return ManagedExtensionRecords.isRunStart(record.get("run"));
+        });
+    }
+
+    public static boolean isExecutionStart(JsonNode record) {
+        return accepts(() -> {
+            requireExecution(record);
+            return ManagedExtensionRecords.isRunStart(record.get("run"))
+                    && record.get("resultRef").isNull() && !record.get("cancelRequested").booleanValue();
+        });
+    }
+
+    public static boolean isRegistrationSuccessor(JsonNode previous, JsonNode next) {
+        return accepts(() -> {
+            requireRegistration(previous);
+            requireRegistration(next);
+            return !List.of("settled", "failed", "cancelled").contains(previous.get("run").get("state").textValue())
+                    && ManagedMcpRecords.same(without(previous, "run"), without(next, "run"))
+                    && ManagedExtensionRecords.isRunSuccessor(previous.get("run"), next.get("run"));
+        });
+    }
+
+    public static boolean isExecutionSuccessor(JsonNode previous, JsonNode next) {
+        return accepts(() -> {
+            requireExecution(previous);
+            requireExecution(next);
+            return ManagedMcpRecords.same(without(previous, "run", "resultRef", "cancelRequested"),
+                            without(next, "run", "resultRef", "cancelRequested"))
+                    && ManagedExtensionRecords.isRunSuccessor(previous.get("run"), next.get("run"))
+                    && (!previous.get("cancelRequested").booleanValue() || next.get("cancelRequested").booleanValue())
+                    && (previous.get("resultRef").isNull() || ManagedMcpRecords.same(previous.get("resultRef"), next.get("resultRef")))
+                    && (!List.of("settled", "failed", "cancelled").contains(previous.get("run").get("state").textValue())
+                            || ManagedMcpRecords.same(previous, next));
+        });
+    }
+
+    private static void pinnedRun(JsonNode record, String idField) {
+        String id = ManagedExtensionRecords.id(record.get(idField), idField);
+        JsonNode run = record.get("run");
+        ManagedExtensionRecords.requireRun(run);
+        require(!run.get("definition").isNull() && id.equals(run.get("effectId").textValue())
+                && run.get("executionCallId").isNull() && run.get("dispatchId").isNull()
+                && run.get("deliveryId").isNull() && run.get("delivery").isNull(),
+                "Hook run must pin its catalog, identify its effect and have no delivery");
+    }
+
+    private static JsonNode without(JsonNode record, String... keys) {
+        ObjectNode copy = record.deepCopy();
+        copy.remove(List.of(keys));
+        return copy;
+    }
+
+    private static boolean accepts(BooleanSupplier check) {
+        try {
+            return check.getAsBoolean();
+        } catch (InvalidRecordException error) {
+            return false;
+        }
+    }
+
+    private static void require(boolean condition, String message) {
+        if (!condition) {
+            throw new InvalidRecordException(message);
+        }
+    }
+}

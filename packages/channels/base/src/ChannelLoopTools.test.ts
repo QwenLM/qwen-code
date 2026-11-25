@@ -1,8 +1,36 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ChannelLoopMcpServer } from './ChannelLoopTools.js';
+import {
+  ChannelLoopMcpServer,
+  selectChannelToolsForSession,
+} from './ChannelLoopTools.js';
 
 describe('ChannelLoopMcpServer', () => {
-  it('lists channel loop tools', async () => {
+  it('lists channel loop tools for a session', async () => {
+    const server = new ChannelLoopMcpServer({
+      create: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+    });
+
+    const response = await server.handleMessage(
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { sessionId: 's-1' },
+    );
+
+    expect(response).toMatchObject({
+      jsonrpc: '2.0',
+      id: 1,
+      result: {
+        tools: expect.arrayContaining([
+          expect.objectContaining({ name: 'channel_loop_create' }),
+          expect.objectContaining({ name: 'channel_loop_list' }),
+          expect.objectContaining({ name: 'channel_loop_cancel' }),
+        ]),
+      },
+    });
+  });
+
+  it('exposes no tools without a resolved session', async () => {
     const server = new ChannelLoopMcpServer({
       create: vi.fn(),
       list: vi.fn(),
@@ -17,13 +45,7 @@ describe('ChannelLoopMcpServer', () => {
     expect(response).toMatchObject({
       jsonrpc: '2.0',
       id: 1,
-      result: {
-        tools: expect.arrayContaining([
-          expect.objectContaining({ name: 'channel_loop_create' }),
-          expect.objectContaining({ name: 'channel_loop_list' }),
-          expect.objectContaining({ name: 'channel_loop_cancel' }),
-        ]),
-      },
+      result: { tools: [] },
     });
   });
 
@@ -189,9 +211,10 @@ describe('ChannelLoopMcpServer', () => {
     });
   });
 
-  it('returns a JSON-RPC error when sessionId is missing', async () => {
+  it('returns an isError tool result when sessionId is missing', async () => {
+    const create = vi.fn();
     const server = new ChannelLoopMcpServer({
-      create: vi.fn(),
+      create,
       list: vi.fn(),
       cancel: vi.fn(),
     });
@@ -209,8 +232,48 @@ describe('ChannelLoopMcpServer', () => {
     expect(response).toMatchObject({
       jsonrpc: '2.0',
       id: 5,
-      error: { code: -32603, message: 'Missing channel session id.' },
+      result: {
+        content: [{ type: 'text', text: 'Missing channel session id.' }],
+        isError: true,
+      },
     });
+    expect(response).not.toHaveProperty('error');
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('names the failed binding when the frame carried an unbound session id', async () => {
+    const create = vi.fn();
+    const server = new ChannelLoopMcpServer({
+      create,
+      list: vi.fn(),
+      cancel: vi.fn(),
+    });
+
+    const response = await server.handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+        params: { name: 'channel_loop_list' },
+      },
+      { carriedSessionId: 's-skip' },
+    );
+
+    expect(response).toMatchObject({
+      jsonrpc: '2.0',
+      id: 7,
+      result: {
+        content: [
+          {
+            type: 'text',
+            text: 'No channel tool binding is active for this session.',
+          },
+        ],
+        isError: true,
+      },
+    });
+    expect(response).not.toHaveProperty('error');
+    expect(create).not.toHaveBeenCalled();
   });
 
   it('does not respond to JSON-RPC notifications', async () => {
@@ -265,5 +328,199 @@ describe('ChannelLoopMcpServer', () => {
     );
 
     expect(cancel).toHaveBeenCalledWith('s-1', 'job-1');
+  });
+});
+
+describe('ChannelLoopMcpServer adapter tools', () => {
+  const handler = { create: vi.fn(), list: vi.fn(), cancel: vi.fn() };
+  const tool = (name: string, run: (...args: never[]) => unknown) => ({
+    name,
+    description: `${name} description`,
+    inputSchema: { type: 'object', properties: {} },
+    handler: run as never,
+  });
+
+  it('merges adapter tools into tools/list', async () => {
+    const server = new ChannelLoopMcpServer(handler, {
+      extraTools: () => [
+        tool('qq_recall_message', vi.fn()),
+        tool('adapter_tool', vi.fn()),
+      ],
+    });
+
+    const response = await server.handleMessage(
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { sessionId: 's-1' },
+    );
+
+    expect(response).toMatchObject({
+      result: {
+        tools: expect.arrayContaining([
+          expect.objectContaining({ name: 'channel_loop_create' }),
+          expect.objectContaining({
+            name: 'qq_recall_message',
+            description: 'qq_recall_message description',
+            inputSchema: { type: 'object', properties: {} },
+          }),
+          expect.objectContaining({ name: 'adapter_tool' }),
+        ]),
+      },
+    });
+  });
+
+  it('dispatches adapter tools with the channel session id', async () => {
+    const run = vi.fn().mockResolvedValue('Message recalled.');
+    const server = new ChannelLoopMcpServer(handler, {
+      extraTools: () => [tool('qq_recall_message', run)],
+    });
+
+    const response = await server.handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'qq_recall_message',
+          arguments: { message_id: 'M1' },
+        },
+      },
+      { sessionId: 's-7' },
+    );
+
+    expect(run).toHaveBeenCalledWith(
+      { message_id: 'M1' },
+      { sessionId: 's-7' },
+    );
+    expect(response).toMatchObject({
+      result: { content: [{ type: 'text', text: 'Message recalled.' }] },
+    });
+  });
+
+  it('marks adapter tool failures as isError', async () => {
+    const server = new ChannelLoopMcpServer(handler, {
+      extraTools: () => [
+        tool(
+          'adapter_tool',
+          vi.fn().mockResolvedValue({ text: 'allowlist-only', isError: true }),
+        ),
+      ],
+    });
+
+    const response = await server.handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'adapter_tool', arguments: {} },
+      },
+      { sessionId: 's-1' },
+    );
+
+    expect(response).toMatchObject({
+      result: {
+        content: [{ type: 'text', text: 'allowlist-only' }],
+        isError: true,
+      },
+    });
+  });
+
+  it('hides loop tools while keeping adapter tools available', async () => {
+    const server = new ChannelLoopMcpServer(handler, {
+      extraTools: () => [tool('qq_recall_message', vi.fn())],
+      loopToolsEnabled: () => false,
+    });
+
+    const response = await server.handleMessage(
+      { jsonrpc: '2.0', id: 4, method: 'tools/list' },
+      { sessionId: 's-1' },
+    );
+
+    const tools = (response as { result: { tools: Array<{ name: string }> } })
+      .result.tools;
+    expect(tools.map((entry) => entry.name)).toEqual(['qq_recall_message']);
+  });
+
+  it('tells loops-enabled intent apart per session', async () => {
+    const server = new ChannelLoopMcpServer(handler, {
+      extraTools: () => [tool('qq_recall_message', vi.fn())],
+      loopToolsEnabled: (sessionId) => sessionId !== 'no-loops',
+    });
+
+    const list = async (sessionId: string) => {
+      const response = await server.handleMessage(
+        { jsonrpc: '2.0', id: 5, method: 'tools/list' },
+        { sessionId },
+      );
+      return (
+        response as { result: { tools: Array<{ name: string }> } }
+      ).result.tools.map((entry) => entry.name);
+    };
+
+    expect(await list('s-1')).toContain('channel_loop_create');
+    expect(await list('no-loops')).not.toContain('channel_loop_create');
+    expect(await list('no-loops')).toContain('qq_recall_message');
+  });
+
+  it('reports unknown tool names as JSON-RPC errors', async () => {
+    const server = new ChannelLoopMcpServer(handler, {
+      extraTools: () => [],
+    });
+
+    const response = await server.handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 6,
+        method: 'tools/call',
+        params: { name: 'nope', arguments: {} },
+      },
+      { sessionId: 's-1' },
+    );
+
+    expect(response).toMatchObject({
+      error: { message: 'Unknown channel loop tool: nope' },
+    });
+  });
+});
+
+describe('selectChannelToolsForSession', () => {
+  const tool = (name: string, owner: string | undefined) => ({
+    name,
+    description: owner ? `${name} owned by ${owner}` : `${name} global`,
+    inputSchema: { type: 'object', properties: {} },
+    ...(owner === undefined ? {} : { owner }),
+    handler: async () => name,
+  });
+
+  it('offers owned tools only to their channel', () => {
+    const tools = [
+      tool('a', 'bot-a'),
+      tool('b', 'bot-b'),
+      tool('c', undefined),
+    ];
+    expect(
+      selectChannelToolsForSession(tools, 'bot-a').map((entry) => entry.name),
+    ).toEqual(['a', 'c']);
+    expect(
+      selectChannelToolsForSession(tools, 'bot-b').map((entry) => entry.name),
+    ).toEqual(['b', 'c']);
+  });
+
+  it('hides owned tools from a session with no owner', () => {
+    const tools = [tool('a', 'bot-a'), tool('c', undefined)];
+    expect(
+      selectChannelToolsForSession(tools, undefined).map((entry) => entry.name),
+    ).toEqual(['c']);
+  });
+
+  it('lets the owning channel shadow an ownerless tool of the same name', () => {
+    const ownerless = tool('shared', undefined);
+    const owned = tool('shared', 'bot-a');
+    const forOwner = selectChannelToolsForSession([ownerless, owned], 'bot-a');
+    expect(forOwner).toHaveLength(1);
+    expect(forOwner[0]?.description).toBe('shared owned by bot-a');
+
+    const forOther = selectChannelToolsForSession([ownerless, owned], 'bot-b');
+    expect(forOther).toHaveLength(1);
+    expect(forOther[0]?.description).toBe('shared global');
   });
 });

@@ -43,8 +43,33 @@ Then enter:
 /mcp
 ```
 
-3. If Qwen Code was already running before you added the server, restart it in
-   the same project. Then ask the model to use tools from that server.
+3. Once `/mcp` shows the server is connected, ask the model to use its tools.
+   Interactive sessions that load servers from `settings.json` pick up
+   `mcpServers` changes without a restart (hot reload). If you edit the
+   project's `.mcp.json`, restart Qwen Code in the same project to load the
+   changes.
+
+### Server approval and session restrictions
+
+- In an [untrusted folder](../configuration/trusted-folders.md), the session
+  skips MCP connections, including servers configured at user scope.
+- If a server from the project's `.mcp.json` or `.qwen/settings.json` is
+  pending approval in the interactive session, use the approval prompt to
+  connect it. To approve it from a shell, run
+  `qwen mcp approve <name>` in that project and start a new interactive session,
+  or use `qwen mcp reject <name>` to deny it.
+- With `--bare` or `--safe-mode`, Qwen Code ignores servers from `settings.json`
+  and the project's `.mcp.json`. Pass servers at startup with `--mcp-config`.
+- The [Linux tool execution sandbox](./sandbox.md#linux-tool-execution-sandbox)
+  rejects startup if the session configuration includes an MCP server. To start
+  in this sandbox, remove the server entries from the settings and project
+  configuration used by the session and omit `--mcp-config`. If configured,
+  also unset `mcp.serverCommand` and remove `memory.mem0`, which registers
+  the bundled Mem0 server.
+
+If the session supports settings-based servers and an eligible server still
+does not appear in `/mcp` after a settings change, restart Qwen Code in the
+same project.
 
 ## Where configuration is stored (scopes)
 
@@ -489,6 +514,51 @@ Optional:
 | `excludeTools`         | array                                         | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server.<br>Note: `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. |
 | `targetAudience`       | string                                        | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
 | `targetServiceAccount` | string                                        | The email address of the Google Cloud Service Account to impersonate. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                                              |
+
+### MCP App resource limits
+
+MCP Apps can return bundled HTML larger than the default 1 MiB or take longer
+than the default 10 seconds to load. Configure only the server that needs more
+headroom in `settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "amplitude": {
+      "httpUrl": "https://mcp.amplitude.com/mcp",
+      "appResourceMaxBytes": 4194304,
+      "appResourceTimeoutMs": 120000
+    }
+  }
+}
+```
+
+Amplitude still requires OAuth authentication. These settings do not enable
+additional App bridge capabilities or guarantee that every App is compatible.
+
+- `appResourceMaxBytes`: maximum decoded HTML size in UTF-8 bytes. Defaults to
+  1,048,576 (1 MiB); clamped to 1–4,194,304 bytes (4 MiB).
+- `appResourceTimeoutMs`: resource-read deadline, independent of tool execution
+  when explicitly set; clamped to 100–120,000 ms. Without an override, the
+  deadline remains the smaller of the general `timeout` and 10,000 ms.
+- Finite values are rounded down and clamped. Nonnumeric or nonfinite values
+  fall back to defaults. Cancellation remains effective at any configured limit.
+
+A limit failure preserves the successful tool result and displays a warning
+with the applicable configuration key. Larger HTML stays outside model context,
+while increasing retained transcript and replay size. The size check happens
+**after** the SDK reads the response; it does not cap network transfer or peak
+memory. These two limit settings do not change the sandbox or CSP.
+
+App HTML is mounted only in a daemon-backed WebShell session and in replay of
+a recorded transcript. Terminal and headless sessions render the fallback text
+instead, so there these keys change only the warning text, the fetch cost and
+latency, and the retained transcript size.
+
+Set these keys in the same source that declares the server. Configuration
+sources replace whole server objects by precedence rather than merging fields,
+so a same-named entry added in another file shadows the original server
+instead of adjusting its limits.
 
 <a id="qwen-mcp-cli"></a>
 

@@ -47,9 +47,17 @@ import {
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
-import { refuseUnsandboxedPhase } from './lib/sandboxed-exec.js';
+import {
+  describeExecutionBoundary,
+  mountRootFor,
+  refuseUnsandboxedPhase,
+  sandboxPolicy,
+  sandboxVerdict,
+  trustInputFromPlan,
+  type ReviewExecutionBoundary,
+} from './lib/sandboxed-exec.js';
 import { failingFilesOf } from './lib/failing-files.js';
-import { TEST_COMMAND_RE } from './lib/npm-toolchain.js';
+import { foundNoTests, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
 
 /**
  * The exact shapes `build-test` emits for a test command — and the only ones
@@ -68,7 +76,8 @@ import { TEST_COMMAND_RE } from './lib/npm-toolchain.js';
  * round-trips through the report into a shell.
  *
  * Restricting to the emitter's own grammar costs nothing real — `build-test`
- * produces `npm test` and `npm test --workspace="<dir>"`, both matched — and
+ * produces `npm test`, `npm test --workspace="<dir>"` and the related run
+ * (`npm exec … -- vitest related --run "<path>"…`), all matched — and
  * anything outside it is skipped and disclosed rather than run, which is
  * the same treatment every other thing this command cannot do gets.
  */
@@ -126,11 +135,15 @@ export interface TestDeltaReport {
    */
   skippedForBudget: string[];
   note: string;
+  /** Structured execution boundary metadata for the base-side rerun phase. */
+  executionBoundary?: ReviewExecutionBoundary;
 }
 
 export interface TestDeltaArgs {
   report: string;
   baseline: string;
+  /** Optional fetch-pr / capture-local plan file for tiered trust classification. */
+  plan?: string;
   out?: string;
   /**
    * The PR worktree the report's failures were produced in — its root is
@@ -206,7 +219,12 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // So the duplicate is gone rather than re-synchronised: one `run`, one place
   // where the boundary is decided, and no way for the two sides to drift again.
   // `kind` defaults to 'test', which is the restrictive shape (no network).
-  const exec = args.exec ?? runCommand;
+  const policy = sandboxPolicy();
+  const trustContext = args.plan ? trustInputFromPlan(args.plan) : undefined;
+  const exec =
+    args.exec ??
+    ((cmd: string, cwd: string, timeoutMs: number) =>
+      runCommand(cmd, cwd, timeoutMs, 'test', trustContext));
   const baseline = resolve(args.baseline);
   const empty = (note: string): TestDeltaReport => ({
     entries: [],
@@ -236,11 +254,30 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // is also the honest answer for the measurement itself: with containment
   // unavailable the PR side either refused too or ran somewhere else, and a
   // delta between two differently-shaped runs is worse than no delta.
-  const refusal = (args.refuse ?? refuseUnsandboxedPhase)(baseline);
+  const refusal = args.refuse
+    ? args.refuse(baseline)
+    : refuseUnsandboxedPhase(
+        baseline,
+        undefined,
+        undefined,
+        policy,
+        trustContext,
+      );
   if (refusal) {
-    return empty(
-      `the base-side rerun did not happen, so NOTHING was attributed — ${refusal}`,
-    );
+    const actionable =
+      policy === 'tiered' && !args.plan
+        ? `${refusal}; pass --plan <the Step 1 fetch plan> so a trusted PR can be classified for this rerun`
+        : refusal;
+    return {
+      ...empty(
+        `the base-side rerun did not happen, so NOTHING was attributed — ${actionable}`,
+      ),
+      executionBoundary: describeExecutionBoundary({
+        policy,
+        backend: 'refused',
+        trustContext,
+      }),
+    };
   }
 
   // Failed for real: a timeout is an infrastructure result and reruns as one.
@@ -347,8 +384,19 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // here from a green base. Reading it as green promotes every PR-side
     // failure to netNew — the strongest evidence this command emits,
     // manufactured from a base that never ran a test.
+    // ...and so does a related run (`vitest related`) that found no test to
+    // run on base: it exits 0 ("No test files found", `passWithNoTests`), and
+    // read as green it would promote a failure the base selection merely
+    // left out to netNew. A green base that RAN tests keeps its zero — that
+    // is the measurement this command exists for.
+    const baseRanNothing =
+      base.exitCode === 0 &&
+      baseFailingFiles.length === 0 &&
+      foundNoTests(base.output);
     const baseUnusable =
-      base.timedOut || (base.exitCode !== 0 && baseFailingFiles.length === 0);
+      base.timedOut ||
+      baseRanNothing ||
+      (base.exitCode !== 0 && baseFailingFiles.length === 0);
     entries.push({
       command: t.command,
       prFailingFiles,
@@ -408,9 +456,10 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   if (unusable.length) {
     parts.push(
       `${unusable.length} command(s) could not be attributed — the base rerun ${unusable
-        .map(
-          (e) =>
-            `\`${e.command}\` failed (exit ${e.base.exitCode}) without naming a failing file, so it did not measure the base (an unbuilt tree, a missing install, a workspace absent at base)`,
+        .map((e) =>
+          e.base.exitCode === 0
+            ? `\`${e.command}\` found no test to run on base, so it measured nothing there`
+            : `\`${e.command}\` failed (exit ${e.base.exitCode}) without naming a failing file, so it did not measure the base (an unbuilt tree, a missing install, a workspace absent at base)`,
         )
         .join('; ')}; judge those failures by the diff as before`,
     );
@@ -428,12 +477,26 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       `${skippedForBudget.length} failed command(s) not rerun — the whole-command budget was exhausted (${skippedForBudget.join(', ')}); their failures stay unattributed, judge them by the diff`,
     );
   }
+  const verdict = sandboxVerdict(policy, undefined, undefined, trustContext);
+  const mountable = mountRootFor(baseline) !== null;
+  const effectiveBackend =
+    verdict.kind === 'container' && mountable ? 'container' : 'direct';
   return {
     entries,
     netNew,
     shared,
     skippedForBudget,
     note: parts.join('. ') || 'nothing to report',
+    executionBoundary: describeExecutionBoundary({
+      policy,
+      backend: effectiveBackend,
+      trustContext,
+      ...(verdict.kind === 'container' && !mountable
+        ? {
+            note: 'baseline tree is not under a review temp dir, so reruns executed directly rather than in a container',
+          }
+        : {}),
+    }),
   };
 }
 
@@ -453,6 +516,11 @@ export const testDeltaCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'The BUILT base tree from `qwen review base-tree`',
+      })
+      .option('plan', {
+        type: 'string',
+        describe:
+          'Optional review plan JSON for tiered sandbox trust classification',
       })
       .option('pr-worktree', {
         type: 'string',

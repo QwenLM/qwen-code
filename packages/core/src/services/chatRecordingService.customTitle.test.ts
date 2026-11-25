@@ -6,10 +6,11 @@
 
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import {
   ChatRecordingService,
   type ChatRecord,
@@ -29,6 +30,17 @@ vi.mock('node:crypto', () => ({
   })),
 }));
 vi.mock('../utils/jsonl-utils.js');
+// The transcript and its synthetic path are already mocked here; real archive
+// exclusion is covered by session-archive-write-fence.test.ts.
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  assertSessionArchiveGeneration: vi.fn(),
+  readSessionArchiveGeneration: vi.fn(),
+  withSessionArchiveWriteLockSync: vi.fn((_path, run) => run()),
+}));
 
 function resumedSessionWithTitle(
   title: string,
@@ -85,6 +97,8 @@ describe('ChatRecordingService - recordCustomTitle', () => {
           .mockReturnValue('/test/project/root/.qwen/projects/test-project'),
       },
       getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAuthType: vi.fn().mockReturnValue(undefined),
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getFastModel: vi.fn().mockReturnValue(undefined),
       isInteractive: vi.fn().mockReturnValue(false),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -108,7 +122,7 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       parts.pop();
       return parts.join('/');
     });
-    vi.mocked(execSync).mockReturnValue('main\n');
+    vi.mocked(execFileSync).mockReturnValue('main\n');
     vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);

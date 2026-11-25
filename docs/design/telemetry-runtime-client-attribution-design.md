@@ -1,72 +1,94 @@
-# Telemetry: Daemon 会话的 channel 归因
+# Telemetry: Channel Attribution for Daemon Sessions
 
-> 配套 issue: [#8660](https://github.com/QwenLM/qwen-code/issues/8660)
-> 基于 2026-08-07 对 qwen-code main 分支的代码复核
+[English](telemetry-runtime-client-attribution-design.md) | [简体中文](telemetry-runtime-client-attribution-design.zh-CN.md)
 
-## 1. 背景
+> Related issue: [#8660](https://github.com/QwenLM/qwen-code/issues/8660)
+> Based on a code review of the qwen-code main branch on 2026-08-07
+> Extended 2026-11-21: Managed Agent (`managed`) attribution, see section 2 "Managed Agent attribution"
 
-默认 usage-statistics（qwen-logger RUM）载荷中只有一个入口维度 `properties.channel`，它来自 `--channel` 标志：
+## 1. Background
 
-- VS Code 伴生插件直接启动 `qwen --acp --channel=VSCode`
-- Electron 桌面端直接启动 `qwen --acp --channel=desktop`
-- TS/Python/Java SDK 的主入口（`query()`）直接 spawn CLI（stream-json 模式），自带 `--channel=SDK`
-- `--acp` 未显式指定 channel 时回退为 `ACP`（`packages/cli/src/config/config.ts` 的 ACP fallback）
+The default usage-statistics (qwen-logger RUM) payload has a single entry-point dimension, `properties.channel`, which comes from the `--channel` flag:
 
-但 `qwen serve`（daemon）的 spawn 工厂启动的是不带 channel 的 `qwen --acp` 子进程（`packages/acp-bridge/src/spawnChannel.ts`），因此**经 daemon 承载的会话——SDK 的 daemon 客户端入口（如 TS SDK 的 `DaemonClient`/`DaemonSessionClient`）、Web Shell、Tauri 桌面 shell——全部上报为 `ACP`**，无法区分。Tauri shell 启动 daemon 时设置了 `QWEN_CODE_DESKTOP=1`（`packages/desktop-shell/src-tauri/src/runtime.rs`），但 telemetry 从未读取该变量。
+- The VS Code companion launches `qwen --acp --channel=VSCode` directly.
+- The Electron desktop app launches `qwen --acp --channel=desktop` directly.
+- The TS/Python/Java SDK main entry (`query()`) spawns the CLI directly (stream-json mode) and passes `--channel=SDK` itself.
+- When `--acp` is given without an explicit channel, the fallback is `ACP` (the ACP fallback in `packages/cli/src/config/config.ts`).
 
-`app.channel` 是来自 `~/.qwen/source.json` 的**安装来源**，与入口归因是不同概念，不应被重载。
+But the `qwen serve` (daemon) spawn factory starts `qwen --acp` children without a channel (`packages/acp-bridge/src/spawnChannel.ts`), so **every daemon-hosted session — the SDK daemon client entries (such as the TS SDK's `DaemonClient`/`DaemonSessionClient`), Web Shell, and the Tauri desktop shell — reports `ACP`**, with no way to tell them apart. The Tauri shell sets `QWEN_CODE_DESKTOP=1` when it starts the daemon (`packages/desktop/src-tauri/src/runtime.rs`), but telemetry never read that variable.
 
-## 2. 方案
+`app.channel` is the **installation source** from `~/.qwen/source.json`; it is a different concept from entry-point attribution and must not be overloaded.
 
-复用现有 `properties.channel` 维度，不新增 payload 键。`getChannel()` 经复核没有任何行为消费方（只有 telemetry 读取），channel 是纯上报维度，扩展其取值无副作用。
+## 2. Solution
 
-daemon 在每个子进程环境中设置 `QWEN_CODE_SERVE=1` 标记，覆盖两个 spawn 点：
+Reuse the existing `properties.channel` dimension; add no payload keys. `getChannel()` has four read sites, and the decided value of `managed` on each is:
 
-- `packages/acp-bridge/src/spawnChannel.ts`（ACP 会话子进程）
-- `packages/cli/src/serve/channel-worker-supervisor.ts`（channel worker；worker 内 `channels/base/AcpBridge.ts` 通过 `{...process.env}` 继续继承该标记）
+- **Usage telemetry** (qwen-logger RUM `properties.channel`): `managed` — the new bucket this design adds.
+- **DashScope request body `metadata.channel`** (provider `buildMetadata`): the raw resolved value, the same pass-through contract as the existing values; `managed` now appears there.
+- **`X-DashScope-Source-Config` `t1` tag** (`buildDashScopeSourceConfig`): `desktop` → `qwen-code-desktop`; every other value, including `managed` and `daemon`, → `qwen-code-cli`. The wire tag is intentionally not extended by this design; the platform enum stays as-is.
+- **Session export metadata** (the `Channel` line): the exporting daemon's channel, resolved **once at boot** (hosted-harness profile → `managed`, desktop launcher marker → `desktop`, otherwise `daemon`) and passed to the export route as a per-daemon dependency. Reading the shared marker at request time would let a co-resident daemon relabel this daemon's exports. The hosted-harness profile gates its public API behind the private managed contract, so Managed transcripts are exported through the control plane rather than this route.
 
-CLI 的 ACP channel 回退（`packages/cli/src/config/acp-channel-fallback.ts`）按标记解析：
+Extending the channel values therefore changes reporting labels on these surfaces only; no control flow reads the channel.
 
-| 条件                  | channel 取值                                                    |
-| --------------------- | --------------------------------------------------------------- |
-| 显式 `--channel=X`    | `X`（不变，显式参数优先）                                       |
-| `QWEN_CODE_DESKTOP=1` | `desktop`（Tauri shell 会话，与 Electron 桌面端同一客户端身份） |
-| `QWEN_CODE_SERVE=1`   | `daemon`（daemon 承载的会话）                                   |
-| 其余                  | `ACP`（直接三方 ACP 启动，不变）                                |
+The daemon sets a `QWEN_CODE_SERVE=1` marker in every child's environment, covering both spawn sites:
 
-归因矩阵：
+- `packages/acp-bridge/src/spawnChannel.ts` (ACP session children)
+- `packages/cli/src/serve/channel-worker-supervisor.ts` (channel workers; inside a worker, `channels/base/AcpBridge.ts` keeps inheriting the marker through `{...process.env}`)
 
-| 场景                                              | properties.channel           |
-| ------------------------------------------------- | ---------------------------- |
-| 交互/无头 CLI                                     | （无）                       |
-| 三方直接 ACP                                      | `ACP`                        |
-| VS Code 伴生                                      | `VSCode`                     |
-| Electron 桌面端（直连，不走 daemon）              | `desktop`                    |
-| SDK `query()` 直连（TS/Python/Java，不走 daemon） | `SDK`（SDK 自带，不变）      |
-| daemon 会话（SDK daemon 客户端、Web Shell 等）    | `daemon`                     |
-| daemon 会话（Tauri desktop shell）                | `desktop`                    |
-| docker/podman sandbox 内的 daemon 会话            | 继承外层 `daemon`/`desktop`  |
-| daemon channel worker                             | worker 名（如 feishu，不变） |
+The CLI's ACP channel fallback (`packages/cli/src/config/acp-channel-fallback.ts`) resolves by marker:
 
-## 3. 为什么 daemon 会话不能像 VS Code 那样直接传 `--channel`
+| Condition                     | channel value                                                          |
+| ----------------------------- | ---------------------------------------------------------------------- |
+| Explicit `--channel=X`        | `X` (unchanged; the explicit flag wins)                                |
+| `QWEN_CODE_MANAGED_RUNTIME=1` | `managed` (the Managed Agent's Hosted Harness and its children)        |
+| `QWEN_CODE_DESKTOP=1`         | `desktop` (Tauri shell sessions, the same client identity as Electron) |
+| `QWEN_CODE_SERVE=1`           | `daemon` (daemon-hosted sessions)                                      |
+| Otherwise                     | `ACP` (direct third-party ACP launches, unchanged)                     |
 
-VS Code 伴生插件**自己拥有 spawn**：一个客户端 = 一个专属子进程，所以能传 `--channel=VSCode`。
+Attribution matrix:
 
-daemon 的桥接模型不同（`packages/acp-bridge/src/bridge.ts`）：**一个 bridge（一个 workspace）至多一个 `qwen --acp` 子进程**，所有客户端的会话经 `connection.newSession()` 多路复用到同一个进程上，共享进程/OAuth/FileReadCache。因此：
+| Scenario                                                      | properties.channel                                                |
+| ------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Interactive/headless CLI                                      | (none)                                                            |
+| Direct third-party ACP                                        | `ACP`                                                             |
+| VS Code companion                                             | `VSCode`                                                          |
+| Electron desktop (direct, not through the daemon)             | `desktop`                                                         |
+| SDK `query()` direct (TS/Python/Java, not through the daemon) | `SDK` (passed by the SDK, unchanged)                              |
+| Daemon sessions (SDK daemon clients, Web Shell, etc.)         | `daemon`                                                          |
+| Daemon sessions (Tauri desktop shell)                         | `desktop`                                                         |
+| Managed Agent sessions (Hosted Harness, both engines)         | `managed`                                                         |
+| Daemon sessions inside a docker/podman sandbox                | inherits the outer session's value (`daemon`/`desktop`/`managed`) |
+| Daemon channel workers                                        | worker name (e.g. feishu, unchanged)                              |
 
-- spawn 时不知道哪个客户端会连进来（子进程可能预热）；
-- 同一进程内同时跑着不同客户端的会话，进程级参数无法表达会话级身份；
-- qwen-logger payload 是进程级构造，进程级 channel 无法按会话区分客户端。
+### Managed Agent attribution (`managed`)
 
-环境标记 + 回退解析因此是当前模型下唯一的进程级归因手段。
+The Managed Agent's session host is the Hosted Harness daemon (`qwen serve --profile hosted-harness`), operated by the Java `managed-agent-server` through the Runtime Broker. At boot (`run-qwen-serve.ts`, before the base env freeze) it stamps `QWEN_CODE_MANAGED_RUNTIME=1` into the shared `process.env`. The stamp is **refcounted**: co-resident embedded daemons share that one slot, so the ambient value captured at the first stamp is restored only when the last hosted harness closes; a startup failure releases the same refcount. Every other profile never touches the shared slot — it deletes an inherited marker from **its own base env copy only**, so an independently launched daemon's children do not inherit a co-resident harness's (or the launcher's) marker while the harness keeps its attribution. Both session execution paths therefore attribute as `managed`:
 
-## 4. Schema 影响与兼容性
+- **Managed engine**: Hosted turns run inside the harness process. Each turn builds its Config through `loadCliConfig` with a synthesized argv (`acp: true`, no channel) that never passes through `parseArguments`. `loadCliConfig` applies the same fallback to ACP argv without an explicit channel, so reading the marker reports `managed`.
+- **Legacy engine**: the `qwen --acp` children the harness spawns through `createSpawnChannelFactory` inherit the marker (alongside the daemon's `QWEN_CODE_SERVE=1`); in the fallback, `managed` wins over `daemon`.
 
-- 零新增键。`properties.channel` 仅新增一个可能取值：`daemon`（`desktop` 是既有取值，Tauri shell 会话并入其中）。
-- `app.channel` 语义与取值不变；显式 `--channel` 的既有取值（`VSCode`/`desktop`/`SDK`/worker 名）不变。
-- `QWEN_CODE_SERVE` 为信息性标记，不含敏感信息；不进入 `SCRUBBED_CHILD_ENV_KEYS`（denylist 语义不受影响）。
-- docker/podman sandbox 会显式透传 `QWEN_CODE_SERVE` / `QWEN_CODE_DESKTOP`，避免 sandbox 内子进程退回 `ACP`；项目 `.env`/`settings.env` 不能设置这两个标记，避免 workspace 伪造客户端归因。
+Tool execution workers (`qwen managed-runtime-worker`) produce no session telemetry and are not stamped.
 
-## 5. 后续工作（不在本次范围）
+## 3. Why daemon sessions cannot pass `--channel` directly like VS Code
 
-按 SDK/Web Shell 细分客户端需要**会话级**归因：各客户端在创建会话时经由 daemon 自我声明，现有 `qwen.session.source` meta → `config.setSessionSource(sourceType, sourceId)` 管道（#8155 为生命周期钩子引入）是自然的扩展点。当前 Web Shell 主会话仅使用 `sourceType: 'default'`。由于默认 payload 是进程级的，会话级身份落到 telemetry 还需要会话维度的支持，届时再决定是否引入独立的 client 键。
+The VS Code companion **owns its spawn**: one client = one dedicated child, so it can pass `--channel=VSCode`.
+
+The daemon's bridge model is different (`packages/acp-bridge/src/bridge.ts`):**one bridge (one workspace) has at most one `qwen --acp` child**, and every client's sessions multiplex onto that same process through `connection.newSession()`, sharing the process/OAuth/FileReadCache. Therefore:
+
+- at spawn time it is unknown which clients will connect (the child may be preheated);
+- sessions from different clients run in the same process at the same time, so a process-level flag cannot express session-level identity;
+- the qwen-logger payload is built at process level, so a process-level channel cannot distinguish clients per session.
+
+Environment markers plus fallback resolution are therefore the only process-level attribution mechanism available under the current model.
+
+## 4. Schema impact and compatibility
+
+- Zero new keys. `properties.channel` only gains possible values: `daemon`, `managed` (`desktop` is an existing value; Tauri shell sessions fold into it).
+- `app.channel` semantics and values are unchanged; the existing explicit `--channel` values (`VSCode`/`desktop`/`SDK`/worker names) are unchanged.
+- `QWEN_CODE_SERVE` / `QWEN_CODE_MANAGED_RUNTIME` are informational markers carrying no sensitive data; they do not enter `SCRUBBED_CHILD_ENV_KEYS` (denylist semantics are unaffected).
+- docker/podman sandboxes explicitly pass through `QWEN_CODE_SERVE` / `QWEN_CODE_DESKTOP` / `QWEN_CODE_MANAGED_RUNTIME` so children inside the sandbox do not fall back to `ACP`; project `.env`/`settings.env` cannot set these three markers, so a workspace cannot spoof client attribution.
+- `qwen daemon start`'s `START_ENV_DROP` discards `QWEN_CODE_MANAGED_RUNTIME`: a new daemon started from inside a Managed session is an independent daemon, not a Hosted Harness worker. The same rule holds at the second door, applied per daemon: any non-hosted-profile `qwen serve` boot deletes an inherited marker from its own frozen base env (children only), leaving the shared slot to co-resident daemons; the hosted stamp's refcount restores the ambient value at last close.
+
+## 5. Follow-up work (out of scope here)
+
+Splitting clients further by SDK/Web Shell requires **session-level** attribution: each client self-declares through the daemon when it creates a session. The existing `qwen.session.source` meta → `config.setSessionSource(sourceType, sourceId)` pipeline (introduced by #8155 for lifecycle hooks) is the natural extension point. Today the Web Shell main session only uses `sourceType: 'default'`. Because the default payload is process-level, landing session-level identity in telemetry also needs session-dimension support; whether to introduce a separate client key can be decided then.

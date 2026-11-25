@@ -8,6 +8,11 @@ import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
+import {
+  getSkillSource,
+  getTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+} from '../skills/turn-skill-snapshot.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { ToolNames } from './tool-names.js';
@@ -15,6 +20,57 @@ import { escapeXml } from '../utils/xml.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SKILL');
+
+/**
+ * The session's own SkillManager, recorded on a subagent Config whose tool
+ * policy withholds it (#12424). Registered in the global symbol registry so
+ * `SubagentManager` can write the record and the scheduler can read it
+ * without either module importing the other's internals.
+ */
+export const SESSION_SKILL_MANAGER: unique symbol = Symbol.for(
+  'qwen-code.subagent.sessionSkillManager',
+);
+
+/**
+ * The SkillManager the session itself holds, looking past any ancestor
+ * subagent that withheld it from its own Config.
+ *
+ * Path-gated skill activation is session-shared state: `matchAndActivateByPaths`
+ * mutates the session registry and notifies every SkillTool, the parent's
+ * included. A subagent that cannot invoke `skill` itself must still feed it —
+ * otherwise a restricted child's file reads stop activating skills for a
+ * parent that can invoke them, and because `matchAndConsume` is one-shot
+ * nothing else in the session can consume the rule later.
+ *
+ * Activation only. The announcement stays gated on declaration, and the
+ * bundled-reference route still reads `config.getSkillManager()`, so a
+ * withheld agent still resolves that route to `inline` and still gets no
+ * listing.
+ */
+export function sessionSkillManager(config: Config): SkillManager | null {
+  const recorded = (config as unknown as Record<symbol, unknown>)[
+    SESSION_SKILL_MANAGER
+  ] as SkillManager | null | undefined;
+  return recorded !== undefined ? recorded : config.getSkillManager();
+}
+
+/**
+ * Why the model cannot invoke a skill right now, or `undefined` when it can.
+ * Shared by the availability filter and the resume path, so a resumed session
+ * never re-arms a skill no tool call could load. Read live, not off
+ * `SkillTool`'s asynchronously refreshed snapshots.
+ */
+export function skillModelInvocationBlock(
+  config: Config,
+  skillManager: SkillManager,
+  skill: SkillConfig,
+  liveOnly?: boolean,
+): 'disabled' | 'inactive' | 'hidden' | undefined {
+  if (!config.isSkillEnabled(getSkillSource(skill))) return 'disabled';
+  if (skill.disableModelInvocation) return 'hidden';
+  if (!skillManager.isSkillActive(skill, liveOnly)) return 'inactive';
+  return undefined;
+}
 
 /**
  * Builds the LLM-facing content string when a skill body is injected.
@@ -110,7 +166,12 @@ export function clearCollectedSkillEntriesCache(
 export async function collectAvailableSkillEntries(
   skillManager: SkillManager,
   config: Config,
+  options?: { liveOnly?: boolean },
 ): Promise<CollectedAvailableSkills> {
+  const snapshot = options?.liveOnly ? undefined : getTurnSkillSnapshot();
+  if (snapshot) {
+    return collectAvailableSkillEntriesUncached(skillManager, config, snapshot);
+  }
   const cached = collectCache.get(skillManager);
   if (cached && Date.now() - cached.ts < COLLECT_CACHE_TTL_MS) {
     return cached.promise;
@@ -136,20 +197,27 @@ export async function collectAvailableSkillEntries(
 async function collectAvailableSkillEntriesUncached(
   skillManager: SkillManager,
   config: Config,
+  snapshot?: TurnSkillSnapshot,
 ): Promise<CollectedAvailableSkills> {
-  // Include a skill only when (a) it is not hidden from the model
-  // (`disable-model-invocation`), (b) it is not user-disabled via
-  // `skills.disabled`, and (c) it is unconditional or already activated by a
-  // matching file path this session. Keeps the listing small in large monorepos
+  // Include a skill only when the model could invoke it right now (see
+  // `skillModelInvocationBlock`). Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
-  const allSkills = await skillManager.listSkills();
-  const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
+  const allSkills = snapshot
+    ? [
+        ...snapshot.skills,
+        ...(await skillManager.listSkills({ level: 'bundled' })).filter(
+          (skill) =>
+            !snapshot.skills.some((pinned) => pinned.name === skill.name),
+        ),
+      ]
+    : await skillManager.listSkills();
+  const isEnabled = (skill: SkillConfig) =>
+    config.isSkillEnabled(getSkillSource(skill));
 
   const availableSkills = allSkills.filter(
     (s) =>
-      !s.disableModelInvocation &&
-      skillManager.isSkillActive(s) &&
-      isEnabled(s),
+      skillModelInvocationBlock(config, skillManager, s, !snapshot) ===
+      undefined,
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -165,7 +233,7 @@ async function collectAvailableSkillEntriesUncached(
           !s.disableModelInvocation &&
           s.paths &&
           s.paths.length > 0 &&
-          !skillManager.isSkillActive(s) &&
+          !skillManager.isSkillActive(s, !snapshot) &&
           isEnabled(s),
       )
       .map((s) => s.name),
@@ -226,6 +294,16 @@ function compareSkillEntries(
 }
 
 /**
+ * Opening sentence of the block coreToolScheduler adds to a tool result when
+ * reading a file activates a path-gated skill. The scheduler folds that
+ * envelope into the tool response rather than emitting it as its own text
+ * part, so `isSkillListingReminder` deliberately does not match it and
+ * `/context` bills it with the tool result (#12235).
+ */
+export const SKILLS_ACTIVATED_OPENER =
+  'The following skill(s) became available via the Skill tool based on the file you just accessed';
+
+/**
  * Renders normalized skill entries into the `<available_skills>` body. Pure: no
  * I/O, no config — XML-escapes every untrusted field (extension/command names
  * bypass `validateSkillName`, so a crafted name could otherwise inject raw tags)
@@ -271,15 +349,17 @@ ${escapeXml(entry.description)}
  * frontmatter hooks — may be applied. A project skill is discovered from
  * `<repo>/.qwen/skills/` regardless of folder trust because its body only
  * influences the model, but its side effects grant tool approvals or run
- * repo-supplied commands, so they need a trusted folder: the same gate
- * `Config.getProjectHooks()` applies to settings-file hooks. User, extension
+ * repo-supplied commands, so they need explicit folder trust. Disabling
+ * folder trust does not authorize these side effects. Settings-file project
+ * hooks additionally need the user's approval (`Config.getProjectHooks()`);
+ * skill and subagent frontmatter hooks do not yet. User, extension
  * and bundled skills are not repo-controlled and are unaffected.
  */
 export function canApplySkillSideEffects(
   skill: Pick<SkillConfig, 'level'>,
-  config: Pick<Config, 'isTrustedFolder'>,
+  config: Pick<Config, 'isExplicitlyTrustedFolder'>,
 ): boolean {
-  return skill.level !== 'project' || config.isTrustedFolder();
+  return skill.level !== 'project' || config.isExplicitlyTrustedFolder();
 }
 
 /**
@@ -332,7 +412,7 @@ export function applySkillAllowedTools(
  * added, so re-invoking a skill never stacks duplicate hooks.
  *
  * A project skill's hooks are marked trust-gated by `registerSkillHooks`, so
- * the event handler re-reads folder trust at fire time. `isTrustedFolder()`
+ * the event handler re-reads folder trust at fire time. `isExplicitlyTrustedFolder()`
  * reads the IDE context store first and only falls back to the `Config`'s
  * own readonly field, so with an IDE companion connected that value is live
  * and revoking trust silences an already-registered gate at the next event,
@@ -389,6 +469,12 @@ export function applySkillHooks(
   }
 }
 
+export class ReviewWorkflowActivationError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
 /**
  * Applies every side effect a skill declares — `allowedTools` session allow
  * rules and frontmatter `hooks:` — behind the single folder-trust gate.
@@ -400,32 +486,65 @@ export function applySkillHooks(
  * skill's instructions reached the model while the hook that was supposed to
  * enforce them was never registered.
  *
- * Both underlying registrations dedup, so calling this repeatedly for the same
+ * The registrations dedup, so calling this repeatedly for the same
  * skill is safe — and necessary, since folder trust can be granted mid-session.
+ * Await review workflow registration before returning the skill to the model.
  */
-export function applySkillSideEffects(
+export async function applySkillSideEffects(
   config:
     | (Pick<Config, 'getHookSystem' | 'getSessionId' | 'getPermissionManager'> &
-        Pick<Config, 'isTrustedFolder'>)
+        Pick<
+          Config,
+          | 'isExplicitlyTrustedFolder'
+          | 'enableReviewWorkflow'
+          | 'isWorkspaceAgentSession'
+        >)
     | null
     | undefined,
   skill: SkillConfig,
-): void {
+): Promise<void> {
   if (!config) {
+    return;
+  }
+  // A workspace agent runs inside a read-only capability boundary. The skill's
+  // body still reaches the model, but its hooks spawn commands (PreToolUse
+  // fires before the invocation guard), and its grants and workflow
+  // registration have no place there.
+  if (config.isWorkspaceAgentSession?.()) {
+    if (skill.allowedTools?.length || skill.hooks) {
+      debugLogger.warn(
+        `Skill "${skill.name}" loaded in a workspace-agent session; ignoring its allowedTools and hooks.`,
+      );
+    }
     return;
   }
   if (!canApplySkillSideEffects(skill, config)) {
     if (skill.allowedTools?.length || skill.hooks) {
       debugLogger.warn(
-        `Skill "${skill.name}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
+        `Skill "${skill.name}" requires explicit folder trust; ignoring its allowedTools and hooks. Enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
       );
     }
     return;
+  }
+  if (
+    'sourceFilePath' in skill &&
+    (skill.allowedTools?.length || Object.keys(skill.hooks ?? {}).length)
+  ) {
+    throw new Error(
+      `turn_skill_session_effects_unavailable: "${skill.name}" requires session-scoped hooks or allow rules and cannot run in this pinned turn`,
+    );
   }
   applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools, {
     trustGated: skill.level === 'project',
   });
   applySkillHooks(config, skill);
+  if (skill.level === 'bundled' && skill.name === 'review') {
+    try {
+      await config.enableReviewWorkflow();
+    } catch (error) {
+      throw new ReviewWorkflowActivationError(error);
+    }
+  }
 }
 
 /**

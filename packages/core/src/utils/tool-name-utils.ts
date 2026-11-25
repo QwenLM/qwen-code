@@ -9,6 +9,15 @@ const MAX_TOOL_NAME_LENGTH = 63;
 const PROVIDER_SAFE_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 /**
+ * Head window `generateLegacyMcpToolName` keeps when middle-truncating past
+ * the 63-character budget. Only these characters of a truncated reduction
+ * are positionally faithful to the name it reduced — the injected `'___'`
+ * and the shifted tail are not — so provenance gates and prefix matching
+ * must never read past them (R12-1, R12-2).
+ */
+export const LEGACY_REDUCTION_HEAD_LENGTH = 28;
+
+/**
  * Produces a deterministic name accepted by Gemini and stricter
  * OpenAI-compatible and Anthropic-compatible providers.
  */
@@ -41,7 +50,10 @@ export function normalizeMcpToolName(name: string): string {
 export function generateLegacyMcpToolName(name: string): string {
   let legacyName = name.replace(/[^A-Za-z0-9_.-]/g, '_');
   if (legacyName.length > MAX_TOOL_NAME_LENGTH) {
-    legacyName = legacyName.slice(0, 28) + '___' + legacyName.slice(-32);
+    legacyName =
+      legacyName.slice(0, LEGACY_REDUCTION_HEAD_LENGTH) +
+      '___' +
+      legacyName.slice(-32);
   }
   return legacyName;
 }

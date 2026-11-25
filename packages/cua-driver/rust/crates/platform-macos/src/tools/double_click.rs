@@ -56,6 +56,7 @@ fn def() -> &'static ToolDef {
                 "element_index": cua_driver_core::tool_schema::element_index_schema(),
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
                 "snapshot_id": cua_driver_core::tool_schema::snapshot_id_schema(),
+                "app_context": { "type": "boolean", "description": "Use app-bound native click routing." },
                 "delivery_mode": cua_driver_core::tool_schema::delivery_mode_schema()
             },
             "additionalProperties": false
@@ -75,6 +76,12 @@ impl Tool for DoubleClickTool {
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        if args.bool_or("app_context", false) {
+            let mut args = args;
+            args["button"] = serde_json::json!("left");
+            args["count"] = serde_json::json!(2);
+            return super::click::invoke_app_click(Arc::clone(&self.state), args).await;
+        }
         let pid = match args.require_i32("pid") {
             Ok(v) => v,
             Err(e) => return e,
@@ -100,12 +107,14 @@ impl Tool for DoubleClickTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                ..
             } => (Some(idx), wid),
         };
 
@@ -113,7 +122,7 @@ impl Tool for DoubleClickTool {
         if let (Some(idx), Some(wid)) = (element_index, window_id) {
             // Retain out of the cache so a concurrent get_window_state can't
             // free the element mid-action (use-after-free → daemon crash).
-            let element_guard = match self.state.element_cache.get_element_retained(pid, wid, idx) {
+            let element_guard = match element_cache.get_element_retained(pid, wid, idx) {
                 Some(e) => e,
                 None => {
                     return ToolResult::error(format!(
@@ -163,7 +172,7 @@ impl Tool for DoubleClickTool {
             .await;
 
             return match result {
-                Ok(Ok(msg)) => ToolResult::text(msg),
+                Ok(Ok(result)) => result,
                 Ok(Err(e)) => ToolResult::error(format!("double_click failed: {e}")),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
@@ -237,6 +246,12 @@ impl Tool for DoubleClickTool {
             None
         };
 
+        if let Some(refusal) =
+            super::click::libreoffice_pixel_refusal(crate::apps::bundle_id_for_pid(pid).as_deref())
+        {
+            return refusal;
+        }
+
         // Pin overlay above the target window before animating.
         if let Some(wid) = window_id {
             crate::cursor::overlay::send_command(
@@ -258,7 +273,7 @@ impl Tool for DoubleClickTool {
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let do_click = move || -> anyhow::Result<()> {
                 if let Some(wid) = window_id {
-                    crate::input::mouse::click_at_xy_with_window_local(
+                    crate::input::mouse::click_at_xy_with_window_delivery(
                         pid,
                         screen_x,
                         screen_y,
@@ -267,6 +282,7 @@ impl Tool for DoubleClickTool {
                         wid,
                         2,
                         &[],
+                        crate::input::mouse::WindowClickDelivery::from_foreground(fg),
                     )
                 } else {
                     crate::input::mouse::click_at_xy(pid, screen_x, screen_y, 2, &[])
@@ -312,25 +328,25 @@ fn ax_double_click(
     idx: usize,
     cursor_key: &str,
     has_ax_open: bool,
-    allow_pointer_fallback: bool,
-) -> anyhow::Result<String> {
+    foreground: bool,
+) -> anyhow::Result<ToolResult> {
     let element = element_ptr as AXUIElementRef;
 
     // Try AXOpen first (Finder items, openable list rows, document cells).
     if has_ax_open {
         let err = unsafe { perform_action(element, "AXOpen") };
         if err == kAXErrorSuccess {
-            return Ok(format!("AXOpen performed on element [{idx}]."));
+            return Ok(ToolResult::text(format!(
+                "AXOpen performed on element [{idx}]."
+            )));
         }
-        if !allow_pointer_fallback {
-            anyhow::bail!(
-                "AXOpen returned {err} for element [{idx}]; background delivery will not \
-                 improvise a pointer fallback after choosing the semantic route"
-            );
-        }
-        tracing::debug!(
-            "AXOpen returned {err} for element [{idx}], falling back to pixel double-click"
-        );
+        return Ok(super::ax_action_unconfirmed("AXOpen", Some(idx), err));
+    }
+
+    if let Some(refusal) =
+        super::click::libreoffice_pixel_refusal(crate::apps::bundle_id_for_pid(pid).as_deref())
+    {
+        return Ok(refusal);
     }
 
     // Resolve screen center and fall back to pixel double-click.
@@ -359,10 +375,20 @@ fn ax_double_click(
              screen coordinates as window-local for element [{idx}]."
             )
         })?;
-    crate::input::mouse::click_at_xy_with_window_local(pid, cx, cy, wx, wy, wid, 2, &[])?;
-    Ok(format!(
+    crate::input::mouse::click_at_xy_with_window_delivery(
+        pid,
+        cx,
+        cy,
+        wx,
+        wy,
+        wid,
+        2,
+        &[],
+        crate::input::mouse::WindowClickDelivery::from_foreground(foreground),
+    )?;
+    Ok(ToolResult::text(format!(
         "✅ Double-clicked element [{idx}] at ({cx:.1}, {cy:.1})."
-    ))
+    )))
 }
 
 #[cfg(test)]

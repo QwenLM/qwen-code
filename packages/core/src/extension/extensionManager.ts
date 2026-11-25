@@ -10,7 +10,7 @@ import type {
 } from '../config/config.js';
 import { Config } from '../config/config.js';
 import { validateSkillName, type SkillConfig } from '../skills/types.js';
-import type { SubagentConfig } from '../subagents/types.js';
+import type { SubagentConfig, SubagentError } from '../subagents/types.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { Storage } from '../config/storage.js';
@@ -33,8 +33,10 @@ import {
   recursivelyHydrateStrings,
   substituteHookVariables,
   performVariableReplacement,
+  replacePluginRootInMarkdown,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
+import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 import {
   checkForExtensionUpdate,
   cloneFromGit,
@@ -63,7 +65,9 @@ import {
   type DiscoveredPlugin,
 } from './sourceRegistry.js';
 import {
+  InsecureArchiveUrlError,
   loadMarketplaceConfigFromSource,
+  resolveExistingLocalExtensionSource,
   parseInstallSource,
 } from './marketplace.js';
 import { convertCompatibleExtension } from './extension-converter.js';
@@ -100,10 +104,15 @@ import {
 } from '../telemetry/types.js';
 import { loadSkillsFromDir } from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
+import {
+  loadExtensionWorkflows,
+  type ExtensionWorkflowDefinition,
+} from '../agents/runtime/workflow-extension.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { refreshExtensionRuntime } from './extension-runtime-refresh.js';
 import {
   ExtensionStore,
+  ExtensionStoreInUseError,
   type ExtensionActivation,
   type ExtensionActivationResult,
   type ExtensionIdentity,
@@ -161,6 +170,8 @@ export interface ExtensionChannelConfig {
 }
 
 export interface Extension {
+  /** Revision of this installed artifact, independent of activation in other workspaces. */
+  artifactGeneration?: number;
   id: string;
   name: string;
   displayName?: string;
@@ -177,7 +188,15 @@ export interface Extension {
   resolvedSettings?: ResolvedExtensionSetting[];
   commands?: string[];
   skills?: SkillConfig[];
+  /** Runtime-only: missing skills may be discovery failures rather than removals. */
+  skillsDiscoveryHasErrors?: boolean;
   agents?: SubagentConfig[];
+  /** Workflow scripts this extension ships, addressed as `<name>:<meta.name>`. */
+  workflows?: ExtensionWorkflowDefinition[];
+  // R10-2: executor-block refusals for this extension's agent files, keyed by
+  // lowercased declared name, recorded at load so a by-name dispatch can refuse
+  // instead of falling through to a builtin of the same name.
+  agentExecutorRefusals?: Map<string, SubagentError>;
   hooks?: { [K in HookEventName]?: HookDefinition[] };
   channels?: Record<string, ExtensionChannelConfig>;
 }
@@ -199,6 +218,8 @@ export interface ExtensionConfig {
   skills?: string | string[];
   skillStates?: Record<string, boolean>;
   agents?: string | string[];
+  /** Workflow directories or `.js` files; defaults to `workflows/`. */
+  workflows?: string | string[];
   settings?: ExtensionSetting[];
   hooks?: { [K in HookEventName]?: HookDefinition[] };
   channels?: Record<string, ExtensionChannelConfig>;
@@ -256,10 +277,12 @@ export type ExtensionRequestOptions = {
   commands?: string[];
   skills?: SkillConfig[];
   subagents?: SubagentConfig[];
+  workflows?: ExtensionWorkflowDefinition[];
   previousExtensionConfig?: ExtensionConfig;
   previousCommands?: string[];
   previousSkills?: SkillConfig[];
   previousSubagents?: SubagentConfig[];
+  previousWorkflows?: ExtensionWorkflowDefinition[];
 };
 
 export interface ExtensionManagerOptions {
@@ -271,6 +294,24 @@ export interface ExtensionManagerOptions {
   /** Locale code for resolving localizable fields (e.g., 'en', 'zh'). Defaults to 'en'. */
   locale?: string;
   telemetrySettings?: TelemetrySettings;
+  /**
+   * Resolved usage-statistics opt-in for the throwaway telemetry Config used
+   * by lifecycle events (same chain as the main session:
+   * `QWEN_USAGE_STATISTICS_ENABLED` env ?? settings.privacy.usageStatisticsEnabled
+   * ?? true). Required for the `QwenLogger.getInstance` opt-out gate to close.
+   */
+  usageStatisticsEnabled?: boolean;
+  /**
+   * Resolved proxy URL forwarded to the throwaway telemetry Config so RUM
+   * uploads go through the configured proxy.
+   *
+   * Note: `QwenLogger` is a process-wide singleton bound to the first
+   * Config that opens its opt-in gate, so in a multi-workspace daemon the
+   * proxy of whichever workspace logs first wins for the process lifetime;
+   * later workspaces' values are ignored (pre-existing singleton behavior,
+   * newly visible now that the proxy differs per workspace).
+   */
+  proxy?: string;
   config?: Config;
   requestConsent?: (options?: ExtensionRequestOptions) => Promise<void>;
   requestSetting?: (setting: ExtensionSetting) => Promise<string>;
@@ -353,6 +394,13 @@ export interface ExtensionStoreMutationResult extends ExtensionStoreSnapshot {
 
 export type ExtensionCommitCallback = (generation: number) => void;
 
+export class UnsupportedTurnExtensionComponentError extends Error {
+  constructor() {
+    super('The active extension has no managed immutable artifact');
+    this.name = 'UnsupportedTurnExtensionComponentError';
+  }
+}
+
 export class PreparedExtensionConsumedError extends Error {
   readonly code = 'prepared_extension_consumed';
 
@@ -405,22 +453,6 @@ function ensureLeadingAndTrailingSlash(dirPath: string): string {
     result = result + '/';
   }
   return result;
-}
-
-function getTelemetryConfig(
-  cwd: string,
-  telemetrySettings?: TelemetrySettings,
-) {
-  const config = new Config({
-    telemetry: telemetrySettings,
-    interactive: false,
-    targetDir: cwd,
-    cwd,
-    model: '',
-    debugMode: false,
-    chatRecording: false,
-  });
-  return config;
 }
 
 function filterMcpConfig(original: MCPServerConfig): MCPServerConfig {
@@ -480,6 +512,10 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 export class ExtensionManager {
   private extensionCache: Map<string, Extension> | null = null;
   private storeSnapshot: ExtensionStoreSnapshot | undefined;
+  private runtimeGeneration: number | undefined;
+  private cacheInitialized = false;
+  private turnReaders = 0;
+  private refreshing = 0;
   private readonly mutationListeners = new Set<ExtensionMutationListener>();
   private nextMutationId = 0;
 
@@ -494,6 +530,7 @@ export class ExtensionManager {
   private readonly networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
   private readonly preparedMutations = new WeakSet<PreparedExtensionMutation>();
   private discoverCache: DiscoveredPlugin[] | null = null;
+  private discoverCacheCwd: string | undefined;
   /** See `sourceFingerprint`. `undefined` until the first refresh commits. */
   private lastSourceFingerprint: string | undefined;
   private inFlightSourceRevalidation: Promise<boolean> | undefined;
@@ -508,6 +545,8 @@ export class ExtensionManager {
 
   private config?: Config;
   private telemetrySettings?: TelemetrySettings;
+  private usageStatisticsEnabled?: boolean;
+  private proxy?: string;
   private isWorkspaceTrusted: boolean;
   private readonly locale: string;
   private requestConsent: (options?: ExtensionRequestOptions) => Promise<void>;
@@ -543,7 +582,47 @@ export class ExtensionManager {
     this.requestConsent = options.requestConsent || (() => Promise.resolve());
     this.config = options.config;
     this.telemetrySettings = options.telemetrySettings;
+    this.usageStatisticsEnabled = options.usageStatisticsEnabled;
+    this.proxy = options.proxy;
     this.isWorkspaceTrusted = options.isWorkspaceTrusted;
+  }
+
+  /**
+   * Throwaway Config used only to route extension lifecycle events through
+   * the telemetry loggers. Must carry the resolved usage-statistics opt-in
+   * and proxy, otherwise `QwenLogger.getInstance` (the sole opt-out gate)
+   * always opens and uploads bypass the configured proxy (#12770).
+   */
+  private getTelemetryConfig(cwd: string): Config {
+    // The Config constructor normalizes the proxy eagerly and throws for
+    // values a session would reject at startup (e.g. SOCKS). Telemetry must
+    // never abort the extension mutation this throwaway is built for, so
+    // drop an unsupported proxy and let the upload fall back to a direct
+    // connection — the pre-#12789 behavior for that case.
+    let proxy: string | undefined;
+    try {
+      proxy = normalizeProxyUrl(this.proxy);
+    } catch {
+      proxy = undefined;
+    }
+    return new Config({
+      telemetry: this.telemetrySettings,
+      usageStatisticsEnabled: this.usageStatisticsEnabled,
+      proxy,
+      // Telemetry-only Config: the RUM logger pins its own proxy agent from
+      // `config.getProxy()` at upload time, so the proxy must stay visible —
+      // but installing the process-global undici dispatcher (which nothing
+      // ever restores) would re-route the host process's plain `fetch` on
+      // every lifecycle event. In `qwen serve` that would leak one
+      // workspace's proxy into every other workspace the daemon hosts.
+      installProxyDispatcher: false,
+      interactive: false,
+      targetDir: cwd,
+      cwd,
+      model: '',
+      debugMode: false,
+      chatRecording: false,
+    });
   }
 
   setConfig(config: Config): void {
@@ -706,7 +785,7 @@ export class ExtensionManager {
         );
       }
       onCommitted?.(snapshot.generation);
-      const config = getTelemetryConfig(currentDir, this.telemetrySettings);
+      const config = this.getTelemetryConfig(currentDir);
       logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(name);
@@ -726,7 +805,7 @@ export class ExtensionManager {
     onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const currentDir = cwd ?? this.workspaceDir;
-    const config = getTelemetryConfig(currentDir, this.telemetrySettings);
+    const config = this.getTelemetryConfig(currentDir);
     if (
       scope === SettingScope.System ||
       scope === SettingScope.SystemDefaults
@@ -764,6 +843,46 @@ export class ExtensionManager {
       return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();
+    }
+  }
+
+  /** Keep installed artifacts and this session's tool graph on the verified generation. */
+  async acquireTurnExtensionLease(
+    generation: number,
+  ): Promise<() => Promise<void>> {
+    if (
+      this.refreshing ||
+      !this.extensionCache ||
+      this.runtimeGeneration !== generation ||
+      this.storeSnapshot?.generation !== generation
+    ) {
+      throw new Error('Extension runtime generation unavailable');
+    }
+    if (
+      this.getLoadedExtensions().some(
+        (ext) =>
+          ext.isActive &&
+          (!ext.installMetadata ||
+            ext.installMetadata.type === 'link' ||
+            this.storeSnapshot?.extensions[ext.id]?.artifactGeneration ===
+              undefined),
+      )
+    ) {
+      throw new UnsupportedTurnExtensionComponentError();
+    }
+    this.turnReaders++;
+    try {
+      const release = await this.extensionStore.acquireTurnReader(generation);
+      let held = true;
+      return async () => {
+        if (!held) return;
+        await release();
+        if (held) this.turnReaders--;
+        held = false;
+      };
+    } catch (error) {
+      this.turnReaders--;
+      throw error;
     }
   }
 
@@ -1120,6 +1239,8 @@ export class ExtensionManager {
   private applyStoreActivation(snapshot: ExtensionStoreSnapshot): void {
     this.storeSnapshot = snapshot;
     for (const extension of this.getLoadedExtensions()) {
+      extension.artifactGeneration =
+        snapshot.extensions[extension.id]?.artifactGeneration;
       if (this.enabledExtensionNamesOverride.length > 0) {
         extension.isActive = this.isEnabled(extension.name);
         continue;
@@ -1215,32 +1336,53 @@ export class ExtensionManager {
     return this.sourceRegistryStore.read();
   }
 
+  parseInstallSource(
+    source: string,
+    cwd?: string,
+  ): Promise<ExtensionInstallMetadata> {
+    return parseInstallSource(source, {
+      networkPolicy: this.networkPolicy,
+      ...(cwd === undefined ? {} : { cwd }),
+    });
+  }
+
   /**
    * Adds a marketplace source. Loads the marketplace config to resolve a
    * human-readable name (falling back to the raw source). Throws if no
    * marketplace config can be resolved from the source.
    */
-  async addSource(source: string): Promise<ExtensionSource> {
+  async addSource(
+    source: string,
+    options?: { cwd?: string },
+  ): Promise<ExtensionSource> {
     const trimmed = source.trim();
     if (!trimmed) {
       throw new Error('Marketplace source cannot be empty.');
     }
-    const config = await loadMarketplaceConfigFromSource(
-      trimmed,
-      this.networkPolicy,
-    );
+    const cwd = options?.cwd;
+    const normalized = await resolveExistingLocalExtensionSource(trimmed, cwd);
+    const config =
+      cwd === undefined
+        ? await loadMarketplaceConfigFromSource(normalized, this.networkPolicy)
+        : await loadMarketplaceConfigFromSource(
+            normalized,
+            this.networkPolicy,
+            cwd,
+          );
     if (!config) {
       // A "marketplace" is a Claude-format collection (.claude-plugin/
       // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
       // not a marketplace — guide the user to install it directly instead.
       let isInstallableExtension = false;
+      let probeError: unknown;
       try {
-        await parseInstallSource(trimmed, {
-          networkPolicy: this.networkPolicy,
-        });
+        await this.parseInstallSource(trimmed, cwd);
         isInstallableExtension = true;
-      } catch {
-        // Not a recognizable install source either.
+      } catch (error) {
+        // Not a recognizable install source either; remember why so a
+        // policy rejection below can surface its real reason instead of the
+        // misleading "no marketplace" message.
+        probeError = error;
       }
       const redacted = redactUrlCredentials(trimmed);
       if (isInstallableExtension) {
@@ -1248,6 +1390,15 @@ export class ExtensionManager {
           `"${redacted}" looks like a single extension, not a marketplace. ` +
             `Install it directly with: /extensions install ${redacted}`,
         );
+      }
+      // A policy rejection (e.g. an insecure archive URL) is the actionable
+      // diagnosis for this source — rethrow it so the user sees the reason
+      // instead of the generic "No marketplace found" guidance. Note the
+      // marketplace probe above has already attempted the fetch by this
+      // point; rethrowing here only changes the reported reason, not the
+      // request behaviour.
+      if (probeError instanceof InsecureArchiveUrlError) {
+        throw probeError;
       }
       throw new Error(
         `No marketplace found at "${redacted}". ` +
@@ -1260,8 +1411,8 @@ export class ExtensionManager {
       const now = new Date().toISOString();
       const entry: ExtensionSource = {
         name: config.name || trimmed,
-        source: trimmed,
-        type: parseExtensionSourceType(trimmed),
+        source: normalized,
+        type: parseExtensionSourceType(normalized),
         addedAt: now,
         lastUpdatedAt: now,
       };
@@ -1304,8 +1455,17 @@ export class ExtensionManager {
     return updated;
   }
 
-  loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {
-    return loadMarketplaceConfigFromSource(source, this.networkPolicy);
+  loadSource(
+    source: string,
+    options?: { cwd?: string },
+  ): Promise<ClaudeMarketplaceConfig | null> {
+    return options?.cwd === undefined
+      ? loadMarketplaceConfigFromSource(source, this.networkPolicy)
+      : loadMarketplaceConfigFromSource(
+          source,
+          this.networkPolicy,
+          options.cwd,
+        );
   }
 
   /**
@@ -1316,22 +1476,35 @@ export class ExtensionManager {
    */
   async discoverPlugins(options?: {
     refresh?: boolean;
+    cwd?: string;
   }): Promise<DiscoveredPlugin[]> {
     const installedNames = new Set(
       this.getLoadedExtensions().map((ext) => ext.name),
     );
-    if (this.discoverCache && !options?.refresh) {
+    const cwd =
+      options?.cwd === undefined ? undefined : path.resolve(options.cwd);
+    if (
+      this.discoverCache &&
+      this.discoverCacheCwd === cwd &&
+      !options?.refresh
+    ) {
       return this.discoverCache.map((plugin) => ({
         ...plugin,
         installed: installedNames.has(plugin.name),
       }));
     }
-    const result = await discoverPlugins(
-      this.getSources(),
-      installedNames,
-      this.networkPolicy,
-    );
+    const sources = this.getSources();
+    const result =
+      cwd === undefined
+        ? await discoverPlugins(sources, installedNames, this.networkPolicy)
+        : await discoverPlugins(
+            sources,
+            installedNames,
+            this.networkPolicy,
+            cwd,
+          );
     this.discoverCache = result;
+    this.discoverCacheCwd = cwd;
     return result;
   }
 
@@ -1360,6 +1533,20 @@ export class ExtensionManager {
   }
 
   async refreshCacheWithSnapshot(options?: {
+    names?: string[];
+  }): Promise<ExtensionStoreSnapshot> {
+    // A read-only refresh can reuse the cache while the Store is pinned.
+    // Replacing the Extension objects here would change an executing tool graph.
+    if (this.turnReaders && this.storeSnapshot) return this.storeSnapshot;
+    this.refreshing++;
+    try {
+      return await this.loadExtensionCache(options);
+    } finally {
+      this.refreshing--;
+    }
+  }
+
+  private async loadExtensionCache(options?: {
     names?: string[];
   }): Promise<ExtensionStoreSnapshot> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
@@ -1396,6 +1583,11 @@ export class ExtensionManager {
     extensions.forEach((extension) => {
       nextCache.set(extension.name, extension);
     });
+    if (!this.cacheInitialized) {
+      this.runtimeGeneration =
+        requestedNames.length === 0 ? snapshot.generation : undefined;
+      this.cacheInitialized = true;
+    }
     this.extensionCache = nextCache;
     this.applyStoreActivation(snapshot);
     // Only a full refresh establishes a baseline. A name-filtered refresh leaves
@@ -1407,6 +1599,82 @@ export class ExtensionManager {
       );
     }
     return snapshot;
+  }
+
+  /**
+   * Loads the extension catalog — identity fields only (id, name, version,
+   * install metadata, activation policy) — and returns it with the store's
+   * snapshot. Skills, commands, agents, hooks, and context files are NOT
+   * loaded, so this costs one manifest read per extension instead of a full
+   * subresource scan. The inclusion set matches the full load exactly: the
+   * manifest head rejects the same manifests the full load's catch rejects.
+   *
+   * Unlike `refreshCacheWithSnapshot`, this touches no manager state: no
+   * `extensionCache` write (the entries carry no subresources, so caching
+   * them would poison a shared manager) and no fingerprint baseline commit
+   * (which would make a later `refreshCacheIfSourcesChanged` on a shared
+   * manager report "unchanged" over a manifest-only cache). That also keeps
+   * the per-request cost down — no fingerprint walk on this path.
+   *
+   * The fingerprint still governs invalidation for full refreshes and is
+   * unaffected by this method: it covers only install metadata and manifests
+   * — never skill files — so a skill-only edit does not change the catalog's
+   * inputs either, which is exactly the desired behavior.
+   */
+  async refreshCatalogSnapshot(options?: {
+    names?: string[];
+  }): Promise<{ snapshot: ExtensionStoreSnapshot; extensions: Extension[] }> {
+    const requestedNames = options?.names?.filter(Boolean) ?? [];
+    const { value: extensions, snapshot } =
+      await this.extensionStore.readConsistent(async () => {
+        // Default: load all extensions from QWEN_HOME-aware user extensions
+        // dir, then filter names from the manifest-only result so a filtered
+        // catalog never falls back to a full subresource load.
+        const loadedAll = await this.loadExtensionsFromExtensionsDir(
+          this.configDir,
+          this.workspaceDir,
+          { manifestOnly: true },
+        );
+        const loaded =
+          requestedNames.length > 0
+            ? loadedAll.filter((extension) =>
+                requestedNames.some(
+                  (name) => name.toLowerCase() === extension.name.toLowerCase(),
+                ),
+              )
+            : loadedAll;
+        return {
+          value: loaded,
+          extensions: loaded.map((extension) => ({
+            id: extension.id,
+            name: extension.name,
+          })),
+        };
+      });
+    return { snapshot, extensions };
+  }
+
+  async refreshExtensionDetailsSnapshot(name: string): Promise<{
+    snapshot: ExtensionStoreSnapshot;
+    extension: Extension | null;
+  }> {
+    const { value: extensions, snapshot } =
+      await this.extensionStore.readConsistent(async () => {
+        const loaded = await this.loadExtensionsFromExtensionsDir(
+          this.configDir,
+          this.workspaceDir,
+          { detailName: name },
+        );
+        return {
+          value: loaded,
+          extensions: loaded.map(({ id, name }) => ({ id, name })),
+        };
+      });
+    const extension =
+      extensions.findLast(
+        (entry) => entry.name.toLowerCase() === name.toLowerCase(),
+      ) ?? null;
+    return { snapshot, extension };
   }
 
   private static stampPath(target: string, followSymlinks = true): string {
@@ -1602,6 +1870,7 @@ export class ExtensionManager {
   private async loadExtensionsFromExtensionsDir(
     extensionsDir: string,
     workspaceDir: string,
+    options: { manifestOnly?: boolean; detailName?: string } = {},
   ): Promise<Extension[]> {
     let subdirs: string[];
     try {
@@ -1611,28 +1880,47 @@ export class ExtensionManager {
     }
 
     const extensions: Extension[] = [];
-    for (const subdir of subdirs) {
-      const extensionDir = path.join(extensionsDir, subdir);
-      const extension = await this.loadExtension({
-        extensionDir,
-        workspaceDir,
-      });
-      if (extension != null) {
-        extensions.push(extension);
+    const batchSize = 4;
+    for (let offset = 0; offset < subdirs.length; offset += batchSize) {
+      // Drain in-flight loads before a failure can release the store read lock.
+      const results = await Promise.allSettled(
+        subdirs
+          .slice(offset, offset + batchSize)
+          .map((subdir) =>
+            this.loadExtension(
+              { extensionDir: path.join(extensionsDir, subdir), workspaceDir },
+              options,
+            ),
+          ),
+      );
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason;
+        if (result.value != null) extensions.push(result.value);
       }
     }
     return extensions;
   }
 
-  async loadExtension(
+  /**
+   * Loads everything an extension's manifest itself provides: install
+   * metadata, the parsed (and env-resolved) config, the extension id, and the
+   * base `Extension` object. Everything sourced from subresource directories
+   * (skills, commands, agents, hooks, context files) is left to the caller.
+   *
+   * The agent-plugins-v1 MCP load always runs here because its throws are
+   * part of this head's rejection set — skipping it would change which
+   * extensions a caller sees. With `createDataDir` (the default) a
+   * successful load also mkdirs the plugin data root; catalog-style callers
+   * pass `false` so a read-only refresh performs no write.
+   */
+  private async loadExtensionManifestHead(
     context: LoadExtensionContext,
-    options: { throwOnError?: boolean } = {},
-  ): Promise<Extension | null> {
-    const { extensionDir, workspaceDir } = context;
-    if (!fs.statSync(extensionDir).isDirectory()) {
-      return null;
-    }
-
+    options: { createDataDir?: boolean } = {},
+  ): Promise<{
+    extension: Extension;
+    loadedManifest: LoadedExtensionManifest;
+  }> {
+    const { extensionDir } = context;
     const installMetadata = this.loadInstallMetadata(extensionDir);
     let effectiveExtensionPath = extensionDir;
 
@@ -1645,75 +1933,184 @@ export class ExtensionManager {
     }
 
     try {
-      const loadedManifest = this.loadExtensionManifest({
-        extensionDir: effectiveExtensionPath,
-        workspaceDir,
-      });
-      let config = loadedManifest.config;
-      if (loadedManifest.format === 'qwen') {
-        config = resolveEnvVarsInObject(config);
-      }
-      const extensionId = getExtensionId(config, installMetadata);
-      if (loadedManifest.format === 'agent-plugins-v1') {
-        config = {
-          ...config,
-          mcpServers: await loadAgentPluginMcpServers(
-            effectiveExtensionPath,
-            this.extensionStore.agentPluginDataRoot(extensionId),
-            { createDataDir: true },
-          ),
-        };
-      }
-
-      const extension: Extension = {
-        id: extensionId,
-        name: config.name,
-        displayName: config.displayName,
-        version:
-          config.version ||
-          installMetadata?.marketplaceConfig?.metadata?.version ||
-          '1.0.0',
-        path: effectiveExtensionPath,
-        format: loadedManifest.format,
+      return await this.loadExtensionManifestHeadResolved(
+        context,
         installMetadata,
-        isActive: this.isEnabled(config.name, this.workspaceDir),
-        config,
-        settings: config.settings,
-        contextFiles: [],
+        effectiveExtensionPath,
+        options,
+      );
+    } catch (error) {
+      // Name the path where the failure actually happened — the linked
+      // source for linked installs, not the install dir that only holds the
+      // metadata sidecar. loadExtension's catch surfaces this for its skip
+      // warning.
+      const withManifestPath = error as Error & { manifestPath?: string };
+      if (!withManifestPath.manifestPath) {
+        withManifestPath.manifestPath = effectiveExtensionPath;
+      }
+      throw error;
+    }
+  }
+
+  private async loadExtensionManifestHeadResolved(
+    context: LoadExtensionContext,
+    installMetadata: ExtensionInstallMetadata | undefined,
+    effectiveExtensionPath: string,
+    options: { createDataDir?: boolean },
+  ): Promise<{
+    extension: Extension;
+    loadedManifest: LoadedExtensionManifest;
+  }> {
+    const { workspaceDir } = context;
+    const loadedManifest = this.loadExtensionManifest({
+      extensionDir: effectiveExtensionPath,
+      workspaceDir,
+    });
+    let config = loadedManifest.config;
+    if (loadedManifest.format === 'qwen') {
+      config = resolveEnvVarsInObject(config);
+    }
+    const extensionId = getExtensionId(config, installMetadata);
+    if (loadedManifest.format === 'agent-plugins-v1') {
+      // The MCP load runs on the manifest-only path too (with its data-dir
+      // creation disabled): its throws are part of the head's rejection set,
+      // so skipping it there would make the catalog list extensions the full
+      // load skips — e.g. a plugin whose mcp.json is a path-escaping symlink.
+      // With createDataDir (the default) a successful load also mkdirs the
+      // plugin data root for stdio servers.
+      config = {
+        ...config,
+        mcpServers: await loadAgentPluginMcpServers(
+          effectiveExtensionPath,
+          this.extensionStore.agentPluginDataRoot(extensionId),
+          { createDataDir: options.createDataDir !== false },
+        ),
       };
+    }
 
-      if (config.mcpServers) {
-        extension.mcpServers = Object.fromEntries(
-          Object.entries(config.mcpServers).map(([key, value]) => [
-            key,
-            filterMcpConfig(value),
-          ]),
-        );
+    const extension: Extension = {
+      id: extensionId,
+      name: config.name,
+      displayName: config.displayName,
+      version:
+        config.version ||
+        installMetadata?.marketplaceConfig?.metadata?.version ||
+        '1.0.0',
+      path: effectiveExtensionPath,
+      format: loadedManifest.format,
+      installMetadata,
+      isActive: this.isEnabled(config.name, this.workspaceDir),
+      config,
+      settings: config.settings,
+      contextFiles: [],
+    };
+
+    if (config.mcpServers) {
+      extension.mcpServers = Object.fromEntries(
+        Object.entries(config.mcpServers).map(([key, value]) => [
+          key,
+          filterMcpConfig(value),
+        ]),
+      );
+    }
+
+    if (loadedManifest.format === 'qwen' && config.channels) {
+      extension.channels = config.channels;
+    }
+
+    return { extension, loadedManifest };
+  }
+
+  async loadExtension(
+    context: LoadExtensionContext,
+    options: {
+      throwOnError?: boolean;
+      manifestOnly?: boolean;
+      detailName?: string;
+    } = {},
+  ): Promise<Extension | null> {
+    const { extensionDir } = context;
+    if (!fs.statSync(extensionDir).isDirectory()) {
+      return null;
+    }
+
+    let extension: Extension | undefined;
+    try {
+      // Destructured separately so `extension` stays visible in the catch
+      // below for the skip warning's path.
+      const head = await this.loadExtensionManifestHead(context, {
+        createDataDir:
+          !options.manifestOnly && options.detailName === undefined,
+      });
+      extension = head.extension;
+
+      if (
+        options.manifestOnly ||
+        (options.detailName !== undefined &&
+          extension.name.toLowerCase() !== options.detailName.toLowerCase())
+      ) {
+        // Catalog-style loads: everything after the head is subresource work
+        // the catalog never reads, and skipping it here keeps the inclusion
+        // set identical to the full load — the head throws for the same
+        // manifests the full load's catch would reject, so both paths list
+        // exactly the same extensions.
+        return extension;
       }
 
-      if (loadedManifest.format === 'qwen' && config.channels) {
-        extension.channels = config.channels;
-      }
+      const { loadedManifest } = head;
+      const config = extension.config;
+      const effectiveExtensionPath = extension.path;
 
+      const onSkillsDiscoveryError = () => {
+        head.extension.skillsDiscoveryHasErrors = true;
+      };
       if (loadedManifest.format === 'agent-plugins-v1') {
         extension.commands = [];
-        extension.skills = await loadAgentPluginSkills(effectiveExtensionPath);
+        extension.skills = await loadAgentPluginSkills(
+          effectiveExtensionPath,
+          onSkillsDiscoveryError,
+        );
         extension.agents = [];
+        // The Agent Plugins v1 schema defines no workflows.
+        extension.workflows = [];
       } else {
-        extension.commands = await loadCommandsFromDir(
-          `${effectiveExtensionPath}/commands`,
-        );
-        extension.contextFiles = getContextFileNames(config)
-          .map((contextFileName) =>
-            path.join(effectiveExtensionPath, contextFileName),
-          )
-          .filter((contextFilePath) => fs.existsSync(contextFilePath));
-        extension.skills = await loadSkillsFromDir(
-          `${effectiveExtensionPath}/skills`,
-        );
-        extension.agents = await loadSubagentFromDir(
-          `${effectiveExtensionPath}/agents`,
-        );
+        const agentExecutorRefusals = new Map<string, SubagentError>();
+        const results = await Promise.allSettled([
+          loadCommandsFromDir(`${effectiveExtensionPath}/commands`).then(
+            (commands) => {
+              head.extension.commands = commands;
+              head.extension.contextFiles = getContextFileNames(config)
+                .map((contextFileName) =>
+                  path.join(effectiveExtensionPath, contextFileName),
+                )
+                .filter((contextFilePath) => fs.existsSync(contextFilePath));
+            },
+          ),
+          loadSkillsFromDir(
+            `${effectiveExtensionPath}/skills`,
+            onSkillsDiscoveryError,
+          ).then((skills) => {
+            head.extension.skills = skills;
+          }),
+          loadSubagentFromDir(
+            `${effectiveExtensionPath}/agents`,
+            agentExecutorRefusals,
+          ).then((agents) => {
+            head.extension.agents = agents;
+            head.extension.agentExecutorRefusals = agentExecutorRefusals;
+          }),
+          loadExtensionWorkflows(
+            effectiveExtensionPath,
+            { name: config.name, displayName: config.displayName },
+            config.workflows,
+          ).then((workflows) => {
+            head.extension.workflows = workflows;
+          }),
+        ]);
+        // Drain reads before a failure can release the store's read lock.
+        for (const result of results) {
+          if (result.status === 'rejected') throw result.reason;
+        }
       }
 
       if (
@@ -1751,7 +2148,7 @@ export class ExtensionManager {
 
           try {
             const hooksContent = fs.readFileSync(hooksFilePath, 'utf-8');
-            const parsedHooks = JSON.parse(hooksContent);
+            const parsedHooks = JSON.parse(hooksContent.replace(/^\uFEFF/, ''));
 
             let hooksData;
             if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
@@ -1782,7 +2179,7 @@ export class ExtensionManager {
     } catch (e) {
       if (options.throwOnError) throw e;
       debugLogger.warn(
-        `Warning: Skipping extension in ${effectiveExtensionPath}: ${getErrorMessage(
+        `Warning: Skipping extension in ${(e as Error & { manifestPath?: string }).manifestPath ?? extension?.path ?? extensionDir}: ${getErrorMessage(
           e,
         )}`,
       );
@@ -1841,7 +2238,7 @@ export class ExtensionManager {
     }
     try {
       const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const parsedConfig = JSON.parse(configContent);
+      const parsedConfig = JSON.parse(configContent.replace(/^\uFEFF/, ''));
       const skillStates = parseSkillStates(parsedConfig?.skillStates);
       const rawConfig = recursivelyHydrateStrings(parsedConfig, {
         extensionPath: extensionDir,
@@ -2070,10 +2467,7 @@ export class ExtensionManager {
       installMetadata.installId = randomBytes(32).toString('hex');
     }
     const currentDir = cwd ?? this.workspaceDir;
-    const telemetryConfig = getTelemetryConfig(
-      currentDir,
-      this.telemetrySettings,
-    );
+    const telemetryConfig = this.getTelemetryConfig(currentDir);
     let extension: Extension | null;
     const redactedInstallSource =
       gitCredential?.persistence === 'one_time'
@@ -2332,6 +2726,28 @@ export class ExtensionManager {
           : await loadSubagentFromDir(`${localSourcePath}/agents`);
         const previousSubagents = previous?.agents ?? [];
 
+        // Resolve environment variables the way loading does, so consent lists
+        // the workflows that will load, without rewriting the saved manifest.
+        // A copied install replaces each symlink with its target, so consent
+        // follows links there; a linked extension loads the source as-is.
+        const workflowConfig = resolveEnvVarsInObject({
+          name: newExtensionConfig.name,
+          displayName: newExtensionConfig.displayName,
+          workflows: newExtensionConfig.workflows,
+        });
+        const workflows = isAgentPlugin
+          ? []
+          : await loadExtensionWorkflows(
+              localSourcePath,
+              {
+                name: workflowConfig.name,
+                displayName: workflowConfig.displayName,
+              },
+              workflowConfig.workflows,
+              { followSymlinks: installMetadata.type !== 'link' },
+            );
+        const previousWorkflows = previous?.workflows ?? [];
+
         if (requestConsent) {
           await requestConsent({
             extensionConfig: newExtensionConfig,
@@ -2342,6 +2758,8 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            workflows,
+            previousWorkflows,
             originSource,
           });
         } else {
@@ -2354,6 +2772,8 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            workflows,
+            previousWorkflows,
             originSource,
           });
         }
@@ -2444,6 +2864,17 @@ export class ExtensionManager {
 
         const usesPluginVariables =
           originSource === 'Claude' || originSource === 'Qoder';
+        // ${CLAUDE_PLUGIN_ROOT} in markdown is how plugin authors reference their
+        // own scripts, so it resolves on every Claude/Qoder install regardless of
+        // whether the plugin ships hooks. The hook-conditional rewrites below stay
+        // gated on a hooks source.
+        if (usesPluginVariables) {
+          try {
+            replacePluginRootInMarkdown(stagingPath, destinationPath);
+          } catch (error) {
+            debugLogger.error('Plugin root markdown replacement failed', error);
+          }
+        }
         if (
           usesPluginVariables &&
           (fs.existsSync(hooksDir) ||
@@ -2778,10 +3209,7 @@ export class ExtensionManager {
         prepared.gitCredentialActivated = true;
         prepared.settingsActivated = true;
       } catch (error) {
-        const telemetryConfig = getTelemetryConfig(
-          prepared.currentDir,
-          this.telemetrySettings,
-        );
+        const telemetryConfig = this.getTelemetryConfig(prepared.currentDir);
         if (prepared.operation === 'update' && prepared.previousConfig) {
           logExtensionUpdateEvent(
             telemetryConfig,
@@ -2838,10 +3266,7 @@ export class ExtensionManager {
         });
       }
 
-      const telemetryConfig = getTelemetryConfig(
-        prepared.currentDir,
-        this.telemetrySettings,
-      );
+      const telemetryConfig = this.getTelemetryConfig(prepared.currentDir);
       if (prepared.operation === 'update' && prepared.previousConfig) {
         logExtensionUpdateEvent(
           telemetryConfig,
@@ -2955,10 +3380,7 @@ export class ExtensionManager {
     const endMutation = this.beginMutation('uninstallExtension');
     try {
       const currentDir = cwd ?? this.workspaceDir;
-      const telemetryConfig = getTelemetryConfig(
-        currentDir,
-        this.telemetrySettings,
-      );
+      const telemetryConfig = this.getTelemetryConfig(currentDir);
       const installedExtensions = this.getLoadedExtensions();
       const extension = installedExtensions.find(
         (installed) =>
@@ -3010,7 +3432,7 @@ export class ExtensionManager {
         { id: extensionId, name: policy.name },
         destinationDirectory,
         isUpdate,
-        getTelemetryConfig(cwd ?? this.workspaceDir, this.telemetrySettings),
+        this.getTelemetryConfig(cwd ?? this.workspaceDir),
         onCommitted,
         installMetadata?.credentialPersistence === 'stored',
       );
@@ -3261,7 +3683,22 @@ export class ExtensionManager {
   }
 
   async refreshTools(): Promise<void> {
-    await refreshExtensionRuntime(this.config);
+    if (this.turnReaders) throw new ExtensionStoreInUseError();
+    this.refreshing++;
+    this.runtimeGeneration = undefined;
+    const generation = this.storeSnapshot?.generation;
+    let complete = true;
+    try {
+      await refreshExtensionRuntime(this.config, () => {
+        complete = false;
+      });
+      this.runtimeGeneration =
+        complete && generation === this.storeSnapshot?.generation
+          ? generation
+          : undefined;
+    } finally {
+      this.refreshing--;
+    }
   }
 }
 

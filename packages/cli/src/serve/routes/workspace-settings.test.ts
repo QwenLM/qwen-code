@@ -4,15 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import {
+  getAllowedKeys,
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
 } from './workspace-settings.js';
-import { loadSettings, type SettingScope } from '../../config/settings.js';
+import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
+  WORKSPACE_RESTRICTED_SETTINGS,
+} from '../../config/settingsUtils.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
+import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
+import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
+import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 
 vi.mock('../../config/settings.js', async (importOriginal) => {
   const actual =
@@ -29,10 +40,105 @@ beforeEach(() => {
   } as never);
 });
 
+describe('fast-model ACP settings writes', () => {
+  const privateUrl = 'https://user:secret@second.example/v1?token=value';
+  const modelProviders = {
+    openai: [
+      { id: 'shared', name: 'First', baseUrl: 'https://first.example/v1' },
+      { id: 'shared', name: 'Second', baseUrl: privateUrl },
+    ],
+  };
+  const route = buildAcpModelOptions(
+    new ModelsConfig({
+      modelProvidersConfig: modelProviders,
+    }).getAllConfiguredModels(),
+  ).find((option) => option.model.registryBaseUrl === privateUrl)!.modelId;
+  const pinned = `openai:shared\0${privateUrl}`;
+  const publicPin = 'openai:shared\0https://second.example/v1';
+
+  it.each(['user', 'workspace'])(
+    'resolves an exact registered row for %s scope',
+    async (scope) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp({
+        userSettings: { modelProviders },
+      });
+      const response = await request(app).post('/workspace/settings').send({
+        key: 'fastModel',
+        scope,
+        value: route,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+        'fastModel',
+        pinned,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'fastModel',
+        publicPin,
+        scope,
+        undefined,
+      );
+      expect(JSON.stringify(response.body)).toContain('second.example');
+      expect(JSON.stringify(response.body)).not.toContain('secret');
+      expect(JSON.stringify(response.body)).not.toContain('token=value');
+    },
+  );
+
+  it('uses the selected workspace registry without loading primary environment', async () => {
+    const { app, persistSetting } = makeQualifiedApp({
+      workspaceCwd: '/selected-workspace',
+    });
+    vi.mocked(loadSettings).mockImplementation(
+      (workspace) =>
+        ({
+          merged: workspace === '/selected-workspace' ? { modelProviders } : {},
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+    const response = await request(app)
+      .post('/workspaces/primary/settings')
+      .send({
+        key: 'fastModel',
+        scope: 'workspace',
+        value: route,
+      });
+    expect(response.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/selected-workspace',
+      SettingScope.Workspace,
+      'fastModel',
+      pinned,
+      expect.any(Function),
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/selected-workspace', {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: false,
+      workspaceTrusted: true,
+    });
+  });
+
+  it('does not persist an unavailable ACP route', async () => {
+    const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+    const response = await request(app).post('/workspace/settings').send({
+      key: 'fastModel',
+      scope: 'workspace',
+      value: 'qwen-route:v1:stale',
+    });
+    expect(response.status).toBe(500);
+    expect(persistSetting).not.toHaveBeenCalled();
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+  });
+});
+
 function makeApp(
   overrides: {
     captureGenerationAssertion?: () => (() => void) | undefined;
     afterPersist?: () => void;
+    imageSyncStatus?: 'applied' | 'deferred' | 'failed';
     userSettings?: Record<string, unknown>;
     workspaceSettings?: Record<string, unknown>;
   } = {},
@@ -47,10 +153,22 @@ function makeApp(
   if (overrides.userSettings || overrides.workspaceSettings) {
     const user = structuredClone(overrides.userSettings ?? {});
     const workspace = structuredClone(overrides.workspaceSettings ?? {});
+    // Mirror the real merge: a workspace value for a restricted key — either
+    // list — is stripped before merging, though the raw workspace scope is
+    // still reported under `workspace`.
+    const mergeableWorkspace = structuredClone(workspace);
+    for (const key of WORKSPACE_RESTRICTED_ROOT_SETTINGS) {
+      delete (mergeableWorkspace as Record<string, unknown>)[key];
+    }
+    for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+      const sectionValue = mergeableWorkspace[section];
+      if (sectionValue && typeof sectionValue === 'object')
+        delete (sectionValue as Record<string, unknown>)[key];
+    }
     // Mirror the real precedence (workspace over user), merging one level deep
     // so sibling keys under `experimental` are not lost.
     const merged: Record<string, unknown> = { ...user };
-    for (const [key, value] of Object.entries(workspace)) {
+    for (const [key, value] of Object.entries(mergeableWorkspace)) {
       const base = merged[key];
       merged[key] =
         base &&
@@ -73,6 +191,9 @@ function makeApp(
   const persistSetting = vi.fn(async () => {
     overrides.afterPersist?.();
   });
+  const syncImageModel = vi
+    .fn()
+    .mockResolvedValue({ status: overrides.imageSyncStatus ?? 'applied' });
   const updateSessionWorkflow = vi.fn().mockResolvedValue(undefined);
   const broadcastSettingsChanged = vi.fn();
   const updateSiblingSessionWorkflows = vi.fn().mockResolvedValue(undefined);
@@ -83,6 +204,7 @@ function makeApp(
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSetting,
+    syncImageModel,
     updateSessionWorkflow,
     updateSiblingSessionWorkflows,
     broadcastSettingsChanged,
@@ -94,6 +216,7 @@ function makeApp(
   return {
     app,
     persistSetting,
+    syncImageModel,
     updateSessionWorkflow,
     updateSiblingSessionWorkflows,
     broadcastSettingsChanged,
@@ -103,6 +226,9 @@ function makeApp(
 /** Minimal registry for the workspace-qualified routes: one active, trusted entry. */
 function makeQualifiedApp(
   overrides: {
+    ssh?: boolean;
+    trusted?: boolean;
+    workspaceCwd?: string;
     invokeWorkspaceCommand?: (
       method: string,
       params: Record<string, unknown>,
@@ -111,29 +237,40 @@ function makeQualifiedApp(
 ) {
   const app = express();
   app.use(express.json());
+  const reloadModelProviders = vi.fn().mockResolvedValue({ status: 'applied' });
   const persistSetting = vi.fn(async () => {});
+  const persistSettings = vi.fn().mockResolvedValue(undefined);
   const invokeWorkspaceCommand =
     overrides.invokeWorkspaceCommand ?? vi.fn().mockResolvedValue(undefined);
   const publishWorkspaceEvent = vi.fn();
   const invalidateServeFeaturesCache = vi.fn();
+  const entryFor = (workspaceCwd: string) => ({
+    state: 'active',
+    current: {
+      runtime: {
+        trusted: overrides.trusted ?? true,
+        workspaceCwd,
+        routeFileSystemFactory: overrides.ssh
+          ? {
+              sshWorkspace: { host: 'host', directory: '/srv/project' },
+            }
+          : {},
+        bridge: {
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+        },
+        workspaceService: { reloadModelProviders },
+        generationGuard: undefined,
+      },
+    },
+  });
   const registry = {
     getEntryByWorkspaceId: (selector: string) =>
       selector === 'primary'
-        ? {
-            state: 'active',
-            current: {
-              runtime: {
-                trusted: true,
-                workspaceCwd: '/workspace',
-                bridge: {
-                  invokeWorkspaceCommand,
-                  publishWorkspaceEvent,
-                },
-                generationGuard: undefined,
-              },
-            },
-          }
-        : undefined,
+        ? entryFor(overrides.workspaceCwd ?? '/workspace')
+        : selector === 'secondary'
+          ? entryFor('/selected-workspace')
+          : undefined,
   };
 
   registerWorkspaceQualifiedSettingsRoutes(app, {
@@ -141,6 +278,7 @@ function makeQualifiedApp(
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSetting,
+    persistSettings,
     workspaceRegistry: registry as unknown as Parameters<
       typeof registerWorkspaceQualifiedSettingsRoutes
     >[1]['workspaceRegistry'],
@@ -149,12 +287,46 @@ function makeQualifiedApp(
 
   return {
     app,
+    reloadModelProviders,
     persistSetting,
+    persistSettings,
     invokeWorkspaceCommand,
     publishWorkspaceEvent,
     invalidateServeFeaturesCache,
   };
 }
+
+describe('Mods settings', () => {
+  it.each([
+    { route: '/workspace/settings', scope: 'user', qualified: false },
+    {
+      route: '/workspaces/primary/settings',
+      scope: 'workspace',
+      qualified: true,
+    },
+  ])(
+    'serves Mods in $route, whose sessions the Web Shell draws',
+    async ({ route, scope, qualified }) => {
+      const { app, persistSetting } = qualified
+        ? makeQualifiedApp()
+        : makeApp();
+
+      const read = await request(app).get(route);
+      expect(read.status).toBe(200);
+      expect(
+        read.body.settings.map((setting: { key: string }) => setting.key),
+      ).toContain('experimental.mods');
+
+      const write = await request(app).post(route).send({
+        scope,
+        key: 'experimental.mods',
+        value: true,
+      });
+      expect(write.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledTimes(1);
+    },
+  );
+});
 
 describe('POST /workspace/settings', () => {
   it('updates live sessions when Session Workflow changes', async () => {
@@ -559,18 +731,50 @@ describe('POST /workspace/settings', () => {
   // a workspace-scope write persists a committable dead entry into the repo's
   // .qwen/settings.json and answers 200 + requiresRestart while the feature
   // never turns on. The TUI dialog already filters them; the API did not.
-  it('rejects a workspace-restricted key at workspace scope', async () => {
+  it.each([
+    ['tools.workflowsEnabled', true],
+    ['general.displayLanguage', 'zh-CN'],
+  ])('rejects the workspace-restricted setting %s', async (key, value) => {
     const { app, persistSetting } = makeApp();
 
     const res = await request(app).post('/workspace/settings').send({
       scope: 'workspace',
-      key: 'tools.workflowsEnabled',
-      value: true,
+      key,
+      value,
     });
 
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'workspace_restricted_setting' });
     expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('rejects a root-level workspace-restricted key at workspace scope', async () => {
+    // `advisorModel` is served to the Web Shell, whose model panel persists to
+    // the scope of the active settings tab, so it reaches this route; its
+    // Workspace value is stripped on merge, since the root list has no section
+    // to flatten into WORKSPACE_RESTRICTED_SETTING_KEYS.
+    const { app, persistSetting } = makeApp();
+
+    const workspace = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'advisorModel',
+      value: 'openai:configured-test-model',
+    });
+
+    expect(workspace.status).toBe(400);
+    expect(workspace.body).toMatchObject({
+      code: 'workspace_restricted_setting',
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+
+    const user = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'advisorModel',
+      value: 'openai:configured-test-model',
+    });
+
+    expect(user.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalled();
   });
 
   it('still accepts the same key at user scope', async () => {
@@ -586,6 +790,155 @@ describe('POST /workspace/settings', () => {
 
     expect(res.status).toBe(200);
     expect(persistSetting).toHaveBeenCalled();
+  });
+
+  it('serves visionBridgeTimeoutMs to the Web Shell and writes it at workspace scope', async () => {
+    // showInDialog: false; Web Shell's /model --vision --timeout writes it.
+    const { app, persistSetting } = makeApp();
+
+    const list = await request(app).get('/workspace/settings');
+    expect(
+      list.body.settings.some(
+        (setting: { key: string }) => setting.key === 'visionBridgeTimeoutMs',
+      ),
+    ).toBe(true);
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'visionBridgeTimeoutMs',
+      value: 60_000,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ requiresRestart: true });
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      SettingScope.Workspace,
+      'visionBridgeTimeoutMs',
+      60_000,
+    );
+  });
+
+  it('serves serve.maxSessions to the Web Shell and writes it at user scope only', async () => {
+    // The key is showInDialog: false, so WEB_SHELL_SETTINGS is what puts it in
+    // the panel; the workspace restriction still refuses a workspace write.
+    const { app, persistSetting } = makeApp();
+
+    const list = await request(app).get('/workspace/settings');
+    expect(list.status).toBe(200);
+    expect(
+      list.body.settings.some(
+        (setting: { key: string }) => setting.key === 'serve.maxSessions',
+      ),
+    ).toBe(true);
+
+    const workspace = await request(app)
+      .post('/workspace/settings')
+      .send({ scope: 'workspace', key: 'serve.maxSessions', value: 64 });
+    expect(workspace.status).toBe(400);
+    expect(workspace.body).toMatchObject({
+      code: 'workspace_restricted_setting',
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+
+    const user = await request(app)
+      .post('/workspace/settings')
+      .send({ scope: 'user', key: 'serve.maxSessions', value: 64 });
+    expect(user.status).toBe(200);
+    expect(user.body).toMatchObject({ requiresRestart: true });
+    expect(persistSetting).toHaveBeenCalled();
+  });
+
+  it('refuses workspace pluginConfigs without persisting operator options', async () => {
+    const { app, persistSetting } = makeApp();
+    const response = await request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'workspace',
+        key: 'pluginConfigs',
+        value: { example: { options: { greeting: 'injected' } } },
+      });
+    expect(response.status).toBe(400);
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  describe('aux-model selector credential scrubbing', () => {
+    // visionModel / imageModel / advisorModel / fastModel persist as
+    // `authType:id\0baseUrl`; a userinfo-bearing baseUrl is a credential and
+    // must never leave this route verbatim.
+    const AUX_VALUE = 'openai:vm\0https://user:sk-secret@host.example/v1';
+    const SCRUBBED = 'openai:vm\0https://host.example/v1';
+
+    it('redacts userinfo from aux-model selectors served by GET /workspace/settings', async () => {
+      const { app } = makeApp({
+        userSettings: {
+          visionModel: AUX_VALUE,
+          imageModel: AUX_VALUE,
+          advisorModel: AUX_VALUE,
+          fastModel: AUX_VALUE,
+        },
+      });
+
+      const res = await request(app).get('/workspace/settings');
+
+      expect(res.status).toBe(200);
+      expect(JSON.stringify(res.body)).not.toContain('sk-secret');
+      const byKey = new Map<string, { values: { effective: unknown } }>(
+        res.body.settings.map(
+          (s: { key: string; values: { effective: unknown } }) => [s.key, s],
+        ),
+      );
+      for (const key of [
+        'visionModel',
+        'imageModel',
+        'advisorModel',
+        'fastModel',
+      ]) {
+        expect(byKey.get(key)?.values.effective).toBe(SCRUBBED);
+      }
+    });
+
+    it('persists the raw selector but answers and broadcasts the scrubbed value', async () => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'user',
+        key: 'imageModel',
+        value: AUX_VALUE,
+      });
+
+      expect(res.status).toBe(200);
+      // Persistence keeps the raw selector: the suffix is the endpoint
+      // disambiguator runtime routing resolves against.
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        expect.anything(),
+        'imageModel',
+        AUX_VALUE,
+      );
+      expect(JSON.stringify(res.body)).not.toContain('sk-secret');
+      expect(res.body.value).toBe(SCRUBBED);
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'imageModel',
+        SCRUBBED,
+        'user',
+        undefined,
+      );
+    });
+
+    it('serves a clean aux-model selector byte-identically', async () => {
+      const { app } = makeApp({
+        userSettings: { visionModel: SCRUBBED },
+      });
+
+      const res = await request(app).get('/workspace/settings');
+
+      expect(res.status).toBe(200);
+      const descriptor = res.body.settings.find(
+        (s: { key: string }) => s.key === 'visionModel',
+      );
+      expect(descriptor?.values.effective).toBe(SCRUBBED);
+    });
   });
 
   it('rejects a security-sensitive key even at user scope', async () => {
@@ -621,6 +974,67 @@ describe('POST /workspace/settings', () => {
         value: false,
       });
 
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: 'disallowed_key' });
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
+
+  it('serves general.outputLanguage read-only for host display', async () => {
+    const { app, persistSetting } = makeApp({
+      userSettings: { general: { outputLanguage: '中文' } },
+    });
+
+    const read = await request(app).get('/workspace/settings');
+    expect(read.status).toBe(200);
+    const descriptor = read.body.settings.find(
+      (setting: { key?: string }) => setting.key === 'general.outputLanguage',
+    );
+    expect(descriptor?.values.effective).toBe('中文');
+    expect(descriptor?.options).toEqual(
+      expect.arrayContaining([
+        { value: 'Chinese', label: '中文 (Chinese)' },
+        { value: 'English', label: 'English' },
+      ]),
+    );
+    // Suggestions carry the full names the command persists, not locale codes.
+    expect(
+      (descriptor?.options ?? []).map(
+        (option: { value: string }) => option.value,
+      ),
+    ).not.toContain('zh');
+
+    // Persisting this key alone would leave output-language.md and running
+    // sessions stale, so the language command stays the only write path.
+    const write = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'general.outputLanguage',
+      value: 'English',
+    });
+    expect(write.status).toBe(400);
+    expect(write.body).toMatchObject({ code: 'disallowed_key' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it.each(['ui.brand', 'ui.brand.name', 'ui.brand.logoPath'])(
+    'keeps the web shell brand (%s) off the settings surface',
+    async (key) => {
+      // Brand is deployment configuration served by `GET /brand` from the
+      // system and user layers only. Exposing it here would make it writable
+      // from any connected browser, and would report a merged effective value
+      // that includes the workspace layer `GET /brand` deliberately excludes.
+      const { app, persistSetting } = makeApp();
+
+      const read = await request(app).get('/workspace/settings');
+      expect(
+        read.body.settings.map((setting: { key?: string }) => setting.key),
+      ).not.toContain(key);
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'user',
+        key,
+        value: 'QiuQiu Code',
+      });
       expect(res.status).toBe(400);
       expect(res.body).toMatchObject({ code: 'disallowed_key' });
       expect(persistSetting).not.toHaveBeenCalled();
@@ -899,5 +1313,505 @@ describe('POST /workspaces/:workspace/settings', () => {
         },
       }),
     );
+  });
+});
+
+describe('POST /workspaces/:workspace/settings/vision-bridge', () => {
+  const route = '/workspaces/secondary/settings/vision-bridge';
+
+  it('commits both settings to the selected workspace in one write', async () => {
+    const { app, persistSetting, persistSettings, publishWorkspaceEvent } =
+      makeQualifiedApp();
+    const model = 'openai:qwen-vl\0https://user:secret@vision.example/v1';
+    const result = await request(app)
+      .post(route)
+      .send({ model, timeoutMs: 60_000 });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({
+      key: 'visionBridgeTimeoutMs',
+      scope: 'workspace',
+      value: 60_000,
+      requiresRestart: true,
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+    expect(persistSettings).toHaveBeenCalledExactlyOnceWith(
+      '/selected-workspace',
+      [
+        { scope: SettingScope.Workspace, key: 'visionModel', value: model },
+        {
+          scope: SettingScope.Workspace,
+          key: 'visionBridgeTimeoutMs',
+          value: 60_000,
+        },
+      ],
+      expect.any(Function),
+    );
+    expect(publishWorkspaceEvent.mock.calls).toEqual([
+      [
+        {
+          type: 'settings_changed',
+          data: {
+            key: 'visionModel',
+            value: 'openai:qwen-vl\0https://vision.example/v1',
+            scope: 'workspace',
+          },
+        },
+      ],
+      [
+        {
+          type: 'settings_changed',
+          data: {
+            key: 'visionBridgeTimeoutMs',
+            value: 60_000,
+            scope: 'workspace',
+          },
+        },
+      ],
+    ]);
+  });
+
+  it.each([
+    ['missing timeout', { model: 'qwen-vl' }],
+    ['missing model', { timeoutMs: 60_000 }],
+    ['option as model', { model: '--global', timeoutMs: 60_000 }],
+    ['missing model after auth type', { model: 'openai:', timeoutMs: 60_000 }],
+    ['trailing option separator', { model: 'qwen-vl  --', timeoutMs: 60_000 }],
+    ['option after auth type', { model: 'openai:--global', timeoutMs: 60_000 }],
+    ['model too long', { model: 'm'.repeat(1_025), timeoutMs: 60_000 }],
+    ['zero timeout', { model: 'qwen-vl', timeoutMs: 0 }],
+    ['timeout too large', { model: 'qwen-vl', timeoutMs: 2_147_483_648 }],
+  ])(
+    'rejects an invalid pair without any writes (%s)',
+    async (_scenario, body) => {
+      const { app, persistSetting, persistSettings, publishWorkspaceEvent } =
+        makeQualifiedApp();
+      const result = await request(app).post(route).send(body);
+
+      expect(result.status).toBe(400);
+      expect(result.body).toMatchObject({ code: 'invalid_value' });
+      expect(persistSetting).not.toHaveBeenCalled();
+      expect(persistSettings).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses an untrusted workspace before persisting', async () => {
+    const { app, persistSettings } = makeQualifiedApp({ trusted: false });
+    const result = await request(app)
+      .post(route)
+      .send({ model: 'qwen-vl', timeoutMs: 60_000 });
+
+    expect(result.status).toBe(403);
+    expect(result.body).toMatchObject({ code: 'untrusted_workspace' });
+    expect(persistSettings).not.toHaveBeenCalled();
+  });
+
+  it('reports a generation closed during the batch commit without broadcasting', async () => {
+    const { app, persistSettings, publishWorkspaceEvent } = makeQualifiedApp();
+    persistSettings.mockRejectedValue(
+      new WorkspaceSettingsPartialPersistError(
+        'commit refused',
+        [],
+        new WorkspaceGenerationClosedError(),
+      ),
+    );
+    const result = await request(app)
+      .post(route)
+      .send({ model: 'qwen-vl', timeoutMs: 60_000 });
+
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({
+      code: 'workspace_runtime_unavailable',
+    });
+    expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('image model settings', () => {
+  it.each(['user', 'workspace'])(
+    'syncs the actual %s write scope after persistence',
+    async (scope) => {
+      const { app, persistSetting, syncImageModel } = makeApp();
+      const value = 'openai:image-01\0https://images.example/v1';
+      const response = await request(app)
+        .post('/workspace/settings')
+        .send({ scope, key: 'imageModel', value });
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ value, requiresRestart: false });
+      expect(syncImageModel).toHaveBeenCalledWith(
+        scope === 'user' ? 'User' : 'Workspace',
+      );
+      expect(persistSetting.mock.invocationCallOrder[0]).toBeLessThan(
+        syncImageModel.mock.invocationCallOrder[0]!,
+      );
+    },
+  );
+  it('reports a required restart when persistence succeeds but runtime sync fails', async () => {
+    const { app, broadcastSettingsChanged } = makeApp({
+      imageSyncStatus: 'failed',
+    });
+    const response = await request(app)
+      .post('/workspace/settings')
+      .send({ scope: 'workspace', key: 'imageModel', value: '' });
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ value: '', requiresRestart: true });
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'imageModel',
+      '',
+      'workspace',
+      undefined,
+    );
+  });
+});
+
+it('refreshes only the resolved runtime for a qualified image model write', async () => {
+  const { app, reloadModelProviders } = makeQualifiedApp();
+  const response = await request(app)
+    .post('/workspaces/primary/settings')
+    .send({ scope: 'workspace', key: 'imageModel', value: '' });
+  expect(response.status).toBe(200);
+  expect(response.body.requiresRestart).toBe(false);
+  expect(reloadModelProviders).toHaveBeenCalledExactlyOnceWith({
+    route: 'POST /workspaces/:workspace/settings imageModel',
+    workspaceCwd: '/workspace',
+  });
+});
+
+it.each(['failed', 'deferred', 'rejected', 'closed'] as const)(
+  'reports a qualified image runtime sync outcome: %s',
+  async (status) => {
+    const { app, reloadModelProviders, persistSetting } = makeQualifiedApp();
+    if (status === 'closed' || status === 'rejected') {
+      reloadModelProviders.mockRejectedValueOnce(
+        status === 'closed'
+          ? new WorkspaceGenerationClosedError()
+          : new Error('sync unavailable'),
+      );
+    } else {
+      reloadModelProviders.mockResolvedValueOnce({ status });
+    }
+    const response = await request(app)
+      .post('/workspaces/primary/settings')
+      .send({ scope: 'workspace', key: 'imageModel', value: '' });
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(response.status).toBe(status === 'closed' ? 503 : 200);
+    if (status === 'closed')
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+    else expect(response.body.requiresRestart).toBe(status !== 'deferred');
+  },
+);
+
+// The web shell settings panel (`packages/web-shell/client`) hides rows behind
+// the stable public aliases in client/settings.ts, while the served key set
+// drifts whenever the schema gains a showInDialog key — omni.enabled shipped
+// days without an alias (#11975). Compare the live route output against the
+// alias table so the next missing alias reddens CI instead of shipping.
+describe('web-shell settings alias drift', () => {
+  const webShellClientDir = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../../web-shell/client',
+  );
+
+  function parseKeySet(source: string, name: string): Set<string> {
+    const match = source.match(
+      new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\)`),
+    );
+    if (!match) throw new Error(`${name} not found`);
+    return new Set(
+      [...match[1].replace(/\/\/[^\n]*/g, '').matchAll(/'([^']+)'/g)].map(
+        (m) => m[1]!,
+      ),
+    );
+  }
+
+  it('aliases every rendered row and serves every published alias', async () => {
+    const { app } = makeApp();
+    const res = await request(app).get('/workspace/settings');
+    expect(res.status).toBe(200);
+    const servedKeys = (res.body.settings as Array<{ key: string }>).map(
+      (setting) => setting.key,
+    );
+
+    // The panel drops HIDDEN/LIVE keys before rendering; parse both sets from
+    // the component so a change on either side is caught here.
+    const panelSource = readFileSync(
+      join(webShellClientDir, 'components/messages/SettingsMessage.tsx'),
+      'utf8',
+    );
+    const hidden = parseKeySet(panelSource, 'HIDDEN_SETTING_KEYS');
+    const live = parseKeySet(panelSource, 'LIVE_SETTING_KEYS');
+    const rendered = servedKeys.filter(
+      (key) => !hidden.has(key) && !live.has(key),
+    );
+
+    const aliasSource = readFileSync(
+      join(webShellClientDir, 'settings.ts'),
+      'utf8',
+    );
+    const table = aliasSource.match(
+      /const SETTING_KEYS = \{([\s\S]*?)\} as const/,
+    );
+    if (!table) throw new Error('SETTING_KEYS not found in settings.ts');
+    const aliased = [...table[1].matchAll(/'[^']+':\s*'([^']+)'/g)].map(
+      (m) => m[1]!,
+    );
+
+    // A second stable ID for one control is invisible to the two membership
+    // checks below, and once published it cannot be removed without breaking
+    // a host that adopted it.
+    expect(aliased.length).toBe(new Set(aliased).size);
+    expect(rendered.filter((key) => !aliased.includes(key))).toEqual([]);
+    expect(aliased.filter((key) => !rendered.includes(key))).toEqual([]);
+  });
+  it('persists SSH workflow defaults without pushing disabled workflow controls to live sessions', async () => {
+    const {
+      app,
+      persistSetting,
+      invokeWorkspaceCommand,
+      publishWorkspaceEvent,
+    } = makeQualifiedApp({
+      ssh: true,
+      invokeWorkspaceCommand: vi
+        .fn()
+        .mockRejectedValue(new Error('unsupported_operation')),
+    });
+    const response = await request(app)
+      .post('/workspaces/primary/settings')
+      .send({
+        scope: 'workspace',
+        key: 'experimental.sessionWorkflow',
+        value: true,
+      });
+    expect(response.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+    expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'settings_changed' }),
+    );
+  });
+});
+
+describe('Web Shell loading phrase settings', () => {
+  it('serves the effective value and user/workspace overrides', async () => {
+    const { app } = makeApp({
+      userSettings: { ui: { accessibility: { enableLoadingPhrases: true } } },
+      workspaceSettings: {
+        ui: { accessibility: { enableLoadingPhrases: false } },
+      },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'ui.accessibility.enableLoadingPhrases',
+        type: 'boolean',
+        default: true,
+        values: { effective: false, user: true, workspace: false },
+      }),
+    );
+  });
+
+  it.each(['user', 'workspace'] as const)(
+    'accepts a %s override',
+    async (scope) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'ui.accessibility.enableLoadingPhrases',
+        value: false,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+        'ui.accessibility.enableLoadingPhrases',
+        false,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'ui.accessibility.enableLoadingPhrases',
+        false,
+        scope,
+        undefined,
+      );
+    },
+  );
+
+  it('reads only the selected runtime on the qualified route', async () => {
+    const { app } = makeQualifiedApp();
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        ({
+          merged: {
+            ui: {
+              accessibility: {
+                enableLoadingPhrases: cwd !== '/selected-workspace',
+              },
+            },
+          },
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+    const response = await request(app).get('/workspaces/secondary/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'ui.accessibility.enableLoadingPhrases',
+        values: { effective: false },
+      }),
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/selected-workspace', {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: false,
+      workspaceTrusted: true,
+    });
+  });
+});
+
+describe('Web Shell approval mode allowlist settings', () => {
+  it('serves the effective list and its settings scopes', async () => {
+    const { app } = makeApp({
+      userSettings: { ui: { allowedApprovalModes: ['default', 'auto'] } },
+      workspaceSettings: { ui: { allowedApprovalModes: [] } },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(
+      response.body.settings.find(
+        (setting: { key: string }) => setting.key === 'ui.allowedApprovalModes',
+      ),
+    ).toMatchObject({
+      values: {
+        effective: ['default', 'auto'],
+        user: ['default', 'auto'],
+        workspace: [],
+      },
+    });
+  });
+
+  it('rejects a workspace-scope write of the allowlist', async () => {
+    const { app, persistSetting } = makeApp();
+    const response = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'ui.allowedApprovalModes',
+      value: [],
+    });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      code: 'workspace_restricted_setting',
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('reads the list from the selected runtime rather than primary', async () => {
+    // Primary keeps its own cwd, so a route that falls back to it serves the
+    // ['yolo'] list instead of the selected workspace's ['default'].
+    const { app } = makeQualifiedApp();
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        ({
+          merged: {
+            ui: {
+              allowedApprovalModes:
+                cwd === '/selected-workspace' ? ['default'] : ['yolo'],
+            },
+          },
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+    const response = await request(app).get('/workspaces/secondary/settings');
+    expect(response.status).toBe(200);
+    expect(
+      response.body.settings.find(
+        (setting: { key: string }) => setting.key === 'ui.allowedApprovalModes',
+      )?.values.effective,
+    ).toEqual(['default']);
+  });
+
+  it('serves the operator value for a root-level restricted key set at workspace scope', async () => {
+    const { app } = makeApp({
+      userSettings: { advisorMaxUses: 3 },
+      workspaceSettings: { advisorMaxUses: 9 },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(
+      response.body.settings.find(
+        (setting: { key: string }) => setting.key === 'advisorMaxUses',
+      )?.values,
+    ).toMatchObject({ effective: 3, user: 3, workspace: 9 });
+  });
+});
+
+describe('Web Shell worktree default setting', () => {
+  it('is served to Web Shell clients with its default', async () => {
+    expect(getAllowedKeys().has('worktree.defaultForNewSessions')).toBe(true);
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'worktree.defaultForNewSessions',
+        type: 'boolean',
+        default: true,
+        values: { effective: true },
+      }),
+    );
+  });
+
+  it('serves user/workspace overrides with workspace precedence', async () => {
+    const { app } = makeApp({
+      userSettings: { worktree: { defaultForNewSessions: true } },
+      workspaceSettings: { worktree: { defaultForNewSessions: false } },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'worktree.defaultForNewSessions',
+        values: { effective: false, user: true, workspace: false },
+      }),
+    );
+  });
+
+  it.each(['user', 'workspace'] as const)(
+    'accepts a %s override',
+    async (scope) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'worktree.defaultForNewSessions',
+        value: false,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+        'worktree.defaultForNewSessions',
+        false,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'worktree.defaultForNewSessions',
+        false,
+        scope,
+        undefined,
+      );
+    },
+  );
+
+  it('rejects a non-boolean value', async () => {
+    const { app, persistSetting } = makeApp();
+    const response = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'worktree.defaultForNewSessions',
+      value: 'yes',
+    });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ code: 'invalid_value' });
+    expect(persistSetting).not.toHaveBeenCalled();
   });
 });

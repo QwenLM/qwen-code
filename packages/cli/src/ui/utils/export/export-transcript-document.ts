@@ -1,5 +1,7 @@
 import {
   DAEMON_ERROR_KINDS,
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
   type DaemonErrorKind,
   type DaemonPermissionTranscriptBlock,
   type DaemonShellTranscriptBlock,
@@ -14,6 +16,7 @@ import {
   type DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { SchemaValidator } from '@qwen-code/qwen-code-core';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
 import type { ExportSessionData } from './types.js';
 import exportTranscriptDocumentV1Schema from './export-transcript-document-v1.schema.json' with { type: 'json' };
@@ -125,6 +128,7 @@ type ExportToolPreviewV1 =
   | ToolPreviewPick<'generic', 'summary'>;
 type ExportToolResultPreviewV1 =
   | ExportTodoListPreviewV1
+  | Extract<DaemonToolResultPreview, { kind: 'question_answers' }>
   | { kind: 'text'; text: string }
   | { kind: 'generic'; summary: string };
 
@@ -135,6 +139,13 @@ export type ExportPermissionResolutionV1 =
   | 'expired'
   | 'resolved';
 
+/**
+ * The workspace agent that wrote a user or assistant block: an agent's reply
+ * (`agent_message`) or a message it posted into the session.
+ */
+export interface ExportTranscriptAuthorV1 {
+  name: string;
+}
 type ExportTextTranscriptBlockBaseV1 = Pick<
   DaemonTextTranscriptBlock,
   | Exclude<ExportBlockBaseKeys, 'kind'>
@@ -144,10 +155,15 @@ type ExportTextTranscriptBlockBaseV1 = Pick<
   | 'parentToolCallId'
 > & { streaming?: false };
 type ExportTextTranscriptBlockV1 =
-  | (ExportTextTranscriptBlockBaseV1 & { kind: 'user' | 'thought' })
+  | (ExportTextTranscriptBlockBaseV1 & { kind: 'thought' })
+  | (ExportTextTranscriptBlockBaseV1 & {
+      kind: 'user';
+      author?: ExportTranscriptAuthorV1;
+    })
   | (ExportTextTranscriptBlockBaseV1 & {
       kind: 'assistant';
       usage?: DaemonTextTranscriptBlock['usage'];
+      author?: ExportTranscriptAuthorV1;
     });
 type ExportToolTranscriptBlockV1 = Pick<
   DaemonToolTranscriptBlock,
@@ -218,11 +234,54 @@ export interface ExportTranscriptDocumentV1 {
   readonly metadata: ExportMetadataPresentationV1;
 }
 
+/** V2 adds only replay's canonical routing tag to an existing user block. */
+export type ExportTranscriptBlockV2 =
+  | ExportTranscriptBlockV1
+  | (Extract<ExportTranscriptBlockV1, { kind: 'user' }> & {
+      meta?: { source: 'cron' };
+    });
+
+export type ExportTranscriptDocumentV2 = Omit<
+  ExportTranscriptDocumentV1,
+  'schemaVersion' | 'blocks'
+> & {
+  readonly schemaVersion: 2;
+  readonly blocks: readonly ExportTranscriptBlockV2[];
+};
+
+type ExportTranscriptDocument =
+  | ExportTranscriptDocumentV1
+  | ExportTranscriptDocumentV2;
+
 export interface CreateExportTranscriptDocumentOptions {
   readonly rendererVersion: string;
   readonly exportedAt: string;
   readonly title?: string;
 }
+
+const exportTranscriptDocumentV2Schema = {
+  ...exportTranscriptDocumentV1Schema,
+  $id: 'https://qwen-code.invalid/export-transcript-document-v2.schema.json',
+  properties: {
+    ...exportTranscriptDocumentV1Schema.properties,
+    schemaVersion: { const: 2 },
+  },
+  $defs: {
+    ...exportTranscriptDocumentV1Schema.$defs,
+    userBlock: {
+      ...exportTranscriptDocumentV1Schema.$defs.userBlock,
+      properties: {
+        ...exportTranscriptDocumentV1Schema.$defs.userBlock.properties,
+        meta: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['source'],
+          properties: { source: { const: 'cron' } },
+        },
+      },
+    },
+  },
+};
 
 export class ExportTranscriptDocumentError extends Error {
   constructor(readonly code: string) {
@@ -236,6 +295,35 @@ export function createExportTranscriptDocumentV1(
   sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
   options: CreateExportTranscriptDocumentOptions,
 ): ExportTranscriptDocumentV1 {
+  return createTranscriptDocumentVersion(records, sessionData, options, 1);
+}
+
+export function createExportTranscriptDocumentV2(
+  records: readonly unknown[],
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+): ExportTranscriptDocumentV2 {
+  return createTranscriptDocumentVersion(records, sessionData, options, 2);
+}
+
+function createTranscriptDocumentVersion(
+  records: readonly unknown[],
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+  schemaVersion: 1,
+): ExportTranscriptDocumentV1;
+function createTranscriptDocumentVersion(
+  records: readonly unknown[],
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+  schemaVersion: 2,
+): ExportTranscriptDocumentV2;
+function createTranscriptDocumentVersion(
+  records: readonly unknown[],
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+  schemaVersion: 1 | 2,
+): ExportTranscriptDocument {
   if (!isSafeRendererVersion(options.rendererVersion)) {
     throw new ExportTranscriptDocumentError('invalid_renderer_version');
   }
@@ -260,10 +348,10 @@ export function createExportTranscriptDocumentV1(
       sourceRecordIds.some((recordId) => policy.visibleRecordIds.has(recordId))
     );
   });
-  const blocks: ExportTranscriptBlockV1[] = [];
+  const blocks: ExportTranscriptBlockV2[] = [];
   for (const block of visibleBlocks) {
     const checkpoint = budget.checkpoint();
-    const safe = sanitizeBlock(block, budget, ids, diagnostics);
+    const safe = sanitizeBlock(block, budget, ids, diagnostics, schemaVersion);
     if (budget.cumulativeTextBudgetExceeded) {
       budget.restore(checkpoint);
       break;
@@ -289,22 +377,26 @@ export function createExportTranscriptDocumentV1(
     complete: !degraded,
     truncated,
   };
-  let document: ExportTranscriptDocumentV1 = {
-    schemaVersion: 1,
+  let document: ExportTranscriptDocument = {
+    schemaVersion,
     rendererVersion: options.rendererVersion,
     blocks,
     diagnostics: diagnostics.toArray(),
     metadata,
   };
   document = fitDocumentToEnvelope(document, diagnostics);
-  assertExportTranscriptDocumentV1(document);
+  if (schemaVersion === 1) {
+    assertExportTranscriptDocumentV1(document);
+  } else {
+    assertExportTranscriptDocumentV2(document);
+  }
   return document;
 }
 
 function fitDocumentToEnvelope(
-  document: ExportTranscriptDocumentV1,
+  document: ExportTranscriptDocument,
   diagnostics: DiagnosticCounter,
-): ExportTranscriptDocumentV1 {
+): ExportTranscriptDocument {
   if (
     serializedEnvelopeBytes(document) <=
     EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes
@@ -312,7 +404,7 @@ function fitDocumentToEnvelope(
     return document;
   }
   diagnostics.add('envelope_budget_exceeded', 'warning', 1, true);
-  const buildCandidate = (blockCount: number): ExportTranscriptDocumentV1 => ({
+  const buildCandidate = (blockCount: number): ExportTranscriptDocument => ({
     ...document,
     blocks: document.blocks.slice(0, blockCount),
     diagnostics: diagnostics.toArray(),
@@ -344,15 +436,25 @@ function fitDocumentToEnvelope(
 export function assertExportTranscriptDocumentV1(
   value: unknown,
 ): asserts value is ExportTranscriptDocumentV1 {
+  validateVersionedTranscriptDocument(value, exportTranscriptDocumentV1Schema);
+}
+
+export function assertExportTranscriptDocumentV2(
+  value: unknown,
+): asserts value is ExportTranscriptDocumentV2 {
+  validateVersionedTranscriptDocument(value, exportTranscriptDocumentV2Schema);
+}
+
+function validateVersionedTranscriptDocument(
+  value: unknown,
+  schema: Parameters<typeof SchemaValidator.validateStrict>[0],
+): void {
   assertDepthAndArrayBudgets(value);
   const bytes = serializedEnvelopeBytes(value);
   if (bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes) {
     throw new ExportTranscriptDocumentError('envelope_budget_exceeded');
   }
-  const schemaError = SchemaValidator.validateStrict(
-    exportTranscriptDocumentV1Schema,
-    value,
-  );
+  const schemaError = SchemaValidator.validateStrict(schema, value);
   if (schemaError) {
     throw new ExportTranscriptDocumentError('schema_validation_failed');
   }
@@ -388,15 +490,20 @@ function applyRecordExportPolicy(
       type === 'system' &&
       typeof subtype === 'string' &&
       VISIBLE_SYSTEM_RECORD_SUBTYPES.has(subtype);
+    const internalCodeModeToolResult = isInternalCodeModeToolResult(record);
     const visible =
       type === 'user' ||
       type === 'assistant' ||
-      type === 'tool_result' ||
+      (type === 'tool_result' && !internalCodeModeToolResult) ||
       acceptedSystemSubtype;
-    if (visible || type === 'system') {
+    if (visible || type === 'system' || internalCodeModeToolResult) {
       projectionRecords.push(record);
       const uuid = record['uuid'];
-      if (visible && typeof uuid === 'string') visibleRecordIds.add(uuid);
+      // The internal result projects no block of its own, but the replay
+      // machine stamps its uuid on the history-gap notice, which must survive.
+      if ((visible || internalCodeModeToolResult) && typeof uuid === 'string') {
+        visibleRecordIds.add(uuid);
+      }
       if (type === 'system' && !acceptedSystemSubtype) {
         diagnostics.add('record_internal_excluded', 'info');
       }
@@ -416,6 +523,12 @@ const VISIBLE_SYSTEM_RECORD_SUBTYPES = new Set([
   'realtime_message',
   'goal_state',
   'goal_runtime',
+  // Session multi-agent records are `type: 'user'`, so the gate above already
+  // admits them; listed so the set names every visible subtype. Replay
+  // projects their display text (an agent reply as an assistant block), and
+  // the block carries its agent as `author`.
+  'agent_mention',
+  'agent_message',
 ]);
 
 function sanitizeBlock(
@@ -423,7 +536,8 @@ function sanitizeBlock(
   budget: ExportBudget,
   ids: OpaqueDocumentIds,
   diagnostics: DiagnosticCounter,
-): ExportTranscriptBlockV1 | undefined {
+  schemaVersion: 1 | 2,
+): ExportTranscriptBlockV2 | undefined {
   const common = {
     id: ids.get('block', block.id),
     kind: block.kind,
@@ -451,11 +565,28 @@ function sanitizeBlock(
         );
         budget.markContentLoss();
       }
+      const authorName =
+        block.kind === 'thought' || block.parentToolCallId
+          ? undefined
+          : parseQwenAgentMessageMeta(
+              block.meta?.[QWEN_AGENT_MESSAGE_META_KEY],
+            )?.author?.name.trim();
+      // V2 preserves only the canonical routing tag, not surrounding metadata.
+      const automaticSource =
+        block.kind === 'user' &&
+        schemaVersion === 2 &&
+        block.meta?.['source'] === 'cron'
+          ? 'cron'
+          : undefined;
       return {
         ...common,
         kind: block.kind,
         text,
         streaming: false,
+        ...(authorName
+          ? { author: { name: budget.label(authorName, 128) } }
+          : {}),
+        ...(automaticSource ? { meta: { source: automaticSource } } : {}),
         ...(block.collapsed ? { collapsed: true } : {}),
         ...(block.parentToolCallId
           ? {
@@ -792,8 +923,21 @@ function sanitizeResultPreview(
   if (preview.kind === 'todo_list') {
     return sanitizeTodoPreview(preview, budget, ids);
   }
+  if (preview.kind === 'shell_result') {
+    return { kind: 'text', text: budget.text(preview.result.text) };
+  }
   if (preview.kind === 'text') {
     return { kind: 'text', text: budget.text(preview.text) };
+  }
+  if (preview.kind === 'question_answers') {
+    return {
+      kind: 'question_answers',
+      text: budget.plainText(preview.text),
+      answers: budget.array(preview.answers).map(({ question, answer }) => ({
+        question: budget.plainText(question),
+        answer: budget.plainText(answer),
+      })),
+    };
   }
   if (!preview.summary?.trim()) return undefined;
   const summary = budget.text(preview.summary);
@@ -1389,6 +1533,15 @@ function assertSemanticSafety(value: Record<string, unknown>): void {
     }
     if (!isRecord(entry)) return;
     if (
+      key === 'author' &&
+      !(
+        isSafeLabel(entry['name'], 128) &&
+        isSafePresentationLabel(entry['name'], 128)
+      )
+    ) {
+      throw new ExportTranscriptDocumentError('invalid_block');
+    }
+    if (
       (entry['kind'] === 'status' || entry['kind'] === 'error') &&
       entry['code'] !== undefined &&
       !isSafeLabel(entry['code'], 128)
@@ -1535,6 +1688,15 @@ function assertNoForbiddenFields(value: unknown): void {
     }
     if (!isRecord(entry)) return;
     for (const [key, item] of Object.entries(entry)) {
+      // The exporter constructs this one-key tag for replayed cron users.
+      if (
+        key === 'meta' &&
+        isRecord(item) &&
+        item['source'] === 'cron' &&
+        Object.keys(item).length === 1
+      ) {
+        continue;
+      }
       if (forbidden.has(key)) {
         throw new ExportTranscriptDocumentError('forbidden_field');
       }
@@ -1710,7 +1872,10 @@ function isMarkdownExportText(
   path: readonly string[],
 ): boolean {
   if (path.at(-2) === 'resultPreview') {
-    return key === 'text' || key === 'summary';
+    return (
+      parent?.['kind'] !== 'question_answers' &&
+      (key === 'text' || key === 'summary')
+    );
   }
   return (
     key === 'text' &&
@@ -1768,6 +1933,7 @@ const VISIBLE_EXPORT_TEXT_FIELDS = new Set([
   'command',
   'cwd',
   'question',
+  'answer',
   'path',
   'oldText',
   'newText',

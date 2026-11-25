@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -25,16 +26,22 @@ import {
   parseModelField,
   parsePathsField,
   parseUserInvocableField,
+  qualifySkillName,
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import { parsePriorityField, validateConfig } from './skill-load.js';
 import { validateSymlinkTarget } from './symlinkScope.js';
 import {
+  getTurnSkillActivation,
+  getTurnSkillSnapshot,
+} from './turn-skill-snapshot.js';
+import {
   SkillActivationRegistry,
   splitConditionalSkills,
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isNodeError } from '../utils/errors.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { expandHomeDir } from '../utils/paths.js';
 import {
@@ -91,6 +98,8 @@ export class SkillManager {
   // `slashCommandProcessor.ts:416`.
   private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
+  private discoveryHasErrors = false;
+  private discoveryHasReadErrors = false;
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
@@ -298,6 +307,16 @@ export class SkillManager {
     return this.collectCachedSkills(level);
   }
 
+  /** Whether missing entries in the current cache might be discovery failures. */
+  hasDiscoveryErrors(): boolean {
+    return this.discoveryHasErrors;
+  }
+
+  /** Whether discovery could not read every enabled source. */
+  hasDiscoveryReadErrors(): boolean {
+    return this.discoveryHasReadErrors;
+  }
+
   private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
     const skills: SkillConfig[] = [];
     const seenNames = new Set<string>();
@@ -313,6 +332,12 @@ export class SkillManager {
       );
 
       for (const skill of levelSkills) {
+        if (
+          level === 'bundled' &&
+          skill.name === 'generated-ui' &&
+          !this.config.isSkillEnabled(skill)
+        )
+          continue;
         // Skip if we've already seen this name (precedence: project > user > extension > bundled)
         if (seenNames.has(skill.name)) {
           debugLogger.debug(
@@ -410,6 +435,14 @@ export class SkillManager {
     debugLogger.debug(
       `Loading skill for runtime: ${name}${level ? ` at level: ${level}` : ''}`,
     );
+    const snapshot = getTurnSkillSnapshot();
+    if (snapshot) {
+      const pinned = snapshot.skills.find((skill) => skill.name === name);
+      if (pinned) return !level || pinned.level === level ? pinned : null;
+      return !level || level === 'bundled'
+        ? this.loadSkill(name, 'bundled')
+        : null;
+    }
     const skill = await this.loadSkill(name, level);
     if (!skill) {
       debugLogger.debug(`Skill not found for runtime: ${name}`);
@@ -439,6 +472,19 @@ export class SkillManager {
     debugLogger.info('Refreshing skills cache...');
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
+    let discoveryHasErrors = false;
+    let discoveryHasReadErrors = false;
+    const onDiscoveryError = (error?: unknown) => {
+      discoveryHasErrors = true;
+      if (
+        !(
+          error instanceof SkillError &&
+          error.code === SkillErrorCode.PARSE_ERROR
+        )
+      ) {
+        discoveryHasReadErrors = true;
+      }
+    };
 
     // Safe mode: only load bundled (system) skills
     const levels: SkillLevel[] = this.config.isSafeMode()
@@ -452,7 +498,10 @@ export class SkillManager {
     // bubble up to the level boundary.
     const settled = await Promise.allSettled(
       levels.map(async (level) => {
-        const levelSkills = await this.listSkillsAtLevel(level);
+        const levelSkills = await this.listSkillsAtLevel(
+          level,
+          onDiscoveryError,
+        );
         debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
         return [level, levelSkills] as const;
       }),
@@ -468,6 +517,7 @@ export class SkillManager {
         totalSkills += levelSkills.length;
       } else {
         errors.push(result.reason);
+        onDiscoveryError();
         debugLogger.warn(
           `Failed to load ${levels[i]} level skills:`,
           result.reason,
@@ -475,6 +525,9 @@ export class SkillManager {
       }
     }
 
+    // Publish completeness with the cache produced by this scan.
+    this.discoveryHasErrors = discoveryHasErrors;
+    this.discoveryHasReadErrors = discoveryHasReadErrors;
     this.skillsCache = skillsCache;
 
     // Rebuild the activation registry so that newly added/removed `paths:`
@@ -543,9 +596,13 @@ export class SkillManager {
    * become eligible only after a tool invocation touches a file matching
    * their `paths:` globs.
    */
-  isSkillActive(skill: SkillConfig): boolean {
+  isSkillActive(skill: SkillConfig, liveOnly?: boolean): boolean {
     if (!skill.paths || skill.paths.length === 0) return true;
-    return this.activationRegistry?.isActivated(skill.name) ?? false;
+    const registry =
+      (!liveOnly &&
+        getTurnSkillActivation(this.config.getProjectRoot(), this)) ||
+      this.activationRegistry;
+    return registry?.isActivated(skill.name) ?? false;
   }
 
   /**
@@ -577,7 +634,11 @@ export class SkillManager {
   async matchAndActivateByPaths(
     filePaths: readonly string[],
   ): Promise<string[]> {
-    const registry = this.activationRegistry;
+    const turnRegistry = getTurnSkillActivation(
+      this.config.getProjectRoot(),
+      this,
+    );
+    const registry = turnRegistry ?? this.activationRegistry;
     if (!registry || filePaths.length === 0) return [];
     const newlyAcrossPaths = new Set<string>();
     for (const filePath of filePaths) {
@@ -585,7 +646,7 @@ export class SkillManager {
         newlyAcrossPaths.add(name);
       }
     }
-    if (newlyAcrossPaths.size > 0) {
+    if (!turnRegistry && newlyAcrossPaths.size > 0) {
       await this.notifyChangeListeners();
     }
     return Array.from(newlyAcrossPaths);
@@ -627,7 +688,7 @@ export class SkillManager {
   stopWatching(): void {
     debugLogger.info('Stopping skill directory watchers...');
     for (const watcher of this.watchers.values()) {
-      void watcher.close().catch((error) => {
+      void closeFileWatcher(watcher).catch((error) => {
         debugLogger.warn('Failed to close skills watcher:', error);
       });
     }
@@ -983,7 +1044,10 @@ export class SkillManager {
    * @param level - Storage level to scan
    * @returns Array of skill configurations
    */
-  private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
+  private async listSkillsAtLevel(
+    level: SkillLevel,
+    onDiscoveryError?: (error?: unknown) => void,
+  ): Promise<SkillConfig[]> {
     if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
       return [];
@@ -1011,6 +1075,7 @@ export class SkillManager {
       const extensions = this.config.getActiveExtensions();
       const skills: SkillConfig[] = [];
       for (const extension of extensions) {
+        if (extension.skillsDiscoveryHasErrors) onDiscoveryError?.();
         extension.skills?.forEach((skill) => {
           // Extension skills bypass parseSkillContent / validateConfig, so a
           // non-number `priority` would silently sort at the bottom of the
@@ -1027,6 +1092,13 @@ export class SkillManager {
           }
           skills.push({
             ...skill,
+            // The registry identity carries the owner, so two extensions
+            // shipping `pdf` contribute two names and a reader can tell where
+            // a skill came from. The manifest and the workspace
+            // extension-skill store keep using the authored spelling;
+            // `Config.isSkillEnabled` bridges the two.
+            name: qualifySkillName(extension.name, skill.name),
+            authoredName: skill.name,
             extensionName: extension.name,
             extensionDisplayName: extension.displayName,
             // Normalize so downstream consumers reading `skill.priority`
@@ -1046,14 +1118,22 @@ export class SkillManager {
 
     if (level === 'bundled') {
       const bundledDir = this.bundledSkillsDir;
-      if (!fsSync.existsSync(bundledDir)) {
-        debugLogger.warn(
-          `Bundled skills directory not found: ${bundledDir}. This may indicate an incomplete installation.`,
-        );
-        return [];
-      }
       debugLogger.debug(`Loading bundled skills from: ${bundledDir}`);
-      const skills = await this.loadSkillsFromDir(bundledDir, 'bundled');
+      const skills = await this.loadSkillsFromDir(
+        bundledDir,
+        'bundled',
+        onDiscoveryError,
+      );
+      const generatedUiDir = this.config.getBundledGeneratedUiSkillsDir?.();
+      if (generatedUiDir) {
+        skills.push(
+          ...(await this.loadSkillsFromDir(
+            generatedUiDir,
+            'bundled',
+            onDiscoveryError,
+          )),
+        );
+      }
       debugLogger.debug(`Loaded ${skills.length} bundled skills`);
       return skills;
     }
@@ -1066,7 +1146,7 @@ export class SkillManager {
     const perDirSkills = await Promise.all(
       baseDirs.map((baseDir) => {
         debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
-        return this.loadSkillsFromDir(baseDir, level);
+        return this.loadSkillsFromDir(baseDir, level, onDiscoveryError);
       }),
     );
     const skills: SkillConfig[] = [];
@@ -1091,6 +1171,7 @@ export class SkillManager {
   async loadSkillsFromDir(
     baseDir: string,
     level: SkillLevel,
+    onDiscoveryError?: (error?: unknown) => void,
   ): Promise<SkillConfig[]> {
     debugLogger.debug(`Loading skills from directory: ${baseDir}`);
     try {
@@ -1139,6 +1220,12 @@ export class SkillManager {
           if (isSymlink) {
             const check = await validateSymlinkTarget(skillDir);
             if (!check.ok) {
+              if (
+                check.reason === 'invalid' &&
+                !(isNodeError(check.error) && check.error.code === 'ENOENT')
+              ) {
+                onDiscoveryError?.();
+              }
               if (check.reason === 'not-directory') {
                 debugLogger.warn(
                   `Skipping symlink ${entry.name} that does not point to a directory`,
@@ -1158,6 +1245,9 @@ export class SkillManager {
             await fs.access(skillManifest);
             return await this.parseSkillFileInternal(skillManifest, level);
           } catch (error) {
+            if (!(isNodeError(error) && error.code === 'ENOENT')) {
+              onDiscoveryError?.(error);
+            }
             if (error instanceof SkillError) {
               debugLogger.error(
                 `Failed to parse skill at ${skillDir}: ${error.message}`,
@@ -1174,6 +1264,13 @@ export class SkillManager {
 
       return loaded.filter((s): s is SkillConfig => s !== null);
     } catch (error) {
+      if (!(isNodeError(error) && error.code === 'ENOENT')) {
+        onDiscoveryError?.();
+      } else if (level === 'bundled') {
+        debugLogger.warn(
+          `Bundled skills directory not found: ${baseDir}. This may indicate an incomplete installation.`,
+        );
+      }
       // Directory doesn't exist or can't be read
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
@@ -1200,7 +1297,15 @@ export class SkillManager {
     const levelSkills = this.skillsCache?.get(level) || [];
 
     // Find the skill with matching name
-    return levelSkills.find((skill) => skill.name === name) || null;
+    return (
+      levelSkills.find(
+        (skill) =>
+          skill.name === name &&
+          (level !== 'bundled' ||
+            name !== 'generated-ui' ||
+            this.config.isSkillEnabled(skill)),
+      ) || null
+    );
   }
 
   /**
@@ -1234,15 +1339,14 @@ export class SkillManager {
 
     for (const existingPath of this.watchers.keys()) {
       if (!watchTargets.has(existingPath)) {
-        void this.watchers
-          .get(existingPath)
-          ?.close()
-          .catch((error) => {
+        void closeFileWatcher(this.watchers.get(existingPath)).catch(
+          (error) => {
             debugLogger.warn(
               `Failed to close skills watcher for ${existingPath}:`,
               error,
             );
-          });
+          },
+        );
         this.watchers.delete(existingPath);
       }
     }

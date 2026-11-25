@@ -46,16 +46,78 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import {
+  CONTAINER_HOME,
+  containerEnv,
+  hasRootlessMarker,
+  trustedProcessEnv,
+} from '../../../utils/container-policy.js';
+export {
+  CONTAINER_HOME,
+  containerEnv,
+  hasRootlessMarker,
+} from '../../../utils/container-policy.js';
+
 import { realpathSync } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { operatorReviewSettings } from './review-settings.js';
-import { REVIEW_TMP_DIR } from './paths.js';
-import { redirectedAncestor } from './worktree.js';
+import { mountRootFor } from './worktree.js';
+import { raiseNpmHeap } from './heap.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../../../utils/processUtils.js';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
 import { readPackageUpSync } from 'read-package-up';
 import { CLI_VERSION } from '../../../generated/git-commit.js';
+import {
+  classifyReviewTrust,
+  forceHardwareRequested,
+  type ReviewBoundaryExecutionClass,
+  type ReviewExecutionBoundary,
+  type ReviewSandboxBackend,
+  type ReviewTeardownStatus,
+  type ReviewTrustInput,
+} from './sandbox-trust.js';
+import {
+  requestedSandboxBackend,
+  selectReviewSandboxBackend,
+  type ReviewBackendProbe,
+} from './sandbox-backends.js';
+
+export type {
+  ReviewBoundaryExecutionClass,
+  ReviewExecutionBoundary,
+  ReviewExecutionClass,
+  ReviewPrTrust,
+  ReviewSandboxBackend,
+  ReviewTeardownStatus,
+  ReviewTrustInput,
+} from './sandbox-trust.js';
+export {
+  classifyReviewTrust,
+  detectReviewMandatoryEscalations,
+  forceHardwareRequested,
+  trustInputFromPlan,
+} from './sandbox-trust.js';
+export {
+  buildReviewBackendPlan,
+  probeHostReviewBackends,
+  requestedSandboxBackend,
+  selectReviewSandboxBackend,
+} from './sandbox-backends.js';
+
+// Re-exported from its old home: `mountRootFor` moved into `worktree.ts` so
+// the gates there — `untrustedGitfile`, `untrustedRepositoryFrom` and the
+// residue probe's own location check — can DEFAULT to it instead of taking
+// it as an argument every call site had to remember to pass. It stays
+// importable from here because every one of this pipeline's commands
+// already reaches it by this name, and the mount is still this module's
+// subject.
+export { mountRootFor };
+export function runtimeClientEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return trustedProcessEnv(env, isFileSourcedEnvKey);
+}
 
 /**
  * Last resort only: the real default is the CLI's own `config.sandboxImageUri`
@@ -77,13 +139,17 @@ export type ContainerRuntime = (typeof RUNTIMES)[number];
  * What the operator asked for.
  *
  * - `off` — run the PR's commands directly, as every review does today.
- * - `auto` — use a container when one is available, run directly when not.
+ * - `auto` — use a hardened container when one is available, run directly when not.
  * - `required` — refuse to run the PR's commands unsandboxed. The caller
  *   reports the affected evidence unavailable; it does not abandon the review.
+ * - `tiered` — classify PR trust and high-risk changed files into
+ *   `trusted-shared-kernel` (hardened container, no host fallback) vs
+ *   `hardware-isolated` (firecracker / vfkit / provider-vm, fail-closed with
+ *   no downgrade to container or host).
  */
-export type SandboxPolicy = 'off' | 'auto' | 'required';
+export type SandboxPolicy = 'off' | 'auto' | 'required' | 'tiered';
 
-const POLICIES: readonly string[] = ['off', 'auto', 'required'];
+const POLICIES: readonly string[] = ['off', 'auto', 'required', 'tiered'];
 
 /**
  * The policy for this run.
@@ -251,23 +317,6 @@ function cachedInfoDocument(runtime: ContainerRuntime): string {
   return doc;
 }
 
-/**
- * The whole `info` document is searched rather than one schema path, because
- * the two runtimes spell this in unrelated places — docker as a
- * `SecurityOptions` entry, podman as `Host.Security.Rootless` — and a
- * per-runtime template that a version rename breaks would fail to the rootful
- * answer without saying so. Verified against a live rootful docker: the word
- * does not occur anywhere in its `info` document, so a marker hit is a
- * positive statement, not an accident of some unrelated field.
- */
-export function hasRootlessMarker(info: string): boolean {
-  return (
-    info.includes('"name=rootless"') ||
-    info.includes('"rootless":true') ||
-    info.includes('"Rootless":true')
-  );
-}
-
 const infoDocuments = new Map<ContainerRuntime, string>();
 
 /** What a caller must do with one command. */
@@ -292,7 +341,34 @@ export function sandboxVerdict(
   // code is contained, and a test that answers differently on two machines
   // pins nothing.
   probe: () => ContainerRuntime | null = containerRuntime,
+  trustContext?: ReviewTrustInput,
+  hostProbe?: ReviewBackendProbe,
+  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): SandboxVerdict {
+  const forceHardware = forceHardwareRequested(env, fileSourced);
+  const requestedBackend = requestedSandboxBackend(env, fileSourced);
+
+  if (policy === 'tiered' || forceHardware) {
+    const trust = classifyReviewTrust(trustContext, env, fileSourced);
+    const selection = selectReviewSandboxBackend({
+      executionClass: trust.executionClass,
+      requestedBackend,
+      containerRuntime: probe(),
+      hostProbe,
+    });
+    if (selection.kind === 'container') {
+      return { kind: 'container', runtime: selection.runtime };
+    }
+    const reasons =
+      trust.escalationReasons.length > 0
+        ? ` [${trust.escalationReasons.join(', ')}]`
+        : '';
+    return {
+      kind: 'refused',
+      reason: `tiered sandbox (${trust.prTrust} -> ${trust.executionClass}${reasons}): ${selection.reason}`,
+    };
+  }
+
   // NOTE: `SANDBOX` being set is NOT a shortcut past the policy. The first cut
   // returned `direct` for it, reasoning that the outer boundary is the one the
   // operator asked for — which is wrong for the property this module is about.
@@ -307,9 +383,30 @@ export function sandboxVerdict(
       kind: 'direct',
       disclose:
         'the PR’s own build and test commands ran as you, in your environment — ' +
-        'set review.sandbox to "auto" or "required" to run them in a container',
+        'set review.sandbox to "auto", "required", or "tiered" to isolate them',
     };
   }
+
+  if (
+    requestedBackend === 'firecracker' ||
+    requestedBackend === 'vfkit' ||
+    requestedBackend === 'provider-vm'
+  ) {
+    const selection = selectReviewSandboxBackend({
+      executionClass: 'hardware-isolated',
+      requestedBackend,
+      containerRuntime: probe(),
+      hostProbe,
+    });
+    return {
+      kind: 'refused',
+      reason:
+        selection.kind === 'container'
+          ? `requested hardware backend "${requestedBackend}" cannot fall back to a shared-kernel container`
+          : selection.reason,
+    };
+  }
+
   const runtime = probe();
   if (runtime) return { kind: 'container', runtime };
   if (policy === 'required') {
@@ -334,7 +431,7 @@ export function sandboxVerdict(
 }
 
 /**
- * The one place a `required` refusal becomes an outcome.
+ * The one place a `required` / `tiered` refusal becomes an outcome.
  *
  * `sandboxVerdict` can say `refused`, and the first cut left acting on it to
  * "the caller" — where no caller acted, so `required` ran the reviewed code
@@ -345,7 +442,7 @@ export function sandboxVerdict(
  *   the phase has committed to producing a verdict, and a per-command refusal
  *   would read as a build failure rather than as absent evidence;
  * - one of them is not even on the path. When the toolchain cannot be scoped
- *   (a yarn/pnpm/bun repo, no `package-lock.json` — `unsupportedReport`), the
+ *   (a yarn/bun repo, no npm or pnpm lockfile — `unsupportedReport`), the
  *   pipeline hands the install/build/test to the AGENT's own shell, which
  *   never passes through `run()` at all. A gate at the spawn would leave that
  *   route wide open under the very policy that forbids it.
@@ -357,19 +454,23 @@ export function refuseUnsandboxedPhase(
   // The tree this phase would execute in. Required, because "is a runtime
   // running" is the wrong question — see below.
   root: string,
-  verdict: SandboxVerdict = sandboxVerdict(),
+  verdict?: SandboxVerdict,
   mountRoot: (cwd: string) => string | null = mountRootFor,
   policy: SandboxPolicy = sandboxPolicy(),
+  trustContext?: ReviewTrustInput,
 ): string | null {
-  if (verdict.kind === 'refused') return verdict.reason;
-  if (verdict.kind === 'direct') return null;
-  // Only `required` turns an unmountable tree into a refusal. Under `auto` the
-  // contract is "contain it when that is possible" — a `/review` of a local
-  // checkout has no layout to mount, and refusing there would take the
+  const resolvedVerdict =
+    verdict ??
+    sandboxVerdict(policy, process.env, containerRuntime, trustContext);
+  if (resolvedVerdict.kind === 'refused') return resolvedVerdict.reason;
+  if (resolvedVerdict.kind === 'direct') return null;
+  // Only `required` and `tiered` turn an unmountable tree into a refusal. Under
+  // `auto` the contract is "contain it when that is possible" — a `/review` of
+  // a local checkout has no layout to mount, and refusing there would take the
   // build/test and efficacy evidence away from every local review the moment a
   // daemon happened to be running. The first cut of this branch refused
   // regardless of policy and said "required" in a message `auto` could reach.
-  if (policy !== 'required') return null;
+  if (policy !== 'required' && policy !== 'tiered') return null;
   // A runtime answering is not containment. The first cut asked only whether
   // one did, and every route the container cannot actually serve still ran the
   // reviewed code with the full environment under `required`: a `/review` of a
@@ -380,7 +481,7 @@ export function refuseUnsandboxedPhase(
   // that can fail while the runtime is healthy.
   if (mountRoot(root) === null) {
     return (
-      'review.sandbox is "required" and this tree cannot be mounted: it is ' +
+      `review.sandbox is "${policy}" and this tree cannot be mounted: it is ` +
       `not under a review temp dir (${root}), which is the layout the ` +
       'container boundary is built on — a review of a local checkout has no ' +
       'such layout, so its commands cannot be contained'
@@ -389,125 +490,107 @@ export function refuseUnsandboxedPhase(
   return null;
 }
 
-/** Whether one command needs the network. */
-export type CommandKind = 'install' | 'build' | 'test';
-
 /**
- * The environment the PR's code is given inside the container.
+ * Phase gate for review subcommands that execute reviewed code directly on the
+ * host via tmux/bash (`drive`, `ab-drive`, `capture-tui`) and therefore cannot
+ * provide a container or hardware-isolated boundary.
  *
- * An allowlist rather than the inherited environment, which is the point:
- * today both call sites hand it `process.env`, and on CI that carries the
- * review's model and GitHub credentials. `CI` and the npm knobs are the ones
- * the pipeline sets on purpose (`buildRunEnv`), so they are the ones that
- * cross.
+ * Refuses fail-closed under `required`, `tiered`, or operator
+ * `QWEN_REVIEW_FORCE_HARDWARE=1`. Returns `null` under `off`/`auto`.
  */
-export const CONTAINER_HOME = '/qwen-review-home';
-
-export function containerEnv(cacheDir: string): string[] {
-  return [
-    'CI=1',
-    'npm_config_yes=true',
-    'QWEN_SKIP_PREPARE=1',
-    // `HOME` explicitly, because forcing a uid resets it to `/` in these
-    // images — `utils/sandbox.ts` copies the host's for the same reason — and
-    // `/` is not writable by the mapped user, so npm's first write fails
-    // before the install starts.
-    //
-    // And it points at a TMPFS, not at the mount. The first cut put it under
-    // the mount and shared it across every command of every tree: `sh -lc` is
-    // a login shell that sources `$HOME/.profile`, and npm reads
-    // `$HOME/.npmrc`, so one run's postinstall could plant both and the NEXT
-    // review's install — network on — would source and read them. That is
-    // cross-run execution wearing this module's own `--rm` "isolation by
-    // construction" claim, and it was introduced by the fix for the `$HOME`
-    // problem rather than found in the original. A tmpfs is discarded with the
-    // container and never touches the host, so the claim is true again.
-    `HOME=${CONTAINER_HOME}`,
-    // The npm cache stays on the mount, deliberately: it is what keeps an
-    // install from re-downloading ~1 700 packages every review, it holds no
-    // rc file or profile, and npm verifies each entry's integrity hash on
-    // read. That verification is what stands between a poisoned cache and a
-    // bad install — worth naming rather than implying the cache is inert.
-    `npm_config_cache=${cacheDir}`,
-  ];
-}
-
-/**
- * The directory to mount for a command running in `cwd`, or null when `cwd` is
- * not one of the pipeline's trees.
- *
- * Not the tree: the dependency farm links out of every tree into the review
- * worktree's `node_modules`, so a per-tree mount leaves every link dangling.
- * Every tree the pipeline builds is a sibling under the review temp dir, so
- * that directory covers both ends of every link while `<repo>/.git` stays
- * outside it.
- *
- * `lastIndexOf`, because a review run from inside another review's worktree —
- * this pipeline's own dogfood geometry — nests one `.qwen/tmp` inside another,
- * and the FIRST occurrence would widen the mount to the outer temp dir,
- * pulling `<repo>/.git` and every sibling checkout in with it. Tree names
- * cannot contain a separator (scratch labels flatten to `[A-Za-z0-9._-]`), so
- * the deepest occurrence is always the tree's own parent.
- *
- * Null for a cwd outside any temp dir — a `/review` of a local checkout, where
- * the tree under test IS the user's working copy and there is no sibling
- * layout to mount.
- */
-export function mountRootFor(cwd: string): string | null {
-  const resolved = resolve(cwd);
-  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
-  const at = resolved.lastIndexOf(marker);
-  if (at < 0) return null;
-  const root = resolved.slice(0, at + marker.length - 1);
-  // A LEXICAL root is not a safe mount target. `resolve` never touches the
-  // filesystem, so a symlink at or above `.qwen/tmp` — committable as mode
-  // 120000 and materialised by a fresh clone — silently widens a read-write
-  // bind mount to wherever it points. Every other creating or destroying path
-  // in this pipeline refuses that (`runCleanup`, `releaseWorktree`,
-  // `resetScratchTree`); the mount is the one place a redirect would hand the
-  // reviewed code a directory nobody chose.
-  try {
-    if (redirectedAncestor(root, dirname(resolve(root, '..', '..'))) !== null) {
-      return null;
-    }
-    const real = realpathSync(root);
-    // `-v src:dst` separates its fields with `:`, so a root that contains one
-    // cannot be spelled in that grammar at all: docker answers `invalid spec
-    // ... too many colons` and every command in the phase hard-fails with a
-    // raw mount error. Under `auto` those land as build/test failures the
-    // report attributes to the PR; under `required` the gate passes and the
-    // refusal that should have explained it never happens. Both designed
-    // degradations are bypassed because this said "mountable" about a root
-    // that is not.
-    //
-    // Refusing it here puts such a checkout back on the path every other
-    // unmountable root already takes. That is the whole fix: the `-v` grammar
-    // has exactly one separator, and `:` in a repository path — legal, if
-    // rare — is the only way to write it.
-    //
-    // On Windows this refuses EVERY absolute path, and that is the right
-    // answer rather than a casualty of it: a drive letter is a colon, and the
-    // mount this builds uses one path as both source and target, which a
-    // Windows path cannot be — the container side has no `C:`. So containment
-    // is not available there, and saying so gives `auto` its direct fallback
-    // and `required` its refusal instead of the runtime's parse error on every
-    // single command.
-    if (real.includes(':')) return null;
-    return real;
-  } catch {
+export function refuseHostExecutionPhase(
+  opts: {
+    policy?: SandboxPolicy;
+    env?: NodeJS.ProcessEnv;
+    trustContext?: ReviewTrustInput;
+    fileSourced?: (key: string) => boolean;
+  } = {},
+): string | null {
+  const env = opts.env ?? process.env;
+  const fileSourced = opts.fileSourced ?? isFileSourcedEnvKey;
+  const policy = opts.policy ?? sandboxPolicy(env, undefined, fileSourced);
+  const forceHardware = forceHardwareRequested(env, fileSourced);
+  if (policy !== 'required' && policy !== 'tiered' && !forceHardware) {
     return null;
   }
+  const trigger = forceHardware
+    ? 'QWEN_REVIEW_FORCE_HARDWARE=1'
+    : `review.sandbox is "${policy}"`;
+  let trustSuffix = '';
+  if (opts.trustContext !== undefined) {
+    const trust = classifyReviewTrust(opts.trustContext, env, fileSourced);
+    const reasons =
+      trust.escalationReasons.length > 0
+        ? ` [${trust.escalationReasons.join(', ')}]`
+        : '';
+    trustSuffix = ` (${trust.prTrust} -> ${trust.executionClass}${reasons})`;
+  }
+  return (
+    `${trigger}${trustSuffix} and ` +
+    'host tmux execution cannot provide an isolated sandbox boundary — refusing ' +
+    'to run untrusted commands directly on the host'
+  );
 }
+
+/**
+ * Builds the structured `executionBoundary` record embedded into review
+ * execution reports (`build-test`, `test-efficacy`, `test-delta`, `drive`,
+ * `ab-drive`).
+ */
+export function describeExecutionBoundary(opts: {
+  policy?: SandboxPolicy;
+  verdict?: SandboxVerdict;
+  backend?: ReviewSandboxBackend;
+  trustContext?: ReviewTrustInput;
+  teardownStatus?: ReviewTeardownStatus;
+  note?: string;
+  env?: NodeJS.ProcessEnv;
+  fileSourced?: (key: string) => boolean;
+}): ReviewExecutionBoundary {
+  const env = opts.env ?? process.env;
+  const fileSourced = opts.fileSourced ?? isFileSourcedEnvKey;
+  const policy = opts.policy ?? sandboxPolicy(env, undefined, fileSourced);
+  // No trust context means this execution was never classified — saying
+  // `unknown -> hardware-isolated` here would contradict a `direct` backend
+  // and describe a rule that was never applied.
+  const trust =
+    opts.trustContext === undefined
+      ? null
+      : classifyReviewTrust(opts.trustContext, env, fileSourced);
+  const executionClass: ReviewBoundaryExecutionClass =
+    trust?.executionClass ?? 'unclassified';
+  const backend: ReviewSandboxBackend =
+    opts.backend ??
+    (opts.verdict?.kind === 'container'
+      ? 'container'
+      : opts.verdict?.kind === 'refused'
+        ? 'refused'
+        : 'direct');
+  return {
+    policy,
+    prTrust: trust?.prTrust ?? 'unknown',
+    executionClass,
+    backend,
+    escalationReasons: trust?.escalationReasons ?? [],
+    ...(opts.teardownStatus !== undefined
+      ? { teardownStatus: opts.teardownStatus }
+      : {}),
+    ...(opts.note !== undefined ? { note: opts.note } : {}),
+  };
+}
+
+/** Whether one command needs the network. */
+export type CommandKind = 'install' | 'build' | 'test';
 
 /**
  * Whether a hand-off report must become a refusal.
  *
  * The hand-off — `toolchain: "unsupported"`, which the brief reads as "install
  * and build it yourself" — is an execution that leaves this process for an
- * agent's own shell, contained by nothing here. Under `required` that is the
- * one route the phase gate cannot catch, because the gate passes exactly when
- * a runtime answered and the tree is mountable, which is when a repo the
- * adapters cannot scope still reaches the hand-off.
+ * agent's own shell, contained by nothing here. Under `required` / `tiered`
+ * that is the one route the phase gate cannot catch, because the gate passes
+ * exactly when a runtime answered and the tree is mountable, which is when a
+ * repo the adapters cannot scope still reaches the hand-off.
  *
  * A predicate, and exported, because the first attempt at this lived inline as
  * `!applicable` — the filtered adapter ARRAY, never falsy — and shipped as dead
@@ -516,8 +599,15 @@ export function mountRootFor(cwd: string): string | null {
 export function handOffRefused(
   toolchain: string,
   policy: SandboxPolicy = sandboxPolicy(),
+  env: NodeJS.ProcessEnv = process.env,
+  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): boolean {
-  return toolchain === 'unsupported' && policy === 'required';
+  return (
+    toolchain === 'unsupported' &&
+    (policy === 'required' ||
+      policy === 'tiered' ||
+      forceHardwareRequested(env, fileSourced))
+  );
 }
 
 /**
@@ -559,6 +649,19 @@ export interface ContainerCommandOptions {
   /** The review temp dir (`<repo>/.qwen/tmp`): the mount, and the farm's far end. */
   tmpDir: string;
   kind: CommandKind;
+  /**
+   * The heap a build or an install gets — the number `declaredBuildHeapMb`
+   * read from the root build script, never an inherited `NODE_OPTIONS`.
+   * Ignored for a test.
+   */
+  heapMb?: number;
+  /**
+   * The tree's own npm `node-options`, as npm inside the container computes
+   * them (`npmNodeOptions`, asked in the environment `containerCommandEnv`
+   * builds), which it hands a lifecycle script in place of `NODE_OPTIONS`.
+   * Raised to `heapMb` with the rest kept, never replaced.
+   */
+  npmNodeOptions?: string;
   runtime: ContainerRuntime;
   image: string;
   /**
@@ -622,6 +725,96 @@ export function killContainer(
   }
 }
 
+/** Bounded PID ceiling for lightweight review containers (stops fork bombs while fitting concurrent Vitest/esbuild workers). */
+export const CONTAINER_PIDS_LIMIT = 512;
+
+export interface ContainerReapResult {
+  status: ReviewTeardownStatus;
+  detail?: string;
+}
+
+/**
+ * Kill a container the deadline could not, then verify via `inspect` that it
+ * is no longer running. Returns a verifiable `ReviewTeardownStatus` so callers
+ * can surface leaked containers instead of silently ignoring teardown failure.
+ */
+export function reapContainer(
+  runtime: ContainerRuntime,
+  name: string,
+  spawn: typeof spawnSync = spawnSync,
+): ContainerReapResult {
+  let rmFailedDetail: string | undefined;
+  try {
+    const rm = spawn(runtime, ['rm', '-f', name], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'ignore', 'pipe'],
+      timeout: 30_000,
+      env: runtimeClientEnv(),
+    });
+    if (rm.error) {
+      rmFailedDetail = `${runtime} rm -f ${name} error: ${rm.error.message}`;
+    } else if (rm.status !== 0) {
+      const rmErr = String(rm.stderr ?? '').trim();
+      rmFailedDetail = `${runtime} rm -f ${name} exited ${String(rm.status)}${rmErr ? `: ${rmErr}` : ''}`;
+    }
+  } catch (err) {
+    return {
+      status: 'failed',
+      detail: `failed to invoke ${runtime} rm -f ${name}: ${(err as Error).message}`,
+    };
+  }
+  try {
+    const inspect = spawn(
+      runtime,
+      ['inspect', '--format', '{{.State.Running}}', name],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 10_000,
+        env: runtimeClientEnv(),
+      },
+    );
+    if (inspect.error) {
+      return {
+        status: 'failed',
+        detail: `could not verify teardown of ${name}: ${inspect.error.message}`,
+      };
+    }
+    const stdout = String(inspect.stdout ?? '')
+      .trim()
+      .toLowerCase();
+    const stderr = String(inspect.stderr ?? '').trim();
+    if (inspect.status === 0) {
+      if (stdout === 'false') return { status: 'clean' };
+      return {
+        status: 'failed',
+        detail:
+          stdout === 'true'
+            ? `container ${name} is still running after ${runtime} rm -f`
+            : `unexpected ${runtime} inspect output for ${name}: ${JSON.stringify(stdout)}`,
+      };
+    }
+    if (/no such (?:container|object)/i.test(stderr)) {
+      return { status: 'clean' };
+    }
+    if (!rmFailedDetail && stderr === '') {
+      return { status: 'clean' };
+    }
+    return {
+      status: 'failed',
+      detail:
+        `could not confirm removal of ${name} (inspect exited ${String(inspect.status)}` +
+        `${stderr ? `: ${stderr}` : ''}` +
+        `${rmFailedDetail ? `; ${rmFailedDetail}` : ''})`,
+    };
+  } catch (err) {
+    return {
+      status: 'failed',
+      detail: `could not verify teardown of ${name}: ${(err as Error).message}`,
+    };
+  }
+}
+
 export function containerCommand(
   command: string,
   opts: ContainerCommandOptions,
@@ -630,6 +823,9 @@ export function containerCommand(
     'run',
     '--rm',
     '--init',
+    '--cap-drop=ALL',
+    '--security-opt=no-new-privileges:true',
+    `--pids-limit=${CONTAINER_PIDS_LIMIT}`,
     // A NAME, so the deadline has something to aim at. `--rm` fires only when
     // the container exits on its own, and a `spawnSync` timeout kills the
     // runtime CLIENT — measured on docker 29.1.3, an attached client forwards
@@ -688,11 +884,39 @@ export function containerCommand(
   // root-owned by default, and `--user` would then be unable to write its own
   // HOME — the very failure this HOME exists to prevent.
   args.push('--tmpfs', `${CONTAINER_HOME}:rw,mode=1777`);
-  for (const entry of containerEnv(join(opts.tmpDir, '.npm-cache'))) {
-    args.push('--env', entry);
-  }
+  // Before the image, or the runtime hands them to `sh -lc` as arguments.
+  for (const entry of containerCommandEnv(opts)) args.push('--env', entry);
+  // npm's own `node-options` — the mounted tree's `.npmrc` can set it, and npm
+  // replaces `NODE_OPTIONS` with it — raised only where it sets less, keeping
+  // its other options.
+  const npm =
+    opts.kind === 'test' ||
+    opts.heapMb === undefined ||
+    opts.npmNodeOptions === undefined
+      ? undefined
+      : raiseNpmHeap(opts.npmNodeOptions, opts.heapMb);
+  if (npm !== undefined) args.push('--env', `npm_config_node_options=${npm}`);
   args.push(opts.image, 'sh', '-lc', command);
   return { file: opts.runtime, args };
+}
+
+/**
+ * The environment a review command's container gets, as `KEY=value` entries:
+ * the `containerEnv` allowlist and, for a build or an install, the declared
+ * heap — the channel the direct spawn raises (`buildRunEnv`). Nothing larger
+ * can be inherited here: `containerEnv` passes no `NODE_OPTIONS`. The heap is
+ * added here, not to `containerEnv`, which subagent workers share. Exported
+ * because the host asks npm its `node-options` in this same environment
+ * (`npmNodeOptions`).
+ */
+export function containerCommandEnv(
+  opts: Pick<ContainerCommandOptions, 'tmpDir' | 'kind' | 'heapMb'>,
+): string[] {
+  const entries = containerEnv(join(opts.tmpDir, '.npm-cache'));
+  if (opts.kind !== 'test' && opts.heapMb !== undefined) {
+    entries.push(`NODE_OPTIONS=--max-old-space-size=${opts.heapMb}`);
+  }
+  return entries;
 }
 
 /**
@@ -783,51 +1007,4 @@ export function reviewSandboxImage(
     manifest() ||
     DEFAULT_IMAGE
   );
-}
-
-/**
- * The environment the container RUNTIME CLIENT is spawned with.
- *
- * `DOCKER_HOST` and its TLS companions decide which daemon answers — so a
- * repository that ships one in `.qwen/.env` points both the availability probe
- * and every `docker run` at a daemon it controls: `required` reads as
- * satisfied, the mount is handed over, and whatever that daemon returns is
- * scored as build, test and probe evidence. An operator's own `DOCKER_HOST`
- * (a remote engine, colima, rootless) is untouched — only the file-sourced
- * ones are dropped.
- */
-export function runtimeClientEnv(
-  env: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
-  const scrubbed = { ...env };
-  // EVERY file-sourced key, not a list of the dangerous ones.
-  //
-  // The list was the first design and it lost twice: it named the daemon
-  // selectors and missed the proxy family, then named those and missed
-  // `DOCKER_API_VERSION` — a value that does not select a daemon at all, it
-  // just makes every call to one fail, which under `auto` turns containment
-  // off silently because the availability probe reads a broken client as "no
-  // runtime". The class is not "variables that point somewhere else", it is
-  // "variables a repository can set that change what this client does", and
-  // that has no last entry: an incompatible API version, a proxy, a config
-  // path, a `PATH` naming a different `docker` binary.
-  //
-  // The client does not need repository-provided environment for anything. So
-  // the rule is provenance, not name: what the loader wrote from a file the
-  // reviewed checkout supplies does not reach the process that decides whether
-  // containment happened.
-  //
-  // Deleting is the right restore, not an approximation of one: the loader
-  // records a key as file-sourced only where the real environment had nothing
-  // (`isEffectivelyUnset` in config/environment.ts), so a file value never
-  // shadows an inherited one and dropping it returns the variable to exactly
-  // its pre-load state. The scrub therefore cannot cost the client a `PATH` or
-  // `HOME` from the operator's shell — those are set, so they are never
-  // file-sourced. What it does cost is a value the operator kept ONLY in a
-  // `.env`, which `isFileSourcedEnvKey` cannot tell from the repository's own;
-  // that one must move to their shell. Conservative on the right side.
-  for (const key of Object.keys(scrubbed)) {
-    if (isFileSourcedEnvKey(key)) delete scrubbed[key];
-  }
-  return scrubbed;
 }

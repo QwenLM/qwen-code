@@ -212,7 +212,7 @@ function getProviderTextValue(provider: WebShellAtProvider): string {
       ? undefined
       : sanitizeDisplayText(provider.textValue)) ??
     (typeof provider.label === 'string'
-      ? (sanitizeDisplayText(provider.label) ?? undefined)
+      ? sanitizeDisplayText(provider.label)
       : undefined) ??
     safeDisplayText(provider.id) ??
     SAFE_DISPLAY_FALLBACK
@@ -793,6 +793,7 @@ export function useAtMentionMenu({
             builtinCacheRef.current.mcpResources,
             serverName,
             () => loadMcpResources(serverName, { signal: abort.signal }),
+            abort.signal,
           );
         })
         .then((status) => {
@@ -1051,6 +1052,27 @@ export function useAtMentionMenu({
             query: itemQuery,
             level: 'items',
             selectedProviderId: prefixedProvider.id,
+            selectedIndex: 0,
+            providers: providerViewsRef.current,
+            itemMode: 'default',
+            mcpServerName: undefined,
+            fileDirectory: undefined,
+            inputMode: 'context',
+          });
+          return true;
+        }
+        const claimingProvider = providerViewsRef.current.find(
+          (view) =>
+            !isBuiltinProviderId(view.id) &&
+            view.provider.claimsTypedQuery?.(parsed.query),
+        );
+        if (claimingProvider) {
+          scheduleLoadItems(claimingProvider.id, parsed.query, {
+            from: parsed.from,
+            to: parsed.to,
+            query: parsed.query,
+            level: 'items',
+            selectedProviderId: claimingProvider.id,
             selectedIndex: 0,
             providers: providerViewsRef.current,
             itemMode: 'default',
@@ -1343,6 +1365,15 @@ export function useAtMentionMenu({
         close();
         return true;
       }
+      if (item.onSelect) {
+        view.dispatch({
+          changes: { from: current.from, to: current.to, insert: '' },
+          selection: { anchor: current.from },
+        });
+        close();
+        item.onSelect();
+        return true;
+      }
       if (
         current.selectedProviderId === FILE_PROVIDER_ID &&
         item.kind === 'directory' &&
@@ -1415,25 +1446,44 @@ export function useAtMentionMenu({
         item,
         insert,
       );
-      const tagText = insert.trimEnd();
-      const effects =
-        tag && createInlineTagEffect
-          ? [
-              createInlineTagEffect({
-                from: current.from,
-                to: current.from + tagText.length,
-                tag,
-              }),
-            ]
-          : undefined;
-      view.dispatch({
-        changes: { from: current.from, to: current.to, insert },
-        ...(effects ? { effects } : {}),
-        selection: { anchor: current.from + insert.length },
-        scrollIntoView: true,
-      });
-      view.focus();
-      close({ preserveProviderSelection: true });
+      const insertPrepared = (prepared: WebShellComposerTag | null) => {
+        const tagText = insert.trimEnd();
+        const effects =
+          prepared && createInlineTagEffect
+            ? [
+                createInlineTagEffect({
+                  from: current.from,
+                  to: current.from + tagText.length,
+                  tag: prepared,
+                }),
+              ]
+            : undefined;
+        view.dispatch({
+          changes: { from: current.from, to: current.to, insert },
+          ...(effects ? { effects } : {}),
+          selection: { anchor: current.from + insert.length },
+          scrollIntoView: true,
+        });
+        view.focus();
+        close({ preserveProviderSelection: true });
+      };
+      const actions = workspaceActionsRef.current;
+      if (tag?.kind === 'file' && actions?.prepareFileReference) {
+        const document = view.state.doc;
+        close({ preserveProviderSelection: true });
+        void actions
+          .prepareFileReference(tag)
+          .then((prepared) => {
+            if (
+              viewRef.current === view &&
+              workspaceActionsRef.current === actions
+            ) {
+              if (view.state.doc === document) insertPrepared(prepared);
+              else actions.onFileReferenceDiscarded?.();
+            }
+          })
+          .catch(() => undefined);
+      } else insertPrepared(tag);
       return true;
     },
     [
@@ -1445,6 +1495,7 @@ export function useAtMentionMenu({
       disabledRef,
       viewRef,
       onUploadRequest,
+      workspaceActionsRef,
     ],
   );
 

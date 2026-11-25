@@ -4,27 +4,58 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  mergeHookExecution,
+  parseHookLifecycle,
+  summarizeHookExecutions,
+  type HookExecutionEntry,
+  type HookTurnPage,
+} from '../telemetry/hook-lifecycle-contract.js';
+
+import {
+  restoreSessionSources,
+  type SessionSourcesRestoreState,
+} from './session-sources.js';
+
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { getHeapStatistics } from 'node:v8';
 import type { Content, Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
+import { userPromptTimestamp } from './last-user-prompt-time.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { addDaemonRequestAttribute } from '../telemetry/daemon-tracing.js';
-import { readSessionTitleInfoFromFileSync } from '../utils/sessionStorageUtils.js';
+import {
+  localManagedSessionKey,
+  readSessionTitleInfoFromFileSync,
+} from '../utils/sessionStorageUtils.js';
+import {
+  ManagedSessionProjectionLimitError,
+  readManagedSessionRecordsAndTitle,
+} from '../managed-runtime/managed-session-message-projection.js';
+import {
+  MANAGED_SESSION_HEADER_SUBTYPE,
+  ManagedSessionRecordError,
+} from '../managed-runtime/managed-session-records.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
 import {
+  isValidSessionApprovalModePayload,
+  isValidSessionWorkflowModePayload,
   isValidSessionModelPayload,
   isTurnResultRecordPayload,
+  normalizeSessionApprovalModePayload,
   type AttributionSnapshotPayload,
   type ChatRecord,
   type ParentSessionRecordPayload,
   type SessionModelRecordPayload,
+  type SessionApprovalModeRecordPayload,
+  type SessionWorkflowModeRecordPayload,
   type SessionSourceRecordPayload,
   type TitleSource,
   type UiTelemetryRecordPayload,
@@ -50,18 +81,15 @@ import {
   type GoalRecoveryRecord,
   type GoalRecoverySelection,
 } from '../goals/goal-persistence.js';
-import {
-  EvidenceSourceUnavailableError,
-  GoalEvidenceCheckpointAccumulator,
-  GoalEvidenceRecordIndexAccumulator,
-  InvalidGoalEvidenceReferenceError,
-  type GoalEvidenceCheckpointWindow,
-  type GoalEvidenceRecordIndexHint,
-} from '../goals/goal-evidence.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
 import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
+import {
+  SessionExecutionEngineAccumulator,
+  type SessionExecutionEngine,
+  type SessionExecutionEngineState,
+} from './session-execution-engine.js';
 import {
   selectActiveSideArtifactRecordUuids,
   SessionArtifactSnapshotAccumulator,
@@ -69,6 +97,7 @@ import {
 } from './session-artifact-persistence.js';
 import {
   aggregateTranscriptRecordFragments,
+  isLifecycleUiTelemetryEvent,
   isUserPromptSubmitContextPartText,
   isTranscriptConversationRecord,
   projectUserTranscriptForDisplay,
@@ -82,11 +111,17 @@ import {
   type BranchPointRecord,
 } from './branch-points.js';
 
+// `limit` counts active ChatRecords (replay uuids), not replay events: one
+// record can produce several events, and a backward page may expand past
+// `limit` to keep turn and tool-call/result boundaries intact.
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_TURN_INDEX_VERSION = 1 as const;
-export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 1024 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_LINE_BYTES = 32 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES = 256 * 1024 * 1024;
+const SESSION_TRANSCRIPT_MAX_PROMPT_TIME_BYTES = 256 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 // Hard source-byte ceiling for one backward page, counting everything the
 // turn-alignment and pair extensions add above the soft `maxBytes`
@@ -122,16 +157,43 @@ export class SessionTranscriptSnapshotUnavailableError extends Error {
 
 class EmptySessionTranscriptError extends SessionTranscriptSnapshotUnavailableError {}
 
+export type SessionTranscriptLimitDimension =
+  | 'snapshot'
+  | 'line'
+  | 'index'
+  | 'replay'
+  | 'artifact_library';
+
 export class SessionTranscriptTooLargeError extends Error {
+  readonly dimension: SessionTranscriptLimitDimension;
+  readonly measuredBytes?: number;
+  readonly retryable?: boolean;
+
   constructor(
     readonly sessionId: string,
     readonly snapshotSize: number,
     readonly maxBytes: number,
+    details?: {
+      dimension?: SessionTranscriptLimitDimension;
+      measuredBytes?: number;
+      retryable?: boolean;
+    },
   ) {
-    super(
-      `Transcript snapshot for session ${sessionId} is too large to index (${snapshotSize} bytes, max ${maxBytes} bytes)`,
-    );
+    const dimension = details?.dimension ?? 'snapshot';
+    const measuredBytes = details?.measuredBytes;
+    const message =
+      dimension === 'snapshot'
+        ? `Transcript snapshot for session ${sessionId} is too large to index (${snapshotSize} bytes, max ${maxBytes} bytes)`
+        : `Transcript ${dimension} for session ${sessionId} exceeds limit (${measuredBytes ?? snapshotSize} bytes, max ${maxBytes} bytes; file size ${snapshotSize} bytes)`;
+    super(message);
     this.name = 'SessionTranscriptTooLargeError';
+    this.dimension = dimension;
+    if (measuredBytes !== undefined) {
+      this.measuredBytes = measuredBytes;
+    }
+    if (details?.retryable !== undefined) {
+      this.retryable = details.retryable;
+    }
   }
 }
 
@@ -183,6 +245,7 @@ export interface SessionTranscriptNavigationTurn {
   turnId: string;
   kind: SessionTranscriptNavigationTurnKind;
   promptId?: string;
+  historyPromptId?: string;
   timestamp?: string;
   label: string;
   detail?: string;
@@ -254,12 +317,14 @@ export interface SessionRestoreReplayPage {
   hasMore: boolean;
   anchorRecordId?: string;
   replay?: unknown;
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
   goalRecoverySourceUuid?: string;
   goalBootstrapRecords?: GoalRecoveryRecord[];
 }
 
-export interface SessionRuntimeResumeState {
+export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
+  completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
   attributionSnapshot?: AttributionSnapshot;
@@ -267,19 +332,32 @@ export interface SessionRuntimeResumeState {
   recording: {
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
+    turnPromptIds?: Array<string | undefined>;
+    turnDaemonPromptIds?: Array<string | undefined>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
     sessionModel?: SessionModelRecordPayload;
+    sessionApprovalMode?: SessionApprovalModeRecordPayload;
+    sessionWorkflowMode?: SessionWorkflowModeRecordPayload;
     lastAssistantModel?: string;
+    executionEngine?: SessionExecutionEngine;
   };
   fileHistorySnapshots?: FileHistorySnapshot[];
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
+  /** Damage warnings from the artifact rebuild, present even when no
+   * readable record produced a snapshot (an all-refused journal). The
+   * first-open seed gates on these like the load funnel does. */
+  artifactJournalWarnings?: readonly string[];
+  /** Whether the transcript read completed (no torn tail). The first-open
+   * projection seed gates on this exactly like the load seed's
+   * sourceReadComplete; sourcesUnavailable is broader (it also flags a
+   * damaged sources snapshot, which does not narrow artifact delivery). */
+  sourceReadComplete?: boolean;
   goalRecords: GoalRecoveryRecord[];
   goalRecoverySourceUuid?: string;
-  goalCheckpointWindow?: GoalEvidenceCheckpointWindow;
   initialTurn: number;
   backgroundNotificationTaskIds: string[];
 }
@@ -290,10 +368,155 @@ export interface SessionRestoreProjection {
   startTime: string;
   lastUpdated: string;
   runtime: SessionRuntimeResumeState;
+  executionEngine?: SessionExecutionEngineState;
   replay?: SessionRestoreReplayPage;
 }
 
-export interface SessionLiveRestoreProjection {
+interface ManagedSessionRestoreProjectionInput {
+  readonly sessionId: string;
+  readonly records: readonly ChatRecord[];
+  readonly replay: SessionRestoreReplaySelection;
+  readonly filePath: string;
+  readonly startTime: string;
+  readonly lastUpdated: string;
+  readonly executionEngine: SessionExecutionEngineState;
+  readonly fallbackLastCompletedUuid: string;
+  readonly customTitle?: string;
+  readonly titleSource?: TitleSource;
+}
+
+/** Rebuilds the existing runtime resume shape from a durable Managed journal. */
+function buildManagedSessionRestoreProjection(
+  input: ManagedSessionRestoreProjectionInput,
+): SessionRestoreProjection {
+  validateRestoreReplaySelection(input.replay);
+  const records = [...input.records];
+  const apiHistory = new SessionApiHistoryAccumulator();
+  const resumeTokenCounts = new ResumeTokenCountsAccumulator();
+  const turnState = new SessionTurnStateAccumulator(input.sessionId);
+  const fileHistory = new SessionFileHistoryAccumulator();
+  const uiTelemetryEvents: UiEvent[] = [];
+  const goalRecords: GoalRecoveryRecord[] = [];
+  let attributionSnapshot: AttributionSnapshot | undefined;
+  let lastAssistantModel: string | undefined;
+  let lastTokenCountsRecord: ChatRecord | undefined;
+  let sessionSource: SessionSourceRecordPayload | undefined;
+  for (const record of records) {
+    if (record.sessionId !== input.sessionId) {
+      throw new ManagedSessionRecordError(
+        'Managed Session projection contains a record from another session.',
+      );
+    }
+    turnState.addHint(getSessionTurnRecordHint(record, input.sessionId));
+    apiHistory.add(record);
+    try {
+      fileHistory.add(record);
+    } catch (error) {
+      // The sink admits any file_history_snapshot carrying a systemPayload
+      // and publishes it unvalidated, so a malformed batch does reach here;
+      // skip it as the Legacy dispatch path does rather than failing the
+      // whole restore.
+      debugLogger.warn(
+        `restore projection: skipping malformed file_history_snapshot: ${error}`,
+      );
+    }
+    if (isResumeTokenCountsCandidate(record)) lastTokenCountsRecord = record;
+    if (isGoalRecoveryCandidate(record)) {
+      const normalized = normalizeGoalRecoveryRecord(record);
+      if (normalized) goalRecords.push(normalized);
+    }
+    if (record.subtype === 'ui_telemetry') {
+      const uiEvent = (
+        record.systemPayload as UiTelemetryRecordPayload | undefined
+      )?.uiEvent;
+      if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
+        uiTelemetryEvents.push(uiEvent as UiEvent);
+      }
+    }
+    if (record.subtype === 'attribution_snapshot') {
+      const snapshot = (
+        record.systemPayload as AttributionSnapshotPayload | undefined
+      )?.snapshot;
+      if (snapshot && typeof snapshot === 'object') {
+        attributionSnapshot = snapshot;
+      }
+    }
+    // The last one, as a Legacy restore reads it.
+    if (record.type === 'system' && record.subtype === 'session_source') {
+      sessionSource = record.systemPayload as
+        | SessionSourceRecordPayload
+        | undefined;
+    }
+    if (
+      record.type === 'assistant' &&
+      typeof record.model === 'string' &&
+      record.model.trim()
+    ) {
+      lastAssistantModel = record.model;
+    }
+  }
+  if (lastTokenCountsRecord) resumeTokenCounts.add(lastTokenCountsRecord);
+  const turnStateValue = turnState.finish();
+  const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
+  const restoredTokenCounts = resumeTokenCounts.finish();
+  const restoredFileHistory = fileHistory.finish();
+  const runtime: SessionRuntimeResumeState = {
+    apiHistory: apiHistory.finish(),
+    // The managed projection rebuilds from the committed journal in full,
+    // so the first-open seed's read-completeness gate holds by construction
+    // (keeps the seed's managed behavior identical to the load funnel's).
+    sourceReadComplete: true,
+    ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
+    uiTelemetryEvents,
+    ...(attributionSnapshot ? { attributionSnapshot } : {}),
+    recording: {
+      lastCompletedUuid:
+        records[records.length - 1]?.uuid ?? input.fallbackLastCompletedUuid,
+      turnParentUuids: turnStateValue.turnParentUuids,
+      turnPromptIds: turnStateValue.turnPromptIds,
+      turnDaemonPromptIds: turnStateValue.turnDaemonPromptIds,
+      ...(input.customTitle !== undefined
+        ? { customTitle: input.customTitle }
+        : {}),
+      ...(input.titleSource !== undefined
+        ? { titleSource: input.titleSource }
+        : {}),
+      ...(sessionSource?.sourceType !== undefined
+        ? { sourceType: sessionSource.sourceType }
+        : {}),
+      ...(sessionSource?.sourceId !== undefined
+        ? { sourceId: sessionSource.sourceId }
+        : {}),
+      ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
+      ...(input.executionEngine.status === 'verified' &&
+      input.executionEngine.recorded
+        ? { executionEngine: input.executionEngine.engine }
+        : {}),
+    },
+    goalRecords,
+    ...(goalRecovery.sourceUuid
+      ? { goalRecoverySourceUuid: goalRecovery.sourceUuid }
+      : {}),
+    ...(restoredFileHistory
+      ? { fileHistorySnapshots: restoredFileHistory }
+      : {}),
+    initialTurn: turnStateValue.initialTurn,
+    backgroundNotificationTaskIds: turnStateValue.backgroundNotificationTaskIds,
+  };
+  const replay = managedReplayPage(records, input.replay);
+  return {
+    sessionId: input.sessionId,
+    filePath: input.filePath,
+    startTime: input.startTime,
+    lastUpdated: input.lastUpdated,
+    runtime,
+    executionEngine: input.executionEngine,
+    ...(replay ? { replay } : {}),
+  };
+}
+
+export interface SessionLiveRestoreProjection
+  extends SessionSourcesRestoreState {
   sessionId: string;
   startTime: string;
   lastUpdated: string;
@@ -305,6 +528,18 @@ export interface SessionLiveRestoreProjection {
 
 interface RestoreProjectionReadOptions {
   validateFirstRecord?: (record: ChatRecord) => boolean | Promise<boolean>;
+}
+
+interface LastUserPromptReadOptions {
+  preferCache?: boolean;
+  validateFirstRecord?: (
+    record: Pick<ChatRecord, 'sessionId' | 'cwd'>,
+  ) => boolean | Promise<boolean>;
+}
+
+interface LastUserPromptSnapshot {
+  lastUserPromptAt?: string;
+  firstRecordOwner?: Pick<ChatRecord, 'sessionId' | 'cwd'>;
 }
 
 interface SessionTranscriptFileIdentity {
@@ -341,6 +576,7 @@ interface AggregatedRecordReadContext {
 
 interface UuidIndexEntry {
   parentUuid: string | null;
+  lastUserPromptAt?: string;
   sessionIdMatchesFile: boolean;
   type: ChatRecord['type'];
   subtype?: TranscriptRecordInput['subtype'];
@@ -349,14 +585,15 @@ interface UuidIndexEntry {
   apiHistoryCompressionCandidate: boolean;
   resumeTokenCountsCandidate: boolean;
   attributionSnapshotCandidate: boolean;
+  uiTelemetryCandidate: boolean;
   goalRecoveryCandidate: boolean;
-  goalEvidenceHint: GoalEvidenceRecordIndexHint;
   turnHint: SessionTurnRecordHint;
   navigationKind?: SessionTranscriptNavigationTurnKind;
   navigationOrdinal?: number;
   navigationTextSuppressed: boolean;
   assistantPreviewCandidate: boolean;
   turnResultPromptId?: string;
+  daemonPromptId?: string;
   segments: RecordSegment[];
 }
 
@@ -369,12 +606,14 @@ interface TranscriptNavigationTurnHint {
 }
 
 interface TranscriptIndex {
+  executionEngine: SessionExecutionEngineState;
   filePath: string;
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
   leafUuid: string;
   firstRecordUuid: string;
   physicalRecords: PhysicalRecordHint[];
+  sourceReadComplete: boolean;
   runtimeUuids: string[];
   replayUuids: string[];
   navigationTurns: TranscriptNavigationTurnHint[];
@@ -385,6 +624,12 @@ interface TranscriptIndex {
   lastUpdated: string;
   byUuid: Map<string, UuidIndexEntry>;
   branchPointsByAssistantUuid: ReadonlyMap<string, string>;
+  /**
+   * Present when the index was projected rather than scanned from the file.
+   * Such an index must not reach the index cache: its byte estimate does not
+   * account for these records.
+   */
+  projectedRecords?: ReadonlyMap<string, ChatRecord>;
 }
 
 interface CacheEntry {
@@ -392,10 +637,32 @@ interface CacheEntry {
   byteSize?: number;
   value?: TranscriptIndex;
   pending?: Promise<TranscriptIndex>;
+  hookTurns?: Map<
+    string,
+    Pick<HookTurnPage, 'executions' | 'summary' | 'coverage'>
+  >;
 }
 
 const INDEX_CACHE_MAX_ENTRIES = 32;
 const INDEX_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+// Refusing indexes above the shared budget outright made every page of a
+// large session reparse the whole JSONL (#17889): the one session that most
+// needs the cache could never enter it. Oversized indexes get their own
+// bounded budget instead, so the shared byte budget keeps capping
+// small-session retention exactly as before while a large session's index
+// survives across requests. Worst-case byte retention is the sum of both
+// budgets. Still O(snapshot) per page: an index estimated above this cap
+// (dense short records reach it well below the file-size cap), and a session
+// refused while the class is full — refusal keeps the resident indexes
+// instead of thrashing between them. The 32-entry count cap stays global, so
+// an oversized entry can take a slot a warm small index held (at most three
+// oversized entries fit the class budget).
+const INDEX_CACHE_OVERSIZED_MAX_BYTES = 256 * 1024 * 1024;
+// Hard refusal ceiling for dense-record index builds, decoupled from the
+// 256 MiB cache-admission budget so terse 60-120 MiB transcripts continue to
+// serve uncached (as on base) while extreme multi-million-record dense files
+// still fail closed before exhausting a 1 GiB heap.
+export const SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES = 512 * 1024 * 1024;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const INDEX_ENTRY_BASE_BYTES = 256;
 const INDEX_SEGMENT_BYTES = 64;
@@ -480,6 +747,43 @@ function recordRestoreSelectionAttributes(
 }
 
 const indexCache = new Map<string, CacheEntry>();
+interface LastUserPromptCacheEntry {
+  fileIdentity: SessionTranscriptFileIdentity;
+  size: number;
+  lastUpdated: string;
+  snapshot: Promise<LastUserPromptSnapshot>;
+}
+
+const lastUserPromptScopes = new Map<
+  string,
+  Map<string, LastUserPromptCacheEntry>
+>();
+const lastUserPromptUpdates = new Map<string, object>();
+const LAST_USER_PROMPT_CACHE_MAX_ENTRIES = 100_000;
+
+function promptTimeScope(filePath: string, workspaceCwd: string) {
+  const key = JSON.stringify([path.dirname(filePath), workspaceCwd]);
+  let entries = lastUserPromptScopes.get(key);
+  if (!entries) entries = new Map();
+  lastUserPromptScopes.delete(key);
+  lastUserPromptScopes.set(key, entries);
+  while (lastUserPromptScopes.size > 64) {
+    lastUserPromptScopes.delete(lastUserPromptScopes.keys().next().value!);
+  }
+  return entries;
+}
+
+function trimPromptTimeScopes(): void {
+  let count = [...lastUserPromptScopes.values()].reduce(
+    (sum, entries) => sum + entries.size,
+    0,
+  );
+  while (count > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
+    const oldest = lastUserPromptScopes.keys().next().value!;
+    count -= lastUserPromptScopes.get(oldest)!.size;
+    lastUserPromptScopes.delete(oldest);
+  }
+}
 // Per-workspace HMAC signing keys are cached for the daemon's lifetime (keyed by
 // key-file path). Rotating a key file externally therefore requires a daemon
 // restart to take effect — the only in-process invalidation is the corrupt
@@ -488,12 +792,17 @@ const indexCache = new Map<string, CacheEntry>();
 // who can already read the key file next to the transcripts it signs.
 const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
+let indexCacheOversizedMaxBytesForTest: number | undefined;
+let maxIndexEstimateBytesForTest: number | undefined;
+let availableHeapBudgetForTest: number | undefined;
+let maxLineBytesForTest: number | undefined;
+let maxAllReplayBytesForTest: number | undefined;
 let expandedPageBytesForTest: number | undefined;
 let cooperativeReadByteBudgetForTest: number | undefined;
 let cooperativeReadTimeBudgetMsForTest: number | undefined;
 let cooperativeYieldHookForTest: (() => void) | undefined;
 let selectedLineReadHookForTest:
-  | ((offset: number, length: number) => void)
+  | ((offset: number, length: number) => void | Promise<void>)
   | undefined;
 let indexBuildCompleteHookForTest:
   | ((filePath: string) => void | Promise<void>)
@@ -636,6 +945,15 @@ function isAttributionSnapshotCandidate(record: ChatRecord): boolean {
     isObjectRecord(record.systemPayload) &&
     'snapshot' in record.systemPayload
   );
+}
+
+function isRestoreUiTelemetryCandidate(record: ChatRecord): boolean {
+  if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
+    return false;
+  }
+  const uiEvent = (record.systemPayload as UiTelemetryRecordPayload | undefined)
+    ?.uiEvent;
+  return isObjectRecord(uiEvent) && !isLifecycleUiTelemetryEvent(uiEvent);
 }
 
 function isFiniteNonNegativeInteger(value: unknown): value is number {
@@ -1013,14 +1331,16 @@ function navigationDisplayText(text: string, systemPayload: unknown): string {
   return isUserPromptSubmitContextPartText(stripped) ? '' : stripped;
 }
 
-function navigationKindForRecord(
+export function navigationKindForRecord(
   record: ChatRecord,
 ): SessionTranscriptNavigationTurnKind | undefined {
   if (record.type !== 'user') return undefined;
   if (
     record.subtype === 'goal_runtime' ||
     record.subtype === 'notification' ||
-    record.subtype === 'mid_turn_user_message'
+    record.subtype === 'mid_turn_user_message' ||
+    record.subtype === 'agent_mention' ||
+    record.subtype === 'agent_message'
   ) {
     return undefined;
   }
@@ -1243,6 +1563,9 @@ const REPLAY_MID_TURN_USER_SUBTYPES: ReadonlySet<string> = new Set([
   'notification',
   'cron',
   'mid_turn_user_message',
+  // Session multi-agent records render inline and never open a turn.
+  'agent_mention',
+  'agent_message',
 ] satisfies ReadonlyArray<NonNullable<ChatRecord['subtype']>>);
 
 export function isReplayTurnStartType(
@@ -1578,8 +1901,64 @@ function getIndexCacheMaxBytes(): number {
   return indexCacheMaxBytesForTest ?? INDEX_CACHE_MAX_BYTES;
 }
 
+function getIndexCacheOversizedMaxBytes(): number {
+  return indexCacheOversizedMaxBytesForTest ?? INDEX_CACHE_OVERSIZED_MAX_BYTES;
+}
+
+function getMaxIndexEstimateBytes(): number {
+  return (
+    maxIndexEstimateBytesForTest ?? SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES
+  );
+}
+
+export function getSessionTranscriptMaxLineBytes(): number {
+  return maxLineBytesForTest ?? SESSION_TRANSCRIPT_MAX_LINE_BYTES;
+}
+
+function getMaxAllReplayBytes(): number {
+  return maxAllReplayBytesForTest ?? SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES;
+}
+
 function estimateStringBytes(value: string | null | undefined): number {
   return value ? value.length * INDEX_STRING_BYTES : 0;
+}
+
+function estimatePhysicalRecordHintBytes(record: PhysicalRecordHint): number {
+  return (
+    INDEX_HINT_BASE_BYTES +
+    estimateStringBytes(record.uuid) +
+    estimateStringBytes(record.parentUuid) +
+    estimateStringBytes(record.type) +
+    estimateStringBytes(record.subtype)
+  );
+}
+
+function estimateUuidIndexEntryBytes(
+  uuid: string,
+  entry: UuidIndexEntry,
+): number {
+  return (
+    INDEX_ENTRY_BASE_BYTES +
+    INDEX_HINT_BASE_BYTES * 2 +
+    INDEX_MAP_ENTRY_BYTES +
+    INDEX_CONTAINER_BASE_BYTES +
+    entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
+    estimateStringBytes(uuid) +
+    estimateStringBytes(entry.parentUuid) +
+    estimateStringBytes(entry.lastUserPromptAt) +
+    estimateStringBytes(entry.type) +
+    estimateStringBytes(entry.subtype) +
+    estimateStringBytes(entry.navigationKind) +
+    estimateStringBytes(entry.turnResultPromptId) +
+    estimateStringBytes(entry.daemonPromptId) +
+    estimateStringBytes(entry.turnHint.turnParentUuid) +
+    estimateStringBytes(entry.turnHint.turnPromptId) +
+    estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
+    estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
+    estimateStringBytes(entry.turnHint.hookTurn?.promptId) +
+    estimateStringBytes(entry.turnHint.hookTurn?.parentUuid) +
+    entry.segments.length * INDEX_SEGMENT_BYTES
+  );
 }
 
 function estimateIndexCacheBytes(index: TranscriptIndex): number {
@@ -1601,12 +1980,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
     estimateStringBytes(index.lastUpdated);
 
   for (const record of index.physicalRecords) {
-    total +=
-      INDEX_HINT_BASE_BYTES +
-      estimateStringBytes(record.uuid) +
-      estimateStringBytes(record.parentUuid) +
-      estimateStringBytes(record.type) +
-      estimateStringBytes(record.subtype);
+    total += estimatePhysicalRecordHintBytes(record);
   }
 
   for (const uuid of index.runtimeUuids) {
@@ -1623,26 +1997,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(gap.missingParentUuid);
   }
   for (const [uuid, entry] of index.byUuid) {
-    total +=
-      INDEX_ENTRY_BASE_BYTES +
-      INDEX_HINT_BASE_BYTES * 2 +
-      (entry.goalEvidenceHint.parsedGoalContext ? INDEX_HINT_BASE_BYTES : 0) +
-      INDEX_MAP_ENTRY_BYTES +
-      INDEX_CONTAINER_BASE_BYTES +
-      entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
-      estimateStringBytes(uuid) +
-      estimateStringBytes(entry.parentUuid) +
-      estimateStringBytes(entry.type) +
-      estimateStringBytes(entry.subtype) +
-      estimateStringBytes(entry.navigationKind) +
-      estimateStringBytes(entry.turnResultPromptId) +
-      estimateStringBytes(entry.turnHint.turnParentUuid) +
-      estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.goalId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.turnId) +
-      estimateStringBytes(entry.goalEvidenceHint.claimedGoalId) +
-      estimateStringBytes(entry.goalEvidenceHint.provenance) +
-      entry.segments.length * INDEX_SEGMENT_BYTES;
+    total += estimateUuidIndexEntryBytes(uuid, entry);
   }
   for (const turn of index.navigationTurns) {
     total +=
@@ -1674,6 +2029,80 @@ function getIndexCacheBytes(): number {
   return total;
 }
 
+// An entry's class follows the current shared budget, not the budget it was
+// admitted under, so lowering the budget reclassifies and prunes consistently.
+function getIndexCacheBytesByClass(): { shared: number; oversized: number } {
+  const sharedBudget = getIndexCacheMaxBytes();
+  let shared = 0;
+  let oversized = 0;
+  for (const entry of indexCache.values()) {
+    if (!entry.byteSize) continue;
+    if (entry.byteSize > sharedBudget) oversized += entry.byteSize;
+    else shared += entry.byteSize;
+  }
+  return { shared, oversized };
+}
+
+// Whether growing a cached entry by extraBytes fits the budget class the
+// entry belongs to AFTER the addition — the same class rule
+// getIndexCacheBytesByClass and pruneCacheByteBudget apply to live entries.
+// A shared entry whose projection or hook aggregate pushes it past the
+// shared budget moves into the oversized class instead of being refused
+// against a budget it no longer belongs to. When superseded snapshots of
+// the same file block the target class (an old prefix whose retained
+// projection holds it), they are reclaimed only if the addition fits after
+// the reclaim — the same fit-before-evict judgment the admission doors use.
+// current describes the file state the reclaim may trust: verified doors
+// (the offer) pass the just-verified snapshot length, frozen-prefix growth
+// (hook aggregates, projections decoded under a frozen cursor) passes a
+// fresh stat of the live file, and a failed stat passes undefined so
+// reclaim is skipped (only additions that already fit without reclaim are
+// retained) rather than reclaiming blind. The entry being grown
+// is excluded from the reclaim scan — under a frozen snapshot it can itself
+// be shorter than the live file.
+function cacheAdditionFitsClassBudget(
+  entry: CacheEntry,
+  extraBytes: number,
+  current: ReclaimContext | undefined,
+): boolean {
+  const sharedBudget = getIndexCacheMaxBytes();
+  const currentBytes = entry.byteSize ?? 0;
+  const totalBytes = currentBytes + extraBytes;
+  const oversized = totalBytes > sharedBudget;
+  const classBudget = oversized
+    ? getIndexCacheOversizedMaxBytes()
+    : sharedBudget;
+  const classBytes = getIndexCacheBytesByClass();
+  const classTotal = oversized ? classBytes.oversized : classBytes.shared;
+  // The entry's current bytes already count toward its current class; when
+  // the addition crosses the class boundary they move with it.
+  const staysInClass = currentBytes > sharedBudget === oversized;
+  const added = staysInClass ? extraBytes : totalBytes;
+  if (classTotal + added <= classBudget) return true;
+  const value = entry.value;
+  if (!value) return false;
+  const reclaimable = supersededSnapshotBytes(
+    value.filePath,
+    value.snapshotSize,
+    value.lastUpdated,
+    value.fileIdentity,
+    current,
+    oversized,
+    entry,
+  );
+  if (classTotal - reclaimable + added > classBudget) return false;
+  evictSupersededSnapshots(
+    value.filePath,
+    value.snapshotSize,
+    value.lastUpdated,
+    value.fileIdentity,
+    current,
+    oversized,
+    entry,
+  );
+  return true;
+}
+
 function pruneCache(now = Date.now()): void {
   for (const [key, entry] of indexCache) {
     if (entry.expiresAt <= now) {
@@ -1682,15 +2111,46 @@ function pruneCache(now = Date.now()): void {
     }
   }
   while (indexCache.size > INDEX_CACHE_MAX_ENTRIES) {
-    const oldest = indexCache.keys().next().value;
-    if (typeof oldest !== 'string') break;
-    indexCache.delete(oldest);
-    debugLogger.debug(`index cache evicted LRU ${oldest}`);
+    // In-flight build placeholders hold no bytes and are bounded by their
+    // own TTL; evicting one discards a completed index when its build
+    // finishes (the stale-completion path returns it uncached). The count
+    // cap stays authoritative over completed entries: skip placeholders
+    // while their build is still awaited.
+    let oldestValue: string | undefined;
+    for (const [key, entry] of indexCache) {
+      if (entry.value) {
+        oldestValue = key;
+        break;
+      }
+    }
+    if (oldestValue === undefined) break;
+    indexCache.delete(oldestValue);
+    debugLogger.debug(`index cache evicted LRU ${oldestValue}`);
   }
-  while (getIndexCacheBytes() > getIndexCacheMaxBytes()) {
+  pruneCacheByteBudget(false);
+  pruneCacheByteBudget(true);
+}
+
+// Evicts least-recently-used entries of one class until that class fits its
+// own budget. The classes never evict each other by byte budget: an oversized
+// index must not push warm small-session indexes out of the shared budget
+// (#17889). The 32-entry count cap in pruneCache remains global.
+function pruneCacheByteBudget(oversizedClass: boolean): void {
+  const sharedBudget = getIndexCacheMaxBytes();
+  const budget = oversizedClass
+    ? getIndexCacheOversizedMaxBytes()
+    : sharedBudget;
+  const inClass = (byteSize: number) =>
+    byteSize > sharedBudget === oversizedClass;
+  let total = 0;
+  for (const entry of indexCache.values()) {
+    if (entry.byteSize && inClass(entry.byteSize)) total += entry.byteSize;
+  }
+  while (total > budget) {
     let evicted = false;
     for (const [key, entry] of indexCache) {
-      if (!entry.byteSize) continue;
+      if (!entry.byteSize || !inClass(entry.byteSize)) continue;
+      total -= entry.byteSize;
       indexCache.delete(key);
       debugLogger.debug(`index cache evicted by byte budget ${key}`);
       evicted = true;
@@ -1700,9 +2160,150 @@ function pruneCache(now = Date.now()): void {
   }
 }
 
+// The file state a reclaim decision may trust. verified means the incoming
+// snapshot was just checked against the file (admission re-verification,
+// offer assertion), so the unreachable clauses apply; a frozen-prefix
+// growth caller only knows a fresh stat of the live file (verified false),
+// and a failed stat leaves the context undefined.
+type ReclaimContext = { size: number; verified: boolean };
+
+// A snapshot of the same file that the incoming one supersedes, or that
+// the current file state has left unreachable. The unreachable clauses
+// need a verified current file state: a changed identity (the identity
+// guard rejects their cursors, even when a backup restored an older
+// mtime), a length beyond the current file (the size guard rejects them,
+// even when a same-millisecond truncation kept the mtime), or an equal
+// size at a different mtime (the mtime guard rejects them). Supersession
+// itself is decided by length, never by mtime order: an in-place sync can
+// append and then restore an older source timestamp, so a newer mtime
+// does not make a shorter prefix live, and an older mtime does not make a
+// longer index dead. Under the append-only read model a same-identity
+// strictly shorter prefix is contained in the incoming snapshot and
+// reclaimable fit-before-evict; a longer same-identity index still serves
+// the frozen offsets and is protected. Frozen-prefix growth compares
+// against the LIVE file length instead of the frozen snapshot: an
+// in-place truncation during the frozen read can leave the current full
+// index shorter than the frozen snapshot at the same identity, and that
+// entry is the live index, not a historical prefix — only entries
+// strictly shorter than the live file are reclaimable. Without a current
+// state (failed stat) nothing is reclaimed and retention is refused.
+function isSupersededSnapshot(
+  value: TranscriptIndex,
+  filePath: string,
+  snapshotSize: number,
+  lastUpdated: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  current: ReclaimContext | undefined,
+): boolean {
+  if (value.filePath !== filePath) return false;
+  const sameIdentity =
+    value.fileIdentity.dev === fileIdentity.dev &&
+    value.fileIdentity.ino === fileIdentity.ino;
+  if (current?.verified) {
+    if (!sameIdentity) return true;
+    if (value.snapshotSize > current.size) return true;
+    if (
+      value.snapshotSize === snapshotSize &&
+      value.lastUpdated !== lastUpdated
+    ) {
+      return true;
+    }
+    return value.snapshotSize < snapshotSize;
+  }
+  if (current) {
+    // The live index always equals the current file length, so strictly
+    // shorter entries are historical prefixes (or unreachable orphans of
+    // a replaced file) regardless of identity; entries at or beyond the
+    // current length may be the live index and are protected.
+    return value.snapshotSize < current.size;
+  }
+  return false;
+}
+
+// The bytes evictSupersededSnapshots would free, so admission can check the
+// new snapshot fits after the reclaim before evicting anything.
+function supersededSnapshotBytes(
+  filePath: string,
+  snapshotSize: number,
+  lastUpdated: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  current: ReclaimContext | undefined,
+  oversizedClass: boolean,
+  exclude?: CacheEntry,
+): number {
+  const sharedBudget = getIndexCacheMaxBytes();
+  let bytes = 0;
+  for (const entry of indexCache.values()) {
+    if (entry === exclude) continue;
+    const value = entry.value;
+    if (!value || !entry.byteSize) continue;
+    if (entry.byteSize > sharedBudget !== oversizedClass) continue;
+    if (
+      isSupersededSnapshot(
+        value,
+        filePath,
+        snapshotSize,
+        lastUpdated,
+        fileIdentity,
+        current,
+      )
+    ) {
+      bytes += entry.byteSize;
+    }
+  }
+  return bytes;
+}
+
+// Evicts superseded snapshots of the same transcript when a newer one cannot
+// be admitted: a superseded frozen prefix would otherwise hold the class
+// budget and force every page of the live snapshot to reparse the whole
+// JSONL. Frozen cursors to an evicted prefix rebuild on demand; eviction
+// itself costs latency only, since page bodies are read from the live file
+// at the frozen offsets whether or not the index is cached. That read model
+// assumes append-only writes: an in-place rewrite followed by an append
+// serves rewritten prefix bytes under a frozen cursor (see the design doc's
+// Compatibility and limits section). Cross-class eviction is deliberately absent: freeing
+// shared bytes does not admit an oversized index, and the class-full refusal
+// keeps resident indexes instead of thrashing between them.
+function evictSupersededSnapshots(
+  filePath: string,
+  snapshotSize: number,
+  lastUpdated: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  current: ReclaimContext | undefined,
+  oversizedClass: boolean,
+  exclude?: CacheEntry,
+): boolean {
+  const sharedBudget = getIndexCacheMaxBytes();
+  let evicted = false;
+  for (const [key, entry] of indexCache) {
+    if (entry === exclude) continue;
+    const value = entry.value;
+    if (!value || !entry.byteSize) continue;
+    if (entry.byteSize > sharedBudget !== oversizedClass) continue;
+    if (
+      !isSupersededSnapshot(
+        value,
+        filePath,
+        snapshotSize,
+        lastUpdated,
+        fileIdentity,
+        current,
+      )
+    ) {
+      continue;
+    }
+    indexCache.delete(key);
+    debugLogger.debug(`index cache evicted superseded snapshot ${key}`);
+    evicted = true;
+  }
+  return evicted;
+}
+
 async function forEachLineInSnapshot(
   filePath: string,
   snapshotSize: number,
+  sessionId: string,
   onLine: (
     line: Buffer,
     offset: number,
@@ -1710,6 +2311,7 @@ async function forEachLineInSnapshot(
   ) => void | Promise<void>,
 ): Promise<void> {
   if (snapshotSize === 0) return;
+  const maxLineBytes = getSessionTranscriptMaxLineBytes();
   const scheduler = new CooperativeReadScheduler();
   let pending: Buffer[] = [];
   let pendingLength = 0;
@@ -1724,52 +2326,69 @@ async function forEachLineInSnapshot(
   const makePendingLine = (): Buffer =>
     pending.length === 1 ? pending[0]! : Buffer.concat(pending, pendingLength);
 
-  for await (const chunk of stream) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    let lineStart = 0;
-    while (lineStart < buffer.length) {
-      const lineEnd = buffer.indexOf(0x0a, lineStart);
-      if (lineEnd === -1) break;
-      const lineOffset =
-        pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
-      const currentLine = buffer.subarray(lineStart, lineEnd);
-      const rawLine =
-        pendingLength > 0
-          ? Buffer.concat(
-              [...pending, currentLine],
-              pendingLength + currentLine.length,
-            )
-          : currentLine;
+  try {
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      let lineStart = 0;
+      while (lineStart < buffer.length) {
+        const lineEnd = buffer.indexOf(0x0a, lineStart);
+        if (lineEnd === -1) break;
+        const lineOffset =
+          pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
+        const currentLine = buffer.subarray(lineStart, lineEnd);
+        const totalLineLength = pendingLength + currentLine.length;
+        if (totalLineLength > maxLineBytes) {
+          throw new SessionTranscriptPageTooLargeError(
+            sessionId,
+            totalLineLength,
+            maxLineBytes,
+          );
+        }
+        const rawLine =
+          pendingLength > 0
+            ? Buffer.concat([...pending, currentLine], totalLineLength)
+            : currentLine;
+        const line =
+          rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+            ? rawLine.subarray(0, rawLine.length - 1)
+            : rawLine;
+        await onLine(line, lineOffset, line.length);
+        await scheduler.afterUnit(line.length);
+        pending = [];
+        pendingLength = 0;
+        lineStart = lineEnd + 1;
+      }
+
+      if (lineStart < buffer.length) {
+        if (pendingLength === 0) {
+          pendingOffset = streamOffset + lineStart;
+        }
+        const tail = buffer.subarray(lineStart);
+        const nextPendingLength = pendingLength + tail.length;
+        if (nextPendingLength > maxLineBytes) {
+          throw new SessionTranscriptPageTooLargeError(
+            sessionId,
+            nextPendingLength,
+            maxLineBytes,
+          );
+        }
+        pending.push(tail);
+        pendingLength = nextPendingLength;
+      }
+      streamOffset += buffer.length;
+    }
+
+    if (pendingLength > 0) {
+      const rawLine = makePendingLine();
       const line =
-        rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+        rawLine[rawLine.length - 1] === 0x0d
           ? rawLine.subarray(0, rawLine.length - 1)
           : rawLine;
-      await onLine(line, lineOffset, line.length);
+      await onLine(line, pendingOffset, line.length);
       await scheduler.afterUnit(line.length);
-      pending = [];
-      pendingLength = 0;
-      lineStart = lineEnd + 1;
     }
-
-    if (lineStart < buffer.length) {
-      if (pendingLength === 0) {
-        pendingOffset = streamOffset + lineStart;
-      }
-      const tail = buffer.subarray(lineStart);
-      pending.push(tail);
-      pendingLength += tail.length;
-    }
-    streamOffset += buffer.length;
-  }
-
-  if (pendingLength > 0) {
-    const rawLine = makePendingLine();
-    const line =
-      rawLine[rawLine.length - 1] === 0x0d
-        ? rawLine.subarray(0, rawLine.length - 1)
-        : rawLine;
-    await onLine(line, pendingOffset, line.length);
-    await scheduler.afterUnit(line.length);
+  } finally {
+    stream.destroy();
   }
 }
 
@@ -1788,7 +2407,7 @@ async function readSegmentRecords(
   ) {
     records = lineCache.value.records;
   } else {
-    selectedLineReadHookForTest?.(segment.offset, segment.length);
+    await selectedLineReadHookForTest?.(segment.offset, segment.length);
     const buffer = Buffer.alloc(segment.length);
     await handle.read(buffer, 0, segment.length, segment.offset);
     const line = buffer.toString('utf8').trim();
@@ -1896,6 +2515,9 @@ async function withAggregatedRecordReadContext<T>(
     handle,
     scheduler: new CooperativeReadScheduler(),
     lineCache: {},
+    ...(index.projectedRecords
+      ? { preloadedRecords: new Map(index.projectedRecords) }
+      : {}),
   };
   try {
     return await callback(context);
@@ -1936,6 +2558,64 @@ async function readGoalStatePayloadBeforePosition(
   return parseGoalStateRecordPayloadV2(record?.systemPayload);
 }
 
+function lastUserPromptFromIndex(index: TranscriptIndex): string | undefined {
+  for (let position = index.replayUuids.length - 1; position >= 0; position--) {
+    const timestamp = index.byUuid.get(
+      index.replayUuids[position]!,
+    )?.lastUserPromptAt;
+    if (timestamp !== undefined) return timestamp;
+  }
+  return undefined;
+}
+
+/**
+ * The index entry for one record's first fragment.
+ *
+ * Shared so a projection-backed index answers navigation, goal and turn
+ * questions exactly the way the physical scanner does; two copies of this field
+ * list would drift and give a Managed session a different history than a legacy
+ * one.
+ */
+function newIndexEntry(
+  record: ChatRecord,
+  sessionId: string,
+  segments: RecordSegment[],
+): UuidIndexEntry {
+  const navigationKind = navigationKindForRecord(record);
+  return {
+    parentUuid: record.parentUuid,
+    lastUserPromptAt: userPromptTimestamp(record),
+    sessionIdMatchesFile: record.sessionId === sessionId,
+    type: record.type,
+    ...(record.subtype !== undefined ? { subtype: record.subtype } : {}),
+    inherited: record.forkedFrom !== undefined,
+    sideTaskSource:
+      record.type === 'system' &&
+      record.subtype === 'session_source' &&
+      isObjectRecord(record.systemPayload) &&
+      record.systemPayload['sourceType'] === 'side_task',
+    apiHistoryCompressionCandidate: isApiHistoryCompressionCandidate(record),
+    resumeTokenCountsCandidate: isResumeTokenCountsCandidate(record),
+    attributionSnapshotCandidate: isAttributionSnapshotCandidate(record),
+    uiTelemetryCandidate: isRestoreUiTelemetryCandidate(record),
+    goalRecoveryCandidate: isGoalRecoveryCandidate(record),
+    turnHint: getSessionTurnRecordHint(record, sessionId),
+    ...(navigationKind ? { navigationKind } : {}),
+    ...(typeof record.daemonPromptId === 'string'
+      ? { daemonPromptId: record.daemonPromptId }
+      : {}),
+    navigationTextSuppressed:
+      record.subtype === 'cron' ||
+      projectUserTranscriptForDisplay(record).displayText !== undefined,
+    assistantPreviewCandidate: isAssistantPreviewCandidate(record),
+    ...(record.subtype === 'turn_result' &&
+    isTurnResultRecordPayload(record.systemPayload)
+      ? { turnResultPromptId: record.systemPayload.promptId }
+      : {}),
+    segments,
+  };
+}
+
 async function buildIndex(params: {
   filePath: string;
   fileIdentity: SessionTranscriptFileIdentity;
@@ -1944,6 +2624,7 @@ async function buildIndex(params: {
 }): Promise<TranscriptIndex> {
   const { filePath, fileIdentity, snapshotSize, lastUpdated } = params;
   const sessionId = path.basename(filePath, '.jsonl');
+  const executionEngine = new SessionExecutionEngineAccumulator(sessionId);
   if (snapshotSize > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) {
     debugLogger.warn(
       `index rejected: snapshot too large session=${sessionId} ` +
@@ -1962,39 +2643,75 @@ async function buildIndex(params: {
   // Retain only the fields required by the shared branch resolver while the
   // frozen snapshot is parsed, so page reads never reopen the full active chain.
   const branchPointRecords = new Map<string, BranchPointRecord>();
-  const goalEvidenceAccumulators = new Map<
-    string,
-    GoalEvidenceRecordIndexAccumulator
-  >();
   let sequence = 0;
   const physicalRecords: PhysicalRecordHint[] = [];
+  let sourceReadComplete = true;
   let leafUuid: string | undefined;
   let firstRecordUuid: string | undefined;
   let firstRecordTimestamp: string | undefined;
   let startTime: string | undefined;
+  const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
+  const buildHeapUsedStart = process.memoryUsage().heapUsed;
+  const heapSizeLimit = getHeapStatistics().heap_size_limit;
+  const availableHeapBytes = Math.max(0, heapSizeLimit - buildHeapUsedStart);
+  const remainingHeapBudget =
+    availableHeapBudgetForTest ??
+    Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
+  // V8's heap_size_limit exceeds --max-old-space-size by a platform-dependent
+  // margin (~96 MiB on x86_64 Node 26; larger on aarch64/Node 24, where a
+  // 192 MiB old space can report roughly 2x that in heap_size_limit). Deducting
+  // 96 MiB keeps 256+ MiB heaps below Mark-Compact OOM while giving ~512+ MiB
+  // heaps 5/8 headroom above GC noise; smaller heaps on such platforms remain
+  // subject to V8's pre-existing OOM limitation, matching base.
+  const estimatedOldSpaceAvailableBytes = Math.max(
+    0,
+    availableHeapBytes - 96 * 1024 * 1024,
+  );
+  const maxHeapGrowthBytes =
+    availableHeapBudgetForTest ??
+    Math.max(
+      64 * 1024,
+      Math.min(
+        Math.floor((availableHeapBytes * 5) / 8),
+        Math.floor((estimatedOldSpaceAvailableBytes * 3) / 4),
+      ),
+    );
+  const maxIndexBuildBytes = Math.min(
+    maxIndexEstimateBytes,
+    remainingHeapBudget,
+  );
+  // Only mark a heap-limited estimate rejection retryable when live heap
+  // occupancy is elevated (or a test injects a constrained headroom). An idle
+  // process with a small fixed --max-old-space-size will reject the same file
+  // on every retry.
+  const transientHeapPressure =
+    availableHeapBudgetForTest !== undefined
+      ? remainingHeapBudget < maxIndexEstimateBytes
+      : remainingHeapBudget < maxIndexEstimateBytes &&
+        buildHeapUsedStart >= Math.floor(heapSizeLimit / 4);
+  let estimatedIndexBytes =
+    INDEX_ENTRY_BASE_BYTES +
+    INDEX_CONTAINER_BASE_BYTES * 7 +
+    estimateStringBytes(filePath);
 
   try {
     await forEachLineInSnapshot(
       filePath,
       snapshotSize,
+      sessionId,
       (line, offset, length) => {
         const text = line.toString('utf8').trim();
         if (text.length === 0) return;
         let fragmentIndex = 0;
-        for (const value of jsonl.parseLineTolerant<unknown>(text, filePath)) {
-          const record = validateTranscriptRecord(value).record;
+        for (const { record } of executionEngine.parseLine(text, filePath)) {
           if (!record) {
+            sourceReadComplete = false;
             continue;
           }
           if (firstRecordUuid === undefined) {
             firstRecordUuid = record.uuid;
             firstRecordTimestamp = record.timestamp;
           }
-          const sideTaskSource =
-            record.type === 'system' &&
-            record.subtype === 'session_source' &&
-            isObjectRecord(record.systemPayload) &&
-            record.systemPayload['sourceType'] === 'side_task';
           if (isTranscriptConversationRecord(record)) {
             appendBranchPointRecord(
               branchPointRecords,
@@ -2004,14 +2721,18 @@ async function buildIndex(params: {
             leafUuid = record.uuid;
           }
           const existing = byUuid.get(record.uuid);
-          physicalRecords.push({
+          const physicalHint: PhysicalRecordHint = {
             uuid: record.uuid,
             parentUuid: record.parentUuid,
             type: record.type,
             ...(record.subtype !== undefined
               ? { subtype: record.subtype }
               : {}),
-          });
+          };
+          physicalRecords.push(physicalHint);
+          estimatedIndexBytes +=
+            INDEX_CONTAINER_SLOT_BYTES +
+            estimatePhysicalRecordHintBytes(physicalHint);
           const segment = {
             offset,
             length,
@@ -2029,10 +2750,17 @@ async function buildIndex(params: {
                 : undefined,
             } as ChatRecord;
             existing.segments.push(segment);
+            estimatedIndexBytes +=
+              INDEX_CONTAINER_SLOT_BYTES + INDEX_SEGMENT_BYTES;
             existing.sessionIdMatchesFile &&= record.sessionId === sessionId;
             existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
             existing.assistantPreviewCandidate ||=
               isAssistantPreviewCandidate(fragmentRecord);
+            existing.uiTelemetryCandidate ||= isRestoreUiTelemetryCandidate({
+              ...(record as unknown as ChatRecord),
+              type: existing.type,
+              subtype: existing.subtype,
+            } as ChatRecord);
             if (existing.type === 'assistant' && record.usageMetadata) {
               existing.resumeTokenCountsCandidate =
                 isResumeTokenCountsCandidate({
@@ -2045,53 +2773,51 @@ async function buildIndex(params: {
               record as unknown as ChatRecord,
               sessionId,
             ).countsAsUserPrompt;
-            goalEvidenceAccumulators
-              .get(record.uuid)
-              ?.addFragment(record as unknown as ChatRecord);
           } else {
             const chatRecord = record as unknown as ChatRecord;
-            const navigationKind = navigationKindForRecord(chatRecord);
-            const navigationTextSuppressed =
-              chatRecord.subtype === 'cron' ||
-              projectUserTranscriptForDisplay(chatRecord).displayText !==
-                undefined;
-            const goalEvidenceAccumulator =
-              new GoalEvidenceRecordIndexAccumulator(chatRecord);
-            const goalEvidenceHint = goalEvidenceAccumulator.finish();
-            if (goalEvidenceHint.provenance) {
-              goalEvidenceAccumulators.set(
-                record.uuid,
-                goalEvidenceAccumulator,
+            const entry = newIndexEntry(chatRecord, sessionId, [segment]);
+            byUuid.set(record.uuid, entry);
+            estimatedIndexBytes += estimateUuidIndexEntryBytes(
+              record.uuid,
+              entry,
+            );
+          }
+          if (estimatedIndexBytes > maxIndexBuildBytes) {
+            const retryable =
+              transientHeapPressure &&
+              estimatedIndexBytes <= maxIndexEstimateBytes;
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              snapshotSize,
+              maxIndexBuildBytes,
+              {
+                dimension: 'index',
+                measuredBytes: estimatedIndexBytes,
+                ...(retryable ? { retryable: true } : {}),
+              },
+            );
+          }
+          // The cache estimate intentionally stays unchanged. For the hard
+          // build ceiling, periodically sample real heap growth as well —
+          // short-record retention can cost materially more than the estimate
+          // on some runtimes, and estimation alone must not free a 1 GiB heap.
+          // Always sample the first record so a depleted process cannot admit
+          // a build even if there are fewer than 1024 records.
+          if ((sequence & 1023) === 1) {
+            const heapGrowth =
+              process.memoryUsage().heapUsed - buildHeapUsedStart;
+            if (heapGrowth > maxHeapGrowthBytes) {
+              throw new SessionTranscriptTooLargeError(
+                sessionId,
+                snapshotSize,
+                maxHeapGrowthBytes,
+                {
+                  dimension: 'index',
+                  measuredBytes: heapGrowth,
+                  retryable: true,
+                },
               );
             }
-            byUuid.set(record.uuid, {
-              parentUuid: record.parentUuid,
-              sessionIdMatchesFile: record.sessionId === sessionId,
-              type: record.type,
-              ...(record.subtype !== undefined
-                ? { subtype: record.subtype }
-                : {}),
-              inherited: record.forkedFrom !== undefined,
-              sideTaskSource,
-              apiHistoryCompressionCandidate:
-                isApiHistoryCompressionCandidate(chatRecord),
-              resumeTokenCountsCandidate:
-                isResumeTokenCountsCandidate(chatRecord),
-              attributionSnapshotCandidate:
-                isAttributionSnapshotCandidate(chatRecord),
-              goalRecoveryCandidate: isGoalRecoveryCandidate(chatRecord),
-              goalEvidenceHint,
-              turnHint: getSessionTurnRecordHint(chatRecord, sessionId),
-              ...(navigationKind ? { navigationKind } : {}),
-              navigationTextSuppressed,
-              assistantPreviewCandidate:
-                isAssistantPreviewCandidate(chatRecord),
-              ...(record.subtype === 'turn_result' &&
-              isTurnResultRecordPayload(record.systemPayload)
-                ? { turnResultPromptId: record.systemPayload.promptId }
-                : {}),
-              segments: [segment],
-            });
           }
         }
       },
@@ -2102,10 +2828,7 @@ async function buildIndex(params: {
     }
     throw error;
   }
-
-  for (const [uuid, accumulator] of goalEvidenceAccumulators) {
-    byUuid.get(uuid)!.goalEvidenceHint = accumulator.finish();
-  }
+  sourceReadComplete &&= executionEngine.sourceComplete;
 
   for (const [uuid, entry] of byUuid) {
     if (!entry.sessionIdMatchesFile) {
@@ -2162,6 +2885,7 @@ async function buildIndex(params: {
         turnId: uuid,
         replayPosition: position,
         kind: entry.navigationKind,
+        ...(entry.daemonPromptId ? { promptId: entry.daemonPromptId } : {}),
       };
       entry.navigationOrdinal = navigationTurns.length;
       navigationTurns.push(turn);
@@ -2181,7 +2905,7 @@ async function buildIndex(params: {
       if (targetTurn) targetTurn.finalAssistantRecordId = uuid;
     }
     if (entry?.turnResultPromptId && currentPromptTurn) {
-      currentPromptTurn.promptId = entry.turnResultPromptId;
+      currentPromptTurn.promptId ??= entry.turnResultPromptId;
       currentPromptTurn = undefined;
     }
   }
@@ -2210,15 +2934,20 @@ async function buildIndex(params: {
       `branchPoints=${branchPointsByAssistantUuid.size}`,
   );
 
-  await indexBuildCompleteHookForTest?.(filePath);
-
-  return {
+  const builtIndex: TranscriptIndex = {
+    executionEngine: executionEngine.finish({
+      filePath,
+      ...fileIdentity,
+      size: snapshotSize,
+      lastUpdated,
+    }),
     filePath,
     fileIdentity,
     snapshotSize,
     leafUuid,
     firstRecordUuid,
     physicalRecords,
+    sourceReadComplete,
     runtimeUuids,
     replayUuids,
     navigationTurns,
@@ -2230,6 +2959,38 @@ async function buildIndex(params: {
     byUuid,
     branchPointsByAssistantUuid,
   };
+  const finalEstimatedBytes = estimateIndexCacheBytes(builtIndex);
+  if (finalEstimatedBytes > maxIndexBuildBytes) {
+    const retryable =
+      transientHeapPressure && finalEstimatedBytes <= maxIndexEstimateBytes;
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      snapshotSize,
+      maxIndexBuildBytes,
+      {
+        dimension: 'index',
+        measuredBytes: finalEstimatedBytes,
+        ...(retryable ? { retryable: true } : {}),
+      },
+    );
+  }
+  const finalHeapGrowth = process.memoryUsage().heapUsed - buildHeapUsedStart;
+  if (finalHeapGrowth > maxHeapGrowthBytes) {
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      snapshotSize,
+      maxHeapGrowthBytes,
+      {
+        dimension: 'index',
+        measuredBytes: finalHeapGrowth,
+        retryable: true,
+      },
+    );
+  }
+
+  await indexBuildCompleteHookForTest?.(filePath);
+
+  return builtIndex;
 }
 
 async function getCachedIndex(params: {
@@ -2263,15 +3024,71 @@ async function getCachedIndex(params: {
 
   debugLogger.debug(`index cache miss ${key}`);
   params.onCacheState?.('miss');
-  const pending = buildIndex(params);
-  indexCache.set(key, {
-    pending,
-    expiresAt: now + INDEX_CACHE_TTL_MS,
-  });
-  try {
-    const value = await pending;
+  // Waiters share the verified completion, not the raw build: a snapshot
+  // rewritten under the build must fail every sharer closed, not only the
+  // initiator's cache admission. The wrapper compares its own promise
+  // against the cache entry; a const self-reference trips TS2454, so the
+  // binding is a let assigned exactly once.
+  let pending: Promise<TranscriptIndex> | undefined;
+  // eslint-disable-next-line prefer-const -- assigned once, see above
+  pending = (async () => {
+    const value = await buildIndex(params);
+    // A build can complete after the file was rewritten or replaced under it
+    // (equal-size mtime move, identity change, truncation). Re-verify the
+    // frozen snapshot before ANY early return or admission: cache-entry
+    // ownership only governs cache writes and deletes, never whether the
+    // built index is safe to serve, so every sharer of the build fails
+    // closed together. allowAppend keeps a prefix frozen across a concurrent
+    // append valid.
+    let verifiedSize: number | undefined;
+    try {
+      verifiedSize = await verifiedSnapshotSize(
+        params.filePath,
+        params.fileIdentity,
+        params.snapshotSize,
+        params.lastUpdated,
+        true,
+      );
+    } catch (error) {
+      // A transient stat error (EMFILE/EIO/EACCES) leaves the file state
+      // unknown: serve the built snapshot uncached rather than fail a page
+      // that was ready. ENOENT maps to undefined inside verifiedSnapshotSize.
+      if (indexCache.get(key)?.pending === pending) {
+        indexCache.delete(key);
+      }
+      debugLogger.debug(
+        `index cache skipped verify after stat error ${key}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return value;
+    }
+    if (verifiedSize === undefined) {
+      if (indexCache.get(key)?.pending === pending) {
+        indexCache.delete(key);
+      }
+      debugLogger.debug(`index cache skipped changed snapshot ${key}`);
+      throw new SessionTranscriptSnapshotUnavailableError(
+        path.basename(params.filePath, '.jsonl'),
+      );
+    }
+    // The signature check yielded; the pending entry may have been replaced
+    // (TTL expiry or the 32-entry LRU). The verified value is still safe to
+    // serve, but this completion no longer owns the cache slot. Everything
+    // from here to the cache write is synchronous: the ownership check, the
+    // class budget math and the reclaim all see one consistent cache state,
+    // and the reclaim uses the length the signature was verified against
+    // instead of a second stat that could fail or observe a newer file.
+    if (indexCache.get(key)?.pending !== pending) {
+      debugLogger.debug(`index cache skipped stale completion ${key}`);
+      return value;
+    }
     const byteSize = estimateIndexCacheBytes(value);
-    if (byteSize > getIndexCacheMaxBytes()) {
+    const oversized = byteSize > getIndexCacheMaxBytes();
+    const classBudget = oversized
+      ? getIndexCacheOversizedMaxBytes()
+      : getIndexCacheMaxBytes();
+    if (byteSize > classBudget) {
       if (indexCache.get(key)?.pending === pending) {
         indexCache.delete(key);
       }
@@ -2280,17 +3097,51 @@ async function getCachedIndex(params: {
       );
       return value;
     }
-    if (indexCache.get(key)?.pending !== pending) {
-      debugLogger.debug(`index cache skipped stale completion ${key}`);
-      return value;
-    }
-    if (getIndexCacheBytes() + byteSize > getIndexCacheMaxBytes()) {
-      indexCache.delete(key);
-      debugLogger.debug(
-        `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
+    const classBytes = getIndexCacheBytesByClass();
+    if (
+      (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+      classBudget
+    ) {
+      // Evict superseded prefixes only when the new snapshot fits after the
+      // reclaim; otherwise the eviction would force their still-readable
+      // frozen cursors to rebuild for an admission that is refused anyway.
+      // The verified current file length decides whether a longer cached
+      // prefix is unreachable (a same-millisecond truncation keeps the
+      // mtime).
+      const reclaimable = supersededSnapshotBytes(
+        params.filePath,
+        params.snapshotSize,
+        params.lastUpdated,
+        params.fileIdentity,
+        { size: verifiedSize, verified: true },
+        oversized,
       );
-      return value;
+      if (
+        (oversized ? classBytes.oversized : classBytes.shared) -
+          reclaimable +
+          byteSize >
+        classBudget
+      ) {
+        indexCache.delete(key);
+        debugLogger.debug(
+          `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
+        );
+        return value;
+      }
+      evictSupersededSnapshots(
+        params.filePath,
+        params.snapshotSize,
+        params.lastUpdated,
+        params.fileIdentity,
+        { size: verifiedSize, verified: true },
+        oversized,
+      );
     }
+    // Map.set updates an existing key in place; the placeholder has held
+    // its insertion position through the build while the count-cap prune
+    // skipped it. Delete first so the completion lands at the MRU tail
+    // instead of being the prune's first eviction candidate.
+    indexCache.delete(key);
     indexCache.set(key, {
       value,
       byteSize,
@@ -2298,12 +3149,19 @@ async function getCachedIndex(params: {
     });
     pruneCache();
     return value;
+  })();
+  indexCache.set(key, {
+    pending,
+    expiresAt: now + INDEX_CACHE_TTL_MS,
+  });
+  try {
+    return await pending;
   } catch (error) {
     if (indexCache.get(key)?.pending === pending) {
       indexCache.delete(key);
     }
     debugLogger.debug(
-      `index cache build failed ${key}: ${
+      `index cache completion rejected ${key}: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -2346,6 +3204,23 @@ function selectRestoreReplayUuids(
   if (replay.kind === 'none') return undefined;
   const replayIndex = makeReplayIndex(index, replay.hideInheritedHistory);
   if (replay.kind === 'all') {
+    const maxAllReplayBytes = getMaxAllReplayBytes();
+    let totalReplayBytes = 0;
+    for (const uuid of replayIndex.replayUuids) {
+      const entry = replayIndex.byUuid.get(uuid);
+      if (!entry) continue;
+      for (const segment of entry.segments) {
+        totalReplayBytes += segment.length;
+      }
+      if (totalReplayBytes > maxAllReplayBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          index.snapshotSize,
+          maxAllReplayBytes,
+          { dimension: 'replay', measuredBytes: totalReplayBytes },
+        );
+      }
+    }
     return {
       index: replayIndex,
       uuids: replayIndex.replayUuids,
@@ -2391,27 +3266,123 @@ async function assertIndexSnapshotUnchanged(
   }
 }
 
+// The verified current file length, or undefined when the file no longer
+// matches the snapshot signature. ENOENT maps to undefined; a transient
+// stat error throws so the caller can choose its degradation. Admission
+// reuses the returned length instead of stat-ing again, keeping the
+// ownership check, budget math and cache writes synchronous with the
+// verification — no second syscall can fail uncaught or observe a file
+// state newer than the one the signature was verified against.
+async function verifiedSnapshotSize(
+  filePath: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  snapshotSize: number,
+  lastUpdated: string,
+  allowAppend = false,
+): Promise<number | undefined> {
+  let stats: fs.Stats;
+  try {
+    stats = await fsp.stat(filePath);
+  } catch (error) {
+    if (isFileMissingError(error)) return undefined;
+    throw error;
+  }
+  const matches =
+    (stats.size === snapshotSize ||
+      (allowAppend && stats.size > snapshotSize)) &&
+    sameFileIdentity(fileIdentityFromStats(stats), fileIdentity) &&
+    ((allowAppend && stats.size > snapshotSize) ||
+      new Date(stats.mtimeMs).toISOString() === lastUpdated);
+  return matches ? stats.size : undefined;
+}
+
 async function hasSnapshotSignature(
   filePath: string,
   fileIdentity: SessionTranscriptFileIdentity,
   snapshotSize: number,
   lastUpdated: string,
+  allowAppend = false,
 ): Promise<boolean> {
+  return (
+    (await verifiedSnapshotSize(
+      filePath,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+      allowAppend,
+    )) !== undefined
+  );
+}
+
+export async function readSessionTranscriptSnapshot(
+  filePath: string,
+  sessionId: string,
+  collectRecords = true,
+): Promise<
+  | {
+      records: ChatRecord[];
+      firstRecord?: ChatRecord;
+      executionEngine: SessionExecutionEngineState;
+      stats: fs.Stats;
+      /** False when any line did not parse whole. */
+      sourceReadComplete: boolean;
+    }
+  | undefined
+> {
   let stats: fs.Stats;
   try {
     stats = await fsp.stat(filePath);
   } catch (error) {
-    if (isFileMissingError(error)) return false;
+    if (isFileMissingError(error)) return undefined;
     throw error;
   }
-  return (
-    stats.size === snapshotSize &&
-    sameFileIdentity(fileIdentityFromStats(stats), fileIdentity) &&
-    new Date(stats.mtimeMs).toISOString() === lastUpdated
-  );
+  if (!stats.isFile()) {
+    throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+  }
+  const fileIdentity = fileIdentityFromStats(stats);
+  const lastUpdated = new Date(stats.mtimeMs).toISOString();
+  const owner = new SessionExecutionEngineAccumulator(sessionId);
+  const records: ChatRecord[] = [];
+  let firstRecord: ChatRecord | undefined;
+  await forEachLineInSnapshot(filePath, stats.size, sessionId, (line) => {
+    for (const { value } of owner.parseLine(
+      line.toString('utf8').trim(),
+      filePath,
+    )) {
+      firstRecord ??= value as ChatRecord;
+      if (collectRecords) records.push(value as ChatRecord);
+    }
+  });
+  if (
+    !(await hasSnapshotSignature(
+      filePath,
+      fileIdentity,
+      stats.size,
+      lastUpdated,
+    ))
+  ) {
+    throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+  }
+  return {
+    records,
+    firstRecord,
+    stats,
+    sourceReadComplete: owner.sourceComplete,
+    executionEngine: owner.finish({
+      filePath,
+      ...fileIdentity,
+      size: stats.size,
+      lastUpdated,
+    }),
+  };
 }
 
 function offerFreshIndexToCache(index: TranscriptIndex): void {
+  // Projected indexes are only built for a page request and their byte
+  // estimate ignores `projectedRecords`. Caching one would both inflate the
+  // cache's byte budget and serve wrapper-free pages from the physical-index
+  // cache.
+  if (index.projectedRecords !== undefined) return;
   pruneCache();
   const key = makeCacheKey(
     index.filePath,
@@ -2421,21 +3392,109 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
   );
   if (indexCache.has(key)) return;
   const byteSize = estimateIndexCacheBytes(index);
-  if (
-    byteSize > getIndexCacheMaxBytes() ||
-    getIndexCacheBytes() + byteSize > getIndexCacheMaxBytes() ||
-    indexCache.size >= INDEX_CACHE_MAX_ENTRIES
-  ) {
+  const oversized = byteSize > getIndexCacheMaxBytes();
+  const classBudget = oversized
+    ? getIndexCacheOversizedMaxBytes()
+    : getIndexCacheMaxBytes();
+  if (byteSize > classBudget) {
     debugLogger.debug(
       `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
     );
     return;
   }
-  indexCache.set(key, {
+  const classBytes = getIndexCacheBytesByClass();
+  const countFull = indexCache.size >= INDEX_CACHE_MAX_ENTRIES;
+  if (
+    (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+      classBudget ||
+    countFull
+  ) {
+    // Same fit-before-evict judgment as getCachedIndex, extended to the
+    // 32-entry count cap: a refused offer must not evict the superseded
+    // prefix it cannot replace. The byte arm stays class-scoped, but count
+    // slots are class-agnostic — a superseded same-file entry in the other
+    // class frees a slot too.
+    // Every offer caller verifies the snapshot unchanged immediately
+    // before offering, so the snapshot length is the current file length.
+    const current: ReclaimContext = {
+      size: index.snapshotSize,
+      verified: true,
+    };
+    const reclaimable = supersededSnapshotBytes(
+      index.filePath,
+      index.snapshotSize,
+      index.lastUpdated,
+      index.fileIdentity,
+      current,
+      oversized,
+    );
+    const reclaimableOtherClass = countFull
+      ? supersededSnapshotBytes(
+          index.filePath,
+          index.snapshotSize,
+          index.lastUpdated,
+          index.fileIdentity,
+          current,
+          !oversized,
+        )
+      : 0;
+    if (
+      (oversized ? classBytes.oversized : classBytes.shared) -
+        reclaimable +
+        byteSize >
+        classBudget ||
+      (countFull && reclaimable + reclaimableOtherClass === 0)
+    ) {
+      debugLogger.debug(
+        `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
+      );
+      return;
+    }
+    evictSupersededSnapshots(
+      index.filePath,
+      index.snapshotSize,
+      index.lastUpdated,
+      index.fileIdentity,
+      current,
+      oversized,
+    );
+    if (countFull && reclaimable === 0) {
+      evictSupersededSnapshots(
+        index.filePath,
+        index.snapshotSize,
+        index.lastUpdated,
+        index.fileIdentity,
+        current,
+        !oversized,
+      );
+    }
+  }
+  const entry: CacheEntry = {
     value: index,
     byteSize,
     expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
+  };
+  indexCache.set(key, entry);
+  accountManagedProjection(index, entry, {
+    size: index.snapshotSize,
+    verified: true,
   });
+}
+
+// A fresh read of the live file length for frozen-prefix growth reclaim.
+// The frozen snapshot is NOT re-verified here — the page already passed
+// its snapshot guards, and a truncation or replacement under the read is
+// exactly what the reclaim must see. Any stat failure leaves the context
+// undefined: reclaim is skipped rather than reclaiming blind.
+async function frozenReclaimContext(
+  filePath: string,
+): Promise<ReclaimContext | undefined> {
+  try {
+    const stats = await fsp.stat(filePath);
+    return { size: stats.size, verified: false };
+  } catch {
+    return undefined;
+  }
 }
 
 function lastUuidMatching(
@@ -2461,6 +3520,269 @@ function selectArtifactUuids(index: TranscriptIndex): string[] {
   );
 }
 
+// Null prototype: record uuids are untrusted, and '__proto__' would silently
+// drop the entry on a plain object.
+function branchPointsForRecords(
+  index: TranscriptIndex,
+  records: readonly ChatRecord[],
+): Record<string, string> | undefined {
+  let branchPoints: Record<string, string> | undefined;
+  for (const record of records) {
+    const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
+    if (checkpointUuid !== undefined) {
+      (branchPoints ??= Object.create(null))[record.uuid] = checkpointUuid;
+    }
+  }
+  return branchPoints;
+}
+
+function indexHasManagedHeader(index: TranscriptIndex): boolean {
+  return index.physicalRecords.some(
+    (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
+  );
+}
+
+function assertManagedAllReplayBudget(
+  records: readonly ChatRecord[],
+  sessionId: string,
+  snapshotSize: number,
+  replay: SessionRestoreReplaySelection,
+): void {
+  if (replay.kind !== 'all') return;
+  const maxBytes = getMaxAllReplayBytes();
+  let total = 0;
+  for (const record of records) {
+    total += Buffer.byteLength(JSON.stringify(record), 'utf8');
+    if (total > maxBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        snapshotSize,
+        maxBytes,
+        { dimension: 'replay', measuredBytes: total },
+      );
+    }
+  }
+}
+
+/**
+ * Builds a replay page over projected records.
+ *
+ * There is nothing to select by uuid here: the projection is already the
+ * committed history in order, so the selection is a suffix of it. Inherited
+ * history has nothing to hide either -- forking a Managed session is refused, so
+ * no record in the log belongs to another session.
+ */
+function managedReplayPage(
+  records: ChatRecord[],
+  selection: SessionRestoreReplaySelection,
+): SessionRestoreReplayPage | undefined {
+  if (selection.kind === 'none') return undefined;
+  const selected =
+    selection.kind === 'recent' ? records.slice(-selection.limit) : records;
+  const hasMore = selected.length < records.length;
+  return {
+    records: selected,
+    gaps: [],
+    hasMore,
+    ...(hasMore && selected[0] ? { anchorRecordId: selected[0].uuid } : {}),
+  };
+}
+
+/**
+ * Derives navigation turns from projected records.
+ *
+ * The physical log of a Managed session holds only wrapper records, which carry
+ * no navigation kind, so deriving turns from the index would report a session
+ * with history as having no turns at all. The rules mirror the index builder's:
+ * the projection is the replay, so a record's position in it is its replay
+ * position.
+ */
+function managedNavigationTurns(
+  records: readonly ChatRecord[],
+): TranscriptNavigationTurnHint[] {
+  const turns: TranscriptNavigationTurnHint[] = [];
+  let currentPromptTurn: TranscriptNavigationTurnHint | undefined;
+  let currentRealtimeTurn: TranscriptNavigationTurnHint | undefined;
+  for (const [position, record] of records.entries()) {
+    const navigationKind = navigationKindForRecord(record);
+    if (navigationKind) {
+      const turn: TranscriptNavigationTurnHint = {
+        turnId: record.uuid,
+        replayPosition: position,
+        kind: navigationKind,
+        ...(typeof record.daemonPromptId === 'string' && record.daemonPromptId
+          ? { promptId: record.daemonPromptId }
+          : {}),
+      };
+      turns.push(turn);
+      if (navigationKind === 'realtime') {
+        currentRealtimeTurn = turn;
+      } else {
+        currentPromptTurn = turn;
+        currentRealtimeTurn = undefined;
+      }
+      continue;
+    }
+    if (isAssistantPreviewCandidate(record)) {
+      const targetTurn =
+        record.subtype === 'realtime_message'
+          ? currentRealtimeTurn
+          : currentPromptTurn;
+      if (targetTurn) targetTurn.finalAssistantRecordId = record.uuid;
+    }
+    if (
+      record.subtype === 'turn_result' &&
+      isTurnResultRecordPayload(record.systemPayload) &&
+      currentPromptTurn
+    ) {
+      currentPromptTurn.promptId ??= record.systemPayload.promptId;
+      currentPromptTurn = undefined;
+    }
+  }
+  return turns;
+}
+
+/**
+ * Projections of the snapshots the index cache still holds.
+ *
+ * Weakly keyed so it inherits that cache's invalidation exactly: a new file
+ * identity or snapshot size builds a new index, which misses here.
+ */
+const managedProjections = new WeakMap<
+  TranscriptIndex,
+  {
+    readonly records: ChatRecord[];
+    readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
+  }
+>();
+// Session title metadata is a few bytes and is never what the class byte
+// budget is sizing; keep it in a separate WeakMap so refusing to retain the
+// decoded bodies does not drop customTitle/titleSource from the restore
+// payload (while still deleting the bodies from managedProjections so a
+// follow-up read re-decodes instead of seeing an empty record list).
+const managedProjectionTitles = new WeakMap<
+  TranscriptIndex,
+  { title?: string; source?: 'auto' | 'manual' }
+>();
+
+function estimateManagedProjectionBytes(projection: {
+  readonly records: ChatRecord[];
+  readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
+}): number {
+  // Fold per record rather than stringifying the whole history at once: a
+  // single giant JSON string would transiently allocate hundreds of MiB on
+  // the event loop for a large managed session. Same UTF-16 caliber as the
+  // index and hook estimates; the omitted array brackets/commas are
+  // negligible against the bodies.
+  let bytes =
+    INDEX_CONTAINER_BASE_BYTES +
+    estimateStringBytes(JSON.stringify(projection.titleInfo));
+  for (const record of projection.records) {
+    bytes += estimateStringBytes(JSON.stringify(record));
+  }
+  return bytes;
+}
+
+// A restore projection can be decoded while its index is not yet cached and
+// then offered to the cache; account the retained bodies at admission, or
+// drop them when they do not fit the entry's budget class.
+// current follows cacheAdditionFitsClassBudget: the offer door passes the
+// just-verified snapshot length, a frozen-prefix decode passes a fresh
+// stat of the live file (or undefined when the stat failed) so retention
+// never reclaims the live index.
+function accountManagedProjection(
+  index: TranscriptIndex,
+  entry: CacheEntry,
+  current: ReclaimContext | undefined,
+) {
+  const projection = managedProjections.get(index);
+  if (!projection) return;
+  const projectionBytes = estimateManagedProjectionBytes(projection);
+  if (cacheAdditionFitsClassBudget(entry, projectionBytes, current)) {
+    entry.byteSize = (entry.byteSize ?? 0) + projectionBytes;
+  } else {
+    managedProjections.delete(index);
+  }
+}
+
+/**
+ * An index over projected records, shaped like the physical one.
+ *
+ * Selection, navigation anchors, goal positions and branch points all read the
+ * index rather than the file, so giving the projection the same shape is what
+ * lets paging work on a Managed log without a second copy of those rules. The
+ * snapshot identity stays the physical one: the turn reader issues snapshots
+ * from it, and a client anchors a page with them.
+ */
+function managedPageIndex(
+  index: TranscriptIndex,
+  records: ChatRecord[],
+): TranscriptIndex {
+  const sessionId = path.basename(index.filePath, '.jsonl');
+  const byUuid = new Map<string, UuidIndexEntry>();
+  const branchPointRecords = new Map<string, BranchPointRecord>();
+  const goalStatePositions: number[] = [];
+  const projectedRecords = new Map<string, ChatRecord>();
+  for (const [position, record] of records.entries()) {
+    if (
+      validateTranscriptRecord(record as unknown as TranscriptRecordInput)
+        .record === undefined ||
+      record.sessionId !== sessionId
+    ) {
+      debugLogger.warn(
+        `projected record rejected session=${sessionId} position=${position}`,
+      );
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+    // The projection is already the whole record, so the segment carries no
+    // offset to read from; its length is what the page byte budget measures.
+    const entry = newIndexEntry(record, sessionId, [
+      {
+        offset: 0,
+        length: Buffer.byteLength(JSON.stringify(record), 'utf8'),
+        sequence: position,
+        fragmentIndex: 0,
+      },
+    ]);
+    byUuid.set(record.uuid, entry);
+    projectedRecords.set(record.uuid, record);
+    appendBranchPointRecord(branchPointRecords, record);
+    if (entry.type === 'system' && entry.subtype === 'goal_state') {
+      goalStatePositions.push(position);
+    }
+  }
+  const navigationTurns = managedNavigationTurns(records);
+  for (const [ordinal, turn] of navigationTurns.entries()) {
+    const entry = byUuid.get(turn.turnId);
+    if (entry) {
+      entry.navigationOrdinal = ordinal;
+    }
+  }
+  const replayUuids = records.map((record) => record.uuid);
+  return {
+    ...index,
+    runtimeUuids: replayUuids,
+    replayUuids,
+    navigationTurns,
+    goalStatePositions,
+    // The committed prefix is contiguous by construction, so a projected page
+    // never reports a hole the way a broken physical chain does.
+    gaps: [],
+    byUuid,
+    branchPointsByAssistantUuid: new Map(
+      [
+        ...resolveBranchPoints(
+          replayUuids.flatMap((uuid) => {
+            const record = branchPointRecords.get(uuid);
+            return record ? [record] : [];
+          }),
+        ).values(),
+      ].map((point) => [point.assistantRecordUuid, point.checkpointUuid]),
+    ),
+    projectedRecords,
+  };
+}
+
 export class SessionTranscriptReader {
   private readonly storage: Storage;
 
@@ -2472,7 +3794,10 @@ export class SessionTranscriptReader {
     this.storage = new Storage(workspaceCwd, runtimeBaseDir);
   }
 
-  getSessionFilePath(sessionId: string): string {
+  getSessionFilePath(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+  ): string {
     if (!SESSION_TRANSCRIPT_SESSION_ID_PATTERN.test(sessionId)) {
       debugLogger.debug(`invalid session id for transcript read: ${sessionId}`);
       throw makeSessionTranscriptNotFoundError(sessionId);
@@ -2480,8 +3805,201 @@ export class SessionTranscriptReader {
     return path.join(
       this.storage.getProjectDir(),
       'chats',
+      ...(archiveState === 'archived' ? ['archive'] : []),
       `${sessionId}.jsonl`,
     );
+  }
+
+  async getLastUserPromptAt(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+    readOptions: LastUserPromptReadOptions = {},
+  ): Promise<string | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, archiveState);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    const warm = readOptions.preferCache
+      ? lastUserPromptCache.get(key)
+      : undefined;
+    if (warm) {
+      let snapshot = await warm.snapshot;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== warm) snapshot = await current.snapshot;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
+    const stats = await fsp.stat(filePath);
+    lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const fileIdentity = fileIdentityFromStats(stats);
+    const lastUpdated = new Date(stats.mtimeMs).toISOString();
+    const cached = lastUserPromptCache.get(key);
+    if (
+      cached &&
+      fileIdentity.ino === 0 &&
+      cached.fileIdentity.ino === 0 &&
+      (stats.size !== cached.size || lastUpdated !== cached.lastUpdated)
+    )
+      return undefined;
+    if (
+      cached &&
+      sameFileIdentity(cached.fileIdentity, fileIdentity) &&
+      stats.size >= cached.size &&
+      (stats.size !== cached.size || lastUpdated === cached.lastUpdated)
+    ) {
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, cached);
+      let snapshot = await cached.snapshot;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== cached) snapshot = await current.snapshot;
+      cached.size = stats.size;
+      cached.lastUpdated = lastUpdated;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
+    // Preserve the base O(1) behavior of session-list enrichment on very
+    // large transcripts. Restore/paging reads use the expanded limit below;
+    // prompt timestamps are optional metadata, not worth an entire index scan.
+    if (stats.size > SESSION_TRANSCRIPT_MAX_PROMPT_TIME_BYTES) return undefined;
+    const pending = (async (): Promise<LastUserPromptSnapshot> => {
+      let index: TranscriptIndex;
+      try {
+        index = await getCachedIndex({
+          filePath,
+          fileIdentity,
+          snapshotSize: stats.size,
+          lastUpdated,
+        });
+      } catch (error) {
+        if (
+          error instanceof SessionTranscriptTooLargeError &&
+          error.retryable === true
+        ) {
+          // Memory available to this process may change. Do not retain a
+          // missing prompt timestamp until the session file is rewritten.
+          throw error;
+        }
+        if (
+          (error instanceof EmptySessionTranscriptError ||
+            error instanceof SessionTranscriptTooLargeError ||
+            error instanceof SessionTranscriptPageTooLargeError) &&
+          (await hasSnapshotSignature(
+            filePath,
+            fileIdentity,
+            stats.size,
+            lastUpdated,
+            true,
+          ))
+        )
+          return {};
+        throw error;
+      }
+      const [firstRecord] = await readAggregatedRecords(index, [
+        index.firstRecordUuid,
+      ]);
+      if (!firstRecord)
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      const effective = indexHasManagedHeader(index)
+        ? managedPageIndex(
+            index,
+            await this.readManagedRecords(sessionId, index, {}),
+          )
+        : index;
+      const timestamp = lastUserPromptFromIndex(effective);
+      if (
+        !(await hasSnapshotSignature(
+          filePath,
+          fileIdentity,
+          stats.size,
+          lastUpdated,
+          true,
+        ))
+      ) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      return {
+        lastUserPromptAt: timestamp,
+        firstRecordOwner: {
+          sessionId: firstRecord.sessionId,
+          cwd: firstRecord.cwd,
+        },
+      };
+    })();
+    const entry = {
+      fileIdentity,
+      size: stats.size,
+      lastUpdated,
+      snapshot: pending,
+    };
+    lastUserPromptCache.set(key, entry);
+    trimPromptTimeScopes();
+    let snapshot: LastUserPromptSnapshot;
+    try {
+      snapshot = await pending;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== entry) snapshot = await current.snapshot;
+    } catch (error) {
+      const currentScope = promptTimeScope(filePath, this.workspaceCwd);
+      if (currentScope.get(key) === entry) currentScope.delete(key);
+      throw error;
+    }
+    return readOptions.validateFirstRecord &&
+      (!snapshot.firstRecordOwner ||
+        !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+      ? undefined
+      : snapshot.lastUserPromptAt;
+  }
+
+  invalidateLastUserPromptAt(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const filePath = this.getSessionFilePath(sessionId, state);
+      const key = JSON.stringify([filePath, this.workspaceCwd]);
+      lastUserPromptUpdates.delete(key);
+      promptTimeScope(filePath, this.workspaceCwd).delete(key);
+    }
+  }
+
+  async setLastUserPromptAt(
+    sessionId: string,
+    timestamp: string | undefined,
+  ): Promise<void> {
+    const filePath = this.getSessionFilePath(sessionId);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    if (timestamp === undefined) {
+      this.invalidateLastUserPromptAt(sessionId);
+      return;
+    }
+    const update = {};
+    lastUserPromptUpdates.set(key, update);
+    try {
+      const stats = await fsp.stat(filePath);
+      if (lastUserPromptUpdates.get(key) !== update) return;
+      lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, {
+        fileIdentity: fileIdentityFromStats(stats),
+        size: stats.size,
+        lastUpdated: new Date(stats.mtimeMs).toISOString(),
+        snapshot: Promise.resolve({
+          lastUserPromptAt: timestamp,
+          firstRecordOwner: { sessionId, cwd: this.workspaceCwd },
+        }),
+      });
+      trimPromptTimeScopes();
+    } catch (error) {
+      if (lastUserPromptUpdates.get(key) === update)
+        promptTimeScope(filePath, this.workspaceCwd).delete(key);
+      throw error;
+    } finally {
+      if (lastUserPromptUpdates.get(key) === update)
+        lastUserPromptUpdates.delete(key);
+    }
   }
 
   private decodeSnapshot(snapshot: string): SessionTranscriptSnapshotState {
@@ -2498,24 +4016,14 @@ export class SessionTranscriptReader {
     );
   }
 
-  async readTurnIndexPage(
+  private async readTurnIndexSnapshot(
     sessionId: string,
-    options: SessionTranscriptReadTurnIndexOptions = {},
-  ): Promise<SessionTranscriptTurnIndexPage> {
-    const limit = normalizeLimit(options.limit);
-    if (options.start !== undefined && options.snapshot === undefined) {
-      throw new InvalidSessionTranscriptCursorError();
-    }
-    if (
-      options.start !== undefined &&
-      !isFiniteNonNegativeInteger(options.start)
-    ) {
-      throw new RangeError('Transcript turn index start must be non-negative');
-    }
+    encodedSnapshot?: string,
+  ) {
     const snapshot =
-      options.snapshot === undefined
+      encodedSnapshot === undefined
         ? undefined
-        : this.decodeSnapshot(options.snapshot);
+        : this.decodeSnapshot(encodedSnapshot);
     if (snapshot && snapshot.sessionId !== sessionId) {
       throw new InvalidSessionTranscriptCursorError();
     }
@@ -2527,7 +4035,10 @@ export class SessionTranscriptReader {
     const fileIdentity = snapshot?.fileIdentity ?? currentIdentity;
     if (
       stats.size < snapshotSize ||
-      !sameFileIdentity(currentIdentity, fileIdentity)
+      !sameFileIdentity(currentIdentity, fileIdentity) ||
+      (snapshot &&
+        stats.size === snapshotSize &&
+        new Date(stats.mtimeMs).toISOString() !== snapshot.lastUpdated)
     ) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
@@ -2560,14 +4071,42 @@ export class SessionTranscriptReader {
       startTime,
       lastUpdated,
     };
-    const totalTurns = index?.navigationTurns.length ?? 0;
+    return { index, snapshotState };
+  }
+
+  async readTurnIndexPage(
+    sessionId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<SessionTranscriptTurnIndexPage> {
+    const limit = normalizeLimit(options.limit);
+    if (options.start !== undefined && options.snapshot === undefined) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    if (
+      options.start !== undefined &&
+      !isFiniteNonNegativeInteger(options.start)
+    ) {
+      throw new RangeError('Transcript turn index start must be non-negative');
+    }
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    const { startTime, lastUpdated } = snapshotState;
+    const projected =
+      index !== undefined && indexHasManagedHeader(index)
+        ? await this.readManagedRecords(sessionId, index, {})
+        : undefined;
+    const navigationTurns = projected
+      ? managedNavigationTurns(projected)
+      : (index?.navigationTurns ?? []);
+    const totalTurns = navigationTurns.length;
     const start =
       options.start ?? Math.max(0, totalTurns - Math.min(limit, totalTurns));
     if (start > totalTurns) {
       throw new InvalidSessionTranscriptCursorError();
     }
-    const selectedTurns =
-      index?.navigationTurns.slice(start, start + limit) ?? [];
+    const selectedTurns = navigationTurns.slice(start, start + limit);
     const selectedUuids = selectedTurns.flatMap((turn) => [
       turn.turnId,
       ...(turn.finalAssistantRecordId ? [turn.finalAssistantRecordId] : []),
@@ -2582,27 +4121,36 @@ export class SessionTranscriptReader {
     );
     const labels = new Map<string, { label: string; timestamp?: string }>();
     const details = new Map<string, string>();
-    if (index) {
+    const collectPreview = (record: ChatRecord): void => {
+      const kind = selectedKinds.get(record.uuid);
+      if (kind) {
+        labels.set(record.uuid, {
+          label: projectNavigationLabel(record, kind),
+          ...(record.timestamp ? { timestamp: record.timestamp } : {}),
+        });
+      }
+      if (selectedAssistantUuids.has(record.uuid)) {
+        const detail = projectNavigationDetail(record);
+        if (detail) details.set(record.uuid, detail);
+      }
+    };
+    if (projected) {
+      const wanted = new Set(selectedUuids);
+      for (const record of projected) {
+        if (wanted.has(record.uuid)) collectPreview(record);
+      }
+    } else if (index) {
       await forEachAggregatedRecord(
         index,
         [...new Set(selectedUuids)],
-        (record) => {
-          const kind = selectedKinds.get(record.uuid);
-          if (kind) {
-            labels.set(record.uuid, {
-              label: projectNavigationLabel(record, kind),
-              ...(record.timestamp ? { timestamp: record.timestamp } : {}),
-            });
-          }
-          if (selectedAssistantUuids.has(record.uuid)) {
-            const detail = projectNavigationDetail(record);
-            if (detail) details.set(record.uuid, detail);
-          }
-        },
+        collectPreview,
       );
     }
     const turns = selectedTurns.map((turn, offset) => {
       const preview = labels.get(turn.turnId);
+      const historyPromptId = projected
+        ? undefined
+        : index?.byUuid.get(turn.turnId)?.turnHint.turnPromptId;
       const detail = turn.finalAssistantRecordId
         ? details.get(turn.finalAssistantRecordId)
         : undefined;
@@ -2611,6 +4159,7 @@ export class SessionTranscriptReader {
         turnId: turn.turnId,
         kind: turn.kind,
         ...(turn.promptId ? { promptId: turn.promptId } : {}),
+        ...(historyPromptId ? { historyPromptId } : {}),
         ...(preview?.timestamp ? { timestamp: preview.timestamp } : {}),
         label: preview
           ? preview.label
@@ -2632,6 +4181,152 @@ export class SessionTranscriptReader {
       turns,
       startTime,
       lastUpdated,
+    };
+  }
+
+  async readTurnHooksPage(
+    sessionId: string,
+    promptId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<HookTurnPage | undefined> {
+    const limit = normalizeLimit(options.limit ?? 50);
+    const start = options.start ?? 0;
+    if (
+      (options.start !== undefined && options.snapshot === undefined) ||
+      !isFiniteNonNegativeInteger(start)
+    )
+      throw new InvalidSessionTranscriptCursorError();
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    if (!index) return undefined;
+    const base = {
+      sessionId,
+      promptId,
+      snapshot: this.encodeSnapshot(snapshotState),
+      start,
+    };
+    if (indexHasManagedHeader(index)) {
+      return {
+        ...base,
+        totalExecutions: 0,
+        executions: [],
+        summary: null,
+        coverage: 'unsupported',
+      };
+    }
+    const cacheKey = makeCacheKey(
+      index.filePath,
+      index.fileIdentity,
+      index.snapshotSize,
+      index.lastUpdated,
+    );
+    const cached = indexCache.get(cacheKey);
+    let turn =
+      cached?.value === index ? cached.hookTurns?.get(promptId) : undefined;
+    if (!turn) {
+      const executionsById = new Map<string, HookExecutionEntry>();
+      let partial = !index.sourceReadComplete || index.gaps.length > 0;
+      await forEachAggregatedRecord(
+        index,
+        index.replayUuids.filter(
+          (uuid) =>
+            index.byUuid.get(uuid)?.turnHint.hookTurn?.promptId === promptId,
+        ),
+        (record) => {
+          const value = (
+            record.systemPayload as UiTelemetryRecordPayload | undefined
+          )?.uiEvent;
+          if (value?.['event.name'] !== 'hook_lifecycle') return;
+          const event = parseHookLifecycle(value);
+          if (!event) {
+            partial = true;
+            return;
+          }
+          if (event.sessionId !== sessionId || event.promptId !== promptId) {
+            partial = true;
+            return;
+          }
+          executionsById.set(
+            event.executionId,
+            mergeHookExecution(
+              executionsById.get(event.executionId),
+              event,
+              'replay',
+            ),
+          );
+        },
+      );
+      if (
+        executionsById.size === 0 &&
+        !index.replayUuids.some(
+          (uuid) => index.byUuid.get(uuid)?.turnHint.turnPromptId === promptId,
+        )
+      )
+        return undefined;
+      const entries = [...executionsById.values()].sort(
+        (a, b) =>
+          a.event.startedAt - b.event.startedAt ||
+          a.event.executionId.localeCompare(b.event.executionId),
+      );
+      partial ||= entries.some(
+        (entry) => entry.conflicted || entry.status === 'unknown',
+      );
+      turn = {
+        executions: entries,
+        summary: entries.length > 0 ? summarizeHookExecutions(entries) : null,
+        coverage: partial
+          ? 'partial'
+          : entries.length > 0
+            ? 'recorded'
+            : 'unrecorded',
+      };
+      if (
+        cached?.value === index &&
+        indexCache.get(cacheKey) === cached &&
+        !cached.hookTurns?.has(promptId)
+      ) {
+        const byteSize =
+          INDEX_CONTAINER_BASE_BYTES +
+          INDEX_MAP_ENTRY_BYTES +
+          entries.length *
+            (INDEX_ENTRY_BASE_BYTES + INDEX_CONTAINER_SLOT_BYTES) +
+          estimateStringBytes(promptId) +
+          estimateStringBytes(JSON.stringify(turn));
+        // Account against the entry's post-add budget class: an oversized
+        // index cached elsewhere must not block hook retention on shared
+        // entries, and an aggregate that pushes a shared entry past the
+        // shared budget moves it into the oversized class. The snapshot is
+        // frozen: reclaim compares candidates against a fresh stat of the
+        // live file, so an in-place truncation under the read cannot make
+        // the current full index look like a historical prefix.
+        const current = await frozenReclaimContext(index.filePath);
+        // The stat yielded; re-check slot ownership and concurrent
+        // retention before the synchronous fit/reclaim/write tail.
+        if (
+          indexCache.get(cacheKey) === cached &&
+          cached.value === index &&
+          !cached.hookTurns?.has(promptId) &&
+          cacheAdditionFitsClassBudget(cached, byteSize, current)
+        ) {
+          cached.hookTurns ??= new Map();
+          cached.hookTurns.set(promptId, turn);
+          cached.byteSize = (cached.byteSize ?? 0) + byteSize;
+        }
+      }
+    }
+    const entries = turn.executions;
+    if (start > entries.length) throw new InvalidSessionTranscriptCursorError();
+    const executions = entries.slice(start, start + limit);
+    return {
+      ...base,
+      totalExecutions: entries.length,
+      ...structuredClone({ executions, summary: turn.summary }),
+      ...(start + executions.length < entries.length
+        ? { nextStart: start + executions.length }
+        : {}),
+      coverage: turn.coverage,
     };
   }
 
@@ -2688,6 +4383,14 @@ export class SessionTranscriptReader {
       recordRestoreStage('transcript_index', indexStartedAt);
     }
     recordRestoreIndexAttributes(index);
+    if (indexHasManagedHeader(index)) {
+      return this.readManagedRestoreProjection(
+        sessionId,
+        index,
+        options,
+        readOptions,
+      );
+    }
     const selectionStartedAt = performance.now();
     let replaySelection: ReturnType<typeof selectRestoreReplayUuids>;
     try {
@@ -2713,7 +4416,10 @@ export class SessionTranscriptReader {
       const entry = index.byUuid.get(uuid);
       if (
         position === compressionPosition ||
-        (entry?.type !== 'system' &&
+        ((entry?.type !== 'system' ||
+          entry?.subtype === 'memory_catalog_snapshot' ||
+          entry?.subtype === 'goal_turn_end' ||
+          entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
       ) {
         modelSet.add(uuid);
@@ -2749,6 +4455,20 @@ export class SessionTranscriptReader {
       return entry?.type === 'system' && entry.subtype === 'session_model';
     });
     const sessionModelSet = new Set(sessionModelUuids);
+    const sessionApprovalModeUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return (
+        entry?.type === 'system' && entry.subtype === 'session_approval_mode'
+      );
+    });
+    const sessionApprovalModeSet = new Set(sessionApprovalModeUuids);
+    const sessionWorkflowModeUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return (
+        entry?.type === 'system' && entry.subtype === 'session_workflow_mode'
+      );
+    });
+    const sessionWorkflowModeSet = new Set(sessionWorkflowModeUuids);
     // The legacy-model fallback reads the last assistant record's `model`.
     // Without an explicit selection it is only dispatched when it happens to
     // land in the replay/model read sets, so on a resume whose tail is a
@@ -2759,10 +4479,9 @@ export class SessionTranscriptReader {
       (entry) => entry.type === 'assistant',
     );
     const uiTelemetrySet = new Set(
-      index.runtimeUuids.filter((uuid) => {
-        const entry = index.byUuid.get(uuid);
-        return entry?.type === 'system' && entry.subtype === 'ui_telemetry';
-      }),
+      index.runtimeUuids.filter(
+        (uuid) => index.byUuid.get(uuid)?.uiTelemetryCandidate === true,
+      ),
     );
     const fileHistorySet = new Set(
       index.runtimeUuids.filter((uuid) => {
@@ -2784,6 +4503,12 @@ export class SessionTranscriptReader {
           )
         : [],
     );
+    const sourcesUuid = index.physicalRecords.findLast(
+      (record) =>
+        record.type === 'system' &&
+        record.subtype === 'session_sources_snapshot',
+    )?.uuid;
+    const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const metadataSet = new Set(
@@ -2791,6 +4516,8 @@ export class SessionTranscriptReader {
         parentSessionUuid,
         sessionSourceUuid,
         ...sessionModelUuids,
+        ...sessionApprovalModeUuids,
+        ...sessionWorkflowModeUuids,
         lastAssistantUuid,
       ].filter((uuid): uuid is string => uuid !== undefined),
     );
@@ -2815,13 +4542,10 @@ export class SessionTranscriptReader {
     let sourceType: string | undefined;
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
+    let sessionApprovalMode: SessionApprovalModeRecordPayload | undefined;
+    let sessionWorkflowMode: SessionWorkflowModeRecordPayload | undefined;
     let lastAssistantModel: string | undefined;
-    let firstRecord: ChatRecord | undefined;
     let firstRecordSeen = false;
-    let goalCheckpointAccumulator:
-      | GoalEvidenceCheckpointAccumulator
-      | undefined;
-    let goalEvidenceSet = new Set<string>();
     const deferredPreReadRecords = new Map<string, ChatRecord>();
     const dispatchRecord = (record: ChatRecord): void => {
       if (modelSet.has(record.uuid)) apiHistory.add(record);
@@ -2830,7 +4554,9 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (uiEvent) uiTelemetryEvents.push(uiEvent);
+        if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
+          uiTelemetryEvents.push(uiEvent as UiEvent);
+        }
       }
       if (record.uuid === attributionUuid) {
         const snapshot = (
@@ -2854,6 +4580,16 @@ export class SessionTranscriptReader {
         if (isValidSessionModelPayload(record.systemPayload)) {
           sessionModel = record.systemPayload;
         }
+      } else if (sessionWorkflowModeSet.has(record.uuid)) {
+        if (isValidSessionWorkflowModePayload(record.systemPayload)) {
+          sessionWorkflowMode = { enabled: record.systemPayload.enabled };
+        }
+      } else if (sessionApprovalModeSet.has(record.uuid)) {
+        if (isValidSessionApprovalModePayload(record.systemPayload)) {
+          sessionApprovalMode = normalizeSessionApprovalModePayload(
+            record.systemPayload,
+          );
+        }
       }
       if (
         record.type === 'assistant' &&
@@ -2871,10 +4607,8 @@ export class SessionTranscriptReader {
           );
         }
       }
+      if (record.uuid === sourcesUuid) sourceRecords.push(record);
       if (artifactSet.has(record.uuid)) artifacts.add(record);
-      if (goalEvidenceSet.has(record.uuid)) {
-        goalCheckpointAccumulator?.capture(record);
-      }
       if (replaySet.has(record.uuid)) {
         replayRecordsByUuid.set(record.uuid, record);
       }
@@ -2887,10 +4621,7 @@ export class SessionTranscriptReader {
     );
     const selectedReadsStartedAt = performance.now();
     const selectedReadSet = new Set(preReadUuids);
-    let goalRecovery: {
-      selectedGoalRecovery: GoalRecoverySelection;
-      goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
-    };
+    let goalRecovery: { selectedGoalRecovery: GoalRecoverySelection };
     try {
       goalRecovery = await withAggregatedRecordReadContext(
         index,
@@ -2909,7 +4640,6 @@ export class SessionTranscriptReader {
                   );
                 }
                 firstRecordSeen = true;
-                if (!goalSet.has(record.uuid)) firstRecord = record;
               }
               if (goalSet.has(record.uuid)) {
                 const normalized = normalizeGoalRecoveryRecord(record);
@@ -2933,7 +4663,8 @@ export class SessionTranscriptReader {
                 metadataSet.has(record.uuid) ||
                 uiTelemetrySet.has(record.uuid) ||
                 fileHistorySet.has(record.uuid) ||
-                artifactSet.has(record.uuid);
+                artifactSet.has(record.uuid) ||
+                record.uuid === sourcesUuid;
               if (needsDeferredDispatch) {
                 if (
                   record.uuid === index.firstRecordUuid &&
@@ -2953,36 +4684,6 @@ export class SessionTranscriptReader {
 
           const selectedGoalRecovery =
             selectGoalRecoveryFromRecords(goalRecords);
-          const pendingGoal =
-            selectedGoalRecovery.recovery.kind === 'v2'
-              ? selectedGoalRecovery.recovery.payload
-              : undefined;
-          const pendingCheckpoint = pendingGoal?.checkpointPending;
-          if (pendingCheckpoint && pendingGoal.snapshot.goal) {
-            try {
-              goalCheckpointAccumulator = new GoalEvidenceCheckpointAccumulator(
-                index.runtimeUuids.map(
-                  (uuid) => index.byUuid.get(uuid)!.goalEvidenceHint,
-                ),
-                pendingGoal.snapshot.goal,
-                pendingCheckpoint.permit,
-              );
-            } catch (error) {
-              if (!(error instanceof EvidenceSourceUnavailableError)) {
-                throw error;
-              }
-              debugLogger.warn(
-                `restore projection: deferring unavailable Goal checkpoint evidence: ${error.message}`,
-              );
-            }
-          }
-          goalEvidenceSet = new Set(
-            goalCheckpointAccumulator?.getCandidateUuids() ?? [],
-          );
-          if (firstRecord && goalEvidenceSet.has(firstRecord.uuid)) {
-            goalCheckpointAccumulator?.capture(firstRecord);
-          }
-          firstRecord = undefined;
           const selectedRuntimeUuids = index.runtimeUuids.filter(
             (uuid) =>
               modelSet.has(uuid) ||
@@ -2991,13 +4692,16 @@ export class SessionTranscriptReader {
               metadataSet.has(uuid) ||
               uiTelemetrySet.has(uuid) ||
               fileHistorySet.has(uuid) ||
-              replaySet.has(uuid) ||
-              goalEvidenceSet.has(uuid),
+              replaySet.has(uuid),
           );
           const preReadSet = new Set(preReadUuids);
           readContext.preloadedRecords = deferredPreReadRecords;
           const remainingUuids = Array.from(
-            new Set([...selectedRuntimeUuids, ...artifactUuids]),
+            new Set([
+              ...selectedRuntimeUuids,
+              ...artifactUuids,
+              ...(sourcesUuid ? [sourcesUuid] : []),
+            ]),
           ).filter(
             (uuid) => !preReadSet.has(uuid) || deferredPreReadRecords.has(uuid),
           );
@@ -3009,18 +4713,7 @@ export class SessionTranscriptReader {
             readContext,
           );
 
-          let goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
-          try {
-            goalCheckpointWindow = goalCheckpointAccumulator?.finish();
-          } catch (error) {
-            if (!(error instanceof InvalidGoalEvidenceReferenceError)) {
-              throw error;
-            }
-            debugLogger.warn(
-              `restore projection: deferring invalid Goal checkpoint evidence: ${error.message}`,
-            );
-          }
-          return { selectedGoalRecovery, goalCheckpointWindow };
+          return { selectedGoalRecovery };
         },
       );
     } finally {
@@ -3065,12 +4758,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(replayGoalRecoverySourceUuid &&
         !replaySet.has(replayGoalRecoverySourceUuid)
@@ -3093,8 +4790,10 @@ export class SessionTranscriptReader {
     const restoredTokenCounts = resumeTokenCounts.finish();
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
+    const completedToolCallIds = apiHistory.getCompletedToolCallIds();
     const runtime: SessionRuntimeResumeState = {
       apiHistory: apiHistory.finish(),
+      ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }
         : {}),
@@ -3104,27 +4803,39 @@ export class SessionTranscriptReader {
       recording: {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
+        turnPromptIds: turnStateValue.turnPromptIds,
+        turnDaemonPromptIds: turnStateValue.turnDaemonPromptIds,
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(sourceType !== undefined ? { sourceType } : {}),
         ...(sourceId !== undefined ? { sourceId } : {}),
         ...(sessionModel !== undefined ? { sessionModel } : {}),
+        ...(sessionApprovalMode !== undefined ? { sessionApprovalMode } : {}),
+        ...(sessionWorkflowMode !== undefined ? { sessionWorkflowMode } : {}),
         ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
+        ...(index.executionEngine.status === 'verified' &&
+        index.executionEngine.recorded
+          ? { executionEngine: index.executionEngine.engine }
+          : {}),
       },
       ...(restoredFileHistory
         ? { fileHistorySnapshots: restoredFileHistory }
         : {}),
+      ...(index.sourceReadComplete
+        ? restoreSessionSources(sourceRecords, sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
+      ...(artifacts.warningList().length > 0
+        ? { artifactJournalWarnings: artifacts.warningList() }
+        : {}),
+      sourceReadComplete: index.sourceReadComplete,
       goalRecords,
       ...(goalRecovery.selectedGoalRecovery.sourceUuid
         ? {
             goalRecoverySourceUuid:
               goalRecovery.selectedGoalRecovery.sourceUuid,
           }
-        : {}),
-      ...(goalRecovery.goalCheckpointWindow
-        ? { goalCheckpointWindow: goalRecovery.goalCheckpointWindow }
         : {}),
       initialTurn: turnStateValue.initialTurn,
       backgroundNotificationTaskIds:
@@ -3139,8 +4850,220 @@ export class SessionTranscriptReader {
       startTime: index.restoreStartTime,
       lastUpdated: index.lastUpdated,
       runtime,
+      executionEngine: index.executionEngine,
       ...(replay ? { replay } : {}),
     };
+  }
+
+  /**
+   * Restores a Managed session from its committed events.
+   *
+   * The index locates physical records by byte offset, but a Managed log keeps
+   * the conversation in resource bodies the index cannot see, so selecting uuids
+   * from it would restore the wrapper records. The projected records are the
+   * whole history, so the accumulators run over them directly.
+   *
+   * Record shapes the sink does not admit, such as artifacts, the parent
+   * session and the session model, cannot appear in a Managed log at all, so
+   * they are absent here by construction.
+   */
+  private async readManagedRestoreProjection(
+    sessionId: string,
+    index: TranscriptIndex,
+    options: SelectiveSessionRestoreOptions,
+    readOptions: RestoreProjectionReadOptions,
+  ): Promise<SessionRestoreProjection> {
+    const records = await this.readManagedRecords(
+      sessionId,
+      index,
+      readOptions,
+      options.replay.kind === 'all' ? getMaxAllReplayBytes() : undefined,
+    );
+    assertManagedAllReplayBudget(
+      records,
+      sessionId,
+      index.snapshotSize,
+      options.replay,
+    );
+    // Read from the whole log: a session whose title the session list no
+    // longer finds in its windows must not restore, and then re-anchor, an
+    // older one. Read from managedProjectionTitles first so a budget refusal
+    // that deleted the decoded bodies from managedProjections still preserves
+    // customTitle/titleSource.
+    const persistedTitle =
+      managedProjectionTitles.get(index) ??
+      managedProjections.get(index)?.titleInfo ??
+      {};
+    const projection = buildManagedSessionRestoreProjection({
+      sessionId,
+      records,
+      replay: options.replay,
+      filePath: index.filePath,
+      startTime: index.restoreStartTime,
+      lastUpdated: index.lastUpdated,
+      executionEngine: index.executionEngine,
+      fallbackLastCompletedUuid: index.leafUuid,
+      ...(persistedTitle.title !== undefined
+        ? { customTitle: persistedTitle.title }
+        : {}),
+      ...(persistedTitle.source !== undefined
+        ? { titleSource: persistedTitle.source }
+        : {}),
+    });
+    await assertIndexSnapshotUnchanged(index, sessionId);
+    offerFreshIndexToCache(index);
+    return projection;
+  }
+
+  /** The live counterpart, which carries the replay page only. */
+  private async readManagedLiveRestoreProjection(
+    sessionId: string,
+    index: TranscriptIndex,
+    options: SelectiveSessionRestoreOptions,
+    readOptions: RestoreProjectionReadOptions,
+  ): Promise<SessionLiveRestoreProjection> {
+    const records = await this.readManagedRecords(
+      sessionId,
+      index,
+      readOptions,
+      options.replay.kind === 'all' ? getMaxAllReplayBytes() : undefined,
+    );
+    assertManagedAllReplayBudget(
+      records,
+      sessionId,
+      index.snapshotSize,
+      options.replay,
+    );
+    const replay = managedReplayPage(records, options.replay);
+    await assertIndexSnapshotUnchanged(index, sessionId);
+    offerFreshIndexToCache(index);
+    return {
+      sessionId,
+      startTime: index.restoreStartTime,
+      lastUpdated: index.lastUpdated,
+      ...(replay ? { replay } : {}),
+    };
+  }
+
+  private async readManagedRecords(
+    sessionId: string,
+    index: TranscriptIndex,
+    readOptions: RestoreProjectionReadOptions,
+    maxBodyBytes?: number,
+  ): Promise<ChatRecord[]> {
+    // Timed as the same stage the index-based path uses for its record reads:
+    // for a Managed log the projection is that read, and leaving it untimed
+    // would blank out the daemon's restore timings for these sessions.
+    const startedAt = performance.now();
+    try {
+      // The first physical record proves which project the session belongs to.
+      // Projecting without that gate would restore another project's session.
+      let firstRecordSeen = false;
+      await forEachAggregatedRecord(
+        index,
+        [index.firstRecordUuid],
+        async (record) => {
+          if (record.uuid !== index.firstRecordUuid) return;
+          if (
+            readOptions.validateFirstRecord &&
+            !(await readOptions.validateFirstRecord(record))
+          ) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+          firstRecordSeen = true;
+        },
+      );
+      if (!firstRecordSeen) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      // Keyed by the index, which the cache already invalidates by file
+      // identity and snapshot size: paging a session would otherwise reproject
+      // the whole log on every request. The gate above stays outside the cache
+      // because it authorises this caller, not the projection.
+      let projection = managedProjections.get(index);
+      if (projection === undefined) {
+        try {
+          projection = await readManagedSessionRecordsAndTitle({
+            transcriptPath: index.filePath,
+            runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+            sessionKey: localManagedSessionKey(
+              this.storage.getProjectRoot(),
+              sessionId,
+            ),
+            // The index froze a byte length, so the projection answers from
+            // the same prefix rather than from records appended since.
+            maxBytes: index.snapshotSize,
+            ...(maxBodyBytes !== undefined ? { maxBodyBytes } : {}),
+          });
+        } catch (error) {
+          if (error instanceof ManagedSessionProjectionLimitError) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              index.snapshotSize,
+              error.maxBytes,
+              {
+                dimension: 'replay',
+                measuredBytes: error.measuredBytes,
+              },
+            );
+          }
+          // A missing or corrupt body is the same class of failure as a
+          // snapshot that can no longer be served: the page contract maps
+          // that to 409, not an untyped 500 from JSON.parse(null).
+          if (error instanceof ManagedSessionRecordError) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+          throw error;
+        }
+        managedProjectionTitles.set(index, projection.titleInfo);
+        // The projection holds every decoded message body, while the cache
+        // accounts only the physical hints. Retain it only while the index is
+        // cache-resident and the bodies fit the entry's budget class; else
+        // the bodies would outlive the request off-budget. A non-resident
+        // index dies with the request, so retaining against it is
+        // request-scoped and safe.
+        const projectionCacheKey = makeCacheKey(
+          index.filePath,
+          index.fileIdentity,
+          index.snapshotSize,
+          index.lastUpdated,
+        );
+        const cachedEntry = indexCache.get(projectionCacheKey);
+        if (cachedEntry?.value !== index) {
+          managedProjections.set(index, projection);
+        } else if (!managedProjections.has(index)) {
+          // A concurrent page may have decoded and retained the projection
+          // while this read was decoding; it is already accounted then.
+          // The index may be a frozen prefix of a changed file: reclaim
+          // compares candidates against a fresh stat of the live file, so
+          // an in-place truncation under the decode cannot make the
+          // current full index look like a historical prefix.
+          const current = await frozenReclaimContext(index.filePath);
+          // The stat yielded; re-check slot ownership and concurrent
+          // retention before accounting. Set first, then let the shared
+          // admission helper account or drop (it deletes from the WeakMap
+          // when the bodies do not fit); the has() re-check keeps the
+          // helper's unconditional byte add from double-counting an
+          // already-accounted projection.
+          if (!managedProjections.has(index)) {
+            if (
+              indexCache.get(projectionCacheKey) === cachedEntry &&
+              cachedEntry.value === index
+            ) {
+              managedProjections.set(index, projection);
+              accountManagedProjection(index, cachedEntry, current);
+            } else {
+              // The slot was re-owned under the stat: keep the projection
+              // request-scoped, off the cache budget.
+              managedProjections.set(index, projection);
+            }
+          }
+        }
+      }
+      return [...projection.records];
+    } finally {
+      recordRestoreStage('selected_record_read', startedAt);
+    }
   }
 
   async readLiveRestoreProjection(
@@ -3195,6 +5118,14 @@ export class SessionTranscriptReader {
       recordRestoreStage('transcript_index', indexStartedAt);
     }
     recordRestoreIndexAttributes(index);
+    if (indexHasManagedHeader(index)) {
+      return this.readManagedLiveRestoreProjection(
+        sessionId,
+        index,
+        options,
+        readOptions,
+      );
+    }
     const selectionStartedAt = performance.now();
     const replaySelection = selectRestoreReplayUuids(
       index,
@@ -3219,6 +5150,12 @@ export class SessionTranscriptReader {
         ? undefined
         : replaySelection.index.replayUuids[goalStatePosition];
     const goalStateSet = new Set(goalStateUuid ? [goalStateUuid] : []);
+    const sourcesUuid = index.physicalRecords.findLast(
+      (record) =>
+        record.type === 'system' &&
+        record.subtype === 'session_sources_snapshot',
+    )?.uuid;
+    const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const selectedRuntimeUuids = index.runtimeUuids.filter(
@@ -3240,6 +5177,7 @@ export class SessionTranscriptReader {
     const selectedReadSet = new Set([
       ...selectedRuntimeUuids,
       ...artifactUuids,
+      ...(sourcesUuid ? [sourcesUuid] : []),
     ]);
     const selectedReadsStartedAt = performance.now();
     try {
@@ -3265,6 +5203,7 @@ export class SessionTranscriptReader {
             const normalized = normalizeGoalRecoveryRecord(record);
             if (normalized) goalRecords.push(normalized);
           }
+          if (record.uuid === sourcesUuid) sourceRecords.push(record);
           if (artifactSet.has(record.uuid)) artifacts.add(record);
         },
       );
@@ -3278,12 +5217,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(goalState
           ? {
@@ -3308,6 +5251,9 @@ export class SessionTranscriptReader {
       startTime: index.restoreStartTime,
       lastUpdated: index.lastUpdated,
       ...(replay ? { replay } : {}),
+      ...(index.sourceReadComplete
+        ? restoreSessionSources(sourceRecords, sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       ...(goalRecords.length > 0 ? { goalRecords } : {}),
       ...(replayGoalRecoverySourceUuid
@@ -3384,8 +5330,33 @@ export class SessionTranscriptReader {
       );
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
+    // A cached index is keyed by the frozen mtime, so an equal-size in-place
+    // rewrite would otherwise serve new bytes under the old snapshot; the
+    // segment uuid check only catches rewrites of the selected records.
+    // Same invariant as readTurnIndexSnapshot and hasSnapshotSignature
+    // (allowAppend); kept inline to reuse the stats already taken, keep the
+    // graded warn, and let a missing file propagate ENOENT rather than fold
+    // into a rewrite error (hasSnapshotSignature returns false on ENOENT).
+    // Pure appends (size grew) stay readable. A rewrite before the append is
+    // not detected: page bodies are read from the live file at the frozen
+    // offsets, so rewritten prefix bytes are served under the frozen cursor
+    // even with a warm index (frozen-prefix digest validation is deferred;
+    // see the design doc's Compatibility and limits section).
+    const frozenLastUpdated = cursor?.lastUpdated ?? snapshot?.lastUpdated;
+    if (
+      frozenLastUpdated !== undefined &&
+      stats.size === snapshotSize &&
+      new Date(stats.mtimeMs).toISOString() !== frozenLastUpdated
+    ) {
+      debugLogger.warn(
+        `snapshot unavailable: equal-size rewrite session=${sessionId} ` +
+          `frozenUpdated=${frozenLastUpdated} ` +
+          `currentUpdated=${new Date(stats.mtimeMs).toISOString()}`,
+      );
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
 
-    const index = await getCachedIndex({
+    const physicalIndex = await getCachedIndex({
       filePath,
       fileIdentity,
       snapshotSize,
@@ -3394,6 +5365,16 @@ export class SessionTranscriptReader {
         snapshot?.lastUpdated ??
         new Date(stats.mtimeMs).toISOString(),
     });
+    // The physical lines of a Managed log are the authority's wrapper records,
+    // so paging that index would hand a client those envelopes as if they were
+    // the conversation. Page the projection instead, the way the restore and
+    // turn readers already read it.
+    const index = indexHasManagedHeader(physicalIndex)
+      ? managedPageIndex(
+          physicalIndex,
+          await this.readManagedRecords(sessionId, physicalIndex, {}),
+        )
+      : physicalIndex;
     const frozenLeafUuid = cursor?.leafUuid ?? snapshot?.leafUuid;
     if (frozenLeafUuid !== undefined && frozenLeafUuid !== index.leafUuid) {
       debugLogger.warn(
@@ -3458,15 +5439,7 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? pageStartPosition + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    // Null prototype: record uuids are untrusted, and '__proto__' would
-    // silently drop the entry on a plain object.
-    const pageBranchPoints: Record<string, string> = Object.create(null);
-    for (const record of records) {
-      const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
-      if (checkpointUuid !== undefined) {
-        pageBranchPoints[record.uuid] = checkpointUuid;
-      }
-    }
+    const pageBranchPoints = branchPointsForRecords(index, records);
     const backwardGoalState =
       direction === 'backward' || options.atRecordId !== undefined
         ? await readGoalStatePayloadBeforePosition(
@@ -3520,7 +5493,7 @@ export class SessionTranscriptReader {
           : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
-      ...(Object.keys(pageBranchPoints).length > 0
+      ...(pageBranchPoints
         ? { branchPointsByAssistantUuid: pageBranchPoints }
         : {}),
       ...(options.atRecordId !== undefined
@@ -3534,9 +5507,16 @@ export class SessionTranscriptReader {
 }
 
 export function resetSessionTranscriptIndexCacheForTest(): void {
+  lastUserPromptScopes.clear();
+  lastUserPromptUpdates.clear();
   indexCache.clear();
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;
+  indexCacheOversizedMaxBytesForTest = undefined;
+  maxIndexEstimateBytesForTest = undefined;
+  availableHeapBudgetForTest = undefined;
+  maxLineBytesForTest = undefined;
+  maxAllReplayBytesForTest = undefined;
   expandedPageBytesForTest = undefined;
   cooperativeReadByteBudgetForTest = undefined;
   cooperativeReadTimeBudgetMsForTest = undefined;
@@ -3566,7 +5546,7 @@ export function setSessionTranscriptIndexBuildCompleteHookForTest(
 }
 
 export function setSessionTranscriptSelectedLineReadHookForTest(
-  hook: (offset: number, length: number) => void,
+  hook: (offset: number, length: number) => void | Promise<void>,
 ): void {
   selectedLineReadHookForTest = hook;
 }
@@ -3576,6 +5556,37 @@ export function setSessionTranscriptIndexCacheMaxBytesForTest(
 ): void {
   indexCacheMaxBytesForTest = maxBytes;
   pruneCache();
+}
+
+export function setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+  maxBytes: number,
+): void {
+  indexCacheOversizedMaxBytesForTest = maxBytes;
+  pruneCache();
+}
+
+export function setSessionTranscriptAvailableHeapBudgetForTest(
+  maxBytes: number | undefined,
+): void {
+  availableHeapBudgetForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxIndexEstimateBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxIndexEstimateBytesForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxLineBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxLineBytesForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxAllReplayBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxAllReplayBytesForTest = maxBytes;
 }
 
 export function setSessionTranscriptExpandedPageBytesForTest(

@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import type { Content } from '@google/genai';
+import { getImportedProjectMemoryRoot } from './import-paths.js';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -18,6 +19,7 @@ import {
   renderAutoMemoryBody,
 } from './entries.js';
 import {
+  rebuildAutoMemoryIndexAtRoot,
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
@@ -129,6 +131,7 @@ async function listIndexedForgetCandidates(
   projectRoot: string,
   abortSignal?: AbortSignal,
   scope?: AutoMemoryStorageScope,
+  trustedProject = true,
 ): Promise<IndexedForgetCandidate[]> {
   abortSignal?.throwIfAborted();
   // Uncapped, to match the recall universe (recall.ts scans uncapped): an
@@ -141,7 +144,7 @@ async function listIndexedForgetCandidates(
   const [projectDocs, userDocs] = await Promise.all([
     scope === 'user'
       ? Promise.resolve<ScannedAutoMemoryDocument[]>([])
-      : scanAllAutoMemoryTopicDocuments(projectRoot),
+      : scanAllAutoMemoryTopicDocuments(projectRoot, undefined, trustedProject),
     scope === 'project'
       ? Promise.resolve<ScannedAutoMemoryDocument[]>([])
       : scanAllUserAutoMemoryTopicDocuments(),
@@ -429,6 +432,9 @@ export async function selectManagedAutoMemoryForgetCandidates(
     projectRoot,
     options.abortSignal,
     options.scope,
+    // Default to the trusted universe: forgetting a document recall never
+    // injected is harmless, while missing one recall does inject strands it.
+    options.config?.isTrustedFolder?.() ?? true,
   );
   if (candidates.length === 0) {
     return { matches: [], strategy: 'none' };
@@ -608,6 +614,10 @@ export async function forgetManagedAutoMemoryMatches(
       await bumpMetadata(projectRoot, now);
       options.abortSignal?.throwIfAborted();
       await rebuildManagedAutoMemoryIndex(projectRoot);
+      await rebuildAutoMemoryIndexAtRoot(
+        getImportedProjectMemoryRoot(projectRoot),
+        'project',
+      );
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
       debugLogger.warn(

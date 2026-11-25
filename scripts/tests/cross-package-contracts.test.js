@@ -41,6 +41,12 @@ const definitions = [
       '^(export )?(const|let|var) MAX_SUB_SESSION_PROMPT_CHARS[[:space:]]*[:=]',
     owner: 'packages/core/src/tools/sub-session-constants.ts',
   },
+  {
+    symbol: 'MAX_SUB_SESSION_WORKSPACE_CHARS',
+    pattern:
+      '^(export )?(const|let|var) MAX_SUB_SESSION_WORKSPACE_CHARS[[:space:]]*[:=]',
+    owner: 'packages/core/src/tools/sub-session-constants.ts',
+  },
 ];
 
 it.each(definitions)('$symbol has one owner', ({ pattern, owner }) => {
@@ -88,6 +94,21 @@ const imports = [
     'packages/acp-bridge/src/bridgeClient.ts',
     './bridgeOptions.js',
   ],
+  [
+    'MAX_SUB_SESSION_WORKSPACE_CHARS',
+    'packages/core/src/tools/create-sub-session.ts',
+    './sub-session-constants.js',
+  ],
+  [
+    'MAX_SUB_SESSION_WORKSPACE_CHARS',
+    'packages/acp-bridge/src/bridgeOptions.ts',
+    '@qwen-code/qwen-code-core/subSessionConstants',
+  ],
+  [
+    'MAX_SUB_SESSION_WORKSPACE_CHARS',
+    'packages/acp-bridge/src/bridgeClient.ts',
+    './bridgeOptions.js',
+  ],
 ];
 
 it.each(imports)('%s is imported by %s', (symbol, path, source) => {
@@ -111,4 +132,35 @@ it('distinguishes locale resolution from prompt sanitization', () => {
   expect(
     definitionFiles('^export function getSanitizedExtensionDisplayName[(]'),
   ).toEqual(['packages/cli/src/utils/extension-mention.ts']);
+});
+
+it('publishes the external subagent runtime through its declared subpath', () => {
+  const pkg = JSON.parse(
+    readFileSync(join(root, 'packages/core/package.json'), 'utf8'),
+  );
+  expect(pkg.exports['./subagentRuntime']).toEqual({
+    types: './dist/src/subagent-runtime.d.ts',
+    import: './dist/src/subagent-runtime.js',
+  });
+  const barrel = readFileSync(
+    join(root, 'packages/core/src/subagent-runtime.ts'),
+    'utf8',
+  );
+  expect(barrel).toContain("from './agents/runtime/subagent-executor.js'");
+  expect(barrel).toContain('ExternalAgentExecutor');
+  expect(barrel).toContain('AgentEventEmitter');
+  const aliases = readFileSync(
+    join(root, 'packages/cli/vitest.config.ts'),
+    'utf8',
+  );
+  expect(aliases).toMatch(
+    /'@qwen-code\/qwen-code-core\/subagentRuntime'\s*:\s*path\.resolve\(\s*__dirname,\s*'\.\.\/core\/src\/subagent-runtime\.ts',?\s*\)/,
+  );
+  const tsconfig = readFileSync(
+    join(root, 'packages/cli/tsconfig.json'),
+    'utf8',
+  );
+  expect(tsconfig).toMatch(
+    /"@qwen-code\/qwen-code-core\/subagentRuntime"\s*:\s*\[\s*"\.\.\/core\/src\/subagent-runtime\.ts"\s*\]/,
+  );
 });

@@ -8,7 +8,7 @@
             "type": "command",
             "command": "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\administrator\\external-context-mem0\\dist\\auto-recall.js'",
             "shell": "powershell",
-            "timeout": 8000,
+            "timeout": 8,
             "name": "external-context-mem0-auto-recall",
             "statusMessage": "Retrieving external context"
           }

@@ -7,11 +7,25 @@
 import type { Part } from '@google/genai';
 import type { GoalRecord, GoalTurnPermit } from './goal-protocol.js';
 import { escapeJsonTagCharacters } from '../utils/formatters.js';
+import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
+import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 export type GoalContinuationUsage = Pick<
   GoalRecord,
   'tokensUsed' | 'tokenBudget' | 'turnCount'
->;
+> & {
+  /** Turns this Goal may finish before it stops; absent when unbounded. */
+  turnBudget?: number;
+  /**
+   * Active time elapsed so far and the ceiling on it, in milliseconds. Sent
+   * as a pair or not at all: elapsed time with nothing to measure it against
+   * is a figure the model cannot act on.
+   */
+  activeTimeMs?: number;
+  activeTimeBudgetMs?: number;
+};
 
 interface GoalContinuationHints {
   /**
@@ -58,9 +72,9 @@ const DATA_CLOSE_TAG = '</goal_runtime_data>';
 
 const SHARED_LINES = [
   'Continue working on the active Goal.',
-  'Use get_goal for the authoritative objective and evidence state.',
+  'Use get_goal for the authoritative objective, the budget figures, and any verifier feedback.',
   "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-  'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
+  'If completion depends on content delivered in this turn, deliver only that content in this turn, before update_goal.',
 ];
 
 const SYNTHETIC_TURN_GUARD_LINES = [
@@ -102,15 +116,36 @@ const OBJECTIVE_UPDATED_LINE =
  */
 function renderBudgetLine(usage: GoalContinuationUsage): string {
   const used = usage.tokensUsed.toLocaleString('en-US');
-  const spend =
+  const segments = [
     usage.tokenBudget === undefined
-      ? `${used} tokens used, with no budget on this Goal`
+      ? `${used} tokens used, with no token budget on this Goal`
       : `${used} of ${usage.tokenBudget.toLocaleString('en-US')} tokens used, ${Math.max(
           0,
           usage.tokenBudget - usage.tokensUsed,
-        ).toLocaleString('en-US')} remaining`;
-  const turns = `${usage.turnCount} Goal ${usage.turnCount === 1 ? 'turn' : 'turns'} finished`;
-  return `Token budget: ${spend}; ${turns}.`;
+        ).toLocaleString('en-US')} remaining`,
+    usage.turnBudget === undefined
+      ? `${usage.turnCount} Goal ${usage.turnCount === 1 ? 'turn' : 'turns'} finished`
+      : `${usage.turnCount} of ${usage.turnBudget.toLocaleString('en-US')} Goal turns finished`,
+  ];
+  // The elapsed clock ships only with the ceiling it is measured against.
+  // Active minutes on a Goal that has no time budget would be a figure on
+  // every turn that nothing acts on.
+  if (
+    usage.activeTimeBudgetMs !== undefined &&
+    usage.activeTimeMs !== undefined
+  ) {
+    segments.push(
+      `${renderActiveMinutes(usage.activeTimeMs)} of ${renderActiveMinutes(
+        usage.activeTimeBudgetMs,
+      )} active minutes used`,
+    );
+  }
+  return `Budget: ${segments.join('; ')}.`;
+}
+
+/** Milliseconds as the minutes the active-time budget is expressed in. */
+function renderActiveMinutes(ms: number): string {
+  return (ms / 60_000).toLocaleString('en-US', { maximumFractionDigits: 1 });
 }
 
 /**
@@ -122,7 +157,7 @@ function renderBudgetLine(usage: GoalContinuationUsage): string {
  * judgement itself, before it spends the turn.
  */
 const EVIDENCE_LINE =
-  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported.";
+  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a proposal from the most recent records of this Goal's transcript, newest first, and older records drop out when the request is full, so run the decisive checks immediately before calling update_goal. A script's or an aggregate wrapper's summary (agent, advisor, workflow, thread_read) supports computation but attests no external fact, so run the decisive check as a direct tool call in this turn.";
 
 const FIDELITY_LINE =
   'Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.';
@@ -133,19 +168,23 @@ const FIDELITY_LINE =
  * turn that does not exist invites it to describe one.
  */
 const NO_PROGRESS_LINE =
-  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.';
+  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, report it through update_goal rather than repeating it.';
 
 const COMPLETION_AUDIT_LINE =
-  'Before proposing that the Goal is complete, check every explicit requirement in the objective against evidence you can cite. Missing, indirect, or self-reported evidence means not done: keep working.';
+  'Before proposing that the Goal is complete, treat completion as unproven: for every explicit requirement in the objective, identify the tool result that proves it and, unless it is among the most recent records, produce it again now, matching the scope of the check to the scope of the requirement. Missing, indirect, or self-reported evidence means not done: keep working, and do not redefine success around the work that already exists.';
 
 /**
  * Sent once per spend window, on the continuation the budget gate grants
  * after the window is spent. The Goal stops when this turn ends, so the
  * hand-off is the last thing the model delivers autonomously.
+ *
+ * Which ceiling was reached is left to the budget line above rather than
+ * named here: the hosts carry a plain `windDown` flag, and the figures the
+ * model needs to say what stopped it are already on the line before this one.
  */
 const WIND_DOWN_LINES = [
-  'The autonomous token budget for this Goal window is spent. This is the final turn before the Goal stops and waits for the user; do not start new work.',
-  'Deliver a concise hand-off: what was accomplished, citing evidence references from get_goal; what remains; and the one concrete next step. Call update_goal only if the objective is already complete or genuinely blocked on the evidence you have. Then end the turn.',
+  'An autonomous budget for this Goal window is spent -- the budget line above says which. This is the final turn before the Goal stops and waits for the user; do not start new work.',
+  'Deliver a concise hand-off: what was accomplished, naming the tool results that show it; what remains; and the one concrete next step. Call update_goal only if the objective is already complete or genuinely blocked on the evidence you have. Then end the turn.',
 ];
 
 /**
@@ -166,9 +205,34 @@ function serializeGoalData(input: GoalContinuationPromptInput): string {
 /** Renders the full continuation prompt text for one Goal turn. */
 export function renderGoalContinuationPrompt(
   input: GoalContinuationPromptInput,
+  registry?: ToolRegistry,
 ): string {
+  const toolNames = registry?.getAllToolNames() ?? [];
+  // CodeModeOnly hides and refuses tool_call, so the Direct-mode route would
+  // send the model to a dead end there. The registry knows the mode; a bare
+  // registry stub falls back to exec, which only that mode registers.
+  const codeModeOnly =
+    registry?.isCodeModeOnly?.() ?? toolNames.includes(ToolNames.EXEC);
+  const discoveryLines: string[] = [];
+  if (registry && !codeModeOnly && isDeferredToolBridgeAvailable(registry)) {
+    discoveryLines.push(
+      `In Direct mode: ${toolSearchBridgeSentence('get_goal or update_goal')}`,
+    );
+  }
+  // The sentence routes through exec, which a deny rule can unregister.
+  if (
+    codeModeOnly &&
+    toolNames.includes(ToolNames.TOOL_SEARCH) &&
+    toolNames.includes(ToolNames.EXEC)
+  ) {
+    discoveryLines.push(
+      'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
+    );
+  }
   const lines = [
-    ...SHARED_LINES,
+    ...SHARED_LINES.slice(0, 2),
+    ...discoveryLines,
+    ...SHARED_LINES.slice(2),
     ...SYNTHETIC_TURN_GUARD_LINES,
     DATA_BLOCK_FRAMING_LINE,
     DATA_OPEN_TAG,
@@ -212,19 +276,24 @@ export function renderGoalContinuationPrompt(
 /** Renders a runtime-scheduled Goal continuation turn. */
 export function renderGoalContinuationTurn(
   turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  registry?: ToolRegistry,
 ): string {
   const { permit, continuationContext, ...hints } = turn;
-  return renderGoalContinuationPrompt({
-    goalId: permit.goalId,
-    revision: permit.revision,
-    objective: continuationContext,
-    ...hints,
-  });
+  return renderGoalContinuationPrompt(
+    {
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: continuationContext,
+      ...hints,
+    },
+    registry,
+  );
 }
 
 /** Builds the sendable parts for a runtime-scheduled Goal continuation turn. */
 export function buildGoalContinuationParts(
   turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  registry?: ToolRegistry,
 ): Part[] {
-  return [{ text: renderGoalContinuationTurn(turn) }];
+  return [{ text: renderGoalContinuationTurn(turn, registry) }];
 }

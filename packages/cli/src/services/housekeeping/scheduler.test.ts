@@ -18,6 +18,7 @@ import {
   _runHousekeepingForTesting,
   _runPassForTesting,
   _FILE_HISTORY_MARKER_FOR_TESTING,
+  _getDebugLogsMarkerPathForTesting,
   _getSubagentMarkerPathForTesting,
   _getOpenAILogsMarkerPathForTesting,
 } from './scheduler.js';
@@ -30,6 +31,10 @@ import {
 const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY = 24 * MS_PER_HOUR;
 const FILE_HISTORY_DIR = 'file-history';
+const DEBUG_DIR = 'debug';
+const DEBUG_UUID_CURRENT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const DEBUG_UUID_STALE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const DEBUG_UUID_RECENT = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 // Past the 1-minute idle threshold so runPass doesn't take the defer branch.
 const PAST_IDLE_THRESHOLD = 2 * 60 * 1000;
 
@@ -98,6 +103,10 @@ describe('_runHousekeepingForTesting', () => {
     qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-scheduler-test-'));
     fileHistoryRoot = path.join(qwenHome, FILE_HISTORY_DIR);
     vi.stubEnv('QWEN_HOME', qwenHome);
+    // runHousekeeping also runs the debug-log sweep, whose root prefers
+    // QWEN_RUNTIME_DIR over QWEN_HOME — pin both so an ambient value can
+    // never redirect the sweep (or these fixtures) at the real debug dir.
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
   });
 
   afterEach(() => {
@@ -236,6 +245,10 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
     qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-scheduler-test-'));
     logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-openai-logs-'));
     vi.stubEnv('QWEN_HOME', qwenHome);
+    // getFirstPassDelay keys the debug-logs marker on
+    // Storage.getGlobalDebugDir(), which prefers QWEN_RUNTIME_DIR — keep the
+    // marker root and the fixture root coincident under an ambient value.
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
   });
 
   afterEach(() => {
@@ -490,6 +503,15 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
 
   it('uses catch-up delay when the OpenAI marker is missing', async () => {
     fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+    // Fresh debug marker so only the missing OpenAI marker forces catch-up —
+    // without it this test passes regardless of what the OpenAI marker does.
+    fs.writeFileSync(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(qwenHome, DEBUG_DIR),
+      ),
+      '',
+    );
 
     await expect(
       _getFirstPassDelayForTesting(
@@ -501,6 +523,13 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
 
   it('uses the normal delay only when the OpenAI marker is fresh', async () => {
     fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+    fs.writeFileSync(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(qwenHome, DEBUG_DIR),
+      ),
+      '',
+    );
     fs.writeFileSync(_getOpenAILogsMarkerPathForTesting(qwenHome, logDir), '');
 
     await expect(
@@ -518,6 +547,14 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
     );
     const openaiMarker = _getOpenAILogsMarkerPathForTesting(qwenHome, logDir);
     fs.writeFileSync(fileHistoryMarker, '');
+    // Fresh debug marker so only the stale OpenAI marker forces catch-up.
+    fs.writeFileSync(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(qwenHome, DEBUG_DIR),
+      ),
+      '',
+    );
     fs.writeFileSync(openaiMarker, '');
     const stale = new Date(Date.now() - 8 * MS_PER_DAY);
     fs.utimesSync(openaiMarker, stale, stale);
@@ -544,6 +581,138 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
       _runHousekeepingForTesting(throwingConfig, makeModelSettings(7)),
     ).resolves.toBeUndefined();
     expect(fs.existsSync(fresh)).toBe(true);
+  });
+});
+
+describe('_runHousekeepingForTesting (debug-logs cleanup)', () => {
+  let qwenHome: string;
+  let debugRoot: string;
+
+  beforeEach(() => {
+    qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-scheduler-test-'));
+    debugRoot = path.join(qwenHome, DEBUG_DIR);
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    // cleanupOldDebugLogs resolves its root via Storage.getGlobalDebugDir(),
+    // which prefers QWEN_RUNTIME_DIR — pin it so fixtures and the sweep
+    // agree under an ambient value. Individual tests re-stub as needed.
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(qwenHome, { recursive: true, force: true });
+  });
+
+  function mkDebugLog(sessionId: string, mtime: Date): string {
+    fs.mkdirSync(debugRoot, { recursive: true });
+    const p = path.join(debugRoot, `${sessionId}.txt`);
+    fs.writeFileSync(p, 'log');
+    fs.utimesSync(p, mtime, mtime);
+    return p;
+  }
+
+  it('sweeps old session debug logs, protecting the current session', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    const recent = new Date(Date.now() - 1 * MS_PER_DAY);
+    const current = mkDebugLog(DEBUG_UUID_CURRENT, old); // protected (current)
+    const stale = mkDebugLog(DEBUG_UUID_STALE, old); // swept
+    const fresh = mkDebugLog(DEBUG_UUID_RECENT, recent); // kept (young)
+
+    await _runHousekeepingForTesting(
+      makeConfig(DEBUG_UUID_CURRENT),
+      makeSettings(30),
+    );
+
+    expect(fs.existsSync(current)).toBe(true);
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+    expect(
+      fs.existsSync(_getDebugLogsMarkerPathForTesting(qwenHome, debugRoot)),
+    ).toBe(true);
+  });
+
+  it('sweeps pseudo-session debug logs but keeps unrelated files', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    // Fixed-name files the ACP layer appends to under non-UUID session-id
+    // contexts — sweepable via the call-site allowlist.
+    const replay = mkDebugLog('transcript-replay', old);
+    const discovery = mkDebugLog('workspace-mcp-discovery', old);
+    // Genuinely unrelated files still fail the real isValidSessionId and
+    // must survive — this pins that the scheduler passes a real predicate
+    // (goes red if the call site ever substitutes `() => true`).
+    const stray = mkDebugLog('notes', old);
+    // Near-miss names: the allowlist is exact-match, so prefix or case
+    // widenings must not make these sweepable.
+    const prefixed = mkDebugLog('workspace-mcp-discovery-old', old);
+    // Case-insensitive filesystems (macOS/Windows defaults) store
+    // 'Transcript-Replay.txt' and 'transcript-replay.txt' as one file, so a
+    // case-widened near-miss only exists apart from the allowlisted name on
+    // case-sensitive filesystems.
+    const recased =
+      process.platform === 'darwin' || process.platform === 'win32'
+        ? undefined
+        : mkDebugLog('Transcript-Replay', old);
+
+    await _runHousekeepingForTesting(makeConfig('current'), makeSettings(30));
+
+    expect(fs.existsSync(replay)).toBe(false);
+    expect(fs.existsSync(discovery)).toBe(false);
+    expect(fs.existsSync(stray)).toBe(true);
+    expect(fs.existsSync(prefixed)).toBe(true);
+    if (recased) {
+      expect(fs.existsSync(recased)).toBe(true);
+    }
+  });
+
+  it('throttles cleanup independently for different runtime directories', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    const firstRuntimeDir = path.join(qwenHome, 'runtime-a');
+    const secondRuntimeDir = path.join(qwenHome, 'runtime-b');
+
+    vi.stubEnv('QWEN_RUNTIME_DIR', firstRuntimeDir);
+    debugRoot = path.join(firstRuntimeDir, DEBUG_DIR);
+    const first = mkDebugLog(DEBUG_UUID_STALE, old);
+    await _runHousekeepingForTesting(makeConfig('current'), makeSettings(30));
+
+    vi.stubEnv('QWEN_RUNTIME_DIR', secondRuntimeDir);
+    debugRoot = path.join(secondRuntimeDir, DEBUG_DIR);
+    const second = mkDebugLog(DEBUG_UUID_RECENT, old);
+    await _runHousekeepingForTesting(makeConfig('current'), makeSettings(30));
+
+    expect(fs.existsSync(first)).toBe(false);
+    expect(fs.existsSync(second)).toBe(false);
+    expect(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(firstRuntimeDir, DEBUG_DIR),
+      ),
+    ).not.toBe(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(secondRuntimeDir, DEBUG_DIR),
+      ),
+    );
+  });
+
+  it('uses catch-up delay when the debug-logs marker is missing', async () => {
+    // file-history marker fresh so only the debug marker forces catch-up.
+    fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+
+    await expect(
+      _getFirstPassDelayForTesting(makeConfig('s'), makeSettings(30)),
+    ).resolves.toBe(60 * 1000);
+  });
+
+  it('uses the normal delay when both markers are fresh', async () => {
+    fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+    fs.writeFileSync(
+      _getDebugLogsMarkerPathForTesting(qwenHome, debugRoot),
+      '',
+    );
+
+    await expect(
+      _getFirstPassDelayForTesting(makeConfig('s'), makeSettings(30)),
+    ).resolves.toBe(10 * 60 * 1000);
   });
 });
 

@@ -12,6 +12,11 @@
 # space left to move prose out.
 set -uo pipefail
 
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "::error::check-workflow-size.sh requires Bash 4 or newer; found ${BASH_VERSION}. Run with a newer Bash (on macOS: brew install bash)." >&2
+  exit 1
+fi
+
 GITHUB_LIMIT_BYTES=512000
 GATE_BYTES="${WORKFLOW_SIZE_GATE_BYTES:-470000}"
 WARN_BYTES=$((GATE_BYTES - 25000))

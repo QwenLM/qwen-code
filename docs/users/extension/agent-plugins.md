@@ -6,7 +6,7 @@ packages. The package keeps its standard `plugin.json`, `mcp.json`, and
 rewrite portable files.
 
 Use the existing extension commands with a local directory, link, archive,
-Git repository, archive URL, or scoped npm package:
+Git repository, archive URL, or npm package:
 
 ```bash
 qwen extensions install ./my-agent-plugin
@@ -33,6 +33,7 @@ The root manifest must target the canonical v1 schema:
 | Streamable HTTP MCP servers                | Yes                                      |
 | Legacy HTTP+SSE MCP servers                | No; the entry is skipped                 |
 | Commands, agents, and hooks                | No; these directories are ignored        |
+| Workflows                                  | No; the directory is ignored             |
 | Qwen context, settings, channels, and apps | No                                       |
 | `extensions.*` client namespaces           | No; unimplemented namespaces are ignored |
 

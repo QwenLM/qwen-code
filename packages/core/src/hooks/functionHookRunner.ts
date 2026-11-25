@@ -5,6 +5,8 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { HookAbortError, HookTimeoutError } from './hook-errors.js';
+import { DEFAULT_FUNCTION_HOOK_TIMEOUT_MS } from './hook-timeout.js';
 import type {
   FunctionHookConfig,
   HookInput,
@@ -16,12 +18,6 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('FUNCTION_HOOK_RUNNER');
-
-/**
- * Default timeout for function hook execution (5 seconds)
- * Function hooks are intended for quick validation checks
- */
-const DEFAULT_FUNCTION_TIMEOUT = 5000;
 
 /**
  * Function Hook Runner - executes function hooks (callbacks)
@@ -60,7 +56,7 @@ export class FunctionHookRunner {
     }
 
     try {
-      const timeout = hookConfig.timeout ?? DEFAULT_FUNCTION_TIMEOUT;
+      const timeout = hookConfig.timeout ?? DEFAULT_FUNCTION_HOOK_TIMEOUT_MS;
 
       // Execute callback with timeout and context
       const result = await this.executeWithTimeout(
@@ -111,11 +107,20 @@ export class FunctionHookRunner {
           ? error
           : new Error(errorMessage);
 
+      // Timeout first, then a caller abort (the abort rejection only happens
+      // once the caller's signal has fired), then any other failure.
+      const outcome: HookExecutionOutcome =
+        error instanceof HookTimeoutError
+          ? 'timeout'
+          : signal?.aborted
+            ? 'cancelled'
+            : 'non_blocking_error';
+
       return {
         hookConfig,
         eventName,
         success: false,
-        outcome: 'non_blocking_error',
+        outcome,
         error: displayError,
         duration,
       };
@@ -220,7 +225,9 @@ export class FunctionHookRunner {
       // Create timeout promise
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(() => {
-          reject(new Error(`Function hook timed out after ${timeout}ms`));
+          reject(
+            new HookTimeoutError(`Function hook timed out after ${timeout}ms`),
+          );
         }, timeout);
       });
 
@@ -228,11 +235,11 @@ export class FunctionHookRunner {
       const abortPromise = new Promise<never>((_, reject) => {
         if (signal) {
           if (signal.aborted) {
-            reject(new Error('Function hook execution aborted'));
+            reject(new HookAbortError('Function hook execution aborted'));
             return;
           }
           abortHandler = () => {
-            reject(new Error('Function hook execution aborted'));
+            reject(new HookAbortError('Function hook execution aborted'));
           };
           signal.addEventListener('abort', abortHandler, { once: true });
         }

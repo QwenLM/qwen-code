@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { globSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { globSync } from 'glob';
 
 function toGlobPath(filePath) {
   return filePath.replaceAll('\\', '/');

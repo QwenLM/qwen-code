@@ -78,6 +78,82 @@ async function writeOne(
 }
 
 describe('ndJsonStream', () => {
+  it('rejects malformed ACP params before dispatch and keeps the channel usable', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const responses: AnyMessage[] = [];
+    const decoder = new TextDecoder();
+    const readTextFile = vi.fn().mockResolvedValue({ content: 'ok' });
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>({
+        write(chunk) {
+          responses.push(JSON.parse(decoder.decode(chunk)) as AnyMessage);
+        },
+      }),
+      input,
+    );
+    const connection = new ClientSideConnection(
+      () => ({
+        requestPermission: vi.fn(),
+        sessionUpdate: vi.fn(),
+        readTextFile,
+      }),
+      stream,
+    );
+
+    try {
+      inputController.enqueue(
+        encoder.encode(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'fs/read_text_file',
+            params: { sessionId: 'session', path: 42 },
+          })}\n`,
+        ),
+      );
+      await vi.waitFor(() =>
+        expect(responses).toContainEqual(
+          expect.objectContaining({
+            id: 1,
+            error: expect.objectContaining({ code: -32602 }),
+          }),
+        ),
+      );
+      expect(readTextFile).not.toHaveBeenCalled();
+
+      inputController.enqueue(
+        encoder.encode(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'fs/read_text_file',
+            params: { sessionId: 'session', path: '/tmp/valid' },
+          })}\n`,
+        ),
+      );
+      await vi.waitFor(() =>
+        expect(responses).toContainEqual({
+          jsonrpc: '2.0',
+          id: 2,
+          result: { content: 'ok' },
+        }),
+      );
+      expect(readTextFile).toHaveBeenCalledOnce();
+      expect(readTextFile).toHaveBeenCalledWith({
+        sessionId: 'session',
+        path: '/tmp/valid',
+      });
+    } finally {
+      inputController.close();
+      await connection.closed;
+    }
+  });
+
   it('round-trips one message', async () => {
     const sent = message('hello', { n: 1 });
     const line = `${JSON.stringify(sent)}\n`;
@@ -964,6 +1040,189 @@ describe('ndJsonStream', () => {
     );
     expect(valuesSpy).not.toHaveBeenCalled();
     valuesSpy.mockRestore();
+  });
+
+  it('drops an oversized available_commands_update notification and keeps the stream open', async () => {
+    const availableSkillDetails = Object.fromEntries(
+      Array.from({ length: 10_001 }, (_, index) => [
+        `skill-${index}`,
+        index === 0 ? 'do-not-log-skill-body' : index,
+      ]),
+    );
+    const oversized = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails },
+        },
+      },
+    } satisfies AnyMessage;
+    const later = message('after-oversized', { ok: true });
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onTransportError = vi.fn();
+    const onMessageReceived = vi.fn();
+    const validateInboundMessage = vi.fn((_message: AnyMessage) => true);
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([
+        encoder.encode(
+          `${JSON.stringify(oversized)}\n${JSON.stringify(later)}\n`,
+        ),
+      ]),
+      { onTransportError, onMessageReceived },
+      limits({ maxFrameBytes: 512_000, maxQueuedBytes: 512_000 }),
+      validateInboundMessage,
+    );
+
+    await expect(readAll(stream.readable)).resolves.toEqual([later]);
+    expect(onTransportError).not.toHaveBeenCalled();
+    expect(onMessageReceived).toHaveBeenCalledOnce();
+    expect(validateInboundMessage).toHaveBeenCalledTimes(1);
+    expect(validateInboundMessage.mock.calls[0]?.[0]).toEqual(later);
+    expect(stderr).toHaveBeenCalledWith(
+      'Dropped oversized JSON-RPC notification:',
+      {
+        errorKind: 'ndjson_oversized_notification',
+        method: 'session/update',
+        bytes: expect.any(Number),
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        payloadOmitted: true,
+      },
+    );
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(
+      'do-not-log-skill-body',
+    );
+    stderr.mockRestore();
+  });
+
+  it('fails closed on an oversized content-bearing session/update notification', async () => {
+    const toolCallContent = Object.fromEntries(
+      Array.from({ length: 10_001 }, (_, index) => [
+        `part-${index}`,
+        index === 0 ? 'do-not-log-tool-body' : index,
+      ]),
+    );
+    const oversized = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-1',
+          content: toolCallContent,
+        },
+      },
+    } satisfies AnyMessage;
+    const later = message('after-oversized', { ok: true });
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onTransportError = vi.fn();
+    const onMessageReceived = vi.fn();
+    const validateInboundMessage = vi.fn((_message: AnyMessage) => true);
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([
+        encoder.encode(
+          `${JSON.stringify(oversized)}\n${JSON.stringify(later)}\n`,
+        ),
+      ]),
+      { onTransportError, onMessageReceived },
+      limits({ maxFrameBytes: 512_000, maxQueuedBytes: 512_000 }),
+      validateInboundMessage,
+    );
+
+    await expect(readAll(stream.readable)).resolves.toEqual([]);
+    expect(onTransportError).toHaveBeenCalledOnce();
+    expect(onTransportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'ndjson_invalid_message' }),
+    );
+    expect(onMessageReceived).not.toHaveBeenCalled();
+    expect(validateInboundMessage).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith('Failed to parse JSON message:', {
+      errorKind: 'ndjson_invalid_message',
+      bytes: expect.any(Number),
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      payloadOmitted: true,
+    });
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(
+      'do-not-log-tool-body',
+    );
+    stderr.mockRestore();
+  });
+
+  it('does not abort the ACP connection after dropping an oversized notification', async () => {
+    const oversized = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: {
+            availableSkillDetails: Object.fromEntries(
+              Array.from({ length: 10_001 }, (_, index) => [
+                `skill-${index}`,
+                index,
+              ]),
+            ),
+          },
+        },
+      },
+    } satisfies AnyMessage;
+    const later = message('after-oversized', { ok: true });
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onTransportError = vi.fn();
+    const notifications = vi.fn();
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      { onTransportError },
+      limits({ maxFrameBytes: 512_000, maxQueuedBytes: 512_000 }),
+    );
+    const connection = new ClientSideConnection(
+      () =>
+        ({
+          extNotification: async (method: string, params: unknown) => {
+            notifications(method, params);
+          },
+        }) as never,
+      stream,
+    );
+
+    inputController.enqueue(encoder.encode(`${JSON.stringify(oversized)}\n`));
+    inputController.enqueue(encoder.encode(`${JSON.stringify(later)}\n`));
+
+    await vi.waitFor(() =>
+      expect(notifications).toHaveBeenCalledWith('after-oversized', {
+        ok: true,
+      }),
+    );
+    expect(notifications).toHaveBeenCalledTimes(1);
+    expect(onTransportError).not.toHaveBeenCalled();
+    expect(connection.signal.aborted).toBe(false);
+    expect(stderr).toHaveBeenCalledWith(
+      'Dropped oversized JSON-RPC notification:',
+      expect.objectContaining({
+        errorKind: 'ndjson_oversized_notification',
+        method: 'session/update',
+      }),
+    );
+
+    inputController.close();
+    await expect(connection.closed).resolves.toBeUndefined();
+    expect(onTransportError).not.toHaveBeenCalled();
+    stderr.mockRestore();
   });
 
   it('accepts a matching response before local write completion', async () => {

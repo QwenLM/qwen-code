@@ -29,6 +29,16 @@ const { dingtalkPlugin } = vi.hoisted(() => {
 
 vi.mock('@qwen-code/channel-dingtalk', () => ({
   plugin: dingtalkPlugin,
+  webhookPlugin: {
+    channelType: 'dingtalk-webhook',
+    displayName: 'DingTalk Webhook',
+    outboundOnly: true,
+    defaultDeliveryTarget: { type: 'chat', id: 'default' },
+    management: { fields: [] },
+    createChannel() {
+      throw new Error('not used');
+    },
+  },
 }));
 
 import {
@@ -42,17 +52,46 @@ describe('built-in channel registry', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     const catalog = await supportedChannelCatalog();
+    expect(
+      catalog
+        .find((entry) => entry.type === 'dws')
+        ?.fields.find((field) => field.key === 'privatePolicy'),
+    ).toMatchObject({
+      kind: 'enum',
+      default: 'pairing',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    });
 
     expect(catalog.find((entry) => entry.type === 'dingtalk')).toEqual({
       type: 'dingtalk',
       displayName: 'DingTalk',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
     expect(catalog.map((entry) => entry.type)).toContain('gitlab');
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
-    ).toEqual(['dws', 'wecom', 'feishu', 'github', 'gitlab']);
+    ).toEqual([
+      'weixin',
+      'dingtalk-webhook',
+      'dws',
+      'email',
+      'wecom',
+      'wecom-callback',
+      'wecom-webhook',
+      'feishu',
+      'feishu-webhook',
+      'generic-webhook',
+      'qq',
+      'github',
+      'gitlab',
+    ]);
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining(
         'Invalid management metadata in "dingtalk" channel: Channel field "settings" cannot be a required object.',
@@ -121,16 +160,18 @@ describe('built-in channel registry', () => {
     });
     expect(entry?.fields.map((field) => field.key)).toEqual([
       'settings',
-      'messagePrefix',
-      'senderPolicy',
+      'messageRoutes',
+      'defaultMessageRoute',
+      'privatePolicy',
       'allowedUsers',
       'groupPolicy',
+      'operators',
       'sessionScope',
       'multiSession',
       'instructions',
     ]);
     expect(
-      entry?.fields.find((field) => field.key === 'senderPolicy'),
+      entry?.fields.find((field) => field.key === 'privatePolicy'),
     ).toMatchObject({ default: 'pairing' });
     // The shared descriptor is injected into every manageable channel, and
     // dingtalk substitutes its own default block instead of composing with it

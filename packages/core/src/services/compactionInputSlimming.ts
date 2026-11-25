@@ -7,6 +7,17 @@
 import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
+import { ToolNames } from '../tools/tool-names.js';
+import {
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from '../core/environmentContext.js';
+import {
+  USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
+  USER_PROMPT_SUBMIT_CONTEXT_OPEN,
+} from '../utils/transcript-records.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -214,7 +225,10 @@ export function estimatePartChars(
     return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
-    return part.text.length;
+    // A thought's signature is replayed beside its text, so it takes room in
+    // the request too (#9455). Other parts reach `JSON.stringify` below,
+    // which already counts it.
+    return part.text.length + (part.thoughtSignature?.length ?? 0);
   }
   // Tool results in qwen-code carry media on `functionResponse.parts`
   // (an extension to the @google/genai schema; see
@@ -278,6 +292,8 @@ interface SlimResult {
 /** Appended to text payloads truncated by `maxTextChars`. */
 export const SLIM_TEXT_TRUNCATION_MARKER = '\n[...truncated for compaction]';
 
+const OMITTED_THOUGHT_PLACEHOLDER = '[thought omitted]';
+
 export interface SlimOptions {
   /**
    * When set, text payloads larger than this (top-level `text` parts,
@@ -289,12 +305,21 @@ export interface SlimOptions {
    * nothing and keep text intact.
    */
   maxTextChars?: number;
+  /**
+   * When true, strip historical `thought: true` parts that do not carry a
+   * `thoughtSignature`. Cold compression side-queries do not share prompt
+   * cache and do not need prior unsigned reasoning transcripts, which can
+   * otherwise crowd out the compaction output budget. Signed thought parts
+   * stay intact for providers that validate replayed signatures.
+   */
+  stripUnsignedThoughts?: boolean;
 }
 
 interface SlimStats {
   imagesStripped: number;
   documentsStripped: number;
   textPartsTruncated: number;
+  thoughtsStripped: number;
 }
 
 /**
@@ -311,6 +336,7 @@ export function slimCompactionInput(
     imagesStripped: 0,
     documentsStripped: 0,
     textPartsTruncated: 0,
+    thoughtsStripped: 0,
   };
   let anyChange = false;
 
@@ -318,7 +344,24 @@ export function slimCompactionInput(
     if (!content.parts || content.parts.length === 0) return content;
 
     let touched = false;
-    const newParts: Part[] = content.parts.map((part) => {
+    const newParts: Part[] = [];
+    for (const part of content.parts) {
+      if (
+        options?.stripUnsignedThoughts &&
+        part.thought === true &&
+        // Only a pure thought part is dropped: one that also carries a tool
+        // call or result must stay so tool_call/tool_response pairing survives.
+        !part.functionCall &&
+        !part.functionResponse &&
+        !(
+          typeof part.thoughtSignature === 'string' &&
+          part.thoughtSignature.length > 0
+        )
+      ) {
+        stats.thoughtsStripped++;
+        touched = true;
+        continue;
+      }
       const replacement = transformPart(
         part,
         stats,
@@ -327,14 +370,19 @@ export function slimCompactionInput(
       );
       if (replacement !== part) {
         touched = true;
-        return replacement;
       }
-      return part;
-    });
+      newParts.push(replacement);
+    }
 
     if (!touched) return content;
     anyChange = true;
-    return { ...content, parts: newParts };
+    return {
+      ...content,
+      parts:
+        newParts.length > 0
+          ? newParts
+          : [{ text: OMITTED_THOUGHT_PLACEHOLDER }],
+    };
   });
 
   return {
@@ -398,7 +446,8 @@ function transformPart(
   // Truncate oversized tool-result text on the payload-overflow compaction
   // path so the side-query itself fits under the gateway byte limit that
   // rejected the main request (#10380). Mirrors `estimatePartChars`, which
-  // bills exactly these carriers for tool results.
+  // bills exactly these carriers for tool results. The scheduler appends
+  // reminders after a tool's own text, so a cut can land inside one.
   const maxTextChars = options?.maxTextChars;
   const fr = nextPart.functionResponse;
   if (maxTextChars !== undefined && fr?.response) {
@@ -407,8 +456,10 @@ function transformPart(
     const newResponse: Record<string, unknown> = { ...response };
     for (const key of ['output', 'error'] as const) {
       const value = response[key];
-      if (typeof value === 'string' && value.length > maxTextChars) {
-        newResponse[key] = truncateTextForSlimming(value, maxTextChars);
+      if (typeof value !== 'string' || value.length <= maxTextChars) continue;
+      const cut = truncateKeepingEnvelopes(value, maxTextChars);
+      if (cut !== value) {
+        newResponse[key] = cut;
         stats.textPartsTruncated++;
         touched = true;
       }
@@ -427,17 +478,44 @@ function transformPart(
   // `write_file`/`edit` carry entire file contents in
   // `functionCall.args.content`, and `estimatePartChars` bills them through
   // the JSON.stringify fallthrough — left untouched they ride into the
-  // side-query at full size (#10380). Only top-level string values are
-  // walked: that is where every built-in tool places its large payloads.
+  // side-query at full size (#10380). Bridge calls carry those same args one
+  // level deeper under `tool_call.arguments`, so walk that envelope too. A
+  // file's contents can quote a block, so the cut closes it as it does in
+  // text (#15936 R8-1).
   const fc = nextPart.functionCall;
   if (maxTextChars !== undefined && fc?.args) {
     const args = fc.args;
     let argsTouched = false;
     const newArgs: Record<string, unknown> = { ...args };
     for (const [key, value] of Object.entries(args)) {
-      if (typeof value === 'string' && value.length > maxTextChars) {
-        newArgs[key] = truncateTextForSlimming(value, maxTextChars);
+      if (typeof value !== 'string' || value.length <= maxTextChars) continue;
+      const cut = truncateKeepingEnvelopes(value, maxTextChars);
+      if (cut !== value) {
+        newArgs[key] = cut;
         stats.textPartsTruncated++;
+        argsTouched = true;
+      }
+    }
+    const bridgedArgs = args['arguments'];
+    if (
+      fc.name === ToolNames.TOOL_CALL &&
+      typeof bridgedArgs === 'object' &&
+      bridgedArgs !== null &&
+      !Array.isArray(bridgedArgs)
+    ) {
+      let bridgedArgsTouched = false;
+      const newBridgedArgs: Record<string, unknown> = { ...bridgedArgs };
+      for (const [key, value] of Object.entries(bridgedArgs)) {
+        if (typeof value !== 'string' || value.length <= maxTextChars) continue;
+        const cut = truncateKeepingEnvelopes(value, maxTextChars);
+        if (cut !== value) {
+          newBridgedArgs[key] = cut;
+          stats.textPartsTruncated++;
+          bridgedArgsTouched = true;
+        }
+      }
+      if (bridgedArgsTouched) {
+        newArgs['arguments'] = newBridgedArgs;
         argsTouched = true;
       }
     }
@@ -450,19 +528,179 @@ function transformPart(
   }
   if (
     maxTextChars !== undefined &&
+    // A signed thought is a replay unit: providers validate the signature
+    // against the exact text, so truncating the text while keeping the
+    // signature would silently relabel a mutated unit as intact. Keep signed
+    // units byte-exact; the unsigned cap still applies to everything else.
+    !(
+      typeof nextPart.thoughtSignature === 'string' &&
+      nextPart.thoughtSignature.length > 0
+    ) &&
     typeof nextPart.text === 'string' &&
     nextPart.text.length > maxTextChars
   ) {
-    stats.textPartsTruncated++;
-    // Spread rather than rebuilding a bare `{ text }` so sibling properties
-    // (`thought`, `thoughtSignature`, ...) survive truncation — the converter
-    // pipeline keys reasoning parts off those flags (#10380).
-    return {
-      ...nextPart,
-      text: truncateTextForSlimming(nextPart.text, maxTextChars),
-    };
+    const text = truncateKeepingEnvelopes(nextPart.text, maxTextChars);
+    if (text !== nextPart.text) {
+      stats.textPartsTruncated++;
+      // Spread rather than rebuilding a bare `{ text }` so sibling properties
+      // (`thought`, `thoughtSignature`, ...) survive truncation — the
+      // converter pipeline keys reasoning parts off those flags (#10380).
+      return { ...nextPart, text };
+    }
   }
   return nextPart;
+}
+
+/**
+ * Blocks the writers wrap whole. One opens a text part (the IDE context before
+ * the prompt, hook context, a task notification) or ends a tool result (the
+ * reminders appended after its output). Left open by a cut, one reads as open
+ * over every part after it.
+ */
+const ENVELOPES = [
+  { open: SYSTEM_REMINDER_OPEN, close: SYSTEM_REMINDER_CLOSE },
+  {
+    open: USER_PROMPT_SUBMIT_CONTEXT_OPEN,
+    close: USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
+  },
+  { open: TASK_NOTIFICATION_OPEN, close: TASK_NOTIFICATION_CLOSE },
+] as const;
+
+/** Where an envelope's body starts and where its closing tag starts. */
+interface EnvelopeSpan {
+  bodyAt: number;
+  closeAt: number;
+  close: string;
+}
+
+/**
+ * The envelopes at the start and at the end of `value`, the two places a
+ * writer puts one. Writers stack them there: the CLI prepends one reminder
+ * over another, and a tool result can end with more than one, so each end
+ * holds a run of envelopes apart only by whitespace (#15936 R3-3). The
+ * writers escape tags inside an envelope's body, so the first closing tag
+ * after a leading opening, and the last opening tag before a trailing closing
+ * tag, are the envelope's own. The text around them, such as a file a tool
+ * read or what the user typed, is not escaped, so a tag inside it is never
+ * taken for an envelope.
+ */
+function envelopesAtEnds(value: string): EnvelopeSpan[] {
+  const spans: EnvelopeSpan[] = [];
+  let openAt = 0;
+  for (;;) {
+    const leading = ENVELOPES.find(({ open }) =>
+      value.startsWith(open, openAt),
+    );
+    if (!leading) break;
+    const closeAt = value.indexOf(leading.close, openAt + leading.open.length);
+    if (closeAt === -1) break;
+    spans.push({
+      bodyAt: openAt + leading.open.length,
+      closeAt,
+      close: leading.close,
+    });
+    const next = closeAt + leading.close.length;
+    openAt =
+      next + (value.length - next - value.slice(next).trimStart().length);
+  }
+  let end = value.trimEnd().length;
+  for (;;) {
+    const text = value.slice(0, end);
+    const trailing = ENVELOPES.find(({ close }) => text.endsWith(close));
+    if (!trailing) break;
+    const closeAt = end - trailing.close.length;
+    const lastOpenAt = text.lastIndexOf(trailing.open, closeAt);
+    if (lastOpenAt === -1) break;
+    spans.push({
+      bodyAt: lastOpenAt + trailing.open.length,
+      closeAt,
+      close: trailing.close,
+    });
+    end = value.slice(0, lastOpenAt).trimEnd().length;
+  }
+  return spans;
+}
+
+/**
+ * The closing tags of the blocks that are open at `cutAt`, the inner one
+ * first, read from the whole of `value`. Text that is not an envelope's body,
+ * such as a file a tool read, can quote a block anywhere, so this pairs every
+ * opening tag with its closing tag and keeps the pairs the cut falls between.
+ * An opening tag with no closing tag after it has no pair, so a tag quoted
+ * alone gets no close (#15936 R7-1).
+ */
+function closesOfBlocksOpenAt(value: string, cutAt: number): string[] {
+  return ENVELOPES.flatMap(({ open, close }) => {
+    const openAt: number[] = [];
+    const cutBlocks: Array<{ openAt: number; close: string }> = [];
+    let at = 0;
+    let nextOpen = value.indexOf(open);
+    let nextClose = value.indexOf(close);
+    while (nextClose !== -1) {
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        openAt.push(nextOpen);
+        at = nextOpen + open.length;
+        nextOpen = value.indexOf(open, at);
+        continue;
+      }
+      const pairedOpenAt = openAt.pop();
+      if (
+        pairedOpenAt !== undefined &&
+        pairedOpenAt + open.length <= cutAt &&
+        nextClose + close.length > cutAt
+      ) {
+        cutBlocks.push({ openAt: pairedOpenAt, close });
+      }
+      at = nextClose + close.length;
+      nextClose = value.indexOf(close, at);
+    }
+    return cutBlocks;
+  })
+    .sort((a, b) => b.openAt - a.openAt)
+    .map(({ close }) => close);
+}
+
+/**
+ * Cuts text like other text, except where the cut lands in an envelope at its
+ * start or its end: a cut inside the body closes the envelope again after the
+ * marker, and a cut that would remove only the closing tag keeps the envelope
+ * whole. An envelope can open a part without ending it, as the IDE context
+ * does before the prompt, or end a tool result without opening it. A cut
+ * before an envelope's body leaves nothing of it to close. A cut inside a
+ * block that sits at neither end, as one quoted in a tool's output does,
+ * closes that block after the marker too. Wherever the text ends, every block
+ * open there is closed, the inner one first: an envelope can hold another
+ * block, and a file's contents carried in a tool call's arguments are not
+ * escaped the way an envelope's body is (#15936 R8-1).
+ */
+function truncateKeepingEnvelopes(value: string, maxTextChars: number): string {
+  const span = envelopesAtEnds(value).find(
+    ({ bodyAt, closeAt, close }) =>
+      bodyAt <= maxTextChars && closeAt + close.length > maxTextChars,
+  );
+  if (!span) {
+    const cut = truncateTextForSlimming(value, maxTextChars);
+    return [cut, ...closesOfBlocksOpenAt(value, maxTextChars)].join('\n');
+  }
+  if (span.closeAt > maxTextChars) {
+    const cut = truncateTextForSlimming(value, maxTextChars);
+    const closes = closesOfBlocksOpenAt(value, maxTextChars);
+    // The pairing gives a closing tag to the nearest opening tag before it,
+    // so an opening tag of the same kind later in the text takes this
+    // envelope's own. The envelope is still open at the cut, so its closing
+    // tag is added unless the pairing already closes a block of that kind or
+    // the kept text closed it (#15936 R11-1).
+    const ownCloseMissing =
+      !closes.includes(span.close) &&
+      !value.slice(span.bodyAt, maxTextChars).includes(span.close);
+    return [cut, ...closes, ...(ownCloseMissing ? [span.close] : [])].join(
+      '\n',
+    );
+  }
+  const closedAt = span.closeAt + span.close.length;
+  if (value.slice(closedAt).trim() === '') return value;
+  const kept = value.slice(0, closedAt) + SLIM_TEXT_TRUNCATION_MARKER;
+  return [kept, ...closesOfBlocksOpenAt(value, closedAt)].join('\n');
 }
 
 function truncateTextForSlimming(value: string, maxTextChars: number): string {

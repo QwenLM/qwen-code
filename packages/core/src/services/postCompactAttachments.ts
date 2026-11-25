@@ -23,6 +23,10 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  RESUME_TRAILER,
+  stripCompactionTranscriptHint,
+} from './compaction-transcript-hint.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -106,6 +110,21 @@ export function extractRecentFilePaths(
   // call ids so we can skip them: never re-read a file the agent didn't
   // successfully read.
   const failedCallIds = collectFailedCallIds(history);
+  const successfulBridgeCallIds = new Set<string>();
+  for (const content of history) {
+    for (const part of content.parts ?? []) {
+      const response = part.functionResponse;
+      if (
+        response?.name === ToolNames.TOOL_CALL &&
+        response.id &&
+        response.response &&
+        'output' in response.response &&
+        !('error' in response.response)
+      ) {
+        successfulBridgeCallIds.add(response.id);
+      }
+    }
+  }
 
   const seen = new Set<string>();
   for (let i = history.length - 1; i >= 0; i--) {
@@ -120,10 +139,23 @@ export function extractRecentFilePaths(
     for (let j = parts.length - 1; j >= 0; j--) {
       const part = parts[j];
       const call = part.functionCall;
-      if (!call || !FILE_TOUCHING_TOOLS.has(call.name ?? '')) continue;
-      // Skip paths whose tool call failed (denied / errored).
+      if (!call) continue;
+      // Always pair responses with the outer call id before unwrapping.
       if (call.id && failedCallIds.has(call.id)) continue;
-      const args = call.args as { file_path?: unknown } | undefined;
+      const bridged = call.name === ToolNames.TOOL_CALL;
+      if (bridged && (!call.id || !successfulBridgeCallIds.has(call.id))) {
+        continue;
+      }
+      const name = bridged ? call.args?.['name'] : call.name;
+      if (
+        typeof name !== 'string' ||
+        !FILE_TOUCHING_TOOLS.has(bridged ? name.toLowerCase() : name)
+      ) {
+        continue;
+      }
+      const args = (bridged ? call.args?.['arguments'] : call.args) as
+        | { file_path?: unknown }
+        | undefined;
       const filePath =
         typeof args?.file_path === 'string' ? args.file_path : undefined;
       if (!filePath || seen.has(filePath)) continue;
@@ -474,19 +506,6 @@ export function buildImageRestorationBlock(
  * naturally append the model's continuation response.
  */
 /**
- * Trailer appended to the post-compact summary message. Mirrors claude-code's
- * "Resume directly" guidance for the resuming agent: it must NOT acknowledge
- * the summary, re-greet, or recap — it picks up from where the prior turn
- * left off based on the summary.
- *
- * Lives in the wrapper (not in the compression system prompt) so the summary
- * model does not have to re-generate this text every compaction (saves
- * output tokens, prevents wording drift).
- */
-const RESUME_TRAILER =
-  'Resume the prior task using the summary above. Continue from the last in-flight step; do not acknowledge the summary, do not re-introduce, do not greet the user again.';
-
-/**
  * Strip the model's drafting scratchpad before the summary becomes the new
  * post-compact context. The compression prompt instructs the summary model
  * to wrap its chain-of-thought reasoning in an `<analysis>...</analysis>`
@@ -532,8 +551,13 @@ export function stripAnalysisBlock(rawSummary: string): string {
   return result.trim();
 }
 
-export function postProcessSummary(rawSummary: string): string {
-  const stripped = stripAnalysisBlock(rawSummary);
+export function postProcessSummary(
+  rawSummary: string,
+  transcriptHint?: string,
+): string {
+  const stripped = stripCompactionTranscriptHint(
+    stripAnalysisBlock(rawSummary),
+  ).trim();
   // Defensive sentinel only. Callers gate on `isSummaryEmpty`, which now
   // checks the STRIPPED summary — so a response that strips to nothing is
   // treated as an empty summary upstream (COMPRESSION_FAILED_EMPTY_SUMMARY)
@@ -541,7 +565,7 @@ export function postProcessSummary(rawSummary: string): string {
   // (a tiny `[Summary unavailable]` is smaller than the original, so the
   // guard wouldn't fire) — the upstream emptiness check is what prevents it.
   const body = stripped.length > 0 ? stripped : '[Summary unavailable]';
-  return `${body}\n\n${RESUME_TRAILER}`;
+  return [body, transcriptHint, RESUME_TRAILER].filter(Boolean).join('\n\n');
 }
 
 /**
@@ -559,6 +583,7 @@ export interface SubagentSnapshot {
 }
 
 export interface ComposePostCompactOptions {
+  transcriptHint?: string;
   /**
    * Workspace root. When set, file paths from history that resolve
    * outside this root are silently skipped (Finding 4). Without this,
@@ -830,7 +855,10 @@ export async function composePostCompactHistory(
   ];
 
   const out: Content[] = [
-    { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
+    {
+      role: 'user',
+      parts: [{ text: postProcessSummary(summary, options.transcriptHint) }],
+    },
   ];
 
   if (postAckParts.length > 0) {

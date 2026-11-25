@@ -25,6 +25,7 @@ function createContext(canUseToolTimeoutMs?: number): IControlContext {
       getDebugMode: vi.fn().mockReturnValue(false),
       getInputFormat: vi.fn().mockReturnValue(InputFormat.STREAM_JSON),
       getWorkflowRunRegistry: vi.fn(),
+      setApprovalMode: vi.fn(),
     } as unknown as IControlContext['config'],
     streamJson: {
       send: vi.fn(),
@@ -86,6 +87,50 @@ describe('PermissionController', () => {
       });
     },
   );
+
+  it('keeps the control context unescalated when the trust gate refuses a mode change', async () => {
+    const context = createContext();
+    const trustGateError = new Error(
+      'Cannot enable privileged approval modes in an untrusted folder.',
+    );
+    trustGateError.name = 'TrustGateError';
+    vi.mocked(context.config.setApprovalMode).mockImplementation(() => {
+      throw trustGateError;
+    });
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+
+    await expect(
+      controller.handleRequest(
+        { subtype: 'set_permission_mode', mode: 'yolo' },
+        'request-trust-gate',
+      ),
+    ).rejects.toThrow('Cannot enable privileged approval modes');
+
+    // The refused escalation must not leave the context certifying `allow`:
+    // core Config is still in DEFAULT and the host was told it failed.
+    expect(context.permissionMode).toBe('default');
+
+    await expect(
+      controller.handleRequest(
+        {
+          subtype: 'can_use_tool',
+          tool_name: 'read_file',
+          tool_use_id: 'tool-after-refused-escalation',
+          input: {},
+          permission_suggestions: null,
+          blocked_path: null,
+        },
+        'request-after-refused-escalation',
+      ),
+    ).resolves.toMatchObject({
+      subtype: 'can_use_tool',
+      behavior: 'deny',
+    });
+  });
 
   it('round-trips workflow approval through can_use_tool with updated input', async () => {
     const context = createContext(120_000);

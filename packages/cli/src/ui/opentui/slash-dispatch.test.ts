@@ -15,6 +15,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { loadInteractiveCommands } from './slash-dispatch.js';
 import { HELP_DOCS_URL, formatHelpText } from './help-content.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 
 describe('original built-in registry', () => {
   it('loads built-in commands without a config (BuiltinCommandLoader)', async () => {
@@ -64,6 +65,7 @@ describe('model-invocable commands registration (ink loader-effect parity)', () 
   ): Config {
     return {
       initialize: async () => {},
+      getGeminiClient: () => undefined,
       getDisabledSlashCommands: () => [],
       setModelInvocableCommandsProvider: (provider: InvocableProvider) =>
         onProvider?.(provider),
@@ -95,6 +97,38 @@ describe('model-invocable commands registration (ink loader-effect parity)', () 
     expect(providerSpy).toHaveBeenCalledTimes(1);
     expect(executorSpy).toHaveBeenCalledTimes(1);
   }, 30000);
+
+  it.each(['config', 'Mod'])(
+    'keeps built-ins after %s startup fails with the Mods flag enabled',
+    async (failure) => {
+      const config = createConfigStub();
+      const initialize = vi
+        .fn()
+        .mockRejectedValue(new Error('Mod startup failed'));
+      const loadCommands = vi.fn(() => new Promise<never>(() => {}));
+      if (failure === 'config') {
+        config.initialize = vi
+          .fn()
+          .mockRejectedValue(new Error('Config startup failed'));
+      }
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          initialize,
+          loadCommands,
+        } as unknown as interactiveMods.InteractiveModSession);
+      try {
+        const commands = await loadInteractiveCommands(config);
+        expect(commands.map((command) => command.name)).toEqual(
+          expect.arrayContaining(['help', 'quit', 'clear']),
+        );
+        expect(loadCommands).not.toHaveBeenCalled();
+        expect(initialize).toHaveBeenCalledTimes(failure === 'config' ? 0 : 1);
+      } finally {
+        owner.mockRestore();
+      }
+    },
+  );
 
   it('provider() returns a {name, description} listing', async () => {
     let provider: InvocableProvider | undefined;

@@ -9,15 +9,14 @@ import type {
   DaemonClient,
   DaemonSettingUpdateResult,
   DaemonWorkspaceCapability,
-  DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspaceVoiceStatus,
 } from '@qwen-code/sdk/daemon';
 
 const PRIMARY_VOICE_FEATURE = 'voice_transcribe';
 const QUALIFIED_VOICE_FEATURE = 'workspace_qualified_voice';
-const QUALIFIED_CORE_FEATURE = 'workspace_qualified_rest_core';
-const WORKSPACE_SETTINGS_FEATURE = 'workspace_settings';
+export const QUALIFIED_CORE_FEATURE = 'workspace_qualified_rest_core';
+export const WORKSPACE_SETTINGS_FEATURE = 'workspace_settings';
 
 const MODERN_WORKSPACE_FEATURES = new Set([
   'dynamic_workspace_registration',
@@ -210,7 +209,10 @@ export function supportsVoiceModelSettings(
   ].every((feature) => features.includes(feature));
 }
 
-function qualifiedClient(client: DaemonClient, target: VoiceWorkspaceTarget) {
+export function qualifiedWorkspaceClient(
+  client: DaemonClient,
+  target: VoiceWorkspaceTarget,
+) {
   if (target.route !== 'workspace-qualified') return undefined;
   return target.selector.kind === 'id'
     ? client.workspaceById(target.selector.value)
@@ -224,26 +226,10 @@ export async function loadVoiceStatus(
   const status =
     target.route === 'legacy-primary'
       ? await client.workspaceVoice()
-      : await qualifiedClient(client, target)!.workspaceVoice();
+      : await qualifiedWorkspaceClient(client, target)!.workspaceVoice();
   if (target.cwd && status.workspaceCwd !== target.cwd) {
     throw new Error(
       'Voice status workspace does not match the selected target.',
-    );
-  }
-  return status;
-}
-
-export async function loadVoiceProviders(
-  client: DaemonClient,
-  target: VoiceWorkspaceTarget,
-): Promise<DaemonWorkspaceProvidersStatus> {
-  const status =
-    target.route === 'legacy-primary'
-      ? await client.workspaceProviders()
-      : await qualifiedClient(client, target)!.workspaceProviders();
-  if (target.cwd && status.workspaceCwd !== target.cwd) {
-    throw new Error(
-      'Voice provider workspace does not match the selected target.',
     );
   }
   return status;
@@ -255,7 +241,7 @@ export async function loadVoiceSettings(
 ): Promise<DaemonWorkspaceSettingsStatus> {
   return target.route === 'legacy-primary'
     ? await client.workspaceSettings()
-    : await qualifiedClient(client, target)!.workspaceSettings();
+    : await qualifiedWorkspaceClient(client, target)!.workspaceSettings();
 }
 
 export async function setVoiceModelSetting(
@@ -265,7 +251,7 @@ export async function setVoiceModelSetting(
   value: string,
 ): Promise<DaemonSettingUpdateResult> {
   if (target.route === 'workspace-qualified' && scope === 'workspace') {
-    return await qualifiedClient(client, target)!.setWorkspaceSetting(
+    return await qualifiedWorkspaceClient(client, target)!.setWorkspaceSetting(
       'workspace',
       'voiceModel',
       value,

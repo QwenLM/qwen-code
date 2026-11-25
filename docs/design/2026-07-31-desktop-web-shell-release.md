@@ -136,7 +136,7 @@ Tauri updater 使用签名更新产物和固定公开 key。稳定发布的安�
 | ------- | ---------- | ------------------------------------- | --------------------------------------- |
 | macOS   | arm64、x64 | `.dmg`、`.app.tar.gz` updater         | Developer ID Application + notarization |
 | Windows | x64        | NSIS `.exe` updater/installer         | Authenticode SHA-256 + timestamp        |
-| Linux   | x64        | `.AppImage` updater/installer、`.deb` | updater minisign；无 OS code-signing    |
+| Linux   | x64、arm64 | `.AppImage` updater/installer、`.deb` | updater minisign；无 OS code-signing    |
 
 Windows WebView2 使用 download bootstrapper；系统离线且缺失 WebView2 时安装失败会明确提示依赖。Linux CI 安装 Tauri WebKit/GTK、AppImage 和 deb 构建依赖。
 

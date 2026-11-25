@@ -188,6 +188,28 @@ describe('serve fast-path bundle check', () => {
     ]);
   });
 
+  it.each([
+    'packages/acp-bridge/src/session-control-plane.ts',
+    'packages/acp-bridge/dist/session-control-plane.js',
+    'packages/acp-bridge/src/channel-harness.ts',
+    'packages/acp-bridge/dist/channel-harness.js',
+  ])('keeps extracted runtime %s out of the pre-listen closure', (input) => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/acp-runtime.js')],
+      }),
+      'dist/chunks/acp-runtime.js': output({ inputs: [input] }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'ACP bridge runtime',
+        matchedInput: input,
+      }),
+    ]);
+  });
+
   it('allows forbidden runtime files behind dynamic imports', () => {
     const metafile = makeMetafile({
       'dist/chunks/run-qwen-serve.js': output({
@@ -514,6 +536,40 @@ describe('ACP import boundary check', () => {
       }),
       'dist/chunks/google-genai.js': output({
         inputs: ['node_modules/@google/genai/dist/node/index.mjs'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
+  it('reports a statically imported Google auth library', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/google-auth.js')],
+      }),
+      'dist/chunks/google-auth.js': output({
+        bytes: 250_446,
+        inputs: ['node_modules/google-auth-library/build/src/index.js'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'Google auth library',
+        matchedInput: 'node_modules/google-auth-library/build/src/index.js',
+      }),
+    ]);
+  });
+
+  it('allows the Google auth library behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/google-auth.js')],
+      }),
+      'dist/chunks/google-auth.js': output({
+        inputs: ['node_modules/google-auth-library/build/src/index.js'],
       }),
     });
 

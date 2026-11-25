@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "exec '/absolute/path/to/node' '/administrator/path/to/external-context-mem0/dist/auto-recall.js'",
-            "timeout": 8000,
+            "timeout": 8,
             "name": "external-context-mem0-auto-recall",
             "statusMessage": "Retrieving external context"
           }

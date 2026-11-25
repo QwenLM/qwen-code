@@ -56,6 +56,32 @@ const wasmBinaryPlugin = {
   },
 };
 
+// OpenCC's prebuilt converter has no license banner for esbuild to preserve.
+const openccLicensePlugin = {
+  name: 'opencc-license',
+  setup(build) {
+    build.onLoad(
+      { filter: /[/\\]opencc-js[/\\]dist[/\\]esm[/\\]t2cn\.js$/ },
+      ({ path: source }) => {
+        const packageDir = path.resolve(path.dirname(source), '../..');
+        const license = readFileSync(path.join(packageDir, 'LICENSE'), 'utf8');
+        const notices = readFileSync(
+          path.join(packageDir, 'THIRD_PARTY_LICENSES.md'),
+          'utf8',
+        );
+        return {
+          contents:
+            '/** @license opencc-js\n' +
+            (license + '\n' + notices).replaceAll('*/', '* /') +
+            '\n*/\n' +
+            readFileSync(source, 'utf8'),
+          loader: 'js',
+        };
+      },
+    );
+  },
+};
+
 // `@opentelemetry/sdk-node` eagerly require()s every exporter package to
 // support `OTEL_*_EXPORTER` env-based auto-configuration, which would drag
 // both OTLP protocol chains (~2 MiB) back into the sdk-impl static closure
@@ -156,6 +182,7 @@ const external = [
   'node-pty',
   '@lydell/node-pty-darwin-arm64',
   '@lydell/node-pty-darwin-x64',
+  '@lydell/node-pty-linux-arm64',
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
@@ -179,7 +206,10 @@ const external = [
 const BUNDLE_CHUNK_DIR = 'chunks';
 
 const mainBuild = esbuild.build({
-  entryPoints: { cli: 'packages/cli/src/cli.ts' },
+  entryPoints: {
+    cli: 'packages/cli/src/cli.ts',
+    'execution-worker': 'packages/core/src/services/execution-worker-main.ts',
+  },
   bundle: true,
   outdir: 'dist',
   entryNames: '[name]',
@@ -243,32 +273,37 @@ const mainBuild = esbuild.build({
     sdkNodeExporterStubPlugin,
     syncFileEncodingTreeShakePlugin,
     wasmBinaryPlugin,
+    openccLicensePlugin,
     wasmLoader({ mode: 'embedded' }),
   ],
   metafile: true,
   write: true,
   keepNames: true,
+  minifyWhitespace: true,
 });
 
-// fzf index worker — runs in its own worker_threads worker that
-// `fzfWorkerHandle.ts` spawns via `new Worker(new URL('./fzfWorker.js', ...))`.
-// Must exist as a standalone file next to `dist/cli.js` so the URL resolves
-// at runtime; we bundle it self-contained (no chunk splitting) so fzf is
-// inlined and the worker doesn't need to walk back into node_modules from
-// the published tarball. `prepare-package.js` whitelists `fzfWorker.js` in
-// the dist `files` array.
+// Worker entries must be self-contained files beside cli.js, included in
+// both package layouts, because worker_threads cannot reuse the main chunks.
 const workerBuild = esbuild.build({
-  entryPoints: ['packages/core/src/utils/filesearch/fzfWorker.ts'],
+  entryPoints: {
+    fzfWorker: 'packages/core/src/utils/filesearch/fzfWorker.ts',
+    'glob-search-worker': 'packages/core/src/tools/glob-search-worker.ts',
+    'mod-worker': 'packages/core/src/mods/mod-worker.ts',
+  },
   bundle: true,
-  outfile: 'dist/fzfWorker.js',
+  outdir: 'dist',
   platform: 'node',
   format: 'esm',
   target: 'node22',
   external,
   packages: 'bundle',
-  // fzf is CJS — needs the same require()-shim the main bundle uses for
+  // Bundled CJS dependencies need the same require()-shim the main bundle uses for
   // CJS interop in ESM output.
   inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  define: {
+    __dirname: '__qwen_dirname',
+    __filename: '__qwen_filename',
+  },
   banner: {
     js: `"use strict";`,
   },
@@ -276,7 +311,56 @@ const workerBuild = esbuild.build({
   keepNames: true,
 });
 
-Promise.all([mainBuild, workerBuild])
+const codeModeHostBuild = esbuild.build({
+  entryPoints: ['packages/core/src/code-mode/host.ts'],
+  bundle: true,
+  outfile: 'dist/codeModeHost.js',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  packages: 'bundle',
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: { js: `"use strict";` },
+  write: true,
+  keepNames: true,
+});
+
+const sandboxWorkersBuild = esbuild.build({
+  entryPoints: {
+    sandboxBwrapRelay: 'packages/core/src/sandbox/bwrap-relay.ts',
+    sandboxLandlockRelay: 'packages/core/src/sandbox/landlock-relay.ts',
+    sandboxFileWorker: 'packages/core/src/sandbox/file-worker.ts',
+  },
+  bundle: true,
+  outdir: 'dist',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+});
+
+const mem0Build = esbuild.build({
+  entryPoints: {
+    main: 'integrations/external-context/src/bundled-mem0.ts',
+    'write-confirmation':
+      'integrations/external-context/src/write-confirmation.ts',
+  },
+  bundle: true,
+  outdir: 'dist/mem0',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  banner: {
+    js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
+  },
+});
+
+Promise.all([
+  mainBuild,
+  workerBuild,
+  codeModeHostBuild,
+  sandboxWorkersBuild,
+  mem0Build,
+])
   .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));

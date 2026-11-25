@@ -29,6 +29,22 @@ export const dreamCommand: SlashCommand = {
 
     try {
       const projectRoot = config.getProjectRoot();
+
+      // Structured recall mode forbids the main model from touching
+      // managed-memory paths with general file tools, which the prompt-
+      // submission consolidation flow requires — run the runtime-managed
+      // dream (forked agent + operations apply + index rebuild) instead.
+      if (config.getMemoryRecallMode?.() === 'structured') {
+        const result = await config
+          .getMemoryManager()
+          .runManualDream(projectRoot, config, config.getSessionId());
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: result.systemMessage ?? t('Dream completed.'),
+        };
+      }
+
       const memoryRoot = getAutoMemoryRoot(projectRoot);
       const transcriptDir = path.join(
         new Storage(projectRoot).getProjectDir(),

@@ -11,7 +11,6 @@ type MemoryMode = 'view' | 'edit';
 type MemoryScope = 'global' | 'workspace';
 
 interface MemoryMessageProps {
-  refreshSignal?: number;
   addSignal?: number;
   addScope?: DaemonContextFileScope;
   onMessage?: (message: string, type?: 'status' | 'error') => void;
@@ -40,25 +39,41 @@ function scopeLabel(
 }
 
 export function MemoryMessage({
-  refreshSignal = 0,
   addSignal = 0,
   addScope = 'workspace',
   onMessage,
 }: MemoryMessageProps) {
   const { t } = useI18n();
-  const { files, loading, error, readFile, reload, writeMemory } = useMemory({
+  const {
+    files,
+    status,
+    loading,
+    error,
+    readMemoryFile,
+    reload,
+    reloadWithOutcome,
+    writeMemory,
+  } = useMemory({
     autoLoad: true,
   });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const loadSeqRef = useRef(0);
+  const refreshSeqRef = useRef(0);
   const [selectedScope, setSelectedScope] = useState<MemoryScope>('workspace');
   const [mode, setMode] = useState<MemoryMode>('view');
   const [content, setContent] = useState('');
   const [draft, setDraft] = useState('');
   const [contentLoading, setContentLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // False when an existing file's full text is not in hand (read failed
+  // or truncated): saving uses mode=replace, which would overwrite
+  // whatever the panel could not show.
+  const [editable, setEditable] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const handledAddSignalRef = useRef(0);
+  const pendingRefreshRef = useRef<
+    (MemoryEntry & { refreshSeq: number }) | undefined
+  >(undefined);
 
   const entries = useMemo<MemoryEntry[]>(() => {
     const globalFile = fileForScope(files, 'global');
@@ -84,45 +99,92 @@ export function MemoryMessage({
   const selectedEntry =
     entries.find((entry) => entry.scope === selectedScope) ?? entries[0];
 
+  // Replace needs both the file's full text and the list that says whether
+  // the file exists. While the status load is outstanding (`status` is
+  // undefined on first paint, in flight, and after a failure) `files` is
+  // empty, so the create path below would offer replace over a file that is
+  // really on disk. Keying on the load having succeeded — never on `files`
+  // being empty — keeps the legitimate first-memory-file create path working.
+  const canReplace = editable && status !== undefined;
+
   const loadContent = useCallback(
-    (entry: MemoryEntry | undefined, nextMode: MemoryMode) => {
+    (
+      entry: MemoryEntry | undefined,
+      nextMode?: MemoryMode,
+      refreshSeq?: number,
+    ) => {
       const loadSeq = ++loadSeqRef.current;
-      setMode(nextMode);
+      if (nextMode !== undefined) setMode(nextMode);
       setMessage(null);
       setContent('');
       setDraft('');
+      setEditable(true);
       if (!entry?.file) {
+        setContentLoading(false);
+        if (refreshSeq === refreshSeqRef.current) {
+          setMessage(t('memory.refreshed'));
+        }
         if (nextMode === 'edit') {
           requestAnimationFrame(() => editorRef.current?.focus());
         }
         return;
       }
       setContentLoading(true);
-      readFile(entry.file.path)
+      readMemoryFile(entry.file.path)
         .then((result) => {
           if (loadSeq !== loadSeqRef.current) return;
           setContent(result.content);
+          if (result.truncated) {
+            setEditable(false);
+            setMode('view');
+            if (
+              refreshSeq === undefined ||
+              refreshSeq === refreshSeqRef.current
+            ) {
+              setMessage(t('memory.fileTruncated'));
+            }
+            return;
+          }
           setDraft(result.content);
-          if (result.truncated) setMessage(t('memory.fileTruncated'));
+          if (refreshSeq === refreshSeqRef.current) {
+            setMessage(t('memory.refreshed'));
+          }
           requestAnimationFrame(() => editorRef.current?.focus());
         })
         .catch((readError: unknown) => {
           if (loadSeq !== loadSeqRef.current) return;
+          setEditable(false);
+          setMode('view');
+          if (refreshSeq !== undefined && refreshSeq !== refreshSeqRef.current)
+            return;
+          if (entry.scope === 'global') {
+            setMessage(t('memory.globalReadUnsupported'));
+            return;
+          }
           const text =
             readError instanceof Error ? readError.message : String(readError);
           setMessage(text);
-          if (entry.scope !== 'global') onMessage?.(text, 'error');
+          onMessage?.(text, 'error');
         })
         .finally(() => {
           if (loadSeq === loadSeqRef.current) setContentLoading(false);
         });
     },
-    [onMessage, readFile, t],
+    [onMessage, readMemoryFile, t],
   );
 
   useEffect(() => {
     if (!selectedEntry) return;
-    loadContent(selectedEntry, mode);
+    const refreshed = pendingRefreshRef.current;
+    pendingRefreshRef.current = undefined;
+    loadContent(
+      selectedEntry,
+      mode,
+      refreshed?.scope === selectedEntry.scope &&
+        refreshed.file?.path === selectedEntry.file?.path
+        ? refreshed.refreshSeq
+        : undefined,
+    );
     // Only reload when the selected file changes. Mode changes are explicit
     // button actions that call loadContent directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -132,19 +194,42 @@ export function MemoryMessage({
     if (error) setMessage(error.message);
   }, [error]);
 
-  useEffect(() => {
-    if (refreshSignal <= 0) return;
-    reload()
-      .then(() => setMessage(t('memory.refreshed')))
-      .catch((refreshError: unknown) => {
-        const text =
-          refreshError instanceof Error
-            ? refreshError.message
-            : String(refreshError);
-        setMessage(text);
-        onMessage?.(text, 'error');
-      });
-  }, [onMessage, refreshSignal, reload, t]);
+  const handleRefresh = useCallback(() => {
+    if (!selectedEntry) return;
+    const refreshSeq = ++refreshSeqRef.current;
+    const loadSeq = loadSeqRef.current;
+    void reloadWithOutcome().then(
+      ({ data: nextStatus, superseded, error: refreshError }) => {
+        if (
+          refreshSeq !== refreshSeqRef.current ||
+          loadSeq !== loadSeqRef.current
+        ) {
+          return;
+        }
+        if (superseded) {
+          const text = t('memory.refreshSuperseded');
+          setMessage(text);
+          onMessage?.(text, 'status');
+          return;
+        }
+        if (!nextStatus) {
+          const text = refreshError?.message ?? t('memory.refreshFailed');
+          setMessage(text);
+          onMessage?.(text, 'error');
+          return;
+        }
+        const nextEntry = {
+          ...selectedEntry,
+          file: fileForScope(nextStatus.files, selectedEntry.scope),
+        };
+        if (nextEntry.file?.path === selectedEntry.file?.path) {
+          loadContent(nextEntry, undefined, refreshSeq);
+        } else {
+          pendingRefreshRef.current = { ...nextEntry, refreshSeq };
+        }
+      },
+    );
+  }, [loadContent, onMessage, reloadWithOutcome, selectedEntry, t]);
 
   useEffect(() => {
     if (addSignal <= 0) return;
@@ -167,17 +252,27 @@ export function MemoryMessage({
   };
 
   const handleSave = () => {
-    if (!selectedEntry) return;
+    if (!selectedEntry || !canReplace) return;
+    // A newer save owns the feedback, even if an older refresh finishes later.
+    refreshSeqRef.current++;
     if (!draft.trim()) {
       setMessage(t('memory.contentEmpty'));
       return;
     }
     setSaving(true);
     setMessage(null);
+    // The <textarea> value API normalizes CRLF to LF, so a one-line edit
+    // would otherwise rewrite every line ending in the file. Restore the
+    // loaded file's own endings — only when they are uniformly CRLF, so a
+    // mixed-ending file is never double-CR'd, and idempotently (`\r?`), so a
+    // draft that was never typed into still holds the file's own CRLF.
+    const restoreCrlf =
+      content.includes('\r\n') && !content.replace(/\r\n/g, '').includes('\n');
+    const payload = restoreCrlf ? draft.replace(/\r?\n/g, '\r\n') : draft;
     writeMemory({
       scope: selectedEntry.scope,
       mode: 'replace',
-      content: draft,
+      content: payload,
     })
       .then((result) => {
         const savedMessage = t('memory.saved', {
@@ -185,7 +280,7 @@ export function MemoryMessage({
           bytes: result.bytesWritten,
           path: result.filePath,
         });
-        setContent(draft);
+        setContent(payload);
         setMode('view');
         setMessage(savedMessage);
         onMessage?.(savedMessage, 'status');
@@ -232,6 +327,15 @@ export function MemoryMessage({
             <button
               type="button"
               className={styles.actionButton}
+              disabled={saving || loading}
+              onClick={handleRefresh}
+            >
+              {t('memory.refresh')}
+            </button>
+            <button
+              type="button"
+              className={styles.actionButton}
+              disabled={!canReplace}
               onClick={handleEdit}
             >
               {t('settings.action.edit')}
@@ -268,7 +372,7 @@ export function MemoryMessage({
               <button
                 type="button"
                 className={styles.primaryButton}
-                disabled={saving || contentLoading}
+                disabled={saving || contentLoading || !canReplace}
                 onClick={handleSave}
               >
                 {saving ? t('memory.saving') : t('memory.save')}
@@ -279,7 +383,8 @@ export function MemoryMessage({
           <pre className={styles.content}>
             {contentLoading
               ? t('memory.loadingFile')
-              : content || t('memory.noFiles')}
+              : content ||
+                (editable && !selectedEntry?.file ? t('memory.noFiles') : '')}
           </pre>
         )}
       </section>

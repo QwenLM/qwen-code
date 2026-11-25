@@ -284,3 +284,88 @@ it('shows a preview on keyboard focus while the tick stays text-free', async () 
   );
   expect(document.querySelector('[role="tooltip"]')).toBeNull();
 });
+
+it('highlights the scroll-followed turn and marks the visible range', async () => {
+  const { state, store, select } = await setup(40);
+  await act(async () =>
+    root.render(
+      <GlobalTurnNavigation
+        state={state}
+        store={store}
+        follow={{ start: 4, end: 8, current: 6 }}
+        onSelect={select}
+      />,
+    ),
+  );
+  expect(
+    container
+      .querySelector('[aria-current="location"]')
+      ?.getAttribute('data-turn-ordinal'),
+  ).toBe('6');
+  expect(container.querySelectorAll('[data-in-current-range]').length).toBe(5);
+});
+
+it('keeps a loading click selection visible ahead of the followed turn', async () => {
+  const { state, store, select } = await setup(40);
+  await act(async () =>
+    root.render(
+      <GlobalTurnNavigation
+        state={{ ...state, selected: { ordinal: 20, status: 'loading' } }}
+        store={store}
+        follow={{ start: 4, end: 8, current: 6 }}
+        onSelect={select}
+      />,
+    ),
+  );
+  expect(
+    container
+      .querySelector('[aria-current="location"]')
+      ?.getAttribute('data-turn-ordinal'),
+  ).toBe('20');
+});
+
+it('falls back to the settled selection when no follow range is reported', async () => {
+  const { state, store, select } = await setup(40);
+  await act(async () =>
+    root.render(
+      <GlobalTurnNavigation
+        state={{ ...state, selected: { ordinal: 20, status: 'ready' } }}
+        store={store}
+        onSelect={select}
+      />,
+    ),
+  );
+  expect(
+    container
+      .querySelector('[aria-current="location"]')
+      ?.getAttribute('data-turn-ordinal'),
+  ).toBe('20');
+});
+
+it('edge-scrolls the rail to keep the current tick visible instead of centering it', async () => {
+  const { state, store, select } = await setup(500);
+  const scroll = container.querySelector<HTMLElement>('nav > div')!;
+  expect(scroll.scrollTop).toBe(500 * 16 - 360);
+  await act(async () =>
+    root.render(
+      <GlobalTurnNavigation
+        state={state}
+        store={store}
+        follow={{ start: 8, end: 12, current: 10 }}
+        onSelect={select}
+      />,
+    ),
+  );
+  expect(scroll.scrollTop).toBe(160);
+  await act(async () =>
+    root.render(
+      <GlobalTurnNavigation
+        state={state}
+        store={store}
+        follow={{ start: 11, end: 14, current: 13 }}
+        onSelect={select}
+      />,
+    ),
+  );
+  expect(scroll.scrollTop).toBe(160);
+});

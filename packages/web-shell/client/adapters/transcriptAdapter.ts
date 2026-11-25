@@ -3,7 +3,8 @@ import type {
   ContentBlock,
   PermissionRequest,
   PermissionOptionKind,
-} from './types';
+} from './types.js';
+import { isAskUserPermission } from '../utils/askUserPermission.js';
 
 type PermissionTranscriptBlock = Extract<
   DaemonTranscriptBlock,
@@ -57,6 +58,46 @@ export function extractPendingPermission(
   return null;
 }
 
+/**
+ * Cheap block-level form of `isAskUserPermission(extractPendingPermission(...))`:
+ * it reads only the tool name and raw input the classification needs, without
+ * building the preview content (`escapePreviewText` of the serialized input).
+ * Callers that classify a pending set on every render use this so a streaming
+ * delta does not re-serialize each outstanding approval's payload.
+ */
+export function isAskUserPermissionBlock(
+  block: DaemonTranscriptBlock,
+): boolean {
+  if (!isPermissionBlock(block) || block.resolved) return false;
+  const toolCallRecord = getRecord(block.toolCall);
+  const metaRecord = getRecord(toolCallRecord?.['_meta']);
+  const toolName =
+    typeof metaRecord?.['toolName'] === 'string'
+      ? metaRecord['toolName']
+      : undefined;
+  return isAskUserPermission({
+    toolName,
+    rawInput: getPermissionRawInput(block.toolCall),
+  });
+}
+
+/**
+ * Cheap content revision for a pending permission block, used to key the
+ * binding's split cache. A re-emitted `permission.request` under the same
+ * request id can change the title/options while id and classification stay
+ * put, so id+classification alone would serve a stale render-ready request.
+ * Reads only scalar/option-id fields (no payload serialization) so a streaming
+ * delta does not re-serialize the payload; `updatedAt` additionally catches
+ * raw-input-only updates that bump the block's revision.
+ */
+export function pendingPermissionRevision(
+  block: DaemonTranscriptBlock,
+): string {
+  if (!isPermissionBlock(block)) return '';
+  const optionIds = block.options.map((option) => option.optionId).join(',');
+  return `${block.updatedAt}:${block.title}:${optionIds}`;
+}
+
 function hasPermissionDiffPreview(
   toolCall: Record<string, unknown> | undefined,
 ): boolean {
@@ -73,6 +114,18 @@ function hasPermissionDiffPreview(
   });
 }
 
+export function escapePreviewText(text: string): string {
+  return text.replace(/[\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (character) =>
+    character
+      .split('')
+      .map(
+        (codeUnit) =>
+          `\\u${codeUnit.charCodeAt(0).toString(16).padStart(4, '0')}`,
+      )
+      .join(''),
+  );
+}
+
 function getPermissionContent(
   toolCall: Record<string, unknown> | undefined,
   fallback?: string,
@@ -81,6 +134,23 @@ function getPermissionContent(
   if (Array.isArray(rawContent)) {
     const content = rawContent.flatMap((value): ContentBlock[] => {
       const block = getRecord(value);
+      if (
+        block?.['type'] === 'diff' &&
+        typeof block['path'] === 'string' &&
+        typeof block['newText'] === 'string'
+      ) {
+        return [
+          {
+            type: 'diff',
+            path: escapePreviewText(block['path']),
+            oldText:
+              typeof block['oldText'] === 'string'
+                ? escapePreviewText(block['oldText'])
+                : '',
+            newText: escapePreviewText(block['newText']),
+          },
+        ];
+      }
       const nested = getRecord(block?.['content']);
       const text =
         block?.['type'] === 'text' && typeof block['text'] === 'string'
@@ -93,19 +163,22 @@ function getPermissionContent(
     if (content.length > 0) return { content };
   }
   const input = getExplicitPermissionInput(toolCall);
-  if (input && !hasPermissionDiffPreview(toolCall)) {
-    const text = JSON.stringify(input, null, 2).replace(
-      /[\u007f-\u009f\u2028\u2029\p{Cf}]/gu,
-      (character) =>
-        character
-          .split('')
-          .map(
-            (codeUnit) =>
-              `\\u${codeUnit.charCodeAt(0).toString(16).padStart(4, '0')}`,
-          )
-          .join(''),
-    );
-    return { content: [{ type: 'text', text }], contentIsInput: true };
+  // An empty input object carries no information; rendering its serialization
+  // would show a bare `{}` as the approval body.
+  if (
+    input &&
+    Object.keys(input).length > 0 &&
+    !hasPermissionDiffPreview(toolCall)
+  ) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: escapePreviewText(JSON.stringify(input, null, 2)),
+        },
+      ],
+      contentIsInput: true,
+    };
   }
   return { content: [{ type: 'text', text: fallback || 'Tool permission' }] };
 }
