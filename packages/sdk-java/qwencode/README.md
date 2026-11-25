@@ -121,55 +121,35 @@ An indeterminate completion is an outcome boundary, not a session-reuse boundary
 
 ## Managed Agent public API
 
-Use `ManagedAgentClient` to call a standalone Managed Agent Server. Its `workspaces()`, `sessions()` and `extensionPackages()` entry points expose Java request builders and response types. The client signs requests for the supplied tenant and actor. Provide the signing key from the trusted service's secret store.
+Use `ManagedAgentClient` to call a standalone Managed Agent Server. The client signs requests for the supplied tenant and actor. Provide the signing key from the trusted service's secret store.
 
 ```java
 import com.alibaba.qwen.code.daemon.ManagedAgentClient;
-import com.alibaba.qwen.code.daemon.ManagedCreateSessionRequest;
-import com.alibaba.qwen.code.daemon.ManagedTurnAdmission;
+import com.alibaba.qwen.code.daemon.ManagedAgentEventStream;
 import java.net.URI;
+import java.util.Map;
 
-var managed = new ManagedAgentClient(
+ManagedAgentClient managed = new ManagedAgentClient(
         URI.create("https://managed.example.com"), tenantId, actorId, signingKey);
-var sessions = managed.sessions();
-var request = ManagedCreateSessionRequest.builder("qwen-code")
-        .workspace(workspaceId)
-        .title("Workspace summary")
-        .build();
-var session = sessions.create(request, createKey);
-
-ManagedTurnAdmission admission;
-try (var events = sessions.streamEvents(session.getId())) {
-    admission = sessions.submitText(session.getId(), "Summarize the workspace", messageKey);
-    for (var event = events.next(); event != null; event = events.next()) {
-        if (event.isResyncRequired()) {
-            // Reload Items and reconnect at their snapshot sequence.
-            break;
-        }
-        if (admission.getTurnId().equals(event.getTurnId())) {
-            String delta = event.getOutputTextDelta();
-            if (delta != null) {
-                System.out.print(delta);
-            }
-            if (event.isTerminal()) {
-                break;
-            }
-        }
-    }
+Map<String, Object> session = managed.createSession(
+        Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", workspaceId)),
+        createKey);
+String sessionId = (String) session.get("id");
+Map<String, Object> admission = managed.submitText(sessionId, "Summarize the workspace", messageKey);
+String turnId = (String) admission.get("turn_id");
+try (ManagedAgentEventStream events = managed.streamEvents(sessionId, 0)) {
+    ManagedAgentEventStream.Event first = events.next();
+    // Continue reading or reconnect from the last event ID processed by your application.
 }
-var turn = sessions.getTurn(session.getId(), admission.getTurnId());
-System.out.println(turn.getStatusCode());
 ```
 
-The client follows the [public OpenAPI contract](../../managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json). `workspaces().list()` returns a typed page and the Workspace default visible to the current actor. `sessions.list(cursor, limit, archiveFilter, titleQuery)` accepts the native archive and title filters. Pass `ManagedSessions.ArchiveFilter.UNARCHIVED` to exclude archived Sessions. Follow `getNextCursor()` on the page with the same filters. Workspace filtering requires server support.
+The client follows the [public OpenAPI contract](../../managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json). `listSessions` supports the native archive and title filters and cursor pagination. Pass `unarchived` to exclude archived sessions. Workspace filtering requires server support.
 
-Supply a stable idempotency key for each write that takes one. `ManagedTurnAdmission` provides the Turn ID and operation ID. Use `getTurn` for execution state and `getOperation` to track command delivery or lifecycle work. Retry decisions belong to the calling application.
+Supply a stable idempotency key for each write that takes one. Admission and lifecycle responses describe accepted commands. Use Turn, operation, or event queries to observe execution. The client does not retry writes on your behalf.
 
-After `event.isResyncRequired()`, page through `sessions.listItems` to rebuild the snapshot, then reopen SSE at the returned `getSnapshotThroughSequence()`. A terminal SSE frame can arrive before the Items projection catches up. For HTTP 503 with `message_projection_pending`, retry the Items read within the application's deadline. On ordinary reconnect, pass the last sequence from `event.getId()` that your application successfully processed. Close streams when finished. JSON responses and individual SSE frames are bounded to 8 MiB. Use a smaller page limit for large history queries.
+After `agent.session.resync_required`, page through Items to rebuild the snapshot, then reopen the SSE stream from its `snapshot_through_sequence`. Close streams when finished. JSON responses and individual SSE frames are bounded to 8 MiB. Use a smaller page limit for large history queries.
 
-Use `ManagedCreateSessionRequest.Builder.skills` for inline Skills and `extensionPins` for an explicit package selection. `extensionPackages().importPackage` takes an `ImportOptions` with the source kind and target platform. Check the returned `Publication`, then call `getPublishedPin` after it settles. If the package needs settings, save them with `saveSettings` and attach their revision with `pin.withSettingsRevision`. Use the pin in creation or pass the desired pins and current configuration revision to `apply` on an existing Session. `sessions.getResources`, `getHookCatalog` and `getMcpCatalog` expose typed resource and catalog entries. `listActions` returns approval options and questions. `decidePermission` and `answerQuestions` copy the action revision fields into the signed response request.
-
-The existing Map API is available for compatibility and for advanced operations such as AgentDefinition administration, MCP management commands and extension-source imports.
+Use `managed.extensions()` to publish or import workspace packages, look up the original operation, load the published package pin, and apply a version to an existing Session. For initial Session creation, pass inline `skills` and any `extensionPins` in the public request map.
 
 ## Hosted Harness private API
 

@@ -54,19 +54,15 @@ public final class ManagedAgentEventStream implements AutoCloseable {
     }
 
     /** One SSE frame. The payload is the complete public event or resync object. */
-    public static final class Event extends ManagedJson {
+    public static final class Event {
         private final String type;
         private final Long id;
+        private final Map<String, Object> payload;
 
         private Event(String type, Long id, Map<String, Object> payload) {
-            super(payload);
             this.type = type;
             this.id = id;
-        }
-
-        static Event fromJson(Map<String, Object> payload) {
-            return new Event(JsonSupport.requiredString(payload, "type", "Managed event"),
-                    JsonSupport.requiredNonNegativeLong(payload, "sequence", "Managed event"), payload);
+            this.payload = payload;
         }
 
         public String getType() {
@@ -79,63 +75,7 @@ public final class ManagedAgentEventStream implements AutoCloseable {
         }
 
         public Map<String, Object> getPayload() {
-            return json();
-        }
-
-        public String getSessionId() {
-            return string("session_id");
-        }
-
-        public String getTurnId() {
-            return optionalString("turn_id");
-        }
-
-        public String getItemId() {
-            return optionalString("item_id");
-        }
-
-        public String getContentPartId() {
-            return optionalString("content_part_id");
-        }
-
-        public String getEventId() {
-            return optionalString("event_id");
-        }
-
-        public Long getCreatedAt() {
-            return optionalNumber("created_at");
-        }
-
-        public Long getSchemaVersion() {
-            return optionalNumber("schema_version");
-        }
-
-        public Long getProjectionVersion() {
-            return optionalNumber("projection_version");
-        }
-
-        public boolean isTerminal() {
-            return !isResyncRequired() && flag("terminal");
-        }
-
-        /** Event-specific data, or null on a resync control frame. */
-        public Map<String, Object> getData() {
-            return optionalObject("data");
-        }
-
-        /** Returns a text fragment for output-text delta events, or null for other events. */
-        public String getOutputTextDelta() {
-            return "item.output_text.delta".equals(type)
-                    ? JsonSupport.optionalString(object("data"), "text") : null;
-        }
-
-        public Long getReplayFloorSequence() {
-            return optionalNumber("replay_floor_sequence");
-        }
-
-        /** Resync watermark at event creation. Use the fresh Items page's watermark to resume. */
-        public Long getSnapshotThroughSequence() {
-            return optionalNumber("snapshot_through_sequence");
+            return payload;
         }
 
         public boolean isResyncRequired() {

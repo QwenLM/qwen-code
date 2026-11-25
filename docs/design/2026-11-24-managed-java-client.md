@@ -10,14 +10,10 @@ Add `ManagedAgentClient` to `qwencode-sdk`. Cover AgentDefinition and Workspace 
 
 ## Design
 
-Use the public `/v1/agents` routes. Expose typed workspace and session operations through `ManagedAgentClient.workspaces()` and `sessions()`. A request builder names the creation fields and requires the Agent ID. Inputs, Skills, model configuration and extension pins have Java types. Pagination exposes typed entries, the next cursor and, for Items, the snapshot sequence. Session, Turn, Turn admission, and command operation have distinct types. Events expose common fields and text deltas directly. Status and event discriminators accept future server values.
-
-Expose typed extension import, published pins, settings revisions and session configuration through `extensionPackages()`. A published pin can select a settings revision explicitly. Surface the Skill resources, Hook catalog and MCP catalog on the session client. AgentDefinition administration and advanced extension operations use the existing Map API. Published SNAPSHOT callers can continue to call the existing methods. Response metadata and polymorphic event data retain their JSON representation. The SDK omits unset request fields and preserves an explicit empty extension selection. Wire field names and capability checks are owned by the existing contract and server.
-
-The caller supplies tenant, actor, signing key and mutation idempotency keys. All entry points share the signed HTTP transport, preserve base path prefixes and surface HTTP outcomes without automatic retries.
+Use the public `/v1/agents` routes and JSON field names directly. Keep structured request and response objects as maps, as the extensions client does, to preserve optional fields and operation variants. Give each operation a named method. The caller supplies tenant, actor, signing key and mutation idempotency keys. Share the signed HTTP transport with the existing extension client, preserve base path prefixes, and surface HTTP outcomes without automatic retries.
 
 Expose SSE as a closeable reader backed by the existing frame parser. Ordinary frames carry the event sequence. Return the resync frame without advancing the cursor so the caller can read Items and open a new stream at the rebuilt snapshot sequence. A submission receipt confirms admission and exposes the identifiers needed to observe settlement.
 
 ## Validation
 
-Compile with Java 11. Use loopback HTTP fixtures to verify request signatures, query encoding, typed pages and receipts, omitted versus empty values, server errors, and SSE terminal and resync events. Run the existing client and extension tests for compatibility.
+Use a loopback HTTP server to check signed requests, query encoding, wire fields, status and error handling, and SSE resume behavior. Run existing extension tests alongside the new tests to check that the transport extraction preserves behavior.
