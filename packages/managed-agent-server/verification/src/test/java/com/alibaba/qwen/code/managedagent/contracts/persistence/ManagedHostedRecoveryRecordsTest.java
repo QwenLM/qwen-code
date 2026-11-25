@@ -168,6 +168,44 @@ class ManagedHostedRecoveryRecordsTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void validatesVersionZeroShellIdentityAgainstPinnedDefinition(boolean publicationLane) {
+        String publicationId = "01234567-89ab-cdef-0123-456789abcdef";
+        ObjectNode body = nativeContinuation("run_shell_command");
+        ObjectNode definition = json.createObjectNode().put("toolProfile", "hosted-workspace-shell/1");
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        if (publicationLane) {
+            definition.put("captureBytes", 1024);
+            call.put("publicationId", publicationId);
+        } else {
+            call.putNull("publicationId");
+        }
+        assertThatCode(() -> validateNativeContinuation(body, definition)).doesNotThrowAnyException();
+
+        if (publicationLane) {
+            call.putNull("publicationId");
+        } else {
+            call.put("publicationId", publicationId);
+        }
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("publication identity");
+        call.remove("publicationId");
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("publication identity");
+    }
+
+    @Test
+    void requiresPublicShellProfileAndToolForPublicationIdentity() {
+        ObjectNode definition = json.createObjectNode().put("toolProfile", "hosted-workspace-files/1");
+        ObjectNode body = nativeContinuation("run_shell_command");
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        call.putNull("publicationId");
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("public Shell profile");
+
+        definition.put("toolProfile", "hosted-workspace-shell/1");
+        ((ObjectNode) call.get("call")).put("name", "read_file");
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("publication identity");
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"ssh-process", "external-workspace", "static", "", "local-process-extra"})
     void rejectsUnsupportedNativeQuestionProviders(String provider) {
         ObjectNode body = nativeContinuation("ask_user_question");
@@ -236,10 +274,17 @@ class ManagedHostedRecoveryRecordsTest {
     }
 
     private void validateNativeContinuation(ObjectNode body) {
+        validateNativeContinuation(body, json.createObjectNode());
+    }
+
+    private void validateNativeContinuation(ObjectNode body, ObjectNode pinnedDefinition) {
+        var definition = stored("definition", "managed-definition", pinnedDefinition);
+        body.set("definitionRef", reference(definition));
         var kinds = java.util.Map.of("definition", "managed-definition", "root", "managed-root",
                 "assistant", "managed-message", "input", "managed-tool-input", "tool", "managed-tool-definition");
         ManagedHostedRecoveryRecords.validateResource(stored("continuation", "hosted-approval-continuation", body),
-                "tenant", "workspace", "session", id -> stored(id, kinds.get(id), json.createObjectNode()));
+                "tenant", "workspace", "session",
+                id -> id.equals("definition") ? definition : stored(id, kinds.get(id), json.createObjectNode()));
     }
 
     @ParameterizedTest
