@@ -14,7 +14,8 @@ import static com.alibaba.qwen.code.daemon.ManagedHttpTransport.sha256;
 
 /**
  * Signed client for the standalone Managed Agent Server's public API.
- * Request and response maps use the field names in the public OpenAPI contract.
+ * Use {@link #sessions()}, {@link #workspaces()} and {@link #extensionPackages()} for typed operations.
+ * The Map methods use the field names in the public OpenAPI contract.
  * Write methods take caller-owned idempotency keys and never replay a mutation.
  */
 public final class ManagedAgentClient {
@@ -25,10 +26,28 @@ public final class ManagedAgentClient {
 
     private final ManagedHttpTransport transport;
     private final ManagedExtensionsClient extensions;
+    private final ManagedSessions sessions;
+    private final ManagedWorkspaces workspaces;
+    private final ManagedExtensionPackages extensionPackages;
 
     public ManagedAgentClient(URI baseUri, String tenantId, String actorId, byte[] signingKey) {
         this.transport = new ManagedHttpTransport(baseUri, tenantId, actorId, signingKey);
         this.extensions = new ManagedExtensionsClient(transport);
+        this.sessions = new ManagedSessions(this);
+        this.workspaces = new ManagedWorkspaces(this);
+        this.extensionPackages = new ManagedExtensionPackages(extensions);
+    }
+
+    public ManagedSessions sessions() {
+        return sessions;
+    }
+
+    public ManagedWorkspaces workspaces() {
+        return workspaces;
+    }
+
+    public ManagedExtensionPackages extensionPackages() {
+        return extensionPackages;
     }
 
     /** Uses the same endpoint and credentials for package publication and session configuration. */
