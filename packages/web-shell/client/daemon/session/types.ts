@@ -619,7 +619,10 @@ export interface DaemonSessionActions {
       | 'idempotencyKey'
       | 'onAdmissionStarted'
       | 'onAdmitted'
-    >,
+    > & {
+      /** Extra guard for an operation during detached client recovery. */
+      beforeDetachedDispatch?: SendPromptOptions['beforeDispatch'];
+    },
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;

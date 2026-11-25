@@ -2053,9 +2053,15 @@ export function createDaemonSessionActions({
         options?.onAdmissionStarted?.();
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
         try {
-          accepted = await session.submitPrompt(
-            promptRequest as Parameters<typeof session.submitPrompt>[0],
-          );
+          accepted = options?.beforeDetachedDispatch
+            ? await session.submitPrompt(
+                promptRequest as Parameters<typeof session.submitPrompt>[0],
+                undefined,
+                options.beforeDetachedDispatch,
+              )
+            : await session.submitPrompt(
+                promptRequest as Parameters<typeof session.submitPrompt>[0],
+              );
         } catch (error) {
           if (isDefinitelyRejectedPromptAdmission(error)) {
             await removeUploadedAttachments(session, uploaded.references);

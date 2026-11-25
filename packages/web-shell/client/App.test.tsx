@@ -3000,7 +3000,12 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
   const React = await import('react');
   return {
     ScheduledTasksDialog: (props: {
-      onRunPrompt?: (prompt: string, sessionId: string | null) => Promise<void>;
+      onRunPrompt?: (
+        prompt: string,
+        sessionId: string | null,
+        workspaceCwd?: string,
+        isStale?: () => boolean,
+      ) => Promise<void>;
       workspaces?: Array<{ id: string; cwd: string }>;
       lockedWorkspace?: { id: string; cwd: string; primary: boolean };
       currentSession?: {
@@ -59077,6 +59082,7 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       prompt: string,
       sessionId: string | null,
       workspaceCwd?: string,
+      isStale?: () => boolean,
     ) => Promise<void>
   > {
     mockConnection.goalState ??= {
@@ -59227,6 +59233,185 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1', {
       workspaceCwd: undefined,
     });
+  });
+
+  it.each([{ deleted: true }, { deleted: false }])(
+    'R21 scheduling replay checks confirmed deletion ($deleted)',
+    async ({ deleted }) => {
+      admitOnSend();
+      const restore = deferred<void>();
+      const { container, rerender } = renderApp();
+      await flush();
+      const run = await openRunHandler(container);
+      mockSessionActions.loadSession.mockImplementationOnce(async () => {
+        mockConnection.sessionId = 'bound-session';
+        mockConnection.catchingUp = true;
+        await restore.promise;
+      });
+      let stale = false;
+      let runError: unknown;
+      let runRecordings = 0;
+
+      act(() => {
+        void run('do the thing', 'bound-session', undefined, () => stale).then(
+          () => {
+            runRecordings += 1;
+          },
+          (error) => {
+            runError = error;
+          },
+        );
+      });
+      await flush();
+      stale = deleted;
+      await act(async () => {
+        mockConnection.catchingUp = false;
+        rerender({});
+        restore.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      if (deleted) {
+        expect((runError as Error | undefined)?.name).toBe('AbortError');
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(runRecordings).toBe(0);
+      } else {
+        expect(runError).toBeUndefined();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+        expect(runRecordings).toBe(1);
+      }
+    },
+  );
+
+  it.each([{ deleted: true }, { deleted: false }])(
+    'R21 checks deletion during unbound admission preflight ($deleted)',
+    async ({ deleted }) => {
+      admitOnSend();
+      const { container } = renderApp();
+      await flush();
+      const run = await openRunHandler(container);
+      let stale = false;
+      let outcome: unknown;
+      await act(async () => {
+        const settlement = run('unbound', null, undefined, () => stale).then(
+          () => null,
+          (error) => error,
+        );
+        stale = deleted;
+        outcome = await settlement;
+      });
+
+      if (deleted) {
+        expect((outcome as Error | null)?.message).toBe(
+          'Run was cancelled before it started',
+        );
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      } else {
+        expect(outcome).toBeNull();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
+  it('R21 binds a live stale guard to the raw dispatch hooks', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    const options: unknown[] = [];
+    mockSessionActions.sendPrompt.mockImplementation((...args: unknown[]) => {
+      options.push(args[1]);
+      return Promise.resolve();
+    });
+    let stale = false;
+    let settlement!: Promise<unknown>;
+    await act(async () => {
+      settlement = run('unbound', null, undefined, () => stale).catch(
+        (error) => error,
+      );
+      await vi.waitFor(() =>
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1),
+      );
+    });
+    const callbacks = options[0] as Record<string, () => unknown>;
+    expect(callbacks).toMatchObject({
+      beforeDispatch: expect.any(Function),
+      onAdmissionStarted: expect.any(Function),
+    });
+
+    stale = true;
+    expect(callbacks.beforeDispatch).toThrow(/before prompt admission/);
+    expect(callbacks.onAdmissionStarted).toThrow(/before prompt admission/);
+    await expect(settlement).resolves.toEqual(expect.any(Error));
+  });
+
+  it('R21 forwards the live stale guard through detached creation', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    const create = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await create.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    const sendOptions: Array<Record<string, () => unknown> | undefined> = [];
+    mockSessionActions.sendDetachedPrompt.mockImplementationOnce(
+      (_session: unknown, _text: string, options?: unknown) => {
+        sendOptions.push(options as Record<string, () => unknown> | undefined);
+        return Promise.resolve({ promptId: 'detached-prompt' });
+      },
+    );
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      rerender({});
+    });
+    let stale = false;
+    let settlement!: Promise<unknown>;
+    act(() => {
+      settlement = run('manual detached', null, undefined, () => stale).catch(
+        (error) => error,
+      );
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender({});
+    });
+    await act(async () => {
+      create.resolve({ sessionId: 'session-1' });
+      await create.promise;
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalled();
+      });
+    });
+    const beforeDetachedDispatch = sendOptions[0]?.beforeDetachedDispatch;
+    expect(beforeDetachedDispatch).toEqual(expect.any(Function));
+    stale = true;
+    expect(beforeDetachedDispatch).toThrow(/before prompt admission/);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    await expect(settlement).resolves.toEqual(expect.any(Error));
   });
 
   it("restores a bound run's session in the workspace it is given", async () => {

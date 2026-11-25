@@ -14,6 +14,7 @@ export type ScheduledTaskRunPrompt = (
   prompt: string,
   sessionId: string | null,
   workspaceCwd?: string,
+  isStale?: () => boolean,
 ) => void | Promise<void>;
 
 export interface ScheduledTaskManualRunErrorHandlers {
@@ -41,10 +42,6 @@ function gatedManualRunPrompt(gate: string, prompt: string): string {
 
 function manualRunPrompt(task: DaemonScheduledTask): string {
   return task.gate ? gatedManualRunPrompt(task.gate, task.prompt) : task.prompt;
-}
-
-function inWorkspace(task: DaemonScheduledTask): [] | [string] {
-  return task.workspaceCwd !== undefined ? [task.workspaceCwd] : [];
 }
 
 export async function runScheduledTaskManually(
@@ -103,8 +100,12 @@ export async function runScheduledTaskManually(
       await onRunPrompt(
         manualRunPrompt(fresh),
         fresh.sessionId ?? null,
-        ...inWorkspace(task),
+        task.workspaceCwd,
+        () => !current(),
       );
+      // Delete can win a replay wait, but an owner switch after admission
+      // does not make the already-admitted run unrecordable.
+      if (isStale?.()) return;
       try {
         await actions.runScheduledTask(
           fresh.id,
@@ -138,7 +139,8 @@ export async function runScheduledTaskManually(
         await onRunPrompt(
           manualRunPrompt(fresh),
           fresh.sessionId ?? null,
-          ...inWorkspace(task),
+          task.workspaceCwd,
+          () => !current(),
         );
       } catch (err) {
         onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));

@@ -436,6 +436,98 @@ describe('sendPrompt admission notices', () => {
   });
 });
 
+describe('sendDetachedPrompt client registration recovery', () => {
+  it.each([true, false])(
+    'checks deletion during reattach before a second HTTP attempt ($deleted)',
+    async (deleteDuringReattach) => {
+      const resume = createDeferred<Response>();
+      const promptClientIds: Array<string | null> = [];
+      const guardedClientIds: Array<string | undefined> = [];
+      let resumeStarted = false;
+      let stale = false;
+      const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/resume')) {
+          resumeStarted = true;
+          return resume.promise;
+        }
+        if (url.endsWith('/prompt')) {
+          promptClientIds.push(
+            new Headers(init?.headers).get('X-Qwen-Client-Id'),
+          );
+          return new Response(
+            JSON.stringify(
+              promptClientIds.length === 1
+                ? { code: 'invalid_client_id', error: 'unknown client' }
+                : { promptId: 'detached-recovered', lastEventId: 0 },
+            ),
+            { status: promptClientIds.length === 1 ? 400 : 202 },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        session: {
+          sessionId: 'session-a',
+          clientId: 'client-a',
+          attached: true,
+          workspaceCwd: '/workspace',
+        },
+      });
+      const detach = vi.spyOn(session, 'detach').mockResolvedValue(undefined);
+      const { actions } = createActionsHarness();
+      const onAdmissionStarted = vi.fn();
+      const onAdmitted = vi.fn();
+      const beforeDetachedDispatch = vi.fn((clientId?: string) => {
+        guardedClientIds.push(clientId);
+        if (stale) {
+          throw new DOMException('Task deleted before retry', 'AbortError');
+        }
+      });
+
+      const settled = actions
+        .sendDetachedPrompt(session, 'manual run', {
+          onAdmissionStarted,
+          onAdmitted,
+          beforeDetachedDispatch,
+        })
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => expect(resumeStarted).toBe(true));
+      stale = deleteDuringReattach;
+      resume.resolve(
+        new Response(
+          JSON.stringify({
+            sessionId: 'session-a',
+            clientId: 'client-recovered',
+            attached: true,
+            workspaceCwd: '/workspace',
+            state: {},
+          }),
+        ),
+      );
+
+      const result = await settled;
+      if (deleteDuringReattach) {
+        expect(result).toBeInstanceOf(Error);
+        expect(result.name).toBe('AbortError');
+        expect(promptClientIds).toEqual(['client-a']);
+        expect(onAdmissionStarted).toHaveBeenCalledOnce();
+        expect(onAdmitted).not.toHaveBeenCalled();
+      } else {
+        expect(result).toEqual({ promptId: 'detached-recovered' });
+        expect(promptClientIds).toEqual(['client-a', 'client-recovered']);
+        expect(onAdmissionStarted).toHaveBeenCalledOnce();
+        expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({
+          promptId: 'detached-recovered',
+        });
+      }
+      expect(guardedClientIds).toEqual(['client-a', 'client-recovered']);
+      expect(detach).toHaveBeenCalledOnce();
+    },
+  );
+});
+
 describe('sendPrompt client registration recovery', () => {
   it('keeps a cancelled recovery request rejected and admits a fresh guarded request', async () => {
     const resume = createDeferred<Response>();

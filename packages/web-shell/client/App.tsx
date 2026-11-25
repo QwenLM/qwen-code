@@ -932,6 +932,7 @@ interface SendPromptOptionsWithRetry {
   retry?: boolean;
   idempotencyKey?: string;
   beforeDispatch?: (clientId: string | undefined) => void;
+  beforeDetachedDispatch?: (clientId: string | undefined) => void;
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
@@ -9787,7 +9788,8 @@ export function App({
       prompt: string,
       boundSessionId: string | null,
       workspaceCwd?: string,
-    ) => runTaskManually(prompt, boundSessionId, workspaceCwd),
+      taskIsStale?: () => boolean,
+    ) => runTaskManually(prompt, boundSessionId, workspaceCwd, taskIsStale),
     onError: (error, fallback) => reportError(error, t(fallback), true),
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
@@ -14089,6 +14091,7 @@ export function App({
         source?: 'mcp-app';
         isCurrent?: () => boolean;
         beforeDispatch?: (clientId: string | undefined) => void;
+        beforeDetachedDispatch?: (clientId: string | undefined) => void;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: (admission: { promptId: string }) => void;
         onCancelledBeforeAdmission?: () => void;
@@ -14309,6 +14312,11 @@ export function App({
               retry: opts?.retry,
               ...(opts?.idempotencyKey
                 ? { idempotencyKey: opts.idempotencyKey }
+                : {}),
+              ...(opts?.beforeDetachedDispatch
+                ? {
+                    beforeDetachedDispatch: opts.beforeDetachedDispatch,
+                  }
                 : {}),
               onAdmissionStarted: () => {
                 opts?.onAdmissionStarted?.(detachedSessionId);
@@ -19600,6 +19608,7 @@ export function App({
     reject: (err: unknown) => void;
     timer?: ReturnType<typeof setTimeout>;
     owner?: { isCurrent(): boolean };
+    taskIsStale?: () => boolean;
   } | null>(null);
   const clearPendingBoundRun = useCallback((sessionId: string) => {
     const cur = pendingBoundRunRef.current;
@@ -19626,8 +19635,22 @@ export function App({
   // admission, reject so the caller skips recording a run that never reached the
   // session.
   const enqueueManualRun = useCallback(
-    (prompt: string): Promise<void> =>
+    (prompt: string, taskIsStale?: () => boolean): Promise<void> =>
       new Promise<void>((resolve, reject) => {
+        const assertRunnable = () => {
+          if (taskIsStale?.()) {
+            throw new DOMException(
+              'Scheduled task was deleted before prompt admission',
+              'AbortError',
+            );
+          }
+        };
+        try {
+          assertRunnable();
+        } catch (error) {
+          reject(error);
+          return;
+        }
         // Session-less means no Goal can exist (and `sendPrompt` allocates a
         // session itself), so gate on the shared predicate rather than on a
         // bare `goalState === undefined`, which also fires with no session.
@@ -19641,7 +19664,20 @@ export function App({
           admitted = true;
           resolve();
         };
-        sendPrompt(prompt, undefined, undefined, { onAdmitted: admit }).then(
+        sendPrompt(prompt, undefined, undefined, {
+          ...(taskIsStale
+            ? {
+                isCurrent: () => !taskIsStale(),
+                beforeAdmission: async () => {
+                  assertRunnable();
+                },
+                beforeDispatch: assertRunnable,
+                beforeDetachedDispatch: assertRunnable,
+                onAdmissionStarted: assertRunnable,
+              }
+            : {}),
+          onAdmitted: admit,
+        }).then(
           () => {
             if (!admitted) {
               reject(new Error('Run was cancelled before it started'));
@@ -19671,6 +19707,16 @@ export function App({
       );
       return;
     }
+    if (pending.taskIsStale?.()) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        new DOMException(
+          'Scheduled task was deleted before prompt admission',
+          'AbortError',
+        ),
+      );
+      return;
+    }
     if (
       conn.sessionId !== pending.sessionId ||
       conn.loadingTranscript ||
@@ -19692,7 +19738,7 @@ export function App({
     // Resolves at prompt admission (see enqueueManualRun); the switch-timeout was
     // cleared above, so a long turn can't trip it. Recording happens in the
     // dialog once this resolves.
-    enqueueManualRun(pending.prompt).then(
+    enqueueManualRun(pending.prompt, pending.taskIsStale).then(
       () => pending.resolve(),
       (error: unknown) => pending.reject(error),
     );
@@ -19704,11 +19750,12 @@ export function App({
       // The workspace the bound session lives in: restoring it from another
       // workspace's conversation would name the wrong one.
       workspaceCwd?: string,
+      taskIsStale?: () => boolean,
     ): Promise<void> => {
       showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
-        return enqueueManualRun(prompt);
+        return enqueueManualRun(prompt, taskIsStale);
       }
       // A newer bound run supersedes an older one still waiting on the latch;
       // reject the old promise so its caller doesn't record a dropped run.
@@ -19724,6 +19771,7 @@ export function App({
           prompt,
           resolve,
           reject,
+          taskIsStale,
         };
         pendingBoundRunRef.current = pending;
         loadSidebarSession(sessionId, workspaceCwd)

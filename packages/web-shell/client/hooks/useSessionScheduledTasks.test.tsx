@@ -492,6 +492,7 @@ describe('useSessionScheduledTasks', () => {
       durable.prompt,
       'session-1',
       '/workspace/cron-example',
+      expect.any(Function),
     );
     expect(sdkMock.workspaceActions.runScheduledTask).toHaveBeenCalledWith(
       'd-run',
@@ -705,7 +706,12 @@ describe('useSessionScheduledTasks', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(onRunPrompt).toHaveBeenCalledWith(taskB.prompt, 'session-2');
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      taskB.prompt,
+      'session-2',
+      undefined,
+      expect.any(Function),
+    );
 
     await act(async () => {
       releaseFreshA();

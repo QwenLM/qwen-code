@@ -126,6 +126,85 @@ describe('runScheduledTaskManually owner matching', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { deleted: true, expectedRecordings: 0 },
+    { deleted: false, expectedRecordings: 1 },
+  ])(
+    'checks confirmed deletion ($deleted) after recurring prompt resolution before recording',
+    async ({ deleted, expectedRecordings }) => {
+      const task = makeTask();
+      let stale = false;
+      let releaseAdmission!: () => void;
+      const admission = new Promise<void>((resolve) => {
+        releaseAdmission = resolve;
+      });
+      const actions = {
+        listScheduledTasks: vi.fn().mockResolvedValue([task]),
+        runScheduledTask: vi.fn().mockResolvedValue(task),
+        assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+      };
+      const onRunPrompt = vi.fn().mockReturnValue(admission);
+      const onError = vi.fn();
+
+      const running = runScheduledTaskManually(
+        task,
+        actions,
+        onRunPrompt,
+        (key) => key,
+        {
+          reload: vi.fn(),
+          onError,
+          isStale: () => stale,
+        },
+      );
+      await vi.waitFor(() => expect(onRunPrompt).toHaveBeenCalledOnce());
+      stale = deleted;
+      releaseAdmission();
+      await running;
+
+      expect(actions.runScheduledTask).toHaveBeenCalledTimes(
+        expectedRecordings,
+      );
+      const replayGuard = onRunPrompt.mock.calls[0]?.[3] as
+        | (() => boolean)
+        | undefined;
+      expect(replayGuard?.()).toBe(deleted);
+      expect(onRunPrompt).toHaveBeenCalledWith(
+        'PROMPT_A',
+        'session-a',
+        '/workspace/a',
+        expect.any(Function),
+      );
+      expect(onError).not.toHaveBeenCalled();
+    },
+  );
+
+  it('R22 records an admitted recurring run after an owner change', async () => {
+    const task = makeTask();
+    let current = true;
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([task]),
+      runScheduledTask: vi.fn().mockResolvedValue(task),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    const onRunPrompt = vi.fn().mockImplementation(async () => {
+      current = false;
+    });
+
+    await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+      reload: vi.fn(),
+      onError: vi.fn(),
+      isCurrent: () => current,
+      isStale: () => false,
+    });
+
+    expect(actions.runScheduledTask).toHaveBeenCalledExactlyOnceWith(
+      'shared-id',
+      'ws-a',
+      'session-a',
+    );
+  });
+
   it('runs the unique task from the expected session', async () => {
     const task = makeTask();
     const actions = {
@@ -145,6 +224,7 @@ describe('runScheduledTaskManually owner matching', () => {
       'PROMPT_A',
       'session-a',
       '/workspace/a',
+      expect.any(Function),
     );
     expect(actions.runScheduledTask).toHaveBeenCalledWith(
       'shared-id',
