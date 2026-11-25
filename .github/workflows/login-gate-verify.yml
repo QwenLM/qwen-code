@@ -1,13 +1,15 @@
 # TEMPORARY verification lane for the release login-path gate on this fork.
 # The real release.yml carries a repository guard (QwenLM/qwen-code only), so
-# the gate job cannot run here. This dispatch-only lane mirrors the gate job
+# the gate job cannot run here. This push-triggered lane mirrors the gate job
 # steps to prove them on a GitHub-hosted runner. REMOVED before the upstream
 # PR; never merged.
 
 name: 'Login Gate Verify (temporary)'
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - 'feat/release-login-path-gate'
 
 jobs:
   verify:
