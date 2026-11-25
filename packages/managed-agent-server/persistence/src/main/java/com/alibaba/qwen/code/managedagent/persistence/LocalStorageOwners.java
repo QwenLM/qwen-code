@@ -128,8 +128,8 @@ final class LocalStorageOwners {
                 + " WHERE mount_host_id = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", identity.hostId());
         for (var owner : owners) {
             String root = (String) owner.get("mount_root");
-            byte[] stored = (byte[]) owner.get("physical_id");
-            if ((stored == null || !java.util.Arrays.equals(stored, key.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+            String stored = (String) owner.get("physical_id");
+            if ((stored == null || !stored.equals(key))
                     && root != null
                     && (contains(root, identity.root()) || contains(identity.root(), root))) {
                 throw new RuntimeBrokerException(409, "storage_overlapping_roots",
