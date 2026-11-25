@@ -63,6 +63,11 @@ describe('WorkspaceDaemonClient artifactLibrary', () => {
           status: 413,
           code: 'transcript_too_large',
           message: 'Transcript exceeds size limit.',
+          snapshotSize: 300,
+          maxBytes: 200,
+          dimension: 'artifact_library',
+          measuredBytes: 300,
+          retryable: true,
         },
       ],
     };
@@ -83,6 +88,13 @@ describe('WorkspaceDaemonClient artifactLibrary', () => {
       .artifactLibrary({ clientId: 'c-1' });
 
     expect(result).toEqual(payload);
+    expect(result.errors[0]).toMatchObject({
+      snapshotSize: 300,
+      maxBytes: 200,
+      dimension: 'artifact_library',
+      measuredBytes: 300,
+      retryable: true,
+    });
     expect(fetch).toHaveBeenCalledWith(
       'http://daemon/workspaces/%2Fwork%2Fproj/artifact-library',
       expect.objectContaining({
