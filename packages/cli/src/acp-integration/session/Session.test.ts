@@ -37697,10 +37697,17 @@ describe('Session', () => {
           'keeps unsent input after %s and a prompt check',
           async (hang) => {
             const request = vi.fn(
-              async ({ input }: { input: { prompt: string } }) => {
+              async ({
+                eventName,
+                input,
+              }: {
+                eventName?: string;
+                input?: { prompt: string };
+              }) => {
                 if (
                   hang === 'a slow media bridge' &&
-                  input.prompt === 'compare with this'
+                  eventName === 'UserPromptSubmit' &&
+                  input?.prompt === 'compare with this'
                 ) {
                   await new Promise((resolve) => setTimeout(resolve, 100));
                 }
@@ -37848,14 +37855,12 @@ describe('Session', () => {
                 ).includes('compare with this');
               for (let i = 0; i < 20 && !isKept(); i++) await nextTick();
               expect(mockChat.addHistory).toHaveBeenCalledWith(kept);
-              expect(request).toHaveBeenCalledTimes(2);
-              expect(request).toHaveBeenLastCalledWith(
-                expect.objectContaining({
-                  eventName: 'UserPromptSubmit',
-                  input: { prompt: content[0]?.text },
-                }),
-                core.MessageBusType.HOOK_EXECUTION_RESPONSE,
+              const checkedPrompts = request.mock.calls.flatMap(([call]) =>
+                call.eventName === 'UserPromptSubmit'
+                  ? [call.input?.prompt]
+                  : [],
               );
+              expect(checkedPrompts).toEqual(['do it', content[0]?.text]);
               if (hang === 'a stuck media bridge') {
                 // The deadline cancels the bridge, so it cannot run on and
                 // report after the turn.
