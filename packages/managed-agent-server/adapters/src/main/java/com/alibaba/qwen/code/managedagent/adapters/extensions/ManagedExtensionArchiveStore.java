@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -110,7 +111,7 @@ public class ManagedExtensionArchiveStore implements ExtensionArchives {
                 try {
                     Files.deleteIfExists(leased);
                 } catch (IOException error) {
-                    throw new java.io.UncheckedIOException(error);
+                    throw new UncheckedIOException(error);
                 } finally {
                     staging.release();
                 }
