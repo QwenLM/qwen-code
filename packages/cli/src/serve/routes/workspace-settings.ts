@@ -133,6 +133,7 @@ interface SettingDescriptor {
   description?: string;
   requiresRestart: boolean;
   default: SettingsValue;
+  unsetToggleValue?: boolean;
   options?: readonly SettingEnumOption[];
   values: {
     effective: unknown;
@@ -284,6 +285,9 @@ function buildSettingsResponse(
       ...(def.description ? { description: def.description } : {}),
       requiresRestart: def.requiresRestart,
       default: def.default,
+      ...(def.unsetToggleValue !== undefined
+        ? { unsetToggleValue: def.unsetToggleValue }
+        : {}),
       ...(options?.length ? { options } : {}),
       values,
     });

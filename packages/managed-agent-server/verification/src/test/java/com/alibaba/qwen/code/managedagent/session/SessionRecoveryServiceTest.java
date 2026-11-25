@@ -56,9 +56,10 @@ class SessionRecoveryServiceTest {
                 + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR,"
                 + " state VARCHAR, activation_phase VARCHAR, activation_head_revision BIGINT,"
                 + " journal_revision BIGINT, is_wake_pending INT, wake_head_revision BIGINT,"
-                + " wake_seal_revision BIGINT, wake_seal_background INT)");
-        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null, 0);
+                + " wake_seal_revision BIGINT, wake_seal_background INT, wake_seal_parked_owner VARCHAR)");
+        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null, 0,
+                null);
         // The obligation projections the sealed-head proof reads. Empty by
         // default: a cleanly suspended Session owes nothing.
         jdbc.execute("CREATE TABLE ma_turn (tenant_id VARCHAR, session_id VARCHAR, status VARCHAR,"
@@ -231,6 +232,22 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.state()).isEqualTo("ready");
         assertThat(recovery.nextTurnAllowed()).isTrue();
         verifyNoInteractions(harness, coordinator);
+    }
+
+    // S4 (#18149): a parked wake-started Turn has no Turn row, and the wake
+    // scan resumes it at its due time; its own owed cleanup is certified work.
+    @Test
+    void aWakeParkedSealIsReadyWhileItsTurnOwesCleanup() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1, wake_seal_revision = 5,"
+                + " wake_seal_parked_owner = 'wake'");
+        oweBackgroundWork();
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        verifyNoInteractions(harness, coordinator);
+
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 4");
+        assertThat(service.query("tenant", "actor", "session").nextTurnAllowed()).isFalse();
     }
 
     @Test

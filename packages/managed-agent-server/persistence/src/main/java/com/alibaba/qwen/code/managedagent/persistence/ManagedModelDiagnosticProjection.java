@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedMcpRecords;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.StreamSupport;
 
 import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.readBody;
 import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.require;
@@ -41,9 +43,9 @@ final class ManagedModelDiagnosticProjection {
     static boolean hasActivityDiagnostics(byte[] records,
             List<JournalResourceWrites.ValidatedResource> validated) {
         boolean activity = validated.stream().anyMatch(resource ->
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.resource().kind()));
+                ManagedActivityDiagnostics.KIND.equals(resource.resource().kind()));
         boolean measured = new String(records, StandardCharsets.UTF_8).lines().anyMatch(line -> {
-            JsonNode envelope = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
+            JsonNode envelope = ManagedExtensionRecordStore.parse(line);
             return envelope != null && "tool.measured".equals(envelope.path("managedSession").path("kind").asText());
         });
         return activity || measured;
@@ -195,7 +197,7 @@ final class ManagedModelDiagnosticProjection {
                 requireMonotonicStatistics(previous.get(field), statistics.get(field));
             }
             for (JsonNode gap : previous.path("coverage").path("gaps")) {
-                require(java.util.stream.StreamSupport.stream(statistics.path("coverage").path("gaps").spliterator(), false)
+                require(StreamSupport.stream(statistics.path("coverage").path("gaps").spliterator(), false)
                         .anyMatch(gap::equals), "Statistics coverage gaps cannot be forgotten.");
             }
         }
@@ -235,15 +237,13 @@ final class ManagedModelDiagnosticProjection {
                 + " AND domain = ? AND record_id = 'latest'"
                 + " AND EXISTS (SELECT 1 FROM ma_resource u WHERE u.tenant_id = ma_session_record.tenant_id"
                 + " AND u.session_id = ma_session_record.session_id"
-                + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "u.resource_id")
-                + " = ma_session_record.record_resource_id AND u.kind = ?)", tenantId, sessionId,
+                + " AND u.resource_id = ma_session_record.record_resource_id AND u.kind = ?)", tenantId, sessionId,
                 MODEL_CONTEXT_DOMAIN, ManagedModelDiagnostics.MAIN_KIND);
     }
 
     static void clearLegacyModelContext(JdbcTemplate jdbc, String tenantId, String sessionId) {
         Integer legacy = jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record r JOIN ma_resource u"
-                + " ON u.tenant_id = r.tenant_id AND u.session_id = r.session_id AND "
-                + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "u.resource_id") + " = r.record_resource_id"
+                + " ON u.tenant_id = r.tenant_id AND u.session_id = r.session_id AND u.resource_id = r.record_resource_id"
                 + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.domain = ? AND r.record_id = 'latest' AND u.kind = ?",
                 Integer.class, tenantId, sessionId, MODEL_CONTEXT_DOMAIN, MODEL_USAGE_KIND);
         if (legacy != null && legacy > 0) {

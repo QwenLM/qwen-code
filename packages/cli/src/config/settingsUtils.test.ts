@@ -1181,6 +1181,11 @@ describe('SettingsUtils', () => {
           );
         const definition =
           getRealSettingsSchema().experimental.properties.eventBusAgentLoop;
+        // Unset must stay distinct from false: with a `false` default the
+        // dialogs would show the row as off while headless and the Ink TUI
+        // run the kernel, and an explicit opt-out would not be saved.
+        expect(definition.default).toBeUndefined();
+        expect(definition.unsetToggleValue).toBe(true);
         expect(
           nextBooleanSettingValue(
             undefined,

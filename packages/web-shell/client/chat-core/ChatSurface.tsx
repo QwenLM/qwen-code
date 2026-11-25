@@ -10,10 +10,15 @@ import { TranscriptViewport } from '../components/TranscriptViewport.js';
 import { ToolApproval } from '../components/messages/ToolApproval.js';
 import type { SessionContentGenerator } from '../components/messages/AssistantMessage.js';
 import { AskUserQuestion } from '../components/messages/AskUserQuestion.js';
-import { ChatEditor } from '../components/ChatEditor.js';
+import {
+  ChatEditor,
+  type ComposerToolbarAction,
+} from '../components/ChatEditor.js';
 import { useI18n } from '../i18n.js';
 import type { QuestionAnswer, SessionChatController } from './contract.js';
 import styles from './ChatSurface.module.css';
+
+const EMPTY_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [];
 
 export interface ChatSurfaceProps {
   readonly controller: SessionChatController;
@@ -60,6 +65,14 @@ export interface ChatSurfaceProps {
   // Page-supplied write block (e.g. rewind sync) folded into submitDisabled,
   // alongside the transcript-loading and in-flight-submit guards.
   readonly composerSubmitBlocked?: boolean;
+  // Opt-in flags for host-context integrations (historical turn-navigation /
+  // message-deletion viewport, workspace-backed composer features, and explicit
+  // composer toolbar actions). All default closed/empty so a non-daemon surface
+  // never crashes outside daemon providers or leaks an ancestor daemon
+  // provider's session, workspace, or voice state when co-mounted.
+  readonly sessionViewportEnabled?: boolean;
+  readonly workspaceFeaturesEnabled?: boolean;
+  readonly visibleToolbarActions?: readonly ComposerToolbarAction[];
 }
 
 /**
@@ -94,6 +107,9 @@ export function ChatSurface({
   atWorkspaceCwd,
   composerScopeKey,
   composerSubmitBlocked,
+  sessionViewportEnabled = false,
+  workspaceFeaturesEnabled = false,
+  visibleToolbarActions = EMPTY_TOOLBAR_ACTIONS,
 }: ChatSurfaceProps) {
   const { t } = useI18n();
   const activeApproval = controller.pendingApprovals.find(
@@ -201,6 +217,7 @@ export function ChatSurface({
             messages={[...controller.messages]}
             pendingApproval={activeApproval?.request ?? null}
             approvalOverlayActive={cardActive}
+            sessionViewportEnabled={sessionViewportEnabled}
             loadingTranscript={controller.transcriptState === 'loading'}
             isResponding={isRunning}
             sessionKey={controller.sessionId}
@@ -254,11 +271,12 @@ export function ChatSurface({
           <AskUserQuestion
             request={activeQuestion.request}
             variant="floating"
+            disabled={approvalDisabled}
             keyboardActive={approvalKeyboardActive}
             customInputLabel={askUserFreeTextLabel}
             onAskDetails={askUserDetails}
             onError={reportError}
-            onConfirm={async (id, optionId, answers) => {
+            onConfirm={async (id, optionId, answers, structuredAnswers) => {
               const option = activeQuestion.request.options.find(
                 (candidate) => candidate.id === optionId,
               );
@@ -269,9 +287,12 @@ export function ChatSurface({
                 const result = await controller.respondApproval(id, optionId);
                 return result.admission === 'accepted';
               }
-              const normalized: QuestionAnswer[] = Object.entries(
-                answers ?? {},
-              ).map(([questionId, value]) => ({ questionId, value }));
+              const normalized: QuestionAnswer[] = structuredAnswers
+                ? [...structuredAnswers]
+                : Object.entries(answers ?? {}).map(([questionId, value]) => ({
+                    questionId,
+                    value,
+                  }));
               const result = await controller.respondQuestion(id, normalized);
               return result.admission === 'accepted';
             }}
@@ -311,6 +332,8 @@ export function ChatSurface({
           sessionId={controller.sessionId}
           atWorkspaceCwd={atWorkspaceCwd}
           composerScopeKey={composerScopeKey}
+          workspaceFeaturesEnabled={workspaceFeaturesEnabled}
+          visibleToolbarActions={visibleToolbarActions}
           isRunning={isRunning}
           dialogOpen={cardActive}
           // The deferred commit keeps the draft, so the send button would stay

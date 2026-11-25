@@ -376,9 +376,37 @@ order this section exists to prevent.
   to that diagnostic process, so it cannot abort restoration of the saved step
   status. Other cleanup and warning I/O failures do not replace that status.
   Permission-denial cleanup cases are gated by an actual removal probe rather
-  than uid alone, so root CI lanes without DAC bypass still run them.
+  than uid alone, so root CI lanes without DAC bypass still run them. Probe
+  setup errors and unexpected unlink errors raise failures instead of silently
+  removing coverage. Each `seed_helper` step's sole trap must sit inside the
+  unbroken missing-helper guard (`if ... fi`) after `mktemp` and before `curl`,
+  pinned to a single-operand `${seed_helper}` removal with the warning
+  subshell and saved status restoration — rejecting extra operands and extra
+  traps. That trap is the step's only `rm`/`unlink`, so a removal cannot hide
+  behind an aliased target, and the only `find -delete` allowed outside it is
+  the write-back's host-cache coordinate purge, pinned to that whole command
+  verbatim so neither an aliased target nor a broader purge of the shared
+  cache can pass. This is a lexical pin: other destructive verbs, and
+  obfuscated spellings of the same verbs (escaped or quoted tokens such as
+  `r\m` or `-de'lete'`), are outside its reach.
+  These cleanup and missing-helper
+  probes set both `cwd` and `GITHUB_WORKSPACE` to a private fixture workspace
+  so a `$PWD`-based deletion cannot touch the source checkout; the log-pipe
+  cleanup probe initializes a fixture workspace helper from the checkout
+  helper's bytes and checks that copy stays unchanged. A directory operand
+  makes its cleanup fail independently of DAC privileges; the closed-pipe FIFO
+  arm checks that `SIGPIPE` does not kill the enclosing shell and that the
+  saved status is preserved, while the ordinary pipe arm checks the single
+  annotated warning and residual path.
   The reference build directly sources its checked-out helper and never
-  requires a fallback fetch. A
+  requires a fallback fetch. Tests pin the step's YAML attributes (no
+  `continue-on-error`, `if`, `env`, or `shell` override), `set -euo pipefail`,
+  the exact `self-hosted` helper block, and `mvn`-only follow-up lines with no
+  downloaders or extra shell chaining; they also run the full step without
+  forcing `-e` externally in a private workspace containing `.github/scripts`
+  with only `maven-cache-seed.sh` absent to assert via executed-command
+  tracing that failure occurs specifically at `source "${seed_helper}"` before
+  Maven, leaving the helper absent and invoking no fetcher. A
   host-source mount or mount-inspection failure skips the optional copy and
   uses a clean repository; required job-local guards still stop Maven. It then
   also pins the sourced helper, the

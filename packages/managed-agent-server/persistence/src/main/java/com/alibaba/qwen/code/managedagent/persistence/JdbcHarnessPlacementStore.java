@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -52,8 +53,7 @@ public class JdbcHarnessPlacementStore
 
     public Map<String, Object> releaseReceipt(String tenant, String session, long epoch, String operationId) {
         var saved = jdbc.query("SELECT b.inline_bytes, b.sha256 FROM ma_session_record r JOIN ma_resource b"
-                + " ON " + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "b.resource_id")
-                + " = r.record_resource_id"
+                + " ON b.resource_id = r.record_resource_id"
                 + " AND b.tenant_id = r.tenant_id AND b.workspace_id = r.workspace_id AND b.session_id = r.session_id"
                 + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.record_id = ?"
                 + " AND r.domain = 'hosted_harness_release' AND r.record_kind = 'DOMAIN'"
@@ -97,7 +97,7 @@ public class JdbcHarnessPlacementStore
 
     private Placement assign(String tenant, String session, String instance, String boot, OperationRecord operation) {
         identity(instance);
-        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(boot, "harnessOwnerBootId");
+        BrokerValues.requireShortId(boot, "harnessOwnerBootId");
         Placement current = lockEligible(tenant, session, operation);
         if (current.instanceId() != null) {
             return current;
@@ -138,7 +138,7 @@ public class JdbcHarnessPlacementStore
 
     private Placement takeover(String tenant, String session, Placement expected, String instance, String boot, OperationRecord operation) {
         identity(instance);
-        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(boot, "harnessOwnerBootId");
+        BrokerValues.requireShortId(boot, "harnessOwnerBootId");
         Placement current = lockEligible(tenant, session, operation);
         if (!sameOwner(current, expected)) {
             throw blocked("harness_placement_changed");
@@ -290,7 +290,7 @@ public class JdbcHarnessPlacementStore
     private static void identity(String id) {
         // The VARCHAR(128) column admits only the pool endpoint charset; a
         // PAD SPACE fold must never alias one instance's ownership to another.
-        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireInstanceId(id, "harnessInstanceId");
+        BrokerValues.requireInstanceId(id, "harnessInstanceId");
     }
 
     static ManagedAgentException blocked(String code) {
