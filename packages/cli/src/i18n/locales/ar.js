@@ -853,6 +853,7 @@ export default {
   'Debug Keystroke Logging': 'تسجيل ضغطات المفاتيح للتنقيح',
   'Language: UI': 'اللغة: الواجهة',
   'Language: Model': 'اللغة: النموذج',
+  'Language: Display Translation': 'اللغة: ترجمة العرض',
   'Output Format': 'تنسيق المخرجات',
   'Hide Window Title': 'إخفاء عنوان النافذة',
   'Show Status in Title': 'عرض الحالة في العنوان',
