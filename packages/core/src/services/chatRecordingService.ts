@@ -1283,6 +1283,7 @@ export class ChatRecordingService {
   private lastRecordUuid: string | null = null;
   /** Bumped whenever the active branch is replaced (rewind, reset). */
   private branchGeneration = 0;
+  private branchCancellation?: AbortController;
   /** UUID of the last active-tail record confirmed written to disk. */
   private lastPersistedRecordUuid: string | null = null;
   /** Active chain mirrored in memory so end-of-turn validation is incremental. */
@@ -1715,7 +1716,7 @@ export class ChatRecordingService {
     this.currentSessionWorkflowMode = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
-    this.branchGeneration += 1;
+    this.advanceBranch();
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
     this.modPromptKeysForTitle.clear();
@@ -3794,7 +3795,7 @@ export class ChatRecordingService {
       if (!input.isCurrent()) return false;
       const rewindWrite = strict(rewind);
       committed = true;
-      this.branchGeneration += 1;
+      this.advanceBranch();
       projectTurns(retained);
       this.resetExternalRecordIndex();
       this.lastAttributionSnapshotJson = undefined;
@@ -4065,7 +4066,7 @@ export class ChatRecordingService {
       this.pendingHookTurnParents.clear();
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
-      this.branchGeneration += 1;
+      this.advanceBranch();
       const projectionStart = Math.max(
         0,
         this.turnParentUuids.length - this.userDisplayTextsForTitle.length,
@@ -4150,7 +4151,7 @@ export class ChatRecordingService {
     this.pendingHookTurnParents.clear();
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
-    this.branchGeneration += 1;
+    this.advanceBranch();
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
 
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
@@ -4798,6 +4799,18 @@ export class ChatRecordingService {
   /** Identifies the current active branch; changes when it is replaced. */
   getBranchGeneration(): number {
     return this.branchGeneration;
+  }
+
+  /** Cancels work tied to the current branch when that branch is replaced. */
+  getBranchAbortSignal(): AbortSignal {
+    return (this.branchCancellation ??= new AbortController()).signal;
+  }
+
+  private advanceBranch(): void {
+    this.branchGeneration += 1;
+    const previous = this.branchCancellation;
+    this.branchCancellation = undefined;
+    previous?.abort();
   }
 
   /**

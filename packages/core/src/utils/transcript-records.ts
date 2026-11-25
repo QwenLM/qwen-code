@@ -808,3 +808,19 @@ export function prepareTranscriptRecords(
     diagnostics,
   };
 }
+
+export function isLifecycleUiTelemetryEvent(uiEvent: unknown): boolean {
+  if (
+    typeof uiEvent !== 'object' ||
+    uiEvent === null ||
+    Array.isArray(uiEvent)
+  ) {
+    return false;
+  }
+  const eventName = (uiEvent as Record<string, unknown>)['event.name'];
+  return (
+    eventName === 'request_lifecycle' ||
+    eventName === 'tool_lifecycle' ||
+    eventName === 'hook_lifecycle'
+  );
+}

@@ -648,4 +648,22 @@ describe('verify-pr-vm-collector', () => {
     expect(sumPre.outputStatus).toBe('complete');
     expect(sumPre.vaultEntries).toEqual(['evidence', 'logs', 'report.md']);
   });
+
+  it('rejects invalid budgets and allowlists before binding a socket', () => {
+    const root = makeTmpDir('qc-collector-options-');
+    const socketPath = join(root, 'never-bound.sock');
+    for (const options of [
+      { maxFrameBytes: {} },
+      { maxTotalBytes: {} },
+      { maxFiles: '32' },
+      { maxFileBytes: Infinity },
+      { allowedFiles: ['report.md'] },
+      { rejectControlChars: 'false' },
+    ]) {
+      expect(() =>
+        startCollectorServer({ socketPath, vaultDir: root, ...options }),
+      ).toThrow();
+      expect(existsSync(socketPath)).toBe(false);
+    }
+  });
 });
