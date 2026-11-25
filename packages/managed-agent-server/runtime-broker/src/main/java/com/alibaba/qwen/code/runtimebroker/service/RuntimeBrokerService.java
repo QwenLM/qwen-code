@@ -1199,7 +1199,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     Map<String, Object> durable = publicationVerifier.finished(saved);
                     if (durable != null) {
                         return CompletableFuture.completedFuture(executionReconciler.absorbRuntimeStatus(saved,
-                                Map.of("state", "settled", "result", durable), false).getRecord());
+                                RuntimeExecutionReconciler.requireRuntimeStatus(
+                                        Map.of("state", "settled", "result", durable)), false).getRecord());
                     }
                 }
             }

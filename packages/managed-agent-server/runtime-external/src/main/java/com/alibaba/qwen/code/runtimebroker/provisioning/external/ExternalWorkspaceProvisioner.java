@@ -222,7 +222,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     @Override
     protected Map<String, Object> bootDocument(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         ExternalStorageRegistry.RegisteredExternalStorage storage = binding(request);
-        Map<String, Object> boot = new LinkedHashMap<>(ManagedContextProtocol.boot(request, seed));
+        Map<String, Object> boot = new LinkedHashMap<>(ManagedContextProtocol.boot(request, seed).toWire());
         boot.put("storage", Map.of(
                 "kind", STORAGE_KIND,
                 "physicalKey", storage.physicalKey(),
