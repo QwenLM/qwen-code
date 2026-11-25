@@ -108,7 +108,7 @@ public final class JdbcExternalWorkspaceOwnership {
                 || !registration.mountRoot().equals(binding.getRequest().getScope().getCanonicalCwd())) {
             throw unavailable();
         }
-        var boot = new TreeMap<String, Object>(ManagedContextProtocol.boot(binding.getRequest(), seed));
+        var boot = new TreeMap<String, Object>(ManagedContextProtocol.boot(binding.getRequest(), seed).toWire());
         boot.remove("token");
         boot.put("storage", new TreeMap<>(Map.of("kind", "external", "physicalKey", registration.physicalKey(),
                 "aliasPath", registration.aliasPath(), "mountRoot", registration.mountRoot(),
