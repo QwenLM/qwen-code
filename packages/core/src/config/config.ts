@@ -13066,7 +13066,9 @@ export class Config {
     projection: SessionRestoreProjection | undefined,
   ): void {
     this.pendingSessionRestoreProjection = projection;
-    this.sessionRestoreRuntime = projection?.runtime;
+    this.sessionRestoreRuntime = projection
+      ? { ...projection.runtime, conversationStartTime: projection.startTime }
+      : undefined;
     this.restoredFileHistory = false;
   }
 
