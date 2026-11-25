@@ -543,13 +543,13 @@ function describeBrokenJsonString(
   // Other failures may mean the string is valid for a different branch.
   let instancePath: string | undefined;
   const types = new Set<string>();
-  const inactive = inactiveTaggedUnionErrors(errors, data, schema);
-  if (!inactive) return '';
+  const branches = inactiveTaggedUnionErrors(errors, data, schema);
+  if (!branches) return '';
   for (const error of errors) {
     if (
       error.keyword === 'anyOf' ||
       (error.keyword === 'oneOf' && error.params['passingSchemas'] === null) ||
-      inactive.has(error)
+      branches.inactive.has(error)
     ) {
       continue;
     }
@@ -570,6 +570,7 @@ function describeBrokenJsonString(
   if (
     instancePath === undefined ||
     types.has('string') ||
+    (branches.uncertain && types.has('array') && types.has('object')) ||
     (!types.has('array') && !types.has('object'))
   ) {
     return '';
@@ -614,14 +615,41 @@ function describeBrokenJsonString(
   return '';
 }
 
+type DiagnosticSchema = Record<string, unknown> & {
+  $ref?: string;
+  const?: unknown;
+  properties?: Record<string, DiagnosticSchema>;
+  allOf?: DiagnosticSchema[];
+  enum?: unknown[];
+};
+
+function diagnosticConjuncts(
+  schema: DiagnosticSchema,
+  root: Record<string, unknown>,
+): DiagnosticSchema[] | undefined {
+  const resolve = (part: DiagnosticSchema) =>
+    resolvePropSchema(part, root, true) as DiagnosticSchema | undefined;
+  const resolved = resolve(schema);
+  if (!resolved || resolved.$ref) return undefined;
+  const parts = [resolved];
+  // Leave deeper or unresolved compositions to Ajv's ordinary error.
+  for (const schemaPart of resolved.allOf ?? []) {
+    const part = resolve(schemaPart);
+    if (!part || part.$ref || part.allOf) return undefined;
+    parts.push(part);
+  }
+  return parts;
+}
+
 // Ajv also reports errors for the other alternatives of a tagged union. A
 // sibling's required or const failure says nothing about the selected payload.
 function inactiveTaggedUnionErrors(
   errors: ErrorObject[],
   data: Record<string, unknown>,
   schema: AnySchema,
-): Set<ErrorObject> | undefined {
+): { inactive: Set<ErrorObject>; uncertain: boolean } | undefined {
   const inactive = new Set<ErrorObject>();
+  let uncertain = false;
   const typeErrorPaths = new Set(
     errors.filter((e) => e.keyword === 'type').map((e) => e.instancePath),
   );
@@ -635,69 +663,76 @@ function inactiveTaggedUnionErrors(
     const input = valueAtPointer(data, error.instancePath);
     if (!Array.isArray(branches) || typeof input !== 'object' || !input)
       continue;
-    // Ajv attributes errors inside a local $ref to its target's schema path.
-    const paths = branches.map(
-      (branch: { $ref?: string }, index) =>
-        branch.$ref ?? `${error.schemaPath}/${index}`,
-    );
+    const root = schema as Record<string, unknown>;
     const fields = input as Record<string, unknown>;
-    const excluded = paths.map((path) => {
-      if (!path.startsWith('#/')) return false;
-      const properties = valueAtPointer(
-        schema,
-        `${decodeURIComponent(path.slice(1))}/properties`,
-      ) as Record<string, { const?: unknown; enum?: unknown[] }> | undefined;
-      for (const [key, property] of Object.entries(properties ?? {})) {
-        if (!Object.hasOwn(fields, key)) continue;
-        const allowed = property?.enum;
-        const literal = property?.const;
-        if (literal === undefined && !allowed?.length) continue;
-        if (
-          (literal !== null && typeof literal === 'object') ||
-          allowed?.some((tag) => tag !== null && typeof tag === 'object')
-        ) {
-          continue;
-        }
-        const value = fields[key];
-        if (
-          (literal === undefined || literal === value) &&
-          (!allowed || allowed.includes(value))
-        ) {
-          continue;
-        }
-        // A literal on the malformed field may be a valid string alternative.
-        if (typeof value === 'string') {
-          const text = value.trimStart();
-          const pointerKey = key.replaceAll('~', '~0').replaceAll('/', '~1');
-          if (
-            (text.startsWith('[') || text.startsWith('{')) &&
-            typeErrorPaths.has(`${error.instancePath}/${pointerKey}`)
-          ) {
+    let hasViableBranch = false;
+    for (const [index, branch] of branches.entries()) {
+      const conjuncts = diagnosticConjuncts(branch, root);
+      if (!conjuncts) {
+        hasViableBranch = true;
+        uncertain = true;
+        continue;
+      }
+      const owners = new Map<string, Set<DiagnosticSchema>>([
+        [error.instancePath, new Set(conjuncts)],
+      ]);
+      let excluded = false;
+      let incomplete = false;
+      for (const node of conjuncts) {
+        for (const [key, property] of Object.entries(node.properties ?? {})) {
+          if (!Object.hasOwn(fields, key)) continue;
+          const constraints = diagnosticConjuncts(property, root);
+          if (!constraints) {
+            incomplete = true;
             continue;
           }
+          const pointerKey = key.replaceAll('~', '~0').replaceAll('/', '~1');
+          const path = `${error.instancePath}/${pointerKey}`;
+          const atPath = owners.get(path) ?? new Set<DiagnosticSchema>();
+          owners.set(path, atPath);
+          const value = fields[key];
+          // A literal on the malformed field may be a valid string alternative.
+          const text = typeof value === 'string' ? value.trimStart() : '';
+          const candidate =
+            typeErrorPaths.has(path) &&
+            (text.startsWith('[') || text.startsWith('{'));
+          for (const constraint of constraints) {
+            atPath.add(constraint);
+            if (candidate) continue;
+            const allowed = constraint.enum;
+            const literal = constraint.const;
+            if (
+              (literal !== undefined &&
+                (literal === null || typeof literal !== 'object') &&
+                literal !== value) ||
+              (allowed &&
+                allowed.every(
+                  (tag) => tag === null || typeof tag !== 'object',
+                ) &&
+                !allowed.includes(value))
+            ) {
+              excluded = true;
+            }
+          }
         }
-        return true;
       }
-      return false;
-    });
-    if (excluded.every(Boolean)) return undefined;
-    for (const [index, isExcluded] of excluded.entries()) {
-      if (!isExcluded) continue;
-      // Consume just this branch's error at this object or its property. The
-      // active payload may reuse the very same definition at another path.
-      const path = paths[index];
-      const failure = errors.find((e) => {
-        if (inactive.has(e)) return false;
-        if (e.instancePath === error.instancePath) {
-          return e.schemaPath === `${path}/${e.keyword}`;
-        }
-        const prefix = `${error.instancePath}/`;
-        if (!e.instancePath.startsWith(prefix)) return false;
-        const property = encodeURIComponent(
-          e.instancePath.slice(prefix.length),
-        );
-        return e.schemaPath === `${path}/properties/${property}/${e.keyword}`;
+      if (!excluded) {
+        hasViableBranch = true;
+        uncertain ||= incomplete;
+        continue;
+      }
+      // Ajv reports a referenced constraint at its definition. Match both
+      // schema and instance so a sibling can reuse that definition elsewhere.
+      const candidates = errors.filter((e) => {
+        if (inactive.has(e) || !e.schemaPath.startsWith('#/')) return false;
+        const path = e.schemaPath.slice(1, e.schemaPath.lastIndexOf('/'));
+        const source = valueAtPointer(schema, decodeURIComponent(path));
+        return owners.get(e.instancePath)?.has(source as DiagnosticSchema);
       });
+      const branchPath = branch.$ref ?? `${error.schemaPath}/${index}`;
+      const failure =
+        candidates.find((e) => e.schemaPath.startsWith(`${branchPath}/`)) ??
+        (candidates.length === 1 ? candidates[0] : undefined);
       // A composite may contribute several errors. Leave the original message
       // alone unless the rejected branch's failure is unambiguous.
       if (
@@ -709,8 +744,9 @@ function inactiveTaggedUnionErrors(
       }
       inactive.add(failure);
     }
+    if (!hasViableBranch) return undefined;
   }
-  return inactive;
+  return { inactive, uncertain };
 }
 
 function valueAtPointer(value: unknown, path: string): unknown {
@@ -758,13 +794,18 @@ function resolveRef(
 function resolvePropSchema(
   propSchema: Record<string, unknown> | undefined,
   rootSchema: Record<string, unknown>,
+  decodeFragment = false,
 ): Record<string, unknown> | undefined {
   if (!propSchema) return undefined;
   let schema = propSchema;
   let depth = 0;
   while (typeof schema['$ref'] === 'string' && depth < 64) {
     depth++;
-    const resolved = resolveRef(schema['$ref'] as string, rootSchema);
+    const ref = schema['$ref'];
+    const resolved = resolveRef(
+      decodeFragment && ref.startsWith('#/') ? decodeURIComponent(ref) : ref,
+      rootSchema,
+    );
     if (!resolved) return propSchema;
     schema = resolved;
   }

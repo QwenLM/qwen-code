@@ -35,6 +35,7 @@ import type {
   GenerateTextOptions,
 } from '../core/baseLlmClient.js';
 import { AuthType } from '../core/contentGenerator.js';
+import { setModelToolErrorNote } from '../tools/tool-error.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
@@ -1755,6 +1756,35 @@ describe('ChatCompressionService.compress cache sharing', () => {
     // The stored order stays put: the cold path and the post-compact image
     // restore read `sideQueryHistory` itself.
     expect(entry.parts?.[1]).toEqual({ text: 'do the thing' });
+  });
+
+  it('reuses dispatched validation hints only in the warm prefix', async () => {
+    const error = 'params/docs must be array';
+    const historical = fnResponse('structured_output', { error }, 'first');
+    const pending = fnResponse('structured_output', { error }, 'second');
+    setModelToolErrorNote(historical, '; previous <<HERE>>');
+    setModelToolErrorNote(pending, '; pending <<HERE>>');
+    const history = [
+      userText('submit a document'),
+      content('model', fnCall('structured_output', {}, 'first')),
+      content('user', historical),
+      content('model', fnCall('structured_output', {}, 'second')),
+    ];
+    const pendingUserMessage = content('user', pending);
+    const { generateText, run } = makeFixture({ history });
+    generateText.mockRejectedValueOnce(new Error('shared request failed'));
+    const cold = spyCold();
+
+    await run({ trigger: 'auto', pendingUserMessage });
+
+    const shared = generateText.mock.calls[0]![0] as GenerateTextOptions;
+    const fullHistory = [...history, pendingUserMessage];
+    expect(shared.contents[2].parts?.[0].functionResponse?.response).toEqual({
+      error: error + '; previous <<HERE>>',
+    });
+    expect(shared.contents.at(-2)).toEqual(pendingUserMessage);
+    expect(cold.mock.calls[0]![1].contents?.slice(0, -1)).toEqual(fullHistory);
+    expect(JSON.stringify(fullHistory)).not.toContain('<<HERE>>');
   });
 
   it('preserves per-request tool overrides used by subagent turns', async () => {

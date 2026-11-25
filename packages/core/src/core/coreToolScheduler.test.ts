@@ -16472,9 +16472,14 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(await send(invalid('c3'))).toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
 
-  it.each(['direct', 'bridge envelope'])(
-    'counts repeated malformed %s arguments with different excerpts as one failure type',
-    async (kind) => {
+  it.each([
+    ['direct', 'main'],
+    ['bridge envelope', 'main'],
+    ['direct', 'subagent'],
+    ['bridge envelope', 'subagent'],
+  ])(
+    'counts repeated malformed %s arguments from the %s model as one failure type',
+    async (kind, owner) => {
       const tool =
         kind === 'direct'
           ? new SyntheticOutputTool({
@@ -16485,14 +16490,17 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       const onErrorPart = vi.fn<(part: Part) => void>();
       const send = createRetryScheduler([tool], {}, onErrorPart);
       for (const value of [1, 2, 3]) {
+        const request = makeRequest(
+          String(value),
+          tool.name,
+          kind === 'direct'
+            ? { docs: `[{"n":${value}},]` }
+            : { name: 'read_file', arguments: `{"n":${value},}` },
+        );
         const error = await send(
-          makeRequest(
-            String(value),
-            tool.name,
-            kind === 'direct'
-              ? { docs: `[{"n":${value}},]` }
-              : { name: 'read_file', arguments: `{"n":${value},}` },
-          ),
+          owner === 'subagent'
+            ? { ...request, source: 'model', isClientInitiated: true }
+            : request,
         );
         expect(error).toContain(
           kind === 'direct'
@@ -16520,6 +16528,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     { argsModifiedByMod: true },
     { isClientInitiated: true },
     { source: 'code_mode' },
+    { source: 'model', argsModifiedByMod: true, isClientInitiated: true },
     { executionOrigin: { kind: 'client' } },
   ] satisfies Array<Partial<ToolCallRequestInfo>>)(
     'keeps local bridge envelope diagnostics private for %j',

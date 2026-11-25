@@ -3592,6 +3592,7 @@ export class AgentCore {
       ...(providerCallId ? { providerCallId } : {}),
       name: toolName,
       args,
+      source: 'model',
       isClientInitiated: true,
       prompt_id: promptId,
       response_id: responseId,

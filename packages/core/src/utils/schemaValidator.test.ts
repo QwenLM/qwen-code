@@ -477,6 +477,103 @@ describe('SchemaValidator', () => {
       expect(validateWithNote(schema, { items: 'auto' }).message).toBeNull();
     });
 
+    it.each(['property reference', 'allOf'])(
+      'uses a tag declared through %s to choose the repair shape',
+      (form) => {
+        const variant = (itemsType: string, kindRef: string) => {
+          const items = { type: itemsType };
+          const kind = { $ref: kindRef };
+          return form === 'allOf'
+            ? { allOf: [obj({ items }), obj({ kind })] }
+            : obj({ items, kind });
+        };
+        const schema = {
+          $defs: {
+            DocKind: { enum: ['docs', 'slides'] },
+            FileKind: { enum: ['file', 'photo'] },
+          },
+          anyOf: [
+            variant('array', '#/$defs/DocKind'),
+            variant('object', '#/$defs/FileKind'),
+          ],
+        };
+        for (const [kind, items, expected] of [
+          ['docs', '{"x":,}', 'array'],
+          ['file', '[1,]', 'object'],
+        ]) {
+          const { report } = validateWithNote(schema, { kind, items });
+          expect(report).toHaveBeenCalledExactlyOnceWith(
+            expect.any(String),
+            expect.stringContaining(`send it as a JSON ${expected}`),
+          );
+          valid(schema, { kind, items: expected === 'array' ? [] : {} });
+          invalid(schema, { kind, items: expected === 'array' ? {} : [] });
+        }
+      },
+    );
+
+    it('keeps the active error when siblings reference the same payload schema', () => {
+      const items = { $ref: '#/$defs/Items' };
+      const schema = {
+        $defs: { Items: strings() },
+        anyOf: [
+          obj({ kind: { const: 'docs' }, items }),
+          obj({ kind: { const: 'file' }, items }),
+        ],
+      };
+      for (const kind of ['docs', 'file']) {
+        const { report } = validateWithNote(schema, { kind, items: '[1,]' });
+        expect(report).toHaveBeenCalledExactlyOnceWith(
+          expect.any(String),
+          expect.stringContaining('send it as a JSON array'),
+        );
+      }
+    });
+
+    it('keeps a known payload type with encoded refs and unrelated property constraints', () => {
+      const schema = {
+        $defs: {
+          'Doc v1': obj({
+            items: strings(),
+            kind: { const: 'docs' },
+            version: { allOf: [{ allOf: [{ type: 'integer' }] }] },
+          }),
+          File: obj({
+            items: { type: 'object' },
+            kind: { const: 'file' },
+            version: false,
+          }),
+        },
+        anyOf: [{ $ref: '#/$defs/Doc%20v1' }, { $ref: '#/$defs/File' }],
+      };
+      const input = { kind: 'docs', version: 1, items: '{"x":,}' };
+      const { report } = validateWithNote(schema, input);
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.stringContaining('send it as a JSON array'),
+      );
+      valid(schema, { ...input, items: [] });
+    });
+
+    it('keeps the ordinary error if deeper compositions leave the shape ambiguous', () => {
+      const schema = {
+        anyOf: [
+          obj({ items: strings(), kind: { const: 'docs' } }),
+          {
+            allOf: [
+              obj({ items: { type: 'object' } }),
+              { allOf: [obj({ kind: { const: 'file' } })] },
+            ],
+          },
+        ],
+      };
+      const { report } = validateWithNote(schema, {
+        kind: 'docs',
+        items: '{"x":,}',
+      });
+      expect(report).not.toHaveBeenCalled();
+    });
+
     it('combines only the payload types of viable tagged branches', () => {
       const variant = (data: object, kind = 'docs') =>
         obj({ data, kind: { const: kind } });

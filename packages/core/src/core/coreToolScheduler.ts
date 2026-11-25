@@ -1281,10 +1281,13 @@ type SchedulerToolCallRequestInfo = ToolCallRequestInfo & {
 };
 
 function isOriginalModelToolRequest(request: ToolCallRequestInfo): boolean {
+  const fromModel =
+    request.source === undefined
+      ? !request.isClientInitiated
+      : request.source === 'model';
   return (
+    fromModel &&
     !request.argsModifiedByMod &&
-    !request.isClientInitiated &&
-    request.source !== 'code_mode' &&
     (request.executionOrigin?.kind ?? 'model') === 'model'
   );
 }

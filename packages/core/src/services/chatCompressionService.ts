@@ -19,6 +19,7 @@ import {
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
+import { withModelToolErrorNotes } from '../tools/tool-error.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { movePromptContextAheadOfUserText } from '../core/prompt-context-order.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
@@ -885,9 +886,11 @@ export class ChatCompressionService {
     const originalHistoryTokenCount =
       originalTokenCount +
       (preserveTail ? (opts.unaccountedOutputTokens ?? 0) : 0);
-    const historyToSummarize = preserveTail
+    const prefixToSummarize = preserveTail
       ? curatedHistory.slice(0, candidateTailStart)
-      : [...sideQueryBase, ...visiblePendingHistory];
+      : sideQueryBase;
+    const pendingToSummarize = preserveTail ? [] : visiblePendingHistory;
+    const historyToSummarize = [...prefixToSummarize, ...pendingToSummarize];
     const sideQueryHistory =
       withoutCompactionTranscriptHint(historyToSummarize);
     const summaryHistoryChanged = historyToSummarize !== sideQueryHistory;
@@ -1261,11 +1264,12 @@ export class ChatCompressionService {
         const authType = config.getContentGeneratorConfig().authType;
         const sharedResult = await config.getBaseLlmClient().generateText({
           contents: [
-            // A copy, reordered the same way the main request reorders its
-            // entries: the shared payload exists to reuse the prefix the main
-            // request just warmed. The cold path and the post-compact image
-            // restore keep reading the stored order of `sideQueryHistory`.
-            ...movePromptContextAheadOfUserText(sideQueryHistory),
+            // Only the dispatched prefix needs the main request's private
+            // hints. Pending results have not warmed the cache yet.
+            ...movePromptContextAheadOfUserText([
+              ...withModelToolErrorNotes(prefixToSummarize),
+              ...pendingToSummarize,
+            ]),
             {
               role: 'user',
               parts: [

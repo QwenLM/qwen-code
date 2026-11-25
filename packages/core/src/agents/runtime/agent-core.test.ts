@@ -1230,7 +1230,12 @@ describe.each(LOOPS)(
         );
         expect(schedule).toHaveBeenCalledOnce();
         expect(schedule.mock.calls[0]?.[0]).toEqual([
-          expect.objectContaining({ callId: 'lookup', name }),
+          expect.objectContaining({
+            callId: 'lookup',
+            name,
+            source: 'model',
+            isClientInitiated: true,
+          }),
         ]);
       } finally {
         schedule.mockRestore();
