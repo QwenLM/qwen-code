@@ -25,6 +25,7 @@ interface Question {
   required?: boolean;
   allowText?: boolean;
   maxTextLength?: number;
+  multilineText?: boolean;
 }
 
 function optionValue(index: number): string {
@@ -248,6 +249,7 @@ export function AskUserQuestion({
     initialState.selectedMulti,
   );
   const [customFocused, setCustomFocused] = useState(false);
+  const [multilineSession, setMultilineSession] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submittedRef = useRef(false);
@@ -297,6 +299,7 @@ export function AskUserQuestion({
     setCustomInputs(hydrated.customInputs);
     setSelectedMulti(hydrated.selectedMulti);
     setCustomFocused(false);
+    setMultilineSession(false);
     focusCustomTriggerAfterSubmitFailureRef.current = false;
   }, [questions, request.id]);
 
@@ -537,9 +540,21 @@ export function AskUserQuestion({
           return next;
         });
       }
+      setMultilineSession(
+        Boolean(current?.multilineText) ||
+          Boolean((initialValue ?? customInputs[currentIdx])?.includes('\n')),
+      );
       setCustomFocused(true);
     },
-    [answers, controlsDisabled, currentAllowText, currentIdx, isMulti],
+    [
+      answers,
+      controlsDisabled,
+      current,
+      currentAllowText,
+      currentIdx,
+      customInputs,
+      isMulti,
+    ],
   );
 
   const handleSelectOption = useCallback(
@@ -743,6 +758,7 @@ export function AskUserQuestion({
       selectedIdxRef.current = nextSelectedIdx;
       setSelectedIdx(nextSelectedIdx);
       setCustomFocused(false);
+      setMultilineSession(false);
       focusAfterQuestionChangeRef.current = true;
       setCurrentIdx(nextIdx);
 
@@ -835,7 +851,7 @@ export function AskUserQuestion({
   }, [customFocused, submitting]);
 
   const handleCustomInputKeyDown = useCallback(
-    (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    (e: ReactKeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (e.ctrlKey || e.metaKey) return;
       if (e.key === 'Escape') {
@@ -845,6 +861,7 @@ export function AskUserQuestion({
         setCustomFocused(false);
       } else if (
         e.key === 'Enter' &&
+        !e.shiftKey &&
         !controlsDisabled &&
         hasCustomAnswer(customInputs[currentIdx])
       ) {
@@ -1290,42 +1307,97 @@ export function AskUserQuestion({
                           </svg>
                         </span>
                         {customFocused ? (
-                          <input
-                            type="text"
-                            className={styles.customInput}
-                            placeholder={
-                              customInputLabel ?? t('askUser.typePlaceholder')
-                            }
-                            value={customInputs[currentIdx] || ''}
-                            aria-label={
-                              customInputLabel ?? t('askUser.typePlaceholder')
-                            }
-                            maxLength={current.maxTextLength}
-                            disabled={controlsDisabled}
-                            onChange={(e) => {
-                              draftDirtyRef.current = true;
-                              setCustomInputs({
-                                ...customInputs,
-                                [currentIdx]: e.target.value,
-                              });
-                            }}
-                            // Clicking inside the input positions the caret; don't
-                            // let it bubble to the row's onClick and re-trigger the
-                            // option choice.
-                            onClick={(e) => e.stopPropagation()}
-                            onFocus={() =>
-                              rememberSelectedIndex(current.options.length)
-                            }
-                            onBlur={() => setCustomFocused(false)}
-                            onKeyDown={handleCustomInputKeyDown}
-                            autoFocus
-                          />
+                          multilineSession ||
+                          Boolean(current.multilineText) ||
+                          (customInputs[currentIdx]?.includes('\n') ??
+                            false) ? (
+                            <textarea
+                              rows={Math.min(
+                                6,
+                                Math.max(
+                                  1,
+                                  (customInputs[currentIdx] || '').split('\n')
+                                    .length,
+                                ),
+                              )}
+                              className={`${styles.customInput} ${styles.customTextarea}`}
+                              placeholder={
+                                customInputLabel ?? t('askUser.typePlaceholder')
+                              }
+                              value={customInputs[currentIdx] || ''}
+                              aria-label={
+                                customInputLabel ?? t('askUser.typePlaceholder')
+                              }
+                              maxLength={current.maxTextLength}
+                              disabled={controlsDisabled}
+                              onChange={(e) => {
+                                draftDirtyRef.current = true;
+                                setCustomInputs({
+                                  ...customInputs,
+                                  [currentIdx]: e.target.value,
+                                });
+                              }}
+                              // Clicking inside the textarea positions the caret;
+                              // don't let it bubble to the row's onClick and
+                              // re-trigger the option choice.
+                              onClick={(e) => e.stopPropagation()}
+                              onFocus={() =>
+                                rememberSelectedIndex(current.options.length)
+                              }
+                              onBlur={() => {
+                                setCustomFocused(false);
+                                setMultilineSession(false);
+                              }}
+                              onKeyDown={handleCustomInputKeyDown}
+                              autoFocus
+                            />
+                          ) : (
+                            <input
+                              type="text"
+                              className={styles.customInput}
+                              placeholder={
+                                customInputLabel ?? t('askUser.typePlaceholder')
+                              }
+                              value={customInputs[currentIdx] || ''}
+                              aria-label={
+                                customInputLabel ?? t('askUser.typePlaceholder')
+                              }
+                              maxLength={current.maxTextLength}
+                              disabled={controlsDisabled}
+                              onChange={(e) => {
+                                draftDirtyRef.current = true;
+                                setCustomInputs({
+                                  ...customInputs,
+                                  [currentIdx]: e.target.value,
+                                });
+                              }}
+                              // Clicking inside the input positions the caret; don't
+                              // let it bubble to the row's onClick and re-trigger the
+                              // option choice.
+                              onClick={(e) => e.stopPropagation()}
+                              onFocus={() =>
+                                rememberSelectedIndex(current.options.length)
+                              }
+                              onBlur={() => {
+                                setCustomFocused(false);
+                                setMultilineSession(false);
+                              }}
+                              onKeyDown={handleCustomInputKeyDown}
+                              autoFocus
+                            />
+                          )
                         ) : (
                           <button
                             type="button"
                             ref={customRef}
                             className={`${styles.customTrigger} ${
                               hasCustomValue ? '' : styles.optionPlaceholder
+                            } ${
+                              hasCustomValue &&
+                              (customInputs[currentIdx]?.includes('\n') ??
+                                false)
+                                ? styles.customTriggerMultiline
+                                : ''
                             }`}
                             data-web-shell-ask-option
                             tabIndex={isCustomActive ? 0 : -1}

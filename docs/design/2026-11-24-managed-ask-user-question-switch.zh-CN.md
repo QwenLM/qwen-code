@@ -55,9 +55,16 @@ Ignore 与 `disabled` 能力。
     内联箭头触发多余重跑）。
   - `submitDisabled` 仅作用于提交路径（Submit 按钮、`Ctrl+Enter`/`Cmd+Enter`
     与末题 `Enter` 提交），选项与文本输入框保持可编辑。
+  - 在 `Question` 上支持可选 `multilineText?: boolean`（由
+    `toManagedQuestionPermissionRequest` 投影为 `true`，单行 Daemon 问题省略
+    默认 `false`）。当 `multilineText` 为真或当前自定义文本已包含 `\n` 时渲
+    染 `<textarea>`（`Shift+Enter` 换行，单独 `Enter` 前进/提交）并在折叠触发
+    器上使用 `white-space: pre-wrap`，确保多行自定义答案在草稿恢复与编辑往
+    返中不丢失换行。
 - **将 `ManagedSessionsPage` 从 `ManagedQuestionForm` 切到共享 `AskUserQuestion`：**
-  - 将 `ManagedQuestionDraft` 类型迁入 `managed-question-response.ts`（与
-    `AskUserQuestionDraft` 同构），解除 `use-managed-actions.ts` 对旧表单的依赖。
+  - 将 `ManagedQuestionDraft` 类型与 `MAX_MANAGED_QUESTION_TEXT_LENGTH`（由
+    `chat-controller.ts` 复用再导出以保持单一事实源）迁入
+    `managed-question-response.ts`，解除 `use-managed-actions.ts` 对旧表单的依赖。
   - 在 `ManagedSessionsPage` 中通过按内容签名缓存的
     `toManagedQuestionPermissionRequest` 投影待处理 Managed 问题（以动作标识、
     修订号与序列化题目列表为键，显式排除 `expiresAt` 且不依赖 `messages`）。
@@ -140,7 +147,12 @@ questions`、`previous`/`next`）与键盘导航，与 Daemon 对齐。
     禁用卡片。
   - `use-managed-actions.test.tsx`、`chat-controller.local-integration.test.tsx`、
     `i18n.test.ts` 与 `build-artifact.test.ts` 全绿。
-- **变异见证：** 每条新增守卫与分支在独立变异装置下均验证转红。
+- **变异见证：** 全部可达守卫与分支（挂载与同实例换请求的草稿水合、commit 期
+  草稿发射、挂载不被动发射、自定义文本抑制首项预选、`submitDisabled` 仅禁提交
+  不锁输入、多行 `<textarea>` 与 `Shift+Enter` 保活、内容签名请求缓存、32 KiB
+  UI 门控、初始过期、提交时刻时钟跳变过期校验、以及实时过期定时器）均在独立变
+  异装置下验证转红；`onConfirm` 内的 `exceedsManagedQuestionAnswerLimits` 位
+  于 UI `submitDisabled={questionTooLarge}` 之后作为纵深防御保留。
 - **静态门禁：** `tsconfig.lib.json`、`tsconfig.json`、含测试严格 `tsc`、
   `eslint --max-warnings=0`、`prettier --check`、全仓
   `npm run build && npm run typecheck`。

@@ -64,10 +64,19 @@ concrete requirements must be preserved:
   - Apply `submitDisabled` strictly to submission paths (Submit button,
     `Ctrl+Enter`/`Cmd+Enter`, and final-question `Enter` submit) while keeping
     option controls and text inputs editable.
+  - Support optional `multilineText?: boolean` on `Question` (projected as
+    `true` by `toManagedQuestionPermissionRequest`, omitted / `false` for
+    single-line daemon questions). When `multilineText` is `true` or the
+    current custom value already contains `\n`, render a `<textarea>` (with
+    `Shift+Enter` inserting newlines and bare `Enter` advancing/submitting) and
+    `white-space: pre-wrap` on the collapsed trigger so multi-line custom
+    answers round-trip across draft restore and edits without silently
+    collapsing line breaks.
 - **Switch `ManagedSessionsPage` from `ManagedQuestionForm` to shared `AskUserQuestion`:**
-  - Move `ManagedQuestionDraft` type to `managed-question-response.ts` (matching
-    `AskUserQuestionDraft`) so `use-managed-actions.ts` has zero dependency on
-    the retired form.
+  - Move `ManagedQuestionDraft` and `MAX_MANAGED_QUESTION_TEXT_LENGTH` (re-exported
+    by `chat-controller.ts` for a single source of truth) to
+    `managed-question-response.ts` so `use-managed-actions.ts` has zero
+    dependency on the retired form.
   - Project pending Managed questions through `toManagedQuestionPermissionRequest`
     behind a content-signature cache (keyed by action identity, revisions, and
     serialized questions, explicitly excluding `expiresAt` and independent of
@@ -171,8 +180,16 @@ concrete requirements must be preserved:
     `role="status"` + disabled card.
   - `use-managed-actions.test.tsx`, `chat-controller.local-integration.test.tsx`,
     `i18n.test.ts`, and `build-artifact.test.ts` all pass.
-- **Mutation witnesses:** Every new guard and branch verified red under an
-  isolated mutation harness.
+- **Mutation witnesses:** Reachable guards and branches (initial and
+  in-place request-change draft hydration, commit-phase draft emission,
+  passive-mount silence, custom-text auto-select suppression,
+  `submitDisabled` without locking inputs, multi-line `<textarea>` and
+  `Shift+Enter` preservation, content-signature request cache, 32 KiB UI
+  limit, expiry-at-load, submit-time clock-jump expiry check, and live expiry
+  timer) verified red under an isolated mutation harness. The redundant
+  submit-time `exceedsManagedQuestionAnswerLimits` check inside `onConfirm`
+  sits behind the UI `submitDisabled={questionTooLarge}` guard as defense in
+  depth.
 - **Static gates:** `tsconfig.lib.json`, `tsconfig.json`, strict test `tsc`,
   `eslint --max-warnings=0`, `prettier --check`, repository
   `npm run build && npm run typecheck`.

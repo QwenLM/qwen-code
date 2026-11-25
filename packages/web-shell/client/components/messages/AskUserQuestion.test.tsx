@@ -2200,4 +2200,127 @@ describe('managed question contract parity', () => {
     expect(input.value).toBe('Shortened');
     expect(onConfirm).not.toHaveBeenCalled();
   });
+
+  it('preserves multi-line custom answers across draft hydration, editing, Shift+Enter, and in-place request updates', () => {
+    const req1: PermissionRequest = {
+      id: 'req-ml-1',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Explain details',
+            header: 'q1',
+            required: true,
+            multiSelect: false,
+            allowText: true,
+            multilineText: true,
+            options: [{ id: 'a', label: 'Alpha', description: '' }],
+          },
+        ],
+      },
+    };
+    const req2: PermissionRequest = {
+      id: 'req-ml-2',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q2',
+            question: 'Second request',
+            header: 'q2',
+            required: true,
+            multiSelect: false,
+            allowText: true,
+            options: [{ id: 'b', label: 'Beta', description: '' }],
+          },
+        ],
+      },
+    };
+    const drafts: AskUserQuestionDraft[] = [];
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const renderReq = (
+      req: PermissionRequest,
+      draft?: AskUserQuestionDraft,
+    ) => {
+      act(() =>
+        root!.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <AskUserQuestion
+                request={req}
+                onConfirm={onConfirm}
+                onError={onError}
+                keyboardActive={false}
+                initialDraft={draft}
+                onDraftChange={(next) => drafts.push(next)}
+              />
+            </I18nProvider>
+          </StrictMode>,
+        ),
+      );
+    };
+
+    renderReq(req1, { q1: { optionIds: [], text: 'line1\nline2' } });
+    // Opening the restored draft uses a textarea and preserves the newline.
+    act(() => optionButtons()[1]!.click());
+    const textarea = container!.querySelector<HTMLTextAreaElement>('textarea')!;
+    expect(textarea).not.toBeNull();
+    expect(textarea.value).toBe('line1\nline2');
+    // Shift+Enter does NOT submit the form.
+    pressKey(textarea, 'Enter', { shiftKey: true, cancelable: true });
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // Editing preserves existing and new line breaks in onDraftChange.
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set?.call(textarea, 'line1\nline2\nline3');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(drafts.at(-1)).toEqual({
+      q1: { optionIds: [], text: 'line1\nline2\nline3' },
+    });
+
+    // Rerendering the SAME mounted instance with a new request.id hydrates the new initialDraft
+    // (exercises the reset useEffect path) and still uses textarea when the draft has a newline
+    // even if multilineText is omitted.
+    renderReq(req2, { q2: { optionIds: [], text: 'next1\nnext2' } });
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[1]!.textContent).toBe('next1\nnext2');
+    act(() => optionButtons()[1]!.click());
+    const textarea2 =
+      container!.querySelector<HTMLTextAreaElement>('textarea')!;
+    expect(textarea2).not.toBeNull();
+    expect(textarea2.value).toBe('next1\nnext2');
+    // Deleting the newline while editing must NOT unmount the textarea mid-edit.
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set?.call(textarea2, 'single-line-now');
+      textarea2.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container!.querySelector('textarea')).toBe(textarea2);
+    // Restore multi-line text and submit with bare Enter.
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set?.call(textarea2, 'next1\nnext2');
+      textarea2.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    pressKey(textarea2, 'Enter', { cancelable: true });
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-ml-2',
+      'submit',
+      { '0': 'next1\nnext2' },
+      [{ questionId: 'q2', value: 'next1\nnext2', text: 'next1\nnext2' }],
+    );
+  });
 });

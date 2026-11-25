@@ -4444,12 +4444,12 @@ describe('ManagedSessionsPage', () => {
       await act(async () => {
         askOptions()[2]!.click();
       });
-      const input = card.querySelector<HTMLInputElement>(
-        '[data-web-shell-ask-panel] input',
+      const input = card.querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
       )!;
       await act(async () => {
         Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
+          HTMLTextAreaElement.prototype,
           'value',
         )!.set!.call(input, value);
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -4467,8 +4467,9 @@ describe('ManagedSessionsPage', () => {
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
     await act(async () => flush());
     expect(
-      card.querySelector<HTMLInputElement>('[data-web-shell-ask-panel] input')
-        ?.value,
+      card.querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )?.value,
     ).toBe('Custom answer 1');
     expect(container.textContent).toContain('Retry the same answers');
     await act(async () => {
@@ -4540,12 +4541,12 @@ describe('ManagedSessionsPage', () => {
       await act(async () => {
         askOptions()[2]!.click();
       });
-      const input = card().querySelector<HTMLInputElement>(
-        '[data-web-shell-ask-panel] input',
+      const input = card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
       )!;
       await act(async () => {
         Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
+          HTMLTextAreaElement.prototype,
           'value',
         )!.set!.call(input, text);
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -4561,7 +4562,7 @@ describe('ManagedSessionsPage', () => {
     expect(
       selector().querySelector('[aria-pressed="true"]')?.textContent,
     ).toContain('child-a');
-    await fillCustom('Keep child A');
+    await fillCustom('Keep child A\nline 2');
     await choose('child-b');
     expect(askOptions()[2]!.textContent).toBe('Other answer');
     await fillCustom('Child B answer');
@@ -4572,7 +4573,15 @@ describe('ManagedSessionsPage', () => {
     await choose('This session');
     expect(card().querySelector('[role="alertdialog"]')).not.toBeNull();
     await choose('child-a');
-    expect(askOptions()[2]!.textContent).toBe('Keep child A');
+    expect(askOptions()[2]!.textContent).toBe('Keep child A\nline 2');
+    await act(async () => {
+      askOptions()[2]!.click();
+    });
+    expect(
+      card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )?.value,
+    ).toBe('Keep child A\nline 2');
     await choose('child-b');
     expect(askOptions()[2]!.textContent).toBe('Child B answer');
     await act(async () => {
@@ -4598,7 +4607,7 @@ describe('ManagedSessionsPage', () => {
     expect(
       selector().querySelector('[aria-pressed="true"]')?.textContent,
     ).toContain('child-a');
-    expect(askOptions()[2]!.textContent).toBe('Keep child A');
+    expect(askOptions()[2]!.textContent).toBe('Keep child A\nline 2');
   });
 
   it('preserves option order, untrimmed text, draft across cloned refreshes, 32 KiB guard, duplicate-submit fencing, and live expiry on shared AskUserQuestion', async () => {
@@ -4620,6 +4629,7 @@ describe('ManagedSessionsPage', () => {
       if (id === 's1') {
         await actionUpdated;
         if (opts.signal.aborted) return;
+        yield event(4, 'Streamed message delta');
         yield {
           id: 5,
           at: 5,
@@ -4673,13 +4683,13 @@ describe('ManagedSessionsPage', () => {
       await act(async () => {
         askOptions()[2]!.click();
       });
-      const input = card().querySelector<HTMLInputElement>(
-        '[data-web-shell-ask-panel] input',
+      const input = card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
       )!;
       expect(input.maxLength).toBe(8192);
       await act(async () => {
         Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
+          HTMLTextAreaElement.prototype,
           'value',
         )!.set!.call(input, value);
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -4695,31 +4705,32 @@ describe('ManagedSessionsPage', () => {
     );
     expect(submitButton().disabled).toBe(true);
     expect(
-      card().querySelector<HTMLInputElement>(
-        '[data-web-shell-ask-panel] input',
+      card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
       )!.disabled,
     ).toBe(false);
 
-    // Replace with valid multi-select (clicked in reverse order) + untrimmed custom text.
+    // Replace with valid multi-select (clicked in reverse order) + untrimmed multi-line text.
     await act(async () => {
       askOptions()[1]!.click();
       askOptions()[0]!.click();
     });
-    const q2Input = card().querySelector<HTMLInputElement>(
-      '[data-web-shell-ask-panel] input',
+    const q2Input = card().querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-ask-panel] textarea',
     );
     if (q2Input) {
       await act(async () => {
         Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
+          HTMLTextAreaElement.prototype,
           'value',
-        )!.set!.call(q2Input, '  also: review, publish  ');
+        )!.set!.call(q2Input, '  also: review\npublish  ');
         q2Input.dispatchEvent(new Event('input', { bubbles: true }));
       });
     } else {
-      await fillCustom('  also: review, publish  ');
+      await fillCustom('  also: review\npublish  ');
     }
-    // Sliding expiresAt + cloned questions refresh while on Q2 must NOT reset step or draft.
+    // Streaming message delta + sliding expiresAt + cloned questions refresh while on Q2
+    // must NOT reset step or draft.
     const readsBefore = listPending.mock.calls.length;
     currentQuestion = {
       ...currentQuestion,
@@ -4733,11 +4744,17 @@ describe('ManagedSessionsPage', () => {
       expect(listPending.mock.calls.length).toBeGreaterThan(readsBefore),
     );
     await act(async () => flush());
+    expect(
+      mocks.messageListProps?.messages.some((message) =>
+        message.content.includes('Streamed message delta'),
+      ),
+    ).toBe(true);
     expect(card().textContent).toContain('2/2 questions');
     expect(
-      card().querySelector<HTMLInputElement>('[data-web-shell-ask-panel] input')
-        ?.value ?? askOptions()[2]?.textContent,
-    ).toBe('  also: review, publish  ');
+      card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )?.value ?? askOptions()[2]?.textContent,
+    ).toBe('  also: review\npublish  ');
     await act(async () => prevQuestion().click());
     // Selecting duplicate-label option 1 on Q1 clears custom text.
     await act(async () => askOptions()[1]!.click());
@@ -4759,7 +4776,7 @@ describe('ManagedSessionsPage', () => {
         {
           questionId: 'q2',
           optionIds: ['q2o1', 'q2o2'],
-          text: '  also: review, publish  ',
+          text: '  also: review\npublish  ',
         },
       ],
     });
@@ -4789,16 +4806,44 @@ describe('ManagedSessionsPage', () => {
     });
     expect(respond).not.toHaveBeenCalled();
 
-    // Live expiry timer flips an open question to expired without a reload.
+    // Live expiry timer flips an open question to expired without a reload;
+    // submit-time clock check also blocks submission if wall clock passes expiresAt
+    // before the timer fires.
     vi.useFakeTimers();
     try {
+      const baseNow = Date.now();
+      currentQuestion = {
+        ...pendingQuestion(),
+        actionId: 'clock-jump-q',
+        sessionId: 's3',
+        expiresAt: baseNow + 60_000,
+      };
+      await render('s3');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => nextQuestion().click());
+      await act(async () => askOptions()[0]!.click());
+      expect(submitButton().disabled).toBe(false);
+      const nowSpy = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(currentQuestion.expiresAt + 1);
+      await act(async () => {
+        submitButton().click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(respond).not.toHaveBeenCalled();
+      nowSpy.mockRestore();
+
       currentQuestion = {
         ...pendingQuestion(),
         actionId: 'live-expiring-q',
-        sessionId: 's3',
+        sessionId: 's4',
         expiresAt: Date.now() + 250,
       };
-      await render('s3');
+      await render('s4');
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
