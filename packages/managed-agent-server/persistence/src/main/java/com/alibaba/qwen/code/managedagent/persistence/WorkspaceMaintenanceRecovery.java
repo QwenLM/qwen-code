@@ -4,11 +4,15 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -18,9 +22,9 @@ import java.util.UUID;
 /** Offline reconciliation of the original Git step after a proven host reboot. */
 public final class WorkspaceMaintenanceRecovery {
     private static final ObjectMapper JSON = new ObjectMapper()
-            .enable(com.fasterxml.jackson.databind.DeserializationFeature.USE_LONG_FOR_INTS)
-            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-            .enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+            .enable(DeserializationFeature.USE_LONG_FOR_INTS)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
     private static final String WORK_KIND = "RECOVERY_EVIDENCE";
     private static final String[] MOUNT_FIELDS = {"physical_id", "mount_revision", "mount_root",
             "mount_host_id", "mount_device", "mount_inode", "mount_birth_time", "mount_registration_id"};
@@ -141,7 +145,7 @@ public final class WorkspaceMaintenanceRecovery {
             if (!"EXECUTING".equals(work.get("state")) || current == null || !executionId.equals(current.get("execution_id"))) {
                 throw blocked();
             }
-            var before = JSON.convertValue(original.get("host"), new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() { });
+            var before = JSON.convertValue(original.get("host"), new TypeReference<Map<String, Object>>() { });
             if (!Boolean.TRUE.equals(before.get("available")) || !Boolean.TRUE.equals(observedHost.get("available"))
                     || !before.get("hostId").equals(observedHost.get("hostId"))
                     || before.get("bootId").equals(observedHost.get("bootId"))) {
@@ -179,8 +183,8 @@ public final class WorkspaceMaintenanceRecovery {
 
     private Map<String, Object> identity(Map<String, Object> work) {
         try {
-            return JSON.readValue(WorkspaceEvidenceResources.read(jdbc, (String) work.get("evidence_resource_ref"), (String) work.get("evidence_sha256")), new com.fasterxml.jackson.core.type.TypeReference<>() { });
-        } catch (java.io.IOException exception) {
+            return JSON.readValue(WorkspaceEvidenceResources.read(jdbc, (String) work.get("evidence_resource_ref"), (String) work.get("evidence_sha256")), new TypeReference<>() { });
+        } catch (IOException exception) {
             throw blocked();
         }
     }
@@ -233,7 +237,7 @@ public final class WorkspaceMaintenanceRecovery {
                 throw blocked();
             }
             return Map.of("available", true, "hostId", host, "bootId", boot, "pidNamespace", pid, "timeNamespace", time);
-        } catch (java.io.IOException | RuntimeException unavailable) {
+        } catch (IOException | RuntimeException unavailable) {
             return Map.of("available", false);
         }
     }
@@ -241,7 +245,7 @@ public final class WorkspaceMaintenanceRecovery {
     private static byte[] bytes(Object value) {
         try {
             return JSON.writeValueAsBytes(value);
-        } catch (java.io.IOException exception) {
+        } catch (IOException exception) {
             throw blocked();
         }
     }

@@ -18,6 +18,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
+import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionCommandProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
@@ -30,23 +34,27 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private final WorkspacePhysicalTransport delegate;
     private final WorkspaceRuntimeResolver resolver;
-    private final java.util.function.Function<String, ContextBinding> savedBindings;
+    private final Function<String, ContextBinding> savedBindings;
     private final WorkspaceExecutionStore ownership;
     private final RuntimeBindingRepository bindings;
     private final RuntimeSessionRepository sessions;
-    private final java.util.function.Function<RuntimeBindingRecord, CompletionStage<Void>> verifyExternalAcquisition;
+    private final Function<RuntimeBindingRecord, CompletionStage<Void>> verifyExternalAcquisition;
     // READY Sessions whose mount went back early (#13800): the worker still
     // holds their installation, so their full release must reach it even
     // though the holder is already gone. In memory only — a Broker restart
     // drops the debt and leaves it to the worker's own lifetime.
-    private final java.util.Set<String> detachOwed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> detachOwed = ConcurrentHashMap.newKeySet();
 
     public WorkspaceRuntimeTransport(WorkspacePhysicalTransport delegate, WorkspaceRuntimeResolver resolver,
             WorkspaceExecutionStore ownership, RuntimeBindingRepository bindings,
@@ -55,11 +63,11 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 ignored -> CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable()));
     }
 
-    public WorkspaceRuntimeTransport(com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport delegate,
+    public WorkspaceRuntimeTransport(WorkspacePhysicalTransport delegate,
             WorkspaceRuntimeResolver resolver,
             WorkspaceExecutionStore ownership, RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
-            java.util.function.Function<RuntimeBindingRecord, CompletionStage<Void>> verifyExternalAcquisition) {
-        this.verifyExternalAcquisition = java.util.Objects.requireNonNull(verifyExternalAcquisition);
+            Function<RuntimeBindingRecord, CompletionStage<Void>> verifyExternalAcquisition) {
+        this.verifyExternalAcquisition = Objects.requireNonNull(verifyExternalAcquisition);
         this.delegate = delegate;
         this.resolver = resolver;
         this.savedBindings = resolver::savedBinding;
@@ -70,7 +78,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
 
     public WorkspaceRuntimeTransport(WorkspacePhysicalTransport delegate, WorkspaceExecutionStore ownership,
             RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
-            java.util.function.Function<String, ContextBinding> savedBindings) {
+            Function<String, ContextBinding> savedBindings) {
         this.delegate = delegate;
         this.resolver = null;
         this.ownership = ownership;
@@ -96,12 +104,12 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
         if (current == null || current.getGeneration() != runtime.getGeneration()
                 || !current.getRequest().equals(runtime.getRequest())
-                || !java.util.Objects.equals(current.getProvisionSeed(), runtime.getProvisionSeed())
+                || !Objects.equals(current.getProvisionSeed(), runtime.getProvisionSeed())
                 || current.getState() != RuntimeBindingRecord.State.READY
                 || current.isDrainRequested() || current.getLease() == null
                 || !sameLease(current.getLease(), runtime.getLease())
-                || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(current.getRequest().getProvisionerKind())
-                && !(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(current.getRequest().getProvisionerKind())
+                || !RuntimeProviderKinds.LOCAL_PROCESS.equals(current.getRequest().getProvisionerKind())
+                && !(RuntimeProviderKinds.SSH_PROCESS.equals(current.getRequest().getProvisionerKind())
                         && ManagedExtensionExecutionProfile.admits(current.getRequest().getScope().getCapabilityDigest()))
                 || !WorkspaceExecutionProfile.admitsCapabilityDigest(current.getRequest().getScope().getCapabilityDigest())) {
             throw WorkspaceExecutionStore.unavailable();
@@ -113,7 +121,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime,
             String harnessSessionId, Map<String, Object> operation) {
         RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
-        if (current != null && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
+        if (current != null && RuntimeProviderKinds.EXTERNAL_WORKSPACE
                 .equals(current.getRequest().getProvisionerKind())) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -121,7 +129,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         boolean recovery = ManagedExtensionProtocol.isRecovery(operation);
         if (current == null || current.getGeneration() != runtime.getGeneration()
                 || !current.getRequest().equals(runtime.getRequest())
-                || !java.util.Objects.equals(current.getProvisionSeed(), runtime.getProvisionSeed())
+                || !Objects.equals(current.getProvisionSeed(), runtime.getProvisionSeed())
                 || current.getLease() == null || !sameLease(current.getLease(), runtime.getLease())
                 || current.getState() != RuntimeBindingRecord.State.READY
                 && !(recovery && current.getState() == RuntimeBindingRecord.State.DRAINING)
@@ -162,9 +170,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             });
         }
         // Reject a missing directory before a new claim can strand storage ownership.
-        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(context.runtime().getRequest().getProvisionerKind())) {
+        if (RuntimeProviderKinds.LOCAL_PROCESS.equals(context.runtime().getRequest().getProvisionerKind())) {
             WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
-        } else if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
+        } else if (RuntimeProviderKinds.SSH_PROCESS.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
             try {
                 resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
             } catch (RuntimeBrokerException error) {
@@ -462,7 +470,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static Context requireLocalCapture(Context context) {
-        if (!java.util.Set.of(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS, com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS)
+        if (!Set.of(RuntimeProviderKinds.LOCAL_PROCESS, RuntimeProviderKinds.SSH_PROCESS)
                 .contains(context.runtime().getRequest().getProvisionerKind())) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -515,9 +523,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             boolean extensionControl = ManagedExtensionExecutionProfile.admits(session.getScope().getCapabilityDigest())
                     && (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
                             || ManagedExtensionCommandProtocol.isOperation(operation));
-            if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(selected.runtime().getRequest().getProvisionerKind())
+            if (RuntimeProviderKinds.SSH_PROCESS.equals(selected.runtime().getRequest().getProvisionerKind())
                     && !extensionControl
-                    && !java.util.Set.of("history", "raw-file-history", "workspace-context").contains(operation.get("kind"))) {
+                    && !Set.of("history", "raw-file-history", "workspace-context").contains(operation.get("kind"))) {
                 throw new RuntimeBrokerException(501, "ssh_runtime_control_unsupported",
                         "SSH Runtime supports files and foreground Shell only.", false);
             }
@@ -721,7 +729,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
 
     private static void requireExternalFile(Context context, Map<String, Object> reference) {
         if (external(context) && (reference.containsKey("runtimeProtocol")
-                || !java.util.Set.of("read_file", "write_file", "edit", "glob").contains(reference.get("toolName")))) {
+                || !Set.of("read_file", "write_file", "edit", "glob").contains(reference.get("toolName")))) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
@@ -729,11 +737,11 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private static void requireExternalControl(Map<String, Object> operation, RuntimeSession session) {
         if (!("workspace-context".equals(operation.get("kind"))
                 || "raw-file-history".equals(operation.get("kind"))
-                        && java.util.Set.of("bind", "prepare", "snapshot").contains(String.valueOf(operation.get("action"))))) {
+                        && Set.of("bind", "prepare", "snapshot").contains(String.valueOf(operation.get("action"))))) {
             throw new RuntimeBrokerException(501, "external_runtime_control_unsupported",
                     "External Workspace control is not qualified.", false);
         }
-        com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol.control(
+        ProviderRuntimeProtocol.control(
                 operation, session.getHarnessSessionId(), session.getRuntimeSessionId());
         if ("prepare".equals(operation.get("action"))) {
             String prompt = (String) operation.get("promptId");
@@ -743,17 +751,17 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             for (Object value : (List<?>) operation.get("paths")) {
                 String path = (String) value;
                 try {
-                    if (".".equals(path) || !path.equals(com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath.normalize(path))) {
+                    if (".".equals(path) || !path.equals(WorkspaceRelativePath.normalize(path))) {
                         throw WorkspaceExecutionStore.unavailable();
                     }
-                } catch (com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException invalid) {
+                } catch (WorkspaceException invalid) {
                     throw WorkspaceExecutionStore.unavailable();
                 }
             }
         }
         if ("bind".equals(operation.get("action")) && operation.get("state") != null
                 && (!(operation.get("state") instanceof Map<?, ?> state)
-                        || !state.keySet().equals(java.util.Set.of("ownerSessionId", "snapshots", "files")))) {
+                        || !state.keySet().equals(Set.of("ownerSessionId", "snapshots", "files")))) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }

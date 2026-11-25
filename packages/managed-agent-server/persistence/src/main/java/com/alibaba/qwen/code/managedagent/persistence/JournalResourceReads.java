@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -81,9 +82,9 @@ final class JournalResourceReads {
 
     private byte[] readSessionObject(JournalStoreRows.ResourceRow resource) {
         byte[] bytes;
-        try (java.io.InputStream stream = publicationObjects.open(resource.objectKey(), () -> {})) {
+        try (InputStream stream = publicationObjects.open(resource.objectKey(), () -> {})) {
             bytes = stream.readAllBytes();
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Session resource read failed", error);
         }
         if (bytes.length != resource.byteLength()
@@ -104,9 +105,9 @@ final class JournalResourceReads {
             fencing.requireCredential(tenantId, workspaceId, sessionId, writerToken);
             throw JournalStoreRows.invalid("Native snapshot resources require the journal-snapshots read API.");
         }
-        if (org.springframework.transaction.support.TransactionSynchronizationManager
+        if (TransactionSynchronizationManager
                         .isActualTransactionActive()
-                || org.springframework.transaction.support.TransactionSynchronizationManager
+                || TransactionSynchronizationManager
                         .hasResource(jdbc.getDataSource())) {
             throw new IllegalStateException(
                     "Owner resource reads require a fresh transaction boundary");

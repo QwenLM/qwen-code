@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -157,7 +158,7 @@ public class JdbcChildWorkspaceStore
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, row.tenantId());
             String storage = JdbcWorkspaceExecutionStore.storageKey(jdbc, new ContextBinding(row.tenantId(), row.workspaceId(),
-                    row.workspaceGeneration(), row.storageId(), ".", com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+                    row.workspaceGeneration(), row.storageId(), ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
             List<String> physical = jdbc.queryForList("SELECT holder_id FROM ma_storage_owner WHERE physical_id = ?"
                     + " AND maintenance_id = ? AND holder_id IS NOT NULL FOR UPDATE", String.class,
                     ManagedSchemaKeys.identity(storage), row.childWorkspaceId());

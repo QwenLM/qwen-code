@@ -81,11 +81,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_create: { standing: 'managed', evidence: 'surface:SESSION_CREATE' },
   hosted_harness_private_v1: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence: 'docs:packages/cli/src/serve/hosted-harness-contract.ts',
   },
   managed_session_journal_delta_v1: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence:
+      'docs:packages/cli/src/serve/hosted-harness-session/observation-routes.ts',
   },
   session_startup_config: LEGACY_ONLY(
     'a client startup config, not a Managed input',
@@ -115,6 +116,18 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed sub-session send surface',
   ),
   session_prompt: { standing: 'managed', evidence: 'surface:TURN_SUBMIT' },
+  session_retire_if_idle: NO_MANAGED_EQUIVALENT(
+    'source-native retirement is available only on trusted local daemon sessions',
+  ),
+  turn_skill_session_effects_check: NO_MANAGED_EQUIVALENT(
+    'Checks the captured native skill files before prompt enqueue',
+  ),
+  turn_extension_store_lease: NO_MANAGED_EQUIVALENT(
+    'A local Serve child holds an installed extension generation through its turn.',
+  ),
+  turn_skill_file_snapshot: NO_MANAGED_EQUIVALENT(
+    'optional snapshot support is restricted to trusted local daemon sessions',
+  ),
   session_turn_status: NO_MANAGED_EQUIVALENT(
     'Managed reads Turns by list and get, not a status route',
   ),
@@ -168,7 +181,8 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   typed_event_schema: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence:
+      'docs:packages/cli/src/serve/hosted-harness-session/observation-routes.ts',
   },
   session_set_model: {
     standing: 'managed',
