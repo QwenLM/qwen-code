@@ -8,6 +8,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
+import type { QuestionAnswer } from '../../chat-core/contract';
 import { useI18n } from '../../i18n';
 import { isEditableTarget } from '../../utils/dom';
 import { Spinner } from '../ui/spinner';
@@ -16,10 +17,32 @@ import styles from './AskUserQuestion.module.css';
 import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface Question {
+  id?: string;
   question: string;
   header: string;
-  options: { label: string; description: string }[];
+  options: { id?: string; label: string; description: string }[];
   multiSelect?: boolean;
+  required?: boolean;
+  allowText?: boolean;
+  maxTextLength?: number;
+}
+
+function optionValue(index: number): string {
+  return String(index);
+}
+
+function isQuestionRequired(question: Question): boolean {
+  return question.required !== false;
+}
+
+function isQuestionTextAllowed(question: Question): boolean {
+  return question.allowText !== false;
+}
+
+function questionRowCount(question: Question): number {
+  return isQuestionTextAllowed(question)
+    ? question.options.length + 1
+    : question.options.length;
 }
 
 interface AskUserQuestionProps {
@@ -28,9 +51,12 @@ interface AskUserQuestionProps {
     id: string,
     selectedOption: string,
     answers?: Record<string, string>,
+    structuredAnswers?: readonly QuestionAnswer[],
   ) => Promise<boolean>;
   onError: (error: unknown, fallback: string) => void;
   variant?: 'inline' | 'floating';
+  /** Disables answering and submitting while keeping questions inspectable. */
+  disabled?: boolean;
   customInputLabel?: string;
   /**
    * Opens a side task that explains the pending question before the user
@@ -48,8 +74,27 @@ interface AskUserQuestionProps {
   keyboardActive?: boolean;
 }
 
-function hasCustomAnswer(value: string | undefined): boolean {
+function hasCustomAnswer(value: string | undefined): value is string {
   return Boolean(value?.trim());
+}
+
+function isQuestionAnswered(
+  question: Question,
+  index: number,
+  multiSelections: Record<number, string[]>,
+  answerMap: Record<number, string>,
+  customMap: Record<number, string>,
+): boolean {
+  const custom = isQuestionTextAllowed(question) ? customMap[index] : undefined;
+  if (hasCustomAnswer(custom)) return true;
+  if (question.multiSelect) {
+    return (multiSelections[index]?.length ?? 0) > 0;
+  }
+  const answer = answerMap[index];
+  return (
+    answer !== undefined &&
+    question.options.some((_, optionIdx) => optionValue(optionIdx) === answer)
+  );
 }
 
 export function AskUserQuestion({
@@ -57,6 +102,7 @@ export function AskUserQuestion({
   onConfirm,
   onError,
   variant = 'inline',
+  disabled = false,
   keyboardActive = true,
   customInputLabel,
   onAskDetails,
@@ -108,13 +154,17 @@ export function AskUserQuestion({
     setCurrentIdx(0);
     // Sync the ref too so the focus effect (which runs in this same commit on a
     // new request) reads the fresh index, not the previous request's selection.
-    const firstSelectedIdx = firstQuestion ? 0 : null;
+    const firstSelectedIdx =
+      firstQuestion && questionRowCount(firstQuestion) > 0 ? 0 : null;
     selectedIdxByQuestionRef.current = { 0: firstSelectedIdx };
     selectedIdxRef.current = firstSelectedIdx;
     setSelectedIdx(firstSelectedIdx);
     setAnswers(
-      firstQuestion && !firstQuestion.multiSelect && firstQuestion.options[0]
-        ? { 0: firstQuestion.options[0].label }
+      firstQuestion &&
+        isQuestionRequired(firstQuestion) &&
+        !firstQuestion.multiSelect &&
+        firstQuestion.options[0]
+        ? { 0: optionValue(0) }
         : {},
     );
     setCustomInputs({});
@@ -125,6 +175,12 @@ export function AskUserQuestion({
 
   const current = questions[currentIdx];
   const isMulti = current?.multiSelect ?? false;
+  const currentRequired = current ? isQuestionRequired(current) : true;
+  const currentAllowText = current ? isQuestionTextAllowed(current) : true;
+  const controlsDisabled = submitting || disabled;
+  const cancelOption = request.options.find(
+    (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
+  );
 
   const rememberSelectedIndex = useCallback(
     (idx: number | null) => {
@@ -138,20 +194,29 @@ export function AskUserQuestion({
   const buildResult = useCallback(
     (
       multiSelections: Record<number, string[]> = selectedMulti,
+      answerMap: Record<number, string> = answers,
+      customMap: Record<number, string> = customInputs,
     ): Record<string, string> => {
       const result: Record<string, string> = {};
       for (let i = 0; i < questions.length; i++) {
         const q = questions[i];
         if (!q) continue;
+        const custom = isQuestionTextAllowed(q) ? customMap[i] : undefined;
         if (q.multiSelect) {
           const multi = multiSelections[i] || [];
-          const custom = customInputs[i];
-          const all = hasCustomAnswer(custom) ? [...multi, custom] : multi;
+          const labels = multi.map(
+            (selected) =>
+              q.options.find((_, index) => optionValue(index) === selected)
+                ?.label ?? selected,
+          );
+          const all = hasCustomAnswer(custom) ? [...labels, custom] : labels;
           result[String(i)] = all.join(', ');
         } else {
-          const custom = customInputs[i];
+          const selected = q.options.find(
+            (_, index) => optionValue(index) === answerMap[i],
+          );
           result[String(i)] =
-            answers[i] || (hasCustomAnswer(custom) ? custom : '');
+            selected?.label || (hasCustomAnswer(custom) ? custom : '');
         }
       }
       return result;
@@ -159,21 +224,76 @@ export function AskUserQuestion({
     [questions, selectedMulti, customInputs, answers],
   );
 
+  const buildStructuredAnswers = useCallback(
+    (
+      multiSelections: Record<number, string[]> = selectedMulti,
+      answerMap: Record<number, string> = answers,
+      customMap: Record<number, string> = customInputs,
+    ): readonly QuestionAnswer[] => {
+      const rendered = buildResult(multiSelections, answerMap, customMap);
+      const entries: QuestionAnswer[] = [];
+      for (let i = 0; i < questions.length; i++) {
+        const question = questions[i];
+        if (!question) continue;
+        const custom = isQuestionTextAllowed(question)
+          ? customMap[i]
+          : undefined;
+        const selected = question.multiSelect
+          ? (multiSelections[i] || [])
+              .map((selection) => question.options[Number(selection)])
+              .filter(
+                (option): option is Question['options'][number] =>
+                  option !== undefined,
+              )
+          : question.options.filter(
+              (_, index) => optionValue(index) === answerMap[i],
+            );
+        // Unanswered optional questions are omitted from structured answers
+        // (Managed backends reject answer objects with neither optionIds nor text).
+        if (
+          !isQuestionRequired(question) &&
+          selected.length === 0 &&
+          !hasCustomAnswer(custom)
+        ) {
+          continue;
+        }
+        const optionIds =
+          selected.length > 0 &&
+          question.options.every((option) => option.id !== undefined)
+            ? selected.map((option) => option.id ?? '')
+            : undefined;
+        entries.push({
+          questionId: question.id ?? String(i),
+          value: rendered[String(i)] ?? '',
+          ...(optionIds === undefined ? {} : { optionIds }),
+          ...(hasCustomAnswer(custom) ? { text: custom } : {}),
+        });
+      }
+      return entries;
+    },
+    [answers, buildResult, customInputs, questions, selectedMulti],
+  );
+
   const submitDecision = useCallback(
     async (
       optionId: string,
       submittedAnswers?: Record<string, string>,
+      structuredAnswers?: readonly QuestionAnswer[],
     ): Promise<void> => {
-      if (submittedRef.current) return;
+      if (submittedRef.current || disabled) return;
       submittedRef.current = true;
       const attempt = ++submissionAttemptRef.current;
       setSubmitting(true);
       try {
-        const accepted = await onConfirm(
-          request.id,
-          optionId,
-          submittedAnswers,
-        );
+        const accepted =
+          structuredAnswers === undefined
+            ? await onConfirm(request.id, optionId, submittedAnswers)
+            : await onConfirm(
+                request.id,
+                optionId,
+                submittedAnswers,
+                structuredAnswers,
+              );
         if (!accepted) throw new Error(t('askUser.submitFailed'));
       } catch (error) {
         if (submissionAttemptRef.current !== attempt) return;
@@ -182,14 +302,36 @@ export function AskUserQuestion({
         onError(error, t('askUser.submitFailed'));
       }
     },
-    [onConfirm, onError, request.id, t],
+    [disabled, onConfirm, onError, request.id, t],
   );
 
   const handleSubmit = useCallback(
-    (submittedAnswers?: Record<string, string>) => {
-      if (submittedRef.current) return;
-      const result = submittedAnswers ?? buildResult();
-      if (!questions.every((_, idx) => hasCustomAnswer(result[String(idx)]))) {
+    (
+      submittedAnswers?: Record<string, string>,
+      multiSelections?: Record<number, string[]>,
+      answerMap?: Record<number, string>,
+      customMap?: Record<number, string>,
+    ) => {
+      if (submittedRef.current || disabled) return;
+      const resolvedMulti = multiSelections ?? selectedMulti;
+      const resolvedAnswers = answerMap ?? answers;
+      const resolvedCustom = customMap ?? customInputs;
+      const result =
+        submittedAnswers ??
+        buildResult(resolvedMulti, resolvedAnswers, resolvedCustom);
+      if (
+        !questions.every(
+          (q, idx) =>
+            !isQuestionRequired(q) ||
+            isQuestionAnswered(
+              q,
+              idx,
+              resolvedMulti,
+              resolvedAnswers,
+              resolvedCustom,
+            ),
+        )
+      ) {
         return;
       }
       const submitOption = request.options.find((o) => o.kind === 'allow_once');
@@ -198,27 +340,52 @@ export function AskUserQuestion({
         onError(new Error(message), message);
         return;
       }
-      void submitDecision(submitOption.id, result);
+      const carriesStructuredAnswers = questions.every(
+        (question) =>
+          question.id !== undefined &&
+          question.options.every((option) => option.id !== undefined),
+      );
+      void submitDecision(
+        submitOption.id,
+        result,
+        carriesStructuredAnswers
+          ? buildStructuredAnswers(
+              resolvedMulti,
+              resolvedAnswers,
+              resolvedCustom,
+            )
+          : undefined,
+      );
     },
-    [buildResult, onError, questions, request.options, submitDecision, t],
+    [
+      answers,
+      buildResult,
+      buildStructuredAnswers,
+      customInputs,
+      disabled,
+      onError,
+      questions,
+      request.options,
+      selectedMulti,
+      submitDecision,
+      t,
+    ],
   );
 
-  const currentAnswers = buildResult();
-  const allQuestionsAnswered = questions.every((_, idx) =>
-    hasCustomAnswer(currentAnswers[String(idx)]),
+  const allQuestionsAnswered = questions.every(
+    (q, idx) =>
+      !isQuestionRequired(q) ||
+      isQuestionAnswered(q, idx, selectedMulti, answers, customInputs),
   );
 
   const handleCancel = useCallback(() => {
-    if (submittedRef.current) return;
-    const cancelOption = request.options.find(
-      (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
-    );
-    if (!cancelOption) return;
+    if (submittedRef.current || disabled || !cancelOption) return;
     void submitDecision(cancelOption.id);
-  }, [request.options, submitDecision]);
+  }, [cancelOption, disabled, submitDecision]);
 
   const focusCustomInput = useCallback(
     (initialValue?: string) => {
+      if (!currentAllowText || controlsDisabled) return;
       if (initialValue !== undefined) {
         setCustomInputs((prev) => ({ ...prev, [currentIdx]: initialValue }));
       }
@@ -232,28 +399,37 @@ export function AskUserQuestion({
       }
       setCustomFocused(true);
     },
-    [currentIdx, isMulti],
+    [controlsDisabled, currentAllowText, currentIdx, isMulti],
   );
 
   const handleSelectOption = useCallback(
     (idx: number) => {
-      if (!current) return;
-      const isOther = idx === current.options.length;
+      if (!current || controlsDisabled) return;
+      const isOther = currentAllowText && idx === current.options.length;
       if (isOther) {
         focusCustomInput();
         return;
       }
-      const label = current.options[idx].label;
+      if (idx < 0 || idx >= current.options.length) return;
+      const value = optionValue(idx);
       if (isMulti) {
         setSelectedMulti((prev) => {
           const selected = prev[currentIdx] || [];
-          const next = selected.includes(label)
-            ? selected.filter((l) => l !== label)
-            : [...selected, label];
+          const next = selected.includes(value)
+            ? selected.filter((selectedValue) => selectedValue !== value)
+            : [...selected, value];
           return { ...prev, [currentIdx]: next };
         });
       } else {
-        const nextAnswers = { ...answers, [currentIdx]: label };
+        if (!currentRequired && answers[currentIdx] === value) {
+          setAnswers((prev) => {
+            const next = { ...prev };
+            delete next[currentIdx];
+            return next;
+          });
+          return;
+        }
+        const nextAnswers = { ...answers, [currentIdx]: value };
         setAnswers(nextAnswers);
         setCustomInputs((prev) => {
           if (!(currentIdx in prev)) return prev;
@@ -263,26 +439,43 @@ export function AskUserQuestion({
         });
       }
     },
-    [current, currentIdx, isMulti, answers, focusCustomInput],
+    [
+      answers,
+      controlsDisabled,
+      current,
+      currentAllowText,
+      currentIdx,
+      currentRequired,
+      focusCustomInput,
+      isMulti,
+    ],
   );
 
   const handleToggle = useCallback(
     (idx: number) => {
-      if (!current || !isMulti) return;
-      if (idx === current.options.length) {
+      if (!current || !isMulti || controlsDisabled) return;
+      if (currentAllowText && idx === current.options.length) {
         focusCustomInput();
         return;
       }
-      const label = current.options[idx].label;
+      if (idx < 0 || idx >= current.options.length) return;
+      const value = optionValue(idx);
       setSelectedMulti((prev) => {
         const selected = prev[currentIdx] || [];
-        const next = selected.includes(label)
-          ? selected.filter((l) => l !== label)
-          : [...selected, label];
+        const next = selected.includes(value)
+          ? selected.filter((selectedValue) => selectedValue !== value)
+          : [...selected, value];
         return { ...prev, [currentIdx]: next };
       });
     },
-    [current, isMulti, currentIdx, focusCustomInput],
+    [
+      controlsDisabled,
+      current,
+      currentAllowText,
+      currentIdx,
+      focusCustomInput,
+      isMulti,
+    ],
   );
 
   // Unified option activation for click, native Enter/Space, and digit
@@ -290,9 +483,11 @@ export function AskUserQuestion({
   // toggle (multi) or pick (single).
   const chooseOption = useCallback(
     (idx: number) => {
-      if (!current) return;
+      if (!current || controlsDisabled) return;
+      const total = questionRowCount(current);
+      if (idx < 0 || idx >= total) return;
       rememberSelectedIndex(idx);
-      if (idx === current.options.length) {
+      if (currentAllowText && idx === current.options.length) {
         focusCustomInput();
         return;
       }
@@ -300,7 +495,9 @@ export function AskUserQuestion({
       else handleSelectOption(idx);
     },
     [
+      controlsDisabled,
       current,
+      currentAllowText,
       isMulti,
       focusCustomInput,
       handleToggle,
@@ -310,18 +507,18 @@ export function AskUserQuestion({
   );
 
   // Move the selection to a specific option index, keeping focus, the roving
-  // tabindex, and — for single-select — the committed answer in sync, so
-  // aria-checked follows focus per the radiogroup contract. Moving to a regular
-  // option commits it as the answer; moving to "Other" clears the regular
-  // answer (the custom answer isn't committed until the user types it). Shared
-  // by arrow navigation and Home/End so every path behaves identically.
+  // tabindex, and — for required single-select — the committed answer in sync,
+  // so aria-checked follows focus per the radiogroup contract. Optional
+  // single-select moves focus only so navigating never fabricates an answer.
   const selectIndex = useCallback(
     (idx: number) => {
       if (!current) return;
+      const total = questionRowCount(current);
+      if (total === 0 || idx < 0 || idx >= total) return;
       rememberSelectedIndex(idx);
-      if (idx === current.options.length) {
+      if (currentAllowText && idx === current.options.length) {
         customRef.current?.focus();
-        if (!isMulti) {
+        if (!isMulti && currentRequired && !controlsDisabled) {
           setAnswers((prev) => {
             if (!(currentIdx in prev)) return prev;
             const cleared = { ...prev };
@@ -331,16 +528,28 @@ export function AskUserQuestion({
         }
       } else {
         optionRefs.current[idx]?.focus();
-        if (!isMulti) handleSelectOption(idx);
+        if (!isMulti && currentRequired && !controlsDisabled) {
+          handleSelectOption(idx);
+        }
       }
     },
-    [current, currentIdx, isMulti, handleSelectOption, rememberSelectedIndex],
+    [
+      controlsDisabled,
+      current,
+      currentAllowText,
+      currentIdx,
+      currentRequired,
+      isMulti,
+      handleSelectOption,
+      rememberSelectedIndex,
+    ],
   );
 
   const moveSelection = useCallback(
     (delta: number) => {
       if (!current) return;
-      const total = current.options.length + 1;
+      const total = questionRowCount(current);
+      if (total === 0) return;
       // Compute from the ref (kept in sync) so rapid key repeats advance
       // correctly before re-render.
       const base = selectedIdxRef.current ?? 0;
@@ -351,18 +560,26 @@ export function AskUserQuestion({
 
   const getSelectedIndexForQuestion = useCallback(
     (questionIdx: number): number | null => {
-      if (Object.hasOwn(selectedIdxByQuestionRef.current, questionIdx)) {
-        return selectedIdxByQuestionRef.current[questionIdx] ?? null;
-      }
       const question = questions[questionIdx];
       if (!question) return null;
-      if (hasCustomAnswer(customInputs[questionIdx])) {
+      const total = questionRowCount(question);
+      if (total === 0) return null;
+      if (Object.hasOwn(selectedIdxByQuestionRef.current, questionIdx)) {
+        const stored = selectedIdxByQuestionRef.current[questionIdx];
+        if (stored !== null && stored !== undefined && stored < total) {
+          return stored;
+        }
+      }
+      if (
+        isQuestionTextAllowed(question) &&
+        hasCustomAnswer(customInputs[questionIdx])
+      ) {
         return question.options.length;
       }
       if (!question.multiSelect) {
         const answer = answers[questionIdx];
         const answerIdx = question.options.findIndex(
-          (option) => option.label === answer,
+          (_, index) => optionValue(index) === answer,
         );
         if (answerIdx >= 0) return answerIdx;
       }
@@ -383,14 +600,15 @@ export function AskUserQuestion({
       focusAfterQuestionChangeRef.current = true;
       setCurrentIdx(nextIdx);
 
-      if (question.multiSelect) return;
+      if (question.multiSelect || !isQuestionRequired(question)) return;
+      const allowText = isQuestionTextAllowed(question);
       setAnswers((prev) =>
         prev[nextIdx] ||
-        hasCustomAnswer(customInputs[nextIdx]) ||
-        nextSelectedIdx === question.options.length ||
+        (allowText && hasCustomAnswer(customInputs[nextIdx])) ||
+        (allowText && nextSelectedIdx === question.options.length) ||
         !question.options[0]
           ? prev
-          : { ...prev, [nextIdx]: question.options[0].label },
+          : { ...prev, [nextIdx]: optionValue(0) },
       );
     },
     [customInputs, getSelectedIndexForQuestion, questions],
@@ -407,7 +625,12 @@ export function AskUserQuestion({
   }, [currentIdx, questions.length, selectQuestion]);
 
   const advanceQuestion = useCallback(
-    (submittedAnswers?: Record<string, string>) => {
+    (
+      submittedAnswers?: Record<string, string>,
+      multiSelections?: Record<number, string[]>,
+      answerMap?: Record<number, string>,
+      customMap?: Record<number, string>,
+    ) => {
       setCustomFocused(false);
       if (currentIdx < questions.length - 1) {
         selectQuestion(currentIdx + 1);
@@ -416,25 +639,31 @@ export function AskUserQuestion({
       if (customFocused) {
         focusCustomTriggerAfterSubmitFailureRef.current = true;
       }
-      if (!submitting) handleSubmit(submittedAnswers);
+      if (!controlsDisabled) {
+        handleSubmit(submittedAnswers, multiSelections, answerMap, customMap);
+      }
     },
     [
+      controlsDisabled,
       currentIdx,
       customFocused,
       handleSubmit,
       questions.length,
       selectQuestion,
-      submitting,
     ],
   );
 
   useEffect(() => {
     if (!focusAfterQuestionChangeRef.current || !current) return;
     focusAfterQuestionChangeRef.current = false;
-    const idx = selectedIdxRef.current ?? 0;
-    if (idx === current.options.length) customRef.current?.focus();
-    else optionRefs.current[idx]?.focus();
-  }, [current, currentIdx]);
+    const idx = selectedIdxRef.current;
+    if (idx === null) return;
+    if (currentAllowText && idx === current.options.length) {
+      customRef.current?.focus();
+    } else {
+      optionRefs.current[idx]?.focus();
+    }
+  }, [current, currentAllowText, currentIdx]);
 
   useEffect(() => {
     if (customFocused || !focusCustomTriggerAfterEditRef.current) return;
@@ -470,6 +699,7 @@ export function AskUserQuestion({
         setCustomFocused(false);
       } else if (
         e.key === 'Enter' &&
+        !controlsDisabled &&
         hasCustomAnswer(customInputs[currentIdx])
       ) {
         e.preventDefault();
@@ -477,7 +707,7 @@ export function AskUserQuestion({
         advanceQuestion();
       }
     },
-    [advanceQuestion, currentIdx, customInputs],
+    [advanceQuestion, controlsDisabled, currentIdx, customInputs],
   );
 
   // Panel-wide action shortcuts stay consistent across controls;
@@ -510,13 +740,15 @@ export function AskUserQuestion({
       }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        if (!submitting) handleSubmit();
+        if (!controlsDisabled) handleSubmit();
         return;
       }
       if (isEditableTarget(e.target)) return;
       if (e.key === 'Escape') {
-        e.preventDefault();
-        handleCancel();
+        if (cancelOption) {
+          e.preventDefault();
+          if (!controlsDisabled) handleCancel();
+        }
         return;
       }
       const isOptionTarget = (e.target as HTMLElement).closest(
@@ -539,7 +771,7 @@ export function AskUserQuestion({
         return;
       }
       if (!current) return;
-      const total = current.options.length + 1;
+      const total = questionRowCount(current);
       if (e.key === prevKey) {
         e.preventDefault();
         handlePrevious();
@@ -554,29 +786,54 @@ export function AskUserQuestion({
         moveSelection(-1);
       } else if (e.key === 'Home') {
         e.preventDefault();
-        selectIndex(0);
+        if (total > 0) selectIndex(0);
       } else if (e.key === 'End') {
         e.preventDefault();
-        selectIndex(total - 1);
+        if (total > 0) selectIndex(total - 1);
       } else if (e.key === 'Enter') {
         e.preventDefault();
+        if (controlsDisabled || total === 0) return;
         const idx = selectedIdxRef.current ?? 0;
         if (
+          currentAllowText &&
           idx === current.options.length &&
           !hasCustomAnswer(customInputs[currentIdx])
         ) {
           chooseOption(idx);
         } else {
           if (isMulti && idx < current.options.length) {
-            const label = current.options[idx].label;
+            const value = optionValue(idx);
             const selected = selectedMulti[currentIdx] || [];
-            if (!selected.includes(label)) {
+            if (!selected.includes(value)) {
               const nextSelectedMulti = {
                 ...selectedMulti,
-                [currentIdx]: [...selected, label],
+                [currentIdx]: [...selected, value],
               };
               setSelectedMulti(nextSelectedMulti);
-              advanceQuestion(buildResult(nextSelectedMulti));
+              advanceQuestion(
+                buildResult(nextSelectedMulti),
+                nextSelectedMulti,
+              );
+              return;
+            }
+          } else if (
+            !isMulti &&
+            !currentRequired &&
+            idx < current.options.length
+          ) {
+            const value = optionValue(idx);
+            if (answers[currentIdx] !== value) {
+              const nextAnswers = { ...answers, [currentIdx]: value };
+              const nextCustomInputs = { ...customInputs };
+              delete nextCustomInputs[currentIdx];
+              setAnswers(nextAnswers);
+              setCustomInputs(nextCustomInputs);
+              advanceQuestion(
+                buildResult(selectedMulti, nextAnswers, nextCustomInputs),
+                selectedMulti,
+                nextAnswers,
+                nextCustomInputs,
+              );
               return;
             }
           }
@@ -586,17 +843,22 @@ export function AskUserQuestion({
         const idx = parseInt(e.key, 10) - 1;
         if (idx < total) {
           e.preventDefault();
-          chooseOption(idx);
+          if (!controlsDisabled) chooseOption(idx);
         }
       }
     },
     [
       advanceQuestion,
+      answers,
       buildResult,
+      cancelOption,
       chooseOption,
       collapsed,
+      controlsDisabled,
       current,
+      currentAllowText,
       currentIdx,
+      currentRequired,
       customInputs,
       handleCancel,
       handleNext,
@@ -607,7 +869,6 @@ export function AskUserQuestion({
       moveSelection,
       selectedMulti,
       selectIndex,
-      submitting,
     ],
   );
 
@@ -625,18 +886,24 @@ export function AskUserQuestion({
     if (requestChanged && currentIdx !== 0) return;
     if (wasActive && !requestChanged) return;
     prevRequestIdRef.current = request.id;
-    const idx = selectedIdxRef.current ?? 0;
-    if (idx === current.options.length) customRef.current?.focus();
-    else optionRefs.current[idx]?.focus();
-  }, [current, currentIdx, keyboardActive, request.id]);
+    const idx = selectedIdxRef.current;
+    if (idx === null) return;
+    if (currentAllowText && idx === current.options.length) {
+      customRef.current?.focus();
+    } else {
+      optionRefs.current[idx]?.focus();
+    }
+  }, [current, currentAllowText, currentIdx, keyboardActive, request.id]);
 
   if (questions.length === 0) return null;
 
   const displayIdx = Math.min(currentIdx, questions.length - 1);
   const isLastQuestion = currentIdx === questions.length - 1;
   const isSingleQuestion = questions.length === 1;
-  const hasCurrentCustomAnswer = hasCustomAnswer(customInputs[currentIdx]);
+  const hasCurrentCustomAnswer =
+    currentAllowText && hasCustomAnswer(customInputs[currentIdx]);
   const isEmptyCustomTrigger =
+    currentAllowText &&
     current !== undefined &&
     !customFocused &&
     selectedIdx === current.options.length &&
@@ -790,12 +1057,12 @@ export function AskUserQuestion({
                 {current.options.map((opt, i) => {
                   const isActive = i === selectedIdx;
                   const isSelected = isMulti
-                    ? (selectedMulti[currentIdx] || []).includes(opt.label)
-                    : answers[currentIdx] === opt.label;
+                    ? (selectedMulti[currentIdx] || []).includes(optionValue(i))
+                    : answers[currentIdx] === optionValue(i);
 
                   return (
                     <button
-                      key={opt.label}
+                      key={optionValue(i)}
                       type="button"
                       ref={(el) => {
                         optionRefs.current[i] = el;
@@ -809,7 +1076,7 @@ export function AskUserQuestion({
                       aria-checked={isMulti ? undefined : isSelected}
                       aria-pressed={isMulti ? isSelected : undefined}
                       aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
-                      disabled={submitting}
+                      disabled={controlsDisabled}
                       onClick={() => chooseOption(i)}
                       onFocus={() => rememberSelectedIndex(i)}
                     >
@@ -832,106 +1099,111 @@ export function AskUserQuestion({
                 })}
 
                 {/* Other / custom input option */}
-                {(() => {
-                  const isCustomActive = selectedIdx === current.options.length;
-                  const hasCustomValue = hasCustomAnswer(
-                    customInputs[currentIdx],
-                  );
-                  return (
-                    <div
-                      className={`${styles.option} ${
-                        hasCustomValue ? styles.optionSelected : ''
-                      }`}
-                      // The whole row is clickable (it carries cursor:pointer via
-                      // styles.option), so clicks on the padding — not just the
-                      // inner trigger/input — activate the "Other" option. The
-                      // trigger button has no onClick of its own; its click (and
-                      // native Enter/Space activation) bubbles up to here.
-                      onClick={() => {
-                        if (!submitting) chooseOption(current.options.length);
-                      }}
-                      onMouseDown={(e) => {
-                        if (!customFocused || isEditableTarget(e.target)) {
-                          return;
-                        }
-                        e.preventDefault();
-                        e.stopPropagation();
-                      }}
-                    >
-                      <span className={styles.pointer} aria-hidden="true">
-                        {isCustomActive ? '›' : ' '}
-                      </span>
-                      <span className={styles.editIcon} aria-hidden="true">
-                        <svg viewBox="0 0 16 16">
-                          <path
-                            d="M3.2 10.9 4 7.8 10.8 1l3.2 3.2-6.8 6.8-3 .8zM10 1.8l3.2 3.2M3 14h10"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
+                {currentAllowText &&
+                  (() => {
+                    const isCustomActive =
+                      selectedIdx === current.options.length;
+                    const hasCustomValue = hasCustomAnswer(
+                      customInputs[currentIdx],
+                    );
+                    return (
+                      <div
+                        className={`${styles.option} ${
+                          hasCustomValue ? styles.optionSelected : ''
+                        }`}
+                        // The whole row is clickable (it carries cursor:pointer via
+                        // styles.option), so clicks on the padding — not just the
+                        // inner trigger/input — activate the "Other" option. The
+                        // trigger button has no onClick of its own; its click (and
+                        // native Enter/Space activation) bubbles up to here.
+                        onClick={() => {
+                          if (!controlsDisabled) {
+                            chooseOption(current.options.length);
+                          }
+                        }}
+                        onMouseDown={(e) => {
+                          if (!customFocused || isEditableTarget(e.target)) {
+                            return;
+                          }
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }}
+                      >
+                        <span className={styles.pointer} aria-hidden="true">
+                          {isCustomActive ? '›' : ' '}
+                        </span>
+                        <span className={styles.editIcon} aria-hidden="true">
+                          <svg viewBox="0 0 16 16">
+                            <path
+                              d="M3.2 10.9 4 7.8 10.8 1l3.2 3.2-6.8 6.8-3 .8zM10 1.8l3.2 3.2M3 14h10"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </span>
+                        {customFocused ? (
+                          <input
+                            type="text"
+                            className={styles.customInput}
+                            placeholder={
+                              customInputLabel ?? t('askUser.typePlaceholder')
+                            }
+                            value={customInputs[currentIdx] || ''}
+                            aria-label={
+                              customInputLabel ?? t('askUser.typePlaceholder')
+                            }
+                            maxLength={current.maxTextLength}
+                            disabled={controlsDisabled}
+                            onChange={(e) =>
+                              setCustomInputs({
+                                ...customInputs,
+                                [currentIdx]: e.target.value,
+                              })
+                            }
+                            // Clicking inside the input positions the caret; don't
+                            // let it bubble to the row's onClick and re-trigger the
+                            // option choice.
+                            onClick={(e) => e.stopPropagation()}
+                            onFocus={() =>
+                              rememberSelectedIndex(current.options.length)
+                            }
+                            onBlur={() => setCustomFocused(false)}
+                            onKeyDown={handleCustomInputKeyDown}
+                            autoFocus
                           />
-                        </svg>
-                      </span>
-                      {customFocused ? (
-                        <input
-                          type="text"
-                          className={styles.customInput}
-                          placeholder={
-                            customInputLabel ?? t('askUser.typePlaceholder')
-                          }
-                          value={customInputs[currentIdx] || ''}
-                          aria-label={
-                            customInputLabel ?? t('askUser.typePlaceholder')
-                          }
-                          disabled={submitting}
-                          onChange={(e) =>
-                            setCustomInputs({
-                              ...customInputs,
-                              [currentIdx]: e.target.value,
-                            })
-                          }
-                          // Clicking inside the input positions the caret; don't
-                          // let it bubble to the row's onClick and re-trigger the
-                          // option choice.
-                          onClick={(e) => e.stopPropagation()}
-                          onFocus={() =>
-                            rememberSelectedIndex(current.options.length)
-                          }
-                          onBlur={() => setCustomFocused(false)}
-                          onKeyDown={handleCustomInputKeyDown}
-                          autoFocus
-                        />
-                      ) : (
-                        <button
-                          type="button"
-                          ref={customRef}
-                          className={`${styles.customTrigger} ${
-                            hasCustomValue ? '' : styles.optionPlaceholder
-                          }`}
-                          data-web-shell-ask-option
-                          tabIndex={isCustomActive ? 0 : -1}
-                          role={isMulti ? undefined : 'radio'}
-                          aria-checked={isMulti ? undefined : hasCustomValue}
-                          aria-pressed={isMulti ? hasCustomValue : undefined}
-                          aria-keyshortcuts={
-                            current.options.length < 9
-                              ? String(current.options.length + 1)
-                              : undefined
-                          }
-                          disabled={submitting}
-                          onFocus={() =>
-                            rememberSelectedIndex(current.options.length)
-                          }
-                        >
-                          {hasCustomValue
-                            ? customInputs[currentIdx]
-                            : (customInputLabel ??
-                              t('askUser.typePlaceholder'))}
-                        </button>
-                      )}
-                    </div>
-                  );
-                })()}
+                        ) : (
+                          <button
+                            type="button"
+                            ref={customRef}
+                            className={`${styles.customTrigger} ${
+                              hasCustomValue ? '' : styles.optionPlaceholder
+                            }`}
+                            data-web-shell-ask-option
+                            tabIndex={isCustomActive ? 0 : -1}
+                            role={isMulti ? undefined : 'radio'}
+                            aria-checked={isMulti ? undefined : hasCustomValue}
+                            aria-pressed={isMulti ? hasCustomValue : undefined}
+                            aria-keyshortcuts={
+                              current.options.length < 9
+                                ? String(current.options.length + 1)
+                                : undefined
+                            }
+                            disabled={controlsDisabled}
+                            onFocus={() =>
+                              rememberSelectedIndex(current.options.length)
+                            }
+                          >
+                            {hasCustomValue
+                              ? customInputs[currentIdx]
+                              : (customInputLabel ??
+                                t('askUser.typePlaceholder'))}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
               </div>
             </>
           ) : null}
@@ -943,23 +1215,25 @@ export function AskUserQuestion({
               <button
                 type="button"
                 className={styles.detailsButton}
-                disabled={submitting}
+                disabled={controlsDisabled}
                 title={t('askUser.askDetailsHint')}
                 onClick={onAskDetails}
               >
                 {t('askUser.askDetails')}
               </button>
             )}
-            <button
-              type="button"
-              className={styles.ignoreButton}
-              disabled={submitting}
-              aria-keyshortcuts="Escape"
-              data-shortcut="Esc"
-              onClick={handleCancel}
-            >
-              {t('askUser.ignore')}
-            </button>
+            {cancelOption && (
+              <button
+                type="button"
+                className={styles.ignoreButton}
+                disabled={controlsDisabled}
+                aria-keyshortcuts="Escape"
+                data-shortcut="Esc"
+                onClick={handleCancel}
+              >
+                {t('askUser.ignore')}
+              </button>
+            )}
             {questions.length > 1 && (
               <>
                 <button
@@ -983,7 +1257,7 @@ export function AskUserQuestion({
             <button
               type="button"
               className={`${styles.button} ${styles.submitButton}`}
-              disabled={submitting || !allQuestionsAnswered}
+              disabled={controlsDisabled || !allQuestionsAnswered}
               aria-busy={submitting}
               aria-keyshortcuts="Control+Enter Meta+Enter"
               data-shortcut={submitShortcutLabel}

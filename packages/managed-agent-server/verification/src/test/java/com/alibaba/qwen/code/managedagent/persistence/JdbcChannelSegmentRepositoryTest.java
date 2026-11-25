@@ -31,7 +31,7 @@ class JdbcChannelSegmentRepositoryTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         segments = new JdbcChannelSegmentRepository(jdbc);
-        tenant = "tenant-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
     }
 
     protected DataSource dataSource() {
@@ -111,16 +111,16 @@ class JdbcChannelSegmentRepositoryTest {
     void isolatesTenantsChannelsAndDeliveries() {
         segments.plan(tenant, channel, "d1", List.of(new SegmentLedger("d1:0", 0, null)));
         segments.receipt(tenant, channel, "d1", 0, "m0");
-        assertThat(segments.list(tenant + "-other", channel, "d1")).isEmpty();
+        assertThat(segments.list(tenant.substring(0, 30) + "-other", channel, "d1")).isEmpty();
         assertThat(segments.list(tenant, channel + "-other", "d1")).isEmpty();
         assertThat(segments.list(tenant, channel, "d2")).isEmpty();
         // The batched read is tenant/channel-scoped too: a foreign scope keeps
         // the per-id entry but it must be empty, never another scope's rows.
-        assertThat(segments.listByDelivery(tenant + "-other", channel, List.of("d1"))
+        assertThat(segments.listByDelivery(tenant.substring(0, 30) + "-other", channel, List.of("d1"))
                 .get("d1")).isEmpty();
         assertThat(segments.listByDelivery(tenant, channel + "-other", List.of("d1"))
                 .get("d1")).isEmpty();
-        assertThat(segments.receipt(tenant + "-other", channel, "d1", 0, "x")).isFalse();
+        assertThat(segments.receipt(tenant.substring(0, 30) + "-other", channel, "d1", 0, "x")).isFalse();
         assertThat(segments.list(tenant, channel, "d1").get(0).providerReceipt())
                 .isEqualTo("m0");
     }

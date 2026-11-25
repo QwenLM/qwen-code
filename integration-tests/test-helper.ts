@@ -1151,3 +1151,14 @@ export function readDebugLogs(runtimeDir: string): string {
 export function sharedLoopRoundCount(runtimeDir: string): number {
   return readDebugLogs(runtimeDir).match(SHARED_LOOP_ROUND_MARKER)?.length ?? 0;
 }
+
+// The debug logger may insert a `[trace_id=… span_id=…]` context between the
+// tag and the message when telemetry is active, so allow it optionally and
+// capture only the path.
+const HEADLESS_LOOP_ENTRY =
+  /\[LOOP\] (?:\[trace_id=[^\]]*\] )?headless (legacy|shared|kernel)/g;
+
+/** The paths a log's `[LOOP] headless <path>` entry markers name, in order. */
+export function headlessLoopPaths(log: string): string[] {
+  return [...log.matchAll(HEADLESS_LOOP_ENTRY)].map((match) => match[1]);
+}

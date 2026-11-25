@@ -3,13 +3,11 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
@@ -80,11 +78,9 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     @Test
     void lifecycleEffectsKeepOtherTenantExtensionRecordsUnlocked() throws Exception {
         var fixture = fixture();
-        String scope = ManagedSessionStore.sessionScopeKey("neighbor", "other-session");
-        String record = ManagedExtensionProjection.recordKey("other-session", "hook_execution", "other-hook");
-        fixture.jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id,"
-                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, gmt_create, first_sequence)"
-                + " VALUES (?, 'neighbor', 'other-workspace', 'other-session', 'hook_execution', 'other-hook', ?, 1, 'other-resource', 1, 1)", record, "a".repeat(64));
+        fixture.jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id,"
+                + " session_id, domain, record_id, operation_id, revision, record_resource_id, gmt_create, first_sequence)"
+                + " VALUES ('neighbor', 'other-workspace', 'other-session', 'hook_execution', 'other-hook', ?, 1, 'other-resource', 1, 1)", "a".repeat(64));
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         try (var workers = Executors.newFixedThreadPool(2)) {
@@ -108,8 +104,8 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             try {
                 assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
                 var neighbor = workers.submit(() -> new JdbcTemplate(source).update(
-                        "UPDATE ma_session_record SET revision = revision + 1 WHERE tenant_id = ? AND session_id = ? AND record_key = ?",
-                        "neighbor", "other-session", record));
+                        "UPDATE ma_session_record SET revision = revision + 1 WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+                        "neighbor", "other-session", "hook_execution", "other-hook"));
                 assertThat(neighbor.get(2, TimeUnit.SECONDS)).isEqualTo(1);
             } finally {
                 release.countDown();
@@ -117,7 +113,8 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             held.get(10, TimeUnit.SECONDS);
         }
         assertThat(fixture.jdbc.queryForObject("SELECT revision FROM ma_session_record"
-                + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?", Long.class, "neighbor", "other-session", record)).isEqualTo(2);
+                + " WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?", Long.class,
+                "neighbor", "other-session", "hook_execution", "other-hook")).isEqualTo(2);
     }
 
     @ParameterizedTest

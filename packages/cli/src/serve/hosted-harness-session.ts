@@ -65,9 +65,18 @@ import {
   type RestoredHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
 import {
+  hostedActionParkRegistration,
+  hostedApprovalResumeShapeRefusal,
+  hostedCommandStepResumeShapeRefusal,
+  registerHostedActionPark,
+  type HostedActionParkRefusal,
+  type HostedActionParkRegistration,
+} from './hosted-action-parking.js';
+import {
   reconcileHostedTurnCleanup,
   backgroundSuspensionCertificate,
   hasHostedCleanupDebt,
+  hasHostedCleanupDebtExcluding,
   hasBlockingHostedCleanupDebt,
   oweHostedTurnCleanup,
   type HostedCleanupHold,
@@ -94,6 +103,7 @@ import {
   endHostedAction,
   parseHostedActionOptions,
   hostedLiveApprovalPoll,
+  hostedApprovalAsks,
 } from './hosted-tool-approval.js';
 import { readHostedQuestionDecision } from './hosted-user-question.js';
 
@@ -228,6 +238,7 @@ import {
   managedSessionDurableRefsEqual,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionCommitRejectedError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import type { ManagedSessionWakeStamp } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import {
@@ -837,6 +848,7 @@ interface HostedSession {
   cwd: string;
   streams: Set<() => void>;
   active?: { promptId: string; digest: string; abort: AbortController };
+  deadlineTimer?: NodeJS.Timeout;
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
   /** #13800 D4: the named store failure kept in memory once a settlement's
@@ -1832,21 +1844,22 @@ export async function settleCrashedWakeTurnAftermath(params: {
       return 'pending';
     }
     await session.automations?.settleRunFailedUnknown(turnId);
+    const authorization =
+      await session.managed.authority.harnessRunAuthorization();
+    // An erased verdict read the checkpoint NOT AT ALL: settling this
+    // crash over it would skip the stop/release or the wait's advance but
+    // still consume the input, closing every retry channel the park has.
+    // Fail closed — the caller's catch keeps the block and the input
+    // pending.
+    if (
+      authorization.status === 'blocked' &&
+      !isDurableBlockedVerdict(authorization)
+    ) {
+      throw new ManagedSessionRecordError(
+        `wake crash aftermath read no durable checkpoint verdict: ${authorization.reason}${authorization.message === undefined ? '' : ` (${authorization.message})`}`,
+      );
+    }
     if (brokerOptions !== undefined) {
-      const authorization =
-        await session.managed.authority.harnessRunAuthorization();
-      // An erased verdict read the checkpoint NOT AT ALL: settling this
-      // crash over it would skip the stop/release but still consume the
-      // input, closing every retry channel the park has. Fail closed —
-      // the caller's catch keeps the block and the input pending.
-      if (
-        authorization.status === 'blocked' &&
-        !isDurableBlockedVerdict(authorization)
-      ) {
-        throw new ManagedSessionRecordError(
-          `wake crash aftermath read no durable checkpoint verdict: ${authorization.reason}${authorization.message === undefined ? '' : ` (${authorization.message})`}`,
-        );
-      }
       if (
         authorization.status === 'runnable' &&
         authorization.checkpoint.identity.turnId === turnId
@@ -2010,6 +2023,28 @@ export async function settleCrashedWakeTurnAftermath(params: {
         }
       }
     }
+    // A turn that died waiting for a decision leaves the checkpoint at
+    // await_action, where no later turn can start. The crash settles that
+    // turn, so its ask ends cancelled and the wait advances, as a parked
+    // prompt's cancellation takeover does.
+    if (
+      authorization.status === 'runnable' &&
+      authorization.checkpoint.identity.turnId === turnId &&
+      authorization.checkpoint.continuation.phase === 'await_action'
+    ) {
+      const requestId = authorization.checkpoint.approval?.requestId;
+      if (
+        requestId !== undefined &&
+        session.managed.authority.action(requestId)?.state === 'requested'
+      )
+        await endHostedAction(
+          session.managed,
+          requestId,
+          'cancelled',
+          () => !session.managed.authority.writesStopped,
+        );
+      await createManagedHarnessHandle(session.managed).resolveDurableWait();
+    }
     // The calls the dead attempt committed but never answered get their
     // answers by what committed before the Turn settles; core's orphan
     // repair would tell the next Turn's model to retry them.
@@ -2089,6 +2124,20 @@ export async function settleCrashedWakeTurnAftermath(params: {
 // pending notification counts as an unsettled Turn on every load while
 // the pump that would deliver it can never run. H6: an automation input
 // rides the same pump and the same rules; H5: so does a channel input.
+/** The wake sources whose interrupted approval wait the pump resumes, so
+ * the only ones whose wait may park (#18149 S4, S4b). Session-message
+ * Turns keep their own settlement. */
+function isResumableWakeSource(source: unknown): boolean {
+  return (
+    source === 'monitor' ||
+    source === AUTOMATION_INPUT_SOURCE ||
+    source === LOOP_INPUT_SOURCE ||
+    source === CHANNEL_INPUT_SOURCE ||
+    source === PR_EVENT_INPUT_SOURCE ||
+    isChildNotificationSource(source)
+  );
+}
+
 function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
   if (event.kind !== 'input.accepted') return false;
   if (isWakeInputSource(event.payload['source'] as string)) return true;
@@ -2868,11 +2917,32 @@ function retainHostedCleanupHolds(
   }
 }
 
+// A resumed Turn restarts from this text, so an Action park refuses a Turn
+// without it exactly as the recovery arms do. A hosted-harness input that
+// carries only attachments restarts from empty text, as its live Turn ran:
+// executeHostedTurn reads the attachments back from the input itself.
+async function hostedOriginalPromptText(
+  managed: ManagedSession,
+  promptId: string,
+): Promise<string | undefined> {
+  const user = (await managed.sink.project()).find(
+    (item) => item.type === 'user' && item.daemonPromptId === promptId,
+  );
+  const text = user?.message?.parts
+    ?.flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
+    .join('\n');
+  if (text) return text;
+  return (await readHostedInput(managed, promptId, '')).attachments.length
+    ? ''
+    : undefined;
+}
+
 async function retryHostedCleanup(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
   drain = false,
   probeOnly = false,
+  excludedPromptId?: string,
 ): Promise<void> {
   if (!drain && unsettledPromptId(session)) return;
   // A load can overlap the wake pump's retry. Re-read the debt with each
@@ -2893,6 +2963,7 @@ async function retryHostedCleanup(
               options,
               undefined,
               drain && !probeOnly,
+              excludedPromptId,
             ),
           );
         }
@@ -3854,6 +3925,7 @@ async function startHostedRecoveredTurn(
         )
       : undefined;
   timer?.unref();
+  session.deadlineTimer = timer;
   if (cancelled) {
     await stopPublicChildSource(session, resume.promptId);
     abort.abort();
@@ -3921,6 +3993,7 @@ async function startHostedRecoveredTurn(
     })
     .finally(() => {
       if (timer) clearTimeout(timer);
+      if (session.deadlineTimer === timer) session.deadlineTimer = undefined;
       session.active = undefined;
       noteSessionActivity(session);
     });
@@ -4036,12 +4109,28 @@ async function executeHostedTurn(
       const actionId = plan.actionId!;
       const original = authority.action(actionId)!;
       const options = await readHostedActionOptions(session.managed, original);
+      let parkRegistration: HostedActionParkRegistration | undefined;
       try {
         const liveApproval =
           options.toolName !== 'exit_plan_mode' &&
           !options.requiresHumanDecision
             ? await hostedApprovalForTurn(session, promptId)
             : undefined;
+        parkRegistration =
+          options.continuationRef !== undefined
+            ? {
+                promptId,
+                options,
+                settings: liveApproval?.settings,
+                livePoll:
+                  liveApproval !== undefined &&
+                  liveApproval.readSettings !== undefined,
+                globProfile: false,
+                freeze: () => session.waiters.park(actionId),
+              }
+            : undefined;
+        if (parkRegistration)
+          registerHostedActionPark(session.managed, parkRegistration);
         onResumeReady?.();
         if (
           plan.runtime &&
@@ -4073,6 +4162,9 @@ async function executeHostedTurn(
               requestId: actionId,
               expiresAt: options.expiresAt,
               signal: abort.signal,
+              registerFreeze: (freeze) => {
+                if (parkRegistration) parkRegistration.freeze = freeze;
+              },
             });
         } else
           await session.waiters.wait(
@@ -4096,6 +4188,9 @@ async function executeHostedTurn(
           );
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
+      } finally {
+        if (parkRegistration)
+          registerHostedActionPark(session.managed, undefined);
       }
       if (authority.action(actionId)?.state === 'requested')
         await endHostedAction(
@@ -4732,6 +4827,8 @@ export function registerHostedHarnessSessionRoutes(
     coldOpenTotalMs: number;
     coldOpenStoreMs: number;
     mcpReadyMs: number;
+    /** Per suspension attempt over a waiting Turn that could not park. */
+    parkRefusals: Partial<Record<HostedActionParkRefusal, number>>;
   };
 } {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
@@ -4789,7 +4886,9 @@ export function registerHostedHarnessSessionRoutes(
     coldOpenTotalMs: 0,
     coldOpenStoreMs: 0,
     mcpReadyMs: 0,
+    parkRefusals: {} as Partial<Record<HostedActionParkRefusal, number>>,
   };
+  const countedParkRefusals = new WeakSet<HostedActionParkRegistration>();
   const releaseColdOpenSlot = (res: Response): void => {
     if (!res.locals['coldOpenSlot']) return;
     res.locals['coldOpenSlot'] = false;
@@ -4869,6 +4968,7 @@ export function registerHostedHarnessSessionRoutes(
             ).length,
           }),
           () => startOwnershipDrain(),
+          () => suspensionStats,
         );
   const acceptingWork = () => instance?.accepting !== false;
   if (instance) {
@@ -5061,6 +5161,124 @@ export function registerHostedHarnessSessionRoutes(
     suspension.rearm?.();
   };
 
+  interface ActionParkCandidate {
+    readonly registration: HostedActionParkRegistration;
+    readonly promptId: string;
+    readonly wakeAt: number;
+    readonly approvalRevision?: number;
+    readonly cleanupExempt: boolean;
+    /** A wake-started Turn: the wake scan, not a Turn row, resumes it. */
+    readonly wakeOwned: boolean;
+  }
+
+  // Undefined means no Turn is waiting; a refusal names why a waiting Turn
+  // cannot park, in the order the terms are checked.
+  const actionParkCandidate = async (
+    session: HostedSession,
+  ): Promise<ActionParkCandidate | HostedActionParkRefusal | undefined> => {
+    const registration = hostedActionParkRegistration(session.managed);
+    if (!registration) return undefined;
+    if (registration.refusal) return registration.refusal;
+    if (session.active?.promptId !== registration.promptId)
+      return 'turn_mismatch';
+    if (session.recoveredTurn !== undefined) return 'recovered_turn';
+    if (
+      session.stores?.supportsActionParking?.() !== true ||
+      session.stores?.supportsWakeDispatch?.() !== true
+    )
+      return 'capability_not_advertised';
+    const events = session.managed.authority.eventsInSequenceRange(
+      1,
+      session.managed.authority.committedSequence,
+    );
+    const accepted = events.find(
+      (event) =>
+        event.kind === 'input.accepted' &&
+        event.payload['turnId'] === registration.promptId,
+    );
+    if (!accepted) return 'input_missing';
+    // A wake-started Turn parks only where the pump resumes its wait, and
+    // only on a control plane that accepts its wake-claiming certificate.
+    const wakeOwned = isWakeOwnedInput(accepted);
+    if (
+      wakeOwned &&
+      (!isResumableWakeSource(accepted.payload['source']) ||
+        session.stores?.supportsWakeActionParking?.() !== true)
+    )
+      return 'wake_owned';
+    // The pump owns wake inputs, so the unsettled set never holds a wake
+    // Turn's own: it must hold nothing else. A second wake input still
+    // refuses at the gate, which reads every pending input.
+    const unsettled = unsettledInputs(session);
+    if (
+      wakeOwned
+        ? unsettled.size !== 0
+        : unsettled.size !== 1 || !unsettled.has(registration.promptId)
+    )
+      return 'other_unsettled_input';
+    if (
+      session.managed.authority.action(registration.options.requestId)
+        ?.state !== 'requested'
+    )
+      return 'action_not_requested';
+    const continuation = await findHostedApprovalContinuation(
+      session.managed,
+      registration.promptId,
+    );
+    if (!continuation) return 'no_continuation';
+    const commandStep = continuation.plan.commandStep;
+    const shape = commandStep
+      ? hostedCommandStepResumeShapeRefusal(session, brokerOptions)
+      : hostedApprovalResumeShapeRefusal(session, brokerOptions);
+    if (shape) return shape;
+    // A drained MCP owner comes back under a new connection, so its tool
+    // names would no longer match the saved batch.
+    if (session.mcp && !session.mcp.parkable()) return 'mcp_not_parkable';
+    // The pump resumes only a native wait.
+    if (commandStep && wakeOwned) return 'wake_owned';
+    if (
+      (await hostedOriginalPromptText(
+        session.managed,
+        registration.promptId,
+      )) === undefined
+    )
+      return 'original_prompt_missing';
+    let approvalRevision: number | undefined;
+    if (registration.livePoll) {
+      const settings = registration.settings;
+      const selection = await session.stores.approvalSelection();
+      if (!settings || !selection) return 'approval_selection_unavailable';
+      if (
+        !hostedApprovalAsks(
+          {
+            mode: selection.mode,
+            timeoutMs: settings.timeoutMs,
+            permissionRules: selection.permissionRules,
+          },
+          registration.options.toolName,
+          registration.globProfile,
+        )
+      )
+        return 'approval_mode_allows';
+      approvalRevision = selection.revision;
+    }
+    const deadline = accepted.payload['deadline'];
+    return {
+      registration,
+      promptId: registration.promptId,
+      wakeAt:
+        typeof deadline === 'number'
+          ? Math.min(registration.options.expiresAt, deadline)
+          : registration.options.expiresAt,
+      approvalRevision,
+      cleanupExempt: !(await hasHostedCleanupDebtExcluding(
+        session.managed,
+        registration.promptId,
+      )),
+      wakeOwned,
+    };
+  };
+
   // Live work only. The persistent owners (hooks, mcp, publishers) are
   // teardown targets the next load re-acquires, not residency pins; the
   // runtime lease is released by teardown step 3. Instance-wide terms are
@@ -5068,8 +5286,9 @@ export function registerHostedHarnessSessionRoutes(
   const suspensionLiveWork = (
     session: HostedSession,
     backgroundCertified = false,
+    actionPark?: ActionParkCandidate,
   ): boolean =>
-    session.active !== undefined ||
+    (session.active !== undefined && !actionPark) ||
     session.recoveredTurn !== undefined ||
     session.blocked ||
     session.lifecycle !== undefined ||
@@ -5088,7 +5307,7 @@ export function registerHostedHarnessSessionRoutes(
     session.fileHistoryOwed !== undefined ||
     session.childConsumption.size > 0 ||
     (session.messageOperations?.size ?? 0) > 0 ||
-    unsettledInputs(session).size > 0 ||
+    (!actionPark && unsettledInputs(session).size > 0) ||
     session.automations?.hasPendingGateReleases === true ||
     session.extensionBootstrapPending === true ||
     (session.replyPlanRetries?.size ?? 0) > 0 ||
@@ -5099,10 +5318,12 @@ export function registerHostedHarnessSessionRoutes(
     session.clientFiles?.active === true ||
     // An open Harness event stream is a reader this teardown would cut. The
     // design's predicate names it beside the Turn's own stream.
-    session.streams.size > 0 ||
+    (!actionPark && session.streams.size > 0) ||
     // The background terms a certified suspension exempts (§4.8).
     (!backgroundCertified &&
-      (hasHostedCleanupDebt(session.managed) ||
+      ((actionPark?.cleanupExempt
+        ? false
+        : hasHostedCleanupDebt(session.managed)) ||
         session.heldRuntimeTurns.size > 0 ||
         [
           ...(session.shell?.monitorLoops?.values() ?? []),
@@ -5160,14 +5381,52 @@ export function registerHostedHarnessSessionRoutes(
       // down against evidence that no longer holds.
       return previous && !backgroundCertified;
     };
+    let actionPark: ActionParkCandidate | undefined;
     const outcome = await runSuspensionAttempt(suspension, {
       pendingInputs: async () => {
+        // Derived inside the attempt so a failed read reverts and rearms;
+        // the pass under the gate re-reads the approval selection (§4.1).
+        if (!marked) {
+          const candidate = await actionParkCandidate(session);
+          if (typeof candidate === 'string') {
+            // Each wait counts once, under the first reason that kept it
+            // resident, so a long wait does not outweigh a short one.
+            const registration = hostedActionParkRegistration(session.managed);
+            if (registration && !countedParkRefusals.has(registration)) {
+              countedParkRefusals.add(registration);
+              suspensionStats.parkRefusals[candidate] =
+                (suspensionStats.parkRefusals[candidate] ?? 0) + 1;
+            }
+            actionPark = undefined;
+          } else actionPark = candidate;
+        } else if (actionPark) {
+          const current = await actionParkCandidate(session);
+          if (
+            typeof current === 'string' ||
+            current?.registration !== actionPark.registration
+          )
+            return true;
+          actionPark = current;
+        }
         const pending = pendingSessionInputs(
           session.managed.authority.eventsInSequenceRange(
             1,
             session.managed.authority.committedSequence,
           ),
         );
+        const park = actionPark;
+        if (park) {
+          const certificateLost = await refreshBackgroundCertificate();
+          const blocked =
+            (backgroundCertified &&
+              session.stores?.supportsBackgroundActionParking?.() !== true) ||
+            certificateLost ||
+            hostedActionParkRegistration(session.managed) !==
+              park.registration ||
+            pending.some((input) => input.turnId !== park.promptId);
+          if (!marked && blocked) suspensionStats.eligibilityFailures += 1;
+          return blocked;
+        }
         let blocked = pending.length > 0;
         if (blocked && session.stores?.supportsWakeDispatch?.()) {
           const projected = await session.managed.sink.project();
@@ -5183,7 +5442,7 @@ export function registerHostedHarnessSessionRoutes(
       },
       markClosing: (attemptStart) => {
         if (
-          suspensionLiveWork(session, backgroundCertified) ||
+          suspensionLiveWork(session, backgroundCertified, actionPark) ||
           suspension.lastActivity > attemptStart ||
           session.ownershipRelease !== undefined ||
           session.lifecycle !== undefined ||
@@ -5200,7 +5459,22 @@ export function registerHostedHarnessSessionRoutes(
         session.mcpClosing = true;
         return true;
       },
-      liveWork: () => suspensionLiveWork(session, backgroundCertified),
+      liveWork: () =>
+        suspensionLiveWork(session, backgroundCertified, actionPark),
+      beforeTeardown: () => {
+        const park = actionPark;
+        if (!park) return true;
+        // A poll or resolution in flight refuses the freeze; the attempt
+        // reverts and the next idle period tries again.
+        if (
+          hostedActionParkRegistration(session.managed) !== park.registration ||
+          !park.registration.freeze()
+        )
+          return false;
+        if (session.deadlineTimer) clearTimeout(session.deadlineTimer);
+        session.deadlineTimer = undefined;
+        return true;
+      },
       teardown: async () => {
         try {
           if (!done.wake) {
@@ -5214,7 +5488,13 @@ export function registerHostedHarnessSessionRoutes(
           }
           if (!done.lease) {
             if (
-              await releaseLeaseNow(session, false, true, backgroundCertified)
+              await releaseLeaseNow(
+                session,
+                false,
+                true,
+                backgroundCertified,
+                actionPark?.promptId,
+              )
             )
               throw new Error('Runtime lease release is unproven.');
             if (broker)
@@ -5223,10 +5503,16 @@ export function registerHostedHarnessSessionRoutes(
                 broker,
                 true,
                 backgroundCertified,
+                actionPark?.promptId,
               );
             else if (
               !backgroundCertified &&
-              hasHostedCleanupDebt(session.managed)
+              (!actionPark
+                ? hasHostedCleanupDebt(session.managed)
+                : await hasHostedCleanupDebtExcluding(
+                    session.managed,
+                    actionPark.promptId,
+                  ))
             )
               throw new Error('Runtime cleanup remains owed.');
             done.lease = true;
@@ -5269,24 +5555,40 @@ export function registerHostedHarnessSessionRoutes(
             // The memoized seal: a retry reconciles this same seal. The wake
             // stamp is what the pump would pick from the prefix this seal
             // closes, recomputed on every retry.
-            let wake:
-              | { pending: boolean; dueAt: number; backgroundHeld?: boolean }
-              | undefined;
-            if (session.stores?.supportsWakeDispatch?.()) {
+            let wake: ManagedSessionWakeStamp | undefined;
+            if (actionPark) {
+              // A wake-started Turn has no Turn row to redispatch: its park
+              // claims the wake at its own due time, and the scan resumes it.
+              wake = {
+                pending: actionPark.wakeOwned,
+                dueAt: actionPark.wakeOwned ? actionPark.wakeAt : 0,
+                ...(backgroundCertified ? { backgroundHeld: true } : {}),
+                parkedTurn: {
+                  promptId: actionPark.promptId,
+                  wakeAt: actionPark.wakeAt,
+                  ...(actionPark.approvalRevision === undefined
+                    ? {}
+                    : { approvalRevision: actionPark.approvalRevision }),
+                  ...(actionPark.wakeOwned ? { owner: 'wake' as const } : {}),
+                },
+              };
+            } else if (session.stores?.supportsWakeDispatch?.()) {
               const { first, earliestDeferred } = pickWakeInputs(
                 session,
                 Date.now(),
               );
               wake =
                 first !== undefined
-                  ? { pending: true, dueAt: 0 }
+                  ? {
+                      pending: true,
+                      dueAt: 0,
+                      ...(backgroundCertified ? { backgroundHeld: true } : {}),
+                    }
                   : {
                       pending: earliestDeferred !== undefined,
                       dueAt: earliestDeferred ?? 0,
+                      ...(backgroundCertified ? { backgroundHeld: true } : {}),
                     };
-              // The writer that ran the per-run evidence check certifies
-              // the background holds at this exact revision (§4.8).
-              if (backgroundCertified) wake.backgroundHeld = true;
             }
             await session.managed.authority.close(wake);
             done.writer = true;
@@ -6485,7 +6787,8 @@ export function registerHostedHarnessSessionRoutes(
           }
           const model = await findHostedModelRequest(resident.managed, parked);
           const approval =
-            (resident.toolProfile && brokerOptions) || resident.memory
+            hostedApprovalResumeShapeRefusal(resident, brokerOptions) ===
+            undefined
               ? await findHostedApprovalContinuation(resident.managed, parked)
               : undefined;
           const memoryResults =
@@ -6496,15 +6799,11 @@ export function registerHostedHarnessSessionRoutes(
               ? await findHostedMemoryResults(resident.managed, parked)
               : undefined;
           if (model || approval || memoryResults) {
-            const user = (await resident.managed.sink.project()).find(
-              (item) => item.type === 'user' && item.daemonPromptId === parked,
+            const text = await hostedOriginalPromptText(
+              resident.managed,
+              parked,
             );
-            const text = user?.message?.parts
-              ?.flatMap((part) =>
-                typeof part.text === 'string' ? [part.text] : [],
-              )
-              .join('\n');
-            if (!text)
+            if (text === undefined)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
               );
@@ -7995,6 +8294,70 @@ export function registerHostedHarnessSessionRoutes(
               // terminal settlement from their own funnel; monitor turns
               // keep the recovery-blocked freeze their fleet owns.
               settleInterrupted: settleInterruptedChannelWake,
+              // A wake turn's native approval wait resumes on the terms the
+              // takeover arm applies to a parked prompt's, ahead of a channel
+              // turn's own settlement, which keeps every other wait.
+              // Session-message turns keep their own settlement.
+              resumeInterrupted: async (turn) => {
+                if (
+                  !isResumableWakeSource(turn.source) ||
+                  hostedApprovalResumeShapeRefusal(session, brokerOptions)
+                )
+                  return undefined;
+                const verdict =
+                  await session.managed.authority.harnessRunAuthorization();
+                if (
+                  verdict.status !== 'runnable' ||
+                  verdict.checkpoint.identity.turnId !== turn.turnId ||
+                  verdict.checkpoint.continuation.phase !== 'await_action'
+                )
+                  return undefined;
+                let continuation:
+                  | RestoredHostedApprovalContinuation
+                  | undefined;
+                try {
+                  continuation = await findHostedApprovalContinuation(
+                    session.managed,
+                    turn.turnId,
+                  );
+                } catch (cause) {
+                  // A Store fault says nothing about the saved continuation,
+                  // so the pump retries it. Any other rejection is fixed in
+                  // the journal and would fail every pass: the Turn takes the
+                  // crash path instead, as it did before it could resume.
+                  if (
+                    cause instanceof ManagedSessionStoreTransportError ||
+                    (cause instanceof ManagedSessionStoreHttpError &&
+                      (cause.status === 429 || cause.status >= 500))
+                  )
+                    throw cause;
+                  writeStderrLineSafe(
+                    `qwen serve: Interrupted wake turn ${turn.turnId} cannot resume its approval wait: ${String(cause)}`,
+                  );
+                  return undefined;
+                }
+                if (!continuation || continuation.plan.commandStep)
+                  return undefined;
+                const text = await hostedOriginalPromptText(
+                  session.managed,
+                  turn.turnId,
+                );
+                if (text === undefined) return undefined;
+                return (abort) =>
+                  executeHostedTurn(
+                    session,
+                    sessionId,
+                    cwd,
+                    turn.turnId,
+                    text,
+                    abort,
+                    brokerOptions,
+                    undefined,
+                    undefined,
+                    undefined,
+                    continuation,
+                  );
+              },
               writeStderr: writeStderrLineSafe,
             });
             // H6c: the automation turn settled; its run settles from the
@@ -8179,8 +8542,9 @@ export function registerHostedHarnessSessionRoutes(
         await managed.close();
         return error(res, 409, 'hosted_tool_profile_conflict');
       }
-      const pendingCommandApproval =
-        session.extensions?.enabled && unsettled
+      const pendingContinuation =
+        (session.extensions?.enabled || session.hooks || session.mcp) &&
+        unsettled
           ? await findHostedApprovalContinuation(managed, unsettled)
           : undefined;
       // Cold loads stay inert: only an explicit takeover request may touch
@@ -8198,18 +8562,27 @@ export function registerHostedHarnessSessionRoutes(
         takeoverFlags &&
         !lifecycle &&
         !!session.extensions?.enabled &&
-        pendingCommandApproval?.plan.commandStep !== undefined;
-      // A parked command-step round must never be answered by a cold load:
-      // answering writes a durable tool_result for the plan's own skill call,
-      // which permanently destroys the continuation. Both answer guards below
-      // key on this one predicate. pendingCommandApproval is computed
-      // unconditionally above; resumeApproval is only assigned inside the
-      // takeover arm, so on a bare load it is undefined and cannot be the key
-      // (R9-1).
+        pendingContinuation?.plan.commandStep !== undefined;
+      // A Hooks or MCP Session's saved native batch is recovered the same
+      // way: only by an explicit takeover load, and only on a shape recovery
+      // admits.
+      const hooksNativePark =
+        (session.hooks !== undefined || session.mcp !== undefined) &&
+        pendingContinuation !== undefined &&
+        pendingContinuation.plan.commandStep === undefined &&
+        hostedApprovalResumeShapeRefusal(session, brokerOptions) === undefined;
+      const hooksNativeTakeover =
+        takeoverFlags && !lifecycle && hooksNativePark;
+      // A parked command-step or Hooks native round must never be answered by
+      // a cold load: answering writes a durable tool_result for one of the
+      // plan's own calls, which permanently destroys the continuation. Both
+      // answer guards below key on this one predicate. pendingContinuation is
+      // computed unconditionally above; resumeApproval is only assigned inside
+      // the takeover arm, so on a bare load it is undefined and cannot be the
+      // key (R9-1).
       let resumeApproval: RestoredHostedApprovalContinuation | undefined;
-      const commandStepPark =
-        pendingCommandApproval?.plan.commandStep !== undefined ||
-        resumeApproval?.plan.commandStep !== undefined;
+      const continuationPark =
+        pendingContinuation?.plan.commandStep !== undefined || hooksNativePark;
       // A Hooks Session recovers only through this load (it never takes
       // over), and the file-history gate below needs every call of the
       // pending round answered. The team and agent calls the dead Harness
@@ -8221,7 +8594,7 @@ export function registerHostedHarnessSessionRoutes(
         session.hooks &&
         !lifecycle &&
         unsettled !== undefined &&
-        !commandStepPark
+        !continuationPark
       ) {
         try {
           await answerResumedTurnCalls({
@@ -8288,7 +8661,9 @@ export function registerHostedHarnessSessionRoutes(
         !fileHistory?.pendingUndo &&
         fileHistory?.pendingTurn &&
         !pumpOwnedParked
-          ? (takeover || extensionsCommandStepTakeover) &&
+          ? (takeover ||
+              extensionsCommandStepTakeover ||
+              hooksNativeTakeover) &&
             unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
               ? null
@@ -8423,15 +8798,8 @@ export function registerHostedHarnessSessionRoutes(
         if (!committedModelOutput)
           resumeModel = await findHostedModelRequest(managed, unsettled);
         if (resumeModel) {
-          const user = (await managed.sink.project()).find(
-            (item) => item.type === 'user' && item.daemonPromptId === unsettled,
-          );
-          const text = user?.message?.parts
-            ?.flatMap((part) =>
-              typeof part.text === 'string' ? [part.text] : [],
-            )
-            .join('\n');
-          if (!text)
+          const text = await hostedOriginalPromptText(managed, unsettled);
+          if (text === undefined)
             throw new HostedToolRecoveryRequiredError(
               'Original model Prompt is missing.',
             );
@@ -8442,20 +8810,21 @@ export function registerHostedHarnessSessionRoutes(
       // the settle exemption above): an explicit, non-lifecycle takeover of an
       // extensions Session's parked command-step plan, even when a Hook catalog
       // makes `takeover` itself false. It is scoped to a command-step plan — a
-      // native approval on a hooks/MCP Session is refused by
-      // resumeSavedNativeBatch, so admitting it here would 503 the load instead
-      // of attaching (R7-2); native approvals stay on the no-hooks arm. Sharing
-      // the boolean with the settle exemption keeps a file-history-owing batch
-      // recoverable instead of 409'ing before this arm is consulted (R8-1).
+      // native approval on an MCP Session is refused by resumeSavedNativeBatch,
+      // so admitting it here would 503 the load instead of attaching (R7-2);
+      // a Hooks Session's native plan takes the Hooks arm on the shape terms
+      // its park eligibility read. Sharing the booleans with the settle
+      // exemption keeps a file-history-owing batch recoverable instead of
+      // 409'ing before this arm is consulted (R8-1).
       if (
         unsettled &&
         ((takeover &&
-          !session.hooks &&
-          !session.mcp &&
-          ((session.toolProfile && brokerOptions) || session.memory)) ||
-          (session.toolProfile &&
-            brokerOptions &&
-            extensionsCommandStepTakeover))
+          hostedApprovalResumeShapeRefusal(session, brokerOptions) ===
+            undefined) ||
+          (extensionsCommandStepTakeover &&
+            hostedCommandStepResumeShapeRefusal(session, brokerOptions) ===
+              undefined) ||
+          hooksNativeTakeover)
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
         if (
@@ -8465,19 +8834,11 @@ export function registerHostedHarnessSessionRoutes(
           )
         ) {
           resumeApproval =
-            pendingCommandApproval ??
+            pendingContinuation ??
             (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
-            const user = (await managed.sink.project()).find(
-              (item) =>
-                item.type === 'user' && item.daemonPromptId === unsettled,
-            );
-            const text = user?.message?.parts
-              ?.flatMap((part) =>
-                typeof part.text === 'string' ? [part.text] : [],
-              )
-              .join('\n');
-            if (!text)
+            const text = await hostedOriginalPromptText(managed, unsettled);
+            if (text === undefined)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
               );
@@ -8525,13 +8886,8 @@ export function registerHostedHarnessSessionRoutes(
           const projected = (await managed.sink.project()).filter(
             (record) => record.daemonPromptId === unsettled,
           );
-          const user = projected.find((record) => record.type === 'user');
-          const text = user?.message?.parts
-            ?.flatMap((part) =>
-              typeof part.text === 'string' ? [part.text] : [],
-            )
-            .join('\n');
-          if (!text)
+          const text = await hostedOriginalPromptText(managed, unsettled);
+          if (text === undefined)
             throw new HostedToolRecoveryRequiredError(
               'Original Prompt is missing.',
             );
@@ -8789,7 +9145,7 @@ export function registerHostedHarnessSessionRoutes(
         // before the Harness died — core's orphan repair would otherwise
         // have the model retry it — and as never run otherwise, so the
         // round the resume needs is whole.
-        if (promptId && !commandStepPark)
+        if (promptId && !continuationPark)
           await answerResumedTurnCalls({
             session: managed,
             sessionId,
@@ -8868,7 +9224,9 @@ export function registerHostedHarnessSessionRoutes(
         (hasUnsettledInput(session, unsettledThrough) &&
           !resume &&
           !settlePromptId &&
-          !session.hooks &&
+          // A Hooks Session otherwise recovers through this load, but only a
+          // takeover may resume a parked command step or native batch (R9-1).
+          (!session.hooks || continuationPark) &&
           !recovery &&
           !inapplicableAnswer)
       ) {
@@ -10087,6 +10445,7 @@ export function registerHostedHarnessSessionRoutes(
             deadlineMs as number,
           );
     timer?.unref();
+    session.deadlineTimer = timer;
     session.active = { promptId, digest, abort };
     void (async () => {
       // A settled Turn's owed file-history retirement runs at admission,
@@ -10246,6 +10605,7 @@ export function registerHostedHarnessSessionRoutes(
           );
       } finally {
         if (timer) clearTimeout(timer);
+        if (session.deadlineTimer === timer) session.deadlineTimer = undefined;
         // Backstop for the admission-time retirement: it must finish inside
         // the busy flag, before the Session is re-admittable — a fresh
         // prompt meeting the still-pending marker would block with no
@@ -11534,10 +11894,16 @@ export function registerHostedHarnessSessionRoutes(
     terminal: boolean,
     rethrowOnFailure = false,
     probeOnly = false,
+    retainPromptId?: string,
   ): Promise<boolean> => {
     await retireOwedFileHistory(session, 'at close');
     const lease = session.runtimeLeaseHeld;
-    if (lease === undefined || !brokerOptions) return false;
+    if (
+      lease === undefined ||
+      !brokerOptions ||
+      lease.promptId === retainPromptId
+    )
+      return false;
     if (
       session.mcp &&
       lease.runtimeSessionId !== hostedRuntimeSessionId(lease.promptId)
@@ -11679,7 +12045,7 @@ export function registerHostedHarnessSessionRoutes(
         !HOSTED_UUID.test(operationId) ||
         typeof childRunId !== 'string' ||
         childRunId.length < 1 ||
-        childRunId.length > 320
+        childRunId.length > 256
       ) {
         return error(res, 400, 'invalid_child_operation');
       }
@@ -12097,7 +12463,7 @@ export function registerHostedHarnessSessionRoutes(
             (route !== 'to_child' && route !== 'to_parent') ||
             typeof childRunId !== 'string' ||
             childRunId.length < 1 ||
-            childRunId.length > 320 ||
+            childRunId.length > 256 ||
             typeof senderSessionId !== 'string' ||
             !HOSTED_UUID.test(senderSessionId) ||
             typeof content !== 'string' ||
@@ -12243,7 +12609,7 @@ export function registerHostedHarnessSessionRoutes(
             route !== 'to_parent' ||
             typeof childRunId !== 'string' ||
             childRunId.length < 1 ||
-            childRunId.length > 320 ||
+            childRunId.length > 256 ||
             typeof senderSessionId !== 'string' ||
             !HOSTED_UUID.test(senderSessionId) ||
             typeof argsBase64 !== 'string' ||
@@ -15240,6 +15606,9 @@ export function registerHostedHarnessSessionRoutes(
       [...sessions.keys(), ...opening].some(
         (candidate) => candidate.toLowerCase() === id.toLowerCase(),
       ),
-    suspensionStats: () => ({ ...suspensionStats }),
+    suspensionStats: () => ({
+      ...suspensionStats,
+      parkRefusals: { ...suspensionStats.parkRefusals },
+    }),
   };
 }

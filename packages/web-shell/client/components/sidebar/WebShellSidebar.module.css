@@ -1632,9 +1632,49 @@ button.livePendingSession:hover {
     display: contents;
   }
 
+  /* Non-interactive source glyphs should not raise the title-row flex line. */
+  .sidebar.mobileOpen[data-narrow] .sessionSourceIcon {
+    height: 20px;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    ) {
+    /* Keep More's 26px hit area above the next metadata line. */
+    row-gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    )
+    .sessionStatusSlot,
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    )
+    .sessionTreeToggle {
+    top: 12px;
+  }
+
   .sidebar.mobileOpen[data-narrow] .sessionRow .sessionLoading {
     margin-right: 4px;
     margin-left: 4px;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow
+    .sessionMetaSlot:not(.sessionMetaSlotReserved)
+    .sessionActions {
+    align-self: stretch;
   }
 
   .sidebar.mobileOpen[data-narrow]
@@ -1644,6 +1684,18 @@ button.livePendingSession:hover {
     position: absolute;
     inset: 2px 0 2px auto;
     width: var(--session-actions-width, 26px);
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    )
+    .sessionMetaSlotReserved
+    .sessionActions {
+    inset: 2px 0 auto auto;
+    max-height: calc(100% - 4px);
   }
 }
 

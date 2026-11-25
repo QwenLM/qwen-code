@@ -15,6 +15,7 @@ import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { Button } from '../ui/button';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import styles from '../SessionPrStateIcon.module.css';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 
 const popoverContentProps = vi.hoisted(() => vi.fn());
 vi.mock('../ui/popover', async (importOriginal) => {
@@ -155,6 +156,7 @@ describe('SessionDetailsTooltip', () => {
     ],
     // Blocked states stay pinned above the unread dot.
     [{ isWaitingForPermission: true }, 'Needs approval', 'Finished'],
+    [{ isWaitingForUserQuestion: true }, 'User input needed', 'Finished'],
     [{}, 'Finished', 'Idle'],
   ])(
     'mirrors the row unread-dot precedence: %s',
@@ -214,6 +216,7 @@ describe('SessionDetailsTooltip', () => {
                 }}
                 label="Session"
                 time=""
+                completedUnread={false}
                 statusLabel="Custom"
               >
                 <button type="button">Session</button>
@@ -233,6 +236,129 @@ describe('SessionDetailsTooltip', () => {
       }
     },
   );
+
+  it('names the background-only arm exactly once', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'background-only',
+                workspaceCwd: '/workspace',
+                hasRunningBackgroundTasks: true,
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('Background tasks running');
+      expect(details?.textContent).not.toContain('· Background tasks running');
+      expect(
+        (details?.textContent ?? '').split('Background tasks running').length -
+          1,
+      ).toBe(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each([
+    [{ isWaitingForPermission: true }, false, 'Needs approval'],
+    [{ isWaitingForUserQuestion: true }, false, 'User input needed'],
+    [{ hasActivePrompt: true }, false, 'Running'],
+    [{ hasActivePrompt: true }, true, 'Finished'],
+  ])(
+    'composes the background suffix exactly once on every suffixed arm: %s',
+    async (flags, unread, label) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'suffix-count',
+                  workspaceCwd: '/workspace',
+                  hasRunningBackgroundTasks: true,
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread={unread}
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(
+          `${label} · Background tasks running`,
+        );
+        expect(
+          (details?.textContent ?? '').split('Background tasks running')
+            .length - 1,
+        ).toBe(1);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it('composes the background suffix exactly once under an override label', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'override-count',
+                workspaceCwd: '/workspace',
+                hasRunningBackgroundTasks: true,
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+              statusLabel="Custom"
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Custom · Background tasks running',
+      );
+      expect(
+        (details?.textContent ?? '').split('Background tasks running').length -
+          1,
+      ).toBe(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
 
   it('names background work alongside a running turn', async () => {
     vi.useFakeTimers();
@@ -877,6 +1003,78 @@ describe('SessionDetailsTooltip', () => {
     ]);
 
     act(() => root.unmount());
+  });
+
+  it('suppresses queued and existing hover without blocking click details', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = async (suppressed: boolean, clickTriggered = false) => {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <SidebarHoverSuppressionContext.Provider value={suppressed}>
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'hover-suppression',
+                  workspaceCwd: '/workspace',
+                }}
+                label="Session"
+                time=""
+                completedUnread={false}
+                openOnClick={clickTriggered}
+              >
+                <button type="button">Session row</button>
+              </SessionDetailsTooltip>
+            </SidebarHoverSuppressionContext.Provider>
+          </I18nProvider>,
+        ),
+      );
+    };
+    try {
+      await render(false);
+      const row = container.querySelector('button')!;
+      act(() => {
+        row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      });
+      await render(true);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+        await Promise.resolve();
+      });
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+      await render(false);
+      act(() => {
+        row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      });
+      await render(true);
+      await act(async () => {
+        vi.advanceTimersByTime(100);
+        await Promise.resolve();
+      });
+      await render(false);
+      await act(async () => {
+        vi.advanceTimersByTime(200);
+        await Promise.resolve();
+      });
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+      await openDetails(container);
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+      await render(true);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+      await render(true, true);
+      act(() => {
+        container.querySelector('button')!.click();
+      });
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    } finally {
+      act(() => root.unmount());
+    }
   });
 
   it('does not reopen after a row action opens its menu', async () => {

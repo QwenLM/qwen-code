@@ -1600,7 +1600,7 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain(', then reply');
   });
 
-  it('renders an accessible retry action for a failed send', () => {
+  it('renders a left exclamation resend button for a failed send', () => {
     const onRetrySend = vi.fn();
     const container = render(
       <I18nProvider language="en">
@@ -1612,25 +1612,50 @@ describe('UserMessage', () => {
       </I18nProvider>,
     );
 
-    expect(container.textContent).toContain('Failed to send');
     const retry = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Retry sending message"]',
+      'button[aria-label="Resend"]',
     );
+    const bubble = container.querySelector('[data-web-shell-user-bubble]');
+    expect(retry).not.toBeNull();
     expect(retry?.type).toBe('button');
-    expect(retry?.title).toBe('Retry sending message');
-    expect(retry?.textContent).toBe('Try again');
+    expect(retry?.getAttribute('data-send-failed-status')).toBe('failed');
+    expect(bubble).not.toBeNull();
+    expect(
+      Boolean(
+        retry!.compareDocumentPosition(bubble!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
 
     act(() => retry?.click());
     expect(onRetrySend).toHaveBeenCalledTimes(1);
   });
 
+  it('uses an uncertain-delivery label when sendFailedStatus is uncertain', () => {
+    const onRetrySend = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          sendFailed
+          sendFailedStatus="uncertain"
+          onRetrySend={onRetrySend}
+        />
+      </I18nProvider>,
+    );
+
+    const retry = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="May not have sent — click to resend"]',
+    );
+    expect(retry).not.toBeNull();
+    expect(retry?.getAttribute('data-send-failed-status')).toBe('uncertain');
+  });
+
   it('does not render send failure controls by default', () => {
     const container = render(<UserMessage content="hello world" />);
 
-    expect(container.textContent).not.toContain('Failed to send');
-    expect(
-      container.querySelector('button[aria-label="Retry sending message"]'),
-    ).toBeNull();
+    expect(container.querySelector('[data-send-failed-status]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Resend"]')).toBeNull();
   });
 
   it('renders file references as chips from input annotations', () => {

@@ -79,7 +79,7 @@ class ManagedRuntimeRetentionRaceTest {
                                     assertThat(connection.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
                                     // Establish a real table-read snapshot before the writer commits.
                                     try (var query = connection.prepareStatement("SELECT COUNT(*) FROM " + reference.table
-                                            + (reference == Reference.HOLDER ? " WHERE execution_storage_key IS NOT NULL" : ""));
+                                            + (reference == Reference.HOLDER ? " WHERE execution_storage_id IS NOT NULL" : ""));
                                             var rows = query.executeQuery()) {
                                         assertThat(rows.next()).isTrue();
                                         assertThat(rows.getInt(1)).isZero();
@@ -118,9 +118,9 @@ class ManagedRuntimeRetentionRaceTest {
     void writersCannotCreateDanglingReferencesAfterTheSweepLocksTheRetiredBinding(Reference reference) throws Exception {
         var fixture = new Fixture(dataSource(), reference);
         fixture.retire();
-        fixture.jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
+        fixture.jdbc.update("UPDATE ma_storage_owner SET holder_id = NULL, binding_id = NULL,"
                 + " runtime_generation = NULL, runtime_session_id = NULL");
-        fixture.jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_rewind_pending = FALSE");
+        fixture.jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL, is_rewind_pending = FALSE");
         var locked = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var first = new AtomicBoolean(true);
@@ -267,16 +267,16 @@ class ManagedRuntimeRetentionRaceTest {
             jdbc.update("UPDATE ma_tool_execution SET settled_at = ?,"
                     + " dispatch_owner = NULL, dispatch_lease_until = NULL", Timestamp.from(OLD));
             if (reference == Reference.OPERATOR) {
-                jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
+                jdbc.update("UPDATE ma_storage_owner SET holder_id = NULL, binding_id = NULL,"
                         + " runtime_generation = NULL, runtime_session_id = NULL");
-                jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_rewind_pending = FALSE");
+                jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL, is_rewind_pending = FALSE");
             }
         }
 
         long count(String table) {
             String where = switch (table) {
                 case "ma_storage_owner" -> " WHERE binding_id IS NOT NULL";
-                case "ma_runtime_session" -> " WHERE execution_storage_key IS NOT NULL";
+                case "ma_runtime_session" -> " WHERE execution_storage_id IS NOT NULL";
                 case "ma_operation" -> " WHERE operation_kind = 'WORKSPACE_OPERATOR_RECOVERY'";
                 default -> "";
             };

@@ -25,7 +25,7 @@ public final class RuntimeSessionRecord {
         if (session == null) {
             throw new IllegalArgumentException("session is required");
         }
-        this.bindingId = BrokerValues.requireId(bindingId, "bindingId");
+        this.bindingId = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (runtimeGeneration <= 0) {
             throw new IllegalArgumentException(
                     "runtimeGeneration must be positive");

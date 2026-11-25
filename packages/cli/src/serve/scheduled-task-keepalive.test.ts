@@ -15,6 +15,7 @@ import {
   updateCronTasks,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
+import { SystemOverloadedError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
@@ -516,6 +517,98 @@ describe('scheduled-task keepalive', () => {
     }
   });
 
+  it('retries at the next tick after load refusals and keeps the failure count', async () => {
+    vi.useFakeTimers();
+    try {
+      await updateCronTasks(workspace, () => [
+        task({ id: 'a', sessionId: 'sess-1', sessionOwnedByTask: false }),
+      ]);
+      // Phase-accurate cadence test:
+      // 1. Seed one genuine failure (failures -> 1, backoff 1x interval).
+      // 2. After that backoff elapses, hit two load refusals whose settle
+      //    takes 40 ms. Advance to the NEXT tick's exact phase (intervalMs
+      //    after tick start, i.e. intervalMs - 40 after settle): arming
+      //    nextAttemptAt at `Date.now() + intervalMs` would skip a whole tick.
+      // 3. Follow with a second genuine failure: keeping the seeded count
+      //    raises failures 1 -> 2 (backoff 2x interval = 20_000 ms); resetting
+      //    failures to 0 on a load refusal would only back off 1x (10_000 ms).
+      const attemptTimes: number[] = [];
+      const outcomes: Array<'genuine' | 'load' | 'ok'> = [
+        'genuine',
+        'load',
+        'load',
+        'genuine',
+        'ok',
+      ];
+      let step = 0;
+      const restoreSession = vi.fn(async () => {
+        attemptTimes.push(Date.now());
+        vi.setSystemTime(Date.now() + 40);
+        const outcome = outcomes[step++] ?? 'ok';
+        if (outcome === 'load') {
+          throw new SystemOverloadedError('cpu_load', 2.5, 20);
+        }
+        if (outcome === 'genuine') {
+          throw new Error('transcript gone');
+        }
+        return undefined;
+      });
+      const ka = startScheduledTaskKeepalive({
+        bridge: {
+          ...bridge,
+          recordHeartbeat: () => {
+            throw new Error('not resident');
+          },
+        },
+        restoreSession,
+        boundWorkspace: workspace,
+        intervalMs: 10_000,
+      });
+      ka.stop();
+      // Tick 1 at T=0: genuine failure #1 (settles at T+40 -> nextAttemptAt T+10_040).
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes).toHaveLength(1);
+
+      // Tick 2 at T=10_040 (past 1x backoff): load refusal #1 (settles T+10_080).
+      vi.setSystemTime(attemptTimes[0] + 10_040);
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes).toHaveLength(2);
+
+      // Tick 3 at exact next cadence (T+20_040 = tick2Start + 10_000, only
+      // 9_960 ms after settle): load refusal #2 must NOT be skipped.
+      vi.setSystemTime(attemptTimes[1] + 10_000);
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes).toHaveLength(3);
+
+      // Tick 4 at exact next cadence (tick3Start + 10_000): genuine failure #2
+      // (settles at +40 ms; failures 1 -> 2 => backoff 20_000 ms).
+      vi.setSystemTime(attemptTimes[2] + 10_000);
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes).toHaveLength(4);
+      const secondGenuineAt = attemptTimes[3];
+
+      // One interval + settle later (10_040 ms): still suppressed because
+      // failures stayed at 1 through the load refusals and became 2 (20_000 ms).
+      vi.setSystemTime(secondGenuineAt + 10_040);
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes).toHaveLength(4);
+
+      // Two intervals + settle later (20_040 ms): now allowed and succeeds.
+      vi.setSystemTime(secondGenuineAt + 20_040);
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes).toHaveLength(5);
+      ka.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('rehydrates through the worktree-aware restore callback when provided', async () => {
     await updateCronTasks(workspace, () => [
       task({ id: 'a', sessionId: 'sess-1' }),
@@ -614,6 +707,28 @@ describe('scheduled-task keepalive', () => {
       boundWorkspace: workspace,
     });
     expect(res).toEqual({ loaded: [], failed: [] });
+  });
+
+  it('skips load-admission refusals during rehydrate without recording failure or alerting', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: 'sess-1' }),
+      task({ id: 'b', sessionId: 'sess-2' }),
+    ]);
+    const onError = vi.fn();
+    const res = await rehydrateScheduledTaskSessions({
+      bridge: {
+        resumeSession: async ({ sessionId }) => {
+          if (sessionId === 'sess-1') {
+            throw new SystemOverloadedError('cpu_load', 3.0, 5);
+          }
+        },
+      },
+      boundWorkspace: workspace,
+      onError,
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(res.failed).toEqual([]);
+    expect(res.loaded).toEqual(['sess-2']);
   });
 
   it('rehydrates in bounded batches, not all sessions at once', async () => {

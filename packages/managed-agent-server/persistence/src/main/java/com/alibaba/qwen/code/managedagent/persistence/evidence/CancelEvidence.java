@@ -4,8 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,22 +42,30 @@ public class CancelEvidence implements AcceptanceEvidence {
         if (!kind().equals(parked.kind())) {
             return Optional.empty();
         }
-        List<Target> targets = jdbc.query("SELECT t.turn_id, t.prompt_id, o.target_key"
+        boolean h2 = Boolean.TRUE.equals(jdbc.execute(
+                (org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection ->
+                        "H2".equals(connection.getMetaData().getDatabaseProductName())));
+        // The Turn id is VARCHAR while the operation target it mirrors stays
+        // VARBINARY. The target is converted to text so the lookup keeps the
+        // full Turn key; a binary probe would scan every Turn of the Session.
+        List<Target> targets = jdbc.query("SELECT t.turn_id, t.prompt_id, o.target_id"
                         + " FROM ma_operation o LEFT JOIN ma_turn t ON t.tenant_id = o.tenant_id"
-                        + " AND t.session_id = o.session_id AND t.turn_id = o.target_id"
-                        + " WHERE o.scope_key = ? AND o.tenant_id = ? AND o.session_id = ?"
+                        + " AND t.session_id = o.session_id AND t.turn_id = "
+                        + (h2 ? "UTF8TOSTRING(o.target_id)" : "CONVERT(o.target_id USING utf8mb4) COLLATE utf8mb4_bin")
+                        + " WHERE o.scope_kind = 'SESSION' AND o.scope_id = ? AND o.tenant_id = ? AND o.session_id = ?"
                         + " AND o.operation_id = ? AND o.operation_kind = 'CANCEL'"
                         + " AND o.target_kind = 'TURN' AND o.state = 'RECOVERY_BLOCKED'"
                         + " AND o.delivery_state = 'BLOCKED' AND o.claim_owner IS NULL",
-                (row, index) -> new Target(row.getString(1), row.getString(2), row.getString(3)),
-                ManagedSessionStore.sessionScopeKey(parked.tenantId(), parked.sessionId()),
+                (row, index) -> new Target(row.getString(1), row.getString(2),
+                        ManagedSchemaRows.identity(row, "target_id")),
+                parked.sessionId(),
                 parked.tenantId(), parked.sessionId(), parked.operationId());
         if (targets.isEmpty()) {
             return Optional.empty();
         }
         Target target = targets.getFirst();
         if (target.turnId() == null || target.promptId() == null
-                || !ManagedSchemaKeys.key(target.turnId()).equals(target.key())) {
+                || !target.turnId().equals(target.key())) {
             return Optional.of(AcceptanceVerdict.unknown());
         }
         List<Head> heads = jdbc.query("SELECT workspace_id, journal_revision FROM ma_session_head"

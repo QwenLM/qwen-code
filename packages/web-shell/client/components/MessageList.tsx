@@ -202,6 +202,7 @@ export interface MessageListProps {
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   failedPromptMessageId?: string;
+  failedPromptStatus?: 'failed' | 'uncertain';
   onRetryFailedPrompt?: () => void;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
@@ -3111,6 +3112,7 @@ export const MessageList = memo(
       showRetryHint = false,
       onRetryClick,
       failedPromptMessageId,
+      failedPromptStatus,
       onRetryFailedPrompt,
       onBranchSession,
       onCanScrollToBottomChange,
@@ -3936,6 +3938,7 @@ export const MessageList = memo(
       null,
     );
     const pendingBottomFollowAfterCooldown = useRef(false);
+    const initialBottomFollowPending = useRef(true);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
     const didTrackLastUserMsgRef = useRef(false);
@@ -4026,6 +4029,7 @@ export const MessageList = memo(
       }
       turnLayoutAnimations.current = [];
       followPausedByUserRef.current = false;
+      initialBottomFollowPending.current = true;
       pendingPaginationTurnCompares.current.clear();
       setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
       setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
@@ -4058,10 +4062,10 @@ export const MessageList = memo(
 
     const reportCanScrollToBottom = useCallback(() => {
       const el = containerRef.current;
-      const distanceFromBottom = el
-        ? el.scrollHeight - el.scrollTop - el.clientHeight
-        : 0;
-      const canScrollToBottom = !shouldFollow.current && distanceFromBottom > 1;
+      const canScrollToBottom =
+        !shouldFollow.current &&
+        el !== null &&
+        el.scrollHeight - el.scrollTop - el.clientHeight > 1;
       if (lastReportedCanScrollToBottom.current === canScrollToBottom) return;
       lastReportedCanScrollToBottom.current = canScrollToBottom;
       onCanScrollToBottomChange?.(canScrollToBottom);
@@ -4337,17 +4341,10 @@ export const MessageList = memo(
     //      visual flash when the model just started replying with a
     //      short first chunk.
     //
-    // Implementation: three refs, three effects, one scroll handler.
-    //
     //   - `shouldFollow`      — whether auto-scroll is active
     //   - `lastScrollTop`     — previous scrollTop for direction detection
     //   - `prevLastUserMsgId` — tracks when a new user message appears
     //   - `prevCatchingUp`    — tracks the catchingUp → ready transition
-    //
-    // The single auto-scroll driver is a `useLayoutEffect` on
-    // `totalVirtualSize` (the virtualizer's computed content height).
-    // Every height change — streaming text, card expand, approval
-    // appearance — flows through this one effect.
     // ─────────────────────────────────────────────────────────────────────
 
     const hasTailContent = tailContent !== undefined && tailContent !== null;
@@ -4685,42 +4682,65 @@ export const MessageList = memo(
       ],
     );
 
+    const releaseScrollCooldown = useCallback(
+      (generation: number) => {
+        if (scrollCooldownCount.current !== generation) return;
+        scrollCooldown.current = false;
+        if (!pendingBottomFollowAfterCooldown.current) return;
+        pendingBottomFollowAfterCooldown.current = false;
+        if (
+          catchingUpRef.current ||
+          followPausedByUserRef.current ||
+          frozenViewportRef.current
+        ) {
+          return;
+        }
+        const el = getScrollElement();
+        if (!el) return;
+        const height = el.scrollHeight;
+        const bottom = height - el.clientHeight;
+        if (bottom <= 0) return;
+        lastScrollTop.current = bottom;
+        if (Math.abs(el.scrollTop - bottom) <= 1) return;
+        setShouldFollow(true);
+        el.scrollTop = height;
+        scheduleScrollOverflowReport();
+        reportCanScrollToBottom();
+      },
+      [
+        getScrollElement,
+        reportCanScrollToBottom,
+        scheduleScrollOverflowReport,
+        setShouldFollow,
+      ],
+    );
+
     // Rule 6: skip if content doesn't overflow (no scrollbar).
     const scrollToBottom = useCallback(
       (behavior: ScrollBehavior = 'auto') => {
         if (frozenViewportRef.current) return;
         const el = getScrollElement();
         if (!el) return;
-        if (el.scrollHeight <= el.clientHeight) return;
+        const scrollHeight = el.scrollHeight;
+        const bottom = scrollHeight - el.clientHeight;
+        if (bottom <= 0) return;
+        if (behavior === 'auto' && Math.abs(el.scrollTop - bottom) <= 1) {
+          lastScrollTop.current = bottom;
+          return;
+        }
         pendingBottomFollowAfterCooldown.current = false;
         scrollCooldownCount.current += 1;
         const gen = scrollCooldownCount.current;
         scrollCooldown.current = true;
         if (behavior === 'smooth') {
-          el.scrollTo({ top: el.scrollHeight, behavior });
+          el.scrollTo({ top: scrollHeight, behavior });
         } else {
-          el.scrollTop = el.scrollHeight;
+          el.scrollTop = scrollHeight;
         }
         scheduleScrollOverflowReport();
-        lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
+        lastScrollTop.current = bottom;
         reportCanScrollToBottom();
-        const releaseCooldown = () => {
-          if (scrollCooldownCount.current !== gen) return;
-          scrollCooldown.current = false;
-          if (!pendingBottomFollowAfterCooldown.current) return;
-          pendingBottomFollowAfterCooldown.current = false;
-          if (catchingUpRef.current || followPausedByUserRef.current) return;
-          const current = getScrollElement();
-          if (!current || current.scrollHeight <= current.clientHeight) return;
-          setShouldFollow(true);
-          current.scrollTop = current.scrollHeight;
-          scheduleScrollOverflowReport();
-          lastScrollTop.current = Math.max(
-            0,
-            current.scrollHeight - current.clientHeight,
-          );
-          reportCanScrollToBottom();
-        };
+        const releaseCooldown = () => releaseScrollCooldown(gen);
         if (behavior === 'smooth') {
           setTimeout(releaseCooldown, 350);
         } else {
@@ -4729,9 +4749,9 @@ export const MessageList = memo(
       },
       [
         getScrollElement,
+        releaseScrollCooldown,
         reportCanScrollToBottom,
         scheduleScrollOverflowReport,
-        setShouldFollow,
       ],
     );
 
@@ -5105,7 +5125,7 @@ export const MessageList = memo(
         locateScrollTimer.current = setTimeout(() => {
           locateScrollTimer.current = null;
           if (scrollCooldownCount.current === gen) {
-            scrollCooldown.current = false;
+            releaseScrollCooldown(gen);
             scheduleSessionTimelineRangeUpdate();
             scheduleScrollOverflowReport();
           }
@@ -5117,6 +5137,7 @@ export const MessageList = memo(
         useVirtualScroll,
         virtualizer,
         setShouldFollow,
+        releaseScrollCooldown,
         scheduleSessionTimelineRangeUpdate,
         scheduleScrollOverflowReport,
       ],
@@ -5659,10 +5680,23 @@ export const MessageList = memo(
     useEffect(() => {
       const el = getScrollElement();
       if (!el || typeof ResizeObserver === 'undefined') return;
-      const observer = new ResizeObserver(() => {
+      const observer = new ResizeObserver((entries) => {
+        if (entries.some((entry) => entry.target === el)) {
+          scheduleSessionTimelineRangeUpdate();
+        }
         scheduleScrollOverflowReport();
         loadOlderHistoryIfUnderfilled();
-        if (catchingUpRef.current || followPausedByUserRef.current) return;
+        if (
+          catchingUpRef.current ||
+          followPausedByUserRef.current ||
+          pendingFollowRecheck.current
+        ) {
+          return;
+        }
+        if (scrollCooldown.current) {
+          pendingBottomFollowAfterCooldown.current = true;
+          return;
+        }
         setShouldFollow(true);
         scrollToBottom();
       });
@@ -5691,6 +5725,7 @@ export const MessageList = memo(
       getScrollElement,
       loadOlderHistoryIfUnderfilled,
       scheduleScrollOverflowReport,
+      scheduleSessionTimelineRangeUpdate,
       scrollToBottom,
       setShouldFollow,
     ]);
@@ -5712,28 +5747,6 @@ export const MessageList = memo(
         pendingSettledMessagesRef.current = undefined;
       }
     }, [messages.length, resetSessionScopedViewState, setShouldFollow]);
-
-    // Container-resize guard: when floating panels (e.g. TodoPanel)
-    // appear or disappear the scroll container's clientHeight changes.
-    // Snap back to bottom so the user doesn't lose their place while
-    // follow mode is active.
-    useEffect(() => {
-      const el = containerRef.current;
-      if (!el) return;
-      const observer = new ResizeObserver(() => {
-        scheduleSessionTimelineRangeUpdate();
-        if (catchingUpRef.current) return;
-        if (followPausedByUserRef.current) return;
-        setShouldFollow(true);
-        requestAnimationFrame(() => {
-          if (!catchingUpRef.current && !followPausedByUserRef.current) {
-            scrollToBottom();
-          }
-        });
-      });
-      observer.observe(el);
-      return () => observer.disconnect();
-    }, [scrollToBottom, scheduleSessionTimelineRangeUpdate, setShouldFollow]);
 
     // Rule 4: new user message → force follow on so the model's reply
     // scrolls into view as it streams in.
@@ -6097,6 +6110,12 @@ export const MessageList = memo(
                 displayItem.message.role === 'user' &&
                 displayItem.message.id === failedPromptMessageId
               }
+              sendFailedStatus={
+                displayItem.message.role === 'user' &&
+                displayItem.message.id === failedPromptMessageId
+                  ? failedPromptStatus
+                  : undefined
+              }
               onRetrySend={onRetryFailedPrompt}
               onBranchSession={onBranchSession}
               branchRecordId={branchRecordId}
@@ -6205,6 +6224,7 @@ export const MessageList = memo(
         showRetryHint,
         onRetryClick,
         failedPromptMessageId,
+        failedPromptStatus,
         onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
@@ -6229,20 +6249,21 @@ export const MessageList = memo(
       ? totalVirtualSize
       : messages;
 
-    // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
-    // Fires whenever the virtualizer's total content height changes —
-    // this captures every scenario: streaming tokens appending, tool
-    // cards expanding/collapsing, approval cards appearing, etc.
-    //
-    // Rule 5: during replay (catchingUp) → skip, avoid fighting rapid
-    //         transcript replay. The catchingUp→ready transition effect
-    //         above handles the final scroll.
-    // Rule 1: when shouldFollow is true → scroll to bottom.
-    // Rule 6: scrollToBottom itself checks scrollHeight <= clientHeight
-    //         and is a no-op when there's no overflow.
+    // Passive updates follow the resize notification after layout. Keep
+    // the initial position and explicit new-prompt scroll before paint.
     useLayoutEffect(() => {
       if (catchingUp) return;
       const isNewUserMessage = pendingNewUserSmoothScroll.current;
+      const isInitialContent =
+        initialBottomFollowPending.current && messages.length > 0;
+      if (isInitialContent) initialBottomFollowPending.current = false;
+      if (
+        !isNewUserMessage &&
+        !isInitialContent &&
+        typeof ResizeObserver !== 'undefined'
+      ) {
+        return;
+      }
       if (scrollCooldown.current && !isNewUserMessage) {
         if (!followPausedByUserRef.current) {
           pendingBottomFollowAfterCooldown.current = true;
@@ -6267,6 +6288,7 @@ export const MessageList = memo(
       autoScrollContentSignal,
       totalCount,
       catchingUp,
+      messages.length,
       scrollToBottom,
       setShouldFollow,
     ]);

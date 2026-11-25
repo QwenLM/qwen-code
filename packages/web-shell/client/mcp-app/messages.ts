@@ -24,6 +24,13 @@ export const MCP_APP_MESSAGES_EN: Record<string, Message> = {
     'Not saved: the session could not store the view state.',
   'mcpApp.generatedUi.state.unavailable':
     'The saved view state could not be loaded, so changes are not saved.',
+  'mcpApp.generatedUi.effect.copied': 'Copied to the clipboard',
+  'mcpApp.generatedUi.effect.copy-pending':
+    'The browser blocked the copy. Use Copy to try again.',
+  'mcpApp.generatedUi.effect.downloaded': ({ name } = {}) =>
+    `Download started: ${name}`,
+  'mcpApp.generatedUi.effect.refused': 'Not copied or downloaded.',
+  'mcpApp.generatedUi.effect.copy': 'Copy',
   'mcpApp.generatedUi.unavailable':
     'Interactive views are off for this session, so only the summary is shown.',
   'mcpApp.generatedUi.title': 'Interactive view',
@@ -74,6 +81,13 @@ export const MCP_APP_MESSAGES_ZH: Record<string, Message> = {
   'mcpApp.generatedUi.state.failed': '未保存：会话无法保存视图状态。',
   'mcpApp.generatedUi.state.unavailable':
     '无法载入已保存的视图状态，因此修改不会被保存。',
+  'mcpApp.generatedUi.effect.copied': '已复制到剪贴板',
+  'mcpApp.generatedUi.effect.copy-pending':
+    '浏览器阻止了复制。点击“复制”重试。',
+  'mcpApp.generatedUi.effect.downloaded': ({ name } = {}) =>
+    `已开始下载：${name}`,
+  'mcpApp.generatedUi.effect.refused': '未复制或下载。',
+  'mcpApp.generatedUi.effect.copy': '复制',
   'mcpApp.generatedUi.unavailable': '此会话未开启交互视图，仅显示摘要。',
   'mcpApp.generatedUi.title': '交互视图',
   'mcpApp.generatedUi.contextTag': ({ title } = {}) => `交互视图参数：${title}`,
@@ -119,6 +133,13 @@ export const MCP_APP_MESSAGES_RU: Record<string, Message> = {
     'Не сохранено: сессия не смогла сохранить состояние вида.',
   'mcpApp.generatedUi.state.unavailable':
     'Не удалось загрузить сохранённое состояние вида, поэтому изменения не сохраняются.',
+  'mcpApp.generatedUi.effect.copied': 'Скопировано в буфер обмена',
+  'mcpApp.generatedUi.effect.copy-pending':
+    'Браузер заблокировал копирование. Нажмите «Копировать», чтобы повторить.',
+  'mcpApp.generatedUi.effect.downloaded': ({ name } = {}) =>
+    `Загрузка началась: ${name}`,
+  'mcpApp.generatedUi.effect.refused': 'Не скопировано и не загружено.',
+  'mcpApp.generatedUi.effect.copy': 'Копировать',
   'mcpApp.generatedUi.unavailable':
     'Интерактивные виды для этой сессии выключены, поэтому показана только сводка.',
   'mcpApp.generatedUi.title': 'Интерактивный вид',

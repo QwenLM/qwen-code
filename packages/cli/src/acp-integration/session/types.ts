@@ -16,7 +16,6 @@ import type {
   ToolCallLocation,
   ToolKind,
 } from '@agentclientprotocol/sdk';
-import type { MessageRewriteMiddleware } from './rewrite/index.js';
 import { DEFAULT_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core/subagents/builtin-agents.js';
 
 export type { ApprovalModeValue };
@@ -51,9 +50,6 @@ export interface SessionEmitterContext extends SessionUpdateSender {
   readonly sessionId: string;
   /** History replay hook used to correlate emitted updates with disk records. */
   setActiveRecordId?: (id: string | null, timestamp?: string) => void;
-  /** Optional message rewrite middleware for ACP message transformation.
-   *  Installed after history replay to avoid rewriting historical messages. */
-  messageRewriter?: MessageRewriteMiddleware;
   /**
    * Running cumulative usage, when the context wants per-todo resource detail.
    * Mutated by MessageEmitter as usage is emitted and read by PlanEmitter to
