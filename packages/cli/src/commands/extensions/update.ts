@@ -69,6 +69,15 @@ export async function handleUpdate(args: UpdateArgs) {
         extension,
         extensionManager,
       );
+      if (updateState === ExtensionUpdateState.ERROR) {
+        // A registry that fails the lookup resolves to ERROR instead of
+        // throwing, so this is the only place a named update can fail quietly.
+        writeStderrLine(
+          t('Failed to check "{{name}}" for updates.', { name: args.name }),
+        );
+        process.exit(1);
+        return;
+      }
       if (updateState !== ExtensionUpdateState.UPDATE_AVAILABLE) {
         writeStdoutLine(
           t('Extension "{{name}}" is already up to date.', { name: args.name }),

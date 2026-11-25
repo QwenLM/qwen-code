@@ -135,6 +135,29 @@ describe('handleUpdate', () => {
       );
     });
 
+    it('should exit 1 when the update check resolves to an error (#15043)', async () => {
+      const mockExtension = {
+        name: 'test-extension',
+        installMetadata: { source: 'test' },
+      };
+      mockGetLoadedExtensions.mockReturnValueOnce([mockExtension]);
+      mockCheckForExtensionUpdate.mockResolvedValueOnce(
+        ExtensionUpdateState.ERROR,
+      );
+      exitSpy.mockClear();
+
+      await handleUpdate({ name: 'test-extension' });
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Failed to check "test-extension" for updates.',
+      );
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        'Extension "test-extension" is already up to date.',
+      );
+      expect(mockUpdateExtension).not.toHaveBeenCalled();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
     it('should update extension when update is available', async () => {
       const mockExtension = {
         name: 'test-extension',
