@@ -10000,7 +10000,10 @@ export class Session implements SessionContext {
     ) {
       hookSystem
         .fireStopFailureEvent(
-          classifyApiError({ message: errorMessage, status: errorStatus }),
+          classifyApiError(
+            { message: errorMessage, status: errorStatus },
+            error,
+          ),
           errorMessage,
         )
         .catch((err) => {
@@ -11031,10 +11034,10 @@ export class Session implements SessionContext {
         this.todoStopGuard.pauseForTrustedRetry();
         const errorStatus = getErrorStatus(error);
         const errorMessage = getErrorMessage(error);
-        const errorType = classifyApiError({
-          message: errorMessage,
-          status: errorStatus,
-        });
+        const errorType = classifyApiError(
+          { message: errorMessage, status: errorStatus },
+          error,
+        );
         const hookSystem = this.config.getHookSystem?.();
         if (
           !this.config.getDisableAllHooks?.() &&
