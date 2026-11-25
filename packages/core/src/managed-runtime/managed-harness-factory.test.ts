@@ -123,7 +123,9 @@ function command(operation: string, commandId: string): ManagedSessionCommand {
   };
 }
 
-function checkpointCommandId(workspace: Workspace): string | undefined {
+function checkpointCommandId(
+  workspace: Workspace,
+): Promise<string | undefined> {
   return fs.readFile(workspace.transcriptPath, 'utf8').then((content) => {
     const records = content
       .trim()
