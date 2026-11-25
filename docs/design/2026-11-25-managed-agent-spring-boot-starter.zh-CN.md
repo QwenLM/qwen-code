@@ -28,7 +28,9 @@ Starter 不实现宿主身份认证、业务 Session 路由、定义或材料所
 
 ## 实现
 
-`ManagedAgentAutoConfiguration` 位于新的 `com.alibaba.qwen.code.managedagent.starter` 包，只负责按条件导入 `ManagedAgentConfiguration`。Maven 模块位于 `packages/managed-agent-server/qwen-managed-agent-spring-boot-starter/`，目录名与 artifactId 保持一致。Starter POM 依赖普通 server library 和直接使用的 Boot 自动配置 API，并注册到 `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`。
+`ManagedAgentAutoConfiguration` 位于 `com.alibaba.qwen.code.managedagent.starter` 包。Maven 模块位于 `packages/managed-agent-server/qwen-managed-agent-spring-boot-starter/`，目录名与 artifactId 保持一致。Starter POM 依赖普通 server library 和直接使用的 Boot 自动配置 API，并注册到 `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`。
+
+启动失败隔离目前仍是实现候选，不是已经验收的结果。注册器将 Managed 初始化延后到宿主 Bean 实例化阶段，此时 Boot 已注册所需自动配置 Bean。`EmbeddedManagedAgentBootstrap` 使用宿主作为父上下文并复用宿主 `Environment`，在子上下文中初始化 `ManagedAgentConfiguration`。透传保留原 Bean 名称、声明类型及非默认候选规则，不覆盖宿主已有定义。成功初始化时暴露真实子上下文服务和资源，由子上下文负责关闭。初始化失败时关闭子上下文并暴露失败代理，普通调用抛出带原始初始化 cause 的 `IllegalStateException`；不依赖 Managed 的宿主 Bean 仍可启动并对外服务。任何失败路径均不放行不兼容 schema，也不把执行改派到其它 Provider。直接组件扫描绕过 Starter 边界，不属于本设计覆盖范围。
 
 `ManagedAgentProperties` 拥有新增的 `enabled`、`schema.initialize-enabled` 属性。`ManagedAgentPersistenceConfiguration.managedJdbcTemplate` 在关闭初始化时调用 `ManagedSchema.validate(source)`，否则保留 `ManagedSchema.initialize(source)`。两条路径都使用现有公开 `ManagedSchema` 方法，不增加绕过、修复或放宽的数据库准入。
 
@@ -61,12 +63,12 @@ Managed catalog 与宿主业务 catalog 不同。其表结构和应用账号由�
 - 上下文测试：默认依赖无效果、显式启用、独立或宿主提供的 Managed 数据源，以及没有公共/内部 Controller Bean。
 - Schema 测试：默认仍初始化；仅校验接受已建基线，拒绝空库且不建表；可用时用真实 MySQL 验证该边界。
 - 架构测试：Starter 类型只属于本模块且仅依赖 server 装配，不依赖宿主类型。
-- 独立夹具：使用 Spring Boot 3.5.3 消费新制品，无 `@Import`，覆盖独立连接池和宿主提供的连接池。验证宿主声明的 `@Transactional` Bean 是 AOP 代理。原显式导入测试继续执行。
+- 独立夹具：使用 Spring Boot 3.5.3 消费新制品，无 `@Import`，覆盖独立连接池和宿主提供的连接池。验证宿主声明的 `@Transactional` Bean 是 AOP 代理。覆盖数据源配置缺失及部分结构：宿主仍须启动，Managed 服务调用须保留原始根因，宿主业务 Bean 仍可使用。原显式导入测试继续执行。
 - 配置参考与 README 同步新属性和制品契约。
 - 聚焦 Maven/Checkstyle 检查及独立夹具提供本地证据；完整 Java、MySQL 和打包测试集保留为 CI 门禁。
 
 ## 验收与边界
 
-只有依赖默认无副作用、显式启用可启动、宿主资源保持隔离、无新增 Controller，以及仅校验模式不执行 DDL，制品才算满足装配验收。
+只有依赖默认无副作用、显式启用可启动、宿主资源保持隔离、无新增 Controller，以及仅校验模式不执行 DDL，制品才算满足装配验收。失败隔离另须确认：启用 Managed 的宿主在 Managed 初始化失败后仍能启动，Managed 调用保留原始异常，无关宿主业务路径仍可用，不存在执行回退或虚假的 Managed 就绪报告。最终候选及对应 MySQL CI 门禁仍需验证；H2 的部分证据不足以视为通过。
 
 Starter 成功不能证明 DataAgent 的业务适配、真实 Runtime 供给、多副本恢复、端到端 Issue/AgentRun 或部署 E2E 已验收。这些结果以及 DataAgent 消费的固定 Qwen 制品版本分别跟踪。回退删除新模块及新增属性，不改变既有 Managed catalog 或独立服务行为。

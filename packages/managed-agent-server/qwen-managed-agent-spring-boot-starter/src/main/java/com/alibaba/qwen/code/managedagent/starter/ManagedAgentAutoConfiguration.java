@@ -1,12 +1,12 @@
 package com.alibaba.qwen.code.managedagent.starter;
 
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentConfiguration;
+import com.alibaba.qwen.code.managedagent.config.EmbeddedManagedAgentBootstrap;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Import;
 
 @AutoConfiguration
-@Import(ManagedAgentConfiguration.class)
+@Import(EmbeddedManagedAgentBootstrap.Registrar.class)
 @ConditionalOnProperty(prefix = "qwen.managed-agent", name = "enabled", havingValue = "true")
 public class ManagedAgentAutoConfiguration {
 }

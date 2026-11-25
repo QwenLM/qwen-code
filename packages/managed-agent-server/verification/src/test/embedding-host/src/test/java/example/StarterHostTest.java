@@ -16,9 +16,12 @@ import org.springframework.web.bind.annotation.RestController;
 
 import javax.sql.DataSource;
 
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class StarterHostTest {
     @Test
@@ -33,6 +36,40 @@ class StarterHostTest {
             assertThat(context.getBeansOfType(TenantContextFilter.class)).isEmpty();
             assertThat(context.getBean("managedJdbcTemplate", JdbcTemplate.class)
                     .queryForObject("SELECT COUNT(*) FROM ma_agent_definition", Integer.class)).isZero();
+        }
+    }
+
+    @Test
+    void failuresAreDeferredInsteadOfStoppingTheHost() {
+        var application = new SpringApplication(Host.class);
+        application.setWebApplicationType(org.springframework.boot.WebApplicationType.NONE);
+        try (var context = application.run("--qwen.managed-agent.enabled=true")) {
+            var service = context.getBean(ManagedAgentService.class);
+            assertThat(service).isNotNull();
+            assertThatThrownBy(() -> service.getPublicSession(
+                    new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "owner", null), "missing"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasStackTraceContaining("qwen.managed-agent.datasource.url");
+            assertThat(context.getBean(TransactionalHostBean.class).value()).isEqualTo("host");
+        }
+    }
+
+    @Test
+    void partialSchemaReturnsFailureProxiesWithoutStoppingHostBusiness() throws Exception {
+        String url = url();
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE ma_session_principal (id BIGINT)");
+        }
+        var application = new SpringApplication(Host.class);
+        application.setWebApplicationType(org.springframework.boot.WebApplicationType.NONE);
+        try (var context = application.run("--qwen.managed-agent.enabled=true", "--qwen.managed-agent.datasource.url=" + url)) {
+            var service = context.getBean(ManagedAgentService.class);
+            assertThatThrownBy(() -> service.getPublicSession(
+                    new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "owner", null), "missing"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasRootCauseInstanceOf(SQLException.class)
+                    .hasStackTraceContaining("must contain exactly");
+            assertThat(context.getBean(TransactionalHostBean.class).value()).isEqualTo("host");
         }
     }
 

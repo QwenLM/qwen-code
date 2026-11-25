@@ -345,6 +345,12 @@ or connection-mode changes. The application does not change the server's global
 SQL mode. MariaDB CHECK enforcement still requires both global and session
 settings to be enabled.
 
+### Embedded startup failure isolation
+
+An embedded host keeps its unrelated application paths available when Managed Agent initialization fails. The starter initializes Managed Agent in an isolated Spring child context with the host as its parent. Successful initialization exposes the same API beans and native schema rules as before; a failed initialization closes that child context and exposes deferred failure proxies for the exposed Managed Agent beans under their Spring names. Calling those proxies throws `IllegalStateException` with the preserved initialization exception as its cause. A missing datasource configuration, malformed profile, partial catalog or unavailable database therefore need not stop the host.
+
+This does not turn a partial or foreign catalog into a supported schema, bypass the next database access, or declare Managed Agent ready. Executions must not silently fall back to another provider. Direct `Managed Agent` Spring component scanning bypasses this isolation boundary as it does not use the starter: use the host's `ApplicationContext` when requesting these APIs.
+
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell
 dual-path development entry below). It supports durable no-tool Sessions and
