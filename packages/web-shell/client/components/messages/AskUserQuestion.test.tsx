@@ -2322,5 +2322,40 @@ describe('managed question contract parity', () => {
       { '0': 'next1\nnext2' },
       [{ questionId: 'q2', value: 'next1\nnext2', text: 'next1\nnext2' }],
     );
+
+    // Single-line daemon questions (no multilineText, no newline) keep <input>
+    // and preserve Shift+Enter submission parity.
+    onConfirm.mockClear();
+    renderReq(
+      {
+        ...req2,
+        id: 'req-single-line-shift-enter',
+      },
+      undefined,
+    );
+    act(() => optionButtons()[1]!.click());
+    const singleInput = container!.querySelector<HTMLInputElement>('input')!;
+    expect(singleInput).not.toBeNull();
+    expect(container!.querySelector('textarea')).toBeNull();
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(singleInput, 'single line answer');
+      singleInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    pressKey(singleInput, 'Enter', { shiftKey: true, cancelable: true });
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-single-line-shift-enter',
+      'submit',
+      { '0': 'single line answer' },
+      [
+        {
+          questionId: 'q2',
+          value: 'single line answer',
+          text: 'single line answer',
+        },
+      ],
+    );
   });
 });

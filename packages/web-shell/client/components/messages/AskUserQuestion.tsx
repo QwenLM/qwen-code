@@ -299,7 +299,6 @@ export function AskUserQuestion({
     setCustomInputs(hydrated.customInputs);
     setSelectedMulti(hydrated.selectedMulti);
     setCustomFocused(false);
-    setMultilineSession(false);
     focusCustomTriggerAfterSubmitFailureRef.current = false;
   }, [questions, request.id]);
 
@@ -758,7 +757,6 @@ export function AskUserQuestion({
       selectedIdxRef.current = nextSelectedIdx;
       setSelectedIdx(nextSelectedIdx);
       setCustomFocused(false);
-      setMultilineSession(false);
       focusAfterQuestionChangeRef.current = true;
       setCurrentIdx(nextIdx);
 
@@ -861,7 +859,7 @@ export function AskUserQuestion({
         setCustomFocused(false);
       } else if (
         e.key === 'Enter' &&
-        !e.shiftKey &&
+        !(e.currentTarget.tagName === 'TEXTAREA' && e.shiftKey) &&
         !controlsDisabled &&
         hasCustomAnswer(customInputs[currentIdx])
       ) {
@@ -1307,10 +1305,7 @@ export function AskUserQuestion({
                           </svg>
                         </span>
                         {customFocused ? (
-                          multilineSession ||
-                          Boolean(current.multilineText) ||
-                          (customInputs[currentIdx]?.includes('\n') ??
-                            false) ? (
+                          multilineSession ? (
                             <textarea
                               rows={Math.min(
                                 6,
@@ -1344,10 +1339,7 @@ export function AskUserQuestion({
                               onFocus={() =>
                                 rememberSelectedIndex(current.options.length)
                               }
-                              onBlur={() => {
-                                setCustomFocused(false);
-                                setMultilineSession(false);
-                              }}
+                              onBlur={() => setCustomFocused(false)}
                               onKeyDown={handleCustomInputKeyDown}
                               autoFocus
                             />
@@ -1378,10 +1370,7 @@ export function AskUserQuestion({
                               onFocus={() =>
                                 rememberSelectedIndex(current.options.length)
                               }
-                              onBlur={() => {
-                                setCustomFocused(false);
-                                setMultilineSession(false);
-                              }}
+                              onBlur={() => setCustomFocused(false)}
                               onKeyDown={handleCustomInputKeyDown}
                               autoFocus
                             />
