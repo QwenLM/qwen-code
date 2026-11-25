@@ -303,6 +303,7 @@ describe('managed chat-controller mappings', () => {
         required: true,
         allowText: true,
         maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
+        multilineText: true,
       },
       {
         id: 'notes',
@@ -316,6 +317,7 @@ describe('managed chat-controller mappings', () => {
         required: true,
         allowText: true,
         maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
+        multilineText: true,
       },
     ]);
 
@@ -351,6 +353,7 @@ describe('managed chat-controller mappings', () => {
         required: false,
         allowText: true,
         maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
+        multilineText: true,
       },
       {
         id: 'strict',
@@ -361,6 +364,7 @@ describe('managed chat-controller mappings', () => {
         required: true,
         allowText: false,
         maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
+        multilineText: true,
       },
     ]);
   });
