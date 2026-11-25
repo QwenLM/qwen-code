@@ -6,7 +6,9 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -189,8 +191,8 @@ public final class ManagedSchemaRows {
             Object value = value(result, index, columns.getColumnType(index), label);
             if (value instanceof byte[] bytes && IDENTITIES.contains(label)) {
                 value = utf8(bytes, label);
-            } else if (value instanceof java.time.LocalDateTime timestamp) {
-                value = java.sql.Timestamp.valueOf(timestamp);
+            } else if (value instanceof LocalDateTime timestamp) {
+                value = Timestamp.valueOf(timestamp);
             }
             row.put(label, value);
         }
@@ -224,10 +226,10 @@ public final class ManagedSchemaRows {
         return result.wasNull() ? null : value;
     }
 
-    private static java.sql.Timestamp timestamp(ResultSet result, int index) throws SQLException {
+    private static Timestamp timestamp(ResultSet result, int index) throws SQLException {
         if ("DATETIME".equalsIgnoreCase(result.getMetaData().getColumnTypeName(index))) {
-            var local = result.getObject(index, java.time.LocalDateTime.class);
-            return local == null ? null : java.sql.Timestamp.valueOf(local);
+            var local = result.getObject(index, LocalDateTime.class);
+            return local == null ? null : Timestamp.valueOf(local);
         }
         return result.getTimestamp(index);
     }

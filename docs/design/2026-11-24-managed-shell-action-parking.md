@@ -2,7 +2,7 @@
 
 [English](2026-11-24-managed-shell-action-parking.md) | [简体中文](2026-11-24-managed-shell-action-parking.zh-CN.md)
 
-Status: proposal, pre-implementation design. Date: 2026-11-24. Checked against `main` at `f38f6fe7c3`; code references are to that commit. This is the separate G3 extension design that the [coverage design](2026-11-22-managed-action-parking-coverage.md) §4.8 requires before the rest of S8a is implemented. It also carries out the G3 review of the public-children Shell path that the coverage design's decision 8 still owes. Tracked in #18149 (Stage 5). Conclusions marked "to verify" come from reading the code, not from tests, and must be confirmed by a test before implementation. Pre-start checks 1 and 2 (§7.1) are confirmed by tests added with this design.
+Status: implemented. Date: 2026-11-24. Checked against `main` at `f38f6fe7c3`; code references are to that commit. This is the separate G3 extension design that the [coverage design](2026-11-22-managed-action-parking-coverage.md) §4.8 requires before the rest of S8a is implemented. It also carries out the G3 review of the public-children Shell path that the coverage design's decision 8 still owes. Tracked in #18149 (Stage 5). Conclusions marked "to verify" come from reading the code, not from tests, and must be confirmed by a test before implementation. Pre-start checks 1 and 2 (§7.1) are confirmed by tests added with this design. The implementation added the §7.2 cases and corrected two shapes the design had assumed: a background Shell exists only on the publication lane, and a public Shell Session with MCP never parks.
 
 ## 1. Problem and current state
 
@@ -43,7 +43,7 @@ Non-goals:
 - Shell after dispatch. A started Shell is not a wait, and its crash recovery is unchanged.
 - Other Shell-lane tools in the batch: `monitor`, workflow, team, messaging, loop and cron tools, and the private `agent`. They keep `unsupported_tool`.
 - The external Shell placement (`hosted-workspace-external-shell/1`). This code does not treat it as a Shell profile (`hosted-workspace-profiles.ts:86-96`), and its Shell calls refuse as `unsupported_tool`.
-- Public Shell Sessions with MCP on lifecycle v1. Phase 1 still never suspends them (`hosted-harness-session.ts:5340-5342`).
+- Public Shell Sessions with MCP. Phase 1 never suspends them ([stateless Harness design](2026-11-16-managed-stateless-harness.md), idle predicate). The term at `hosted-harness-session.ts:5340-5342` exempts lifecycle v2, but a Session runs lifecycle v2 only while a close or delete holds the lifecycle authority. It then already counts as live work and admits no Turn.
 
 ## 3. Overview
 
@@ -95,27 +95,26 @@ A plan that fails these checks is a durable conflict and fails closed, as any ot
 The owner and wake terms are shared and do not depend on the profile, so the shapes below need no new code. A public-children Session can already carry an extension Hook catalog or MCP when the Harness supports extension packages on lifecycle v2 (`hosted-harness-session.ts:6011-6027`). Lifting the profile term also brings version-0 Sessions to these shapes:
 
 - A Shell profile with an extension Hook catalog on a config-scoped owner (S5). S5 already pins a Shell call in this shape on a public-children Session, on the publication lane ("resumes a public-children Shell approval with extension Hooks").
-- A Shell profile with MCP on lifecycle v2 (S6b), including a Hook owner that is the MCP owner. No case has a Shell call here yet: the S6b cases use the MCP profile.
 - Wake-started Turns on a Shell Session, such as loop and monitor wakes (S4). No case has a Shell call here yet.
 
-§7.2 adds a version-0 case for each.
+§7.2 adds a version-0 case for each. MCP is not among these shapes, because a public Shell Session with MCP never suspends (§2).
 
 ## 5. G3 review of Shell before dispatch (decision 8)
 
 Shell has no public-children term in resume, execution or cleanup, and S8a changes only capture and recognition. The review below therefore covers public-children and version-0 Sessions alike. In the first column, "G3 §" names a section of the G3 step 3 design; the other section numbers refer to this document.
 
-| G3 requirement                                                                            | Evidence for Shell before dispatch                                                                                 | State                                                                                      |
-| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| The plan is saved before the wait is published (G3 §4.1)                                  | Same producer as native files. A Shell call adds only `publicationId`                                              | Existing                                                                                   |
-| Definition, profile and policy pins (G3 §4.1)                                             | `definitionRef` pins the profile and lane, and a load cannot change them (§1)                                      | Existing; S8a reads them (§4.3)                                                            |
-| Original call, Runtime and prepare identities, without `prepareRequests` (G3 §4.2 step 5) | `resumeSavedNativeBatch` rebuilds requests from the plan, including `publicationId`                                | Existing                                                                                   |
-| No dispatched work at the wait (G3 §4.3)                                                  | Prepare happens only after the final plan (§4.2), and the Broker never dispatches on prepare                       | Confirmed for both lanes (#18231; §7.1 check 1)                                            |
-| A crash among prepares replays the original reservations (G3 §4.2 step 5)                 | Exact-key replay returns the original record; a changed `publicationId`, payload digest or `inputDigest` conflicts | Confirmed for both lanes (#18231; §7.1 check 1)                                            |
-| Allow executes once; Deny and expiry execute zero times (G3 §4.2 steps 4 and 6)           | The #18231 gate cases, after a park and after a Harness death                                                      | Pinned for public children on both lanes (#18231; §7.1 check 2); version-0 Sessions to add |
-| A background Shell starts no second process                                               | Every `child_run` record after the Allow belongs to the one reserved execution                                     | Pinned for public children on the publication lane; Shell lane to add                      |
-| The Runtime is released only after safe settlement (G3 §4.2 step 7)                       | Resumed cleanup debt with the `held` exemption (§4.4)                                                              | Existing                                                                                   |
-| Stale authorization or changed pins never grant execution (G3 §2)                         | Workspace generation, definition and argument checks (§4.4)                                                        | Existing                                                                                   |
-| Shell after dispatch keeps its refusal (G3 §4.3)                                          | A started Shell is past the wait; parking never reaches it                                                         | Unchanged                                                                                  |
+| G3 requirement                                                                            | Evidence for Shell before dispatch                                                                                 | State                                                                               |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| The plan is saved before the wait is published (G3 §4.1)                                  | Same producer as native files. A Shell call adds only `publicationId`                                              | Existing                                                                            |
+| Definition, profile and policy pins (G3 §4.1)                                             | `definitionRef` pins the profile and lane, and a load cannot change them (§1)                                      | Existing; S8a reads them (§4.3)                                                     |
+| Original call, Runtime and prepare identities, without `prepareRequests` (G3 §4.2 step 5) | `resumeSavedNativeBatch` rebuilds requests from the plan, including `publicationId`                                | Existing                                                                            |
+| No dispatched work at the wait (G3 §4.3)                                                  | Prepare happens only after the final plan (§4.2), and the Broker never dispatches on prepare                       | Confirmed for both lanes (#18231; §7.1 check 1)                                     |
+| A crash among prepares replays the original reservations (G3 §4.2 step 5)                 | Exact-key replay returns the original record; a changed `publicationId`, payload digest or `inputDigest` conflicts | Confirmed for both lanes (#18231; §7.1 check 1)                                     |
+| Allow executes once; Deny and expiry execute zero times (G3 §4.2 steps 4 and 6)           | The #18231 gate cases, after a park and after a Harness death                                                      | Pinned for public children and version 0 on both lanes (#18231; §7.1 check 2; §7.2) |
+| A background Shell starts no second process                                               | Every `child_run` record after the Allow belongs to the one reserved execution                                     | Pinned for public children and version 0 (§7.2). Only the publication lane has one  |
+| The Runtime is released only after safe settlement (G3 §4.2 step 7)                       | Resumed cleanup debt with the `held` exemption (§4.4)                                                              | Existing                                                                            |
+| Stale authorization or changed pins never grant execution (G3 §2)                         | Workspace generation, definition and argument checks (§4.4)                                                        | Existing                                                                            |
+| Shell after dispatch keeps its refusal (G3 §4.3)                                          | A started Shell is past the wait; parking never reaches it                                                         | Unchanged                                                                           |
 
 Findings:
 
@@ -136,7 +135,7 @@ Findings:
 ### 7.1 Pre-start checks (before implementation)
 
 1. **Broker, Shell lane.** A Shell-lane reservation (`runtimeProtocol: 3`, `inputDigest`) replays under the exact key without dispatching and returns the original record. A changed `inputDigest` or request digest under that key is refused as `runtime_idempotency_conflict`, and the settled record answers the same key. This is the Shell-lane counterpart of the #18231 Broker test. Confirmed by `RuntimeBrokerServiceTest.shellLanePrepareReplaysTheOriginalReservationUnderItsExactKey`.
-2. **Harness, decision 8 on the Shell lane.** On today's code, a public-children Session without `captureBytes` parks a Shell approval, is cold-loaded and is allowed. It sees one `prepare` with the saved key and one start. Deny, expiry and a mode change that allows on the user's behalf behave as on the publication lane. Confirmed: the #18231 matrix "settles a public-children Shell approval through %s after a %s" now also runs on the Shell lane, and all eight Shell-lane cases pass. Each asserts that the saved plan records `publicationId: null`, and each Allow or mode change asserts one `prepare` with the saved call ID, request digest and recomputed `inputDigest`. Removing the recomputed `inputDigest` from the resume makes those cases fail.
+2. **Harness, decision 8 on the Shell lane.** On today's code, a public-children Session without `captureBytes` parks a Shell approval, is cold-loaded and is allowed. It sees one `prepare` with the saved key and one start. Deny, expiry and a mode change that allows on the user's behalf behave as on the publication lane. Confirmed: the #18231 matrix, now "settles a %s Shell approval through %s after a %s on the %s lane", also runs on the Shell lane, and all eight Shell-lane cases pass. Each asserts that the saved plan records `publicationId: null`, and each Allow or mode change asserts one `prepare` with the saved call ID, request digest and recomputed `inputDigest`. Removing the recomputed `inputDigest` from the resume makes those cases fail.
 3. **Which Sessions are affected.** Read the canary `parkRefusals.shell_profile` counts from `suspensionStats`. They set the priority of S8a but do not block implementation.
 
 ### 7.2 S8a cases
@@ -144,11 +143,10 @@ Findings:
 Each case runs both after a park and after a Harness death in the wait, and the two must give the same journal outcome (coverage design §7, crash equivalence):
 
 - **Version-0 public Shell, each lane.** A Shell approval completes through Allow, Deny, expiry and a mode change that allows on the user's behalf. Allow and the mode change prepare the saved reservation and execute once; Deny and expiry execute zero times.
-- **Background Shell, each lane.** An `is_background` approval resumes without starting a second process, and the resumed Turn's cleanup debt stays `held` until the process ends.
+- **Background Shell, publication lane.** An `is_background` approval resumes without starting a second process, and the resumed Turn's cleanup debt stays `held` while the process holds the Runtime. Only the publication lane admits a background Shell (`hosted-workspace-tool-turn.ts:2697-2703`). The Shell lane refuses `is_background` as a validation error before it asks, so it has no such wait.
 - **A file approval on a Shell profile.** A `write_file` approval on a version-0 public Shell Session parks and completes. This shows that the refusal by profile is gone.
 - **Extension Hooks.** On a config-scoped Hook owner, a Shell call's completed PreToolUse and PermissionRequest occurrences are not rerun, and its PostToolUse runs once after the Allow.
-- **MCP.** A Shell call on a Shell Session with MCP on lifecycle v2 parks and completes. This covers a Hook owner that is the MCP owner.
-- **Wake-started Turn.** A Shell approval in a loop-started Turn parks and completes without the coordinator.
+- **Wake-started Turn.** A Shell approval in a monitor-started Turn parks and completes without the coordinator.
 - **Agreement and refusals.**
   - A team-lead wait registers `team_lead_profile`, counted once.
   - The reader refuses a plan with a Shell call whose definition does not name a public Shell profile. Park eligibility and every recovery entry point read plans through it, so each refuses the same plan.
@@ -172,7 +170,7 @@ As coverage design §7 requires, at least one "park → new Harness generation �
 - **Rolling deploy and Harness rollback.** A Harness below S8a cannot read a version-0 Shell plan. It refuses the load with the ordinary retriable recovery refusal before any effect, so a Turn parked under S8a waits until a newer Harness loads it. S1, S5 and S6b plans have the same property. Before rolling the Harness back, turn `action-parking.enabled` off and let parked Turns resume.
 - **Fail-safe direction.** A changed Shell tool definition, a different Workspace generation or a lane mismatch declines recovery and ends the Turn without executing. It never runs the Shell under a different identity.
 - **Metrics.** `parkRefusals.shell_profile` disappears and `team_lead_profile` appears. Dashboards that read the old key need updating.
-- **Reach.** S8a does nothing until `action-parking.enabled` is on, and on a version-0 Shell Session with Hooks or MCP it parks only where S5 and S6b already allow.
+- **Reach.** S8a does nothing until `action-parking.enabled` is on. On a version-0 Shell Session with Hooks it parks only where S5 already allows, and with MCP it never parks (§2).
 
 ## 10. Open questions
 
@@ -184,5 +182,5 @@ None of these blocks development.
 ## 11. Implementation surface
 
 - Harness production: the capture term, allowlist and identity rule (`hosted-workspace-tool-turn.ts:4626-4656`, `:4737`); the reader (`hosted-approval-continuation.ts:299-379`); the refusal type (`hosted-action-parking.ts:20`).
-- Tests: `hosted-harness-session.approval-parking.test.ts`, `hosted-approval-continuation.test.ts`, and the Broker test `RuntimeBrokerServiceTest.java`.
+- Tests: `hosted-harness-session.approval-parking.test.ts`, `hosted-harness-session.wake-approval-parking.test.ts`, `hosted-approval-continuation.test.ts`, and the Broker test `RuntimeBrokerServiceTest.java`.
 - No Java production, Store, seal or certificate change.

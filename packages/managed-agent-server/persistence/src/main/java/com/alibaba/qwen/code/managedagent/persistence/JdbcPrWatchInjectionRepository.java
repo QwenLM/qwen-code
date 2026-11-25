@@ -15,6 +15,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Optional;
 
@@ -143,7 +145,7 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
         return Boolean.TRUE.equals(released);
     }
 
-    private PrWatchInjection row(java.sql.ResultSet row, int index) throws java.sql.SQLException {
+    private PrWatchInjection row(ResultSet row, int index) throws SQLException {
         JsonNode body = JdbcManagedToolResultStore.parse(row.getString("request_json"));
         return new PrWatchInjection(row.getString("tenant_id"), row.getString("operation_id"),
                 body.path("channelInstanceId").asText(), body.path("bindingId").asText(),
