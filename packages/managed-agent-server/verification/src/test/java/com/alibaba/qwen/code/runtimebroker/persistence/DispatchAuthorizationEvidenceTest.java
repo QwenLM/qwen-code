@@ -188,8 +188,8 @@ class DispatchAuthorizationEvidenceTest {
         assertThrows(IllegalStateException.class,
                 () -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(f.source));
         try (var connection = f.source.getConnection(); var statement = connection.prepareStatement(
-                "SELECT execution_call_id, execution_state FROM ma_tool_execution WHERE execution_call_id_hash = ?")) {
-            statement.setString(1, JdbcRepositorySupport.valueKey(prepared.getExecutionCallId()));
+                "SELECT execution_call_id, execution_state FROM ma_tool_execution WHERE execution_call_id = ?")) {
+            statement.setString(1, prepared.getExecutionCallId());
             try (var row = statement.executeQuery()) {
                 assertTrue(row.next());
                 assertEquals(prepared.getExecutionCallId(), row.getString(1));

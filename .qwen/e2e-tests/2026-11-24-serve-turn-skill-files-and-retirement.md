@@ -1,0 +1,11 @@
+# Skill files across turns and idle session retirement
+
+Use a temporary trusted local workspace, a writable runtime directory and a disposable model endpoint. Record the workspace, session ID, event epoch, prompt ID, idempotency key and retirement operation ID for each assertion.
+
+1. Start Serve. Check the capabilities response for `turn_skill_file_snapshot` and `session_retire_if_idle`. For a baseline on a daemon without those capabilities, submit an ordinary prompt and verify it reaches a terminal event.
+2. Install a project Skill whose instructions and companion script each emit a version marker. Submit a prompt with `pinSkills: true` and hold its execution before the script runs. Record the returned digest. Replace both markers with v2 and open a second session. Run the Skill there, resume the first turn, and run it again in the original session. Verify v2, v1 and v2 respectively.
+3. Replay the first admission with its original idempotency key and unchanged payload. Verify that the prompt ID and digest match the first receipt. Submit a new prompt with the previous expected digest and verify that the mismatch is rejected before admission.
+4. Submit a retirement with the source event epoch and a fresh operation UUID while a prompt is active or queued. Check for the busy response. Retry the same operation after completion. Verify that a committed receipt survives restarting the daemon with the same storage and that a late load of the source session is rejected.
+5. Delay the native close acknowledgement. Query the original operation, then release the acknowledgement and check the same receipt again. Repeat with the child exiting before acknowledgement. Verify that only the confirmed close produces a retired receipt.
+6. Change the source approval mode to plan without persisting workspace settings. Retire the idle session, copy its raw transcript into a separate runtime and load it there. Verify the same session ID, a new event epoch and plan mode.
+7. In the [real Serve regression](../../integration-tests/cli/qwen-serve-turn-resources.test.ts), leave session A waiting on an actual `ask_user_question`. Publish Skill v2 and let B finish on v2 before answering A. Reply with the original request ID and answer key, confirm A receives the answer and executes v1, then verify A's next prompt executes v2.

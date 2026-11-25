@@ -4528,18 +4528,17 @@ describe('AgentTool', () => {
       );
     });
 
-    it('should re-execute subagent when stop hook returns shouldStopExecution', async () => {
-      vi.mocked(mockHookSystem.fireSubagentStopEvent)
-        .mockResolvedValueOnce(
-          stopOutput(
-            'Output is incomplete',
-            vi.fn().mockReturnValue(false),
-            vi.fn().mockReturnValueOnce(true),
-          ),
-        )
-        .mockResolvedValueOnce(undefined as never);
+    it('lets the subagent stop when the stop hook returns continue: false without a block', async () => {
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValueOnce(
+        stopOutput(
+          'Output is incomplete',
+          vi.fn().mockReturnValue(false),
+          vi.fn().mockReturnValue(true),
+        ),
+      );
       await runFg();
-      expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(1);
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(1);
     });
 
     it('uses the configured SubagentStop blocking cap', async () => {
