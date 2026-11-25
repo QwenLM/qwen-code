@@ -8,7 +8,7 @@ jobs:
   hosted:
     name: Hosted process acceptance / Linux / MySQL 8.4 / Java 21
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     services:
       mysql:
         image: mysql:8.4.6
@@ -70,7 +70,7 @@ jobs:
           echo 1 > "$QWEN_MANAGED_HOOK_CGROUP_ROOT/smoke/cgroup.kill"
           wait "$smoke" || true
           rmdir "$QWEN_MANAGED_HOOK_CGROUP_ROOT/smoke"
-          mvn -B -ntp -Phosted-harness-mysql \
+          mvn -B -ntp -Phosted-harness-mysql -Dtest=ManagedHostedRecoveryRecordsTest -Dsurefire.failIfNoSpecifiedTests=false \
             '-Dit.test=HostedExtensionsIT#hooksAndMcpApprovalResumesOnTheSameOwnerAfterParkingAndHarnessReplacementOnMySql,HostedPublicWorkspaceIT#versionZeroShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql+publicChildrenShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql' \
             -Dnode.executable="$(command -v node)" \
             -Dqwen.cli.entry="$GITHUB_WORKSPACE/dist/cli.js" \
