@@ -126,6 +126,19 @@ const server = createServer((sock) => {
         curFile = null;
         fileChunks = [];
       } else if (kind === 'C') {
+        if (mode === 'close-old-echo') {
+          // Previous in-repo peer behaviour: echoed H, treats C payload as a
+          // bare session id, and returns an unbound Z frame without runId/sid.
+          sock.write(enc('Z', JSON.stringify({
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdoutSha256: sha(Buffer.alloc(0)),
+            stderrSha256: sha(Buffer.alloc(0)),
+          })));
+          sock.end();
+          return;
+        }
         const closeRequest = JSON.parse(payload.toString('utf8'));
         const sid = closeRequest.workspaceSessionId;
         if (mode === 'close-no-ack') {
@@ -271,6 +284,7 @@ async function startGuestAgentChild(
     | 'close-pretend-delete'
     | 'close-wrong-sender'
     | 'close-old-peer'
+    | 'close-old-echo'
     | 'close-r3-assert' = 'normal',
 ): Promise<ChildProcess> {
   const child = spawn(
@@ -689,6 +703,19 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
       );
       expect(handshakes()).toEqual(['guest-exec-close-v2', 'guest-exec-v1']);
       expect(existsSync(join(dir, 'session-session-negotiate-r3'))).toBe(false);
+
+      // Only an explicit refusal (`R`) may trigger a retry: an echoing old peer
+      // returning an unbound ACK must receive strictly one handshake (`v2`) and
+      // report failure rather than retrying on `v1`.
+      rmSync(join(dir, 'handshakes.log'));
+      const echoSock = join(dir, 'old-echo.sock');
+      children.push(
+        await startGuestAgentChild(echoSock, dir, 'close-old-echo'),
+      );
+      const echoRes = closeGuestSessionSync(echoSock, 'session-negotiate-echo');
+      expect(echoRes.ok).toBe(false);
+      expect(echoRes.reason).toContain('not bound');
+      expect(handshakes()).toEqual(['guest-exec-close-v2']);
     },
   );
 

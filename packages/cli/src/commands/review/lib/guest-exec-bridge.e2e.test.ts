@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -41,7 +42,7 @@ vi.mock('./sandbox-backends.js', async (importOriginal) => {
 import { isolateOperatorReviewSettings } from './test-utils.js';
 import { runBuildTest } from '../build-test.js';
 import { runTestDelta } from '../test-delta.js';
-import { runControlMutant } from '../test-efficacy.js';
+import { runControlMutant, testEfficacyCommand } from '../test-efficacy.js';
 import { closeGuestSessionSync } from './guest-exec-bridge.js';
 
 const SESSION_GUEST_AGENT_SCRIPT = `
@@ -144,13 +145,16 @@ const server = createServer((sock) => {
           }
         }
 
-        // Optional fault-injection mode: install exits 0 but omits the completeness marker.
+        // Optional fault-injection mode: install exits 0 but omits the completeness marker
+        // (or writes only a decoy npm marker when testing pnpm's .modules.yaml check).
         const cmdToRun =
           mode === 'fake-install-no-marker' && req.kind === 'install'
             ? 'mkdir -p node_modules && echo FAKE_INSTALL_NO_MARKER'
-            : mode === 'install-exit-1' && req.kind === 'install'
-              ? 'exit 1'
-              : req.command;
+            : mode === 'fake-pnpm-decoy-npm-marker' && req.kind === 'install'
+              ? 'mkdir -p node_modules && echo "{}" > node_modules/.package-lock.json && echo FAKE_PNPM_DECOY'
+              : mode === 'install-exit-1' && req.kind === 'install'
+                ? 'exit 1'
+                : req.command;
         try {
           appendFileSync(
             join(scratchBase, 'requests.ndjson'),
@@ -204,6 +208,7 @@ async function startSessionGuestAgent(
   mode:
     | 'normal'
     | 'fake-install-no-marker'
+    | 'fake-pnpm-decoy-npm-marker'
     | 'install-exit-1'
     | 'close-refuse' = 'normal',
 ): Promise<ChildProcess> {
@@ -251,12 +256,33 @@ function createOfflineInstallableFixture(wt: string): void {
       name: 'local-dep',
       version: '1.0.0',
       main: 'index.cjs',
+      bin: { vitest: './vitest.cjs' },
     }),
   );
   writeFileSync(
     join(wt, 'dep', 'index.cjs'),
     'module.exports = { greeting: "FROM_GUEST_INSTALLED_DEP" };\n',
   );
+  // Offline local vitest stub installed by `npm ci` into guest node_modules/.bin/vitest
+  // so `npx --no-install vitest` runs in milliseconds even under `--network none`.
+  writeFileSync(
+    join(wt, 'dep', 'vitest.cjs'),
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => {
+  let failed = false;
+  try {
+    if (fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')) failed = true;
+  } catch { failed = true; }
+  return { name: path.resolve(f), assertionResults: [{ status: failed ? 'failed' : 'passed' }] };
+});
+process.stdout.write(JSON.stringify({ success: results.every((r) => r.assertionResults[0].status === 'passed'), testResults: results }));
+process.exit(results.every((r) => r.assertionResults[0].status === 'passed') ? 0 : 1);
+`,
+  );
+  chmodSync(join(wt, 'dep', 'vitest.cjs'), 0o755);
   writeFileSync(
     join(wt, 'package.json'),
     JSON.stringify({
@@ -609,6 +635,220 @@ describe.skipIf(IS_WINDOWS)(
         settingsGuard.dispose();
       }
     }, 60_000);
+
+    it('surfaces the close failure reason in the test-efficacy boundary note', async () => {
+      const settingsGuard = isolateOperatorReviewSettings();
+      const dir = mkdtempSync(join('/tmp', 'qvm-eff-close-note-'));
+      tmpDirs.push(dir);
+      try {
+        const scratch = join(dir, 'scratch');
+        const repo = join(dir, 'repo');
+        const wt = join(dir, 'wt');
+        mkdirSync(scratch, { recursive: true });
+        createOfflineInstallableFixture(repo);
+        // `test-efficacy` probes workspace members (`isWorkspaceMember`).
+        const pkg = JSON.parse(
+          readFileSync(join(repo, 'package.json'), 'utf8'),
+        ) as Record<string, unknown>;
+        pkg['workspaces'] = ['packages/*'];
+        writeFileSync(join(repo, 'package.json'), JSON.stringify(pkg));
+        mkdirSync(join(repo, 'packages', 'lib', 'src'), { recursive: true });
+        writeFileSync(
+          join(repo, 'packages', 'lib', 'package.json'),
+          JSON.stringify({ name: '@fixture/lib', version: '1.0.0' }),
+        );
+        writeFileSync(
+          join(repo, 'packages', 'lib', 'src', 'index.ts'),
+          'export const x = 1;\n',
+        );
+        execFileSync('npm', ['install', '--package-lock-only', '--offline'], {
+          cwd: repo,
+          stdio: 'ignore',
+          timeout: 30_000,
+        });
+        rmSync(join(repo, 'node_modules'), { recursive: true, force: true });
+        const git = (...a: string[]) =>
+          execFileSync('git', a, { cwd: repo, encoding: 'utf8' });
+        git('init', '-q', '-b', 'main');
+        git('config', 'user.email', 't@e.com');
+        git('config', 'user.name', 'T');
+        git('add', '.');
+        git('commit', '-q', '-m', 'base');
+        const baseSha = git('rev-parse', 'HEAD').trim();
+
+        writeFileSync(
+          join(repo, 'packages', 'lib', 'src', 'index.ts'),
+          'export const x = 2;\n',
+        );
+        writeFileSync(
+          join(repo, 'packages', 'lib', 'src', 'index.test.ts'),
+          'import { x } from "./index.js";\nimport { it, expect } from "vitest";\nit("t", () => expect(x).toBe(2));\n',
+        );
+        git('add', '.');
+        git('commit', '-q', '-m', 'pr');
+        git('worktree', 'add', '-q', '--detach', wt, 'HEAD');
+
+        const sockPath = join(dir, 'eff-close-refuse.sock');
+        children.push(
+          await startSessionGuestAgent(sockPath, scratch, 'close-refuse'),
+        );
+        probeOverride.current = {
+          platform: 'linux',
+          arch: 'x64',
+          hasKvm: true,
+          hasFirecracker: true,
+          hasJailer: true,
+          hasVfkit: false,
+          hasSandboxExec: false,
+          firecrackerKernel: '/opt/vm/vmlinux',
+          firecrackerRootfs: '/opt/vm/rootfs.ext4',
+          bridgeSocketPath: sockPath,
+        };
+        const planPath = join(dir, 'plan.json');
+        writeFileSync(
+          planPath,
+          JSON.stringify({
+            prNumber: '904',
+            isCrossRepository: true,
+            authorAssociation: 'NONE',
+            diffStat: { files: 2 },
+            files: [
+              {
+                path: 'packages/lib/src/index.ts',
+                kind: 'source',
+                binary: false,
+              },
+              {
+                path: 'packages/lib/src/index.test.ts',
+                kind: 'test',
+                binary: false,
+              },
+            ],
+          }),
+        );
+        const effOut = join(dir, 'efficacy.json');
+        vi.stubEnv('QWEN_REVIEW_SANDBOX', 'tiered');
+
+        const runHandler = testEfficacyCommand.handler as unknown as (a: {
+          report: string;
+          worktree: string;
+          base: string;
+          out: string;
+        }) => Promise<void>;
+        await runHandler({
+          report: planPath,
+          worktree: wt,
+          base: baseSha,
+          out: effOut,
+        });
+
+        const eff = JSON.parse(readFileSync(effOut, 'utf8')) as {
+          executionBoundary?: {
+            backend?: string;
+            teardownStatus?: string;
+            note?: string;
+          };
+        };
+        expect(eff.executionBoundary?.backend).toBe('firecracker');
+        expect(eff.executionBoundary?.teardownStatus).toBe('partial');
+        expect(eff.executionBoundary?.note).toContain(
+          'cleanup could not be fully verified',
+        );
+        expect(eff.executionBoundary?.note).toContain(
+          'no complete session-bound close ACK',
+        );
+      } finally {
+        settingsGuard.dispose();
+      }
+    }, 60_000);
+
+    it('probes node_modules/.modules.yaml (not .package-lock.json) for pnpm test-efficacy installs', async () => {
+      const settingsGuard = isolateOperatorReviewSettings();
+      const dir = mkdtempSync(join('/tmp', 'qvm-eff-pnpm-'));
+      tmpDirs.push(dir);
+      try {
+        const scratch = join(dir, 'scratch');
+        const wt = join(dir, 'pnpm-wt');
+        mkdirSync(scratch, { recursive: true });
+        mkdirSync(join(wt, 'src'), { recursive: true });
+        writeFileSync(
+          join(wt, 'package.json'),
+          JSON.stringify({ name: 'pnpm-fixture', version: '1.0.0' }),
+        );
+        writeFileSync(join(wt, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+        const probeFile = 'src/index.test.ts';
+        writeFileSync(join(wt, probeFile), 'it("dummy", () => {});\n');
+        execFileSync('git', ['init', '-q'], { cwd: wt });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: wt });
+        execFileSync('git', ['config', 'user.name', 'T'], { cwd: wt });
+        execFileSync('git', ['add', '.'], { cwd: wt });
+        execFileSync('git', ['commit', '-q', '-m', 'fixture'], { cwd: wt });
+
+        const sockPath = join(dir, 'eff-pnpm.sock');
+        children.push(
+          await startSessionGuestAgent(
+            sockPath,
+            scratch,
+            'fake-pnpm-decoy-npm-marker',
+          ),
+        );
+        probeOverride.current = {
+          platform: 'linux',
+          arch: 'x64',
+          hasKvm: true,
+          hasFirecracker: true,
+          hasJailer: true,
+          hasVfkit: false,
+          hasSandboxExec: false,
+          firecrackerKernel: '/opt/vm/vmlinux',
+          firecrackerRootfs: '/opt/vm/rootfs.ext4',
+          bridgeSocketPath: sockPath,
+        };
+        vi.stubEnv('QWEN_REVIEW_FORCE_HARDWARE', '1');
+        const vmSession: Parameters<typeof runControlMutant>[7] = {
+          sessionId: 'eff-pnpm-marker-1',
+          socketPath: sockPath,
+          sessionAllocated: false,
+          installAttempted: false,
+        };
+
+        // Even though the guest created a decoy `node_modules/.package-lock.json`,
+        // pnpm must check `node_modules/.modules.yaml` and fail closed as not-run.
+        expect(() =>
+          runControlMutant(
+            wt,
+            probeFile,
+            undefined,
+            () => 1,
+            wt,
+            undefined,
+            undefined,
+            vmSession,
+          ),
+        ).toThrow(/without the lockfile completeness marker/);
+
+        const requests = readFileSync(join(scratch, 'requests.ndjson'), 'utf8')
+          .trim()
+          .split('\n')
+          .map((l) => JSON.parse(l) as { command: string });
+        expect(
+          requests.some((r) =>
+            r.command.includes('corepack pnpm install --frozen-lockfile'),
+          ),
+        ).toBe(true);
+        expect(
+          requests.some(
+            (r) => r.command === 'test -f node_modules/.modules.yaml',
+          ),
+        ).toBe(true);
+        expect(requests.some((r) => r.command.includes('vitest'))).toBe(false);
+        expect(closeGuestSessionSync(sockPath, 'eff-pnpm-marker-1').ok).toBe(
+          true,
+        );
+      } finally {
+        settingsGuard.dispose();
+      }
+    }, 30_000);
 
     it('syncs (not overlays) the probe tree once the guest session holds installed dependencies', async () => {
       const settingsGuard = isolateOperatorReviewSettings();
