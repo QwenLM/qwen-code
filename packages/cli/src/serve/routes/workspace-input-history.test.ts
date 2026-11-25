@@ -217,8 +217,12 @@ describe('workspace-input-history routes', () => {
       });
       await Promise.race([once(holder, 'message'), earlyFailure]);
       holder.kill('SIGKILL');
-      const [, signal] = await holderExit;
-      expect(signal).toBe('SIGKILL');
+      const [code, signal] = await holderExit;
+      if (process.platform === 'win32') {
+        expect(code !== 0 || signal !== null).toBe(true);
+      } else {
+        expect(signal).toBe('SIGKILL');
+      }
       const started = performance.now();
       const write = runWithWorkspaceRuntimeStorage(
         fakeRuntime({ id: 'primary', cwd: primaryCwd, primary: true }),
@@ -237,6 +241,80 @@ describe('workspace-input-history routes', () => {
       await write;
     } finally {
       if (!holder.killed) holder.kill('SIGKILL');
+    }
+  }, 60_000);
+
+  it('falls back to the on-disk snapshot instead of 500 when a queued append fails', async () => {
+    const app = createApp();
+    const filePath = new Storage(primaryCwd, primaryCwd).getHistoryFilePath();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, JSON.stringify(['from-before-crash']));
+    const initial = await request(app).get(
+      '/workspace/input-history?kind=shell',
+    );
+    expect(initial.status).toBe(200);
+
+    const holder = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        `
+          import lockfile from 'proper-lockfile';
+          await lockfile.lock(process.argv.at(-1), {
+            realpath: false,
+            stale: 10_000,
+            retries: 0,
+            onCompromised: () => {},
+          });
+          process.send('locked');
+          setInterval(() => {}, 60_000);
+        `,
+        filePath,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
+    );
+    try {
+      const errors: Buffer[] = [];
+      holder.stderr?.on('data', (chunk: Buffer) => errors.push(chunk));
+      const holderExit = once(holder, 'exit');
+      const earlyFailure = holderExit.then(([code, signal]) => {
+        throw new Error(
+          `holder exited before locking (${code}/${signal}): ${Buffer.concat(errors)}`,
+        );
+      });
+      await Promise.race([once(holder, 'message'), earlyFailure]);
+
+      const failingWrite = runWithWorkspaceRuntimeStorage(
+        fakeRuntime({ id: 'primary', cwd: primaryCwd, primary: true }),
+        () => appendWorkspaceInputHistory(primaryCwd, 'shell', 'will-fail'),
+      );
+      const writeOutcome = failingWrite.then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+
+      const conditional = await request(app)
+        .get('/workspace/input-history?kind=shell')
+        .set('If-None-Match', initial.headers['etag'] as string);
+      expect(conditional.status).toBe(304);
+
+      const outcome = await writeOutcome;
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) {
+        expect((outcome.error as NodeJS.ErrnoException).code).toBe('ELOCKED');
+      }
+
+      const unconditional = await request(app).get(
+        '/workspace/input-history?kind=shell',
+      );
+      expect(unconditional.status).toBe(200);
+      expect(unconditional.body.entries).toEqual(['from-before-crash']);
+    } finally {
+      if (holder.exitCode === null && holder.signalCode === null) {
+        holder.kill('SIGKILL');
+        await once(holder, 'exit').catch(() => {});
+      }
     }
   }, 60_000);
 

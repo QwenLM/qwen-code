@@ -180,8 +180,12 @@ describe('shell-history-file', () => {
       });
       await Promise.race([once(holder, 'message'), earlyFailure]);
       holder.kill('SIGKILL');
-      const [, signal] = await holderExit;
-      expect(signal).toBe('SIGKILL');
+      const [code, signal] = await holderExit;
+      if (process.platform === 'win32') {
+        expect(code !== 0 || signal !== null).toBe(true);
+      } else {
+        expect(signal).toBe('SIGKILL');
+      }
       expect((await fs.stat(`${historyPath}.lock`)).isDirectory()).toBe(true);
 
       const started = performance.now();

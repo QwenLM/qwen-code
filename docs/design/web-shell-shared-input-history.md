@@ -36,7 +36,7 @@ Persistence invariants:
 - Treat lock compromise as an append-promise rejection, not an uncaught asynchronous callback error. When compromise is already observed before the atomic write, do not write; handle the expected release failure from an already-compromised lock. Other release errors still propagate. A module-level pending-write set lets the normal exit cleanup drain writes after the hook unmounts. Its active drain keeps consuming additions that arrive while it is already waiting, until the set is empty or the existing timeout prevents further progress; those writes join the same pass rather than escaping its initial snapshot. The existing 2-second per-function and 5-second total exit bounds remain unchanged.
 - Write atomically through a temporary file in the same directory + `rename`, `fsync`, and `0o600` on platforms that support POSIX mode bits. For shell history, the final compromise check and atomic replacement stay in one synchronous commit; lock acquisition, retries, and the preceding read remain asynchronous.
 - Return `[]` only for a missing (`ENOENT`) file. Preserve legacy line-based shell history; reject malformed prompt history instead of overwriting it. Both TUI and daemon keep shell history oldest-to-newest on disk; the TUI reverses it only in memory for navigation.
-- Compute a lightweight `revision` (short SHA-256 hex digest of the canonical entries payload) for `ETag` / `If-None-Match` (`304 Not Modified`).
+- Compute a lightweight `revision` (short SHA-256 hex digest of the canonical entries payload) for `ETag` / `If-None-Match` (`304 Not Modified`). Conditional reads carrying `If-None-Match` await any already-queued write on the same path (swallowing write failures so the read falls back to the on-disk snapshot rather than propagating a `500`), while unconditional reads remain immediate.
 
 ### 2. Automatic Server-Side Recording
 
@@ -47,7 +47,7 @@ Normal user submissions are recorded automatically on the daemon without extra c
 - `POST /session/:id/mid-turn-message`: after `enqueueMidTurnMessage` returns `accepted: true` with non-empty `trimmed`, inspect its prior mid-turn snapshot and record `trimmed` only when the supplied `messageId` is not already queued, settled, or promoted. Rejected messages and idempotent replay acknowledgements do not enter `prompt` history for `runtime.workspaceCwd`; fresh accepted IDs still record normally.
 - `POST /session/:id/shell`: once `command.trim()` passes validation, record `command.trim()` into `shell` history for `runtime.workspaceCwd`.
 
-All recording hooks are best-effort (errors are logged via `daemonLog` and never block or fail the session request). Prompt, mid-turn-message, and shell auto-recording execute in the same runtime storage context as their target session.
+All recording hooks are best-effort (errors are logged via `daemonLog` and never fail the session request). Prompt and mid-turn-message routes await their local atomic JSON write before returning `202`/`200` so concurrent peer refreshes observe the new revision, whereas shell history writes do not block command execution behind cross-process file locks. Prompt, mid-turn-message, and shell auto-recording execute in the same runtime storage context as their target session.
 
 ### 3. HTTP Routes & Capability
 

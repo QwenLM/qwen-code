@@ -124,64 +124,69 @@ test('refreshes an open mobile history from another desktop client @smoke', asyn
     ...devices['Pixel 7'],
     viewport: { width: 390, height: 844 },
   });
-  const mobile = await context.newPage();
-  await mobile.addInitScript(() => {
-    localStorage.setItem(
-      'qwen-web-shell-history',
-      JSON.stringify(['local-only-pending']),
-    );
-  });
-  const harnessUrl = (clientId: string) => {
-    const params = new URLSearchParams({
-      daemon: daemon.base,
-      token,
-      sessionId: client.sessionId,
-      clientId,
-      cwd: workspace,
+  let desktop: Page | undefined;
+  try {
+    const mobile = await context.newPage();
+    await mobile.addInitScript(() => {
+      localStorage.setItem(
+        'qwen-web-shell-history',
+        JSON.stringify(['local-only-pending']),
+      );
     });
-    return `${baseURL}/e2e/live-input-history-harness.html?${params}`;
-  };
-  await mobile.goto(harnessUrl('browser-mobile'));
-  await expect(editor(mobile)).toBeEditable();
-  await writeDraft(mobile, 'draft-not-submitted');
-  await mobile.getByRole('button', { name: 'Add to message' }).click();
-  await mobile.getByRole('button', { name: 'Input history' }).click();
-  const historyPanel = mobile
-    .locator('[data-web-shell-composer-history-search]')
-    .locator('..')
-    .locator('..');
-  const historyEntries = historyPanel.locator('button:has(span)');
-  await expect(historyEntries).toHaveCount(1);
-  await expect(historyPanel).toContainText('local-only-pending');
+    const harnessUrl = (clientId: string) => {
+      const params = new URLSearchParams({
+        daemon: daemon.base,
+        token,
+        sessionId: client.sessionId,
+        clientId,
+        cwd: workspace,
+      });
+      return `${baseURL}/e2e/live-input-history-harness.html?${params}`;
+    };
+    await mobile.goto(harnessUrl('browser-mobile'));
+    await expect(editor(mobile)).toBeEditable();
+    await writeDraft(mobile, 'draft-not-submitted');
+    await mobile.getByRole('button', { name: 'Add to message' }).click();
+    await mobile.getByRole('button', { name: 'Input history' }).click();
+    const historyPanel = mobile
+      .locator('[data-web-shell-composer-history-search]')
+      .locator('..')
+      .locator('..');
+    const historyEntries = historyPanel.locator('button:has(span)');
+    await expect(historyEntries).toHaveCount(1);
+    await expect(historyPanel).toContainText('local-only-pending');
 
-  const desktop = await browser.newPage({
-    viewport: { width: 1280, height: 900 },
-  });
-  await desktop.goto(harnessUrl('browser-desktop'));
-  await expect(editor(desktop)).toBeEditable();
-  await submit(desktop, 'desktop-original');
-  await expect
-    .poll(() =>
-      historyEntries.locator(':scope > span:nth-child(2)').allTextContents(),
-    )
-    .toEqual(['desktop-original', 'local-only-pending']);
-  await submit(desktop, 'desktop-followup');
-  await expect
-    .poll(() =>
-      historyEntries.locator(':scope > span:nth-child(2)').allTextContents(),
-    )
-    .toEqual(['desktop-followup', 'desktop-original', 'local-only-pending']);
+    desktop = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+    });
+    await desktop.goto(harnessUrl('browser-desktop'));
+    await expect(editor(desktop)).toBeEditable();
+    await submit(desktop, 'desktop-original');
+    await expect
+      .poll(() =>
+        historyEntries.locator(':scope > span:nth-child(2)').allTextContents(),
+      )
+      .toEqual(['desktop-original', 'local-only-pending']);
+    await submit(desktop, 'desktop-followup');
+    await expect
+      .poll(() =>
+        historyEntries.locator(':scope > span:nth-child(2)').allTextContents(),
+      )
+      .toEqual(['desktop-followup', 'desktop-original', 'local-only-pending']);
 
-  await historyPanel
-    .getByRole('button', { name: 'close', exact: true })
-    .click();
-  await expectEditorText(editor(mobile), 'draft-not-submitted');
-  const persisted = await fetch(`${daemon.base}/workspace/input-history`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  expect(persisted.status).toBe(200);
-  await expect(persisted.json()).resolves.toMatchObject({
-    entries: ['desktop-original', 'desktop-followup'],
-  });
-  await context.close();
+    await historyPanel
+      .getByRole('button', { name: 'close', exact: true })
+      .click();
+    await expectEditorText(editor(mobile), 'draft-not-submitted');
+    const persisted = await fetch(`${daemon.base}/workspace/input-history`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(persisted.status).toBe(200);
+    await expect(persisted.json()).resolves.toMatchObject({
+      entries: ['desktop-original', 'desktop-followup'],
+    });
+  } finally {
+    await desktop?.close().catch(() => {});
+    await context.close().catch(() => {});
+  }
 });

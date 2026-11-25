@@ -170,7 +170,7 @@ export async function readWorkspaceInputHistory(
   const filePath = getWorkspaceInputHistoryFilePath(workspaceCwd, kind);
   if (waitForPendingWrite) {
     const pendingWrite = writeQueueByPath.get(filePath);
-    await pendingWrite;
+    await pendingWrite?.catch(() => {});
   }
   const { entries } = await readRawEntriesOldestFirst(filePath, kind);
   const bounded =

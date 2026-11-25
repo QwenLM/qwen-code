@@ -36,7 +36,7 @@
 - 锁失效通过 append 的 Promise rejection 告知调用方，而不是在异步回调中抛出未捕获异常。若在原子写入前已经观察到失效，则不再写入，并处理失效锁释放时的预期错误；其他释放异常仍正常传播。模块级 pending-write 集合使 hook 卸载后仍可排空写入。当前 drain 正在等待时，后续加入的写入也纳入这一轮，而不是只等待启动时的快照；集合清空后结束本轮等待；超出时限时仍遵循原有有界退出语义，不无限等待。既有每个清理函数 2 秒、整体 5 秒的上限保持不变，超过上限时不无限等待。
 - 通过同目录临时文件 + `rename` 原子替换，执行 `fsync`；平台支持 POSIX 模式位时使用 `0o600`。Shell 历史的最后一次锁失效检查与原子替换在同一个同步回合里完成；锁获取、重试和读取仍是异步的，检查与最终替换之间不让出事件循环。
 - 仅在文件不存在（`ENOENT`）时返回 `[]`。保留旧式行式 Shell 历史；对损坏的 Prompt 历史拒绝覆盖。TUI 与 daemon 的磁盘 Shell 历史均按从旧到新排列，TUI 仅在内存中为导航反转。
-- 基于规范化结果计算轻量 `revision`（短 SHA-256 摘要），支持 `ETag` / `If-None-Match`（`304 Not Modified`）。
+- 基于规范化结果计算轻量 `revision`（短 SHA-256 摘要），支持 `ETag` / `If-None-Match`（`304 Not Modified`）。携带 `If-None-Match` 的条件读取会在读盘前等待同路径已入队的写入结算（若写入失败则静默回退读取磁盘快照，不传播为 `500`）；无条件读取保持即时返回。
 
 ### 2. 服务端自动记录
 
@@ -47,7 +47,7 @@
 - `POST /session/:id/mid-turn-message`：在 `enqueueMidTurnMessage` 返回 `accepted: true` 且 `trimmed` 非空时，检查该消息原有的 mid-turn 快照，仅在所给 `messageId` 不属于已有 queued、settled、promoted ID 时写入 `runtime.workspaceCwd` 的 `prompt` 历史。被拒绝的消息和幂等 replay 确认不写入；新的有效 ID 仍正常记录。
 - `POST /session/:id/shell`：校验 `command.trim()` 通过后，立即写入 `runtime.workspaceCwd` 的 `shell` 历史。
 
-所有自动记录均为 best-effort（异常通过 `daemonLog` 记录，绝不阻塞或导致会话请求失败）。Prompt、mid-turn-message 和 Shell 自动记录均使用目标会话所属 runtime 同一套存储上下文。
+所有自动记录均为 best-effort（异常通过 `daemonLog` 记录，绝不导致会话请求失败）。Prompt 与 mid-turn-message 在返回 `202`/`200` 前等待本地原子 JSON 写入完成，确保并发跨端刷新能看到新 revision；Shell 历史写入不因跨进程文件锁阻塞命令执行。Prompt、mid-turn-message 和 Shell 自动记录均使用目标会话所属 runtime 同一套存储上下文。
 
 ### 3. HTTP 路由与能力宣告
 

@@ -13149,7 +13149,7 @@ export function registerSessionRoutes(
     mutate(),
     withOwnerMutableSession(
       'POST /session/:id/mid-turn-message',
-      (req, res, sessionId, runtime) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const eventDetailMode = parseReplayMode(body, res, 'eventDetailMode');
         if (eventDetailMode === null) return;
@@ -13247,7 +13247,7 @@ export function registerSessionRoutes(
           },
         );
         if (trimmed.length > 0 && result.accepted && !alreadyRecordedMidTurn) {
-          void runWithWorkspaceRuntimeStorage(runtime, () =>
+          await runWithWorkspaceRuntimeStorage(runtime, () =>
             appendWorkspaceInputHistory(
               runtime.workspaceCwd,
               'prompt',
