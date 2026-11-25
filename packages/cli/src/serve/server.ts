@@ -17,6 +17,7 @@ import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
   hashDaemonWorkspace,
+  supportsLocalExtensionTurnStore,
   readCronTasks,
   Storage,
   WebTerminalRegistry,
@@ -1244,6 +1245,37 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      sessionRetireIfIdleAvailable: () =>
+        workspaceRegistry
+          .listAll()
+          .some(
+            (runtime) =>
+              runtime.trusted &&
+              runtime.provenance !== 'live-conversation' &&
+              !runtime.routeFileSystemFactory.sshWorkspace &&
+              runtime.bridge.retireSessionIfIdle !== undefined,
+          ),
+      turnSkillFileSnapshotAvailable: () =>
+        workspaceRegistry
+          .listAll()
+          .some(
+            (runtime) =>
+              runtime.trusted &&
+              !runtime.routeFileSystemFactory.sshWorkspace &&
+              typeof runtime.bridge.updateTurnSkillLease === 'function',
+          ),
+      turnExtensionStoreLeaseAvailable: () =>
+        supportsLocalExtensionTurnStore(
+          path.join(Storage.getGlobalQwenDir(), 'extension-store'),
+        ) &&
+        workspaceRegistry
+          .listAll()
+          .some(
+            (runtime) =>
+              runtime.trusted &&
+              !runtime.routeFileSystemFactory.sshWorkspace &&
+              runtime.bridge.supportsTurnExtensionStoreLease === true,
+          ),
       userSkillActivationAvailable:
         deps.persistUserSkillsActivation !== undefined,
       sessionArtifactsPersistenceAvailable:
