@@ -407,11 +407,11 @@ export async function handleBranchSession(
       projectHistoryToStreamEvents(uiHistoryItems, { config }),
     );
     uiSwapped = true;
-    resetBackgroundStateForSessionSwitch(config);
     // The UI re-key commits the swap: from here on a failure keeps the
     // replay — it belongs to the session the user is on.
     flushRunUsageOnSessionSwap(config, oldSessionId);
     config.getLlmClient()?.commitTelemetrySwap?.();
+    resetBackgroundStateForSessionSwitch(config);
 
     await getInteractiveModSession(config)?.syncSession('resume');
 

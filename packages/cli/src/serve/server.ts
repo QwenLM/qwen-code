@@ -4115,7 +4115,8 @@ export function createServeApp(
   registerUsageStatsRoutes(app, {
     getLedgerRuntimeBaseDirs: () => [
       ...workspaceRegistry
-        .list()
+        .listManaged()
+        .filter((runtime) => runtime.trusted)
         .map((runtime) => runtime.sessionRuntimeBaseDir),
       // This is the default CLI's shared ledger, not whichever runtime root
       // happens to be ambient in this daemon process.

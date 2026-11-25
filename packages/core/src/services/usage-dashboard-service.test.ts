@@ -11,6 +11,7 @@ import path from 'node:path';
 import {
   buildUsageDashboard,
   buildUsageDayTable,
+  loadLedgerOrEmpty,
   loadUsageDashboard,
   loadUsageDashboardSources,
   recordTouchesLedgerDays,
@@ -4068,6 +4069,1448 @@ describe('loadUsageDashboard', () => {
     const cell = dash.heatmap[dayKey(now)];
     expect(cell?.tokens).toBe(1200);
     expect(cell?.cacheReadRate).toBeCloseTo(0.9, 6);
+  });
+
+  it('deducts partial Gemini reasoning and cache-only live usage accurately', async () => {
+    const now = Date.parse('2026-06-12T12:00:00.000Z');
+    const day = dayKey(now);
+    const geminiLedgerFile = getTokenUsageFilePath(day.slice(0, 7));
+    fs.mkdirSync(path.dirname(geminiLedgerFile), { recursive: true });
+    fs.writeFileSync(
+      geminiLedgerFile,
+      [
+        {
+          schemaVersion: 1,
+          id: 'row-gem-1',
+          timestamp: new Date(now - 2_000).toISOString(),
+          localDate: day,
+          localMonth: day.slice(0, 7),
+          sessionId: 'gem-live',
+          model: 'gemini-2.5-pro',
+          authType: 'gemini-api-key',
+          source: 'main',
+          executionId: 'gem-req-1',
+          inputTokens: 100,
+          outputTokens: 50,
+          cachedTokens: 0,
+          thoughtsTokens: 30,
+          totalTokens: 180,
+          apiDurationMs: 100,
+        },
+        {
+          schemaVersion: 1,
+          id: 'row-cache-1',
+          timestamp: new Date(now - 2_000).toISOString(),
+          localDate: day,
+          localMonth: day.slice(0, 7),
+          sessionId: 'cache-live',
+          model: 'gemini-2.5-pro',
+          authType: 'gemini-api-key',
+          source: 'main',
+          executionId: 'cache-req-1',
+          inputTokens: 500,
+          outputTokens: 50,
+          cachedTokens: 500,
+          thoughtsTokens: 0,
+          totalTokens: 550,
+          apiDurationMs: 100,
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join('\n') + '\n',
+    );
+    const ledger = await loadLedgerOrEmpty(day);
+
+    // Case A: Gemini request 1 persisted (out=50, thoughts=30) + request 2 unpersisted (out=20).
+    const gemLowOut: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 'gem-live',
+        timestamp: now,
+        startTime: now - 5_000,
+        modelName: 'gemini-2.5-pro',
+        model: {
+          requests: 2,
+          inputTokens: 200,
+          outputTokens: 70,
+          cachedTokens: 0,
+          thoughtsTokens: 30,
+          totalTokens: 300,
+          totalLatencyMs: 200,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['gem-req-1', 'gem-req-2'],
+      successfulRequestExecutionIds: ['gem-req-1', 'gem-req-2'],
+    };
+    const lowTable = buildUsageDayTable(
+      [gemLowOut],
+      ledger,
+      undefined,
+      undefined,
+      gemLowOut,
+    );
+    expect(lowTable.get(day)?.get('gemini-2.5-pro')).toMatchObject({
+      requests: 3, // gem-req-1 + gem-req-2 + cache-req-1 from shared ledger
+      totalTokens: 850,
+      outputTokens: 150, // ledger normalized (50+30)+50 + remaining 20
+      thoughtsTokens: 30,
+    });
+
+    // Case B: Gemini request 2 has higher output=40 so thoughts must not be subtracted from output.
+    const gemHighOut: UsageSummaryRecord = {
+      ...gemLowOut,
+      models: {
+        'gemini-2.5-pro': {
+          requests: 2,
+          inputTokens: 200,
+          outputTokens: 90,
+          cachedTokens: 0,
+          thoughtsTokens: 30,
+          totalTokens: 320,
+          totalLatencyMs: 200,
+        },
+      },
+    };
+    const highTable = buildUsageDayTable(
+      [gemHighOut],
+      ledger,
+      undefined,
+      undefined,
+      gemHighOut,
+    );
+    expect(highTable.get(day)?.get('gemini-2.5-pro')).toMatchObject({
+      requests: 3,
+      totalTokens: 870,
+      outputTokens: 170, // ledger normalized (50+30)+50 + remaining 40
+      thoughtsTokens: 30,
+    });
+
+    // Case C: Cache-only request 1 persisted (ledger input=500, live prompt=0) + request 2 unpersisted.
+    const cacheLive: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 'cache-live',
+        timestamp: now,
+        startTime: now - 5_000,
+        modelName: 'gemini-2.5-pro',
+        model: {
+          requests: 2,
+          inputTokens: 0,
+          outputTokens: 60,
+          cachedTokens: 600,
+          thoughtsTokens: 0,
+          totalTokens: 660,
+          totalLatencyMs: 200,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['cache-req-1', 'cache-req-2'],
+      successfulRequestExecutionIds: ['cache-req-1', 'cache-req-2'],
+    };
+    const cacheTable = buildUsageDayTable(
+      [cacheLive],
+      ledger,
+      undefined,
+      undefined,
+      cacheLive,
+    );
+    expect(cacheTable.get(day)?.get('gemini-2.5-pro')).toMatchObject({
+      requests: 3, // cache-req-1 + cache-req-2 + gem-req-1
+      totalTokens: 840,
+    });
+  });
+
+  it('preserves unpersisted totals for omitted-total, mixed cache-only, and OpenAI reasoning live records', async () => {
+    const now = Date.parse('2026-06-16T12:00:00.000Z');
+    const day = dayKey(now);
+    const ledgerFile = getTokenUsageFilePath(day.slice(0, 7));
+    fs.mkdirSync(path.dirname(ledgerFile), { recursive: true });
+    const row = (
+      id: string,
+      sessionId: string,
+      model: string,
+      authType: string,
+      executionId: string,
+      inputTokens: number,
+      outputTokens: number,
+      cachedTokens: number,
+      thoughtsTokens: number,
+      totalTokens: number,
+    ) =>
+      JSON.stringify({
+        schemaVersion: 1,
+        id,
+        timestamp: new Date(now).toISOString(),
+        localDate: day,
+        localMonth: day.slice(0, 7),
+        sessionId,
+        model,
+        authType,
+        source: 'main',
+        executionId,
+        inputTokens,
+        outputTokens,
+        cachedTokens,
+        thoughtsTokens,
+        totalTokens,
+        apiDurationMs: 10,
+      });
+    fs.writeFileSync(
+      ledgerFile,
+      [
+        row(
+          'r-omit',
+          's-omit',
+          'm-omit',
+          'openai',
+          'omit-1',
+          100,
+          20,
+          0,
+          0,
+          120,
+        ),
+        row('r-old', 's-old-l', 'm-old', 'openai', 'old-1', 150, 50, 0, 0, 200),
+        row('r-co', 's-co', 'm-co', 'openai', 'co-1', 100, 20, 100, 0, 120),
+        row(
+          'r-mix-hi',
+          's-mix-hi',
+          'm-mix-hi',
+          'openai',
+          'mh-1',
+          100,
+          20,
+          0,
+          0,
+          120,
+        ),
+        row(
+          'r-mix-lo',
+          's-mix-lo',
+          'm-mix-lo',
+          'openai',
+          'ml-1',
+          100,
+          20,
+          0,
+          0,
+          120,
+        ),
+        row('r-oai', 's-oai', 'm-oai', 'openai', 'oai-1', 100, 50, 0, 30, 150),
+      ].join('\n') + '\n',
+    );
+    const ledger = await loadLedgerOrEmpty(day);
+
+    // 1. omittedAllTotals (metrics.totalTokens=0) + unpersisted 250 tokens -> 120 + 250 = 370
+    const omitLive: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-omit',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-omit',
+        model: {
+          requests: 2,
+          inputTokens: 300,
+          outputTokens: 70,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 0,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['omit-1', 'omit-2'],
+      successfulRequestExecutionIds: ['omit-1', 'omit-2'],
+    };
+    expect(
+      buildUsageDayTable([omitLive], ledger, undefined, undefined, omitLive)
+        .get(day)
+        ?.get('m-omit')?.totalTokens,
+    ).toBe(370);
+
+    // 2. Uncovered old record with totalTokens=0 (600) + same-day ledger (200) -> 800
+    const oldZero: UsageSummaryRecord = rec({
+      sessionId: 's-old-u',
+      timestamp: now,
+      startTime: now - 1_000,
+      modelName: 'm-old',
+      model: {
+        requests: 1,
+        inputTokens: 500,
+        outputTokens: 100,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 0,
+      },
+    });
+    const corruptNoModels = {
+      ...rec({ sessionId: 'corrupt-no-models', timestamp: now }),
+      models: undefined,
+    } as unknown as UsageSummaryRecord;
+    expect(
+      buildUsageDayTable([oldZero, corruptNoModels], ledger)
+        .get(day)
+        ?.get('m-old')?.totalTokens,
+    ).toBe(800);
+
+    // 3. Mixed persisted cache-only (0/100) + unpersisted regular (500/0) -> input=600, total=670
+    const coLive: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-co',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-co',
+        model: {
+          requests: 2,
+          inputTokens: 500,
+          outputTokens: 70,
+          cachedTokens: 100,
+          thoughtsTokens: 0,
+          totalTokens: 670,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['co-1', 'co-2'],
+      successfulRequestExecutionIds: ['co-1', 'co-2'],
+    };
+    expect(
+      buildUsageDayTable([coLive], ledger, undefined, undefined, coLive)
+        .get(day)
+        ?.get('m-co'),
+    ).toMatchObject({ requests: 2, inputTokens: 600, totalTokens: 670 });
+
+    // 4. Persisted omitted total (120) + unpersisted positive total (180 or 60) -> 300 / 180
+    const mixHi: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-mix-hi',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-mix-hi',
+        model: {
+          requests: 2,
+          inputTokens: 250,
+          outputTokens: 50,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 180,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['mh-1', 'mh-2'],
+      successfulRequestExecutionIds: ['mh-1', 'mh-2'],
+    };
+    expect(
+      buildUsageDayTable([mixHi], ledger, undefined, undefined, mixHi)
+        .get(day)
+        ?.get('m-mix-hi'),
+    ).toMatchObject({ requests: 2, totalTokens: 300 });
+
+    const mixLo: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-mix-lo',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-mix-lo',
+        model: {
+          requests: 2,
+          inputTokens: 150,
+          outputTokens: 30,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 60,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['ml-1', 'ml-2'],
+      successfulRequestExecutionIds: ['ml-1', 'ml-2'],
+    };
+    expect(
+      buildUsageDayTable([mixLo], ledger, undefined, undefined, mixLo)
+        .get(day)
+        ?.get('m-mix-lo'),
+    ).toMatchObject({ requests: 2, totalTokens: 180 });
+
+    // 5. OpenAI omitted totals with thoughts (100/50/30 persisted + 200/40/10 unpersisted) -> 390
+    const oaiLive: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-oai',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-oai',
+        model: {
+          requests: 2,
+          inputTokens: 300,
+          outputTokens: 90,
+          cachedTokens: 0,
+          thoughtsTokens: 40,
+          totalTokens: 430,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['oai-1', 'oai-2'],
+      successfulRequestExecutionIds: ['oai-1', 'oai-2'],
+    };
+    expect(
+      buildUsageDayTable([oaiLive], ledger, undefined, undefined, oaiLive)
+        .get(day)
+        ?.get('m-oai'),
+    ).toMatchObject({ requests: 2, totalTokens: 390 });
+
+    // 6. Persisted cache-only (0/100/50/150) + unpersisted OpenAI reasoning (200/150/100/350)
+    const oaiCacheFile = getTokenUsageFilePath(day.slice(0, 7));
+    fs.appendFileSync(
+      oaiCacheFile,
+      [
+        row('r-oco', 's-oco', 'm-oco', 'openai', 'oco-1', 100, 50, 100, 0, 150),
+        row('r-uo', 's-uo', 'm-uo', 'openai', 'uo-1', 100, 50, 0, 0, 150),
+        row(
+          'r-ut',
+          's-ut',
+          'm-ut',
+          'gemini-api-key',
+          'ut-1',
+          100,
+          50,
+          0,
+          0,
+          150,
+        ),
+      ].join('\n') + '\n',
+    );
+    const ledger2 = await loadLedgerOrEmpty(day);
+    const ocoLive: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-oco',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-oco',
+        model: {
+          requests: 2,
+          inputTokens: 200,
+          outputTokens: 200,
+          cachedTokens: 100,
+          thoughtsTokens: 100,
+          totalTokens: 500,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['oco-1', 'oco-2'],
+      successfulRequestExecutionIds: ['oco-1', 'oco-2'],
+    };
+    expect(
+      buildUsageDayTable([ocoLive], ledger2, undefined, undefined, ocoLive)
+        .get(day)
+        ?.get('m-oco'),
+    ).toMatchObject({
+      requests: 2,
+      inputTokens: 300,
+      outputTokens: 200,
+      thoughtsTokens: 100,
+      totalTokens: 500,
+    });
+
+    // 7. Unpersisted omitted total (0) -> 150 + 280 = 430; unpersisted extra total -> 150 + 330 = 480
+    const uoLive: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-uo',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-uo',
+        model: {
+          requests: 2,
+          inputTokens: 300,
+          outputTokens: 130,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 150,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['uo-1', 'uo-2'],
+      successfulRequestExecutionIds: ['uo-1', 'uo-2'],
+    };
+    expect(
+      buildUsageDayTable([uoLive], ledger2, undefined, undefined, uoLive)
+        .get(day)
+        ?.get('m-uo'),
+    ).toMatchObject({ requests: 2, inputTokens: 300, totalTokens: 430 });
+
+    const utLive: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-ut',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-ut',
+        model: {
+          requests: 2,
+          inputTokens: 300,
+          outputTokens: 130,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 480,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['ut-1', 'ut-2'],
+      successfulRequestExecutionIds: ['ut-1', 'ut-2'],
+    };
+    expect(
+      buildUsageDayTable([utLive], ledger2, undefined, undefined, utLive)
+        .get(day)
+        ?.get('m-ut'),
+    ).toMatchObject({ requests: 2, totalTokens: 480 });
+
+    // 8. Cross-day multi-model live session must not emit a 0-token ghost model on today.
+    const prevDay = dayKey(now - MS_PER_DAY);
+    const prevLedgerFile = getTokenUsageFilePath(prevDay.slice(0, 7));
+    fs.appendFileSync(
+      prevLedgerFile,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        id: 'r-ghost-a',
+        timestamp: new Date(now - MS_PER_DAY).toISOString(),
+        localDate: prevDay,
+        localMonth: prevDay.slice(0, 7),
+        sessionId: 's-ghost',
+        model: 'model-yesterday',
+        authType: 'openai',
+        source: 'main',
+        executionId: 'ghost-a1',
+        inputTokens: 100,
+        outputTokens: 50,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 150,
+        apiDurationMs: 10,
+      })}\n`,
+    );
+    const ledger3 = await loadLedgerOrEmpty(prevDay);
+    const ghostLive: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-ghost',
+        timestamp: now,
+        startTime: now - MS_PER_DAY,
+      }),
+      runScoped: true,
+      requestExecutionIds: ['ghost-a1', 'ghost-b1'],
+      successfulRequestExecutionIds: ['ghost-a1', 'ghost-b1'],
+      models: {
+        'model-yesterday': {
+          requests: 1,
+          inputTokens: 100,
+          outputTokens: 50,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 150,
+          totalLatencyMs: 10,
+        },
+        'model-today': {
+          requests: 1,
+          inputTokens: 80,
+          outputTokens: 20,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 100,
+          totalLatencyMs: 10,
+        },
+      },
+    };
+    const ghostTable = buildUsageDayTable(
+      [ghostLive],
+      ledger3,
+      undefined,
+      undefined,
+      ghostLive,
+    );
+    expect(ghostTable.get(day)?.has('model-yesterday')).toBe(false);
+    expect(ghostTable.get(day)?.get('model-today')?.totalTokens).toBe(100);
+    expect(recordTouchesLedgerDays(corruptNoModels, ledger3)).toBe(false);
+
+    // 9. Persisted cache-only with omitted total (1A), persisted omitted total +
+    // unpersisted cache-only (1B), and multiple persisted cache-only + regular (3).
+    fs.appendFileSync(
+      oaiCacheFile,
+      [
+        row('r-1a', 's-1a', 'm-1a', 'openai', 'e-1a', 100, 50, 100, 0, 150),
+        row('r-1b', 's-1b', 'm-1b', 'openai', 'e-1b', 100, 50, 0, 0, 150),
+        row('r-3a', 's-3', 'm-3', 'openai', 'e-3a', 100, 50, 100, 0, 150),
+        row('r-3b', 's-3', 'm-3', 'openai', 'e-3b', 100, 30, 100, 0, 130),
+      ].join('\n') + '\n',
+    );
+    const ledger4 = await loadLedgerOrEmpty(day);
+    const live1a: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-1a',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-1a',
+        model: {
+          requests: 2,
+          inputTokens: 120,
+          outputTokens: 90,
+          cachedTokens: 100,
+          thoughtsTokens: 0,
+          totalTokens: 160,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-1a', 'e-1a-live'],
+      successfulRequestExecutionIds: ['e-1a', 'e-1a-live'],
+    };
+    expect(
+      buildUsageDayTable([live1a], ledger4, undefined, undefined, live1a)
+        .get(day)
+        ?.get('m-1a'),
+    ).toMatchObject({ requests: 2, inputTokens: 220, totalTokens: 310 });
+
+    const live1b: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-1b',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-1b',
+        model: {
+          requests: 2,
+          inputTokens: 100,
+          outputTokens: 90,
+          cachedTokens: 120,
+          thoughtsTokens: 0,
+          totalTokens: 160,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-1b', 'e-1b-live'],
+      successfulRequestExecutionIds: ['e-1b', 'e-1b-live'],
+    };
+    expect(
+      buildUsageDayTable([live1b], ledger4, undefined, undefined, live1b)
+        .get(day)
+        ?.get('m-1b'),
+    ).toMatchObject({ requests: 2, totalTokens: 310 });
+
+    const live3: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-3',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-3',
+        model: {
+          requests: 3,
+          inputTokens: 150,
+          outputTokens: 120,
+          cachedTokens: 200,
+          thoughtsTokens: 0,
+          totalTokens: 470,
+          totalLatencyMs: 30,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-3a', 'e-3b', 'e-3-live'],
+      successfulRequestExecutionIds: ['e-3a', 'e-3b', 'e-3-live'],
+    };
+    expect(
+      buildUsageDayTable([live3], ledger4, undefined, undefined, live3)
+        .get(day)
+        ?.get('m-3'),
+    ).toMatchObject({ requests: 3, inputTokens: 350, totalTokens: 470 });
+
+    // 10. Fifth-round adversarial regressions:
+    // (a) persisted cache-only + unpersisted regular + unpersisted cache-only
+    // (b) persisted OpenAI reasoning + unpersisted cache-only where total === componentFallbackTotal
+    // (c) multi-model live session where one model is 100% persisted (cache-only + 100% cache hit)
+    // (d) single-model mixed persisted cache-only + persisted 100% cache hit + unpersisted regular
+    fs.appendFileSync(
+      oaiCacheFile,
+      [
+        row('r-5a', 's-5a', 'm-5a', 'openai', 'e-5a1', 500, 20, 500, 0, 520),
+        row('r-5b', 's-5b', 'm-5b', 'openai', 'e-5b1', 100, 80, 0, 50, 180),
+        row(
+          'r-5c1',
+          's-5c',
+          'm-5c-done',
+          'openai',
+          'e-5c1',
+          200,
+          20,
+          200,
+          0,
+          220,
+        ),
+        row(
+          'r-5c2',
+          's-5c',
+          'm-5c-done',
+          'openai',
+          'e-5c2',
+          100,
+          0,
+          100,
+          0,
+          100,
+        ),
+        row('r-5d1', 's-5d', 'm-5d', 'openai', 'e-5d1', 100, 10, 100, 0, 110),
+        row('r-5d2', 's-5d', 'm-5d', 'openai', 'e-5d2', 200, 0, 200, 0, 200),
+      ].join('\n') + '\n',
+    );
+    const ledger5 = await loadLedgerOrEmpty(day);
+
+    const live5a: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-5a',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-5a',
+        model: {
+          requests: 3,
+          inputTokens: 600,
+          outputTokens: 80,
+          cachedTokens: 800,
+          thoughtsTokens: 0,
+          totalTokens: 1480,
+          totalLatencyMs: 30,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-5a1', 'e-5a2', 'e-5a3'],
+      successfulRequestExecutionIds: ['e-5a1', 'e-5a2', 'e-5a3'],
+    };
+    expect(
+      buildUsageDayTable([live5a], ledger5, undefined, undefined, live5a)
+        .get(day)
+        ?.get('m-5a'),
+    ).toMatchObject({
+      requests: 3,
+      inputTokens: 1100,
+      cachedTokens: 800,
+      totalTokens: 1480,
+    });
+
+    const live5b: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-5b',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-5b',
+        model: {
+          requests: 2,
+          inputTokens: 100,
+          outputTokens: 140,
+          cachedTokens: 50,
+          thoughtsTokens: 50,
+          totalTokens: 290,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-5b1', 'e-5b2'],
+      successfulRequestExecutionIds: ['e-5b1', 'e-5b2'],
+    };
+    expect(
+      buildUsageDayTable([live5b], ledger5, undefined, undefined, live5b)
+        .get(day)
+        ?.get('m-5b'),
+    ).toMatchObject({ requests: 2, totalTokens: 290 });
+
+    const live5c: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-5c',
+        timestamp: now,
+        startTime: now - 1_000,
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-5c1', 'e-5c2', 'e-5c3'],
+      successfulRequestExecutionIds: ['e-5c1', 'e-5c2', 'e-5c3'],
+      models: {
+        'm-5c-done': {
+          requests: 2,
+          inputTokens: 100,
+          outputTokens: 20,
+          cachedTokens: 300,
+          thoughtsTokens: 0,
+          totalTokens: 320,
+          totalLatencyMs: 20,
+        },
+        'm-5c-live': {
+          requests: 1,
+          inputTokens: 50,
+          outputTokens: 10,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 60,
+          totalLatencyMs: 10,
+        },
+      },
+    };
+    const table5c = buildUsageDayTable(
+      [live5c],
+      ledger5,
+      undefined,
+      undefined,
+      live5c,
+    );
+    expect(table5c.get(day)?.get('m-5c-done')).toMatchObject({
+      requests: 2,
+      inputTokens: 300,
+      totalTokens: 320,
+    });
+    expect(table5c.get(day)?.get('m-5c-live')).toMatchObject({
+      requests: 1,
+      totalTokens: 60,
+    });
+
+    const live5d: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-5d',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-5d',
+        model: {
+          requests: 3,
+          inputTokens: 250,
+          outputTokens: 40,
+          cachedTokens: 300,
+          thoughtsTokens: 0,
+          totalTokens: 390,
+          totalLatencyMs: 30,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-5d1', 'e-5d2', 'e-5d3'],
+      successfulRequestExecutionIds: ['e-5d1', 'e-5d2', 'e-5d3'],
+    };
+    expect(
+      buildUsageDayTable([live5d], ledger5, undefined, undefined, live5d)
+        .get(day)
+        ?.get('m-5d'),
+    ).toMatchObject({ requests: 3, inputTokens: 350, totalTokens: 390 });
+
+    // 11. Sixth-round adversarial regressions:
+    // (1A) OpenAI persisted + unpersisted with toolUsePromptTokens (in former dead zone)
+    // (1B) OpenAI persisted + Gemini unpersisted where total === componentFallbackTotal
+    // (2A) all omitted total + persisted cache-only
+    // (2B) all omitted total + OpenAI thoughts + unpersisted cached
+    // (3) persisted cache-only + single unpersisted 100% cache hit + extra total
+    // (4) NaN metrics / errors ceiling guard
+    // (5) mixed 100% cache hit + cache-only + unpersisted extra total
+    fs.appendFileSync(
+      oaiCacheFile,
+      [
+        row('r-6a', 's-6a', 'm-6a', 'openai', 'e-6a1', 100, 50, 0, 0, 150),
+        row('r-6b', 's-6b', 'm-6b', 'openai', 'e-6b1', 100, 50, 0, 0, 150),
+        row('r-6c', 's-6c', 'm-6c', 'openai', 'e-6c1', 100, 20, 100, 0, 120),
+        row('r-6d', 's-6d', 'm-6d', 'openai', 'e-6d1', 100, 80, 0, 30, 180),
+        row('r-6e', 's-6e', 'm-6e', 'openai', 'e-6e1', 100, 20, 100, 0, 120),
+        row('r-6f1', 's-6f', 'm-6f', 'openai', 'e-6f1', 100, 20, 100, 0, 120),
+        row('r-6f2', 's-6f', 'm-6f', 'openai', 'e-6f2', 200, 20, 200, 0, 220),
+      ].join('\n') + '\n',
+    );
+    const ledger6 = await loadLedgerOrEmpty(day);
+
+    const live6a: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-6a',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-6a',
+        model: {
+          requests: 2,
+          inputTokens: 200,
+          outputTokens: 100,
+          cachedTokens: 0,
+          thoughtsTokens: 40,
+          totalTokens: 320,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-6a1', 'e-6a2'],
+      successfulRequestExecutionIds: ['e-6a1', 'e-6a2'],
+    };
+    expect(
+      buildUsageDayTable([live6a], ledger6, undefined, undefined, live6a)
+        .get(day)
+        ?.get('m-6a'),
+    ).toMatchObject({ requests: 2, totalTokens: 320 });
+
+    const live6b: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-6b',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-6b',
+        model: {
+          requests: 2,
+          inputTokens: 200,
+          outputTokens: 100,
+          cachedTokens: 0,
+          thoughtsTokens: 40,
+          totalTokens: 340,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-6b1', 'e-6b2'],
+      successfulRequestExecutionIds: ['e-6b1', 'e-6b2'],
+    };
+    expect(
+      buildUsageDayTable([live6b], ledger6, undefined, undefined, live6b)
+        .get(day)
+        ?.get('m-6b'),
+    ).toMatchObject({ requests: 2, totalTokens: 340 });
+
+    const live6c: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-6c',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-6c',
+        model: {
+          requests: 2,
+          inputTokens: 50,
+          outputTokens: 30,
+          cachedTokens: 100,
+          thoughtsTokens: 0,
+          totalTokens: 80,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-6c1', 'e-6c2'],
+      successfulRequestExecutionIds: ['e-6c1', 'e-6c2'],
+    };
+    expect(
+      buildUsageDayTable([live6c], ledger6, undefined, undefined, live6c)
+        .get(day)
+        ?.get('m-6c'),
+    ).toMatchObject({ requests: 2, inputTokens: 150, totalTokens: 180 });
+
+    const live6d: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-6d',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-6d',
+        model: {
+          requests: 2,
+          inputTokens: 150,
+          outputTokens: 120,
+          cachedTokens: 50,
+          thoughtsTokens: 40,
+          totalTokens: 310,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-6d1', 'e-6d2'],
+      successfulRequestExecutionIds: ['e-6d1', 'e-6d2'],
+    };
+    expect(
+      buildUsageDayTable([live6d], ledger6, undefined, undefined, live6d)
+        .get(day)
+        ?.get('m-6d'),
+    ).toMatchObject({ requests: 2, totalTokens: 270 });
+
+    const live6e: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-6e',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-6e',
+        model: {
+          requests: 2,
+          inputTokens: 200,
+          outputTokens: 40,
+          cachedTokens: 300,
+          thoughtsTokens: 0,
+          totalTokens: 390,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-6e1', 'e-6e2'],
+      successfulRequestExecutionIds: ['e-6e1', 'e-6e2'],
+    };
+    expect(
+      buildUsageDayTable([live6e], ledger6, undefined, undefined, live6e)
+        .get(day)
+        ?.get('m-6e'),
+    ).toMatchObject({
+      requests: 2,
+      inputTokens: 300,
+      cachedTokens: 300,
+      totalTokens: 390,
+    });
+
+    const live6f: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-6f',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-6f',
+        model: {
+          requests: 3,
+          inputTokens: 150,
+          outputTokens: 50,
+          cachedTokens: 300,
+          thoughtsTokens: 0,
+          totalTokens: 450,
+          totalLatencyMs: 30,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-6f1', 'e-6f2', 'e-6f3'],
+      successfulRequestExecutionIds: ['e-6f1', 'e-6f2', 'e-6f3'],
+    };
+    expect(
+      buildUsageDayTable([live6f], ledger6, undefined, undefined, live6f)
+        .get(day)
+        ?.get('m-6f'),
+    ).toMatchObject({ requests: 3, inputTokens: 350, totalTokens: 450 });
+
+    // NaN live metric must never bypass deduction guards and emit NaN into remaining.
+    const nanLive: UsageSummaryRecord = {
+      ...live6a,
+      models: {
+        'm-6a': {
+          ...live6a.models['m-6a']!,
+          thoughtsTokens: NaN,
+        },
+      },
+    };
+    const nanTable = buildUsageDayTable(
+      [nanLive],
+      ledger6,
+      undefined,
+      undefined,
+      nanLive,
+    );
+    // Conservative fallback retains the raw record without deducting partially.
+    expect(nanTable.get(day)?.get('m-6a')?.requests).toBe(3);
+
+    // 12. Seventh-round adversarial regressions:
+    // (1A) remSuccesses === 0 with errors > 0 must preserve error count/latency without inventing tokens
+    // (1B) remSuccesses === 1 with errors > 0 must still enforce single-response cache invariant
+    // (2) cross-day conflicting fingerprints for one executionId must fail closed
+    fs.appendFileSync(
+      oaiCacheFile,
+      [
+        row(
+          'r-7a1',
+          's-7a',
+          'm-7a1',
+          'gemini-api-key',
+          'e-7a1',
+          100,
+          20,
+          100,
+          0,
+          120,
+        ),
+        row(
+          'r-7a2',
+          's-7a',
+          'm-7a1',
+          'gemini-api-key',
+          'e-7a2',
+          100,
+          20,
+          100,
+          0,
+          120,
+        ),
+        row(
+          'r-7a3',
+          's-7a',
+          'm-7a1',
+          'gemini-api-key',
+          'e-7a3',
+          20,
+          10,
+          20,
+          0,
+          30,
+        ),
+        row(
+          'r-7b1',
+          's-7b',
+          'm-7b',
+          'gemini-api-key',
+          'e-7b1',
+          80,
+          10,
+          80,
+          0,
+          90,
+        ),
+        row(
+          'r-7c-d1',
+          's-7c',
+          'm-7c',
+          'openai',
+          'e-7c-conflict',
+          100,
+          20,
+          0,
+          0,
+          120,
+        ),
+      ].join('\n') + '\n',
+    );
+    fs.appendFileSync(
+      prevLedgerFile,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        id: 'r-7c-d0',
+        timestamp: new Date(now - MS_PER_DAY).toISOString(),
+        localDate: prevDay,
+        localMonth: prevDay.slice(0, 7),
+        sessionId: 's-7c',
+        model: 'm-7c',
+        authType: 'openai',
+        source: 'main',
+        executionId: 'e-7c-conflict',
+        inputTokens: 999,
+        outputTokens: 1,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 1000,
+        apiDurationMs: 10,
+      })}\n`,
+    );
+    const ledger7 = await loadLedgerOrEmpty(prevDay);
+
+    const live7a: UsageSummaryRecord = {
+      ...rec({ sessionId: 's-7a', timestamp: now, startTime: now - 1_000 }),
+      runScoped: true,
+      requestExecutionIds: ['e-7a1', 'e-7a2', 'e-7a3', 'e-7a-err', 'e-7a4'],
+      successfulRequestExecutionIds: ['e-7a1', 'e-7a2', 'e-7a3', 'e-7a4'],
+      models: {
+        'm-7a1': {
+          requests: 4,
+          errors: 1,
+          errorLatencyMs: 50,
+          inputTokens: 120,
+          outputTokens: 50,
+          cachedTokens: 220,
+          thoughtsTokens: 0,
+          totalTokens: 150,
+          totalLatencyMs: 80,
+        },
+        'm-7a2': {
+          requests: 1,
+          inputTokens: 40,
+          outputTokens: 10,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 50,
+          totalLatencyMs: 10,
+        },
+      },
+    };
+    const table7a = buildUsageDayTable(
+      [live7a],
+      ledger7,
+      undefined,
+      undefined,
+      live7a,
+    );
+    expect(table7a.get(day)?.get('m-7a1')).toMatchObject({
+      requests: 4,
+      inputTokens: 220,
+      totalTokens: 270,
+      apiDurationMs: 80,
+    });
+
+    const live7b: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-7b',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-7b',
+        model: {
+          requests: 3,
+          errors: 1,
+          errorLatencyMs: 50,
+          inputTokens: 100,
+          outputTokens: 30,
+          cachedTokens: 130,
+          thoughtsTokens: 0,
+          totalTokens: 90,
+          totalLatencyMs: 70,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-7b1', 'e-7b2', 'e-7b-err'],
+      successfulRequestExecutionIds: ['e-7b1', 'e-7b2'],
+    };
+    expect(
+      buildUsageDayTable([live7b], ledger7, undefined, undefined, live7b)
+        .get(day)
+        ?.get('m-7b'),
+    ).toMatchObject({
+      requests: 3,
+      inputTokens: 180,
+      cachedTokens: 130,
+      totalTokens: 210,
+    });
+
+    const live7c: UsageSummaryRecord = {
+      ...rec({
+        sessionId: 's-7c',
+        timestamp: now,
+        startTime: now - 1_000,
+        modelName: 'm-7c',
+        model: {
+          requests: 2,
+          inputTokens: 200,
+          outputTokens: 40,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 240,
+          totalLatencyMs: 20,
+        },
+      }),
+      runScoped: true,
+      requestExecutionIds: ['e-7c-conflict', 'e-7c-live'],
+      successfulRequestExecutionIds: ['e-7c-conflict', 'e-7c-live'],
+    };
+    // Cross-day conflict fails closed: live7c is kept conservatively without partial deduction.
+    expect(
+      buildUsageDayTable([live7c], ledger7, undefined, undefined, live7c)
+        .get(day)
+        ?.get('m-7c')?.requests,
+    ).toBe(3);
+  });
+
+  it('matches mixed regular, cache-only, omitted-total, and cross-timezone ledger rows', async () => {
+    const now = Date.parse('2026-06-15T04:00:00.000Z');
+    const recordDay = dayKey(now);
+    const ledgerPrevDay = dayKey(now - MS_PER_DAY);
+    const ledgerFile = getTokenUsageFilePath(ledgerPrevDay.slice(0, 7));
+    fs.mkdirSync(path.dirname(ledgerFile), { recursive: true });
+    fs.writeFileSync(
+      ledgerFile,
+      [
+        // Mixed regular + cache-only on one model
+        {
+          schemaVersion: 1,
+          id: 'mix-1',
+          timestamp: new Date(now).toISOString(),
+          localDate: recordDay,
+          localMonth: recordDay.slice(0, 7),
+          sessionId: 'mix-cache',
+          model: 'qwen-max',
+          authType: 'openai',
+          source: 'main',
+          executionId: 'mix-reg',
+          inputTokens: 1000,
+          outputTokens: 100,
+          cachedTokens: 200,
+          thoughtsTokens: 0,
+          totalTokens: 1100,
+          apiDurationMs: 10,
+        },
+        {
+          schemaVersion: 1,
+          id: 'mix-2',
+          timestamp: new Date(now).toISOString(),
+          localDate: recordDay,
+          localMonth: recordDay.slice(0, 7),
+          sessionId: 'mix-cache',
+          model: 'qwen-max',
+          authType: 'openai',
+          source: 'main',
+          executionId: 'mix-co',
+          inputTokens: 500,
+          outputTokens: 50,
+          cachedTokens: 500,
+          thoughtsTokens: 0,
+          totalTokens: 550,
+          apiDurationMs: 10,
+        },
+        // OpenAI cache-only + reasoning with omitted total_token_count (0)
+        {
+          schemaVersion: 1,
+          id: 'co-reason-1',
+          timestamp: new Date(now).toISOString(),
+          localDate: recordDay,
+          localMonth: recordDay.slice(0, 7),
+          sessionId: 'co-reason',
+          model: 'qwen-max',
+          authType: 'openai',
+          source: 'main',
+          executionId: 'co-reason-exec',
+          inputTokens: 500,
+          outputTokens: 100,
+          cachedTokens: 500,
+          thoughtsTokens: 40,
+          totalTokens: 600,
+          apiDurationMs: 10,
+        },
+        // Mixed reported total + omitted total on OpenAI
+        {
+          schemaVersion: 1,
+          id: 'mix-tot-1',
+          timestamp: new Date(now).toISOString(),
+          localDate: recordDay,
+          localMonth: recordDay.slice(0, 7),
+          sessionId: 'mix-tot',
+          model: 'qwen-max',
+          authType: 'openai',
+          source: 'main',
+          executionId: 'mix-tot-a',
+          inputTokens: 100,
+          outputTokens: 80,
+          cachedTokens: 0,
+          thoughtsTokens: 30,
+          totalTokens: 180,
+          apiDurationMs: 10,
+        },
+        {
+          schemaVersion: 1,
+          id: 'mix-tot-2',
+          timestamp: new Date(now).toISOString(),
+          localDate: recordDay,
+          localMonth: recordDay.slice(0, 7),
+          sessionId: 'mix-tot',
+          model: 'qwen-max',
+          authType: 'openai',
+          source: 'main',
+          executionId: 'mix-tot-b',
+          inputTokens: 200,
+          outputTokens: 60,
+          cachedTokens: 0,
+          thoughtsTokens: 20,
+          totalTokens: 260,
+          apiDurationMs: 10,
+        },
+        // Cross-timezone: ledger wrote previous localDate while reader sees recordDay
+        {
+          schemaVersion: 1,
+          id: 'tz-1',
+          timestamp: new Date(now).toISOString(),
+          localDate: ledgerPrevDay,
+          localMonth: ledgerPrevDay.slice(0, 7),
+          sessionId: 'tz-sess',
+          model: 'qwen-max',
+          authType: 'openai',
+          source: 'main',
+          executionId: 'tz-exec',
+          inputTokens: 800,
+          outputTokens: 200,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 1000,
+          apiDurationMs: 10,
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join('\n') + '\n',
+    );
+    const ledger = await loadLedgerOrEmpty(ledgerPrevDay);
+    const records: UsageSummaryRecord[] = [
+      {
+        ...rec({
+          sessionId: 'mix-cache',
+          timestamp: now,
+          startTime: now - 1_000,
+          model: {
+            requests: 2,
+            inputTokens: 1000,
+            outputTokens: 150,
+            cachedTokens: 700,
+            thoughtsTokens: 0,
+            totalTokens: 1650,
+          },
+        }),
+        runScoped: true,
+        requestExecutionIds: ['mix-reg', 'mix-co'],
+        successfulRequestExecutionIds: ['mix-reg', 'mix-co'],
+      },
+      {
+        ...rec({
+          sessionId: 'co-reason',
+          timestamp: now,
+          startTime: now - 1_000,
+          model: {
+            requests: 1,
+            inputTokens: 0,
+            outputTokens: 100,
+            cachedTokens: 500,
+            thoughtsTokens: 40,
+            totalTokens: 0,
+          },
+        }),
+        runScoped: true,
+        requestExecutionIds: ['co-reason-exec'],
+        successfulRequestExecutionIds: ['co-reason-exec'],
+      },
+      {
+        ...rec({
+          sessionId: 'mix-tot',
+          timestamp: now,
+          startTime: now - 1_000,
+          model: {
+            requests: 2,
+            inputTokens: 300,
+            outputTokens: 140,
+            cachedTokens: 0,
+            thoughtsTokens: 50,
+            totalTokens: 180,
+          },
+        }),
+        runScoped: true,
+        requestExecutionIds: ['mix-tot-a', 'mix-tot-b'],
+        successfulRequestExecutionIds: ['mix-tot-a', 'mix-tot-b'],
+      },
+      {
+        ...rec({
+          sessionId: 'tz-sess',
+          timestamp: now,
+          startTime: now,
+          model: {
+            requests: 1,
+            inputTokens: 800,
+            outputTokens: 200,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 1000,
+          },
+        }),
+        runScoped: true,
+        requestExecutionIds: ['tz-exec'],
+        successfulRequestExecutionIds: ['tz-exec'],
+      },
+    ];
+    const dash = buildUsageDashboard(records, { range: 'all' }, ledger);
+    expect(dash.summary).toMatchObject({
+      requests: 6,
+      totalTokens: 3690,
+    });
+  });
+
+  it('bounds heatmapDays=1 to today only', async () => {
+    const now = Date.now();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    seed([
+      rec({ sessionId: 'today', timestamp: now, model: { totalTokens: 100 } }),
+      rec({
+        sessionId: 'yesterday',
+        timestamp: yesterday.getTime(),
+        model: { totalTokens: 200 },
+      }),
+    ]);
+    const dash = await loadUsageDashboard({ heatmapDays: 1 });
+    expect(Object.keys(dash.heatmap)).toEqual([dayKey(now)]);
   });
 
   it('returns zeros for an empty history', async () => {

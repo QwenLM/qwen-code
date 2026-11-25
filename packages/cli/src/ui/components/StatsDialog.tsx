@@ -100,11 +100,12 @@ export function buildCurrentSessionRecord(
   metrics: import('@qwen-code/qwen-code-core').SessionMetrics,
 ) {
   if (!hasRunActivity(metrics)) return undefined;
+  const startMs = startTime.getTime();
   return metricsToRunUsageRecord(
     sessionId,
     project,
-    startTime.getTime(),
-    Date.now(),
+    startMs,
+    Math.max(startMs, Date.now()),
     metrics,
   );
 }

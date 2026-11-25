@@ -757,7 +757,18 @@ export async function loadTokenUsageDailyByModel(
           table.set(day, destination);
         }
         for (const [model, totals] of byModel) {
-          destination.set(model, { ...totals });
+          const existing = destination.get(model);
+          if (existing) {
+            existing.requests += totals.requests;
+            existing.inputTokens += totals.inputTokens;
+            existing.outputTokens += totals.outputTokens;
+            existing.cachedTokens += totals.cachedTokens;
+            existing.thoughtsTokens += totals.thoughtsTokens;
+            existing.totalTokens += totals.totalTokens;
+            existing.apiDurationMs += totals.apiDurationMs;
+          } else {
+            destination.set(model, { ...totals });
+          }
         }
       }
     } else {

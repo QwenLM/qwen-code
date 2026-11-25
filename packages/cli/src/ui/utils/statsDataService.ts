@@ -4,30 +4,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type {
+  AggregatedReport,
+  TimeRange,
+  UsageSummaryRecord,
+} from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
 import {
-  loadUsageHistory,
   aggregateUsage,
   dedupBySessionId,
-  getTranscriptScope,
   getTimeRangeBounds,
+  getTranscriptScope,
+  loadUsageHistory,
+  projectKeysFromRecords,
+} from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
+import {
+  isCompleteLedgerExecutionEvidence,
+  type TokenUsageCompletedMonthCache,
+  type TokenUsageDailyByModel,
+} from '@qwen-code/qwen-code-core/services/tokenUsageService.js';
+import {
   buildUsageDayTable,
   filterUsageRecordsByLocalDay,
-  sumUsageWindowByModel,
   loadLedgerOrEmpty,
   localDateKey,
   modelTokens,
-  type AggregatedReport,
-  type TimeRange,
-  type TokenUsageCompletedMonthCache,
-  type TokenUsageDailyByModel,
-  type UsageDayModelTable,
-  type UsageSummaryRecord,
-} from '@qwen-code/qwen-code-core';
-import {
   recordTouchesLedgerDays,
   setLedgerTranscriptScope,
+  sumUsageWindowByModel,
+  type UsageDayModelTable,
 } from '@qwen-code/qwen-code-core/services/usage-dashboard-service.js';
-import { projectKeysFromRecords } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
 
 /** Pending opens coalesce; only immutable completed months are retained. */
 const pendingLedgerLoads = new Map<string, Promise<TokenUsageDailyByModel>>();
@@ -294,6 +299,7 @@ function canUseLedgerDelta(
 ): boolean {
   return !records.some(
     (record) =>
+      record.models &&
       Object.values(record.models).some(
         (model) =>
           model.requests > 0 ||
@@ -308,7 +314,6 @@ function canUseLedgerDelta(
         record,
         ledgerDaily,
         sortedLedgerDays,
-        undefined,
         currentSession,
       ),
   );
@@ -381,7 +386,10 @@ export async function loadStatsData(
       ? prevStartKey
       : currentStartKey;
   const firstRecordStart = records.reduce(
-    (earliest, record) => Math.min(earliest, record.startTime),
+    (earliest, record) =>
+      Number.isFinite(record.startTime) && record.startTime > 0
+        ? Math.min(earliest, record.startTime)
+        : earliest,
     start.getTime(),
   );
   const firstRecordKey = localDateKey(firstRecordStart);
@@ -390,11 +398,25 @@ export async function loadStatsData(
   const ledgerDaily = await loadLedgerShared(ledgerStartKey);
   setLedgerTranscriptScope(ledgerDaily, transcriptScope);
   const sortedLedgerDays = [...ledgerDaily.keys()].sort();
+  let scopedEvidenceDaily: TokenUsageDailyByModel | undefined;
+  if (currentSession && !isCompleteLedgerExecutionEvidence(ledgerDaily)) {
+    const currentSessionKey =
+      Number.isFinite(currentSession.startTime) && currentSession.startTime > 0
+        ? localDateKey(currentSession.startTime)
+        : currentEndKey;
+    const paddedSessionKey = addLocalDays(currentSessionKey, -1);
+    const scopedStartKey =
+      paddedSessionKey > ledgerStartKey ? paddedSessionKey : currentSessionKey;
+    if (scopedStartKey > ledgerStartKey) {
+      scopedEvidenceDaily = await loadLedgerShared(scopedStartKey);
+      setLedgerTranscriptScope(scopedEvidenceDaily, transcriptScope);
+    }
+  }
   const table = buildUsageDayTable(
     records,
     ledgerDaily,
     sortedLedgerDays,
-    undefined,
+    scopedEvidenceDaily,
     currentSession,
   );
   const report = aggregateUsage(

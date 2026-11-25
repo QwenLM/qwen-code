@@ -374,10 +374,12 @@ function splitTranscriptObjects(line: string): string[] {
       if (c === '{' && depth === 0) start = i;
       depth++;
     } else if (c === '}' || c === ']') {
-      depth--;
-      if (c === '}' && depth === 0 && start >= 0) {
-        records.push(line.slice(start, i + 1));
-        start = -1;
+      if (depth > 0) {
+        depth--;
+        if (c === '}' && depth === 0 && start >= 0) {
+          records.push(line.slice(start, i + 1));
+          start = -1;
+        }
       }
     }
   }
@@ -501,8 +503,8 @@ async function summarizeTranscriptFile(
       string,
       ReadonlyArray<{ start: number; end: number }>
     >;
-    readNow?: number;
-    supplementalTranscriptPaths?: ReadonlyMap<string, string>;
+    expectedSupplementalKey?: string;
+    rejectedSupplemental?: boolean;
   },
 ): Promise<TranscriptSummary> {
   const telemetry = new UiTelemetryService();
@@ -526,6 +528,8 @@ async function summarizeTranscriptFile(
   let hasEvents = false;
   let firstEventTime: number | undefined;
   let latestEventTime: number | undefined;
+  let maxObservedTime: number | undefined;
+  let hasUnreadableTime = false;
   let header: ChatRecord | null = null;
   let lastLine = '';
   let lastTsFallback: string | undefined;
@@ -580,6 +584,11 @@ async function summarizeTranscriptFile(
           // lines. Tolerant of non-compact writers (spaces around the colon).
           const ts = extractJsonStringField(line, 'timestamp');
           const rowTime = ts === undefined ? NaN : Date.parse(ts);
+          if (Number.isFinite(rowTime)) {
+            maxObservedTime = Math.max(maxObservedTime ?? rowTime, rowTime);
+          } else {
+            hasUnreadableTime = true;
+          }
           if (!header) {
             const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
             if (recs.length > 0) {
@@ -591,12 +600,12 @@ async function summarizeTranscriptFile(
                   candidateHeader.sessionId &&
                   typeof candidateHeader.cwd === 'string'
                 ) {
-                  const supplementalKey =
-                    projectScope.supplementalTranscriptPaths?.get(filePath);
+                  const supplementalKey = projectScope.expectedSupplementalKey;
                   if (
                     supplementalKey !== undefined &&
                     supplementalKey !== key
                   ) {
+                    projectScope.rejectedSupplemental = true;
                     return null;
                   }
                   replayProjectKey = key;
@@ -688,6 +697,14 @@ async function summarizeTranscriptFile(
               const effectiveTime = Number.isFinite(eventTime)
                 ? eventTime
                 : rowTime;
+              if (Number.isFinite(effectiveTime)) {
+                maxObservedTime = Math.max(
+                  maxObservedTime ?? effectiveTime,
+                  effectiveTime,
+                );
+              } else {
+                hasUnreadableTime = true;
+              }
               const isPostRunTool =
                 effectiveAfterMs !== undefined &&
                 Number.isFinite(effectiveAfterMs) &&
@@ -932,6 +949,8 @@ async function summarizeTranscriptFile(
       ? JSON.stringify([...effectiveExcludedRequestIds].sort())
       : undefined,
     futureOwnedRequestIdsKey: projectScope?.futureOwnedRequestIdsKey,
+    maxObservedTime,
+    hasUnreadableTime,
     record,
     ...(supplements.length > 0 ? { supplements } : {}),
   };
@@ -1168,6 +1187,8 @@ type TranscriptSummary = {
   afterMs?: number;
   excludedRequestIdsKey?: string;
   futureOwnedRequestIdsKey?: string;
+  maxObservedTime?: number;
+  hasUnreadableTime?: boolean;
   record: UsageSummaryRecord | null;
   supplements?: UsageSummaryRecord[];
 } | null;
@@ -1423,15 +1444,27 @@ async function rebuildFromSessionJsonl(
 
   const projectKeysBySession = new Map<string, Set<string>>();
   const coveredProjectKeysBySession = new Map<string, Set<string>>();
+  const maxCumulativeTimestampByKey = new Map<string, number>();
   for (const record of knownRecords) {
+    const key = projectSessionKey(record);
     const keys =
       projectKeysBySession.get(record.sessionId) ?? new Set<string>();
-    keys.add(projectSessionKey(record));
+    keys.add(key);
     projectKeysBySession.set(record.sessionId, keys);
-    if (skipSessionIds?.has(projectSessionKey(record))) {
+    if (
+      record.runScoped !== true &&
+      record.transcriptRebuild !== true &&
+      Number.isFinite(record.timestamp)
+    ) {
+      const prior = maxCumulativeTimestampByKey.get(key);
+      if (prior === undefined || record.timestamp > prior) {
+        maxCumulativeTimestampByKey.set(key, record.timestamp);
+      }
+    }
+    if (skipSessionIds?.has(key)) {
       const coveredKeys =
         coveredProjectKeysBySession.get(record.sessionId) ?? new Set<string>();
-      coveredKeys.add(projectSessionKey(record));
+      coveredKeys.add(key);
       coveredProjectKeysBySession.set(record.sessionId, coveredKeys);
     }
   }
@@ -1555,7 +1588,11 @@ async function rebuildFromSessionJsonl(
     }
   }
 
-  const replayCandidates: Array<{ filePath: string; stats: fs.Stats }> = [];
+  const replayCandidates: Array<{
+    filePath: string;
+    stats: fs.Stats;
+    usedSupplementalExemption: boolean;
+  }> = [];
   for (const { filePath, stats: priorStats } of candidates) {
     const sessionId = path.basename(filePath, '.jsonl');
     if (
@@ -1567,12 +1604,31 @@ async function rebuildFromSessionJsonl(
     ) {
       const authorizedKeys = coveredProjectKeysBySession.get(sessionId);
       const cached = cachedReplayFile(filePath);
+      const authorizedKey =
+        authorizedKeys?.size === 1 ? [...authorizedKeys][0] : undefined;
+      const maxCumulative =
+        authorizedKey !== undefined
+          ? maxCumulativeTimestampByKey.get(authorizedKey)
+          : undefined;
+      const cachedRecord = cached?.summarized?.record;
+      const hasNewerSnapshot =
+        (cached?.summarized?.supplements?.length ?? 0) > 0 ||
+        (cachedRecord !== undefined &&
+          cachedRecord !== null &&
+          (maxCumulative === undefined ||
+            cachedRecord.timestamp > maxCumulative));
       if (
-        authorizedKeys?.size === 1 &&
-        cached?.projectKey === [...authorizedKeys][0] &&
+        authorizedKey !== undefined &&
+        cached?.projectKey === authorizedKey &&
         cached.mtimeMs === priorStats?.mtimeMs &&
-        cached.size === priorStats?.size
+        cached.size === priorStats?.size &&
+        cached.beforeMs === undefined &&
+        cached.afterMs === undefined &&
+        cached.excludedRequestIdsKey === undefined &&
+        cached.futureOwnedRequestIdsKey === undefined &&
+        !hasNewerSnapshot
       ) {
+        if (nextCache) nextCache.set(filePath, cached);
         continue;
       }
     }
@@ -1595,14 +1651,15 @@ async function rebuildFromSessionJsonl(
     }
     // An explicitly requested run may need an older boundary supplement;
     // unrelated unrecorded transcripts still honor the trailing window.
-    if (
-      sinceMs !== undefined &&
-      stats.mtimeMs < sinceMs &&
-      !supplementalTranscriptPaths?.has(filePath)
-    ) {
+    const outsideTrailingWindow =
+      sinceMs !== undefined && stats.mtimeMs < sinceMs;
+    const usedSupplementalExemption =
+      outsideTrailingWindow &&
+      (supplementalTranscriptPaths?.has(filePath) ?? false);
+    if (outsideTrailingWindow && !usedSupplementalExemption) {
       continue;
     }
-    replayCandidates.push({ filePath, stats });
+    replayCandidates.push({ filePath, stats, usedSupplementalExemption });
   }
 
   // Phase 2 — summarize each candidate (replay-cache hit or selective scan)
@@ -1612,9 +1669,11 @@ async function rebuildFromSessionJsonl(
   let cursor = 0;
   const worker = async (): Promise<void> => {
     while (cursor < replayCandidates.length) {
-      const { filePath, stats } = replayCandidates[cursor++]!;
+      const { filePath, stats, usedSupplementalExemption } =
+        replayCandidates[cursor++]!;
       try {
         let summarized: TranscriptSummary;
+        let rejectedSupplemental = false;
         const sessionId = path.basename(filePath, '.jsonl');
         const authorizedKeys = coveredTranscriptPathsBySession
           .get(sessionId)
@@ -1656,34 +1715,42 @@ async function rebuildFromSessionJsonl(
           cached.excludedRequestIdsKey === excludedRequestIdsKey &&
           cached.futureOwnedRequestIdsKey ===
             cached.summarized?.futureOwnedRequestIdsKey &&
+          (!usedSupplementalExemption ||
+            supplementalTranscriptPaths?.get(filePath) === cached.projectKey) &&
           (cached.beforeMs === beforeMs ||
             (cached.beforeMs === undefined &&
               beforeMs !== undefined &&
               cached.summarized?.record?.transcriptRebuild === true &&
-              cached.summarized.record.timestamp < beforeMs))
+              cached.summarized.hasUnreadableTime !== true &&
+              cached.summarized.maxObservedTime !== undefined &&
+              cached.summarized.maxObservedTime < beforeMs))
         ) {
           summarized = cached.summarized;
         } else {
+          const scopeArgs = {
+            beforeMsBySession,
+            afterMsBySession,
+            knownRequestIdsBySession,
+            callerBeforeMs: replayBoundariesByCaller?.get(sessionId),
+            callerProjectRoot: currentProjectRoot,
+            futureOwnedRequestIdsBySession,
+            futureOwnedRequestKeysBySession: futureOwnerKeysBySession,
+            futureWindowsBySession,
+            expectedSupplementalKey: usedSupplementalExemption
+              ? supplementalTranscriptPaths?.get(filePath)
+              : undefined,
+            rejectedSupplemental: false,
+          };
           summarized = await summarizeTranscriptFile(
             filePath,
             beforeMs,
             afterMs,
             excludedRequestIds,
-            {
-              beforeMsBySession,
-              afterMsBySession,
-              knownRequestIdsBySession,
-              callerBeforeMs: replayBoundariesByCaller?.get(sessionId),
-              callerProjectRoot: currentProjectRoot,
-              futureOwnedRequestIdsBySession,
-              futureOwnedRequestKeysBySession: futureOwnerKeysBySession,
-              futureWindowsBySession,
-              readNow,
-              supplementalTranscriptPaths,
-            },
+            scopeArgs,
           );
+          rejectedSupplemental = scopeArgs.rejectedSupplemental === true;
         }
-        if (nextCache) {
+        if (nextCache && !rejectedSupplemental) {
           nextCache.set(filePath, {
             mtimeMs: stats.mtimeMs,
             size: stats.size,
@@ -1847,7 +1914,7 @@ function withCoveredRunSkills(
     skills: {
       ...source.skills,
       byName: Object.fromEntries(
-        Object.entries(source.skills.byName).map(([name, metrics]) => [
+        Object.entries(source.skills.byName ?? {}).map(([name, metrics]) => [
           name,
           { ...metrics },
         ]),
@@ -1913,6 +1980,7 @@ function rebuildCoversRun(
     'thoughtsTokens',
     'totalTokens',
   ] as const;
+  if (!run.models || !rebuilt.models) return false;
   return (
     Object.entries(run.models).every(([model, counters]) => {
       const full = rebuilt.models[model];
@@ -2073,7 +2141,9 @@ export function dedupBySessionId(
             skills.totalCalls += run.skills.totalCalls;
             skills.totalSuccess += run.skills.totalSuccess;
             skills.totalFail += run.skills.totalFail;
-            for (const [name, metrics] of Object.entries(run.skills.byName)) {
+            for (const [name, metrics] of Object.entries(
+              run.skills.byName ?? {},
+            )) {
               const current = skills.byName[name];
               skills.byName[name] = {
                 count: (current?.count ?? 0) + metrics.count,
@@ -2174,17 +2244,29 @@ export function identifiedConsumptionKey(
 }
 
 function byNameCoverage(
-  byName: Record<string, { count: number; success: number; fail: number }>,
+  byName:
+    | Record<string, { count: number; success: number; fail: number }>
+    | undefined,
 ): number {
+  if (!byName || typeof byName !== 'object') return 0;
   return Object.values(byName).reduce(
-    (total, metrics) => total + metrics.count + metrics.success + metrics.fail,
+    (total, metrics) =>
+      metrics
+        ? total +
+          (metrics.count ?? 0) +
+          (metrics.success ?? 0) +
+          (metrics.fail ?? 0)
+        : total,
     0,
   );
 }
 
-function toolDurationCoverage(tools: UsageSummaryRecord['tools']): number {
+function toolDurationCoverage(
+  tools: UsageSummaryRecord['tools'] | undefined,
+): number {
+  if (!tools?.byName || typeof tools.byName !== 'object') return 0;
   return Object.values(tools.byName).reduce(
-    (total, metrics) => total + (metrics.totalDurationMs ?? 0),
+    (total, metrics) => total + (metrics?.totalDurationMs ?? 0),
     0,
   );
 }
@@ -2280,17 +2362,19 @@ export function deduplicateIdentifiedRootHistory(
     };
     const toolSource = [...group].sort(
       (a, b) =>
-        b.tools.totalCalls - a.tools.totalCalls ||
-        b.tools.totalSuccess - a.tools.totalSuccess ||
-        b.tools.totalFail - a.tools.totalFail ||
-        byNameCoverage(b.tools.byName) - byNameCoverage(a.tools.byName) ||
-        toolDurationCoverage(b.tools) - toolDurationCoverage(a.tools),
+        (b.tools?.totalCalls ?? 0) - (a.tools?.totalCalls ?? 0) ||
+        (b.tools?.totalSuccess ?? 0) - (a.tools?.totalSuccess ?? 0) ||
+        (b.tools?.totalFail ?? 0) - (a.tools?.totalFail ?? 0) ||
+        byNameCoverage(b.tools?.byName ?? {}) -
+          byNameCoverage(a.tools?.byName ?? {}) ||
+        (b.tools ? toolDurationCoverage(b.tools) : 0) -
+          (a.tools ? toolDurationCoverage(a.tools) : 0),
     )[0]!;
     const fileSource = [...group].sort(
       (a, b) =>
-        b.files.linesAdded +
-        b.files.linesRemoved -
-        (a.files.linesAdded + a.files.linesRemoved),
+        (b.files?.linesAdded ?? 0) +
+        (b.files?.linesRemoved ?? 0) -
+        ((a.files?.linesAdded ?? 0) + (a.files?.linesRemoved ?? 0)),
     )[0]!;
     const skillSource = [...group].sort(
       (a, b) =>
@@ -2301,23 +2385,26 @@ export function deduplicateIdentifiedRootHistory(
           byNameCoverage(a.skills?.byName ?? {}),
     )[0]!;
     merged.tools = {
-      ...toolSource.tools,
+      totalCalls: toolSource.tools?.totalCalls ?? 0,
+      totalSuccess: toolSource.tools?.totalSuccess ?? 0,
+      totalFail: toolSource.tools?.totalFail ?? 0,
       byName: Object.fromEntries(
-        Object.entries(toolSource.tools.byName).map(([name, metrics]) => [
-          name,
-          { ...metrics },
-        ]),
+        Object.entries(toolSource.tools?.byName ?? {}).map(
+          ([name, metrics]) => [name, { ...metrics }],
+        ),
       ),
     };
-    merged.files = { ...fileSource.files };
+    merged.files = {
+      linesAdded: fileSource.files?.linesAdded ?? 0,
+      linesRemoved: fileSource.files?.linesRemoved ?? 0,
+    };
     if (skillSource.skills) {
       merged.skills = {
         ...skillSource.skills,
         byName: Object.fromEntries(
-          Object.entries(skillSource.skills.byName).map(([name, metrics]) => [
-            name,
-            { ...metrics },
-          ]),
+          Object.entries(skillSource.skills.byName ?? {}).map(
+            ([name, metrics]) => [name, { ...metrics }],
+          ),
         ),
       };
     }
@@ -2889,11 +2976,13 @@ export async function loadUsageHistoryWithLive(options?: {
     : merged;
 }
 
-export function getTimeRangeBounds(range: TimeRange): {
+export function getTimeRangeBounds(
+  range: TimeRange,
+  now: Date = new Date(),
+): {
   start: Date;
   end: Date;
 } {
-  const now = new Date();
   const end = now;
   let start: Date;
   switch (range) {
@@ -3006,7 +3095,7 @@ export function aggregateUsage(
 
     if (r.skills && r.transcriptSupplement !== true) {
       totalSkillCalls += r.skills.totalCalls;
-      for (const [name, s] of Object.entries(r.skills.byName)) {
+      for (const [name, s] of Object.entries(r.skills.byName ?? {})) {
         const existing = skillCounts.get(name);
         if (existing) {
           existing.count += s.count;

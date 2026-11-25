@@ -14,24 +14,42 @@ import type {
   TokenUsageDailyByModel,
 } from '@qwen-code/qwen-code-core';
 
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
-  return {
-    ...actual,
-    loadUsageHistory: vi.fn(),
-    dedupBySessionId: vi.fn(actual.dedupBySessionId),
-    // Default: no ledger coverage, so records drive every field. Without this
-    // the real loader would read the developer's own ~/.qwen/usage.
-    loadLedgerOrEmpty: vi.fn(async () => new Map()),
-  };
-});
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usageHistoryService.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/usageHistoryService.js')
+      >();
+    return {
+      ...actual,
+      loadUsageHistory: vi.fn(),
+      dedupBySessionId: vi.fn(actual.dedupBySessionId),
+    };
+  },
+);
+
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usage-dashboard-service.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/usage-dashboard-service.js')
+      >();
+    return {
+      ...actual,
+      // Default: no ledger coverage, so records drive every field. Without this
+      // the real loader would read the developer's own ~/.qwen/usage.
+      loadLedgerOrEmpty: vi.fn(async () => new Map()),
+    };
+  },
+);
 
 import {
   dedupBySessionId,
   loadUsageHistory,
-  loadLedgerOrEmpty,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
+import { loadLedgerOrEmpty } from '@qwen-code/qwen-code-core/services/usage-dashboard-service.js';
 import {
   loadStatsData,
   computeDelta,
@@ -979,10 +997,15 @@ describe('loadStatsData — per-request ledger accounting', () => {
     process.env['QWEN_HOME'] = fixtureHome;
     process.env['QWEN_RUNTIME_DIR'] = fixtureHome;
     try {
-      const core = await vi.importActual<
-        typeof import('@qwen-code/qwen-code-core')
-      >('@qwen-code/qwen-code-core');
-      vi.mocked(loadLedgerOrEmpty).mockImplementation(core.loadLedgerOrEmpty);
+      const dashboard = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/services/usage-dashboard-service.js')
+      >('@qwen-code/qwen-code-core/services/usage-dashboard-service.js');
+      const tokenUsage = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/services/tokenUsageService.js')
+      >('@qwen-code/qwen-code-core/services/tokenUsageService.js');
+      vi.mocked(loadLedgerOrEmpty).mockImplementation(
+        dashboard.loadLedgerOrEmpty,
+      );
       const now = Date.now();
       const localDate = dayKey(now);
       const responseRecord = (sessionId: string, ids: string[]) =>
@@ -1026,7 +1049,7 @@ describe('loadStatsData — per-request ledger accounting', () => {
             apiDurationMs: 0,
           })),
         );
-        const file = core.getTokenUsageFilePath(localDate.slice(0, 7));
+        const file = tokenUsage.getTokenUsageFilePath(localDate.slice(0, 7));
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(
           file,
@@ -1055,6 +1078,152 @@ describe('loadStatsData — per-request ledger accounting', () => {
       ).toBe(400);
       expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledTimes(2);
     } finally {
+      if (previousHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousHome;
+      if (previousRuntime === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = previousRuntime;
+      fs.rmSync(fixtureHome, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps active session exact coverage when older ledger history exceeds the evidence budget', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 15, 12, 0, 0));
+    const fixtureHome = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-stats-budget-'),
+    );
+    const previousHome = process.env['QWEN_HOME'];
+    const previousRuntime = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_HOME'] = fixtureHome;
+    process.env['QWEN_RUNTIME_DIR'] = fixtureHome;
+    try {
+      const dashboard = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/services/usage-dashboard-service.js')
+      >('@qwen-code/qwen-code-core/services/usage-dashboard-service.js');
+      const tokenUsage = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/services/tokenUsageService.js')
+      >('@qwen-code/qwen-code-core/services/tokenUsageService.js');
+      vi.mocked(loadLedgerOrEmpty).mockImplementation(
+        dashboard.loadLedgerOrEmpty,
+      );
+      const now = Date.now();
+      const today = dayKey(now);
+      const oldDate = new Date(now);
+      oldDate.setMonth(oldDate.getMonth() - 2);
+      const oldDay = dayKey(oldDate.getTime());
+      const oldFile = tokenUsage.getTokenUsageFilePath(oldDay.slice(0, 7));
+      fs.mkdirSync(path.dirname(oldFile), { recursive: true });
+      const oldLines: string[] = [];
+      for (let i = 0; i < 10_005; i++) {
+        oldLines.push(
+          JSON.stringify({
+            schemaVersion: 1,
+            id: `old-${i}`,
+            timestamp: oldDate.toISOString(),
+            localDate: oldDay,
+            localMonth: oldDay.slice(0, 7),
+            sessionId: `old-sess-${i % 20}`,
+            model: 'qwen-max',
+            authType: 'openai',
+            source: 'main',
+            executionId: `old-exec-${i}`,
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 1,
+            apiDurationMs: 0,
+          }),
+        );
+      }
+      fs.writeFileSync(oldFile, `${oldLines.join('\n')}\n`);
+
+      const todayFile = tokenUsage.getTokenUsageFilePath(today.slice(0, 7));
+      fs.mkdirSync(path.dirname(todayFile), { recursive: true });
+      fs.writeFileSync(
+        todayFile,
+        `${JSON.stringify({
+          schemaVersion: 1,
+          id: 'today-1',
+          timestamp: new Date(now).toISOString(),
+          localDate: today,
+          localMonth: today.slice(0, 7),
+          sessionId: 'active-today',
+          model: 'qwen-max',
+          authType: 'openai',
+          source: 'main',
+          executionId: 'active-req-1',
+          inputTokens: 100,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 100,
+          apiDurationMs: 0,
+        })}\n`,
+      );
+
+      mockedLoadUsageHistory.mockResolvedValue([
+        makeRecord({
+          sessionId: 'old-persisted',
+          startTime: oldDate.getTime(),
+          timestamp: oldDate.getTime() + 1000,
+        }),
+        makeRecord({
+          sessionId: 'corrupt-start',
+          startTime: NaN,
+          timestamp: oldDate.getTime() + 2000,
+        }),
+        makeRecord({
+          sessionId: 'zero-start',
+          startTime: 0,
+          timestamp: oldDate.getTime() + 3000,
+        }),
+        {
+          ...makeRecord({
+            sessionId: 'corrupt-missing-models',
+            startTime: oldDate.getTime(),
+            timestamp: oldDate.getTime() + 4000,
+          }),
+          models: undefined,
+        } as unknown as UsageSummaryRecord,
+      ]);
+      const live = makeRecord({
+        sessionId: 'active-today',
+        startTime: now - 1000,
+        timestamp: now,
+        runScoped: true,
+        requestExecutionIds: ['active-req-1'],
+        successfulRequestExecutionIds: ['active-req-1'],
+        totalLatencyMs: 0,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 100,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 100,
+          },
+        },
+      });
+      const result = await loadStatsData('today', live);
+      expect(reportTokens(result.report)).toBe(100);
+      expect(result.report.totalRequests).toBe(1);
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenNthCalledWith(
+        1,
+        oldDay,
+        expect.any(Map),
+      );
+      expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenNthCalledWith(
+        2,
+        dayKey(yesterday.getTime()),
+        expect.any(Map),
+      );
+      await expect(loadStatsData('week', live)).resolves.toBeDefined();
+    } finally {
+      vi.useRealTimers();
       if (previousHome === undefined) delete process.env['QWEN_HOME'];
       else process.env['QWEN_HOME'] = previousHome;
       if (previousRuntime === undefined) delete process.env['QWEN_RUNTIME_DIR'];

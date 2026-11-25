@@ -553,10 +553,9 @@ or bounded legacy evidence.
 
 **Session counts now count runs, not conversations.** Keeping every disjoint run
 means the sessions tile, the TUI Sessions number and the per-day session counts
-read two runs of one conversation as 2 sessions, where last-wins previously read
-
-1. That is the more honest number once each record is a delta rather than a
-   cumulative copy, but it is a semantic shift, not an invariant the tiles preserve.
+read two runs of one conversation as 2 sessions, where last-wins previously
+read 1. That is the more honest number once each record is a delta rather than a
+cumulative copy, but it is a semantic shift, not an invariant the tiles preserve.
 
 **Known runtime roots own both transcripts and ledgers.** The daemon keeps each
 root's records and ledger paired, applies coverage within that pair, and sums
@@ -777,7 +776,23 @@ real response IDs and a finite end but an invalid start, a finite non-negative
 duration may derive a start in `[0, end]`; that same bounded start governs both
 ordinary replay inclusion and future-tool ownership. An identified future record without a bounded start cannot extend the
 supplement cutoff past it, so an independently dated later response can still
-be retained rather than lost between two deadlines. An invalid or unknown
+be retained rather than lost between two deadlines; it still contributes its own
+`requestExecutionIds` to `knownRequestIdsBySession` so the already-owned future
+response is not emitted again as a late supplement. When run-scoped records
+cover each other in `dedupBySessionId`, the candidate accumulates coverage
+bidirectionally across all already-kept runs before insertion so an intermediate
+bridge run is never left beside a complete covering snapshot. Exact
+execution-ID matching (`identifiedLedgerModels` and partial live deduction)
+matches across ledger days without truncating to reader-local `[startDay,
+endDay]`, deducts raw output/thoughts/cached-only inputs consistently, and loads
+a narrow current-session ledger scope when older history overflows the 10,000-row
+evidence budget. Completed-month cache merges accumulate rather than overwrite
+shared `(day, model)` buckets, covered-transcript fast skips retain their cache
+entries and never drop newer snapshots, sanitized-directory supplemental
+exemptions only apply to files outside the trailing window without caching
+rejected `null`s, `beforeMs` cache reuse checks the maximum observed event
+timestamp, and daemon ledger root discovery enumerates trusted managed runtimes
+only (`listManaged().filter(r => r.trusted)`). An invalid or unknown
 row timestamp cannot prove future membership and is therefore not truncated by
 that boundary. Without a valid window, matching tool counts alone are not an
 identity, so an uncertain extra observation may remain instead of deleting
@@ -1146,7 +1161,7 @@ than a fabricated attribution.
 - Current stats do not convert replayed history into a live record, preserve the
   session clock across a live reset, and compare matching bases. **Verified** in
   the focused suites and real-file oracle: replay-only returned no record; the
-  the restored conversation supplied the display clock while the run start
+  restored conversation supplied the display clock while the run start
   advanced independently; a partial ledger
   yielded the same-record-basis -100% delta, while complete coverage on both
   sides yielded +100%. The current token table independently summed to 7,007.

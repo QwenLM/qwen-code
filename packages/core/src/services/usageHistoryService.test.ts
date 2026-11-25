@@ -1240,6 +1240,252 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     }
   });
 
+  it('keeps covered transcript cache warm across repeated loads without oscillating', async () => {
+    const sessionId = 'covered-no-oscillation';
+    const project = '/repro/oscillation';
+    const filePath = new SessionService(project, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(sessionId);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(filePath))),
+      sessionId,
+      {
+        cwd: project,
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 110,
+        assistant: true,
+      },
+    );
+    appendNativeResponse(
+      filePath,
+      sessionId,
+      '2026-06-11T00:05:00.000Z',
+      'later-appended-call',
+      500,
+    );
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 110),
+        project,
+        startTime: Date.parse('2026-06-11T00:00:00.000Z'),
+        timestamp: Date.parse('2026-06-11T00:02:00.000Z'),
+      },
+    ]);
+    const openSpy = vi.spyOn(fs.promises, 'open');
+    try {
+      for (let i = 0; i < 4; i++) {
+        const loaded = await loadUsageHistoryWithLive({ sinceMs: 0 });
+        expect(totalTokensOf(aggregateUsage(loaded, 'all'))).toBe(610);
+      }
+      expect(
+        openSpy.mock.calls.filter(([target]) => target === filePath),
+      ).toHaveLength(1);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('does not discard an in-window sibling project or poison cache on sanitized dir collisions', async () => {
+    const sessionId = 'sanitized-collision';
+    const persistedProject = '/work/a_b';
+    const liveProject = '/work/a-b';
+    const filePath = new SessionService(liveProject, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(sessionId);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(filePath))),
+      sessionId,
+      {
+        cwd: liveProject,
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 500,
+        assistant: true,
+      },
+    );
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100),
+        project: persistedProject,
+        runScoped: true,
+        requestExecutionIds: ['persisted-run'],
+        successfulRequestExecutionIds: ['persisted-run'],
+      },
+    ]);
+
+    // In-window active transcript belongs to /work/a-b and must not be dropped.
+    const inWindow = await loadUsageHistoryWithLive();
+    expect(
+      inWindow.find((record) => record.project === liveProject),
+    ).toBeDefined();
+    expect(totalTokensOf(aggregateUsage(inWindow, 'all'))).toBe(600);
+
+    // When aged outside the trailing window, a rejected supplemental exemption
+    // must not poison a subsequent unbounded (sinceMs: 0) read.
+    _resetReplayCacheForTest();
+    const oldTime = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(filePath, oldTime, oldTime);
+    const windowed = await loadUsageHistoryWithLive();
+    expect(
+      windowed.find((record) => record.project === liveProject),
+    ).toBeUndefined();
+    const unbounded = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    expect(
+      unbounded.find((record) => record.project === liveProject),
+    ).toBeDefined();
+    expect(totalTokensOf(aggregateUsage(unbounded, 'all'))).toBe(600);
+  });
+
+  it('handles duplicate identified records missing tools, files, or skills.byName without throwing', () => {
+    const corrupt = {
+      ...persistedRec('corrupt-dup', 100),
+      runScoped: true,
+      requestExecutionIds: ['corrupt-req'],
+      successfulRequestExecutionIds: ['corrupt-req'],
+      tools: undefined,
+      files: undefined,
+      skills: { totalCalls: 1, totalSuccess: 1, totalFail: 0 },
+    } as unknown as UsageSummaryRecord;
+    const corruptToolsNoByName = {
+      ...corrupt,
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0 },
+    } as unknown as UsageSummaryRecord;
+    const history = [corrupt, corruptToolsNoByName];
+    expect(() => deduplicateIdentifiedRootHistory([history])).not.toThrow();
+    expect(history).toHaveLength(1);
+    expect(history[0]?.tools).toEqual({
+      totalCalls: 0,
+      totalSuccess: 0,
+      totalFail: 0,
+      byName: {},
+    });
+    expect(history[0]?.files).toEqual({ linesAdded: 0, linesRemoved: 0 });
+  });
+
+  it('does not let a beforeMs-truncated cache entry cause Phase 1.5 to skip newer transcript activity', async () => {
+    const sessionId = 'truncated-cache-no-skip';
+    const project = '/repro/truncated-cache';
+    const filePath = new SessionService(project, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(sessionId);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(filePath))),
+      sessionId,
+      {
+        cwd: project,
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 100,
+        assistant: true,
+      },
+    );
+    appendNativeResponse(
+      filePath,
+      sessionId,
+      '2026-06-11T00:05:00.000Z',
+      'later-after-before-ms',
+      500,
+    );
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100),
+        project,
+        startTime: Date.parse('2026-06-11T00:00:00.000Z'),
+        timestamp: Date.parse('2026-06-11T00:02:00.000Z'),
+      },
+    ]);
+
+    // Step 1: bounded load populates the shared cache with a beforeMs-truncated summary.
+    await loadUsageHistory(sessionId, {
+      projectRoot: project,
+      beforeMsBySession: new Map([
+        [sessionId, Date.parse('2026-06-11T00:01:30.000Z')],
+      ]),
+    });
+
+    // Step 2: unbounded live load must not treat the truncated cache as covering the file.
+    const live = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    expect(totalTokensOf(aggregateUsage(live, 'all'))).toBe(600);
+  });
+
+  it('does not reuse an unbounded cache for beforeMs when an inner event is later than the tail row', async () => {
+    const sessionId = 'out-of-order-before-ms';
+    const project = '/repro/out-of-order';
+    const filePath = new SessionService(project, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(sessionId);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          uuid: 'h1',
+          parentUuid: null,
+          sessionId,
+          cwd: project,
+          timestamp: '2026-06-11T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hi' }] },
+        }),
+        JSON.stringify({
+          uuid: 'e1',
+          parentUuid: 'h1',
+          sessionId,
+          cwd: project,
+          timestamp: '2026-06-11T00:05:00.000Z',
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'qwen-code.api_response',
+              'event.timestamp': '2026-06-11T00:05:00.000Z',
+              execution_id: 'late-inner-call',
+              model: 'qwen-max',
+              duration_ms: 100,
+              input_token_count: 400,
+              output_token_count: 100,
+              cached_content_token_count: 0,
+              thoughts_token_count: 0,
+              total_token_count: 500,
+            },
+          },
+        }),
+        JSON.stringify({
+          uuid: 'tail',
+          parentUuid: 'e1',
+          sessionId,
+          cwd: project,
+          timestamp: '2026-06-11T00:02:00.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'done' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    const full = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    expect(totalTokensOf(aggregateUsage(full, 'all'))).toBe(500);
+
+    // Seed an unrelated persisted record so loadUsageHistory runs in scoped
+    // (useCache = true) mode and actually exercises the replay cache guard.
+    seedPersisted([persistedRec('unrelated-cache-base', 10)]);
+    const openSpy = vi.spyOn(fs.promises, 'open');
+    try {
+      const cut = await loadUsageHistory(sessionId, {
+        projectRoot: project,
+        beforeMsBySession: new Map([
+          [sessionId, Date.parse('2026-06-11T00:03:00.000Z')],
+        ]),
+      });
+      const cutForSession = cut.filter((r) => r.sessionId === sessionId);
+      expect(totalTokensOf(aggregateUsage(cutForSession, 'all'))).toBe(0);
+      expect(
+        openSpy.mock.calls.filter(([target]) => target === filePath),
+      ).toHaveLength(1);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
   it('withLive: with a persisted base, the trailing window excludes stale transcripts (sinceMs:0 includes them)', async () => {
     // A persisted base means the window engages (old days come from the file).
     seedPersisted([persistedRec('sess-persisted', 500)]);

@@ -29,7 +29,7 @@ import {
   buildUsageDashboard,
   loadUsageDashboardSources,
   type UsageDashboardSources,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/usage-dashboard-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const DEFAULT_HEATMAP_DAYS = 183;

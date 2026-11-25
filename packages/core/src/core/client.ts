@@ -1016,8 +1016,8 @@ export class LlmClient {
     // restores the captured clock rather than keeping the incoming session's.
     if (previousSessionId !== sessionId) {
       const recordedStart =
-        resumedSessionData?.conversation.startTime ??
-        restoreRuntime?.conversationStartTime;
+        restoreRuntime?.conversationStartTime ??
+        resumedSessionData?.conversation.startTime;
       const parsedStart = recordedStart ? new Date(recordedStart) : new Date();
       uiTelemetryService.setSessionStartTime(
         Number.isNaN(parsedStart.getTime()) ? new Date() : parsedStart,

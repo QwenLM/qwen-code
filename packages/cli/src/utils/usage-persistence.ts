@@ -15,10 +15,12 @@ function persistLiveUsage(config: Config, sessionId: string): void {
   try {
     const metrics = uiTelemetryService.getLiveMetrics();
     if (!hasRunActivity(metrics)) return;
+    const startTime = uiTelemetryService.getRunStartTime();
+    const endTime = new Date(Math.max(startTime.getTime(), Date.now()));
     persistSessionUsage({
       sessionId,
-      startTime: uiTelemetryService.getRunStartTime(),
-      endTime: new Date(),
+      startTime,
+      endTime,
       project: config.getProjectRoot(),
       metrics,
     });

@@ -205,17 +205,65 @@ function isActiveSessionRecord(
   );
 }
 
+function canFormSubsetSum(values: readonly number[], target: number): boolean {
+  if (target === 0) return true;
+  if (target < 0 || values.length === 0) return false;
+  let sum = 0;
+  for (const value of values) sum += value;
+  if (target > sum) return false;
+  if (target === sum) return true;
+  if (values.length > 64) return false;
+  let reachable = new Set<number>([0]);
+  for (const value of values) {
+    if (value <= 0 || value > target) continue;
+    const next = new Set(reachable);
+    for (const current of reachable) {
+      const candidate = current + value;
+      if (candidate === target) return true;
+      if (candidate < target && next.size < 4096) {
+        next.add(candidate);
+      }
+    }
+    reachable = next;
+  }
+  return false;
+}
+
 function partialLiveModelUsage(
   record: UsageSummaryRecord,
   model: string,
   metrics: UsageSummaryRecord['models'][string],
   ledgerDaily?: TokenUsageDailyByModel,
+  scopedEvidenceDaily?: TokenUsageDailyByModel,
   runtimeScopes?: readonly UsageDashboardSources[],
 ): UsageSummaryRecord['models'][string] | undefined {
   const expectedIds = successfulRequestIds(record, record);
-  if (!expectedIds?.length || (metrics.errors ?? 0) < 0) return undefined;
+  const errors = metrics.errors ?? 0;
+  const totalLatencyMs = metrics.totalLatencyMs ?? 0;
+  if (
+    !expectedIds?.length ||
+    !Number.isFinite(metrics.requests) ||
+    !Number.isFinite(metrics.inputTokens) ||
+    !Number.isFinite(metrics.outputTokens) ||
+    !Number.isFinite(metrics.cachedTokens) ||
+    !Number.isFinite(metrics.thoughtsTokens) ||
+    !Number.isFinite(metrics.totalTokens) ||
+    !Number.isFinite(errors) ||
+    !Number.isFinite(totalLatencyMs) ||
+    metrics.requests < 0 ||
+    metrics.inputTokens < 0 ||
+    metrics.outputTokens < 0 ||
+    metrics.cachedTokens < 0 ||
+    metrics.thoughtsTokens < 0 ||
+    metrics.totalTokens < 0 ||
+    errors < 0 ||
+    totalLatencyMs < 0
+  ) {
+    return undefined;
+  }
   if (new Set(expectedIds).size !== expectedIds.length) return undefined;
   const tables = [
+    ...(scopedEvidenceDaily ? [scopedEvidenceDaily] : []),
     ...(ledgerDaily ? [ledgerDaily] : []),
     ...(runtimeScopes?.map((scope) => scope.ledgerDaily) ?? []),
   ].filter(isCompleteLedgerExecutionEvidence);
@@ -228,6 +276,12 @@ function partialLiveModelUsage(
     totalTokens: 0,
     latency: 0,
   };
+  const cacheOnlyInputs: number[] = [];
+  let cacheOnlyInputSum = 0;
+  const synthesizedTotals: number[] = [];
+  const claimedRows: TokenUsageRecord[] = [];
+  let claimedExtraThoughts = 0;
+  let allOutputIncludesThoughts = true;
   for (const id of expectedIds) {
     const responses = new Map<string, TokenUsageRecord>();
     for (const table of tables) {
@@ -240,54 +294,239 @@ function partialLiveModelUsage(
         responses.set(fingerprints.values().next().value!, row);
       }
     }
-    if (responses.size !== 1) continue;
+    if (responses.size === 0) continue;
+    if (responses.size > 1) return undefined;
     const row = [...responses.values()][0]!;
     if (row.model !== model) continue;
-    const outputTokens = outputTokenCount(
-      {
-        input: row.inputTokens,
-        output: row.outputTokens,
-        thoughts: row.thoughtsTokens,
-        total: row.totalTokens,
-      },
-      row.authType,
-    );
-    const coherentTotal =
-      row.inputTokens +
-      outputTokens +
-      (outputIncludesThoughts(row.authType) ? 0 : row.thoughtsTokens);
+    // Live metrics keep raw candidates output and thoughts separately; deduct
+    // raw row fields rather than normalized display output.
+    claimedRows.push(row);
     claimed.requests += 1;
     claimed.inputTokens += row.inputTokens;
-    claimed.outputTokens += outputTokens;
+    claimed.outputTokens += row.outputTokens;
     claimed.cachedTokens += row.cachedTokens;
     claimed.thoughtsTokens += row.thoughtsTokens;
-    claimed.totalTokens +=
-      row.inputTokens === 0 && metrics.inputTokens === 0 && row.cachedTokens > 0
-        ? coherentTotal
-        : row.totalTokens;
+    claimed.totalTokens += row.totalTokens;
     claimed.latency += row.apiDurationMs ?? 0;
+    if (outputIncludesThoughts(row.authType)) {
+      claimedExtraThoughts += row.thoughtsTokens;
+    } else {
+      allOutputIncludesThoughts = false;
+    }
+    if (row.cachedTokens > 0 && row.inputTokens === row.cachedTokens) {
+      cacheOnlyInputs.push(row.cachedTokens);
+      cacheOnlyInputSum += row.cachedTokens;
+    }
+    const providerCoherent =
+      row.inputTokens +
+      row.outputTokens +
+      (outputIncludesThoughts(row.authType) ? 0 : row.thoughtsTokens);
+    if (row.totalTokens === providerCoherent) {
+      synthesizedTotals.push(row.totalTokens);
+    }
   }
+  const successfulCount = metrics.requests - errors;
   if (
     claimed.requests === 0 ||
-    claimed.requests > metrics.requests ||
-    claimed.inputTokens > metrics.inputTokens ||
+    claimed.requests > successfulCount ||
     claimed.outputTokens > metrics.outputTokens ||
     claimed.cachedTokens > metrics.cachedTokens ||
     claimed.thoughtsTokens > metrics.thoughtsTokens ||
-    claimed.totalTokens > metrics.totalTokens ||
-    claimed.latency > (metrics.totalLatencyMs ?? 0)
+    claimed.latency > totalLatencyMs
   ) {
     return undefined;
   }
+  const remRequests = metrics.requests - claimed.requests;
+  const remSuccesses = successfulCount - claimed.requests;
+  const remOutput = metrics.outputTokens - claimed.outputTokens;
+  const remThoughts = metrics.thoughtsTokens - claimed.thoughtsTokens;
+  const remCached = metrics.cachedTokens - claimed.cachedTokens;
+  if (remSuccesses === 0) {
+    if (!tokensCanMatchEquivalentResponses(metrics, claimedRows)) {
+      return undefined;
+    }
+    return {
+      ...metrics,
+      requests: remRequests,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedTokens: 0,
+      thoughtsTokens: 0,
+      totalTokens: 0,
+      totalLatencyMs: remRequests === 0 ? 0 : totalLatencyMs - claimed.latency,
+    };
+  }
+  if (
+    metrics.totalTokens === 0 &&
+    synthesizedTotals.length !== claimed.requests
+  ) {
+    return undefined;
+  }
+
+  const nonCacheOnlyInput = claimed.inputTokens - cacheOnlyInputSum;
+  if (nonCacheOnlyInput > metrics.inputTokens) return undefined;
+  const directRem = metrics.totalTokens - claimed.totalTokens;
+  const componentFallbackTotal =
+    metrics.inputTokens + metrics.outputTokens + metrics.thoughtsTokens;
+
+  // Build candidate deducted inputs: full claimed, non-cache-only, and when
+  // cache-only rows are few, any reachable subset sum <= metrics.inputTokens.
+  const candidateInputSet = new Set<number>();
+  if (claimed.inputTokens <= metrics.inputTokens) {
+    candidateInputSet.add(claimed.inputTokens);
+  }
+  candidateInputSet.add(nonCacheOnlyInput);
+  if (cacheOnlyInputs.length > 1 && cacheOnlyInputs.length <= 16) {
+    let sums = new Set<number>([nonCacheOnlyInput]);
+    for (const value of cacheOnlyInputs) {
+      const next = new Set(sums);
+      for (const current of sums) {
+        const candidate = current + value;
+        if (candidate <= metrics.inputTokens && next.size < 256) {
+          next.add(candidate);
+        }
+      }
+      sums = next;
+    }
+    for (const sum of sums) candidateInputSet.add(sum);
+  }
+  // For a single unpersisted successful response, 0 < remInput < remCached is impossible.
+  const candidateInputs = [...candidateInputSet].filter((candidateInput) => {
+    const remInput = metrics.inputTokens - candidateInput;
+    return !(remSuccesses === 1 && remInput > 0 && remInput < remCached);
+  });
+  if (candidateInputs.length === 0) return undefined;
+
+  const remBounds = (remInput: number) => {
+    const effectiveSingleInput =
+      remSuccesses === 1 && remInput === 0 && remCached > 0
+        ? remCached
+        : remInput;
+    const remMin = effectiveSingleInput + remOutput;
+    const remExpectedMax = allOutputIncludesThoughts
+      ? remMin
+      : remMin + remThoughts;
+    const remNoExtraMax =
+      remSuccesses === 1
+        ? remMin + remThoughts
+        : remInput + remCached + remOutput + remThoughts;
+    return { remMin, remExpectedMax, remNoExtraMax };
+  };
+
+  // Pass 1: tight provider-consistent match (no extra thoughts slack on OpenAI).
+  // Pass 2: full coherent band [remMin, remNoExtraMax] (no dead zone) or exact
+  //         componentFallbackTotal algebraic match when all totals were omitted.
+  const matchStrictTotal = (
+    candidateInput: number,
+    tightOnly: boolean,
+  ): number | undefined => {
+    const remInput = metrics.inputTokens - candidateInput;
+    const { remMin, remExpectedMax, remNoExtraMax } = remBounds(remInput);
+    if (metrics.totalTokens === 0) return 0;
+    if (tightOnly) {
+      return directRem >= remMin && directRem <= remExpectedMax
+        ? directRem
+        : undefined;
+    }
+    if (directRem >= remMin && directRem <= remNoExtraMax) {
+      return directRem;
+    }
+    const inputDelta = claimed.inputTokens - candidateInput;
+    if (
+      synthesizedTotals.length === claimed.requests &&
+      metrics.totalTokens === componentFallbackTotal &&
+      directRem ===
+        remInput + remOutput + remThoughts + claimedExtraThoughts - inputDelta
+    ) {
+      return remExpectedMax;
+    }
+    return undefined;
+  };
+
+  // Pass 3: persisted rows omitted total_token_count (0 in live metrics).
+  const matchOmittedTotal = (candidateInput: number): number | undefined => {
+    if (synthesizedTotals.length === 0 || metrics.totalTokens === 0) {
+      return undefined;
+    }
+    const remInput = metrics.inputTokens - candidateInput;
+    const { remMin, remNoExtraMax } = remBounds(remInput);
+    const remWithCacheMin =
+      remSuccesses === 1 ? remMin : remInput + remCached + remOutput;
+    const candidates = [
+      ...new Set([
+        remMin - directRem,
+        remMin + remThoughts - directRem,
+        remWithCacheMin - directRem,
+        remNoExtraMax - directRem,
+      ]),
+    ];
+    const matchedOmitted = candidates.find(
+      (target) => target > 0 && canFormSubsetSum(synthesizedTotals, target),
+    );
+    return matchedOmitted !== undefined
+      ? directRem + matchedOmitted
+      : undefined;
+  };
+
+  let deductedInput: number | undefined;
+  let remTotal: number | undefined;
+  for (const candidateInput of candidateInputs) {
+    const resolved = matchStrictTotal(candidateInput, true);
+    if (resolved !== undefined) {
+      deductedInput = candidateInput;
+      remTotal = resolved;
+      break;
+    }
+  }
+  if (deductedInput === undefined) {
+    for (const candidateInput of candidateInputs) {
+      const resolved = matchStrictTotal(candidateInput, false);
+      if (resolved !== undefined) {
+        deductedInput = candidateInput;
+        remTotal = resolved;
+        break;
+      }
+    }
+  }
+  if (deductedInput === undefined) {
+    for (const candidateInput of candidateInputs) {
+      const resolved = matchOmittedTotal(candidateInput);
+      if (resolved !== undefined) {
+        deductedInput = candidateInput;
+        remTotal = resolved;
+        break;
+      }
+    }
+  }
+  // Pass 4: direct fallback only for unpersisted omitted total (directRem === 0)
+  // or unpersisted extra total (directRem > remNoExtraMax); never 0 < directRem < remMin.
+  if (deductedInput === undefined) {
+    const eligible = candidateInputs.filter((candidateInput) => {
+      const remInput = metrics.inputTokens - candidateInput;
+      const { remNoExtraMax } = remBounds(remInput);
+      return directRem === 0 || directRem > remNoExtraMax;
+    });
+    if (eligible.length === 1) {
+      deductedInput = eligible[0]!;
+      remTotal = directRem;
+    } else if (eligible.length > 1 && eligible.includes(claimed.inputTokens)) {
+      deductedInput = claimed.inputTokens;
+      remTotal = directRem;
+    }
+  }
+  if (deductedInput === undefined || remTotal === undefined) {
+    return undefined;
+  }
+  const remInput = metrics.inputTokens - deductedInput;
   return {
     ...metrics,
-    requests: metrics.requests - claimed.requests,
-    inputTokens: metrics.inputTokens - claimed.inputTokens,
-    outputTokens: metrics.outputTokens - claimed.outputTokens,
-    cachedTokens: metrics.cachedTokens - claimed.cachedTokens,
-    thoughtsTokens: metrics.thoughtsTokens - claimed.thoughtsTokens,
-    totalTokens: metrics.totalTokens - claimed.totalTokens,
-    totalLatencyMs: (metrics.totalLatencyMs ?? 0) - claimed.latency,
+    requests: remRequests,
+    inputTokens: remInput,
+    outputTokens: remOutput,
+    cachedTokens: remCached,
+    thoughtsTokens: remThoughts,
+    totalTokens: remTotal,
+    totalLatencyMs: totalLatencyMs - claimed.latency,
   };
 }
 
@@ -323,6 +562,59 @@ function successfulRequestIds(
   return record.requestExecutionIds;
 }
 
+function canMatchPerRowTotal(
+  rows: readonly TokenUsageRecord[],
+  targetTotal: number,
+  inputDelta: number,
+): boolean {
+  let ledgerTotal = 0;
+  let allCoherent = true;
+  let maxExtraThoughts = 0;
+  const perRowChoices: Array<readonly number[]> = [];
+  for (const row of rows) {
+    ledgerTotal += row.totalTokens;
+    const extraThoughts = outputIncludesThoughts(row.authType)
+      ? row.thoughtsTokens
+      : 0;
+    const providerCoherent =
+      row.inputTokens +
+      row.outputTokens +
+      (outputIncludesThoughts(row.authType) ? 0 : row.thoughtsTokens);
+    if (row.totalTokens !== providerCoherent) {
+      allCoherent = false;
+      perRowChoices.push([row.totalTokens]);
+      continue;
+    }
+    maxExtraThoughts += extraThoughts;
+    perRowChoices.push(row.totalTokens === 0 ? [0] : [row.totalTokens, 0]);
+  }
+  if (targetTotal === ledgerTotal) return true;
+  if (allCoherent) {
+    if (
+      targetTotal === 0 ||
+      targetTotal === ledgerTotal + maxExtraThoughts - inputDelta
+    ) {
+      return true;
+    }
+  }
+  if (rows.length > 64) return false;
+  let reachable = new Set<number>([0]);
+  for (const choices of perRowChoices) {
+    const next = new Set<number>();
+    for (const current of reachable) {
+      for (const choice of choices) {
+        const candidate = current + choice;
+        if (candidate <= targetTotal && next.size < 4096) {
+          next.add(candidate);
+        }
+      }
+    }
+    reachable = next;
+    if (reachable.size === 0) return false;
+  }
+  return reachable.has(targetTotal);
+}
+
 function tokensCanMatchEquivalentResponses(
   metrics: UsageSummaryRecord['models'][string],
   rows: readonly TokenUsageRecord[],
@@ -334,37 +626,29 @@ function tokensCanMatchEquivalentResponses(
     thoughtsTokens: 0,
     totalTokens: 0,
   };
-  let providerCoherentTokens = 0;
+  const cacheOnlyInputs: number[] = [];
   for (const row of rows) {
     ledger.inputTokens += row.inputTokens;
     ledger.outputTokens += row.outputTokens;
     ledger.cachedTokens += row.cachedTokens;
     ledger.thoughtsTokens += row.thoughtsTokens;
     ledger.totalTokens += row.totalTokens;
-    providerCoherentTokens +=
-      row.inputTokens +
-      row.outputTokens +
-      (outputIncludesThoughts(row.authType) ? 0 : row.thoughtsTokens);
+    if (row.cachedTokens > 0 && row.inputTokens === row.cachedTokens) {
+      cacheOnlyInputs.push(row.cachedTokens);
+    }
   }
-  const componentTokens = modelTokens(metrics);
-  const inputCarriesCount =
-    metrics.inputTokens + metrics.outputTokens + metrics.thoughtsTokens;
-  const cacheOnlyNormalization =
-    metrics.inputTokens === 0 &&
-    ledger.cachedTokens > 0 &&
-    ledger.inputTokens === ledger.cachedTokens &&
-    (ledger.totalTokens === componentTokens ||
-      ledger.totalTokens === componentTokens + ledger.cachedTokens);
-  return (
-    ledger.outputTokens === metrics.outputTokens &&
-    ledger.cachedTokens === metrics.cachedTokens &&
-    ledger.thoughtsTokens === metrics.thoughtsTokens &&
-    (cacheOnlyNormalization ||
-      (ledger.inputTokens === metrics.inputTokens &&
-        (ledger.totalTokens === componentTokens ||
-          (ledger.totalTokens === providerCoherentTokens &&
-            componentTokens === inputCarriesCount))))
-  );
+  if (
+    ledger.outputTokens !== metrics.outputTokens ||
+    ledger.cachedTokens !== metrics.cachedTokens ||
+    ledger.thoughtsTokens !== metrics.thoughtsTokens
+  ) {
+    return false;
+  }
+  const inputDelta = ledger.inputTokens - metrics.inputTokens;
+  if (!canFormSubsetSum(cacheOnlyInputs, inputDelta)) {
+    return false;
+  }
+  return canMatchPerRowTotal(rows, metrics.totalTokens, inputDelta);
 }
 
 function identifiedLedgerModels(
@@ -399,11 +683,7 @@ function identifiedLedgerModels(
   );
   const matchedByModel = new Map<string, Set<string>>();
   const matchedRowsByModel = new Map<string, Map<string, TokenUsageRecord>>();
-  const startDay = localDateKey(record.startTime);
-  const endDay = localDateKey(record.timestamp);
   for (const day of sortedLedgerDays ?? [...ledgerDaily.keys()].sort()) {
-    if (day < startDay) continue;
-    if (day > endDay) break;
     for (const model of ledgerDaily.get(day)?.keys() ?? []) {
       if (!Object.hasOwn(record.models, model)) continue;
       const sessionIds = getLedgerSessionIds(ledgerDaily, day, model);
@@ -455,8 +735,6 @@ function hasScopedExecutionEvidence(
   ledgerDaily: TokenUsageDailyByModel,
   model: string,
   scopedEvidenceDaily: TokenUsageDailyByModel | undefined,
-  startDay: string,
-  endDay: string,
   sortedLedgerDays?: readonly string[],
   scopedLedgerDays?: readonly string[],
 ): boolean {
@@ -467,8 +745,6 @@ function hasScopedExecutionEvidence(
         ? (scopedLedgerDays ?? sortedLedgerDays ?? [...table.keys()].sort())
         : (sortedLedgerDays ?? [...table.keys()].sort());
     for (const day of days) {
-      if (day < startDay) continue;
-      if (day > endDay) break;
       const byExecution = getLedgerIdentityEvidence(table, day, model).get(
         record.sessionId,
       );
@@ -596,6 +872,7 @@ function ledgerCoversModel(
     if (Array.isArray(record.requestExecutionIds)) {
       const persistedIds = new Set<string>();
       for (const table of [
+        ...(scopedEvidenceDaily ? [scopedEvidenceDaily] : []),
         ledgerDaily,
         ...(runtimeScopes?.map((scope) => scope.ledgerDaily) ?? []),
       ]) {
@@ -639,8 +916,6 @@ function ledgerCoversModel(
       ledgerDaily,
       model,
       scopedEvidenceDaily,
-      startDay,
-      endDay,
       sortedLedgerDays,
       scopedLedgerDays,
     ) ||
@@ -650,8 +925,6 @@ function ledgerCoversModel(
           scope.ledgerDaily,
           model,
           undefined,
-          startDay,
-          endDay,
           [
             ...new Set([
               ...(sortedLedgerDays ?? [...ledgerDaily.keys()]),
@@ -717,10 +990,9 @@ export function recordTouchesLedgerDays(
   record: UsageSummaryRecord,
   ledgerDaily: TokenUsageDailyByModel | undefined,
   sortedLedgerDays?: readonly string[],
-  scopedEvidenceDaily?: TokenUsageDailyByModel,
   activeSessionRecord?: UsageSummaryRecord,
-  runtimeScopes?: readonly UsageDashboardSources[],
 ): boolean {
+  if (!record.models) return false;
   const models = Object.entries(record.models).filter(
     ([, model]) =>
       model.requests > 0 ||
@@ -738,11 +1010,10 @@ export function recordTouchesLedgerDays(
         record,
         model,
         ledgerDaily,
-        scopedEvidenceDaily,
+        undefined,
         sortedLedgerDays,
         undefined,
         activeSessionRecord,
-        runtimeScopes,
       ),
     )
   );
@@ -792,8 +1063,26 @@ export function buildUsageDayTable(
       )
         continue;
       const remaining = isActiveSessionRecord(r, activeSessionRecord)
-        ? (partialLiveModelUsage(r, model, m, ledgerDaily, runtimeScopes) ?? m)
+        ? (partialLiveModelUsage(
+            r,
+            model,
+            m,
+            ledgerDaily,
+            scopedEvidenceDaily,
+            runtimeScopes,
+          ) ?? m)
         : m;
+      if (
+        remaining.requests === 0 &&
+        remaining.inputTokens === 0 &&
+        remaining.outputTokens === 0 &&
+        remaining.cachedTokens === 0 &&
+        remaining.thoughtsTokens === 0 &&
+        remaining.totalTokens === 0 &&
+        (remaining.totalLatencyMs ?? 0) === 0
+      ) {
+        continue;
+      }
       let byModel = table.get(day);
       if (!byModel) {
         byModel = new Map();
@@ -805,7 +1094,7 @@ export function buildUsageDayTable(
       totals.outputTokens += remaining.outputTokens;
       totals.cachedTokens += remaining.cachedTokens;
       totals.thoughtsTokens += remaining.thoughtsTokens;
-      totals.totalTokens += remaining.totalTokens;
+      totals.totalTokens += modelTokens(remaining);
       totals.apiDurationMs += remaining.totalLatencyMs ?? 0;
       byModel.set(model, totals);
     }
@@ -831,6 +1120,7 @@ export function buildUsageDayTable(
     }
   }
   for (const record of records) {
+    if (!record.models) continue;
     const day = localDateKey(record.timestamp);
     for (const [model, metrics] of Object.entries(record.models)) {
       if (
@@ -1002,6 +1292,14 @@ function buildDaily(
   return out;
 }
 
+function shiftLocalDays(base: Date, deltaDays: number): Date {
+  return new Date(
+    base.getFullYear(),
+    base.getMonth(),
+    base.getDate() + deltaDays,
+  );
+}
+
 /**
  * Build the dashboard from already-loaded usage records (pure — no I/O). Split
  * out from {@link loadUsageDashboard} so a caller can load the history once and
@@ -1020,12 +1318,14 @@ export function buildUsageDashboard(
       ? Math.floor(options.heatmapDays)
       : DEFAULT_HEATMAP_DAYS;
 
-  const now = Date.now();
+  const nowDate = new Date();
+  const now = nowDate.getTime();
   const endedRecords = records.filter(
     (record) => record.transcriptSupplement === true || record.timestamp <= now,
   );
   const todayKey = localDateKey(now);
-  const rangeStartKey = localDateKey(getTimeRangeBounds(range).start.getTime());
+  const rangeStart = getTimeRangeBounds(range, nowDate).start;
+  const rangeStartKey = localDateKey(rangeStart.getTime());
   // These fields only exist on session records, but they use the same whole-day
   // window as the token table rather than a rolling millisecond cut-off.
   const report = aggregateUsage(
@@ -1110,8 +1410,8 @@ export function buildUsageDashboard(
   }));
 
   const dailyStart = Math.max(
-    getTimeRangeBounds(range).start.getTime(),
-    now - MAX_DAILY_DAYS * MS_PER_DAY,
+    rangeStart.getTime(),
+    shiftLocalDays(nowDate, -(MAX_DAILY_DAYS - 1)).getTime(),
   );
   const daily = buildDaily(table, records, dailyStart, now);
 
@@ -1119,7 +1419,7 @@ export function buildUsageDashboard(
   // independent of `range`.
   const heatmap = buildHeatmap(
     table,
-    localDateKey(now - heatmapDays * MS_PER_DAY),
+    localDateKey(shiftLocalDays(nowDate, -(heatmapDays - 1)).getTime()),
     todayKey,
   );
 

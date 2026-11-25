@@ -1952,6 +1952,56 @@ describe('tokenUsageService', () => {
     });
   });
 
+  it('accumulates completed-month cache entries that share a local day', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 10, 12, 0, 0));
+    try {
+      const aprilFile = getTokenUsageFilePath('2026-04');
+      const mayFile = getTokenUsageFilePath('2026-05');
+      fs.mkdirSync(path.dirname(aprilFile), { recursive: true });
+      const row = (
+        id: string,
+        localMonth: string,
+        executionId: string,
+        inputTokens: number,
+        outputTokens: number,
+      ) =>
+        JSON.stringify({
+          schemaVersion: 1,
+          id,
+          timestamp: '2026-05-01T00:01:00.000Z',
+          localDate: '2026-05-01',
+          localMonth,
+          sessionId: 'cross-month-day',
+          model: 'qwen-max',
+          authType: 'openai',
+          source: 'main',
+          executionId,
+          inputTokens,
+          outputTokens,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: inputTokens + outputTokens,
+          apiDurationMs: 10,
+        });
+      fs.writeFileSync(aprilFile, `${row('r1', '2026-04', 'e1', 100, 20)}\n`);
+      fs.writeFileSync(mayFile, `${row('r2', '2026-05', 'e2', 200, 30)}\n`);
+      const cache: TokenUsageCompletedMonthCache = new Map();
+      const first = await loadTokenUsageDailyByModel('2026-04-01', cache);
+      const second = await loadTokenUsageDailyByModel('2026-04-01', cache);
+      for (const table of [first, second]) {
+        expect(table.get('2026-05-01')?.get('qwen-max')).toMatchObject({
+          requests: 2,
+          inputTokens: 300,
+          outputTokens: 50,
+          totalTokens: 350,
+        });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('matches successful identities across every model in a run', async () => {
     const startTime = new Date(2026, 4, 25, 10);
     const endTime = new Date(startTime.getTime() + 1_000);
