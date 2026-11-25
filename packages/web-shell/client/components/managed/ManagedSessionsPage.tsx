@@ -17,7 +17,7 @@ import { useI18n } from '../../i18n';
 import { useManagedRecoveryText } from './managed-recovery-messages';
 import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
-import type { Message } from '../../adapters/types';
+import type { Message, PermissionRequest } from '../../adapters/types';
 import {
   ToolDetailsContext,
   type ToolDetailsLoader,
@@ -38,6 +38,7 @@ import {
   getComposerDraftStorageKey,
 } from '../../hooks/useComposerCore';
 import { ToolApproval } from '../messages/ToolApproval';
+import { AskUserQuestion } from '../messages/AskUserQuestion';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Input } from '../ui/input';
@@ -65,7 +66,11 @@ import { useManagedRecovery } from './use-managed-recovery';
 import { useManagedTurnCancel } from './use-managed-turn-cancel';
 import { useManagedSessionRename } from './use-managed-session-rename';
 import { managedActionKey, useManagedActions } from './use-managed-actions';
-import { ManagedQuestionForm } from './ManagedQuestionForm';
+import { toManagedQuestionPermissionRequest } from './chat-controller';
+import {
+  exceedsManagedQuestionAnswerLimits,
+  managedQuestionAnswersFromDraft,
+} from './managed-question-response';
 import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
@@ -101,6 +106,7 @@ import { getLatestSuccessfulTodos } from '../../utils/todos';
 import { getShadowAwareActiveElement } from '../../utils/dom';
 import type {
   ManagedAgentProvider,
+  ManagedAgentQuestionAnswer,
   ManagedAgentSessionSummary,
   ManagedAgentWorkspace,
   ManagedInputBlock,
@@ -987,15 +993,60 @@ function ManagedSessionsContent({
       ),
     [approvals.actions, sessionId],
   );
+  const questionAction =
+    approvals.action?.kind === 'question' ? approvals.action : undefined;
+  const questionRequestCacheRef = useRef<{
+    signature: string;
+    request: PermissionRequest;
+  }>(undefined);
+  const pendingQuestionRequest = useMemo(() => {
+    if (!questionAction) return null;
+    const signature = JSON.stringify([
+      questionAction.actionId,
+      questionAction.sessionId,
+      questionAction.turnId,
+      questionAction.functionCallId,
+      questionAction.toolName,
+      questionAction.inputRevision,
+      questionAction.policyRevision,
+      questionAction.questions,
+    ]);
+    if (questionRequestCacheRef.current?.signature === signature) {
+      return questionRequestCacheRef.current.request;
+    }
+    const request = toManagedQuestionPermissionRequest(questionAction);
+    questionRequestCacheRef.current = { signature, request };
+    return request;
+  }, [questionAction]);
+  const questionExpiresAt = questionAction?.expiresAt;
+  const [expiredFor, setExpiredFor] = useState<number>();
+  const questionExpired =
+    questionExpiresAt !== undefined &&
+    (expiredFor === questionExpiresAt || Date.now() >= questionExpiresAt);
+  useEffect(() => {
+    if (questionExpiresAt === undefined) return;
+    const remaining = questionExpiresAt - Date.now();
+    if (remaining <= 0 || remaining > 2_147_483_647) return;
+    const timer = setTimeout(() => setExpiredFor(questionExpiresAt), remaining);
+    return () => clearTimeout(timer);
+  }, [questionExpiresAt]);
+  const questionTooLarge = useMemo(() => {
+    if (!questionAction) return false;
+    return exceedsManagedQuestionAnswerLimits(
+      managedQuestionAnswersFromDraft(questionAction, approvals.questionDraft),
+    );
+  }, [questionAction, approvals.questionDraft]);
   const pendingApproval = useMemo(
     () =>
       approvals.action
-        ? toManagedPermissionRequest(
-            approvals.action,
-            approvals.action.sessionId === sessionId ? messages : [],
-          )
+        ? approvals.action.kind === 'question'
+          ? pendingQuestionRequest
+          : toManagedPermissionRequest(
+              approvals.action,
+              approvals.action.sessionId === sessionId ? messages : [],
+            )
         : null,
-    [approvals.action, messages, sessionId],
+    [approvals.action, messages, pendingQuestionRequest, sessionId],
   );
   const modelChange = useManagedModelChange(
     provider,
@@ -2758,24 +2809,87 @@ function ManagedSessionsContent({
                   {approvals.action?.sessionId}
                 </p>
               )}
-              {approvals.action?.kind === 'question' ? (
-                <ManagedQuestionForm
-                  key={managedActionKey(approvals.action)}
-                  action={approvals.action}
-                  draft={approvals.questionDraft}
-                  onDraftChange={(draft) =>
-                    approvals.setQuestionDraft(approvals.action!, draft)
-                  }
-                  submitting={approvals.submitting}
-                  disabled={approvals.respondForbidden || compression.blocked}
-                  onSubmit={(response) => {
-                    if (compression.isBlocked())
-                      return Promise.reject(
-                        new Error('Context compression is pending'),
-                      );
-                    return approvals.respond(approvals.action!, response);
-                  }}
-                />
+              {approvals.action?.kind === 'question' &&
+              pendingQuestionRequest ? (
+                <>
+                  <AskUserQuestion
+                    key={managedActionKey(approvals.action)}
+                    request={pendingQuestionRequest}
+                    variant="floating"
+                    keyboardActive={false}
+                    customInputLabel={t('managed.question.other')}
+                    initialDraft={approvals.questionDraft}
+                    onDraftChange={(draft) => {
+                      if (approvals.action?.kind === 'question') {
+                        approvals.setQuestionDraft(approvals.action, draft);
+                      }
+                    }}
+                    disabled={
+                      approvals.respondForbidden ||
+                      approvals.submitting ||
+                      compression.blocked ||
+                      questionExpired
+                    }
+                    submitDisabled={questionTooLarge}
+                    onConfirm={async (
+                      actionId,
+                      _optionId,
+                      _answers,
+                      structuredAnswers,
+                    ) => {
+                      const activeAction = approvals.action;
+                      if (
+                        compression.isBlocked() ||
+                        !activeAction ||
+                        activeAction.kind !== 'question' ||
+                        activeAction.actionId !== actionId ||
+                        Date.now() >= activeAction.expiresAt
+                      ) {
+                        return false;
+                      }
+                      const answers: ManagedAgentQuestionAnswer[] = (
+                        structuredAnswers ?? []
+                      ).flatMap((entry) => {
+                        const optionIds = entry.optionIds ?? [];
+                        const text = entry.text;
+                        if (!optionIds.length && !text?.trim()) return [];
+                        return [
+                          {
+                            questionId: entry.questionId,
+                            ...(optionIds.length
+                              ? { optionIds: [...optionIds] }
+                              : {}),
+                            ...(text?.trim() ? { text } : {}),
+                          },
+                        ];
+                      });
+                      if (exceedsManagedQuestionAnswerLimits(answers)) {
+                        return false;
+                      }
+                      await approvals.respond(activeAction, {
+                        kind: 'question',
+                        answers,
+                      });
+                      return true;
+                    }}
+                    onError={() => {
+                      /* `useManagedActions.respond` records answer errors shown beside the card. */
+                    }}
+                  />
+                  {questionExpired && (
+                    <p
+                      role="status"
+                      className="mt-2 text-sm text-muted-foreground"
+                    >
+                      {t('managed.question.expired')}
+                    </p>
+                  )}
+                  {questionTooLarge && (
+                    <p role="alert" className="mt-2 text-sm text-destructive">
+                      {t('managed.question.tooLarge')}
+                    </p>
+                  )}
+                </>
               ) : (
                 <ToolApproval
                   key={approvals.action && managedActionKey(approvals.action)}
