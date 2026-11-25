@@ -52,18 +52,26 @@ them is the code and the misjudgment surface they carry, not their effect.
 | TUI "potential loop" dialog with a session disable                                                                          | Ink TUI                                              | shown on a stop                       |
 
 `#14828` and the code comment above `TOOL_CALL_LOOP_THRESHOLD` say that
-DashScope no longer rejects repeated identical calls. That is not true. A probe
-on 2026-11-25 (Standard CN and Token Plan) sent a history with N consecutive
-rounds of the same tool call. qwen3.7-plus with thinking on returned
+DashScope no longer rejects repeated identical calls. That is not true, but the
+rejection is narrower than #5019 suggests. Probes on 2026-11-25 (Standard CN
+and Token Plan) sent a history with N consecutive rounds of the same
+`read_file` call, called with `path` where the schema requires `file_path`, each
+answered with the schema error. qwen3.7-plus returned
 `400 invalid_parameter_error "Repetitive tool calls detected in the
-conversation history..."` at N ≥ 20 and 200 at N ≤ 19; with thinking off the
-threshold is between 40 and 80. qwen3.6-plus, qwen3.7-max and qwen3.6-flash
-also return 400 at N = 30. qwen3.5-plus, qwen3.8-flash, qwen3.8-max,
-qwen4-max and the DeepSeek, Kimi and GLM models on Token Plan do not, up to
-N = 30. qwen3.7-plus is the first model of the Token Plan preset. The 400 is
-sticky: a new user message appended after the last tool result is rejected
-again, while an assistant text reply or one different tool call round in
-between is accepted. The Coding Plan models `qwen3-coder-plus`,
+conversation history..."` from about N = 20 (thinking on; between 40 and 80
+with thinking off); qwen3.6-plus, qwen3.7-max and qwen3.6-flash also returned
+400 at N = 30. qwen3.5-plus, qwen3.8-flash, qwen3.8-max, qwen4-max and the
+DeepSeek, Kimi and GLM models on Token Plan did not, up to N = 30. qwen3.7-plus
+is the first model of the Token Plan preset. The rejection depends on content
+and is not deterministic: at N = 25 the same request was rejected two times
+out of three, and repeated successful reads, a different error text, or the
+schema error with a valid argument name were never rejected. A new user message
+appended after the last tool result is rejected again, while an assistant text
+reply or one different tool call round in between is accepted. Through the
+client itself the rejection did not reproduce: resuming a session with 25 such
+rounds against qwen3.7-plus (Qwen Code 0.27.4, with its system prompt, tools and
+loop reminders) returned 200 on every request, and `/compress` worked. The
+Coding Plan models `qwen3-coder-plus`,
 `qwen3-coder-next` and `qwen3-max-2026-01-23` are not served on Standard CN and
 were not probed, nor was Qwen OAuth (`coder-model`).
 
@@ -151,16 +159,15 @@ API error formatter recognizes the message `Repetitive tool calls detected in
 the conversation history` and appends a hint, the same way it appends one to a
 429:
 
-> DashScope rejected the request because the conversation repeats the same
-> tool call. The history still contains the repeats, so the next message will
-> be rejected too. Run /compress to summarize the history, or /clear to start
-> over.
+> The provider rejected the request because the conversation repeats the same
+> tool call. The next message may be rejected for the same reason; run
+> /compress to summarize the history, or /clear to start over.
 
-`/compress` sends the history with thinking disabled, where the measured
-threshold is higher (40 to 80 rounds), so it is expected to succeed in most
-cases; this is checked end to end before the hint ships. `/clear` always
-recovers. The hint is independent of the removal: under today's `warn` default
-the 400 is already reachable, so it ships first.
+Daemon sessions append the same hint to the turn error. `/compress` sends the
+history with thinking disabled, where the measured threshold is higher, and
+`/clear` always recovers. The hint is independent of the removal: under
+today's `warn` default the 400 is already reachable, so it ships first
+(#18317).
 
 ### Extension point
 
@@ -181,8 +188,9 @@ repeats `read_file` with an invalid `path` argument, and then with a valid one:
   ledger records this as C14 and T27 (`differs`).
 
 So a hook can remind and deny today, but not stop. Ending the turn on a tool
-hook's `continue: false` is a hooks change (C14, hooks alignment #18217); it is
-listed under Open questions.
+hook's `continue: false` (`PreToolUse`, `PostToolUse` and
+`PostToolUseFailure`; ledger C14 and T27, hooks alignment #18217) ships before
+the removal (Delivery step 2).
 
 The settings reference gets a short example: a `PreToolUse` command hook that
 keeps the last calls in a file under the session directory and adds a reminder
@@ -225,10 +233,10 @@ after three identical calls.
   repetition, invalid params, read-only exploration) gets none. A turn that
   today stops at the 1000 backstop runs on. Users who set
   `model.loopProtection: "stop"` lose the stops.
-- On qwen3.6 and qwen3.7 models a model that repeats one call about 20 times
-  now gets the DashScope 400 instead of a client reminder, and the session
-  needs `/compress` or `/clear`. Today's `warn` default already reaches the same
-  400 when the model ignores the reminder.
+- On qwen3.6 and qwen3.7 models a model that keeps repeating a call DashScope
+  rejects may now get the DashScope 400 instead of a client reminder, and the
+  session needs `/compress` or `/clear`. Today's `warn` default already
+  reaches the same 400 when the model ignores the reminder.
 - Protocol: `turn_error`, `errorKind: loop_detected`, `loopType`, `loopReason`,
   `toolCallCount` and `toolCallLimit` keep their shape. Clients stop receiving
   the removed `loopType` and `loopReason` values. The SDK keeps
@@ -246,8 +254,8 @@ after three identical calls.
   hooks.
 - Users of the convergence reminder or the ACP guard lose them; #13321 and
   #10887 are closed with the hook pointer.
-- The DashScope 400 strands a session on the affected models until the user
-  compacts or clears.
+- When it fires, the DashScope 400 strands a session on the affected models
+  until the user compacts or clears.
 
 ## Files affected
 
@@ -278,10 +286,14 @@ Current state.
 
 ## Delivery
 
-1. **DashScope hint** (small, independent): the formatter hint and its tests.
-2. **Removal**: core, subagents, daemon, settings, TUI, telemetry and docs, in
+1. **DashScope hint** (small, independent): the formatter and daemon hint and
+   their tests (#18317).
+2. **Tool hooks end the turn**: `continue: false` from `PreToolUse`,
+   `PostToolUse` and `PostToolUseFailure` ends the turn after the batch
+   (ledger C14 and T27, #18217), so the hook extension point can stop.
+3. **Removal**: core, subagents, daemon, settings, TUI, telemetry and docs, in
    one PR, since the settings and the shared counter cross all three runtimes.
-3. **Presentation cleanup**: Web Shell and SDK texts for the removed causes.
+4. **Presentation cleanup**: Web Shell and SDK texts for the removed causes.
 
 ## Validation
 
@@ -302,9 +314,8 @@ End to end, against a mock OpenAI-compatible server:
 - a replayed provider call id still stops;
 - settings with `model.loopProtection` or `model.skipLoopDetection` print one
   warning and run;
-- a mock 400 with the DashScope message shows the hint; and against
-  qwen3.7-plus, a session that hits the real 400 recovers with `/compress`
-  (else the hint names only `/clear`).
+- a mock 400 with the DashScope message shows the hint in headless text and
+  JSON output and in a daemon session (done for #18317).
 
 ## Acceptance criteria
 
@@ -317,9 +328,6 @@ End to end, against a mock OpenAI-compatible server:
 
 ## Open questions
 
-- Whether a tool hook's `continue: false` should end the turn (ledger C14)
-  before this removal ships, so that a hook-based guard can stop and not only
-  remind or deny.
 - Whether `loop_protection` decision data from #15016 exists. It would show how
   often a reminded turn recovered; it does not change this decision.
 - A rename of the `loop_detected` channel, if wanted later.

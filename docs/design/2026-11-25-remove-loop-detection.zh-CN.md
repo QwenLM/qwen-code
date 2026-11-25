@@ -49,16 +49,20 @@ OpenHands 会停止。
 | TUI 的"可能存在循环"对话框（可在本会话内禁用）                                                     | Ink TUI                                    | 停止时显示                              |
 
 `#14828` 以及 `TOOL_CALL_LOOP_THRESHOLD` 上方的代码注释称 DashScope 已不再拒绝
-重复的相同调用，这与事实不符。2026-11-25 的探测（Standard CN 与 Token Plan）
-发送了一段含 N 轮连续相同工具调用的历史。开启思考的 qwen3.7-plus 在 N ≥ 20 时
-返回 `400 invalid_parameter_error "Repetitive tool calls detected in the
-conversation history..."`，N ≤ 19 时返回 200；关闭思考后阈值在 40 到 80 之间。
-qwen3.6-plus、qwen3.7-max 和 qwen3.6-flash 在 N = 30 时同样返回 400。
+重复的相同调用，这与事实不符，但拒绝的范围比 #5019 所暗示的要窄。2026-11-25 的
+探测（Standard CN 与 Token Plan）发送了一段含 N 轮连续相同 `read_file` 调用的历史：
+调用时传的是 `path`，而 schema 要求 `file_path`，每次都以 schema 错误作答。
+qwen3.7-plus 大约从 N = 20 起返回 `400 invalid_parameter_error "Repetitive tool
+calls detected in the conversation history..."`（开启思考时；关闭思考后在 40 到 80
+之间）；qwen3.6-plus、qwen3.7-max 和 qwen3.6-flash 在 N = 30 时同样返回 400。
 qwen3.5-plus、qwen3.8-flash、qwen3.8-max、qwen4-max 以及 Token Plan 上的
 DeepSeek、Kimi、GLM 模型在 N = 30 以内都不会。qwen3.7-plus 是 Token Plan 预设中
-的第一个模型。这个 400 会一直卡住：在最后一个工具结果之后直接
-追加新的用户消息仍会被拒绝，而中间夹一条 assistant 文本回复或一轮不同的工具
-调用则会被接受。Coding Plan 的 `qwen3-coder-plus`、`qwen3-coder-next` 和
+的第一个模型。这种拒绝取决于内容，而且不是确定性的：N = 25 时同一个请求三次中有两次
+被拒；重复的成功读取、不同的错误文本，或参数名正确时的 schema 错误，都从未被拒绝。
+在最后一个工具结果之后直接追加新的用户消息仍会被拒绝，而中间夹一条 assistant 文本
+回复或一轮不同的工具调用则会被接受。通过客户端本身没有复现这种拒绝：用 qwen3.7-plus
+恢复一个含 25 轮此类调用的会话（Qwen Code 0.27.4，带它的系统提示、工具和循环提醒），
+每次请求都返回 200，`/compress` 也正常工作。Coding Plan 的 `qwen3-coder-plus`、`qwen3-coder-next` 和
 `qwen3-max-2026-01-23` 在 Standard CN 上不提供，未测；Qwen OAuth（`coder-model`）
 同样未测。
 
@@ -133,14 +137,13 @@ settings schema、生成的 VS Code schema 和设置参考文档删除这两个�
 `Repetitive tool calls detected in the conversation history` 这段消息，并像处理
 429 那样追加一段提示：
 
-> DashScope rejected the request because the conversation repeats the same
-> tool call. The history still contains the repeats, so the next message will
-> be rejected too. Run /compress to summarize the history, or /clear to start
-> over.
+> The provider rejected the request because the conversation repeats the same
+> tool call. The next message may be rejected for the same reason; run
+> /compress to summarize the history, or /clear to start over.
 
-`/compress` 发送历史时关闭了思考，实测此时阈值更高（40 到 80 轮），因此预计多数
-情况下能成功；提示发布前会做端到端验证。`/clear` 一定能恢复。这条提示与移除工作
-相互独立：在今天的 `warn` 默认值下已经可能撞上这个 400，所以它先发。
+daemon 会话在 turn 错误后追加同样的提示。`/compress` 发送历史时关闭了思考，实测此时
+阈值更高；`/clear` 一定能恢复。这条提示与移除工作相互独立：在今天的 `warn` 默认值下
+已经可能撞上这个 400，所以它先发（#18317）。
 
 ### 扩展点
 
@@ -157,8 +160,9 @@ headless 下对接模拟服务（模型先用无效的 `path` 参数、再用有
   调用的结果变成错误（`EXECUTION_DENIED`，"Tool ... was not run"）；模型会被再次
   调用，运行继续。loop capability ledger 把这一点记为 C14 和 T27（`differs`）。
 
-因此 hook 目前能提醒、能拒绝，但不能停止。让工具 hook 的 `continue: false` 结束
-turn 属于 hook 的改动（C14，hooks 对齐 #18217），列在"待定问题"中。
+因此 hook 目前能提醒、能拒绝，但不能停止。让工具 hook（`PreToolUse`、
+`PostToolUse` 和 `PostToolUseFailure`）的 `continue: false` 结束 turn（ledger C14
+与 T27，hooks 对齐 #18217）会在移除之前交付（"交付"第 2 步）。
 
 设置参考文档中增加一个简短示例：一个 `PreToolUse` 命令 hook，把最近的调用记录在
 会话目录下的文件里，在三次相同调用后加一条提醒。
@@ -190,8 +194,8 @@ turn 属于 hook 的改动（C14，hooks 对齐 #18217），列在"待定问题"
 - 今天会收到提醒的 turn（相同调用、shell 检查、卡住重复、无效参数、只读探索）
   将不再收到提醒。今天在 1000 次兜底处停止的 turn 将继续运行。设置了
   `model.loopProtection: "stop"` 的用户将失去这些停止。
-- 在 qwen3.6 和 qwen3.7 模型上，把同一调用重复约 20 次的模型会收到 DashScope 的
-  400，而不是客户端的提醒，会话需要 `/compress` 或 `/clear`。在今天的 `warn` 默认值
+- 在 qwen3.6 和 qwen3.7 模型上，一直重复某个会被 DashScope 拒绝的调用的模型，可能
+  会收到 DashScope 的 400，而不是客户端的提醒，会话需要 `/compress` 或 `/clear`。在今天的 `warn` 默认值
   下，模型忽略提醒时也会撞上同一个 400。
 - 协议：`turn_error`、`errorKind: loop_detected`、`loopType`、`loopReason`、
   `toolCallCount` 和 `toolCallLimit` 的结构不变。客户端不再收到已移除的 `loopType`
@@ -205,7 +209,7 @@ turn 属于 hook 的改动（C14，hooks 对齐 #18217），列在"待定问题"
 - 无人值守场景中失控的模型会持续消耗 token，直到外部限制把它停下。缓解：显式上限、
   现有的轮数和时间限制，以及 hook。
 - 收敛提醒和 ACP 守卫的使用者会失去它们；#13321 和 #10887 以指向 hook 的说明关闭。
-- 在受影响的模型上，DashScope 400 会让会话卡住，直到用户压缩或清空。
+- 在受影响的模型上，DashScope 400 一旦触发，会让会话卡住，直到用户压缩或清空。
 
 ## 涉及的文件
 
@@ -232,10 +236,13 @@ turn 属于 hook 的改动（C14，hooks 对齐 #18217），列在"待定问题"
 
 ## 交付
 
-1. **DashScope 提示**（小而独立）：格式化逻辑中的提示及其测试。
-2. **移除**：core、子 agent、daemon、设置、TUI、遥测和文档放在一个 PR 中，因为
+1. **DashScope 提示**（小而独立）：格式化逻辑与 daemon 中的提示及其测试（#18317）。
+2. **工具 hook 结束 turn**：`PreToolUse`、`PostToolUse` 和 `PostToolUseFailure` 的
+   `continue: false` 在该批次之后结束 turn（ledger C14 与 T27，#18217），使 hook
+   扩展点能够停止。
+3. **移除**：core、子 agent、daemon、设置、TUI、遥测和文档放在一个 PR 中，因为
    设置和共享计数器横跨三个运行时。
-3. **展示清理**：Web Shell 和 SDK 中已移除原因的文案。
+4. **展示清理**：Web Shell 和 SDK 中已移除原因的文案。
 
 ## 验证
 
@@ -253,8 +260,8 @@ turn 属于 hook 的改动（C14，hooks 对齐 #18217），列在"待定问题"
 - 被重放的 provider call id 仍会停止；
 - 带有 `model.loopProtection` 或 `model.skipLoopDetection` 的设置只打印一次提示，
   并正常运行；
-- 带 DashScope 消息的模拟 400 显示提示；并对 qwen3.7-plus 验证：撞上真实 400 的
-  会话可以用 `/compress` 恢复（否则提示中只写 `/clear`）。
+- 带 DashScope 消息的模拟 400 在 headless 文本与 JSON 输出以及 daemon 会话中显示
+  提示（已在 #18317 完成）。
 
 ## 验收标准
 
@@ -266,8 +273,6 @@ turn 属于 hook 的改动（C14，hooks 对齐 #18217），列在"待定问题"
 
 ## 待定问题
 
-- 是否应在本次移除发布之前，让工具 hook 的 `continue: false` 结束 turn（ledger
-  C14），使基于 hook 的守卫不仅能提醒或拒绝，还能停止。
 - #15016 的 `loop_protection` 决策数据是否存在。它能说明被提醒的 turn 有多少恢复了，
   但不改变本决定。
 - 如有需要，之后再重命名 `loop_detected` 通道。
