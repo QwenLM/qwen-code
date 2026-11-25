@@ -54,17 +54,16 @@ Managed catalog 与宿主业务 catalog 不同。其表结构和应用账号由�
 
 宿主不希望新增 Controller 时使用默认 Java 面。独立服务保留现有 Web 装配，Starter 不移除它。
 
-宿主可提供唯一的 `ExternalRuntimeClient` Bean，选择同进程的外部 Runtime placement。`RuntimeProviderDependencies.externalRuntime()` 以 `Optional` 暴露该端口；`ExternalRuntimeProviderFactory` 仍负责原有 `ExternalRuntimeProvisioner` / `ExternalWorkspaceProvisioner` 及其 binding、attest、reattach 语义。注入客户端后，不再要求外部 provider URL/token；没有客户端时，URL/token 校验与 HTTP 行为保持不变。`RuntimeProviderFactory.validate(settings)` 的旧 SPI 继续有效，宿主依赖感知的校验通过新的缺省重载传递。该注入不创建业务身份、不授权 Workspace 访问、不替代 MA 数据源，也不把宿主内部服务暴露成 Servlet。
+扩展归档存储由 `ManagedAgentConfiguration` 导入，不再单独注册到 server 的全局自动配置索引。现有工厂方法继续以参数注入 `ManagedAgentProperties`，并通过 `@ConditionalOnMissingBean` 优先使用宿主自备的 `ExtensionArchiveStorage`；不再依赖该配置注册属性 Bean 前就会求值的类级 `@ConditionalOnBean`。设置 `qwen.managed-agent.enabled=false` 时，Starter 不导入 `ManagedAgentConfiguration`，也不创建 Managed 资源。
 
-宿主还可经 `RuntimeProviderDependencies.externalRuntimeTransport()` 为外部 Worker 提供一个 `RuntimeTransport`，在保留官方 Runtime 协议的前提下接入自有传输；缺省仍是 `HttpRuntimeTransport`。传输不负责资源分配，必须沿用原 boot/lease 与 attest，不能把资源已分配当作 Worker READY。
-
+宿主可提供唯一的 `ExternalRuntimeClient` Bean，选择同进程的外部 Runtime placement；`RuntimeProviderDependencies.externalRuntime()` 以 `Optional` 暴露该端口。注入客户端后，不再要求外部 provider URL/token；没有客户端时保留既有校验与 HTTP 行为。宿主还可经 `RuntimeProviderDependencies.externalRuntimeTransport()` 提供外部 Worker 的 `RuntimeTransport`，缺省仍是 `HttpRuntimeTransport`。二者都不创建业务身份或替代 Workspace 授权；传输不负责资源分配，必须沿用原 boot/lease 与 attest，不能把资源已分配当作 Worker READY。
 
 ## 验证
 
 - 上下文测试：默认依赖无效果、显式启用、独立或宿主提供的 Managed 数据源，以及没有公共/内部 Controller Bean。
 - Schema 测试：默认仍初始化；仅校验接受已建基线，拒绝空库且不建表；可用时用真实 MySQL 验证该边界。
 - 架构测试：Starter 类型只属于本模块且仅依赖 server 装配，不依赖宿主类型。
-- 独立夹具：使用 Spring Boot 3.5.3 消费新制品，无 `@Import`，覆盖独立连接池和宿主提供的连接池。原显式导入测试继续执行。
+- 独立夹具：使用 Spring Boot 3.5.3 消费新制品，无 `@Import`，覆盖独立连接池和宿主提供的连接池。验证宿主声明的 `@Transactional` Bean 是 AOP 代理。原显式导入测试继续执行。
 - 配置参考与 README 同步新属性和制品契约。
 - 聚焦 Maven/Checkstyle 检查及独立夹具提供本地证据；完整 Java、MySQL 和打包测试集保留为 CI 门禁。
 

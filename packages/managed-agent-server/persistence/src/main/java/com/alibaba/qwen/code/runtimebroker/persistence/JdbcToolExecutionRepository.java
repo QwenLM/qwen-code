@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolHoldRow;
@@ -583,7 +584,7 @@ public final class JdbcToolExecutionRepository
 
     @Override
     public ToolExecutionRecord attachMeasurements(
-            ToolExecutionRecord expected, Map<String, Object> metadata) {
+            ToolExecutionRecord expected, RuntimeToolMeasurements.Metadata metadata) {
         return JdbcToolExecutionObservations.attachMeasurements(dataSource, expected, metadata);
     }
 

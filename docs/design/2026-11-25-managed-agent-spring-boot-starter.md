@@ -54,17 +54,16 @@ The Managed catalog is distinct from the host business catalog. Its schema and a
 
 A host that wants no controllers uses the default Java surface. The standalone application retains its existing web assembly; the starter does not remove it.
 
-A host may provide one `ExternalRuntimeClient` bean for same-process external Runtime placement. `RuntimeProviderDependencies.externalRuntime()` exposes this optional port. `ExternalRuntimeProviderFactory` continues to create the established `ExternalRuntimeProvisioner` / `ExternalWorkspaceProvisioner` with their binding, attestation and reattachment semantics. An injected client replaces the external provider URL/token requirement; without one, URL/token validation and HTTP behavior are unchanged. Existing `RuntimeProviderFactory.validate(settings)` plugins remain valid, while a default overload receives host dependencies for configuration-only validation. Neither this SPI nor an injected client creates business identity, authorizes Workspace access, replaces the Managed database, or exposes host services as a servlet.
+Extension archive storage is imported through `ManagedAgentConfiguration`, not registered separately in the server-wide auto-configuration index. The existing factory method receives `ManagedAgentProperties` as a parameter and uses `@ConditionalOnMissingBean`, so host-provided `ExtensionArchiveStorage` takes precedence. It does not depend on a class-level `@ConditionalOnBean` evaluated before that configuration has registered the properties. With `qwen.managed-agent.enabled=false`, the Starter does not import `ManagedAgentConfiguration` or create Managed resources.
 
-A host may additionally provide one `RuntimeTransport` for external workers through `RuntimeProviderDependencies.externalRuntimeTransport()`. It retains the official Runtime protocol while supplying its own transport; the default remains `HttpRuntimeTransport`. This transport does not allocate resources, and it must preserve the original boot/lease and attestation path instead of assuming that an allocated resource is ready.
-
+A host may provide one `ExternalRuntimeClient` for same-process placement through `RuntimeProviderDependencies.externalRuntime()`, removing the provider URL/token requirement. It may also provide an external `RuntimeTransport` through `RuntimeProviderDependencies.externalRuntimeTransport()`, retaining the default `HttpRuntimeTransport` when absent. Neither port authorizes Workspace access or allocates native facts; the original boot, lease and attestation semantics stay unchanged.
 
 ## Validation
 
 - Context tests: dependency disabled by default, explicit enablement, owned or host-supplied Managed data source, and no public/internal controller beans.
 - Schema tests: initialization remains the default; validation-only accepts a prepared catalog and refuses an empty catalog without creating tables; real MySQL verifies that boundary when available.
 - Architecture tests: starter classes belong only to the starter module and depend only on the server assembly, not on host types.
-- Independent fixture: consume the new artifact with Spring Boot 3.5.3 and no `@Import`, both with an owned pool and a host-supplied pool. Existing explicit-import coverage remains executable.
+- Independent fixture: consume the new artifact with Spring Boot 3.5.3 and no `@Import`, both with an owned pool and a host-supplied pool. Verify that a host-declared `@Transactional` bean is an AOP proxy. Existing explicit-import coverage remains executable.
 - Configuration reference and README are regenerated or updated with the new properties and artifact contract.
 - Relevant focused Maven/Checkstyle checks and the independent fixture provide local evidence; the complete Java, MySQL and packaging suites remain CI gates.
 

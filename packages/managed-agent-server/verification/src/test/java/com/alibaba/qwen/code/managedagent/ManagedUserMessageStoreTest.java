@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
@@ -227,9 +228,9 @@ class ManagedUserMessageStoreTest {
         Message first = messages.command(TENANT, ACTOR, legacy, "legacy-first",
                 submit("legacy")).messages().getFirst();
         messages.startNext(TENANT, legacy, (actorTenant, principal, actorId, key, target, input) -> {
-            var admission = store.insertTurnCommand(principal.tenantId(),
+            var admission = store.insertTurnCommand(actorTenant,
                     "queue-test", key, "digest", target, first.input(),
-                    "sha256:" + "0".repeat(64), principal);
+                    "sha256:" + "0".repeat(64), actorId);
             return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
                     target, admission.turnId(), "ACCEPTED", false);
         });
@@ -482,7 +483,8 @@ class ManagedUserMessageStoreTest {
         store.beginOperation(TENANT, session, OperationKind.ARCHIVE, ACTOR, "archive", "digest");
         jdbc.update("UPDATE ma_user_message SET state = 'queued' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
         long beforeUnarchive = queueRevision(session);
-        store.beginSessionMutation(TENANT, "UNARCHIVE_SESSION", "unarchive", "digest", session, SessionMutationKind.UNARCHIVE);
+        store.beginSessionMutation(TENANT, "UNARCHIVE_SESSION", "unarchive", "digest", session, SessionMutationKind.UNARCHIVE, ACTOR,
+                SessionPrincipal.ofUser(TENANT, ACTOR));
         store.completeSessionMutation(TENANT, "UNARCHIVE_SESSION", "unarchive", session, SessionMutationKind.UNARCHIVE, null, null);
         assertThat(store.requireSession(TENANT, session).status()).isEqualTo("CLOSED");
         assertThat(state(queued)).isEqualTo("withdrawn");

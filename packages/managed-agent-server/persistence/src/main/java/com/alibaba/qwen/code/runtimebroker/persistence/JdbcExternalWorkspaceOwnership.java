@@ -285,6 +285,7 @@ public final class JdbcExternalWorkspaceOwnership {
 
     private static void requireSoleMember(Connection connection, Owner owner, RuntimeBindingRecord binding,
             RuntimeSessionRecord session) throws SQLException {
+        // 同一共享 binding 可持有多个成员；非共享 binding 仍只允许单个成员。
         try (var statement = connection.prepareStatement("SELECT binding_id, runtime_generation, runtime_session_id"
                 + " FROM ma_runtime_session WHERE execution_storage_id = ? FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, owner.registration().ownerKey());
@@ -494,6 +495,18 @@ public final class JdbcExternalWorkspaceOwnership {
                         throw unavailable();
                     }
                 }
+            }
+        }
+    }
+
+    /** Shared storage has no single Harness Session, so the fence is its retirement authority. */
+    public static boolean storageFenced(Connection connection, RuntimeProvisionRequest request) throws SQLException {
+        try (var statement = connection.prepareStatement("SELECT fence_operation_id FROM ma_storage"
+                + " WHERE tenant_id = ? AND storage_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, request.getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, request.getStorageId());
+            try (var row = statement.executeQuery()) {
+                return row.next() && row.getString("fence_operation_id") != null;
             }
         }
     }

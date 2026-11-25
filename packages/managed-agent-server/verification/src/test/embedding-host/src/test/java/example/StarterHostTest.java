@@ -5,11 +5,13 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.Test;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.sql.DataSource;
@@ -25,6 +27,7 @@ class StarterHostTest {
         application.setWebApplicationType(org.springframework.boot.WebApplicationType.NONE);
         try (var context = application.run("--qwen.managed-agent.enabled=true", "--qwen.managed-agent.datasource.url=" + url())) {
             assertThat(context.getBean(ManagedAgentService.class)).isNotNull();
+            assertThat(AopUtils.isAopProxy(context.getBean(TransactionalHostBean.class))).isTrue();
             assertThat(context.containsBean("managedAgentExecutor")).isTrue();
             assertThat(context.getBeansWithAnnotation(RestController.class)).isEmpty();
             assertThat(context.getBeansOfType(TenantContextFilter.class)).isEmpty();
@@ -53,6 +56,17 @@ class StarterHostTest {
     @SpringBootConfiguration
     @EnableAutoConfiguration
     static class Host {
+        @Bean
+        TransactionalHostBean transactionalHostBean() {
+            return new TransactionalHostBean();
+        }
+    }
+
+    static class TransactionalHostBean {
+        @Transactional
+        public String value() {
+            return "host";
+        }
     }
 
     @org.springframework.context.annotation.Configuration(proxyBeanMethods = false)

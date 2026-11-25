@@ -63,6 +63,32 @@ public class ManagedAgentDefinitionService {
                         System.currentTimeMillis()));
     }
 
+    Result prepare(String tenantId, String agentId, String idempotencyKey,
+            AgentDefinitionRequest request) {
+        requireAgentId(agentId);
+        ManagedAgentService.validateIdempotencyKey(idempotencyKey);
+        Map<String, Object> content = content(request);
+        String digest = contentDigest(content);
+        var existing = store.find(tenantId, agentId, 1);
+        if (existing.isPresent()) {
+            if (!digest.equals(existing.get().digest())) {
+                throw new ManagedAgentException(409, "source_projection_conflict",
+                        "The exact source identity already names different content.");
+            }
+            return new Result(publicDefinition(existing.get()), true);
+        }
+        Result created = result(tenantId, idempotencyKey, requestDigest("create", null, content),
+                () -> store.create(tenantId, idempotencyKey,
+                        requestDigest("create", null, content), agentId, digest,
+                        json(content), System.currentTimeMillis()));
+        AgentDefinition saved = get(tenantId, agentId, "1");
+        if (!digest.equals(saved.digest())) {
+            throw new ManagedAgentException(409, "source_projection_conflict",
+                    "The saved native definition does not match the exact source.");
+        }
+        return new Result(saved, created.replayed());
+    }
+
     public Result update(String tenantId, String agentId,
             String idempotencyKey, AgentDefinitionRequest request) {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);

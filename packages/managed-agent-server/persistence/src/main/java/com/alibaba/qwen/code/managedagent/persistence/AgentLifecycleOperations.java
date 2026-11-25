@@ -166,7 +166,8 @@ final class AgentLifecycleOperations {
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         AgentSessionPolicies.requireSessionStatus(session.status(), "ARCHIVED");
         sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
-        if (!sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId)) {
+        // 非 Workspace 会话的历史生命周期不适用 Workspace close 门禁。
+        if (session.workspace() != null && !sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         long now = storeRows.lifecycleDatabaseTime();

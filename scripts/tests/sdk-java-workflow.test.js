@@ -184,14 +184,16 @@ describe('SDK Java self-hosted workflow guards', () => {
       'utf8',
     );
     expect(embeddingScript).toContain('set -euo pipefail');
-    expect(embeddingScript).toContain('-pl server -am -DskipTests');
+    expect(embeddingScript).toContain(
+      '-pl server,qwen-managed-agent-spring-boot-starter -am -DskipTests',
+    );
     expect(embeddingScript).toContain('-Dexpression=project.version');
     const hostRuns = embeddingScript
       .split('\n')
       .filter((line) =>
         line.includes('-f verification/src/test/embedding-host/pom.xml'),
       );
-    expect(hostRuns).toHaveLength(2);
+    expect(hostRuns).toHaveLength(3);
     for (const line of hostRuns) {
       expect(line).toContain('-Dmanaged-agent.version="${managed_version}"');
       expect(line).toContain('-DfailIfNoTests=true');
@@ -201,6 +203,8 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(hostRuns[0]).not.toContain('-Pembedded');
     expect(hostRuns[1]).toContain('-Dtest=EnabledHostTest');
     expect(hostRuns[1]).toContain('-Pembedded');
+    expect(hostRuns[2]).toContain('-Dtest=StarterHostTest');
+    expect(hostRuns[2]).toContain('-Pembedded');
     expect(
       steps.find(
         (candidate) =>
