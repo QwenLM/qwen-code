@@ -19,6 +19,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -391,7 +392,7 @@ public class ClientFilesRelayService {
         }
         try {
             enqueue(binding, requestId, body, now);
-        } catch (org.springframework.dao.DuplicateKeyException retried) {
+        } catch (DuplicateKeyException retried) {
             // A retried JSON-RPC id attaches to the existing queue row; the
             // waiter shares its answer (or its settled failure).
         }

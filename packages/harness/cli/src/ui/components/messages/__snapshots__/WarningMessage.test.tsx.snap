@@ -1,0 +1,17 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`WarningMessage > renders multiline warning messages 1`] = `
+" ● Warning line 1
+   Warning line 2
+"
+`;
+
+exports[`WarningMessage > renders warning messages with inline code 1`] = `
+" ● Check config.json before continuing
+"
+`;
+
+exports[`WarningMessage > renders with the correct prefix and text 1`] = `
+" ● Watch out!
+"
+`;

@@ -14,9 +14,13 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.LongSupplier;
 
@@ -74,7 +78,7 @@ public final class SessionResourceCollectionCollector {
         // The page-time recovery re-check fences a registration through InnoDB gap locks, which
         // exist
         // only under REPEATABLE READ; pin it rather than inherit the server default.
-        this.transactions.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        this.transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.properties = properties;
         this.clock = clock;
     }
@@ -137,7 +141,7 @@ public final class SessionResourceCollectionCollector {
                 "SESSION", session, session, operationId(session));
     }
 
-    private static JsonNode progress(java.util.Map<String, Object> row) {
+    private static JsonNode progress(Map<String, Object> row) {
         Object value = row.get("result_json");
         return value == null ? JSON.createObjectNode() : JdbcManagedToolResultStore.parse((String) value);
     }
@@ -297,7 +301,7 @@ public final class SessionResourceCollectionCollector {
         return null;
     }
 
-    private String blocker(String tenant, String session, long now, java.util.Map<String, Object> head) {
+    private String blocker(String tenant, String session, long now, Map<String, Object> head) {
         var roots =
                 jdbc.query(
                         "SELECT retired_at, is_recovery_protected FROM ma_session WHERE tenant_id = ?"
@@ -401,7 +405,7 @@ public final class SessionResourceCollectionCollector {
         var rows = jdbc.query(RESOURCE_PAGE, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), claim.tenant(),
                 claim.session(), claim.cursor());
         long bytes = 0;
-        var ids = new java.util.ArrayList<String>(PAGE_ROWS);
+        var ids = new ArrayList<String>(PAGE_ROWS);
         String cursor = claim.cursor();
         boolean more = rows.size() > PAGE_ROWS;
         for (var candidate : rows.subList(0, Math.min(rows.size(), PAGE_ROWS))) {
@@ -424,11 +428,11 @@ public final class SessionResourceCollectionCollector {
         }
         long freed = 0;
         if (!ids.isEmpty()) {
-            var args = new java.util.ArrayList<Object>(ids.size() + 2);
+            var args = new ArrayList<Object>(ids.size() + 2);
             args.add(claim.tenant());
             args.add(claim.session());
             args.addAll(ids);
-            String in = String.join(", ", java.util.Collections.nCopies(ids.size(), "?"));
+            String in = String.join(", ", Collections.nCopies(ids.size(), "?"));
             // Retirement fences new references; only this operation can collect these SQL bodies.
             jdbc.update(
                     "UPDATE ma_resource SET state = 'COLLECTED', inline_bytes = NULL,"
