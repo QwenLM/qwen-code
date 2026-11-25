@@ -15,7 +15,7 @@ import {
   readFile,
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const mockStorageDir = vi.hoisted(() => vi.fn());
@@ -156,6 +156,46 @@ describe('FileHistoryService', () => {
       expect(await readFile(file)).toEqual(before);
     },
   );
+
+  describe('one file reached through two path spellings', () => {
+    const aliases = (projectDir: string): Array<[string, string]> => {
+      const file = join(projectDir, 'a.ts');
+      const parent = join(projectDir, '..');
+      const list: Array<[string, string]> = [
+        ['a dot segment', `${parent}${sep}.${sep}${basename(projectDir)}${sep}a.ts`],
+      ];
+      if (process.platform === 'win32') {
+        list.push(['forward slashes', file.split(sep).join('/')]);
+        list.push([
+          'another drive-letter case',
+          (file[0] === file[0].toUpperCase()
+            ? file[0].toLowerCase()
+            : file[0].toUpperCase()) + file.slice(1),
+        ]);
+      }
+      return list;
+    };
+
+    it('rewinds to the version before the first edit', async () => {
+      const results: string[] = [];
+      for (const [name, alias] of aliases(projectDir)) {
+        const svc = new FileHistoryService(`s-${name}`, true, projectDir);
+        const file = join(projectDir, 'a.ts');
+        await writeFile(file, 'v0');
+        await svc.makeSnapshot('p1');
+        await svc.trackEdit(alias);
+        await writeFile(file, 'v1');
+        await svc.makeSnapshot('p2');
+        await svc.trackEdit(file);
+        await writeFile(file, 'v2');
+        await svc.rewind('p1', false);
+        results.push(`${name}: ${await readFile(file, 'utf8')}`);
+      }
+      expect(results).toEqual(
+        aliases(projectDir).map(([name]) => `${name}: v0`),
+      );
+    });
+  });
 
   describe('disabled service', () => {
     it('should no-op all operations when disabled', async () => {

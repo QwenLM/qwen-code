@@ -1652,10 +1652,20 @@ export class FileHistoryService {
 
   private maybeShortenFilePath(filePath: string): string {
     if (!isAbsolute(filePath)) return filePath;
-    if (filePath.startsWith(this.cwd + sep) || filePath === this.cwd) {
-      return relative(this.cwd, filePath);
+    // Tools pass the path as the model spelled it. Resolve it and compare
+    // with `relative` (case-insensitive on Windows), so `C:/proj/a.ts`,
+    // `c:\proj\a.ts` and `/tmp/./proj/a.ts` all key the file the same way.
+    // Two keys for one file made rewind restore whichever was tracked later
+    // at its first version, not the file's state at the chosen checkpoint.
+    const resolved = resolve(filePath);
+    const rel = relative(this.cwd, resolved);
+    if (
+      rel === '' ||
+      (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+    ) {
+      return rel;
     }
-    return filePath;
+    return resolved;
   }
 
   private maybeExpandFilePath(filePath: string): string {
