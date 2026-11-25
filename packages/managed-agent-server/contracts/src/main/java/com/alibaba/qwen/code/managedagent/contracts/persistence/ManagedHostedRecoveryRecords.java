@@ -316,32 +316,45 @@ public final class ManagedHostedRecoveryRecords {
                 ManagedExtensionRecords.id(body.get(field), field);
             }
             ManagedExtensionRecords.oneOf(body.get("stage"), List.of("approval", "final"), "stage");
+            JsonNode calls = body.path("calls");
+            require(calls.isArray() && !calls.isEmpty(), "Native batch is empty.");
+            boolean hooksPlan = false;
+            for (JsonNode call : calls) {
+                hooksPlan |= call.has("hookResults");
+            }
             JsonNode runtime = body.get("runtime");
             boolean memoryOnly = runtime != null && runtime.isNull();
+            boolean durableOwner = false;
+            String owner = null;
             if (memoryOnly) {
-                require(!body.has("commandStep") && !body.has("publicChildModel"), "Memory continuation cannot name Runtime work.");
+                require(!body.has("commandStep") && !body.has("publicChildModel") && !hooksPlan,
+                        "Memory continuation cannot name Runtime work.");
             } else {
                 Set<String> runtimeFields = new HashSet<>(Set.of("runtimeSessionId", "bindingId", "generation", "workspaceGeneration"));
-                if (runtime != null && runtime.has("provisionerKind")) {
+                boolean providerPinned = runtime != null && runtime.has("provisionerKind");
+                if (providerPinned) {
                     runtimeFields.add("provisionerKind");
                     ManagedExtensionRecords.oneOf(runtime.get("provisionerKind"), List.of("local-process"), "native Runtime provider");
-                    require(!body.has("commandStep") && body.path("calls").isArray() && body.path("calls").size() == 1
-                            && "ask_user_question".equals(body.path("calls").get(0).path("call").path("name").asText()),
+                    require(!body.has("commandStep") && calls.size() == 1
+                            && "ask_user_question".equals(calls.get(0).path("call").path("name").asText()),
                             "Native Runtime provider pin requires a single question.");
                 }
                 ManagedExtensionRecords.closed(runtime, runtimeFields, "native Runtime");
+                owner = ManagedExtensionRecords.id(runtime.get("runtimeSessionId"), "native Runtime owner");
                 if (body.has("commandStep")) {
-                    ManagedExtensionRecords.id(runtime.get("runtimeSessionId"), "command Runtime owner");
+                    require(!hooksPlan, "Command continuation cannot carry native Hook results.");
                 } else {
-                    require(runtimeSessionId(body.get("promptId").asText()).equals(runtime.path("runtimeSessionId").asText()), "Native Runtime owner conflicts.");
+                    boolean turnOwner = !hooksPlan && runtimeSessionId(body.get("promptId").asText()).equals(owner);
+                    // The Harness verifies the exact reattached owner before replay.
+                    durableOwner = !turnOwner && !providerPinned && owner.matches("(?:mcp|extensions-components)-[a-f0-9]{64}");
+                    require(turnOwner || durableOwner, "Native Runtime owner conflicts.");
                 }
                 ManagedExtensionRecords.id(runtime.get("bindingId"), "bindingId");
                 generation(runtime.get("generation"));
                 generation(runtime.get("workspaceGeneration"));
             }
-            require(body.path("calls").isArray() && !body.path("calls").isEmpty(), "Native batch is empty.");
-            ManagedExtensionRecords.count(body.get("approvalOrdinal"), 0, body.path("calls").size() - 1, "approvalOrdinal");
-            for (JsonNode call : body.get("calls")) {
+            ManagedExtensionRecords.count(body.get("approvalOrdinal"), 0, calls.size() - 1, "approvalOrdinal");
+            for (JsonNode call : calls) {
                 if (memoryOnly) {
                     require(Set.of("context_search", "context_remember", "context_get", "context_forget")
                             .contains(call.path("call").path("name").asText()), "Memory continuation contains another tool.");
@@ -353,6 +366,20 @@ public final class ManagedHostedRecoveryRecords {
                 require(!body.has("commandStep") || "skill".equals(call.path("call").path("name").asText()), "Command continuation must resume its Skill call.");
                 Set<String> callFields = new HashSet<>(Set.of("call", "runtimeCallId", "inputRef", "definitionRef",
                         "requestDigest", "argsDigest", "prepareKey", "prepareReference", "partIndex", "refusal", "actionId"));
+                if (hooksPlan) {
+                    callFields.add("hookResults");
+                    validateHookResults(call.get("hookResults"));
+                }
+                if (durableOwner) {
+                    JsonNode reference = call.path("prepareReference");
+                    String callId = ManagedExtensionRecords.id(call.get("runtimeCallId"), "runtimeCallId");
+                    require(owner.equals(reference.path("sessionId").asText())
+                            && body.get("promptId").equals(reference.get("promptId"))
+                            && callId.equals(reference.path("callId").asText())
+                            && call.path("requestDigest").equals(reference.get("argsDigest"))
+                            && (owner + ":" + callId).equals(call.path("prepareKey").asText()),
+                            "Native Runtime correlation conflicts.");
+                }
                 if (body.has("publicChildModel") && call.has("publicationId")) {
                     callFields.add("publicationId");
                     require("run_shell_command".equals(call.path("call").path("name").asText())
@@ -364,6 +391,19 @@ public final class ManagedHostedRecoveryRecords {
                 ManagedExtensionRecords.durableRef(call.get("inputRef"), "inputRef");
                 ManagedExtensionRecords.durableRef(call.get("definitionRef"), "definitionRef");
             }
+        }
+    }
+
+    private static void validateHookResults(JsonNode results) {
+        require(results != null && results.isArray(), "Invalid native Hook results.");
+        List<String> events = List.of("PreToolUse", "PermissionRequest");
+        int previous = -1;
+        for (JsonNode result : results) {
+            ManagedExtensionRecords.closed(result, Set.of("event", "resultDigest"), "native Hook result");
+            int event = events.indexOf(result.path("event").asText());
+            require(event > previous, "Invalid native Hook result order.");
+            ManagedExtensionRecords.digest(result.get("resultDigest"), "native Hook result digest");
+            previous = event;
         }
     }
 

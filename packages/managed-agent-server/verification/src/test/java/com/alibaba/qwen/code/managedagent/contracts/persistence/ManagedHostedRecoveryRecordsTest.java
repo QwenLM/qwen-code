@@ -124,6 +124,50 @@ class ManagedHostedRecoveryRecordsTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"extensions-components-", "mcp-"})
+    void acceptsDurableRuntimeOwnersWithHookResults(String prefix) {
+        ObjectNode body = nativeContinuation("read_file");
+        setNativeRuntimeOwner(body, prefix + "a".repeat(64));
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        var results = call.putArray("hookResults");
+        results.addObject().put("event", "PreToolUse").put("resultDigest", "b".repeat(64));
+        results.addObject().put("event", "PermissionRequest").put("resultDigest", "c".repeat(64));
+        assertThatCode(() -> validateNativeContinuation(body)).doesNotThrowAnyException();
+
+        results.add(results.get(0).deepCopy());
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Hook result order");
+        results.remove(2);
+        ((ObjectNode) results.get(0)).put("resultDigest", "invalid");
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Hook result digest");
+        ((ObjectNode) results.get(0)).put("resultDigest", "b".repeat(64));
+        ((com.fasterxml.jackson.databind.node.ArrayNode) body.get("calls"))
+                .add(nativeContinuation("read_file").path("calls").get(0));
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Hook results");
+    }
+
+    @Test
+    void enforcesDurableNativeOwnerAndPrepareCorrelation() {
+        ObjectNode body = nativeContinuation("mcp_" + "a".repeat(32));
+        String owner = "mcp-" + "1".repeat(64);
+        setNativeRuntimeOwner(body, owner);
+        assertThatCode(() -> validateNativeContinuation(body)).doesNotThrowAnyException();
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        call.put("prepareKey", "different:call");
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Runtime correlation");
+        setNativeRuntimeOwner(body, "mcp-not-a-durable-id");
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Runtime owner");
+
+        ObjectNode activationScoped = nativeContinuation("read_file");
+        ((ObjectNode) activationScoped.path("calls").get(0)).putArray("hookResults");
+        assertThatThrownBy(() -> validateNativeContinuation(activationScoped)).hasMessageContaining("Runtime owner");
+
+        ObjectNode question = nativeContinuation("ask_user_question");
+        setNativeRuntimeOwner(question, owner);
+        ((ObjectNode) question.get("runtime")).put("provisionerKind", "local-process");
+        assertThatThrownBy(() -> validateNativeContinuation(question)).hasMessageContaining("Runtime owner");
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"ssh-process", "external-workspace", "static", "", "local-process-extra"})
     void rejectsUnsupportedNativeQuestionProviders(String provider) {
         ObjectNode body = nativeContinuation("ask_user_question");
@@ -182,6 +226,13 @@ class ManagedHostedRecoveryRecordsTest {
         call.set("inputRef", reference(stored("input", "managed-tool-input", json.createObjectNode())));
         call.set("definitionRef", reference(stored("tool", "managed-tool-definition", json.createObjectNode())));
         return body;
+    }
+
+    private static void setNativeRuntimeOwner(ObjectNode body, String runtimeSessionId) {
+        ((ObjectNode) body.get("runtime")).put("runtimeSessionId", runtimeSessionId);
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        call.put("prepareKey", runtimeSessionId + ":" + call.path("runtimeCallId").asText());
+        ((ObjectNode) call.get("prepareReference")).put("sessionId", runtimeSessionId);
     }
 
     private void validateNativeContinuation(ObjectNode body) {
