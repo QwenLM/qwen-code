@@ -3200,24 +3200,32 @@ describe('scheduled-tasks routes', () => {
   it('re-enabling a one-shot task re-seats its anchor (not fired as missed + deleted)', async () => {
     // A one-shot paused past its slot then re-enabled must fire at its NEXT
     // occurrence, not be read as a missed one-shot on the next reload and
-    // silently deleted.
-    const createdAt = 1_700_000_000_000; // long past
-    await seedTask({
-      id: 'o1',
-      cron: '0 9 1 1 *',
-      prompt: 'p',
-      recurring: false,
-      createdAt,
-      lastFiredAt: createdAt,
-      enabled: false,
-    });
-    const now = Date.now();
-    const patch = await request(h.app)
-      .patch('/scheduled-tasks/o1')
-      .send({ enabled: true });
-    expect(patch.status).toBe(200);
-    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
-    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+    // silently deleted. Pin the clock at local midnight so the projected 09:00
+    // is hours out and the <=90s early one-shot jitter can't undercut `now`.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date().setHours(0, 0, 0, 0));
+    try {
+      const createdAt = 1_700_000_000_000; // long past
+      await seedTask({
+        id: 'o1',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: false,
+        createdAt,
+        lastFiredAt: createdAt,
+        enabled: false,
+      });
+      const now = Date.now();
+      const patch = await request(h.app)
+        .patch('/scheduled-tasks/o1')
+        .send({ enabled: true });
+      expect(patch.status).toBe(200);
+      expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
+      expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+      expect(patch.body.nextRunAt).toBeLessThanOrEqual(now + 86_400_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('editing an enabled recurring task cron re-seats the anchor to now (no catch-up on save)', async () => {
@@ -3314,25 +3322,38 @@ describe('scheduled-tasks routes', () => {
     // A long-ago createdAt would make the new one-shot read as a MISSED slot the
     // scheduler fires + deletes immediately. Re-seating createdAt to now points
     // its next fire at the upcoming occurrence instead.
-    const createdAt = 1_700_000_000_000;
-    const firedAt = createdAt + 3 * 86_400_000;
-    await seedTask({
-      id: 'r2o',
-      cron: '0 9 * * *',
-      prompt: 'p',
-      recurring: true,
-      createdAt,
-      lastFiredAt: firedAt,
-      enabled: true,
-    });
-    const now = Date.now();
-    const patch = await request(h.app)
-      .patch('/scheduled-tasks/r2o')
-      .send({ recurring: false });
-    expect(patch.status).toBe(200);
-    expect(patch.body.recurring).toBe(false);
-    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
-    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+    //
+    // Pin the clock at local midnight so the projected 09:00 is hours out: a
+    // one-shot landing on :00/:30 is jittered EARLY by up to 90s, so a real clock
+    // inside that window makes nextRunAt legitimately land before `now`. Fake
+    // only Date so supertest's real timers keep working.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date().setHours(0, 0, 0, 0));
+    try {
+      const createdAt = 1_700_000_000_000;
+      const firedAt = createdAt + 3 * 86_400_000;
+      await seedTask({
+        id: 'r2o',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt,
+        lastFiredAt: firedAt,
+        enabled: true,
+      });
+      const now = Date.now();
+      const patch = await request(h.app)
+        .patch('/scheduled-tasks/r2o')
+        .send({ recurring: false });
+      expect(patch.status).toBe(200);
+      expect(patch.body.recurring).toBe(false);
+      expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
+      // The upcoming 09:00, minus at most the 90s early jitter.
+      expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+      expect(patch.body.nextRunAt).toBeLessThanOrEqual(now + 86_400_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('re-seats a schedule edit made while DISABLED (so a later re-enable is not a missed fire)', async () => {
@@ -3360,23 +3381,31 @@ describe('scheduled-tasks routes', () => {
   });
 
   it('editing an ENABLED one-shot cron re-seats createdAt (fires next, not as missed)', async () => {
-    const createdAt = 1_700_000_000_000; // long past
-    await seedTask({
-      id: 'eo1',
-      cron: '0 9 1 1 *',
-      prompt: 'p',
-      recurring: false,
-      createdAt,
-      lastFiredAt: createdAt,
-      enabled: true,
-    });
-    const now = Date.now();
-    const patch = await request(h.app)
-      .patch('/scheduled-tasks/eo1')
-      .send({ cron: '30 8 1 1 *' });
-    expect(patch.status).toBe(200);
-    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
-    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+    // Pin the clock at local midnight so the yearly projection is months out and
+    // the <=90s early one-shot jitter on a :00/:30 landing can't undercut `now`.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date().setHours(0, 0, 0, 0));
+    try {
+      const createdAt = 1_700_000_000_000; // long past
+      await seedTask({
+        id: 'eo1',
+        cron: '0 9 1 1 *',
+        prompt: 'p',
+        recurring: false,
+        createdAt,
+        lastFiredAt: createdAt,
+        enabled: true,
+      });
+      const now = Date.now();
+      const patch = await request(h.app)
+        .patch('/scheduled-tasks/eo1')
+        .send({ cron: '30 8 1 1 *' });
+      expect(patch.status).toBe(200);
+      expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
+      expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects re-enabling an archive-disabled task via PATCH (409, no write)', async () => {
