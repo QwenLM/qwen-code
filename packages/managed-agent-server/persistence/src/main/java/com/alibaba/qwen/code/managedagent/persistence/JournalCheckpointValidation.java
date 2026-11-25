@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -15,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Function;
 
 /** Checkpoint-history closure validation, extracted from JournalCommit (class-size ratchet). */
 final class JournalCheckpointValidation {
@@ -48,7 +50,7 @@ final class JournalCheckpointValidation {
     }
 
     void validateCheckpointHistory(JsonNode ref, String tenant, String workspace, String session,
-            long previousRevision, Set<String> declared, java.util.function.Function<String, StoredResource> resources) {
+            long previousRevision, Set<String> declared, Function<String, StoredResource> resources) {
         try {
             ManagedCheckpointHistory.pageRef(ref);
             StoredResource stored = resources.apply(ref.path("resourceId").asText());
@@ -89,7 +91,7 @@ final class JournalCheckpointValidation {
                     throw JournalStoreRows.invalid("Checkpoint history predecessor conflicts.");
                 }
             }
-        } catch (IllegalArgumentException | com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException error) {
+        } catch (IllegalArgumentException | RuntimeBrokerException error) {
             throw JournalStoreRows.invalid("Invalid checkpoint history page.");
         }
     }

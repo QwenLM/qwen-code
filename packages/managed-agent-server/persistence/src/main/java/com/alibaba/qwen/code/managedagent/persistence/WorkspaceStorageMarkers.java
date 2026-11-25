@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -59,7 +60,7 @@ final class WorkspaceStorageMarkers {
             }
             try {
                 Files.createLink(file, temporary);
-            } catch (java.nio.file.FileAlreadyExistsException ignored) {
+            } catch (FileAlreadyExistsException ignored) {
                 if (!expected.equals(read(root))) {
                     throw WorkspaceExecutionStore.unavailable();
                 }

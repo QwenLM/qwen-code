@@ -585,6 +585,9 @@ export function useQueuedSubmissionDrain({
           userAdmission: { turnKey: submission.turnKey },
           displayText: submission.displayText,
           humanInput: submission.humanInput,
+          ...(submission.promptHook
+            ? { promptHook: submission.promptHook }
+            : {}),
           ...(submission.hasUnknownInput ? { hasUnknownInput: true } : {}),
           ...(submission.pasteExpansions?.size
             ? { pasteExpansions: submission.pasteExpansions }
@@ -599,10 +602,7 @@ export function useQueuedSubmissionDrain({
             : { shellMode: submission.shellMode }),
           onAdmissionFailed: () => {
             // Deferred until idle, the same recovery the direct /btw
-            // path uses: admission failed because a turn is active,
-            // and the mid-turn steer drain returns raw text only, which
-            // would steer an undeferred restore into that turn with its
-            // projection lost.
+            // path uses: admission failed because a turn is active.
             restoreMessages(
               [submission.modelText],
               submission.submittedPrompt,
@@ -610,11 +610,13 @@ export function useQueuedSubmissionDrain({
               submission.shellMode,
               ...(submission.displayText !== undefined ||
               submission.humanInput !== undefined ||
+              submission.promptHook !== undefined ||
               submission.pasteExpansions?.size
                 ? ([
                     {
                       displayText: submission.displayText,
                       humanInput: submission.humanInput,
+                      promptHook: submission.promptHook,
                       ...(submission.hasUnknownInput
                         ? { hasUnknownInput: true }
                         : {}),
@@ -2616,7 +2618,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const midTurnDrainRef = useRef<UseMessageQueueReturn['drainQueue'] | null>(
     null,
   );
-  const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
+  const midTurnRestoreRef = useRef<
+    UseMessageQueueReturn['restoreMessages'] | null
+  >(null);
   const goalQueueRef = useRef<
     | (Pick<
         UseMessageQueueReturn,

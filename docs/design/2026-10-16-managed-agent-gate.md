@@ -5,6 +5,10 @@
 Status: implemented in `.github/workflows/managed-agent-gate.yml`; required-check
 enablement is tracked in #17039. Historical tracking issues: #14392, #14381.
 
+The design below records the original rollout. See
+[Managed Agent checks by changed path](2026-11-25-managed-agent-path-checks.md)
+for the current fast-check scope, separate approval result, and rollout criteria.
+
 ## Problem
 
 Since #14205 the SDK Java suite (`sdk-java.yml`) runs only nightly, on demand,
