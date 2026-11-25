@@ -1105,6 +1105,7 @@ export default {
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
   'No hooks were loaded.': '未載入任何 Hook。',
+  'skipped (unsupported args)': '已略過（不支援 args）',
   Hooks: 'Hook',
   'Loading hooks...': '正在加載 Hook...',
   'Error loading hooks:': '加載 Hook 出錯：',
