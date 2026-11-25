@@ -9731,7 +9731,7 @@ export function App({
       boundSessionId: string | null,
       workspaceCwd?: string,
     ) => runTaskManually(prompt, boundSessionId, workspaceCwd),
-    onError: (error, fallback) => reportError(error, fallback),
+    onError: (error, fallback) => reportError(error, t(fallback), true),
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
   const matchesCurrentScheduledTaskScope = useCallback(
@@ -13777,7 +13777,7 @@ export function App({
   // sendPrompt / enqueuePrompt so their dep arrays can reference it (a
   // reference below those callbacks would be a TDZ error).
   const reportError = useCallback(
-    (error: unknown, fallback: string) => {
+    (error: unknown, fallback: string, includeErrorContext = false) => {
       if (isAbortError(error)) return;
       if (isDaemonTurnError(error)) {
         return;
@@ -13785,9 +13785,15 @@ export function App({
       if (isAlreadyDispatched(error)) {
         return;
       }
+      const includeLocalizedContext =
+        includeErrorContext &&
+        error instanceof Error &&
+        !error.message.startsWith(fallback);
       const message = isAcpChildCapacityError(error)
         ? t('daemon.capacity.exhausted')
-        : formatError(error, fallback);
+        : includeLocalizedContext
+          ? `${fallback}: ${error.message}`
+          : formatError(error, fallback);
       console.error('[web-shell]', message, error);
       pushToast('error', message);
     },
@@ -25931,6 +25937,7 @@ export function App({
                         onOpenScheduledTasks:
                           scheduledTasksHeaderItemVisible &&
                           environmentPanelReachable &&
+                          environmentPanelMounted &&
                           environmentPanelItems.includes('scheduledTasks') &&
                           connection.sessionId
                             ? openEnvironmentScheduledTasks
@@ -26024,6 +26031,7 @@ export function App({
                       onOpenScheduledTasks={
                         scheduledTasksHeaderItemVisible &&
                         environmentPanelReachable &&
+                        environmentPanelMounted &&
                         environmentPanelItems.includes('scheduledTasks') &&
                         connection.sessionId
                           ? openEnvironmentScheduledTasks

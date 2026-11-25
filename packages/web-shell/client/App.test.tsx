@@ -7476,6 +7476,71 @@ describe('task activity key', () => {
     await flush();
   });
 
+  it('keeps scheduled-task error context localized without hiding the cause', async () => {
+    const { getTranslator, loadLanguage } = await import('./i18n');
+    await loadLanguage('ru');
+    expect(getTranslator('ru')('scheduledTasks.error.toggleFailed')).toBe(
+      'Не удалось обновить задачу',
+    );
+    const ownedTask = {
+      id: 'durable:localized-error',
+      name: 'Localized scheduled task failure',
+      cron: '15 8 * * *',
+      prompt: 'A scheduled task',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.updateScheduledTask.mockRejectedValue(
+      new Error('backend_refused_update'),
+    );
+    const renderChatHeader = vi.fn(() => null);
+    const onToast = vi.fn();
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+      language: 'ru',
+      onToast,
+    });
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[data-testid="environment-scheduled-task"]'),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button[aria-label="Отключить"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'Не удалось обновить задачу: backend_refused_update',
+      );
+    });
+  });
+
   it('synchronizes durable environment mutations into an already open detail', async () => {
     const ownedTask = {
       id: 'durable:environment-sync',
@@ -58688,6 +58753,74 @@ it('gates the scheduled-task entry on the host environment section with live dat
   });
   await flush();
   expect(testState.latestScheduledTasksProps).not.toBeNull();
+});
+
+it('does not offer an unreachable scheduled-task opener in the cockpit', async () => {
+  testState.settings = [sessionWorkflowSetting()];
+  testState.messages = [
+    {
+      id: 'cockpit-scheduled-config-activity',
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'cockpit-scheduled-config-create',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: {
+            cron: '*/5 * * * *',
+            prompt: 'Check the release pipeline',
+            recurring: true,
+          },
+          rawOutput: {
+            returnDisplay:
+              'Created scheduled task (id: cockpit-cron-config-visible)',
+          },
+        },
+      ],
+    },
+  ];
+  testState.sessionScheduledTasks = [
+    {
+      id: 'cockpit-cron-config-visible',
+      source: 'cron',
+      cronExpr: '*/5 * * * *',
+      prompt: 'Check the release pipeline',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 60_000,
+    },
+  ];
+  window.history.replaceState(null, '', '/');
+  const renderChatHeader = vi.fn(() => null);
+  const { container } = renderApp({
+    environmentPanel: { items: ['scheduledTasks'] },
+    renderChatHeader,
+  });
+  await flush();
+  await act(async () => {
+    renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+  });
+  await vi.waitFor(async () => {
+    await flush();
+    expect(
+      container.querySelector('[data-testid="environment-scheduled-task"]'),
+    ).not.toBeNull();
+  });
+  window.history.pushState(null, '', '/?view=cockpit');
+  act(() => window.dispatchEvent(new PopStateEvent('popstate')));
+  await flush();
+  expect(
+    container.querySelector('[data-testid="cockpit-page"]'),
+  ).not.toBeNull();
+  expect(
+    container.querySelector('[data-testid="environment-scheduled-task"]'),
+  ).toBeNull();
+  expect(
+    container.querySelector('[data-web-shell-scheduled-tasks-entry]'),
+  ).toBeNull();
 });
 
 describe('App manual-run orchestration (scheduled tasks)', () => {
