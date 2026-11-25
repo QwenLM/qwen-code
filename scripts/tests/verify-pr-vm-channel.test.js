@@ -768,7 +768,7 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
         client.on('error', reject);
       });
 
-    for (const listen of ['127.0.0.1', '::1', 'localhost']) {
+    for (const listen of ['127.0.0.1', '::1', 'localhost', '0.0.0.0']) {
       const bridge = spawn(
         'python3',
         [
@@ -792,6 +792,15 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
       });
 
       try {
+        if (listen === '0.0.0.0') {
+          const [code] = await once(bridge, 'close');
+          expect(code).toBe(1);
+          expect(stderr).toContain(
+            'model-bridge refuses non-loopback listen address',
+          );
+          continue;
+        }
+
         const [ready] = await Promise.race([
           once(bridge.stdout, 'data'),
           once(bridge, 'exit').then(([code]) => {
@@ -804,8 +813,11 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
         expect(health.endsWith(responseBody)).toBe(true);
         expect(health).not.toContain('socket.gaierror');
       } finally {
-        bridge.kill('SIGTERM');
-        await once(bridge, 'exit');
+        if (bridge.exitCode === null && bridge.signalCode === null) {
+          const exited = once(bridge, 'exit');
+          bridge.kill('SIGTERM');
+          await exited;
+        }
       }
     }
   });
