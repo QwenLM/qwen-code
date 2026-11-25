@@ -1457,6 +1457,15 @@ export interface SessionMetadataUpdate {
   prs?: SessionPrInfo[];
 }
 
+export type {
+  SessionRetirementIdentity,
+  SessionRetirementReceipt,
+} from './session-retirement.js';
+import type {
+  SessionRetirementIdentity,
+  SessionRetirementReceipt,
+} from './session-retirement.js';
+
 export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
   /** Explicit client close cancels active work as user intent. */
@@ -1564,6 +1573,8 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** Server-owned child reservation, never taken from prompt metadata. */
+  turnSkillLease?: string;
   /** Original text explicitly declared by a supported submission producer. */
   submittedPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
@@ -1620,6 +1631,10 @@ export interface BridgeClientRequestContext {
   deadlineMs?: number;
 }
 
+export const TURN_SKILL_LEASE_META_KEY = 'qwen.daemon.turnSkillLease';
+export const SESSION_RETIREMENT_RECEIPT_META_KEY =
+  'qwen.dev/sessionRetirementReceipt';
+export const TURN_SKILL_LEASE_METHOD = 'qwen/control/session/turnSkillLease';
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
 export const DAEMON_EXPECTED_APPROVAL_MODE_META_KEY =
   'qwen.daemon.expectedApprovalMode';
@@ -2179,6 +2194,15 @@ export interface WorkspaceEventBridge extends WorkspaceEventPublisher {
 }
 
 export interface AcpSessionBridge extends WorkspaceEventBridge {
+  retireSessionIfIdle?(
+    identity: SessionRetirementIdentity,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionRetirementReceipt>;
+  getSessionRetirement?(
+    sessionId: string,
+    operationId?: string,
+  ): SessionRetirementReceipt | undefined;
+
   /**
    * Immutable proof derived at construction: this bridge's frozen
    * child-environment overrides carry the exact Conversations provenance
@@ -2868,6 +2892,20 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context: { clientId: string },
   ): Promise<McpAppToolResult>;
 
+  readonly supportsTurnExtensionStoreLease?: true;
+  /** Reserve or release native skill files and optional extension generation before prompt admission. */
+  updateTurnSkillLease?(
+    sessionId: string,
+    key: string,
+    action: 'prepare' | 'release',
+    expectedDigest?: string,
+    expectedExtensionGeneration?: number,
+  ): Promise<{
+    digest?: string;
+    extensionGeneration?: number;
+    unsupportedExtensionComponent?: true;
+    sessionSkillEffectsCompatible?: boolean;
+  }>;
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
     sessionId: string,
