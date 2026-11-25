@@ -380,6 +380,7 @@ export {
   readCronTasks,
   withTaskGate,
   cronTaskSessionDeletionId,
+  cronTaskLegacyDeletionId,
   updateCronTasks,
   removeCronTasks,
   getCronFilePath,

@@ -84,6 +84,7 @@ export async function runScheduledTaskManually(
       return;
     }
     await actions.assertScheduledTaskOwnerSelection(fresh.sessionId);
+    if (!current()) return;
     if (fresh.sessionMode === 'per_run') {
       // The daemon dispatches a fresh child session and records it on this
       // run. Never also enqueue the prompt into the controller session.

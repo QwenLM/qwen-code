@@ -24,6 +24,7 @@ import {
   addCronTask,
   annotateCronRunSession,
   cronTaskSessionDeletionId,
+  cronTaskLegacyDeletionId,
   CRON_TASKS_DISPLAY_PATH,
   appendCronRun,
   generateCronTaskId,
@@ -635,15 +636,22 @@ export class CronScheduler {
     // create() installs synchronously, so preserve the incumbent reference.
     const previousJobs = new Map(this.jobs);
     const job = this.create(cronExpr, prompt, recurring, gate);
-    job.durable = true;
-    this.jobs.delete(job.id);
-    this.jobs.set(runtimeJobKey(job), job);
-    const incumbent = previousJobs.get(runtimeJobKey(job));
-    if (incumbent) {
-      this.jobs.set(runtimeJobKey(job), incumbent);
+    const sessionIncumbent = previousJobs.get(job.id);
+    if (sessionIncumbent) {
+      this.jobs.set(job.id, sessionIncumbent);
       throw new Error(`scheduled task id already exists: ${job.id}`);
     }
-    this.pendingAdd.add(runtimeJobKey(job));
+    job.durable = true;
+    const key = runtimeJobKey(job);
+    const incumbent = previousJobs.get(key);
+    if (incumbent) {
+      this.jobs.delete(job.id);
+      this.jobs.set(key, incumbent);
+      throw new Error(`scheduled task id already exists: ${job.id}`);
+    }
+    this.jobs.delete(job.id);
+    this.jobs.set(key, job);
+    this.pendingAdd.add(key);
     try {
       await addCronTask(this.projectRoot, jobToDurableTask(job));
       if (
@@ -1385,18 +1393,28 @@ export class CronScheduler {
           // cross-process race firePersistPending can't see). Overwriting it with
           // the older catch-up minute would re-open the manually-covered slots.
           // Mirrors the tick persist's guard.
-          if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp) return t;
+          if (stamp === undefined) return t;
+          if (gated.has(key)) {
+            if ((t.lastFiredAt ?? 0) >= stamp) return t;
+            changed = true;
+            return { ...t, lastFiredAt: stamp };
+          }
+          const runId = runIds.get(key);
+          const alreadyRecorded =
+            runId !== undefined &&
+            t.runs?.some((run) => run.at === stamp && run.runId === runId);
+          if (alreadyRecorded && (t.lastFiredAt ?? 0) >= stamp) return t;
           changed = true;
-          if (gated.has(key)) return { ...t, lastFiredAt: stamp };
+          if (alreadyRecorded) return { ...t, lastFiredAt: stamp };
           // Late fire (overdue while no session owned the schedule) — record it
           // as 'catch-up' so the history distinguishes it from an on-time fire.
           return {
             ...t,
-            lastFiredAt: stamp,
+            lastFiredAt: Math.max(stamp, t.lastFiredAt ?? 0),
             runs: appendCronRun(t.runs, {
               at: stamp,
               kind: 'catch-up',
-              runId: runIds.get(key),
+              runId,
               ...(t.sessionMode !== 'per_run' && this.sessionId
                 ? { sessionId: this.sessionId }
                 : {}),
@@ -1515,8 +1533,8 @@ export class CronScheduler {
     id: string,
     expectedTaskSessionId: string | null = null,
   ): Promise<void> {
-    await this.delete(id, expectedTaskSessionId);
-    if (this.projectRoot) {
+    const deleted = await this.delete(id, expectedTaskSessionId);
+    if (this.projectRoot && !deleted) {
       const key = durableTaskKey(id, expectedTaskSessionId);
       await updateCronTasks(
         this.projectRoot,
@@ -2168,10 +2186,8 @@ export class CronScheduler {
             const observed = new Map([[key, generation]]);
             const snapshot = this.restorablePerRunOneShots.get(key);
             if (!snapshot) continue;
-            observed.set(
-              snapshot.task.id,
-              removalGenerations.get(snapshot.task.id)!,
-            );
+            const deletionId = cronTaskLegacyDeletionId(snapshot.task.id);
+            observed.set(deletionId, removalGenerations.get(deletionId)!);
             if (owner) {
               const deletionId = cronTaskSessionDeletionId(owner);
               const sessionGeneration = removalGenerations.get(deletionId);
@@ -2211,11 +2227,10 @@ export class CronScheduler {
                 // between this tick's read and write; overwriting it with the older
                 // tick slot could re-open an already-covered slot. Mirrors the
                 // catch-up persist's equality guard.
-                if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp) {
-                  return t;
-                }
+                if (stamp === undefined) return t;
                 const gate = gated.get(key);
                 if (gate) {
+                  if ((t.lastFiredAt ?? 0) >= stamp) return t;
                   // A PATCH may have replaced the command (and dropped its
                   // status) since this session loaded the job: the old
                   // command's summary must not come back onto the new one.
@@ -2227,13 +2242,26 @@ export class CronScheduler {
                       : {}),
                   };
                 }
+                const runId = firedRunIds.get(key);
+                const alreadyRecorded =
+                  runId !== undefined &&
+                  t.runs?.some(
+                    (run) => run.at === stamp && run.runId === runId,
+                  );
+                if (alreadyRecorded) {
+                  return (t.lastFiredAt ?? 0) < stamp
+                    ? { ...t, lastFiredAt: stamp }
+                    : t;
+                }
                 return {
                   ...t,
-                  lastFiredAt: stamp,
+                  // A newer manual stamp must not suppress this natural fire's
+                  // history, and the history write must not regress that stamp.
+                  lastFiredAt: Math.max(stamp, t.lastFiredAt ?? 0),
                   runs: appendCronRun(t.runs, {
                     at: stamp,
                     kind: 'scheduled',
-                    runId: firedRunIds.get(key),
+                    runId,
                     // The owner session that ran this fire — links the run back
                     // to its transcript. Set whenever a durable fire persists.
                     ...(t.sessionMode !== 'per_run' && this.sessionId
@@ -2253,7 +2281,7 @@ export class CronScheduler {
                   return [];
                 }
                 return [
-                  task.id,
+                  cronTaskLegacyDeletionId(task.id),
                   durableTaskKey(task.id, owner),
                   ...(owner ? [cronTaskSessionDeletionId(owner)] : []),
                 ];

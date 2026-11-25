@@ -642,6 +642,15 @@ async function acquireUpdateLock(
   }
 }
 
+export function cronTaskLegacyDeletionId(taskId: string): string {
+  // Keep bare ids disjoint from owner/session and already tagged guards.
+  return taskId.startsWith('[') ||
+    taskId.startsWith('session:') ||
+    taskId.startsWith('legacy:')
+    ? `legacy:${JSON.stringify(taskId)}`
+    : taskId;
+}
+
 export function cronTaskSessionDeletionId(sessionId: string): string {
   const canonicalId =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(

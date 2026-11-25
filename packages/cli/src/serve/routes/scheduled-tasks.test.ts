@@ -18,6 +18,7 @@ import {
   Storage,
   getCronFilePath,
   readCronTasks,
+  cronTaskLegacyDeletionId,
   removeCronTasks,
   updateCronTasks,
 } from '@qwen-code/qwen-code-core';
@@ -1405,6 +1406,70 @@ describe('scheduled-tasks routes', () => {
         enabled: false,
       }),
     ]);
+  });
+
+  it('does not confuse a legacy id with another owner’s deletion guard', async () => {
+    addLiveSession(
+      h.bridge,
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      h.workspace,
+    );
+    const owned = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'guarded owner recovery',
+      recurring: false,
+      sessionMode: 'per_run',
+      sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      modelServiceId: 'missing-model',
+    });
+    expect(owned.status).toBe(201);
+    const id = 'victim';
+    const collisionId = JSON.stringify([owned.body.sessionId, id]);
+    await updateCronTasks(h.workspace, (tasks) => {
+      const original = tasks[0]!;
+      return [
+        { ...original, id },
+        {
+          ...original,
+          id: collisionId,
+          prompt: 'unbound legacy identifier',
+          sessionId: undefined,
+          sessionMode: undefined,
+          recurring: true,
+        },
+      ];
+    });
+    const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
+      const child = await originalSpawn(req);
+      const deleted = await request(h.app).delete(
+        `/scheduled-tasks/${encodeURIComponent(collisionId)}`,
+      );
+      expect(deleted.status).toBe(200);
+      return { ...child, modelApplied: false };
+    });
+
+    const run = await request(h.app)
+      .post(`/scheduled-tasks/${id}/run`)
+      .query({ expectedSessionId: owned.body.sessionId });
+
+    expect(run.status).toBe(500);
+    expect(await readCronTasks(h.workspace)).toEqual([
+      expect.objectContaining({
+        id,
+        sessionId: owned.body.sessionId,
+        enabled: false,
+      }),
+    ]);
+    let generations = new Map<string, number>();
+    await updateCronTasks(h.workspace, (tasks) => tasks, {
+      observeDeletionIds: [collisionId, cronTaskLegacyDeletionId(collisionId)],
+      onDeletionGenerations: (observed) => {
+        generations = new Map(observed);
+      },
+    });
+    expect(generations.get(collisionId)).toBe(0);
+    expect(generations.get(cronTaskLegacyDeletionId(collisionId))).toBe(1);
   });
 
   it('attributes same-timestamp per-run outcomes to their expected owners', async () => {

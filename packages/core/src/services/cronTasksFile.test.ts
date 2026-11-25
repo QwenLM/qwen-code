@@ -8,6 +8,7 @@ import {
   annotateCronRunSession,
   appendCronRun,
   cronTaskSessionDeletionId,
+  cronTaskLegacyDeletionId,
   generateCronTaskId,
   getCronFilePath,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
@@ -110,6 +111,33 @@ describe('cronTasksFile', () => {
       // Crucially, not in the project working tree.
       expect(file.startsWith('/project')).toBe(false);
       expect(file).not.toContain(`${path.sep}.qwen${path.sep}scheduled_tasks`);
+    });
+  });
+
+  describe('deletion guard ids', () => {
+    it('does not collide ordinary, owner, session or tagged guards', () => {
+      const composite = JSON.stringify(['session-a', 'shared']);
+      const ids = [
+        'ordinary',
+        composite,
+        'session:session-a',
+        'legacy:"ordinary"',
+      ];
+      const guards = [
+        composite,
+        cronTaskSessionDeletionId('session-a'),
+        ...ids.map(cronTaskLegacyDeletionId),
+      ];
+
+      expect(new Set(guards).size).toBe(guards.length);
+      expect(guards).toHaveLength(6);
+      expect(cronTaskLegacyDeletionId('ordinary')).toBe('ordinary');
+      expect(cronTaskLegacyDeletionId(composite)).toBe(
+        `legacy:${JSON.stringify(composite)}`,
+      );
+      expect(cronTaskLegacyDeletionId('legacy:"ordinary"')).toBe(
+        'legacy:' + JSON.stringify('legacy:"ordinary"'),
+      );
     });
   });
 

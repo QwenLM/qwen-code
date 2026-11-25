@@ -11,6 +11,7 @@ import {
 } from './cronScheduler.js';
 import { nextFireTime } from '../utils/cronParser.js';
 import { getLockFilePath } from './cronTasksLock.js';
+import * as cronTasksFile from './cronTasksFile.js';
 import {
   getCronFilePath,
   readCronTasks,
@@ -1303,6 +1304,84 @@ describe('CronScheduler', () => {
       await waitForRuns(run(30), run(31));
     });
 
+    it('preserves a natural run when a manual run wins the file lock', async () => {
+      const original = perRunOneShot('manual-first', {
+        cron: '30 10 * * *',
+        recurring: true,
+      });
+      await load([original]);
+      let manualWrite!: Promise<unknown>;
+      const fired: CronJob[] = [];
+      scheduler.start((job) => {
+        fired.push(job);
+        const manualAt = job.lastFiredAt! + 1000;
+        manualWrite = updateCronTasks(tmpDir, (tasks) =>
+          tasks.map((task) =>
+            task.id === original.id
+              ? {
+                  ...task,
+                  lastFiredAt: manualAt,
+                  runs: [
+                    {
+                      at: manualAt,
+                      kind: 'manual' as const,
+                      runId: 'manual-before-natural',
+                    },
+                  ],
+                }
+              : task,
+          ),
+        );
+      });
+
+      const fireAt = nextDurableFireMs(original)!;
+      scheduler.tick(new Date(fireAt + 1000));
+      expect(fired).toHaveLength(1);
+      await manualWrite;
+      await internals().pendingPersist;
+      const manuallyStampedTask = (await readCronTasks(tmpDir))[0]!;
+      const naturalAt = fired[0]!.lastFiredAt!;
+      expect(naturalAt).toBe(
+        nextFireTime(original.cron, new Date(original.createdAt)).getTime(),
+      );
+      expect(manuallyStampedTask.lastFiredAt).toBe(naturalAt + 1000);
+      expect(manuallyStampedTask.runs).toEqual([
+        {
+          at: naturalAt,
+          kind: 'scheduled',
+          runId: fired[0]!.runId,
+        },
+        {
+          at: naturalAt + 1000,
+          kind: 'manual',
+          runId: 'manual-before-natural',
+        },
+      ]);
+
+      await scheduler.annotateRunSession(
+        original.id,
+        naturalAt,
+        { sessionId: 'natural-child' },
+        original.sessionId ?? null,
+        fired[0]!.runId,
+      );
+      const annotated = (await readCronTasks(tmpDir))[0]!;
+      expect(annotated.lastFiredAt).toBe(naturalAt + 1000);
+      expect(annotated.runs).toEqual([
+        {
+          at: naturalAt,
+          kind: 'scheduled',
+          runId: fired[0]!.runId,
+          sessionId: 'natural-child',
+        },
+        {
+          at: naturalAt + 1000,
+          kind: 'manual',
+          runId: 'manual-before-natural',
+        },
+      ]);
+    });
+
     it('attributes a per-run fire to its fresh session after dispatch', async () => {
       await load([
         diskTask('fresh1', {
@@ -1500,6 +1579,57 @@ describe('CronScheduler', () => {
         lastFiredAt: now - (now % 60_000),
         runs: [{ kind: 'catch-up' }],
       });
+    });
+
+    it('preserves catch-up history when a manual run wins the file lock', async () => {
+      const original = hourly('manual-first-catch', 'catch', hoursAgo(3), {
+        sessionId: 'session-1',
+        sessionMode: 'per_run',
+      });
+      await writeCronTasks(tmpDir, [original]);
+      const fired: CronJob[] = [];
+      let manualWrite!: Promise<unknown>;
+      scheduler.start((job) => {
+        fired.push(job);
+        const manualAt = job.lastFiredAt! + 1000;
+        manualWrite = updateCronTasks(tmpDir, (tasks) =>
+          tasks.map((task) =>
+            task.id === original.id
+              ? {
+                  ...task,
+                  lastFiredAt: manualAt,
+                  runs: [
+                    {
+                      at: manualAt,
+                      kind: 'manual' as const,
+                      runId: 'manual-before-catch-up',
+                    },
+                  ],
+                }
+              : task,
+          ),
+        );
+      });
+
+      await scheduler.enableDurable('session-1');
+      await manualWrite;
+      await internals().pendingPersist;
+      expect(fired).toHaveLength(1);
+      const naturalAt = fired[0]!.lastFiredAt!;
+      const task = (await readCronTasks(tmpDir))[0]!;
+      expect(task.lastFiredAt).toBe(naturalAt + 1000);
+      expect(task.runs).toEqual([
+        {
+          at: naturalAt,
+          kind: 'catch-up',
+          runId: fired[0]!.runId,
+        },
+        {
+          at: naturalAt + 1000,
+          kind: 'manual',
+          runId: 'manual-before-catch-up',
+        },
+      ]);
     });
 
     it('preserves a same-id sibling through a final fire', async () => {
@@ -2387,6 +2517,53 @@ describe('CronScheduler', () => {
         ).toEqual(['ORIGINAL_B', 'UNIQUE_A']);
       } finally {
         random.mockRestore();
+      }
+    });
+
+    it('preserves a session-only incumbent when a durable id collides', async () => {
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const original = scheduler.create(
+          '* * * * *',
+          'ORIGINAL_SESSION_ONLY',
+          true,
+        );
+
+        await expect(
+          scheduler.createDurable('* * * * *', 'REJECTED_DURABLE', true),
+        ).rejects.toThrow('scheduled task id already exists: aaaaaaaa');
+
+        expect(scheduler.list().find((job) => job.id === original.id)).toBe(
+          original,
+        );
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+      } finally {
+        random.mockRestore();
+      }
+    });
+
+    it('does not write again after deleting a loaded durable job', async () => {
+      const actualUpdate = (
+        await vi.importActual<typeof import('./cronTasksFile.js')>(
+          './cronTasksFile.js',
+        )
+      ).updateCronTasks;
+      const mockedUpdate = vi.spyOn(cronTasksFile, 'updateCronTasks');
+      let writes = 0;
+      mockedUpdate.mockImplementation(async (...args) => {
+        writes++;
+        if (writes === 2) throw new Error('second durable delete write failed');
+        return actualUpdate(...args);
+      });
+      try {
+        const job = await scheduler.createDurable('* * * * *', 'loaded', true);
+
+        await expect(scheduler.removeDurable(job.id)).resolves.toBeUndefined();
+
+        expect(writes).toBe(1);
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+      } finally {
+        mockedUpdate.mockRestore();
       }
     });
 

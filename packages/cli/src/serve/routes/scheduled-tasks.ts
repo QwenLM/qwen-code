@@ -37,6 +37,7 @@ import {
   readCronTasks,
   getCronFilePath,
   cronTaskSessionDeletionId,
+  cronTaskLegacyDeletionId,
   updateCronTasks,
   generateCronTaskId,
   appendCronRun,
@@ -568,7 +569,7 @@ async function restoreConsumedOneShot(
         provided: true,
         sessionId: failedTask.sessionId ?? null,
       }),
-      id,
+      cronTaskLegacyDeletionId(id),
       ...(failedTask.sessionId
         ? [cronTaskSessionDeletionId(failedTask.sessionId)]
         : []),
@@ -2101,7 +2102,9 @@ function registerScheduledTaskCrudRoutes(
                 if (expectedOwner.provided && expectedOwner.sessionId) {
                   return [scheduledTaskDeletionGuardId(id, expectedOwner)];
                 }
-                if (!expectedOwner.provided) return [id];
+                if (!expectedOwner.provided) {
+                  return [cronTaskLegacyDeletionId(id)];
+                }
                 return [JSON.stringify([expectedOwner.sessionId ?? null, id])];
               },
             },
@@ -2268,7 +2271,7 @@ function registerScheduledTaskCrudRoutes(
                       provided: true,
                       sessionId: task.sessionId ?? null,
                     }),
-                    id,
+                    cronTaskLegacyDeletionId(id),
                   ]),
                 ];
                 if (task.sessionId) {

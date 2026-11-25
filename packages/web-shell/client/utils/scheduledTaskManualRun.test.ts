@@ -86,6 +86,46 @@ describe('runScheduledTaskManually owner matching', () => {
     );
   });
 
+  it('does not admit a prompt after deletion during capability negotiation', async () => {
+    const task = makeTask();
+    let releaseCapability!: () => void;
+    let deleted = false;
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([task]),
+      runScheduledTask: vi.fn(),
+      assertScheduledTaskOwnerSelection: vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseCapability = resolve;
+          }),
+      ),
+    };
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    const onError = vi.fn();
+
+    const running = runScheduledTaskManually(
+      task,
+      actions,
+      onRunPrompt,
+      (key) => key,
+      {
+        reload: vi.fn(),
+        onError,
+        isStale: () => deleted,
+      },
+    );
+    await vi.waitFor(() =>
+      expect(actions.assertScheduledTaskOwnerSelection).toHaveBeenCalledOnce(),
+    );
+    deleted = true;
+    releaseCapability();
+    await running;
+
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it('runs the unique task from the expected session', async () => {
     const task = makeTask();
     const actions = {
