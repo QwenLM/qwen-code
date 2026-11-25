@@ -4816,6 +4816,12 @@ export interface DaemonSettingDescriptor {
   description?: string;
   requiresRestart: boolean;
   default: unknown;
+  /**
+   * The value a host writes when it toggles a boolean that has no stored
+   * value and no schema default, mirroring `unsetToggleValue` in the CLI
+   * settings dialogs. Absent when the schema does not declare one.
+   */
+  unsetToggleValue?: boolean;
   options?: ReadonlyArray<{ value: string | number; label: string }>;
   values: {
     effective: unknown;
