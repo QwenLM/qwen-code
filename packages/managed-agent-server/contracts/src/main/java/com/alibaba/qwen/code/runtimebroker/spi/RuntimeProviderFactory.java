@@ -15,11 +15,6 @@ public interface RuntimeProviderFactory {
     public default void validate(ManagedAgentSettings settings) {
     }
 
-    /** Host-provided dependencies may offer a direct implementation rather than HTTP. */
-    public default void validate(ManagedAgentSettings settings, RuntimeProviderDependencies dependencies) {
-        validate(settings);
-    }
-
     /** The caller owns and closes the returned provider. Clean up partial creation on failure. */
     public RuntimeProvisioner create(ManagedAgentSettings settings, RuntimeTransport transport,
             RuntimeProviderDependencies dependencies);

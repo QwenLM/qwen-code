@@ -3296,23 +3296,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 "Turn cursor is invalid.");
     }
 
-    /** Read-only lookup of an original Turn admission for an authorized caller. */
-    public CommandAdmission findSubmission(SessionPrincipal principal,
-            String idempotencyKey, String sessionId) {
-        Objects.requireNonNull(principal, "principal");
-        validateIdempotencyKey(idempotencyKey);
-        requireReadableSession(principal, sessionId);
-        StoreModels.CommandRecord command = store.findCommand(principal.tenantId(),
-                "SUBMIT_TURN", idempotencyKey).orElse(null);
-        if (command == null || !sessionId.equals(command.sessionId())
-                || !command.admitsReplayBy(null, principal)) {
-            throw new ManagedAgentException(404, "session_not_found",
-                    "The Session was not found.");
-        }
-        return response(principal.tenantId(), store.replayCommand(principal.tenantId(),
-                "SUBMIT_TURN", idempotencyKey, command.requestDigest()));
-    }
-
     private static CommandAdmission response(Admission admission) {
         return new CommandAdmission(admission.sessionId(),
                 admission.turnId(), "accepted", admission.replayed());

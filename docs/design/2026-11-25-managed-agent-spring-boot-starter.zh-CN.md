@@ -54,11 +54,6 @@ Managed catalog 与宿主业务 catalog 不同。其表结构和应用账号由�
 
 宿主不希望新增 Controller 时使用默认 Java 面。独立服务保留现有 Web 装配，Starter 不移除它。
 
-嵌入宿主可提供 `ExternalRuntimeClient` Bean，直接完成物理 Runtime 供给，不再经宿主自行实现的 loopback Controller。`RuntimeProviderDependencies` 在 external factory 中选择该实现；普通 HTTP transport 仍是兼容回退。只有 external provider URL/token 校验不适用于 Java transport；Workspace 身份、能力摘要、隔离与超时校验保持不变。
-
-`ManagedRuntimeAttachmentService` 是 Workspace 附着的可选 Java 宿主接口。`acquire` 与 `inspect` 先校验显式 `SessionPrincipal`，再通过持久化的 RuntimeSession→RuntimeBinding 关系取得或读取附着。`inspect` 要求调用方提供完全相同的 binding ID 和 generation，不会挑选“最新 READY”绑定。
-
-`ManagedAgentService.findSubmission(principal, key, sessionId)` 是已有 `SUBMIT_TURN` 受理记录的只读恢复查询。接口同时校验 Session 读取授权和原受理身份，并沿原 request digest 与 operation 关系读取，不创建新 Turn。这些 Java 接口和注入式 Runtime client 都不会绕过 Workspace/actor 授权，也不会创建公开 HTTP/Controller 门面。其聚焦测试、真实进程验证、完整 CI 与制品发布仍是相互独立的验收条件。
 
 ## 验证
 

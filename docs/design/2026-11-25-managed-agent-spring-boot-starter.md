@@ -54,11 +54,6 @@ The Managed catalog is distinct from the host business catalog. Its schema and a
 
 A host that wants no controllers uses the default Java surface. The standalone application retains its existing web assembly; the starter does not remove it.
 
-An embedding host may provide an `ExternalRuntimeClient` bean for physical Runtime placement instead of routing through its own loopback controller. `RuntimeProviderDependencies` selects this implementation in the external factory; the ordinary HTTP transport remains the compatibility fallback. Only the external provider URL/token validation is unnecessary for a Java transport, while Workspace identity, capability, isolation and timeout validation remain unchanged.
-
-`ManagedRuntimeAttachmentService` is the optional Java host surface for Workspace attachments. `acquire` and `inspect` first authorize the explicit `SessionPrincipal`, then bind or read the attachment through the durable RuntimeSession→RuntimeBinding relation. `inspect` requires the caller's exact binding ID and generation rather than selecting a latest READY binding.
-
-`ManagedAgentService.findSubmission(principal, key, sessionId)` is the read-only recovery lookup for an existing `SUBMIT_TURN` admission. The caller's Session read grant and original receipt identity are enforced, and lookup uses the original request digest and operation relation; it never writes a new Turn. Neither these Java surfaces nor an injected Runtime client bypass Workspace/actor authorization or create a public HTTP/controller facade. Their focused tests, real process verification, full CI and artifact publication remain distinct acceptance requirements.
 
 ## Validation
 
