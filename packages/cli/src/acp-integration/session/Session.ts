@@ -454,6 +454,10 @@ import {
 import { modsWanted } from '../../services/display-translation-mod.js';
 import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
+import {
+  isRepetitiveToolCallsError,
+  REPETITIVE_TOOL_CALLS_HINT,
+} from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -10091,6 +10095,11 @@ export class Session implements SessionContext {
         details: errorMessage,
         subscriptionQuota: quota,
       });
+    }
+
+    if (isRepetitiveToolCallsError(errorMessage)) {
+      const message = errorMessage + REPETITIVE_TOOL_CALLS_HINT;
+      throw new RequestError(-32603, message, { details: message });
     }
     throw error;
   }

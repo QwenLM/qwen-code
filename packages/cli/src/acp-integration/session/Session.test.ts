@@ -38,6 +38,7 @@ import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { REPETITIVE_TOOL_CALLS_HINT } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
@@ -53481,6 +53482,24 @@ describe('Session', () => {
             code: -32603,
             message: 'quota fallback',
             data: { details: 'quota fallback', subscriptionQuota },
+          });
+        });
+        it('adds the recovery hint to a repeated-tool-call rejection', async () => {
+          const message =
+            '400 Repetitive tool calls detected in the conversation history.';
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            throw Object.assign(new Error(message), { status: 400 });
+          });
+          const expected = message + REPETITIVE_TOOL_CALLS_HINT;
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            message: expected,
+            data: { details: expected },
           });
         });
         it('preserves the subscription backend rate-limit message', async () => {

@@ -28,7 +28,30 @@ const RATE_LIMIT_MESSAGE_BY_AUTH = {
     '\nPossible quota limitations in place or slow response times detected. Please wait and try again later.',
 } as const;
 
-const RATE_LIMIT_SUFFIXES = Object.values(RATE_LIMIT_MESSAGE_BY_AUTH);
+// DashScope rejects a request whose history repeats one tool call across
+// consecutive rounds (#5019). The rejection is not deterministic, but when it
+// happens the same history may be rejected again, so name the way out.
+const REPETITIVE_TOOL_CALLS_MESSAGE =
+  /Repetitive tool calls detected in the conversation history/i;
+
+export const REPETITIVE_TOOL_CALLS_HINT =
+  '\nThe provider rejected the request because the conversation repeats the same tool call. The next message may be rejected for the same reason; run /compress to summarize the history, or /clear to start over.';
+
+const KNOWN_GUIDANCE_SUFFIXES = [
+  ...Object.values(RATE_LIMIT_MESSAGE_BY_AUTH),
+  REPETITIVE_TOOL_CALLS_HINT,
+];
+
+/** Whether an API error is DashScope's repeated-tool-call rejection. */
+export function isRepetitiveToolCallsError(message: string): boolean {
+  return REPETITIVE_TOOL_CALLS_MESSAGE.test(message);
+}
+
+function withRepetitiveToolCallsHint(text: string, message: string): string {
+  return isRepetitiveToolCallsError(message)
+    ? text + REPETITIVE_TOOL_CALLS_HINT
+    : text;
+}
 
 function getRateLimitMessage(authType?: AuthType): string {
   if (authType === AuthType.QWEN_SUBSCRIPTION) return '';
@@ -147,8 +170,8 @@ export function resolveApiErrorRequestId(error: unknown): string | undefined {
  *
  * Accepts:
  * 1) base format: "[API Error: ...]"
- * 2) 429 format: "[API Error: ...]" followed by one of the known quota
- *    guidance suffixes.
+ * 2) "[API Error: ...]" followed by one of the known guidance suffixes (the
+ *    429 quota guidance or the repeated-tool-call hint).
  * 3) friendly quota-exhaustion messages ("Quota exhausted: ...") built by
  *    formatQuotaExhaustedMessage — these live here rather than in the
  *    Qwen-OAuth prefix list because they also arrive via the plain-string
@@ -176,7 +199,9 @@ function isAlreadyFormatted(value: string): boolean {
     return true;
   }
 
-  return RATE_LIMIT_SUFFIXES.some((suffix) => trimmed.includes(`]${suffix}`));
+  return KNOWN_GUIDANCE_SUFFIXES.some((suffix) =>
+    trimmed.includes(`]${suffix}`),
+  );
 }
 
 export function parseAndFormatApiError(
@@ -236,7 +261,7 @@ export function parseAndFormatApiError(
     if (error.status === 429) {
       text += getRateLimitMessage(authType);
     }
-    return text;
+    return withRepetitiveToolCallsHint(text, message);
   }
 
   // The error message might be a string containing a JSON object.
@@ -248,7 +273,8 @@ export function parseAndFormatApiError(
 
     const jsonStart = error.indexOf('{');
     if (jsonStart === -1) {
-      return `[API Error: ${error}]`; // Not a JSON error, return as is.
+      // Not a JSON error, return as is.
+      return withRepetitiveToolCallsHint(`[API Error: ${error}]`, error);
     }
 
     const jsonString = error.substring(jsonStart);
@@ -273,12 +299,12 @@ export function parseAndFormatApiError(
         if (parsedError.error.code === 429) {
           text += getRateLimitMessage(authType);
         }
-        return text;
+        return withRepetitiveToolCallsHint(text, finalMessage);
       }
     } catch (_e) {
       // Not a valid JSON, fall through and return the original message.
     }
-    return `[API Error: ${error}]`;
+    return withRepetitiveToolCallsHint(`[API Error: ${error}]`, error);
   }
 
   return '[API Error: An unknown error occurred.]';
