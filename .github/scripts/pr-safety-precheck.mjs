@@ -17,6 +17,57 @@ const SENSITIVE_DIFF_PATTERNS = [
   ['sensitive_diff:secret_network', secretSinkPattern(NETWORK_SINK_PATTERN)],
 ];
 
+// Paths that decide what CI executes or what the review agent reads as
+// instructions. An untrusted author changing one is escalating authority, not
+// proposing product code, so "let the full review judge it" is circular here:
+// the reviewer is the target. Gate first, let a maintainer opt in.
+const PROTECTED_DIR_PREFIXES = [
+  '.github/',
+  '.agents/',
+  'scripts/',
+  '.qwen/skills/',
+  '.qwen/commands/',
+  '.qwen/agents/',
+  '.qwen/workflows/',
+  '.qwen/extensions/',
+  '.qwen/scripts/',
+];
+// Context files load hierarchically, so a nested copy steers the agent too.
+const PROTECTED_FILE_NAMES = new Set([
+  'AGENTS.md',
+  'QWEN.md',
+  'CLAUDE.md',
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  '.npmrc',
+  '.pnpmfile.mjs',
+]);
+const PROTECTED_FILE_PATHS = new Set(['.qwen/settings.json']);
+
+// Credentials the runner holds ambiently, reachable without naming a single
+// GitHub secret. #18362 read these from a CI script and #18364 asked the agent
+// to read them; neither payload names `secrets.*`, so the sink pairs above
+// cannot see them. The source itself is the signal.
+const AMBIENT_CREDENTIAL_PATTERNS = [
+  [
+    'ambient_credential:cloud_metadata',
+    /100\.100\.100\.200|169\.254\.169\.254|169\.254\.170\.2|fd00:ec2::254|metadata\.google\.internal|metadata\.goog/i,
+  ],
+  [
+    'ambient_credential:proc_environ',
+    /\/proc\/(?:self|\d+|\$\$|\$\{?\w+\}?)\/environ/,
+  ],
+  [
+    'ambient_credential:env_dump',
+    /(?:^|[;&|(`]|\$\()\s*(?:env(?=\s*(?:\||;|&|>|$))|printenv\b|export\s+-p\b)/m,
+  ],
+  [
+    'ambient_credential:credential_file',
+    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|\.credentials\b/,
+  ],
+];
+
 const SECRET_VALUE_PATTERNS = [
   ['secret_value:private_key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   [
@@ -73,7 +124,47 @@ function checkPatterns(text, patterns, reasons) {
   }
 }
 
-export function assessPullRequestSafety({ pr, diff, trustedAuthor = false }) {
+// Git quotes a path containing a tab, a newline or (with core.quotePath) a
+// non-ASCII byte. Left quoted, `.github/...` no longer matches a prefix test,
+// so a file added under a protected directory with such a name would walk past
+// the gate. Unquote before testing; the escapes sit after the prefix.
+function diffPath(raw) {
+  const unquoted =
+    raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
+  return unquoted.replace(/^[ab]\//, '');
+}
+
+// `---`/`+++` carry one unambiguous path each, so they cover deletions, renames
+// and paths containing spaces. The `diff --git` header also covers mode-only
+// changes, which emit no side headers.
+function changedPaths(diffText) {
+  const paths = new Set();
+  for (const line of diffText.split('\n')) {
+    const header = /^diff --git .*? ("?b\/.+)$/.exec(line);
+    const side = /^(?:---|\+\+\+) (.+)$/.exec(line);
+    const rename = /^rename (?:from|to) (.+)$/.exec(line);
+    const raw = header?.[1] ?? side?.[1] ?? rename?.[1];
+    if (!raw) continue;
+    const path = diffPath(raw);
+    if (path !== '/dev/null') paths.add(path);
+  }
+  return paths;
+}
+
+function isProtectedPath(path) {
+  return (
+    PROTECTED_DIR_PREFIXES.some((prefix) => path.startsWith(prefix)) ||
+    PROTECTED_FILE_PATHS.has(path) ||
+    PROTECTED_FILE_NAMES.has(path.slice(path.lastIndexOf('/') + 1))
+  );
+}
+
+export function assessPullRequestSafety({
+  pr,
+  diff,
+  trustedAuthor = false,
+  diffTruncated = false,
+}) {
   const reasons = [];
   const headSha = typeof pr?.headRefOid === 'string' ? pr.headRefOid : '';
   const diffText = typeof diff === 'string' ? diff : '';
@@ -89,6 +180,10 @@ export function assessPullRequestSafety({ pr, diff, trustedAuthor = false }) {
     };
   }
 
+  // A capped diff hides whatever sits past the cap, so a partial read must not
+  // be reported as a clean one.
+  if (diffTruncated) addReason(reasons, 'input:diff_truncated');
+
   if (!diffText) {
     addReason(reasons, 'input:diff_unavailable');
   } else {
@@ -98,11 +193,15 @@ export function assessPullRequestSafety({ pr, diff, trustedAuthor = false }) {
       .map((line) => line.slice(1))
       .join('\n');
     checkPatterns(addedText, SENSITIVE_DIFF_PATTERNS, reasons);
+    if ([...changedPaths(diffText)].some(isProtectedPath)) {
+      addReason(reasons, 'protected_path:authority_surface');
+    }
   }
 
   const prText = `${pr?.title ?? ''}\n${pr?.body ?? ''}\n${addedText}`;
   checkPatterns(prText, SECRET_VALUE_PATTERNS, reasons);
   checkPatterns(prText, PROMPT_INJECTION_PATTERNS, reasons);
+  checkPatterns(prText, AMBIENT_CREDENTIAL_PATTERNS, reasons);
 
   return {
     decision: reasons.length === 0 ? 'allow_triage' : 'manual_required',
@@ -156,7 +255,13 @@ function main() {
   const pr = JSON.parse(readFileSync(args.pr, 'utf8'));
   const diff = readFileSync(args.diff, 'utf8');
   const trustedAuthor = args['trusted-author'] === 'true';
-  const result = assessPullRequestSafety({ pr, diff, trustedAuthor });
+  const diffTruncated = args['diff-truncated'] === 'true';
+  const result = assessPullRequestSafety({
+    pr,
+    diff,
+    trustedAuthor,
+    diffTruncated,
+  });
 
   if (args.comment) {
     writeFileSync(
