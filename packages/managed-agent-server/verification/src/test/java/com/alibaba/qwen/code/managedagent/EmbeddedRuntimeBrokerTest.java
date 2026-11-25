@@ -16,14 +16,17 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.net.HttpURLConnection;
 import java.net.URI;
@@ -41,6 +44,38 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EmbeddedRuntimeBrokerTest {
+    @Test
+    void externalTransportIsSharedByWorkspaceOperationsAndPublication() throws Exception {
+        var properties = properties();
+        var settings = properties.getRuntimeBroker();
+        settings.setProvisioner("external-workspace");
+        settings.setIsolationClass("session");
+        settings.setExternalProviderId("provider");
+        settings.setWorkspaceId("da-session");
+        settings.setWorkspaceCwd("/worker/workspace");
+        properties.getHarness().setEnabled(true);
+        properties.getToolPublication().setEnabled(true);
+        var transport = mock(HttpRuntimeTransport.class);
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:embedded-transport-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(mock(ManagedAgentStore.class), properties, bindings,
+                new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source),
+                mock(JdbcWorkspaceExecutionStore.class), mock(com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore.class),
+                mock(com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore.class),
+                new org.springframework.jdbc.core.JdbcTemplate(source),
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source), null,
+                mock(ExternalRuntimeClient.class), transport)) {
+            var actual = ReflectionTestUtils.getField(broker.service(), "transport");
+            assertThat(actual).isInstanceOf(com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeTransport.class);
+            assertThat(ReflectionTestUtils.getField(actual, "delegate")).isSameAs(transport);
+            assertThat(ReflectionTestUtils.getField(broker, "externalShellProducer")).extracting("transport").isSameAs(transport);
+        }
+    }
+
     @Test
     void stepCallBackstopExceedsEveryShippedCalleeWait() {
         // The never-answering step backstop is twice the operation lease; it

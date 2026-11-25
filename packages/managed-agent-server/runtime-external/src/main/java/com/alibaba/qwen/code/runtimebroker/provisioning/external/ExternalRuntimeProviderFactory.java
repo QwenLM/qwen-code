@@ -29,7 +29,7 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
     @Override
     public RuntimeProvisioner create(ManagedAgentSettings settings, RuntimeTransport transport,
             RuntimeProviderDependencies dependencies) {
-        validate(settings);
+        validate(settings, dependencies);
         var broker = settings.getRuntimeBroker();
         boolean workspace = ExternalRuntimeKinds.isWorkspace(broker.getProvisioner());
         ExternalStorageRegistry storage = workspace ? dependencies.externalStorage() : null;

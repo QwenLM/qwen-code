@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.ExternalStorageIdentity;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -13,6 +14,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.util.List;
+import java.util.Optional;
 
 @Component
 public final class ExternalWorkspaceMaterializationStore {
@@ -127,6 +131,30 @@ public final class ExternalWorkspaceMaterializationStore {
                     digest, "MATERIALIZE_EXTERNAL_WORKSPACE", null, null, null, "COMPLETED", null, null, now);
             jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", encode(receipt), receiptKey);
             return receipt;
+        });
+    }
+
+    public Optional<Receipt> findByPhysicalKey(String tenant, String providerId, String physicalKey) {
+        String owner = new ExternalStorageIdentity(providerId, physicalKey, 1).ownerKey();
+        return transaction.execute(status -> {
+            List<String> records = jdbc.queryForList("SELECT r.result_json FROM ma_workspace w"
+                    + " JOIN ma_request_receipt r ON r.tenant_id = w.tenant_id AND r.namespace = ? AND r.scope_kind = ?"
+                    + " JOIN ma_storage_owner o ON o.tenant_id = w.tenant_id AND o.storage_id = w.workspace_id"
+                    + " WHERE o.physical_id = ? AND w.tenant_id = ? AND w.state = 'ACTIVE' AND w.workspace_kind = 'ROOT'",
+                    String.class, NAMESPACE.name(), ReceiptScope.TENANT.name(), owner, tenant);
+            if (records.isEmpty()) {
+                return Optional.empty();
+            }
+            if (records.size() != 1) {
+                throw new RuntimeBrokerException(409, "external_workspace_conflict",
+                        "External Workspace storage ownership is ambiguous.", false);
+            }
+            Receipt receipt = decode(records.getFirst(), Receipt.class);
+            if (!receipt.storageId().equals(receipt.workspaceId())) {
+                throw new RuntimeBrokerException(409, "external_workspace_conflict",
+                        "External Workspace receipt does not match its registered alias.", false);
+            }
+            return Optional.of(receipt);
         });
     }
 
