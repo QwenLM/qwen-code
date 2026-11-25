@@ -61,7 +61,7 @@ Extension archive storage is imported through `ManagedAgentConfiguration`, not r
 - Context tests: dependency disabled by default, explicit enablement, owned or host-supplied Managed data source, and no public/internal controller beans.
 - Schema tests: initialization remains the default; validation-only accepts a prepared catalog and refuses an empty catalog without creating tables; real MySQL verifies that boundary when available.
 - Architecture tests: starter classes belong only to the starter module and depend only on the server assembly, not on host types.
-- Independent fixture: consume the new artifact with Spring Boot 3.5.3 and no `@Import`, both with an owned pool and a host-supplied pool. Existing explicit-import coverage remains executable.
+- Independent fixture: consume the new artifact with Spring Boot 3.5.3 and no `@Import`, both with an owned pool and a host-supplied pool. Verify that a host-declared `@Transactional` bean is an AOP proxy. Existing explicit-import coverage remains executable.
 - Configuration reference and README are regenerated or updated with the new properties and artifact contract.
 - Relevant focused Maven/Checkstyle checks and the independent fixture provide local evidence; the complete Java, MySQL and packaging suites remain CI gates.
 

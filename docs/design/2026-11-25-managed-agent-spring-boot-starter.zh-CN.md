@@ -61,7 +61,7 @@ Managed catalog 与宿主业务 catalog 不同。其表结构和应用账号由�
 - 上下文测试：默认依赖无效果、显式启用、独立或宿主提供的 Managed 数据源，以及没有公共/内部 Controller Bean。
 - Schema 测试：默认仍初始化；仅校验接受已建基线，拒绝空库且不建表；可用时用真实 MySQL 验证该边界。
 - 架构测试：Starter 类型只属于本模块且仅依赖 server 装配，不依赖宿主类型。
-- 独立夹具：使用 Spring Boot 3.5.3 消费新制品，无 `@Import`，覆盖独立连接池和宿主提供的连接池。原显式导入测试继续执行。
+- 独立夹具：使用 Spring Boot 3.5.3 消费新制品，无 `@Import`，覆盖独立连接池和宿主提供的连接池。验证宿主声明的 `@Transactional` Bean 是 AOP 代理。原显式导入测试继续执行。
 - 配置参考与 README 同步新属性和制品契约。
 - 聚焦 Maven/Checkstyle 检查及独立夹具提供本地证据；完整 Java、MySQL 和打包测试集保留为 CI 门禁。
 
