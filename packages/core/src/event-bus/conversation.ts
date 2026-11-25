@@ -128,7 +128,7 @@ export class ConversationHandler {
         if (round === undefined || !batch) return;
         const rounds = round + 1;
         const turn = state.model?.turn;
-        const { parts, responses } = batch;
+        const { parts, responses, hookStopReason } = batch;
         if (batch.stop) {
           this.finish(state, {
             reason: batch.stop,
@@ -136,6 +136,7 @@ export class ConversationHandler {
             turn,
             parts,
             responses,
+            ...(hookStopReason !== undefined ? { hookStopReason } : {}),
           });
           return;
         }

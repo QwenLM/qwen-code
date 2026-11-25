@@ -707,6 +707,12 @@ export interface ToolResult {
    * honored when the tool batch carries a Goal context; ignored otherwise.
    */
   terminateTurn?: boolean;
+
+  /**
+   * A tool hook of a call this tool ran (a Code Mode `exec` call) returned
+   * `continue: false`: the turn ends after this batch, with this reason.
+   */
+  hookStopReason?: string;
 }
 
 /**
