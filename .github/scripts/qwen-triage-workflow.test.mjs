@@ -1015,18 +1015,14 @@ describe('qwen-triage: token isolation contract', () => {
   it('falls back to GITHUB_TOKEN only when both bot PATs are absent', () => {
     const expected =
       '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}';
-    for (const name of [
-      'Acknowledge triage request',
-      'Post triage status comment',
-      'Prepare agent context',
-      'Finalize triage status comment',
-    ]) {
-      assert.equal(
-        steps.find((step) => step.name === name).env.GH_TOKEN,
-        expected,
-        `${name} must share the publishing identity`,
-      );
-    }
+    // Only the identity read needs the fallback in the read-only triage job;
+    // its reaction/status steps stay PAT-only because the built-in token
+    // cannot write there. The publish job's token has write scopes, so both
+    // of its steps fall back.
+    assert.equal(
+      steps.find((step) => step.name === 'Prepare agent context').env.GH_TOKEN,
+      expected,
+    );
     for (const name of [
       'Publish triage drafts',
       'Notify silent triage re-run',
@@ -1036,6 +1032,29 @@ describe('qwen-triage: token isolation contract', () => {
         expected,
       );
     }
+  });
+
+  it('keeps triage-job write steps PAT-only', () => {
+    const patOnly = '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}';
+    for (const name of [
+      'Acknowledge triage request',
+      'Post triage status comment',
+      'Finalize triage status comment',
+    ]) {
+      assert.equal(
+        steps.find((step) => step.name === name).env.GH_TOKEN,
+        patOnly,
+        `${name} must not fall back to the read-only GITHUB_TOKEN`,
+      );
+    }
+  });
+
+  it('grants publish-triage exactly the write scopes the fallback needs', () => {
+    assert.deepEqual(publishTriageJob.permissions, {
+      contents: 'read',
+      issues: 'write',
+      'pull-requests': 'write',
+    });
   });
 
   it('inspects published reviews only after publishing (notify moved)', () => {

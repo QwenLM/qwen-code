@@ -392,6 +392,17 @@ function submitReview(action, { repo, number, botLogin, exec }) {
     ? reviews.filter((review) => review.user?.login === botLogin)
     : [];
   if (action.event === 'APPROVE') {
+    // The no-PAT fallback publishes as github-actions[bot], which GitHub will
+    // not let approve a PR. Skipping up front keeps a drafted approval from
+    // counting as a failed action (and reddening the whole publish job);
+    // formal approvals stay a PAT-only feature.
+    if (botLogin === 'github-actions[bot]') {
+      return {
+        status: 'skipped',
+        detail:
+          'github-actions[bot] cannot approve; configure a bot PAT for approvals',
+      };
+    }
     if (
       own.some(
         (review) =>
