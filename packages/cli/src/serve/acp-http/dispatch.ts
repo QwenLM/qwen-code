@@ -6466,6 +6466,7 @@ export class AcpDispatcher {
         abort.signal,
         {
           ...this.sessionCtx(conn, sessionId, fromLoopback),
+          userPrompt: true,
           ...(typeof submittedPrompt === 'string' &&
           metadata?.[CHANNEL_PROMPT_META_KEY] === undefined &&
           metadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === undefined &&

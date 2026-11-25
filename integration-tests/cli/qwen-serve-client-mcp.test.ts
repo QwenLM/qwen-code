@@ -130,6 +130,9 @@ beforeAll(async () => {
       '127.0.0.1',
       '--workspace',
       REPO_ROOT,
+      // Client MCP contracts, not host-load admission, are under test
+      // here; keep a shared runner's load out of session creation.
+      '--no-load-admission',
       '--initialize-timeout-ms',
       String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
