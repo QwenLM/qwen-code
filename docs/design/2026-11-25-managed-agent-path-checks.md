@@ -18,7 +18,7 @@ merge group. It selects jobs inside the workflow using the changed paths.
 | Change                                                                                   | Fast checks     | Full suite on maintainer approval |
 | ---------------------------------------------------------------------------------------- | --------------- | --------------------------------- |
 | SDK or Managed Agent Server Java packages and Java CI helpers                            | Java            | Yes                               |
-| Daemon code, CLI serve entry points, managed runtime, or daemon E2E fixtures             | Daemon          | Yes                               |
+| Daemon and CLI serve code, ACP bridge, managed runtime, or daemon E2E fixtures           | Daemon          | Yes                               |
 | Java daemon SDK client, shared gate or SDK Java workflows, or both Java and daemon paths | Java and daemon | Yes                               |
 | Managed channel adapters or Hosted integration fixtures                                  | None            | Yes                               |
 | Documentation and unrelated paths, including the legacy GitHub adapter                   | None            | No                                |

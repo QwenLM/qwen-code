@@ -36,6 +36,8 @@ const writeBackFind =
   "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
+const javaFastCondition =
+  "${{ inputs.tier != 'fast' || inputs.coverage == 'java' || inputs.coverage == 'both' }}";
 const job = (name) => {
   const start = workflow.indexOf(`  ${name}:`);
   const next = workflow.slice(start + 1).search(/\n {2}[a-z0-9-]+:\n/);
@@ -305,6 +307,11 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(existsSync('scripts/run-java-daemon-sdk-e2e.ts')).toBe(true);
     expect(scripts.build).toBeTruthy();
     expect(scripts.bundle).toBeTruthy();
+  });
+
+  it('starts the daemon fixture independently of host load admission', () => {
+    const source = readFileSync('scripts/run-java-daemon-sdk-e2e.ts', 'utf8');
+    expect(source).toContain("'--no-load-admission',");
   });
 
   it('gates every pool-capable Java job and calibrates its floor', () => {
@@ -1750,7 +1757,7 @@ describe('SDK Java self-hosted workflow guards', () => {
             }
             if (arm === 'helper' || arm === 'helper-capitalised') {
               const expectedWait =
-                status !== 0 ? '300' : name === 'test' ? '9600' : '5400';
+                status !== 0 || name === 'test' ? '300' : '5400';
               expect(
                 readFileSync(join(runnerTemp, 'lock-wait'), 'utf8').trim(),
                 label,
@@ -5959,15 +5966,15 @@ exec /usr/bin/find "$@"
 });
 
 // #12940: the duplicate-version guard is the fast lane for a collision two
-// green PRs can only produce in the merge result, so it runs on every
-// trigger — no job-level condition, no Java, no database. #13245 moved its
+// green PRs can only produce in the merge result. It runs for Java coverage
+// and in the full tier, without Java or a database. #13245 moved its
 // trusted runs onto the ECS pool (a seconds-long scan sat 26 minutes in the
 // hosted queue); untrusted fork PRs stay hosted.
 describe('SDK Java Flyway migration version guard', () => {
-  it('runs the uniqueness check as an unconditional job', () => {
+  it('runs the uniqueness check for Java coverage and the full tier', () => {
     const block = job('flyway-migrations');
     const parsed = parse(workflow).jobs['flyway-migrations'];
-    expect(parsed.if).toBeUndefined();
+    expect(parsed.if).toBe(javaFastCondition);
     for (const fragment of [
       "github.event_name != ''pull_request''",
       'github.event.pull_request.head.repo.full_name == github.repository',
@@ -6909,8 +6916,8 @@ describe('Java SDK release validation gate', () => {
       required: true,
       type: 'string',
     });
-    // The only lane condition is the fast-tier skip, and the release caller
-    // passes no tier, so the default 'full' runs every lane.
+    // The lane conditions only restrict the fast tier. Release uses the full
+    // default, so every lane validates the prepared release source.
     expect(checks.on.workflow_call.inputs.tier).toMatchObject({
       required: false,
       default: 'full',
@@ -6920,7 +6927,11 @@ describe('Java SDK release validation gate', () => {
         entry.uses?.startsWith('actions/checkout@'),
       );
       expect(checkout.with.ref).toBe('${{ inputs.ref || github.sha }}');
-      expect([undefined, "${{ inputs.tier != 'fast' }}"]).toContain(lane.if);
+      expect([
+        "${{ inputs.tier != 'fast' }}",
+        javaFastCondition,
+        "${{ inputs.tier != 'fast' || inputs.coverage == 'daemon' || inputs.coverage == 'both' }}",
+      ]).toContain(lane.if);
       expect(lane['continue-on-error']).toBeUndefined();
     }
     expect(release.jobs.java_checks).toMatchObject({
@@ -7043,7 +7054,7 @@ describe('SDK Java runner-local tool-cache repair', () => {
 // and qwen-autofix.yml already absorb (#11726); the heap class is capped in
 // pnpm-workspace.yaml, and a retry only offers it a quieter host. Pin the
 // recipe on every install so a new bare step fails here instead of on main.
-// For the five installs that do not set QWEN_SKIP_PREPARE, each attempt
+// For the installs that do not set QWEN_SKIP_PREPARE, each attempt
 // re-runs prepare's build (~4m32s observed), not just backoff; daemon-e2e
 // skips the build and only runs `npm run generate` on each attempt.
 // Scope is sdk-java.yml: release-sdk-java.yml's install is a bare one-liner
@@ -7076,7 +7087,6 @@ describe('SDK Java install-transient retry', () => {
       'hosted-failover-e2e',
       'hosted-harness-mysql',
       'mysql-integration',
-      'test',
     ]);
   });
 

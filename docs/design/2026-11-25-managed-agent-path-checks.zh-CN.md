@@ -17,7 +17,7 @@
 | 改动                                                                               | 快检           | 维护者批准后运行全量套件 |
 | ---------------------------------------------------------------------------------- | -------------- | ------------------------ |
 | SDK 或 Managed Agent Server Java 包、Java CI 脚本                                  | Java           | 是                       |
-| Daemon 代码、CLI serve 入口、managed runtime 或 daemon E2E 测试夹具                | Daemon         | 是                       |
+| Daemon 和 CLI serve 代码、ACP bridge、managed runtime 或 daemon E2E 测试夹具       | Daemon         | 是                       |
 | Java daemon SDK 客户端、共用门禁或 SDK Java 工作流，或同时涉及 Java 和 daemon 路径 | Java 和 daemon | 是                       |
 | Managed channel 适配器或 Hosted 集成测试夹具                                       | 无             | 是                       |
 | 文档及无关路径，包括旧版 GitHub 适配器                                             | 无             | 否                       |

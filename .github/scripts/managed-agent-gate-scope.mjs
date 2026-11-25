@@ -10,6 +10,7 @@ const JAVA_PATHS = [
 
 const DAEMON_PATHS = [
   /^packages\/sdk-java\/qwencode\/src\/(main|test)\/java\/com\/alibaba\/qwen\/code\/daemon\//,
+  /^packages\/acp-bridge\/src\//,
   /^packages\/cli\/src\/serve\//,
   /^packages\/cli\/src\/commands\/serve(\.ts|\/)/,
   /^packages\/core\/src\/managed-runtime\//,

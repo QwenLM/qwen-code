@@ -72,6 +72,7 @@ describe('Managed Agent gate scope', () => {
   });
 
   it.each([
+    'packages/acp-bridge/src/session-control-plane.ts',
     'packages/cli/src/serve/server.ts',
     'packages/cli/src/commands/serve.ts',
     'packages/core/src/managed-runtime/runtime.ts',
