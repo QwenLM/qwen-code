@@ -281,6 +281,21 @@ function resolveValue(setting: DaemonSettingDescriptor, scope: Scope): unknown {
   return scopeVal !== undefined ? scopeVal : setting.values.effective;
 }
 
+/**
+ * The value a boolean toggle writes, mirroring the CLI dialogs'
+ * `nextBooleanSettingValue()`: a resolved value flips, while a setting with no
+ * stored value and no schema default takes the schema's `unsetToggleValue`.
+ * Without it a `default: undefined` setting (e.g. `unifiedAgentLoop`) reads as
+ * off and a host would have to guess what the first toggle means.
+ */
+function nextBooleanValue(
+  setting: DaemonSettingDescriptor,
+  value: unknown,
+): boolean {
+  if (typeof value === 'boolean') return !value;
+  return setting.unsetToggleValue ?? false;
+}
+
 interface CategoryGroup {
   category: string;
   items: DaemonSettingDescriptor[];
@@ -1077,7 +1092,9 @@ export function SettingsMessage({
         <Switch
           checked={checked}
           disabled={disabled}
-          onCheckedChange={(next) => handleSetValue(setting.key, next)}
+          onCheckedChange={() =>
+            handleSetValue(setting.key, nextBooleanValue(setting, value))
+          }
           aria-label={formatSettingLabel(setting, t)}
         />
       );
@@ -1395,6 +1412,14 @@ export function SettingsMessage({
                           );
                           const hintKey = scopeHintKey(setting, scope);
                           const hasScopeValue = scopeHasValue(setting, scope);
+                          // A boolean with no stored value and no schema
+                          // default is not "off": each surface applies its own
+                          // default (unifiedAgentLoop runs on the shared loop
+                          // for ACP/headless/TUIs), so an unchecked switch
+                          // alone would misreport the setting.
+                          const isUnsetWithoutDefault =
+                            setting.type === 'boolean' &&
+                            resolveValue(setting, scope) === undefined;
                           const scopeHint = hintKey
                             ? t(hintKey, {
                                 scope: t(
@@ -1420,6 +1445,10 @@ export function SettingsMessage({
                                       {scope === 'workspace'
                                         ? t('settings.scope.workspace')
                                         : t('settings.scope.user')}
+                                    </Badge>
+                                  ) : isUnsetWithoutDefault ? (
+                                    <Badge variant="outline">
+                                      {t('settings.value.unset')}
                                     </Badge>
                                   ) : undefined
                                 }
