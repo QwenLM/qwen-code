@@ -6,7 +6,7 @@ Status: implemented first cut for #15683. Date: 2026-11-01.
 
 ## Problem and scope
 
-Long turns push the prompt far above the fold. The turn navigation rail shows a prompt only on hover, and it hides when the conversation width plus two 64px gutters does not fit. At a 1440px window with the default sidebar, in full-width mode, and on narrow layouts, nothing in the transcript says which prompt the visible output belongs to.
+Long turns push the prompt far above the fold. The turn navigation rail shows a prompt only on hover, and it hides in full-width mode or when the conversation does not keep 440px for its text and 56px on each side. In those layouts, nothing in the transcript says which prompt the visible output belongs to.
 
 This change adds a compact overlay at the top of the transcript viewport. It shows the prompt of the turn being read, clamped to two lines, or one line on short viewports. All changes stay inside `packages/web-shell`. There is no daemon protocol change and there are no new strings.
 
@@ -38,7 +38,7 @@ These constraints come from the defects listed in #15426 for the earlier `Sticky
 - Landmarks: it is a plain `div`. It adds no landmark. It is not `aria-hidden`, because when the prompt row has left the mounted window, the overlay is the only copy of the prompt in the DOM. When the prompt row is still mounted, assistive technology can read the prompt twice. This is accepted.
 - History banner: the history loading and error banner uses the same top-centre slot. The banner and the overlay are children of one flex column, `.topStack`, so the overlay starts below the banner at each banner height. The column has no `z-index`, so the banner keeps `z-10` and the overlay stays below `.searchAction` and `.navigation` (`z-index: 4`).
 - Input: it has `pointer-events: none`, so wheel, touch, click and selection go to the transcript below it.
-- Small viewports: below 600px of window height it clamps to one line. At 900x480 it is at most 30px high.
+- Small viewports: below 600px of window height it clamps to one line. At 540x480 it is at most 30px high.
 
 ## Decisions and rationale
 
@@ -54,7 +54,7 @@ The overlay is an opt-in prop on `TranscriptViewport`, set by the main transcrip
 ## Validation and acceptance criteria
 
 - Unit tests in `TranscriptViewport.pinned.test.tsx` cover label choice, the reading line, hiding, a partly visible prompt row, the collapse row, the unmounted prompt row, a turn the index does not know, provisional turns, a missing label, the history banner, unsupported modes, and panes without the prop.
-- `web-shell.pinned-prompt.spec.ts` covers positioning, label changes, the unmounted prompt row, row sizing, wheel input over the overlay, agreement with the rail, and a label that wraps to two lines at 900x900 and to one line at 900x480. Its `/turn-index` mock is the shared `installTurnIndexRoute` helper in `client/e2e/utils/turnIndexRoute.ts`.
+- `web-shell.pinned-prompt.spec.ts` covers positioning, label changes, the unmounted prompt row, row sizing, wheel input over the overlay, agreement with the rail, and a label that wraps to two lines at 540x900 and to one line at 540x480. Its `/turn-index` mock is the shared `installTurnIndexRoute` helper in `client/e2e/utils/turnIndexRoute.ts`.
 - The existing `web-shell.turn-navigation-scroll-follow.spec.ts` and the `TranscriptViewport` unit tests still pass.
 
 ## Follow-up work

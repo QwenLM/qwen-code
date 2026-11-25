@@ -321,6 +321,25 @@ describe('TranscriptViewport pinned prompt', () => {
     expect(pinnedText()).toBeUndefined();
   });
 
+  it('keeps the rail on the turn before an unknown turn while the overlay names none', () => {
+    observed.railVisible = true;
+    observed.navigation = navigation({
+      totalTurns: 1,
+      effectiveTurnCount: 4,
+      indexPages: new Map([
+        [0, { turns: [{ ordinal: 0, turnId: 't0', label: 'First prompt' }] }],
+      ]),
+      locations: new Map([['t0', { blockId: 'prompt-0' }]]),
+    });
+    observed.rows = [
+      { id: 'output-0b', top: -300, bottom: -10 },
+      { id: 'output-1a', top: -10, bottom: 300 },
+    ];
+    renderViewport();
+    expect(observed.railFollow?.current).toBe(0);
+    expect(pinnedText()).toBeUndefined();
+  });
+
   it.each([
     ['loading', () => (observed.loading = true), '[role="status"]'],
     ['error', () => (observed.error = 'failed'), '[role="alert"]'],

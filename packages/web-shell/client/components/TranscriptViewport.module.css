@@ -58,7 +58,10 @@
   justify-content: flex-end;
   width: min(
     100% - 40px,
-    var(--chat-content-width, var(--chat-regular-content-width, 1000px))
+    var(
+      --chat-responsive-content-width,
+      var(--chat-content-width, var(--chat-regular-content-width, 1000px))
+    )
   );
   pointer-events: none;
 }
