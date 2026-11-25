@@ -90,7 +90,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // merged with main, using Node v26.12.1 on 2026-11-25, measured 2,156,867
 // bytes. Re-track the warning and hard ceiling to that later measurement
 // while preserving the house margins of 713 and 1,713 bytes respectively.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_731;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_157_580;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
