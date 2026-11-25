@@ -1188,6 +1188,7 @@ export default {
   'skipped (unsupported args)': 'skipped (unsupported args)',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}': 'A hook stopped the turn: {{reason}}',
   'Loading hooks...': 'Loading hooks...',
   'Error loading hooks:': 'Error loading hooks:',
   'Press Escape to close': 'Press Escape to close',

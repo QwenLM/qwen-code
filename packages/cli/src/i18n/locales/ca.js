@@ -842,6 +842,8 @@ export default {
   'Manage Qwen Code hooks': 'Gestiona els hooks de Qwen Code',
   'List all configured hooks': 'Llista tots els hooks configurats',
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Un hook ha aturat el torn: {{reason}}',
   'Loading hooks...': 'Carregant hooks...',
   'Error loading hooks:': 'Error en carregar els hooks:',
   'Press Escape to close': 'Premeu Escape per tancar',
