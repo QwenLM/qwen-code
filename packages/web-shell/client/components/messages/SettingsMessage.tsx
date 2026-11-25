@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -279,21 +280,6 @@ function resolveValue(setting: DaemonSettingDescriptor, scope: Scope): unknown {
   const scopeVal =
     scope === 'user' ? setting.values.user : setting.values.workspace;
   return scopeVal !== undefined ? scopeVal : setting.values.effective;
-}
-
-/**
- * The value a boolean toggle writes, mirroring the CLI dialogs'
- * `nextBooleanSettingValue()`: a resolved value flips, while a setting with no
- * stored value and no schema default takes the schema's `unsetToggleValue`.
- * Without it a `default: undefined` setting (e.g. `unifiedAgentLoop`) reads as
- * off and a host would have to guess what the first toggle means.
- */
-function nextBooleanValue(
-  setting: DaemonSettingDescriptor,
-  value: unknown,
-): boolean {
-  if (typeof value === 'boolean') return !value;
-  return setting.unsetToggleValue ?? false;
 }
 
 interface CategoryGroup {
@@ -741,6 +727,7 @@ export function SettingsMessage({
   initialCategory,
   workspaceSettingsWritable = true,
 }: SettingsMessageProps) {
+  const settingsId = useId();
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
   const notifications = useBrowserNotificationSettings();
@@ -1008,7 +995,10 @@ export function SettingsMessage({
     </Select>
   );
 
-  const renderSettingControl = (setting: DaemonSettingDescriptor) => {
+  const renderSettingControl = (
+    setting: DaemonSettingDescriptor,
+    unsetBadgeId: string | undefined,
+  ) => {
     const value = resolveValue(setting, scope);
     const isBusy = busyKey === setting.key;
     // User-scope settings are editable (this PR enables user-scope writes); the
@@ -1088,14 +1078,17 @@ export function SettingsMessage({
 
     if (setting.type === 'boolean') {
       const checked = value === true;
+      const unsetToggleValue =
+        value === undefined ? setting.unsetToggleValue : undefined;
       return (
         <Switch
           checked={checked}
           disabled={disabled}
-          onCheckedChange={() =>
-            handleSetValue(setting.key, nextBooleanValue(setting, value))
+          onCheckedChange={(next) =>
+            handleSetValue(setting.key, unsetToggleValue ?? next)
           }
           aria-label={formatSettingLabel(setting, t)}
+          aria-describedby={unsetBadgeId}
         />
       );
     }
@@ -1412,14 +1405,11 @@ export function SettingsMessage({
                           );
                           const hintKey = scopeHintKey(setting, scope);
                           const hasScopeValue = scopeHasValue(setting, scope);
-                          // A boolean with no stored value and no schema
-                          // default is not "off": each surface applies its own
-                          // default (unifiedAgentLoop runs on the shared loop
-                          // for ACP/headless/TUIs), so an unchecked switch
-                          // alone would misreport the setting.
-                          const isUnsetWithoutDefault =
+                          const unsetBadgeId =
                             setting.type === 'boolean' &&
-                            resolveValue(setting, scope) === undefined;
+                            resolveValue(setting, scope) === undefined
+                              ? `${settingsId}-unset-${setting.key}`
+                              : undefined;
                           const scopeHint = hintKey
                             ? t(hintKey, {
                                 scope: t(
@@ -1446,8 +1436,8 @@ export function SettingsMessage({
                                         ? t('settings.scope.workspace')
                                         : t('settings.scope.user')}
                                     </Badge>
-                                  ) : isUnsetWithoutDefault ? (
-                                    <Badge variant="outline">
+                                  ) : unsetBadgeId ? (
+                                    <Badge id={unsetBadgeId} variant="outline">
                                       {t('settings.value.unset')}
                                     </Badge>
                                   ) : undefined
@@ -1456,7 +1446,7 @@ export function SettingsMessage({
                                   busyKey === setting.key ? (
                                     <Spinner />
                                   ) : (
-                                    renderSettingControl(setting)
+                                    renderSettingControl(setting, unsetBadgeId)
                                   )
                                 }
                               />

@@ -765,51 +765,43 @@ describe('SettingsMessage user-scope editing', () => {
     expect(setValue).toHaveBeenCalledWith('user', 'general.testFlag', true);
   });
 
-  it('marks a boolean with no stored value and no schema default as not set', () => {
+  it('describes an unset boolean switch with its visible badge', () => {
     const container = renderPanel(makeState([unsetBoolSetting()], vi.fn()));
+    const control = switchButton(container);
+    const badge = container.querySelector('[data-slot="badge"]');
 
-    // `undefined` resolves to an unchecked switch, but "unset" is not "off":
-    // each surface applies its own default, so the row must say so.
-    expect(container.textContent).toContain(
-      'Not set (each surface uses its default)',
-    );
-    expect(switchButton(container).getAttribute('data-state')).toBe(
-      'unchecked',
-    );
+    expect(badge?.textContent).toBe('Not set (each surface uses its default)');
+    expect(badge?.id).toBeTruthy();
+    expect(control.getAttribute('aria-describedby')).toBe(badge?.id);
+    expect(control.getAttribute('data-state')).toBe('unchecked');
   });
 
-  it('writes the schema unset toggle value for an unset boolean', async () => {
-    const setValue = vi.fn(
-      (scope: 'workspace' | 'user', key: string, value: unknown) =>
-        Promise.resolve({
-          key,
-          scope,
-          value,
-          requiresRestart: true,
-        } as DaemonSettingUpdateResult),
+  it('omits the unset description for an explicitly disabled boolean', () => {
+    const container = renderPanel(
+      makeState(
+        [
+          {
+            ...unsetBoolSetting(),
+            values: { effective: false, workspace: false },
+          },
+        ],
+        vi.fn(),
+      ),
     );
-    const container = renderPanel(makeState([unsetBoolSetting()], setValue));
 
-    await act(async () => {
-      switchButton(container).click();
-    });
-
-    expect(setValue).toHaveBeenCalledWith(
-      'workspace',
-      'experimental.unifiedAgentLoop',
-      true,
+    expect(switchButton(container).hasAttribute('aria-describedby')).toBe(
+      false,
     );
   });
 
   it.each([
-    ['declares false', false, false],
-    ['declares nothing', undefined, false],
+    ['experimental.unifiedAgentLoop', true, true],
+    ['experimental.unifiedAgentLoop', false, false],
+    ['tools.webSearch.enabled', undefined, true],
+    ['tools.shell.enableInteractiveShell', undefined, true],
   ] as const)(
-    'writes the unset value when the schema %s',
-    async (_label, unsetToggleValue, expected) => {
-      // The unchecked switch's next state is "true", so the host must not
-      // forward it blindly: the CLI dialogs use the same rule, where an
-      // absent unset value flips to false.
+    'toggles unset %s with schema value %s to %s',
+    async (key, unsetToggleValue, expected) => {
       const setValue = vi.fn(
         (scope: 'workspace' | 'user', key: string, value: unknown) =>
           Promise.resolve({
@@ -820,18 +812,14 @@ describe('SettingsMessage user-scope editing', () => {
           } as DaemonSettingUpdateResult),
       );
       const container = renderPanel(
-        makeState([{ ...unsetBoolSetting(), unsetToggleValue }], setValue),
+        makeState([{ ...unsetBoolSetting(), key, unsetToggleValue }], setValue),
       );
 
       await act(async () => {
         switchButton(container).click();
       });
 
-      expect(setValue).toHaveBeenCalledWith(
-        'workspace',
-        'experimental.unifiedAgentLoop',
-        expected,
-      );
+      expect(setValue).toHaveBeenCalledWith('workspace', key, expected);
     },
   );
 
