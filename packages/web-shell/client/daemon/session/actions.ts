@@ -3866,7 +3866,11 @@ export function createDaemonSessionActions({
       }
     },
 
-    async cancelTask(taskId: string, kind: DaemonSessionCancelableTaskKind) {
+    async cancelTask(
+      taskId: string,
+      kind: DaemonSessionCancelableTaskKind,
+      source?: 'cron' | 'wakeup',
+    ) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -3875,7 +3879,7 @@ export function createDaemonSessionActions({
       );
       try {
         return await withActionTimeout(
-          session.cancelTask(taskId, kind),
+          session.cancelTask(taskId, kind, source),
           'Cancel task timed out',
         );
       } catch (error) {

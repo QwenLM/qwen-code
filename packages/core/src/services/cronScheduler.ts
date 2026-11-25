@@ -346,7 +346,7 @@ export class CronScheduler {
   // dropping route-only fields such as session ownership.
   private restorablePerRunOneShots = new Map<
     string,
-    { task: DurableCronTask; index: number }
+    { task: DurableCronTask; index: number; runId?: string }
   >();
   private consumedPerRunOneShots = new Set<string>();
   // The durable deletion generation observed by the task-file mutation that
@@ -732,6 +732,15 @@ export class CronScheduler {
     this.consumedPerRunRemovalGenerations.delete(key);
     this.armedDurableOneShots.delete(key);
     return true;
+  }
+
+  /** Cancel a session-only cron without selecting a durable or wakeup sibling. */
+  cancelSessionCron(id: string): boolean {
+    this.abortGate(id);
+    this.pendingGateApprovals.delete(id);
+    const job = this.jobs.get(id);
+    if (!job || job.durable) return false;
+    return this.jobs.delete(id);
   }
 
   /**
@@ -1178,6 +1187,8 @@ export class CronScheduler {
       if (!task.recurring && task.sessionMode === 'per_run') {
         this.restorablePerRunOneShots.set(key, {
           task,
+          runId:
+            existing?.runId ?? this.restorablePerRunOneShots.get(key)?.runId,
           index: read.findIndex(
             (candidate) =>
               candidate.id === task.id &&
@@ -1601,6 +1612,8 @@ export class CronScheduler {
     kind: 'scheduled' | 'catch-up' = 'scheduled',
   ): void {
     job.runId = job.durable ? generateId() : undefined;
+    const restorable = this.restorablePerRunOneShots.get(runtimeJobKey(job));
+    if (restorable) restorable.runId = job.runId;
     if (!job.gate) {
       onFire(job);
       return;
@@ -1898,6 +1911,7 @@ export class CronScheduler {
             runs: appendCronRun(current.runs, {
               at: firedAt,
               kind: 'scheduled',
+              runId: snapshot.runId,
               sessionDispatchFailed: true,
             }),
           };

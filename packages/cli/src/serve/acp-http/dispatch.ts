@@ -4426,6 +4426,23 @@ export class AcpDispatcher {
               }
               return;
             }
+            const source = params['source'];
+            if (
+              source !== undefined &&
+              source !== 'cron' &&
+              source !== 'wakeup'
+            ) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`source` must be "cron" or "wakeup"',
+                  ),
+                );
+              }
+              return;
+            }
             const kind = params['kind'];
             if (
               kind !== 'agent' &&
@@ -4457,6 +4474,7 @@ export class AcpDispatcher {
               taskId,
               kind,
               this.sessionCtx(conn, sessionId, loopback),
+              source,
             );
             this.replyConn(conn, id, result as unknown);
           });

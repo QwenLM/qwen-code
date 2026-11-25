@@ -1635,6 +1635,53 @@ describe('ScheduledTasksDialog run now', () => {
     expect(onRunPrompt).toHaveBeenCalledWith('legacy', null);
   });
 
+  it('does not deliver a consumed unbound one-shot after the owner changes', async () => {
+    const task = baseTask({
+      id: 'global-unbound-one-shot',
+      prompt: 'keep the clicked owner',
+      sessionId: null,
+      recurring: false,
+    });
+    const onRunPrompt = vi.fn();
+    const onError = vi.fn();
+    let releaseRun!: () => void;
+    const running = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    actions.runScheduledTask.mockImplementationOnce(() => running);
+    const { rerender } = await mount([task], {
+      currentSession: { sessionId: 'owner-a', workspaceCwd: '/tmp' },
+      onRunPrompt,
+      onError,
+    });
+    click(document.querySelector('[aria-label="Run now"]'));
+    await vi.waitFor(() => {
+      expect(actions.runScheduledTask).toHaveBeenCalledWith(
+        task.id,
+        undefined,
+        null,
+      );
+    });
+
+    actions.listScheduledTasks.mockResolvedValue([]);
+    await rerender({
+      currentSession: { sessionId: 'owner-b', workspaceCwd: '/tmp' },
+      onRunPrompt,
+      onError,
+    });
+    await act(async () => {
+      releaseRun();
+      await running;
+    });
+    await flush();
+
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      expect.any(Error),
+      'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
+    );
+  });
+
   it('does not run a DISABLED task (button disabled, prompt never enqueued)', async () => {
     // The server /run guard only refuses the record — the prompt must not even
     // be enqueued, or a disabled task would execute unrecorded.

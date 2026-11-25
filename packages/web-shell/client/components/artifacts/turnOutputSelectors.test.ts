@@ -1163,7 +1163,8 @@ describe('live scheduled-task labels', () => {
       ]),
       {
         taskStatusById: new Map([
-          ['cron-known', 'active'],
+          ['["session","cron","cron-known"]', 'active'],
+          ['["session","wakeup","cron-known"]', 'paused'],
           ['durable-paused', 'paused'],
         ]),
         hasLiveDurableSnapshot: true,

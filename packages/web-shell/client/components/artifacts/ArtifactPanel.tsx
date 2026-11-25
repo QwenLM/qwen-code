@@ -20,7 +20,10 @@ import {
   type DaemonSessionActions,
   type DaemonScheduledTask,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import type { SessionDurableScheduledTask } from '../../hooks/useSessionScheduledTasks';
+import {
+  scheduledTaskRuntimeKey,
+  type SessionDurableScheduledTask,
+} from '../../hooks/useSessionScheduledTasks';
 import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
 import { DownloadIcon } from 'lucide-react';
@@ -1988,7 +1991,13 @@ export function ArtifactPanel({
             actions={activeWorkspaceActions}
             liveSessionTask={
               liveSnapshotBelongsToActiveTask
-                ? liveSessionScheduledTasks?.get(activeTab.task.id)
+                ? liveSessionScheduledTasks?.get(
+                    scheduledTaskRuntimeKey({
+                      scope: 'session',
+                      source: 'cron',
+                      id: activeTab.task.id,
+                    }),
+                  )
                 : undefined
             }
             hasLiveSessionSnapshot={
@@ -2020,7 +2029,15 @@ export function ArtifactPanel({
             confirmedSessionCancellation={
               !activeTab.task.durable &&
               liveSnapshotBelongsToActiveTask &&
-              Boolean(confirmedCancelledSessionTaskIds?.has(activeTab.task.id))
+              Boolean(
+                confirmedCancelledSessionTaskIds?.has(
+                  scheduledTaskRuntimeKey({
+                    scope: 'session',
+                    source: 'cron',
+                    id: activeTab.task.id,
+                  }),
+                ),
+              )
             }
             sourceSessionId={activeTab.sourceSessionId}
             onCancelSessionTask={onCancelSessionScheduledTask}

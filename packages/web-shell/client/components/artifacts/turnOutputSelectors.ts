@@ -5,6 +5,7 @@ import type {
   TurnOutputFileChange,
   TurnOutputScheduledTask,
 } from './TurnOutputs';
+import { scheduledTaskRuntimeKey } from '../../hooks/useSessionScheduledTasks';
 import { isSamePath, normalizePath, stripWorkspacePath } from './artifactUtils';
 
 function getToolCallIds(tool: ACPToolCall): string[] {
@@ -228,7 +229,15 @@ export function enrichScheduledTasksByTurn(
     next.set(
       turnId,
       items.map((item) => {
-        const status = live.taskStatusById.get(item.id);
+        const status = live.taskStatusById.get(
+          item.durable
+            ? item.id
+            : scheduledTaskRuntimeKey({
+                scope: 'session',
+                source: 'cron',
+                id: item.id,
+              }),
+        );
         if (status) return { ...item, liveStatus: status };
         // Absence is not a cancellation event: durable filtering, a consumed
         // one-shot, an expired recurring job and task-owner changes all look

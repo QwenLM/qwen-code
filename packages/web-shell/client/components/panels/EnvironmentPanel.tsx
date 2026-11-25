@@ -30,10 +30,11 @@ import {
 import type { WebShellEnvironmentPanelItem } from '../../customization';
 import { useI18n } from '../../i18n';
 import { useSharedNow } from '../../hooks/useSharedNow';
-import type {
-  SessionDurableScheduledTask,
-  SessionScheduledTask,
-  SessionScopedScheduledTask,
+import {
+  scheduledTaskRuntimeKey as scheduledTaskKey,
+  type SessionDurableScheduledTask,
+  type SessionScheduledTask,
+  type SessionScopedScheduledTask,
 } from '../../hooks/useSessionScheduledTasks';
 import {
   describeCron,
@@ -117,8 +118,7 @@ const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
     'artifacts',
   ];
 
-const scheduledTaskKey = (entry: SessionScheduledTask): string =>
-  `${entry.scope}:${entry.id}`;
+// Runtime task keys include both the scheduler scope and the wakeup/cron source.
 const AGENT_COLORS: Readonly<Record<string, string>> = {
   red: '#e5484d',
   blue: 'var(--agent-blue-500)',
@@ -704,7 +704,8 @@ export function EnvironmentPanel({
             {scheduledTasksExpanded && (
               <ul className={styles.scheduledList}>
                 {scheduledTasks.map((entry) => {
-                  const busy = scheduledTaskBusyIds?.has(entry.id) === true;
+                  const busy =
+                    scheduledTaskBusyIds?.has(scheduledTaskKey(entry)) === true;
                   const scopeLabel =
                     entry.scope === 'durable'
                       ? t('environment.scheduledTasks.scopeDurable')

@@ -2924,7 +2924,11 @@ objects, and trigger expiry or stop reasons are not part of this snapshot.
 These entries never appear in the ordinary background `tasks` array. Durable tasks created through
 `/scheduled-tasks` are excluded and remain owned by that CRUD surface.
 `POST /session/:id/tasks/:taskId/cancel` accepts `kind: "cron"` only for these
-session-owned entries; a durable task must be disabled or deleted through its
+session-owned entries; an optional `source: "cron" | "wakeup"` selects the
+exact entry when those two kinds share an id. Omitting `source` preserves
+legacy cancellation for a unique candidate, but multiple session-only
+candidates return `{ "cancelled": false, "reason": "ambiguous" }` without
+deleting either one. A durable task must be disabled or deleted through its
 workspace-scoped scheduled-task route instead. As with the snapshot itself,
 cancellation resolves the live-session owner and returns
 `{ "cancelled": false }` without mutating another runtime or primary session

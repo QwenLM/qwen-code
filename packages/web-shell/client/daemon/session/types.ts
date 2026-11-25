@@ -850,6 +850,7 @@ export interface DaemonSessionActions {
   cancelTask(
     taskId: string,
     kind: DaemonSessionCancelableTaskKind,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }>;
   controlWorkflowTask(
     taskId: string,

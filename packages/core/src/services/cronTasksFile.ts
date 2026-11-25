@@ -801,7 +801,7 @@ export async function removeCronTasks(
       removed = tasks.length - remaining.length;
       return removed === 0 ? tasks : remaining;
     },
-    { deletionIds: ids },
+    { deletionIds: ids.map(cronTaskLegacyDeletionId) },
   );
   return removed;
 }

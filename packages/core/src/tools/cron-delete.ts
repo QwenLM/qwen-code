@@ -10,6 +10,8 @@ import { getErrorMessage } from '../utils/errors.js';
 import {
   CRON_TASKS_DISPLAY_PATH,
   readCronTasks,
+  removeCronTasks,
+  type DurableCronTask,
 } from '../services/cronTasksFile.js';
 
 export interface CronDeleteParams {
@@ -33,11 +35,25 @@ class CronDeleteInvocation extends BaseToolInvocation<
 
   async execute(): Promise<ToolResult> {
     const scheduler = this.config.getCronScheduler();
-    let deleted: boolean;
+    let deleted = false;
     try {
-      const matches = (
-        await readCronTasks(this.config.getProjectRoot())
-      ).filter((task) => task.id === this.params.id);
+      let matches: DurableCronTask[];
+      try {
+        matches = (await readCronTasks(this.config.getProjectRoot())).filter(
+          (task) => task.id === this.params.id,
+        );
+      } catch (error) {
+        // Never resolve a default unbound durable while ownership is unreadable.
+        if (
+          scheduler
+            .list()
+            .some((job) => job.id === this.params.id && job.durable === true)
+        )
+          throw error;
+        deleted = await scheduler.delete(this.params.id);
+        if (!deleted) throw error;
+        matches = [];
+      }
       if (matches.length > 1) {
         const message = `Job ${this.params.id} is ambiguous across session owners; use owner-qualified scheduled-task management.`;
         return {
@@ -52,8 +68,9 @@ class CronDeleteInvocation extends BaseToolInvocation<
           matches[0]!.sessionId ?? null,
         );
         deleted = true;
-      } else {
+      } else if (!deleted) {
         deleted = await scheduler.delete(this.params.id);
+        await removeCronTasks(this.config.getProjectRoot(), [this.params.id]);
       }
     } catch (error) {
       // Durable removal failed to persist — the job is restored, so don't

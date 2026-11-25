@@ -4709,12 +4709,13 @@ export class DaemonClient {
     taskId: string,
     kind: DaemonSessionCancelableTaskKind,
     clientId?: string,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }> {
     return await this.sessionTaskMutation<{ cancelled: boolean }>(
       sessionId,
       taskId,
       'cancel',
-      { kind },
+      { kind, ...(source ? { source } : {}) },
       clientId,
     );
   }

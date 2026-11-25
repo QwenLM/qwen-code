@@ -1428,12 +1428,14 @@ export class DaemonSessionClient {
   cancelTask(
     taskId: string,
     kind: DaemonSessionCancelableTaskKind,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }> {
     return this.client.sessionTaskCancel(
       this.sessionId,
       taskId,
       kind,
       this.clientId,
+      source,
     );
   }
 

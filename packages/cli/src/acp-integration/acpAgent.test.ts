@@ -19235,6 +19235,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     const deleteCron = vi.fn().mockResolvedValue(true);
+    const cancelCron = vi.fn().mockReturnValue(true);
+    const cancelWakeup = vi.fn().mockReturnValue(true);
     Object.assign(innerConfig, {
       isCronEnabled: vi.fn().mockReturnValue(true),
       getCronScheduler: vi.fn().mockReturnValue({
@@ -19259,8 +19261,20 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             expiresAt: Infinity,
             jitterMs: 0,
           },
+          {
+            id: 'shared-source',
+            cronExpr: '*/5 * * * *',
+            durable: false,
+          },
+          {
+            id: 'shared-source',
+            cronExpr: '@wakeup',
+            durable: false,
+          },
         ]),
         delete: deleteCron,
+        cancelSessionCron: cancelCron,
+        cancelWakeup,
       }),
     });
 
@@ -19302,6 +19316,37 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskKind: 'cron',
       }),
     ).resolves.toEqual({ cancelled: false, reason: 'not_found' });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'shared-source',
+        taskKind: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: false, reason: 'ambiguous' });
+    expect(deleteCron).not.toHaveBeenCalledWith('shared-source');
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'shared-source',
+        taskKind: 'cron',
+        source: 'wakeup',
+      }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(cancelWakeup).toHaveBeenCalledExactlyOnceWith('shared-source');
+    expect(cancelCron).not.toHaveBeenCalled();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'shared-source',
+        taskKind: 'cron',
+        source: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(cancelCron).toHaveBeenCalledExactlyOnceWith('shared-source');
+    expect(cancelWakeup).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -210,7 +210,9 @@ describe('useSessionScheduledTasks', () => {
     expect(latest?.nextRunAt).toBe(20_000);
     expect(latest?.taskStatusById.get('durable-active')).toBe('active');
     expect(latest?.taskStatusById.get('durable-paused')).toBe('paused');
-    expect(latest?.taskStatusById.get('wakeup-1')).toBe('active');
+    expect(latest?.taskStatusById.get('["session","wakeup","wakeup-1"]')).toBe(
+      'active',
+    );
   });
 
   it('keeps durable discovery and explicit refresh silent when durable reads are disabled', async () => {
@@ -366,9 +368,12 @@ describe('useSessionScheduledTasks', () => {
     expect(sdkMock.sessionActions.cancelTask).toHaveBeenCalledWith(
       'c-1',
       'cron',
+      'cron',
     );
     expect(latest?.activeSessionCount).toBe(0);
-    expect(latest?.confirmedCancelledSessionTaskIds.has('c-1')).toBe(true);
+    expect(
+      latest?.confirmedCancelledSessionTaskIds.has('["session","cron","c-1"]'),
+    ).toBe(true);
 
     await act(async () => {
       await latest!.deleteDurableTask(durableEntry!);
@@ -634,7 +639,9 @@ describe('useSessionScheduledTasks', () => {
       ]);
     });
     expect(latest?.activeSessionCount).toBe(0);
-    expect(latest?.taskStatusById.get('stopped-loop')).toBe('paused');
+    expect(
+      latest?.taskStatusById.get('["session","wakeup","stopped-loop"]'),
+    ).toBe('paused');
     expect(latest?.tasks[0]?.enabled).toBe(false);
   });
 
@@ -760,6 +767,35 @@ describe('useSessionScheduledTasks', () => {
       else expect(latest?.taskStatusById.get('d-stale')).toBe('paused');
     },
   );
+
+  it('cancels only the selected source when cron and wakeup share an id', async () => {
+    const cron = sessionCronTask({ id: 'shared-source' });
+    const wakeup = sessionCronTask({
+      id: 'shared-source',
+      source: 'wakeup',
+      cronExpr: '@wakeup',
+      prompt: 'target loop',
+    });
+    sdkMock.sessionActions.cancelTask.mockResolvedValue({ cancelled: true });
+    renderHarness({ sessionId: 'session-1' });
+    await act(async () => latest!.syncSessionTasks([cron, wakeup]));
+    const entry = latest!.tasks.find(
+      (task) => task.scope === 'session' && task.source === 'wakeup',
+    ) as SessionScopedScheduledTask;
+    const staleSnapshot = latest!.syncSessionTasks;
+
+    await act(async () => {
+      expect(await latest!.cancelSessionTask(entry)).toBe(true);
+    });
+    expect(sdkMock.sessionActions.cancelTask).toHaveBeenCalledExactlyOnceWith(
+      'shared-source',
+      'cron',
+      'wakeup',
+    );
+    expect(latest?.tasks.map((task) => task.source).sort()).toEqual(['cron']);
+    await act(async () => staleSnapshot([cron, wakeup]));
+    expect(latest?.tasks.map((task) => task.source).sort()).toEqual(['cron']);
+  });
 
   it('keeps a confirmed cancellation when an older snapshot arrives', async () => {
     const sessionTask = sessionCronTask({ id: 'cron-cancelled' });

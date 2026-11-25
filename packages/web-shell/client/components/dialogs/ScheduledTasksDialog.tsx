@@ -827,6 +827,8 @@ export function ScheduledTasksDialog({
 
   // Guard against setState after unmount (loads are async).
   const mountedRef = useRef(true);
+  const currentSessionIdRef = useRef(currentSession?.sessionId);
+  currentSessionIdRef.current = currentSession?.sessionId;
   // Monotonic reload id: a slow mount/Refresh load that resolves after a
   // create/toggle/delete's reload must not overwrite the newer list with
   // stale data. Only the latest reload is allowed to apply its result.
@@ -1533,6 +1535,9 @@ export function ScheduledTasksDialog({
         await runScheduledTaskManually(task, actions, onRunPrompt, t, {
           reload,
           onError,
+          isCurrent: () =>
+            task.sessionId != null ||
+            currentSessionIdRef.current === currentSession?.sessionId,
           isStale: () =>
             confirmedDeletionsRef.current.has(taskDeletionKey(task)) ||
             isTaskDeleted?.(task) === true,
@@ -1541,7 +1546,16 @@ export function ScheduledTasksDialog({
         setRunningTaskId(null);
       }
     },
-    [actions, isTaskDeleted, onError, onRunPrompt, reload, runningTaskId, t],
+    [
+      actions,
+      currentSession?.sessionId,
+      isTaskDeleted,
+      onError,
+      onRunPrompt,
+      reload,
+      runningTaskId,
+      t,
+    ],
   );
 
   const handleDelete = useCallback(

@@ -650,6 +650,7 @@ class FakeBridge {
         taskId: string;
         kind: Parameters<HttpAcpBridge['cancelSessionTask']>[2];
         context: Parameters<HttpAcpBridge['cancelSessionTask']>[3];
+        source: Parameters<HttpAcpBridge['cancelSessionTask']>[4];
       }
     | undefined;
   async cancelSessionTask(
@@ -657,8 +658,9 @@ class FakeBridge {
     taskId: string,
     kind: Parameters<HttpAcpBridge['cancelSessionTask']>[2],
     context: Parameters<HttpAcpBridge['cancelSessionTask']>[3],
+    source?: Parameters<HttpAcpBridge['cancelSessionTask']>[4],
   ) {
-    this.lastCancelledTask = { sessionId, taskId, kind, context };
+    this.lastCancelledTask = { sessionId, taskId, kind, context, source };
     return { cancelled: true };
   }
   lastWorkflowAction:
@@ -10385,6 +10387,40 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         taskId: 'cron-1',
         kind: 'cron',
         context: { clientId: 'client-1', fromLoopback: true },
+      });
+    });
+
+    it('_qwen/session/tasks/cancel forwards an explicit wakeup source', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 69,
+        method: '_qwen/session/tasks/cancel',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'shared-cron',
+          kind: 'cron',
+          source: 'wakeup',
+          clientId: 'forged-client',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ result: { cancelled: true } });
+      expect(bridge.lastCancelledTask).toEqual({
+        sessionId: 'sess-1',
+        taskId: 'shared-cron',
+        kind: 'cron',
+        context: { clientId: 'client-1', fromLoopback: true },
+        source: 'wakeup',
       });
     });
 

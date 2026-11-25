@@ -14488,6 +14488,13 @@ class QwenAgent implements Agent {
             'Invalid or missing taskId',
           );
         }
+        const source = params['source'];
+        if (source !== undefined && source !== 'cron' && source !== 'wakeup') {
+          throw RequestError.invalidParams(
+            undefined,
+            'source must be "cron" or "wakeup"',
+          );
+        }
         const taskKind = params['taskKind'];
         if (
           taskKind !== 'agent' &&
@@ -14609,20 +14616,39 @@ class QwenAgent implements Agent {
               return { cancelled: false, reason: 'disabled' };
             }
             const scheduler = config.getCronScheduler?.();
-            const job = scheduler?.list?.().find((item) => item.id === taskId);
+            const candidates =
+              scheduler?.list?.().filter((item) => item.id === taskId) ?? [];
+            const job =
+              source === undefined
+                ? candidates[0]
+                : candidates.find((item) =>
+                    source === 'wakeup'
+                      ? item.cronExpr === '@wakeup'
+                      : item.cronExpr !== '@wakeup',
+                  );
             if (!job) {
               debugLogger.info(
-                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=not_found`,
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} source=${source ?? 'legacy'} reason=not_found`,
               );
               return { cancelled: false, reason: 'not_found' };
             }
             if (job.durable) {
               debugLogger.info(
-                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=not_session_scoped`,
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} source=${source ?? 'legacy'} reason=not_session_scoped`,
               );
               return { cancelled: false, reason: 'not_session_scoped' };
             }
-            const deleted = await scheduler!.delete(taskId);
+            if (
+              source === undefined &&
+              candidates.filter((item) => !item.durable).length > 1
+            ) {
+              return { cancelled: false, reason: 'ambiguous' };
+            }
+            const deleted = source
+              ? source === 'wakeup'
+                ? scheduler!.cancelWakeup(taskId)
+                : scheduler!.cancelSessionCron(taskId)
+              : await scheduler!.delete(taskId);
             debugLogger.info(
               `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} deleted=${deleted}`,
             );

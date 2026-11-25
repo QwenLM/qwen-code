@@ -1615,8 +1615,9 @@ interface FakeBridge extends AcpSessionBridge {
   cancelSessionTaskCalls: Array<{
     sessionId: string;
     taskId: string;
-    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
+    taskKind: Parameters<AcpSessionBridge['cancelSessionTask']>[2];
     context?: BridgeClientRequestContext;
+    source?: Parameters<AcpSessionBridge['cancelSessionTask']>[4];
   }>;
   controlSessionWorkflowTaskCalls: Array<{
     sessionId: string;
@@ -2928,13 +2929,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTurnIndexCalls.push(req);
       return sessionTurnIndexImpl(req);
     },
-    async cancelSessionTask(sessionId, taskId, taskKind, context) {
+    async cancelSessionTask(sessionId, taskId, taskKind, context, source) {
       cancelSessionTaskCalls.push({
         sessionId,
         taskId,
         taskKind,
         ...(context ? { context } : {}),
+        ...(source ? { source } : {}),
       });
+      return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
       return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
     },
     async controlSessionWorkflowTask(
@@ -12263,6 +12266,37 @@ describe('createServeApp', () => {
           taskId: 'cron-1',
           taskKind: 'cron',
           context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('forwards the selected cron wakeup source through the bridge', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/shared-source/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ kind: 'cron', source: 'wakeup' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cancelled: true });
+      expect(bridge.cancelSessionTaskCalls).toEqual([
+        {
+          sessionId: 's-1',
+          taskId: 'shared-source',
+          taskKind: 'cron',
+          context: { clientId: 'client-1' },
+          source: 'wakeup',
         },
       ]);
     });

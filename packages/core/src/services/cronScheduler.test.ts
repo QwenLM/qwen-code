@@ -22,6 +22,7 @@ import {
 } from './cronTasksFile.js';
 import { Storage } from '../config/storage.js';
 import type { CronGateResult } from './cron-gate.js';
+import { CronDeleteTool } from '../tools/cron-delete.js';
 
 // Gates for the pass-through mock below. readGate holds the startup read
 // while stop() runs, or fails it (a transient fs error). updateGate holds a
@@ -42,10 +43,13 @@ const { readGate, updateGate, removeGate } = vi.hoisted(() => {
   return { readGate: gate(), updateGate: gate(), removeGate: remove };
 });
 
+const generatedId = vi.hoisted(() => ({ next: null as string | null }));
+
 vi.mock('./cronTasksFile.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./cronTasksFile.js')>();
   return {
     ...actual,
+    generateCronTaskId: () => generatedId.next ?? actual.generateCronTaskId(),
     readCronTasks: async (projectRoot: string) => {
       if (readGate.block) {
         readGate.onHit?.();
@@ -116,6 +120,7 @@ describe('CronScheduler', () => {
       Object.assign(gate, { block: null, onHit: null, fail: null });
     }
     removeGate.fail = null;
+    generatedId.next = null;
   });
 
   const at = (h: number, m: number, sec = 0, ms = 0) =>
@@ -726,6 +731,26 @@ describe('CronScheduler', () => {
       expect(scheduler.cancelWakeup(w.id)).toBe(false);
     });
 
+    it('cancels a same-id session cron without selecting its wakeup or durable sibling', () => {
+      const job = scheduler.create('*/1 * * * *', 'session cron', true);
+      generatedId.next = job.id;
+      const wakeup = scheduler.scheduleWakeup(300, 'same-id wakeup');
+      expect(
+        scheduler.list().filter((task) => task.id === job.id),
+      ).toHaveLength(2);
+
+      expect(scheduler.cancelSessionCron(job.id)).toBe(true);
+      expect(scheduler.list().map((task) => task.cronExpr)).toEqual([
+        '@wakeup',
+      ]);
+      expect(scheduler.cancelWakeup(wakeup.id)).toBe(true);
+      (scheduler as unknown as { jobs: Map<string, CronJob> }).jobs.set(
+        job.id,
+        { ...job, durable: true },
+      );
+      expect(scheduler.cancelSessionCron(job.id)).toBe(false);
+    });
+
     it('cancelAllWakeups cancels the pending wakeup and returns the count', () => {
       scheduler.scheduleWakeup(120, 'a');
       scheduler.scheduleWakeup(240, 'b');
@@ -1150,12 +1175,19 @@ describe('CronScheduler', () => {
       return slot;
     };
     // A consumed per-run one-shot restored after its dispatch failed.
-    const pausedAfterFailure = (t: Task, firedAt: number, o: Over = {}) => ({
+    const pausedAfterFailure = (
+      t: Task,
+      firedAt: number,
+      o: Over = {},
+      runId?: string,
+    ) => ({
       ...t,
       ...o,
       enabled: false,
       lastFiredAt: firedAt,
-      runs: [{ at: firedAt, kind: 'scheduled', sessionDispatchFailed: true }],
+      runs: [
+        { at: firedAt, kind: 'scheduled', runId, sessionDispatchFailed: true },
+      ],
     });
     // onFire restores each fired one-shot (after `dispatch`, when given).
     type Restoring = { fired: CronJob[]; restoration?: Promise<boolean> };
@@ -1489,7 +1521,7 @@ describe('CronScheduler', () => {
       dispatch.resolve();
       expect(await r.restoration).toBe(true);
       expect(await readCronTasks(tmpDir)).toEqual([
-        pausedAfterFailure(original, fireAt),
+        pausedAfterFailure(original, fireAt, {}, r.fired[0]!.runId),
       ]);
     });
 
@@ -1892,11 +1924,21 @@ describe('CronScheduler', () => {
       scheduler.stop();
 
       expect(await r.restoration).toBe(true);
+      const expectedFailure = pausedAfterFailure(
+        original,
+        fireAt,
+        {},
+        r.fired[0]!.runId,
+      );
       expect(await readCronTasks(tmpDir)).toEqual([
         tasks[0],
-        pausedAfterFailure(original, fireAt),
+        expectedFailure,
         tasks[2],
       ]);
+      const restored = (await readCronTasks(tmpDir)).find(
+        (task) => task.id === original.id,
+      )!;
+      expect(restored.runs?.[0]?.runId).toBe(r.fired[0]!.runId);
     });
 
     it('keeps a restored one-shot through the watcher debounce without a missed fire', async () => {
@@ -1949,7 +1991,12 @@ describe('CronScheduler', () => {
 
         expect(restartedFires).toHaveLength(0);
         expect(await readCronTasks(tmpDir)).toEqual([
-          pausedAfterFailure(original, fireAt, { prompt: 'edited' }),
+          pausedAfterFailure(
+            original,
+            fireAt,
+            { prompt: 'edited' },
+            r.fired[0]!.runId,
+          ),
         ]);
       } finally {
         await settle(restarted);
@@ -1986,7 +2033,7 @@ describe('CronScheduler', () => {
       scheduler.tick(new Date(firedAt + 61_000));
       expect(r.fired).toHaveLength(1);
       expect(await readCronTasks(tmpDir)).toEqual([
-        pausedAfterFailure(original, firedAt),
+        pausedAfterFailure(original, firedAt, {}, r.fired[0]!.runId),
       ]);
       await settle(scheduler);
       const restarted = new CronScheduler(tmpDir);
@@ -2059,7 +2106,12 @@ describe('CronScheduler', () => {
 
       expect(await r.restoration).toBe(true);
       expect(await readCronTasks(tmpDir)).toEqual([
-        pausedAfterFailure(original, fireAt, { prompt: 'edited' }),
+        pausedAfterFailure(
+          original,
+          fireAt,
+          { prompt: 'edited' },
+          r.fired[0]!.runId,
+        ),
       ]);
     });
 
@@ -2073,6 +2125,45 @@ describe('CronScheduler', () => {
       expect(await removeCronTasks(tmpDir, [original.id])).toBe(0);
       dispatch.resolve();
 
+      expect(await r.restoration).toBe(false);
+      expect(await readCronTasks(tmpDir)).toEqual([]);
+    });
+
+    it('persists a tool miss-delete so another session cannot restore its consumed one-shot', async () => {
+      const original = await loadOneShot('once-tool-miss-delete');
+      const dispatch = deferred();
+      const r = startRestoring(dispatch.promise);
+      tickPastFirstFire(original);
+      await internals().pendingPersist;
+      const other = new CronScheduler(tmpDir);
+      const deleteTool = new CronDeleteTool({
+        getCronScheduler: () => other,
+        getProjectRoot: () => tmpDir,
+      } as unknown as import('../config/config.js').Config);
+      try {
+        const result = await deleteTool
+          .build({ id: original.id })
+          .execute(new AbortController().signal);
+        expect(result.llmContent).toContain('not found');
+        dispatch.resolve();
+        expect(await r.restoration).toBe(false);
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+      } finally {
+        dispatch.resolve();
+        await settle(other);
+      }
+    });
+
+    it('honors reserved-id tombstones from a public miss-delete during one-shot restoration', async () => {
+      const original = await loadOneShot(
+        JSON.stringify(['session-1', 'reserved-once']),
+      );
+      const dispatch = deferred();
+      const r = startRestoring(dispatch.promise);
+      tickPastFirstFire(original);
+      await internals().pendingPersist;
+      expect(await removeCronTasks(tmpDir, [original.id])).toBe(0);
+      dispatch.resolve();
       expect(await r.restoration).toBe(false);
       expect(await readCronTasks(tmpDir)).toEqual([]);
     });

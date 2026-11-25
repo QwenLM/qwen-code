@@ -9343,6 +9343,17 @@ export function registerSessionRoutes(
         }
         const body = safeBody(req);
         const kind = body['kind'];
+        const source = body['source'];
+        if (
+          source !== undefined &&
+          ((kind === 'cron' && source !== 'cron' && source !== 'wakeup') ||
+            (kind !== 'cron' && source !== undefined))
+        ) {
+          res.status(400).json({
+            error: '`source` must be "cron" or "wakeup" for a cron task',
+          });
+          return;
+        }
         if (
           kind !== 'agent' &&
           kind !== 'shell' &&
@@ -9370,6 +9381,7 @@ export function registerSessionRoutes(
               taskId,
               kind,
               clientId !== undefined ? { clientId } : undefined,
+              source,
             ),
           );
       },

@@ -66,6 +66,16 @@ export type SessionScheduledTask =
   | SessionDurableScheduledTask
   | SessionScopedScheduledTask;
 
+export function scheduledTaskRuntimeKey(
+  task:
+    | Pick<SessionDurableScheduledTask, 'id' | 'scope'>
+    | Pick<SessionScopedScheduledTask, 'id' | 'scope' | 'source'>,
+): string {
+  return task.scope === 'session'
+    ? JSON.stringify([task.scope, task.source, task.id])
+    : JSON.stringify([task.scope, task.id]);
+}
+
 export type SessionScheduledTaskLiveState = 'active' | 'paused';
 
 export interface SessionScheduledTasksResult {
@@ -85,6 +95,7 @@ export interface SessionScheduledTasksResult {
   confirmSessionCancellation: (
     taskId: string,
     expectedSessionId?: string,
+    source?: 'cron' | 'wakeup',
   ) => void;
   confirmDurableDeletion: (task: {
     id: string;
@@ -103,7 +114,10 @@ export interface SessionScheduledTasksResult {
   runDurableTask: (task: SessionDurableScheduledTask) => Promise<void>;
   deleteDurableTask: (task: SessionDurableScheduledTask) => Promise<boolean>;
   cancelSessionTask: (task: SessionScopedScheduledTask) => Promise<boolean>;
-  cancelSessionTaskById: (taskId: string) => Promise<boolean>;
+  cancelSessionTaskById: (
+    taskId: string,
+    source?: 'cron' | 'wakeup',
+  ) => Promise<boolean>;
 }
 
 function summarizePrompt(prompt: string): string {
@@ -341,7 +355,10 @@ export function useSessionScheduledTasks(options: {
       // flight. Do not resurrect it if that older response arrives later.
       setSessionScopedTasks(
         incoming.filter(
-          (task) => !confirmedCancelledIdsRef.current.has(task.id),
+          (task) =>
+            !confirmedCancelledIdsRef.current.has(
+              scheduledTaskRuntimeKey({ ...task, scope: 'session' }),
+            ),
         ),
       );
       setHasLiveSessionSnapshot(true);
@@ -356,14 +373,18 @@ export function useSessionScheduledTasks(options: {
     setManualRefreshTick((n) => n + 1);
   }, [sessionId]);
 
-  const markBusy = useCallback((id: string, busy: boolean) => {
-    setBusyIds((prev) => {
-      const next = new Set(prev);
-      if (busy) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-  }, []);
+  const markBusy = useCallback(
+    (task: Parameters<typeof scheduledTaskRuntimeKey>[0], busy: boolean) => {
+      const key = scheduledTaskRuntimeKey(task);
+      setBusyIds((prev) => {
+        const next = new Set(prev);
+        if (busy) next.add(key);
+        else next.delete(key);
+        return next;
+      });
+    },
+    [],
+  );
 
   const toggleDurableTask = useCallback(
     async (entry: SessionDurableScheduledTask) => {
@@ -375,7 +396,7 @@ export function useSessionScheduledTasks(options: {
         scopeGenerationRef.current === generation &&
         owner.isCurrent();
       durableReqRef.current += 1;
-      markBusy(entry.id, true);
+      markBusy(entry, true);
       try {
         const updated = await workspaceActions.updateScheduledTask(
           entry.id,
@@ -397,7 +418,7 @@ export function useSessionScheduledTasks(options: {
       } catch (error) {
         if (isCurrent()) onError(error, t('scheduledTasks.error.toggleFailed'));
       } finally {
-        if (isCurrent()) markBusy(entry.id, false);
+        if (isCurrent()) markBusy(entry, false);
       }
     },
     [markBusy, onError, owner, t, workspaceActions, workspaceId],
@@ -422,7 +443,7 @@ export function useSessionScheduledTasks(options: {
       // the rapid second-click window before React state renders.
       manualRunActiveRef.current = true;
       setManualRunActive(true);
-      markBusy(entry.id, true);
+      markBusy(entry, true);
       try {
         await runScheduledTaskManually(
           { ...entry.task, workspaceId: entry.workspaceId ?? workspaceId },
@@ -441,7 +462,7 @@ export function useSessionScheduledTasks(options: {
         if (isCurrent()) {
           manualRunActiveRef.current = false;
           setManualRunActive(false);
-          markBusy(entry.id, false);
+          markBusy(entry, false);
         }
       }
     },
@@ -487,7 +508,7 @@ export function useSessionScheduledTasks(options: {
         scopeGenerationRef.current === generation &&
         owner.isCurrent();
       durableReqRef.current += 1;
-      markBusy(entry.id, true);
+      markBusy(entry, true);
       try {
         await workspaceActions.deleteScheduledTask(
           entry.id,
@@ -504,7 +525,7 @@ export function useSessionScheduledTasks(options: {
         if (isCurrent()) onError(error, t('scheduledTasks.error.deleteFailed'));
         return false;
       } finally {
-        if (isCurrent()) markBusy(entry.id, false);
+        if (isCurrent()) markBusy(entry, false);
       }
     },
     [
@@ -519,29 +540,44 @@ export function useSessionScheduledTasks(options: {
   );
 
   const confirmSessionCancellation = useCallback(
-    (taskId: string, expectedSessionId = sessionId) => {
+    (
+      taskId: string,
+      expectedSessionId = sessionId,
+      source: 'cron' | 'wakeup' = 'cron',
+    ) => {
       if (!owner.isCurrent() || expectedSessionId !== sessionId) return;
-      confirmedCancelledIdsRef.current.add(taskId);
+      const key = scheduledTaskRuntimeKey({
+        id: taskId,
+        source,
+        scope: 'session',
+      });
+      confirmedCancelledIdsRef.current.add(key);
       setConfirmedCancelledSessionTaskIds(
         new Set(confirmedCancelledIdsRef.current),
       );
       setSessionScopedTasks((prev) =>
-        prev.filter((item) => item.id !== taskId),
+        prev.filter(
+          (item) =>
+            scheduledTaskRuntimeKey({ ...item, scope: 'session' }) !== key,
+        ),
       );
     },
     [owner, sessionId],
   );
 
   const cancelSessionTaskById = useCallback(
-    async (taskId: string): Promise<boolean> => {
+    async (
+      taskId: string,
+      source: 'cron' | 'wakeup' = 'cron',
+    ): Promise<boolean> => {
       const generation = scopeGenerationRef.current;
       const isCurrent = () =>
         scopeGenerationRef.current === generation && owner.isCurrent();
-      markBusy(taskId, true);
+      markBusy({ id: taskId, scope: 'session', source }, true);
       try {
-        const result = await sessionActions.cancelTask(taskId, 'cron');
+        const result = await sessionActions.cancelTask(taskId, 'cron', source);
         if (result.cancelled && isCurrent()) {
-          confirmSessionCancellation(taskId);
+          confirmSessionCancellation(taskId, undefined, source);
         }
         if (!result.cancelled && isCurrent()) {
           onError(
@@ -554,7 +590,9 @@ export function useSessionScheduledTasks(options: {
         if (isCurrent()) onError(error, t('scheduledTasks.error.cancelFailed'));
         return false;
       } finally {
-        if (isCurrent()) markBusy(taskId, false);
+        if (isCurrent()) {
+          markBusy({ id: taskId, scope: 'session', source }, false);
+        }
       }
     },
     [confirmSessionCancellation, markBusy, onError, owner, sessionActions, t],
@@ -562,7 +600,7 @@ export function useSessionScheduledTasks(options: {
 
   const cancelSessionTask = useCallback(
     async (entry: SessionScopedScheduledTask): Promise<boolean> =>
-      cancelSessionTaskById(entry.id),
+      cancelSessionTaskById(entry.id, entry.source),
     [cancelSessionTaskById],
   );
 
@@ -627,7 +665,10 @@ export function useSessionScheduledTasks(options: {
   const taskStatusById = useMemo(() => {
     const map = new Map<string, SessionScheduledTaskLiveState>();
     for (const task of tasks) {
-      map.set(task.id, task.enabled ? 'active' : 'paused');
+      map.set(
+        task.scope === 'session' ? scheduledTaskRuntimeKey(task) : task.id,
+        task.enabled ? 'active' : 'paused',
+      );
     }
     return map;
   }, [tasks]);
@@ -635,7 +676,7 @@ export function useSessionScheduledTasks(options: {
   const liveSessionTaskById = useMemo(() => {
     const map = new Map<string, DaemonSessionScheduledTaskStatus>();
     for (const task of sessionScopedTasks) {
-      map.set(task.id, task);
+      map.set(scheduledTaskRuntimeKey({ ...task, scope: 'session' }), task);
     }
     return map;
   }, [sessionScopedTasks]);

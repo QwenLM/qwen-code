@@ -2947,6 +2947,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     taskId: string,
     taskKind: 'agent' | 'shell' | 'monitor' | 'workflow' | 'cron',
     context?: BridgeClientRequestContext,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }>;
 
   /**

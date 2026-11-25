@@ -20,7 +20,10 @@ import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import type { WebShellRightPanelItem } from '../../customization';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import type { TurnOutputScheduledTask } from './TurnOutputs';
-import type { SessionDurableScheduledTask } from '../../hooks/useSessionScheduledTasks';
+import {
+  scheduledTaskRuntimeKey,
+  type SessionDurableScheduledTask,
+} from '../../hooks/useSessionScheduledTasks';
 
 const mockDocxRender = vi.hoisted(() => vi.fn());
 vi.mock('docx-preview', () => ({ renderAsync: mockDocxRender }));
@@ -3244,7 +3247,11 @@ describe('ArtifactPanel scheduled-task ownership', () => {
           task: { durable: false },
           liveSessionScheduledTasks: new Map([
             [
-              'cron-secondary',
+              scheduledTaskRuntimeKey({
+                id: 'cron-secondary',
+                scope: 'session',
+                source: 'cron',
+              }),
               {
                 id: 'cron-secondary',
                 source: 'cron',
@@ -7045,7 +7052,11 @@ describe('ArtifactPanel binary document previews', () => {
             liveSessionScheduledTasks={
               new Map([
                 [
-                  'cron-paused-live',
+                  scheduledTaskRuntimeKey({
+                    id: 'cron-paused-live',
+                    scope: 'session',
+                    source: 'cron',
+                  }),
                   {
                     id: 'cron-paused-live',
                     source: 'cron' as const,
@@ -7141,7 +7152,14 @@ describe('ArtifactPanel binary document previews', () => {
             onCloseTab={() => {}}
             onOpenFilePreview={() => {}}
             onClose={() => {}}
-            liveSessionScheduledTasks={new Map([[liveTask.id, liveTask]])}
+            liveSessionScheduledTasks={
+              new Map([
+                [
+                  scheduledTaskRuntimeKey({ ...liveTask, scope: 'session' }),
+                  liveTask,
+                ],
+              ])
+            }
             hasLiveSessionScheduledSnapshot
             onCancelSessionScheduledTask={onCancelSessionScheduledTask}
           />
@@ -7269,7 +7287,14 @@ describe('ArtifactPanel binary document previews', () => {
             onCloseTab={() => {}}
             onOpenFilePreview={() => {}}
             onClose={() => {}}
-            liveSessionScheduledTasks={new Map([[liveTask.id, liveTask]])}
+            liveSessionScheduledTasks={
+              new Map([
+                [
+                  scheduledTaskRuntimeKey({ ...liveTask, scope: 'session' }),
+                  liveTask,
+                ],
+              ])
+            }
             hasLiveSessionScheduledSnapshot
             onCancelSessionScheduledTask={onCancelSessionScheduledTask}
           />
