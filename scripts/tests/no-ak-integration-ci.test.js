@@ -249,6 +249,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/qwen-serve-streaming.test.ts',
       './cli/qwen-serve-feedback.test.ts',
       './cli/qwen-serve-standalone-concurrency.test.ts',
+      './cli/qwen-serve-turn-resources.test.ts',
       './helpers/hosted-sse-observer.test.ts',
       './interactive/workflow-completion.test.ts',
       './interactive/workflow-intent.test.ts',

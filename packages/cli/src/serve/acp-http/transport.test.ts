@@ -39,6 +39,7 @@ import {
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SystemOverloadedError,
   TotalSessionLimitExceededError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -2054,6 +2055,47 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       limit: 10,
       scope: 'total',
       retryable: true,
+    });
+  });
+
+  it('maps load admission failures to retryable RPC error data', async () => {
+    bridge.spawnOrAttach = async () => {
+      throw new SystemOverloadedError('event_loop_lag', 0.4, 1500);
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: { cwd: TEST_WORKSPACE },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        data: {
+          errorKind: string;
+          httpStatus: number;
+          retryable: boolean;
+          reason: string;
+          loadRatio: number;
+          eventLoopLagP99Ms: number;
+        };
+      };
+    }>;
+    expect(frame.id).toBe(3);
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'system_overloaded',
+      httpStatus: 503,
+      retryable: true,
+      reason: 'event_loop_lag',
+      loadRatio: 0.4,
+      eventLoopLagP99Ms: 1500,
     });
   });
 

@@ -141,6 +141,8 @@ export interface FetchMeta {
   baseRefName: string;
   /** True when the head lives in a different repository than the base. */
   isCrossRepository: boolean;
+  /** Author association with the base repository (GitHub: OWNER, MEMBER, COLLABORATOR, NONE, ...). */
+  authorAssociation?: string;
   /** The description, fetched to detect the author's language. */
   body?: string;
   additions?: number;

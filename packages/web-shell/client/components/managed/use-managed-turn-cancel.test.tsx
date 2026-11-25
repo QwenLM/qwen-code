@@ -7,7 +7,10 @@ import type {
   ManagedAgentSessionSummary,
   ManagedTurnCancelOperation,
 } from './managed-agent-provider';
-import { useManagedTurnCancel } from './use-managed-turn-cancel';
+import {
+  useManagedTurnCancel,
+  type ManagedTurnCancelObserver,
+} from './use-managed-turn-cancel';
 
 describe('useManagedTurnCancel', () => {
   let root: Root;
@@ -16,6 +19,7 @@ describe('useManagedTurnCancel', () => {
   let current: ReturnType<typeof useManagedTurnCancel>;
   let refresh: ReturnType<typeof vi.fn>;
   let interactive: boolean;
+  let observer: ManagedTurnCancelObserver | undefined;
   const key = 'qwen-managed-turn-cancel:["tenant:actor","s1"]';
   const operation: ManagedTurnCancelOperation = {
     operationId: 'op1',
@@ -34,6 +38,7 @@ describe('useManagedTurnCancel', () => {
       summary,
       interactive,
       refresh,
+      observer,
     );
     return null;
   }
@@ -52,6 +57,7 @@ describe('useManagedTurnCancel', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     sessionStorage.clear();
+    observer = undefined;
     interactive = true;
     summary = {
       sessionId: 's1',
@@ -277,5 +283,61 @@ describe('useManagedTurnCancel', () => {
     const count = vi.mocked(provider.queryCancelOperation).mock.calls.length;
     await tick();
     expect(provider.queryCancelOperation).toHaveBeenCalledTimes(count);
+  });
+
+  it('observes the accepted receipt and the terminal cancellation separately', async () => {
+    const onAccepted = vi.fn();
+    const onSettlement = vi.fn();
+    const onError = vi.fn();
+    observer = { onAccepted, onSettlement, onError };
+    vi.mocked(provider.queryCancelOperation).mockResolvedValue(operation);
+    await render();
+    await act(async () => {
+      await current.request();
+    });
+    expect(onAccepted).toHaveBeenCalledWith({
+      sessionId: 's1',
+      turnId: 't1',
+      operationId: 'op1',
+    });
+    expect(onSettlement).not.toHaveBeenCalled();
+    vi.mocked(provider.queryCancelOperation).mockResolvedValue({
+      ...operation,
+      status: 'completed',
+    });
+    await tick();
+    expect(onSettlement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 's1',
+        operationId: 'op1',
+        status: 'completed',
+        type: 'cancel',
+      }),
+    );
+    expect(onAccepted.mock.invocationCallOrder[0]).toBeLessThan(
+      onSettlement.mock.invocationCallOrder[0],
+    );
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('reports the original query error without inventing a terminal outcome', async () => {
+    const onAccepted = vi.fn();
+    const onSettlement = vi.fn();
+    const onError = vi.fn();
+    observer = { onAccepted, onSettlement, onError };
+    const failure = new Error('operation query failed');
+    vi.mocked(provider.queryCancelOperation).mockRejectedValue(failure);
+    await render();
+    await act(async () => {
+      await current.request();
+    });
+    expect(onAccepted).toHaveBeenCalledWith({
+      sessionId: 's1',
+      turnId: 't1',
+      operationId: 'op1',
+    });
+    expect(onSettlement).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(failure);
+    expect(current.status).toBe('unconfirmed');
   });
 });

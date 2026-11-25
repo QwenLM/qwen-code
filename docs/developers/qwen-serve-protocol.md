@@ -667,6 +667,10 @@ nothing.
 | `external_tool_guard`                    | `qwen serve` completed the startup handshake for `--external-tool-guard-mode=required`; every spawned ACP channel must acknowledge the installed callback before Session creation, and every supported top-level managed ACP tool invocation that reaches the final execution boundary must receive one external pre-execution allow. Earlier permission/hook denials make no provider request. Nested AgentCore execution is outside v1 and is rejected while this external provider mode is active. The tag reflects only the external provider: independently of it, every daemon applies the built-in Git relocation guard to the managed tools that carry a shell command line (`run_shell_command` and `monitor`), so the absence of this tag does not mean no pre-execution denials.                                                                                                                                                                                                                                                                    |
 | `allow_origin`                           | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). The daemon was started with at least one `--allow-origin <pattern>` (or `allowOrigins: [...]` via the embedded API). Cross-origin requests from matched origins receive proper CORS response headers; unmatched origins still get the default 403. The configured pattern list is intentionally NOT echoed in `/capabilities` to avoid leaking the trusted-origin set to unauthenticated readers — a browser client already knows its own origin.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `prompt_absolute_deadline`               | `--prompt-deadline-ms` / `QWEN_SERVE_PROMPT_DEADLINE_MS` / `ServeOptions.promptDeadlineMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `turn_skill_file_snapshot`               | A trusted local session runtime supports retaining managed Skill files until its turn settles.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `turn_skill_session_effects_check`       | A caller may require a pre-admission check on the captured managed Skills for session-level hooks and grants.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `turn_extension_store_lease`             | A trusted local runtime can hold a verified managed extension generation while a turn executes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `session_retire_if_idle`                 | A trusted local runtime is available for generation-fenced, durable source session retirement.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `writer_idle_timeout`                    | `--writer-idle-timeout-ms` / `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` / `ServeOptions.writerIdleTimeoutMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `workspace_settings`                     | the daemon was created with settings persistence available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `user_language_sync`                     | the daemon was created with settings persistence available (same condition as `workspace_settings`), so the sessionless `POST /language` route is registered.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -1057,6 +1061,8 @@ runtime routes return `503`.
 `runtime.memory.children.heap` is additive within that block and reports each ACP child's lifetime V8 old-generation high-water marks, aggregated as a **maximum, not a sum**: `peakOldGenerationBytes`, `peakLiveSetBytes`, `peakTotalHeapBytes`, `majorGcCount`, `majorGcMs`, `unclassifiedSpaceNames`, and `reported`. A heap ceiling applies per child and the peaks were reached at different times, so a total would answer no question; each field is an independent maximum across the reporting children, not a portrait of one child, and a per-child ceiling is judged against each axis on its own. `reported` counts how many of `sampled` contributed, and is lower when some children predate the fields. Every byte figure covers the **old generation** — what `--max-old-space-size` actually bounds — and not `old_space` alone, because a child can exhaust its ceiling with `old_space` at a few megabytes while `large_object_space` holds everything. `peakOldGenerationBytes` is committed bytes and rises with the ceiling the child was given, so read it as an upper bound on what the workload needs rather than as its requirement; `peakLiveSetBytes` is what survives a major GC and does not move with the ceiling, which is what makes it the figure able to say a child cannot fit one; read it as an upper bound rather than an exact live set, because GC entries arrive asynchronously and anything allocated between the collection and the read is counted. `peakLiveSetBytes` is `0` until a major GC is observed, which is an absence rather than a measurement. `unclassifiedSpaceNames` is the union of heap spaces no reporting child could classify; V8 renames and adds spaces between versions, an unknown space is dropped from the sums, and dropping under-counts — so a non-empty array means the byte figures are incomplete and must not be read as a full measurement. The whole object is `null`, never a zeroed object, when no sampled child reported one; with no SSE/WS watcher attached nothing is sampled at all, so that is a routine state rather than an edge case. All of it is observational: nothing here sizes a child, refuses a spawn, or moves `limits.memory.enforced` off `false`.
 
 `runtime.memory.pressure` is additive within that block and reports the daemon root's own memory pressure: `mode` (`off` / `observe`), `level` (`normal` / `soft` / `hard` / `critical`), `source` (`rss` / `heap` / `unknown`), `ratio`, and the six raw figures the ratios come from — `rssBytes`, `rssRatio`, `availableBytes`, `heapUsedBytes`, `heapRatio`, `heapLimitBytes`. `ratio` is the larger of `rssRatio` and `heapRatio`, and `source` names which one it was; ties are reported as `rss`. `availableBytes` is `limits.memory.availableMemoryMb` in bytes — deliberately the detected cgroup/host figure rather than `effectiveBudgetMb`, because what ends the process is the real limit, not an operator's policy number. `source: "unknown"` means neither denominator was measurable and must not be read as healthy; `level` is `normal` in that case only because there is nothing to classify. The figures cover the daemon **root process only**: they are this process's own `memoryUsage()`, so children growing does not move them. `runtime.memory.children` reports those separately, and neither figure is process-tree memory. Both modes report the whole block; only `observe` additionally raises the path-free `daemon_memory_pressure` warning into the status rollup, so `off` leaves the top-level `status` unchanged. Nothing remediates in either mode. The field is optional in the SDK mirror because daemons that shipped `runtime.memory` before it exists send the block without it.
+
+`runtime.loadAdmission` is additive and reports the load-based fresh-session admission verdict: `enabled`, `overloaded`, `reason` (`cpu_load` / `event_loop_lag` / `observation_gap` / `null`), `loadRatio` (host load average divided by host core count), `eventLoopLagP99Ms` (window-scoped daemon event-loop p99), and `sampledAtMs` (0 until the first tick). The measured signals come from the last 2 s tick, while the sampling-blackout latch is evaluated both on overdue ticks and whenever the snapshot is read: each signal enters after three consecutive samples at ratio >= 2 or p99 >= 1000 ms, and releases only after every active signal stays below its own exit threshold for three consecutive samples (ratio < 1.0 and p99 < 250 ms), so refusals continue while any active signal sits between its exit and enter thresholds. A sampling blackout (monotonic age of the last tick over three intervals) latches `reason: "observation_gap"` (which alone sets `overloaded: true` and outranks both signal reasons, even if both measured figures sit below their enter thresholds) and refuses until three timely healthy ticks land after the signals clear; cold start stays fail-open. `enabled: false` marks both the `--no-load-admission` opt-out and an injected bridge that never receives admission; `overloaded` is then always false. While `overloaded`, fresh child spawns on `POST /session`, `POST /standalone/sessions`, load/resume and branch return REST 503 with `code: "system_overloaded"`, the same measured fields and `Retry-After: 15` (ACP JSON-RPC: `-32603` with `data.errorKind: "system_overloaded"`, `data.httpStatus: 503`, `retryable: true`); live sessions, prompts, cancel, detach and status are never gated. Fresh `per_run` child dispatch through `/scheduled-tasks/:id/run` and its workspace-qualified equivalent uses that same `503` + `Retry-After: 15` + `code: "system_overloaded"` shape when the gate refuses allocation. Creating a scheduled task that needs a new bound child through `POST /scheduled-tasks`, or its workspace-qualified equivalent, uses the same 503 contract before writing the task; other initial spawn failures retain `scheduled_tasks_session_failed`. For `POST /session` with `branch` or `worktree`, the daemon checks overload before git preparation because those requests force a fresh `thread` child; the final bridge reservation and existing rollback still cover a later load transition. It retains the failed-attempt bookkeeping, including the `sessionDispatchFailed` marker and restoration of a consumed one-shot for inspection, before responding; ordinary dispatch failures keep `scheduled_task_session_dispatch_failed` instead. A live bound-session attach is not a fresh child spawn, so it remains available under load; a cold restore is still subject to admission. The status rollup gains a path-free `system_overloaded` warning while paused. The SDK mirror carries the block as an additive optional member.
 
 `limits.maxRegisteredWorkspaces` is additive and reports the resolved user registration cap (default 256, configurable from 1 through 256). `limits.maxChannelControlWorkspaces` reports the independent control/recovery owner cap of 25 on the standard daemon, even while channels are disabled. Custom controllers advertise that field only when they enforce it. These fields are present on both bootstrap and ready responses; older daemons may omit them. The channel controller rejects transitional owner unions over its cap with `409 channel_control_workspace_limit_reached` before constructing candidate workers; an initial boot-time union over the cap fails startup before the listener is published, so it has no HTTP surface. Registration capacity does not determine the SDK channel timeout.
 
@@ -3400,6 +3406,7 @@ The replay-window byte caps apply after the child has reconstructed the persiste
 - `400` — `workspace_mismatch` (same shape as `POST /session`), including the reversible lifecycle states: a workspace whose registry entry exists but is draining, transitioning, or blocked. Retry once the workspace settles; do not classify it as gone.
 - `403` — `untrusted_workspace` when `cwd` targets an untrusted non-primary workspace.
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
+- `503` — `system_overloaded` while load admission pauses fresh child spawns (cold `load`/`resume`; warm re-attaches are never gated). Body is `{ error, code, reason, loadRatio, eventLoopLagP99Ms }` with `Retry-After: 15`; already-live sessions stay usable, so retry after the header.
 - `504` — `session_restore_timeout`; retryable, with a `Retry-After` derived from the restore budget (clamped to 5-120s) because the same session id stays fenced until late cleanup settles.
 - `504` — `init_timeout`; NOT retryable, no `Retry-After`, no `sideEffectPossible`, no fence installed. Emitted when channel initialization times out before the restore request is dispatched (the `ensureChannel` stage); the restore was never attempted, so no session id is fenced and no cleanup is pending.
 - `503` — `acp_channel_unavailable` when the workspace channel is closed to new session work. `reason` says why: `restore_cleanup_failed` when an abandoned restore could not be cleaned up conclusively; `restore_settlement_overdue` when an abandoned restore has still not settled one full restore budget after its deadline; `new_session_cleanup_failed` when a session created after the public initialization timeout could not be closed conclusively; or `new_session_settlement_overdue` when the timed-out initialization has still not settled one further initialization budget after its deadline. Existing sessions remain available. On a workspace runtime with more than one execution engine, any of these quarantines that engine's channel instead: its sessions take no new work either (prompts, continuations, side requests, shell commands, mid-turn messages, and Goal or workflow starts return the same `503`), settled sessions are closed, and fresh sessions of that engine stay refused until the channel's process tree is gone, with `channel_exit_unverified` while that cannot be confirmed. There, `workspace_change_unacknowledged` means the channel did not acknowledge a session-affecting workspace change (permission rules, settings reload, the Session Workflow gate, model providers or Skills); a late acknowledgement of every missing change ends that quarantine early. A settlement-overdue state clears after a late failure settles or a late success completes its exact-ID cleanup; inconclusive cleanup transitions to the matching cleanup-failed state, which requires the workspace channel to drain and recycle. The body carries `retryAfterSeconds` and the header a matching budget-derived `Retry-After` so clients use an operation-budget-scale backoff instead of polling at the ordinary 5-second cadence.
@@ -4218,6 +4225,145 @@ configured server deadline. Expiry emits a correlated `turn_error` with
 `code: "prompt_deadline_exceeded"`. The deadline releases the caller without
 killing the agent; if the agent later settles, turn-status polls for that
 `promptId` return the settled transcript outcome instead of the deadline error.
+
+A daemon that advertises `turn_skill_file_snapshot` supports opt-in file
+snapshots for sessions on compatible trusted local runtimes. Send
+`"pinSkills": true` and optionally `"expectedSkillDigest"` with a lowercase
+64-character SHA-256 value from a previous admission. The `202` includes
+`skillDigest` in addition to the usual prompt ID and event cursor.
+
+```json
+{
+  "prompt": [{ "type": "text", "text": "Use the reporting skill." }],
+  "pinSkills": true,
+  "idempotencyKey": "report-2026-11-23"
+}
+```
+
+Retry the same prompt under the same key to recover its admission receipt
+within the daemon's bounded in-memory idempotency window. A repeat returns the
+same `promptId`, `skillDigest`, and pre-admission event cursor with `deduplicated: true`, so the caller can replay an already published terminal event. If the live event epoch changed, the old receipt cannot attest to a turn in the new session generation. An incompatible
+retry receives `409 turn_skill_receipt_conflict`, a new request whose expected
+digest differs receives `409 turn_skill_digest_mismatch`, and an unsupported
+runtime responds with `409 turn_skill_snapshot_unavailable`. These receipts
+do not promise recovery across a daemon restart.
+
+Skill copies use a private temporary directory. The owning runtime removes
+the directory after the turn and tracked work release it. An abrupt process
+exit can leave files behind until the host cleans its temporary directory.
+
+The snapshot covers each selected `SKILL.md` and regular files under its skill
+directory, including skills provided by extensions. Bundled system Skills
+resolve through their existing installed definitions and do not affect this
+digest. A configured Skill with the same name takes precedence as usual.
+Path references to files outside those directories, session-scoped hooks and permission grants,
+process-wide tool registrations, MCP server processes, and external executable
+dependencies have their existing behavior. An unused skill that declares session-level hooks or allow rules does not block admission. If invoked, a pinned skill requiring such side effects fails at the tool boundary with `turn_skill_session_effects_unavailable` before applying either its hooks or grants. This keeps its security behavior intact.
+Hosts that need every managed skill in the turn to be usable can negotiate
+`turn_skill_session_effects_check` and send `"requireSessionSkillEffects": true`
+alongside `"pinSkills": true`. The runtime checks the same immutable files it
+reserves for this prompt. A skill declaring a session hook or allow rule
+produces HTTP 409 with `code: "turn_skill_session_effects_unavailable"`,
+`sessionId` and `definitivelyNotStarted: true`, even if the prompt might never
+invoke that skill. A negotiated daemon backed by an older native child that
+cannot verify the files also declines. Older daemons may ignore unknown fields;
+callers must check the advertised capability before posting.
+A successful 202 includes `sessionSkillEffectsChecked: true`; retries with the
+same key must request the same guarantee. Hosts can use an explicitly safe
+alternative only after a confirmed pre-admission decline. A lost receipt or a
+tool failure in an accepted turn must never trigger a replay on another runtime.
+
+Requests without `pinSkills` keep the ordinary prompt contract.
+
+#### Managed extension generations
+
+With `turn_extension_store_lease`, read the workspace extension catalog and
+verify its desired and applied generations and active artifacts. To reserve
+that generation on the native session, submit the nonblocking prompt with
+`{"pinSkills":true,"pinExtensions":true,"expectedExtensionGeneration":7,"idempotencyKey":"task-7","prompt":[{"type":"text","text":"Review"}]}`.
+The 202 includes `extensionGeneration: 7`; require the receipt. A matching
+retry gets the same prompt, even after an upgrade. If the native runtime
+cannot reserve the selected generation, the server returns HTTP 409 with
+`code: "turn_extension_generation_unavailable"`, `sessionId` and
+`definitivelyNotStarted: true`.
+
+An unverified transaction journal, including a quarantined corrupt record,
+prevents admission of a new protected generation. Inspect the Store recovery
+logs and verify the installed artifacts and transaction state before clearing
+the quarantined record. A retry alone does not establish that the Store is
+consistent.
+
+Every participating local Store writer checks live readers under the artifact
+commit lock. An install, removal or activation change against a held Store
+fails with `extension_store_in_use` by default. On a global managed mutation
+such as `POST /extensions/:extensionId/update?waitForTurnDrainMs=30000`, the
+original operation waits for the turn and its dependent work to drain and
+rechecks before its first transaction. Poll its original operation ID.
+The optional wait is bounded to 300000 ms and uses the operation's existing
+deadline and ownership checks. After the bound expires, a fresh request can
+retry. The wait is in-memory and does not survive a daemon restart. A separate Store and Serve can
+run the newer revision concurrently. Shared homes with older writers, linked
+development sources, direct filesystem edits and arbitrary external services
+cannot provide this contract. This reservation does not freeze general settings,
+model selection, caller credentials or service availability. All Store writers
+must run the lease-aware binary and use the same Store directory. The pinned
+session refuses an extension-owned full tool-graph refresh; administrative MCP,
+hook, or LSP management outside that path and external provider failures have
+their own lifecycle. An active package without a managed artifact generation
+is rejected before admission with `409 turn_extension_component_unsupported`,
+`sessionId` and `definitivelyNotStarted: true`. Retrying the same unmanaged artifact
+on the same runtime cannot change that result. A package's independently running channel
+plugin or an external daemon started by a hook owns its own lifecycle. Extension-owned
+MCP and LSP process configurations include the installed artifact generation to replace
+the old process even when its command and arguments stay the same. A Qwen-managed
+background command hook retains its turn's files until its execution settles.
+Readers are owned by the native execution
+process. Cancellation or a disconnected client alone does not release them.
+A local UNIX-domain socket held by the process proves it is alive. After
+process exit, even SIGKILL or a reboot, the writer reclaims the stale socket.
+An inaccessible owner conservatively blocks writes. The lease requires a
+supported local filesystem on Linux or macOS; network filesystems and homes
+shared between hosts cannot provide this contract. External processes that outlive a crashed native execution must
+arrange their own resource lifetimes.
+
+### `PUT /session/:id/retirements/:operationId`
+
+When `session_retire_if_idle` is advertised, obtain the owning session's
+`eventEpoch` from `GET /session/:id/status`. Send an operation UUID and
+`{"expectedEventEpoch":"<eventEpoch>"}` to retire that exact native generation.
+This is a terminal source-side operation for integrations that archive and
+restore to a different runtime.
+
+The daemon records a source workspace fence before sending the strict close
+request. It admits the operation only when queued prompts, runtime holds,
+permission requests, and native attachment activity are absent. Committed
+attachments in the native attachment store are also a refusal because the
+workspace export does not transport that store. The owning ACP child must negotiate operation-bound retirement receipts. An older child receives no close request. A live session can explicitly decline before close if its recorder is absent or its initial flush fails. Files managed directly in the
+workspace remain the integrator's responsibility. An external writer must be
+fenced by that integrator before treating an archived workspace as consistent.
+
+The response identifies `sessionId`, `operationId`, `eventEpoch`, and
+`state`. `200 retired` confirms the native recorder flushed and closed.
+If a `202 retiring` receipt includes `awaitingFenceSync: true`, the live owner
+confirmed it has not sent the native close and may retry syncing the same
+fence. Repeat the identical PUT to resume. Polling alone only reads the
+receipt. A restarted owner cannot make that assertion.
+`202 retiring` and `202 result_unknown` prohibit migration or replay. Poll
+`GET /session/:id/retirements/:operationId` for that exact receipt. An unknown
+outcome retains the source fence, including across daemon restart. The owning
+daemon can record a delayed strict close confirmation for up to 120 seconds.
+Only an acknowledgement for the same session and operation, from the owner that flushed and closed the live recorder, confirms retirement. Its late explicit refusal reopens the live source. Transport loss, restart
+before that acknowledgement, and expiry of that observation window leave the
+source fenced for reconciliation. A `404`
+means no matching receipt is available. It does not certify an attempted
+operation's failure.
+
+`409 session_retire_busy` with `definitivelyNotStarted: true` confirms that
+the source stayed open and the same operation may retry against the same
+epoch. An epoch mismatch or an operation identity conflict is also returned
+as a `409`. The source daemon rejects new Prompt, explicit same-ID Create,
+Load, Resume, and native attachment mutations when the retirement fence exists.
+Use a distinct runtime workspace to restore a retired native session.
 
 ### `POST /session/:id/cancel`
 

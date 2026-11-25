@@ -21,7 +21,10 @@ import {
   removeCronTasks,
   updateCronTasks,
 } from '@qwen-code/qwen-code-core';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionNotFoundError,
+  SystemOverloadedError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -125,7 +128,7 @@ interface StubBridge {
     displayName?: string;
     titleSource?: 'manual' | 'auto';
   }>;
-  failNext: boolean;
+  failNext: boolean | Error;
   modelApplied?: boolean;
   persistenceError?: Error;
 }
@@ -148,8 +151,9 @@ function makeStubBridge(): StubBridge {
     liveSessions: new Map(),
     async spawnOrAttach(req) {
       if (bridge.failNext) {
+        const error = bridge.failNext;
         bridge.failNext = false;
-        throw new Error('spawn failed');
+        throw error === true ? new Error('spawn failed') : error;
       }
       const sessionId = `sess-${++seq}`;
       bridge.spawned.push(sessionId);
@@ -1299,6 +1303,67 @@ describe('scheduled-tasks routes', () => {
     const [stored] = await readCronTasks(h.workspace);
     expect(stored?.runs).toHaveLength(2);
     expect(stored?.runs?.map((run) => run.sessionId)).toEqual(childIds);
+  });
+
+  it('preserves overload coding when task creation needs a fresh child', async () => {
+    h.bridge.failNext = new SystemOverloadedError('cpu_load', 2.5, 20);
+
+    const response = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'requires a fresh task child',
+      recurring: true,
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers['retry-after']).toBe('15');
+    expect(response.body).toMatchObject({
+      code: 'system_overloaded',
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 20,
+    });
+    expect(h.bridge.spawned).toEqual([]);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('preserves overload coding for refused per-run children', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const boundBefore = [...h.bridge.spawned];
+    expect(boundBefore).toHaveLength(1);
+    h.bridge.failNext = new SystemOverloadedError('cpu_load', 2.5, 20);
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(503);
+    expect(run.headers['retry-after']).toBe('15');
+    expect(run.body).toMatchObject({
+      error:
+        'System overloaded (cpu_load: load ratio 2.50, event-loop p99 20 ms); new sessions are paused until load subsides',
+      code: 'system_overloaded',
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 20,
+    });
+    expect([...h.bridge.spawned]).toEqual(boundBefore);
+    const stored = await readCronTasks(h.workspace);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      id: created.body.id,
+      recurring: false,
+      sessionMode: 'per_run',
+      enabled: false,
+    });
+    expect(stored[0]?.runs?.[0]).toMatchObject({
+      kind: 'manual',
+      sessionDispatchFailed: true,
+    });
   });
 
   it('keeps a failed per-run one-shot paused until explicitly re-enabled', async () => {
