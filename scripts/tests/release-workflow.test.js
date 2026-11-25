@@ -575,6 +575,9 @@ describe('release workflow', () => {
       expect(scriptCheckout.with, jobId).toEqual({
         ref: '${{ github.workflow_sha }}',
         'fetch-depth': 1,
+        // A blob-less sparse checkout fetches missing blobs while checking
+        // out, after the action's retryable fetch has already succeeded.
+        filter: 'blob:limit=1g',
         'persist-credentials': false,
         // The tarball gate rides this checkout too: run from the selected
         // ref's own `scripts/`, it is missing on any ref that predates it.
@@ -597,6 +600,23 @@ describe('release workflow', () => {
         }
       }
     }
+  });
+
+  it('keeps every sparse checkout blob inside the retryable fetch', () => {
+    // The YAML pin above cannot tell a filter that omits objects from one
+    // that keeps them: `blob:none` and `tree:0` both leave the checkout
+    // fetching from the promisor remote after the action's retries are spent.
+    // Only a size-bounded blob filter above GitHub's file-size limit admits
+    // every blob the sparse set can need.
+    let swept = 0;
+    for (const job of Object.values(releaseYaml.jobs)) {
+      for (const step of job.steps ?? []) {
+        if (step.name !== 'Checkout release workflow scripts') continue;
+        swept += 1;
+        expect(step.with.filter, step.name).toMatch(/^blob:limit=\d+[kmg]$/);
+      }
+    }
+    expect(swept).toBeGreaterThan(0);
   });
 
   it('re-pins trusted runners before every step that runs one', () => {
