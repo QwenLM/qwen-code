@@ -9343,11 +9343,17 @@ export function registerSessionRoutes(
         }
         const body = safeBody(req);
         const kind = body['kind'];
-        const source = body['source'];
+        const sourceValue = body['source'];
+        const source =
+          sourceValue === 'cron' || sourceValue === 'wakeup'
+            ? sourceValue
+            : undefined;
         if (
-          source !== undefined &&
-          ((kind === 'cron' && source !== 'cron' && source !== 'wakeup') ||
-            (kind !== 'cron' && source !== undefined))
+          sourceValue !== undefined &&
+          ((kind === 'cron' &&
+            sourceValue !== 'cron' &&
+            sourceValue !== 'wakeup') ||
+            (kind !== 'cron' && sourceValue !== undefined))
         ) {
           res.status(400).json({
             error: '`source` must be "cron" or "wakeup" for a cron task',
