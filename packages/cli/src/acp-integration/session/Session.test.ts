@@ -37629,9 +37629,28 @@ describe('Session', () => {
           );
         });
 
-        it.each(['a file read', 'a media bridge'] as const)(
-          'bounds resolving the input a finished turn keeps unsent when %s hangs',
+        it.each([
+          'a stuck file read',
+          'a stuck media bridge',
+          'a slow media bridge',
+        ] as const)(
+          'keeps unsent input after %s and a prompt check',
           async (hang) => {
+            const request = vi.fn(
+              async ({ input }: { input: { prompt: string } }) => {
+                if (
+                  hang === 'a slow media bridge' &&
+                  input.prompt === 'compare with this'
+                ) {
+                  await new Promise((resolve) => setTimeout(resolve, 100));
+                }
+                return { output: {} };
+              },
+            );
+            mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
+            mockConfig.hasHooksForEvent = vi.fn(
+              (event) => event === 'UserPromptSubmit',
+            );
             const tempDir = await fs.realpath(
               await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-keep-')),
             );
@@ -37656,24 +37675,27 @@ describe('Session', () => {
             // Like the real bridge, it answers `skipped` once cancelled.
             runVisionBridgeSpy.mockImplementation(
               ({ signal }: { signal: AbortSignal }) =>
-                new Promise((resolve) =>
-                  signal.addEventListener(
-                    'abort',
-                    () =>
-                      resolve({
-                        applied: false,
-                        status: 'skipped',
-                        convertedCount: 0,
-                        omittedCount: 0,
-                      }),
-                    { once: true },
-                  ),
-                ),
+                new Promise((resolve) => {
+                  const skip = () =>
+                    resolve({
+                      applied: false,
+                      status: 'skipped',
+                      convertedCount: 0,
+                      omittedCount: 0,
+                    });
+                  if (hang === 'a slow media bridge') {
+                    setTimeout(skip, 1_950);
+                  } else {
+                    signal.addEventListener('abort', skip, { once: true });
+                  }
+                }),
             );
             const started =
-              hang === 'a file read' ? readManyFilesSpy : runVisionBridgeSpy;
+              hang === 'a stuck file read'
+                ? readManyFilesSpy
+                : runVisionBridgeSpy;
             const content =
-              hang === 'a file read'
+              hang === 'a stuck file read'
                 ? [{ type: 'text', text: `compare with @${imagePath}` }]
                 : [
                     { type: 'text', text: 'compare with this' },
@@ -37687,7 +37709,7 @@ describe('Session', () => {
               role: 'user',
               parts: [
                 { text: `${responsePrefix}compare with this` },
-                ...(hang === 'a media bridge'
+                ...(hang === 'a stuck media bridge'
                   ? [{ text: '[Attachment could not be processed]' }]
                   : []),
               ],
@@ -37758,7 +37780,7 @@ describe('Session', () => {
               expect(started).toHaveBeenCalled();
               expect(mockChat.addHistory).not.toHaveBeenCalledWith(kept);
 
-              // Kept once the deadline passes, not when slower bounds do.
+              // A hook that starts near the attachment deadline still gets time.
               await vi.advanceTimersByTimeAsync(2_100);
               const isKept = () =>
                 JSON.stringify(
@@ -37766,7 +37788,15 @@ describe('Session', () => {
                 ).includes('compare with this');
               for (let i = 0; i < 20 && !isKept(); i++) await nextTick();
               expect(mockChat.addHistory).toHaveBeenCalledWith(kept);
-              if (hang === 'a media bridge') {
+              expect(request).toHaveBeenCalledTimes(2);
+              expect(request).toHaveBeenLastCalledWith(
+                expect.objectContaining({
+                  eventName: 'UserPromptSubmit',
+                  input: { prompt: content[0]?.text },
+                }),
+                core.MessageBusType.HOOK_EXECUTION_RESPONSE,
+              );
+              if (hang === 'a stuck media bridge') {
                 // The deadline cancels the bridge, so it cannot run on and
                 // report after the turn.
                 expect(

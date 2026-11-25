@@ -13057,6 +13057,7 @@ export class Session implements SessionContext {
       proposalTurn.settlementBlocked = true;
     }
     const parts: Part[] = [];
+    let preserveHookSignal: AbortSignal | undefined;
     for (const [index, message] of messages.entries()) {
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
@@ -13119,10 +13120,13 @@ export class Session implements SessionContext {
         options.prefix,
       );
       if (message.kind !== 'structured' || !message.queueOnly) {
-        const preserving = abortSignal.aborted;
+        const preserving =
+          abortSignal.aborted || options.deadline !== undefined;
+        // Attachment resolution and its fallback both need a prompt check.
         const hookSignal = preserving
-          ? (options.deadline ??
-            AbortSignal.timeout(MID_TURN_KEEP_RESOLVE_TIMEOUT_MS))
+          ? (preserveHookSignal ??= AbortSignal.timeout(
+              MID_TURN_KEEP_RESOLVE_TIMEOUT_MS,
+            ))
           : resolveSignal;
         let decision;
         try {
