@@ -1408,6 +1408,45 @@ describe('scheduled-tasks routes', () => {
     ]);
   });
 
+  it.each(['ordinary-legacy', '[json-legacy'])(
+    'restores a failed one-shot after an unqualified legacy run: %s',
+    async (taskId) => {
+      addLiveSession(h.bridge, OTHER_SESSION_ID, h.workspace);
+      const owned = await create({
+        cron: '0 0 1 1 *',
+        prompt: 'legacy guarded recovery',
+        recurring: false,
+        sessionMode: 'per_run',
+        sessionId: OTHER_SESSION_ID,
+        modelServiceId: 'missing-model',
+      });
+      expect(owned.status).toBe(201);
+      await updateCronTasks(h.workspace, (tasks) =>
+        tasks.map((task) => ({ ...task, id: taskId })),
+      );
+      const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+      vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(
+        async (req) => ({
+          ...(await originalSpawn(req)),
+          modelApplied: false,
+        }),
+      );
+
+      const run = await request(h.app).post(
+        `/scheduled-tasks/${encodeURIComponent(taskId)}/run`,
+      );
+
+      expect(run.status).toBe(500);
+      expect(await readCronTasks(h.workspace)).toEqual([
+        expect.objectContaining({
+          id: taskId,
+          sessionId: OTHER_SESSION_ID,
+          enabled: false,
+        }),
+      ]);
+    },
+  );
+
   it('does not confuse a legacy id with another owner’s deletion guard', async () => {
     addLiveSession(
       h.bridge,

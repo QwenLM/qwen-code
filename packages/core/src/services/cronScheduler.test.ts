@@ -2567,6 +2567,16 @@ describe('CronScheduler', () => {
       }
     });
 
+    it('still removes a disk-only durable task when it shares an id with a wakeup', async () => {
+      const wakeup = scheduler.scheduleWakeup(300, 'wakeup sharing task id');
+      await writeCronTasks(tmpDir, [diskTask(wakeup.id)]);
+
+      await scheduler.removeDurable(wakeup.id);
+
+      expect(scheduler.list()).toEqual([]);
+      expect(await readCronTasks(tmpDir)).toEqual([]);
+    });
+
     it('reloads durable tasks when the file changes on disk', async () => {
       await scheduler.enableDurable('session-1');
       expect(scheduler.list()).toHaveLength(0);

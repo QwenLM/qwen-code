@@ -561,7 +561,7 @@ async function restoreConsumedOneShot(
   deletionGuardId?: string,
 ): Promise<void> {
   const id = failedTask.id;
-  const guardId = deletionGuardId ?? id;
+  const guardId = deletionGuardId ?? cronTaskLegacyDeletionId(id);
   const guardIds = [
     ...new Set([
       guardId,
@@ -959,7 +959,7 @@ function scheduledTaskDeletionGuardId(
 ): string {
   return expectedOwner.provided
     ? JSON.stringify([expectedOwner.sessionId, id])
-    : id;
+    : cronTaskLegacyDeletionId(id);
 }
 
 function findScheduledTaskIndex(

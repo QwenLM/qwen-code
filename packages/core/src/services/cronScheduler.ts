@@ -1533,8 +1533,10 @@ export class CronScheduler {
     id: string,
     expectedTaskSessionId: string | null = null,
   ): Promise<void> {
+    const [, job] = this.#runtimeEntry(id, expectedTaskSessionId);
     const deleted = await this.delete(id, expectedTaskSessionId);
-    if (this.projectRoot && !deleted) {
+    // A wakeup or session-only deletion is not the durable file commit.
+    if (this.projectRoot && !(deleted && job?.durable === true)) {
       const key = durableTaskKey(id, expectedTaskSessionId);
       await updateCronTasks(
         this.projectRoot,
