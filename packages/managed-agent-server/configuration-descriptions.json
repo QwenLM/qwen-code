@@ -381,6 +381,10 @@
       "en": "How long one Session event stream (SSE) connection may stay open before the server ends it; the client must reconnect to keep receiving events. A plain number is seconds.",
       "zh": "单个 Session 事件流（SSE）连接可保持打开的最长时间，到时服务端结束连接，客户端需重新连接才能继续接收事件。不带单位的数字按秒计。"
     },
+    "qwen.managed-agent.definition-input.mode": {
+      "en": "How immutable AgentDefinitions are obtained. Defaults to `PRE_REGISTERED`, preserving the existing public definition API, JDBC store and native Session admission. `SPI` requires a registered ManagedAgentDefinitionSource provider and MA-authorized execution scope; host sources are called only during authorized preparation, never on demand from Node's agent-loop. No fallback to a different store or latest object is performed.",
+      "zh": "获取不可变 AgentDefinition 的方式。默认 `PRE_REGISTERED`，保持现有公开 definition API、JDBC store 与原生 Session 准入行为。选择 `SPI` 时，必须注册 ManagedAgentDefinitionSource provider，并通过 MA 对执行 Workspace 的授权校验；授权准备阶段才调用宿主 Source，绝不由 Node agent-loop 动态回调。不会回退到其他存储或 latest 对象。"
+    },
     "qwen.managed-agent.extensions.allowed-actors": {
       "en": "The actor IDs allowed to publish extension packages, save their settings, and select or apply them for Sessions, as a comma-separated list; `*` allows every actor. The actor also needs Workspace OPERATOR access. Empty allows nobody.",
       "zh": "允许发布扩展包、保存其设置以及为 Session 选择或应用扩展包的 actor ID，以逗号分隔；`*` 表示允许所有 actor。该 actor 还需具备 Workspace OPERATOR 权限。为空时不允许任何人。"
