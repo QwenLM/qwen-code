@@ -53,9 +53,14 @@ vi.mock('./acp-output.js', () => ({
   }),
 }));
 
-vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
-  ndJsonStream: vi.fn(),
-}));
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/acp-bridge/ndJsonStream')>();
+  return {
+    ...actual,
+    ndJsonStream: vi.fn(),
+  };
+});
 
 it('carries real Config Plan policy through ACP control, context and mode notifications', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'acp-plan-config-'));
