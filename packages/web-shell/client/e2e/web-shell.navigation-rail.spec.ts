@@ -279,99 +279,141 @@ test('narrow embedded container uses a contained drawer on a wide viewport @smok
   }
 });
 
-test('Home-only hosts retain secondary collapse and hosts with another item show the rail @smoke', async ({
-  page,
-  baseURL,
-}, info) => {
-  await installMockDaemon(page, createWebShellDaemonScenario(), { baseURL });
-  await page.goto(
-    '/e2e/navigation-rail-harness.html?single&custom&locked&light',
-  );
-  const sidebar = page.getByRole('complementary', {
-    name: 'Workspace sidebar',
+test.describe('embedded navigation rail @smoke', () => {
+  test.beforeEach(async ({ page, baseURL }) => {
+    await installMockDaemon(page, createWebShellDaemonScenario(), { baseURL });
   });
-  await expect(sidebar).toBeVisible();
-  await expect(page.locator(railSelector)).toHaveCount(0);
-  await expect(page.getByText('Host brand', { exact: true })).toBeVisible();
-  await expect(
-    sidebar.getByRole('button', { name: 'Plugins', exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    sidebar.getByRole('button', { name: 'Host navigation' }),
-  ).toBeVisible();
-  await expect(
-    sidebar.getByRole('button', { name: 'Host footer' }),
-  ).toBeVisible();
-  expect((await sidebar.boundingBox())!.width).toBe(300);
-  await page.screenshot({
-    path: info.outputPath('embedded-single-custom-light.png'),
+
+  test('Home-only hosts retain secondary collapse with custom branding', async ({
+    page,
+  }, info) => {
+    await page.goto(
+      '/e2e/navigation-rail-harness.html?single&custom&locked&light',
+    );
+    const sidebar = page.getByRole('complementary', {
+      name: 'Workspace sidebar',
+    });
+    await expect(sidebar).toBeVisible();
+    await expect(page.locator(railSelector)).toHaveCount(0);
+    await expect(page.getByText('Host brand', { exact: true })).toBeVisible();
+    await expect(
+      sidebar.getByRole('button', { name: 'Plugins', exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      sidebar.getByRole('button', { name: 'Host navigation' }),
+    ).toBeVisible();
+    await expect(
+      sidebar.getByRole('button', { name: 'Host footer' }),
+    ).toBeVisible();
+    expect((await sidebar.boundingBox())!.width).toBe(300);
+    await page.screenshot({
+      path: info.outputPath('embedded-single-custom-light.png'),
+    });
+    await sidebar
+      .getByRole('button', { name: 'Collapse', exact: true })
+      .click();
+    await expect
+      .poll(async () => (await sidebar.boundingBox())!.width)
+      .toBe(56);
+    await sidebar.locator('[data-web-shell-collapsed-session-trigger]').hover();
+    await expect(
+      page.locator('[data-web-shell-collapsed-session-switcher]'),
+    ).toBeVisible();
+    await sidebar.getByRole('button', { name: 'Expand', exact: true }).click();
   });
-  await sidebar.getByRole('button', { name: 'Collapse', exact: true }).click();
-  await expect.poll(async () => (await sidebar.boundingBox())!.width).toBe(56);
-  await sidebar.locator('[data-web-shell-collapsed-session-trigger]').hover();
-  await expect(
-    page.locator('[data-web-shell-collapsed-session-switcher]'),
-  ).toBeVisible();
-  await sidebar.getByRole('button', { name: 'Expand', exact: true }).click();
-  await page.goto('/e2e/navigation-rail-harness.html?default');
-  await expect(page.locator(railSelector)).toHaveCount(0);
-  await expect(
-    page.getByRole('button', { name: 'New session', exact: true }),
-  ).toBeVisible();
-  await expect.poll(async () => (await sidebar.boundingBox())!.width).toBe(300);
-  await page.goto('/e2e/navigation-rail-harness.html?plugin-only');
-  const rail = page.locator(railSelector);
-  await expect(
-    rail.getByRole('button', { name: 'Home', exact: true }),
-  ).toBeVisible();
-  await expect(
-    rail.getByRole('button', { name: 'Plugins', exact: true }),
-  ).toBeVisible();
-  await expect(
-    rail.getByRole('button', { name: 'Channels', exact: true }),
-  ).toHaveCount(0);
-  await expect(page.locator(homeColumn)).toHaveCSS('width', '300px');
-  await expect(
-    page
-      .locator('[data-web-shell-rail-footer]')
-      .getByRole('button', { name: 'Collapse', exact: true }),
-  ).toHaveCount(1);
-  await expect(
-    page.locator(homeColumn).locator('[data-web-shell-sidebar-collapse]'),
-  ).toHaveCount(0);
-  await rail.getByRole('button', { name: 'Collapse', exact: true }).click();
-  await expect(page.locator(homeColumn)).toBeHidden();
-  await expect(sidebar).toHaveCSS('width', '56px');
-  await expect(rail).toBeVisible();
-  await expect(
-    page.locator('[data-web-shell-collapsed-session-trigger]'),
-  ).toHaveCount(0);
-  await rail.getByRole('button', { name: 'Expand', exact: true }).click();
-  await expect(page.locator(homeColumn)).toHaveCSS('width', '300px');
-  await page.goto('/e2e/navigation-rail-harness.html?disabled');
-  await expect(
-    page.locator('[data-web-shell-composer-editor] .cm-content'),
-  ).toBeVisible();
-  await expect(sidebar).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Toggle menu' })).toHaveCount(
-    0,
-  );
-  await page.setViewportSize({ width: 1400, height: 900 });
-  await page.goto('/e2e/navigation-rail-harness.html?split-only');
-  await expect(
-    sidebar.getByRole('button', { name: 'New session', exact: true }),
-  ).toBeVisible();
-  await expect(page.locator(railSelector)).toHaveCount(0);
-  await page.setViewportSize({ width: 1000, height: 900 });
-  await expect(page.locator(railSelector)).toHaveCount(0);
-  await page.setViewportSize({ width: 1400, height: 900 });
-  await page.getByTestId('host-shell').evaluate((element) => {
-    element.style.width = '1100px';
+
+  test('hosts with default navigation keep the session sidebar', async ({
+    page,
+  }) => {
+    await page.goto('/e2e/navigation-rail-harness.html?default');
+    const sidebar = page.getByRole('complementary', {
+      name: 'Workspace sidebar',
+    });
+    await expect(page.locator(railSelector)).toHaveCount(0);
+    await expect(
+      page.getByRole('button', { name: 'New session', exact: true }),
+    ).toBeVisible();
+    await expect
+      .poll(async () => (await sidebar.boundingBox())!.width)
+      .toBe(300);
   });
-  await expect(page.locator(railSelector)).toHaveCount(0);
-  await expect(
-    sidebar.getByRole('button', { name: 'Split View', exact: true }),
-  ).toBeVisible();
+
+  test('hosts with a Plugins item retain the rail while the home column collapses', async ({
+    page,
+  }) => {
+    await page.goto('/e2e/navigation-rail-harness.html?plugin-only');
+    const sidebar = page.getByRole('complementary', {
+      name: 'Workspace sidebar',
+    });
+    const rail = page.locator(railSelector);
+    await expect(
+      rail.getByRole('button', { name: 'Home', exact: true }),
+    ).toBeVisible();
+    await expect(
+      rail.getByRole('button', { name: 'Plugins', exact: true }),
+    ).toBeVisible();
+    await expect(
+      rail.getByRole('button', { name: 'Channels', exact: true }),
+    ).toHaveCount(0);
+    await expect(page.locator(homeColumn)).toHaveCSS('width', '300px');
+    await expect(
+      page
+        .locator('[data-web-shell-rail-footer]')
+        .getByRole('button', { name: 'Collapse', exact: true }),
+    ).toHaveCount(1);
+    await expect(
+      page.locator(homeColumn).locator('[data-web-shell-sidebar-collapse]'),
+    ).toHaveCount(0);
+    await rail.getByRole('button', { name: 'Collapse', exact: true }).click();
+    await expect(page.locator(homeColumn)).toBeHidden();
+    await expect(sidebar).toHaveCSS('width', '56px');
+    await expect(rail).toBeVisible();
+    await expect(
+      page.locator('[data-web-shell-collapsed-session-trigger]'),
+    ).toHaveCount(0);
+    await rail.getByRole('button', { name: 'Expand', exact: true }).click();
+    await expect(page.locator(homeColumn)).toHaveCSS('width', '300px');
+  });
+
+  test('hosts can hide the sidebar while keeping the composer', async ({
+    page,
+  }) => {
+    await page.goto('/e2e/navigation-rail-harness.html?disabled');
+    const sidebar = page.getByRole('complementary', {
+      name: 'Workspace sidebar',
+    });
+    await expect(
+      page.locator('[data-web-shell-composer-editor] .cm-content'),
+    ).toBeVisible();
+    await expect(sidebar).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Toggle menu' })).toHaveCount(
+      0,
+    );
+  });
+
+  test('Split View alone does not show the navigation rail', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    const sidebar = page.getByRole('complementary', {
+      name: 'Workspace sidebar',
+    });
+    await page.goto('/e2e/navigation-rail-harness.html?split-only');
+    await expect(
+      sidebar.getByRole('button', { name: 'New session', exact: true }),
+    ).toBeVisible();
+    await expect(page.locator(railSelector)).toHaveCount(0);
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await expect(page.locator(railSelector)).toHaveCount(0);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.getByTestId('host-shell').evaluate((element) => {
+      element.style.width = '1100px';
+    });
+    await expect(page.locator(railSelector)).toHaveCount(0);
+    await expect(
+      sidebar.getByRole('button', { name: 'Split View', exact: true }),
+    ).toBeVisible();
+  });
 });
 
 test('split view keeps the home column and a working collapse control', async ({
