@@ -5,6 +5,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import { isSystemOverloadedError } from '../session/httpErrors.js';
 import { createDaemonWorkspaceActions } from './actions.js';
 
 // Assert the native REST request sent by the SDK, including auth and bodies.
@@ -22,11 +24,7 @@ const ok = (body: unknown) => ({
   status: 200,
   json: async () => body,
 });
-const fail = (status: number, body: unknown) => ({
-  ok: false,
-  status,
-  json: async () => body,
-});
+const fail = (status: number, body: unknown) => Response.json(body, { status });
 
 describe('scheduled-tasks workspace actions', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -100,6 +98,24 @@ describe('scheduled-tasks workspace actions', () => {
     await expect(
       makeActions().createScheduledTask({ cron: 'x', prompt: 'p' }),
     ).rejects.toThrow(/bad cron/);
+  });
+
+  it('preserves overload error identity for fresh task creation and a cold run', async () => {
+    const body = {
+      error: 'System overloaded (cpu_load)',
+      code: 'system_overloaded',
+    };
+    for (const operation of [
+      () =>
+        makeActions().createScheduledTask({ cron: '0 9 * * *', prompt: 'p' }),
+      () => makeActions().runScheduledTask('task-1'),
+    ]) {
+      fetchMock.mockResolvedValueOnce(fail(503, body));
+      await expect(operation()).rejects.toSatisfy(
+        (error) =>
+          error instanceof DaemonHttpError && isSystemOverloadedError(error),
+      );
+    }
   });
 
   describe('workspace-qualified targeting', () => {

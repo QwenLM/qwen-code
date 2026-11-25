@@ -94,9 +94,9 @@ export function useDaemonOverloadPause(options: {
 
   const loadAdmission = report?.runtime.loadAdmission;
   // Freshness bound: useDaemonResource keeps the last payload across poll
-  // failures AND when disabled/unavailable (leaving `error` unset), so gate
-  // on `enabled` as well — a stale overloaded sample must not keep creation
-  // disabled while status stops answering or the daemon is offline.
+  // failures and when disabled/unavailable. Gate on both the settled error
+  // and enabled so stale overload data cannot revive during a retry or keep
+  // creation disabled while status stops answering or the daemon is offline.
   const pollOverloaded =
     enabled && error === undefined && loadAdmission?.overloaded === true;
   const reactiveActive = refusal !== null && Date.now() < refusal.expiresAt;

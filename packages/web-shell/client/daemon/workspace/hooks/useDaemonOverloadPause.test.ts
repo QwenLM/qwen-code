@@ -40,6 +40,14 @@ function reportWith(overloaded: boolean): DaemonStatusReport {
   } as unknown as DaemonStatusReport;
 }
 
+function deferredReport() {
+  let resolve!: (report: DaemonStatusReport) => void;
+  const promise = new Promise<DaemonStatusReport>((executor) => {
+    resolve = executor;
+  });
+  return { promise, resolve };
+}
+
 describe('useDaemonOverloadPause', () => {
   let loadDaemonStatus: ReturnType<typeof vi.fn>;
 
@@ -195,6 +203,56 @@ describe('useDaemonOverloadPause', () => {
     expect(view.result.current.paused).toBe(true);
     loadDaemonStatus.mockRejectedValue(new Error('502 from proxy'));
     await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS * 3);
+    await flush();
+    expect(view.result.current.paused).toBe(false);
+  });
+
+  it.each([true, false])(
+    'does not revive an old pause while the next retry is pending (overload=%o)',
+    async (initiallyOverloaded) => {
+      loadDaemonStatus.mockResolvedValueOnce(reportWith(initiallyOverloaded));
+      const { view } = renderPause();
+      await flush();
+      expect(view.result.current.paused).toBe(initiallyOverloaded);
+
+      loadDaemonStatus.mockRejectedValueOnce(new Error('502 from proxy'));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS);
+      });
+      await flush();
+      expect(loadDaemonStatus).toHaveBeenCalledTimes(2);
+      expect(view.result.current.paused).toBe(false);
+
+      const recovery = deferredReport();
+      loadDaemonStatus.mockImplementationOnce(() => recovery.promise);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS);
+      });
+      expect(loadDaemonStatus).toHaveBeenCalledTimes(3);
+      expect(view.result.current.paused).toBe(false);
+      expect(view.result.current.pollOverloaded).toBe(false);
+
+      recovery.resolve(reportWith(initiallyOverloaded));
+      await flush();
+      expect(view.result.current.paused).toBe(initiallyOverloaded);
+    },
+  );
+
+  it('preserves an old pause while a healthy refresh is pending', async () => {
+    loadDaemonStatus.mockResolvedValue(reportWith(true));
+    const { view } = renderPause();
+    await flush();
+    expect(view.result.current.paused).toBe(true);
+
+    const refresh = deferredReport();
+    loadDaemonStatus.mockImplementationOnce(() => refresh.promise);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS);
+    });
+    expect(loadDaemonStatus).toHaveBeenCalledTimes(2);
+    expect(view.result.current.paused).toBe(true);
+
+    refresh.resolve(reportWith(false));
     await flush();
     expect(view.result.current.paused).toBe(false);
   });

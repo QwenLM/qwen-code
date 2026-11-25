@@ -7262,6 +7262,36 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('reports an aborted deferred checkpoint switch as incomplete', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('source-session');
+    session.client.branchSession.mockResolvedValue({
+      sessionId: 'checkpoint-child',
+      displayName: 'Historical branch',
+    });
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      addNotice,
+      session,
+    });
+    const branch = actions.branchSession({ atRecordId: 'checkpoint-1' });
+    await vi.waitFor(() => {
+      expect(pendingSessionLoadRef.current?.sessionId).toBe('checkpoint-child');
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    if (!pendingLoad) throw new Error('Expected a pending checkpoint load');
+    clearTimeout(pendingLoad.timeout);
+    pendingSessionLoadRef.current = undefined;
+    pendingLoad.reject(new DOMException('Navigation changed', 'AbortError'));
+
+    await expect(branch).resolves.toMatchObject({
+      sessionId: 'checkpoint-child',
+      switchStarted: true,
+    });
+    await expect((await branch).switchCompleted).resolves.toBe(false);
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   describe('fresh-session load overload notices', () => {
     it.each([
       {

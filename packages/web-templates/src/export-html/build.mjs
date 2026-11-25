@@ -86,9 +86,10 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // transcript-stubbed and contribute no document bytes), adding +445 bytes:
 // rebuilt @qwen-code/web-shell transcript lib + export-html on the merged
 // tree measures 2,156,018 renderer JS bytes and 2,428,500 CSS bytes
-// (2,155,573 + 445 = 2,156,018 exact). Keep the house margins from this
-// single measurement: warning = measurement + 713, hard ceiling = warning +
-// 1,000 (measurement + 1,713).
+// (2,155,573 + 445 = 2,156,018 exact). A later rebuild of this branch
+// merged with main, using Node v26.12.1 on 2026-11-25, measured 2,156,867
+// bytes. Re-track the warning and hard ceiling to that later measurement
+// while preserving the house margins of 713 and 1,713 bytes respectively.
 const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_731;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
@@ -222,13 +223,8 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_731;
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,
 // including the metadata checks: 2,155,023 bytes with ChatSurface merged.
-// The latest measured shared tree also re-tracks this ceiling to 2,157,286,
-// which is 1,713 bytes above its 2,155,573-byte measurement, and stays coupled
-// to the warning threshold instead of becoming an independent literal.
-// With #18054 merged on top of 91a14e3349 (+445 from the two EN/ZH-CN
-// sidebar.overload* entries; zh-TW and RU are transcript-stubbed; 2,156,018
-// measured, forbidden-input guard passing), the same coupled expression
-// yields 2,157,731 (1,713 above the merged measurement).
+// With the latest 2,156,867-byte measurement, the same coupled expression
+// yields 2,158,580 (1,713 above it), retaining 713 bytes to the warning.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 
 // Modules that must not be reachable from the document entry, checked against

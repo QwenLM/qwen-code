@@ -3011,6 +3011,7 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
   return {
     ScheduledTasksDialog: (props: {
       onRunPrompt?: (prompt: string, sessionId: string | null) => Promise<void>;
+      onError?: (error: unknown, fallback: string) => void;
       workspaces?: Array<{ id: string; cwd: string }>;
       lockedWorkspace?: { id: string; cwd: string; primary: boolean };
       currentSession?: {
@@ -18537,6 +18538,9 @@ describe('App session callbacks', () => {
         );
       } else {
         expect(mockStore.dispatch).not.toHaveBeenCalledWith(expectedStatus);
+        expect(
+          sessionCatalogController.invalidateWorkspace,
+        ).toHaveBeenCalledWith('/tmp/project');
       }
     },
   );
@@ -18672,6 +18676,9 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       expect.objectContaining({ type: 'status' }),
     ]);
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
   });
 
   it('refreshes the source catalog after a late worktree activation failure', async () => {
@@ -62177,6 +62184,58 @@ describe('overload pause guards in App', () => {
     expect(toasts[0]?.[0]).toBe('warning');
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('pauses on a structured cold scheduled-task overload without an error toast', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const onError = testState.latestScheduledTasksProps?.onError;
+    expect(onError).toBeTypeOf('function');
+
+    await act(async () => {
+      onError!(
+        new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+          },
+          'POST /scheduled-tasks/task-1/run: System overloaded (cpu_load)',
+        ),
+        'Failed to run task',
+      );
+      await Promise.resolve();
+    });
+
+    expect(toasts).toEqual([
+      [
+        'warning',
+        'POST /scheduled-tasks/task-1/run: System overloaded (cpu_load)',
+      ],
+    ]);
+    const newSession = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    );
+    expect(newSession).not.toBeNull();
+    toasts.length = 0;
+    await act(async () => {
+      newSession!.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(toasts).toEqual([
+      [
+        'warning',
+        'POST /scheduled-tasks/task-1/run: System overloaded (cpu_load)',
+      ],
+    ]);
   });
 
   it('refuses createNewSession at the App root with a warning toast while paused', async () => {

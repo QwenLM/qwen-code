@@ -13578,6 +13578,15 @@ export function App({
       if (isAlreadyDispatched(error)) {
         return;
       }
+      if (isSystemOverloadedError(error)) {
+        const message = formatError(error, fallback);
+        setOverloadRefusal({
+          message,
+          expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
+        });
+        pushToast('warning', message);
+        return;
+      }
       const message = isAcpChildCapacityError(error)
         ? t('daemon.capacity.exhausted')
         : formatError(error, fallback);
@@ -17389,8 +17398,17 @@ export function App({
             : sessionActions.branchSession({ name: options.name });
       const request = branchRequest
         .then(async (result) => {
-          if (!result.switchStarted) return;
-          if ((await result.switchCompleted) === false) return;
+          if (
+            !result.switchStarted ||
+            (await result.switchCompleted) === false
+          ) {
+            // The branch metadata was already published even when its
+            // switch was refused or aborted.
+            if (sourceWorkspaceCwd) {
+              sessionCatalogController.invalidateWorkspace(sourceWorkspaceCwd);
+            }
+            return;
+          }
           if (result.sourceWarnings?.length)
             pushToast('warning', result.sourceWarnings.join(' '));
           store.dispatch([

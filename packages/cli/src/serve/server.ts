@@ -1418,6 +1418,55 @@ export function createServeApp(
     );
   let reclaimIdleAcp: IdleAcpReclaimer | undefined;
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
+  // Embedded callers have no earlier CLI validation. Reject unsafe origins
+  // before creating the monitor or bridge so failed apps own no resources.
+  const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins ?? []);
+  if (parsedAllowOrigins.allowAny && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin '*' but no bearer token ` +
+        `configured. '*' admits any cross-origin browser to the API; ` +
+        `without a token, any local page can drive the daemon. Set a ` +
+        `token or list specific origins instead of '*'.`,
+    );
+  }
+  if (
+    parsedAllowOrigins.loopbackPortWildcards &&
+    parsedAllowOrigins.loopbackPortWildcards.length > 0 &&
+    !opts.token
+  ) {
+    throw new Error(
+      `Refusing to start with a loopback port wildcard in --allow-origin ` +
+        `but no bearer token configured. A port wildcard admits any page ` +
+        `served from that loopback host, on any port; without a token, any ` +
+        `local page can drive the daemon. Set a token or list specific ` +
+        `origins instead.`,
+    );
+  }
+  const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
+  if (nonLoopbackHttpOrigin && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin ${JSON.stringify(
+        nonLoopbackHttpOrigin,
+      )} but no bearer token configured. Non-loopback HTTP(S) browser ` +
+        `origins can drive the full operator API, including code execution ` +
+        `as the daemon user. Set a token or use a loopback origin.`,
+    );
+  }
+  if (deps.managedLocalWeb) {
+    if (
+      opts.hostname !== '127.0.0.1' ||
+      !opts.requireAuth ||
+      !opts.token ||
+      opts.profile === 'hosted-harness'
+    ) {
+      throw new Error(
+        'Managed local WebShell requires an authenticated loopback daemon.',
+      );
+    }
+  }
+  const managedLocalJava = deps.managedLocalWeb
+    ? new URL(deps.managedLocalWeb.javaUrl)
+    : undefined;
   const loadAdmissionMonitor =
     !deps.bridge && !injectedWorkspaceRegistry && opts.loadAdmission !== false
       ? (deps.createLoadAdmissionMonitor ?? createLoadAdmissionMonitor)()
@@ -2383,40 +2432,7 @@ export function createServeApp(
   // returned, so the no-`--allow-origin` posture is unchanged, and there is
   // one middleware to reason about instead of two interchangeable ones.
   // Pattern parsing happens in `run-qwen-serve.ts` for validation; here we
-  // still keep the tokenless origin restrictions for embedded callers that
-  // construct the app directly.
-  const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins ?? []);
-  if (parsedAllowOrigins.allowAny && !opts.token) {
-    throw new Error(
-      `Refusing to start with --allow-origin '*' but no bearer token ` +
-        `configured. '*' admits any cross-origin browser to the API; ` +
-        `without a token, any local page can drive the daemon. Set a ` +
-        `token or list specific origins instead of '*'.`,
-    );
-  }
-  if (
-    parsedAllowOrigins.loopbackPortWildcards &&
-    parsedAllowOrigins.loopbackPortWildcards.length > 0 &&
-    !opts.token
-  ) {
-    throw new Error(
-      `Refusing to start with a loopback port wildcard in --allow-origin ` +
-        `but no bearer token configured. A port wildcard admits any page ` +
-        `served from that loopback host, on any port; without a token, any ` +
-        `local page can drive the daemon. Set a token or list specific ` +
-        `origins instead.`,
-    );
-  }
-  const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
-  if (nonLoopbackHttpOrigin && !opts.token) {
-    throw new Error(
-      `Refusing to start with --allow-origin ${JSON.stringify(
-        nonLoopbackHttpOrigin,
-      )} but no bearer token configured. Non-loopback HTTP(S) browser ` +
-        `origins can drive the full operator API, including code execution ` +
-        `as the daemon user. Set a token or use a loopback origin.`,
-    );
-  }
+  // The tokenless embedded-caller restrictions run before bridge construction.
   // One CORS middleware for both deployments, over a set that can change.
   // With no `--allow-origin` the behavior is byte-for-byte the
   // `denyBrowserOriginCors` wall this replaces — every Origin-bearing request
@@ -2674,16 +2690,6 @@ export function createServeApp(
   }
 
   if (deps.managedLocalWeb) {
-    if (
-      opts.hostname !== '127.0.0.1' ||
-      !opts.requireAuth ||
-      !opts.token ||
-      opts.profile === 'hosted-harness'
-    ) {
-      throw new Error(
-        'Managed local WebShell requires an authenticated loopback daemon.',
-      );
-    }
     app.use(['/managed/boot', '/api/agent', '/v1/agents'], (req, res, next) => {
       if (listenerIdentityOf(req).kind !== 'primary') {
         res.status(403).json({ error: 'primary_listener_required' });
@@ -4340,10 +4346,6 @@ export function createServeApp(
     resolveSubagentSessionRuntime,
     conversationRuntimeActivity,
   });
-
-  const managedLocalJava = deps.managedLocalWeb
-    ? new URL(deps.managedLocalWeb.javaUrl)
-    : undefined;
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
   // alongside the REST surface, sharing this same `bridge` instance.
