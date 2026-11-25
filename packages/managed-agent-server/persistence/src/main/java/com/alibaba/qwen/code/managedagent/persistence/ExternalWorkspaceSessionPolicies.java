@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
 import java.util.List;
@@ -26,7 +28,7 @@ final class ExternalWorkspaceSessionPolicies {
     static boolean externalFilesAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces, ContextBinding binding) {
         try {
             return workspaces.externalFilesAllowed(binding);
-        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException unreadable) {
+        } catch (RuntimeBrokerException unreadable) {
             return false;
         }
     }
@@ -65,7 +67,7 @@ final class ExternalWorkspaceSessionPolicies {
         if (!AgentSessionPolicies.availableApprovalModes(pin).contains(requested)
                 && !(supported && pin.digest() == null && "yolo".equals(requested)
                         && WorkspaceToolProfiles.isPublicShell(pin.toolProfile()))) {
-            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(400,
+            throw new ManagedAgentException(400,
                     "unsupported_approval_mode",
                     "The selected approval mode is not available for this Agent.");
         }

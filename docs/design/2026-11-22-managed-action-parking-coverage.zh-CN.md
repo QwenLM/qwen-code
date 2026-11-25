@@ -153,7 +153,7 @@
   - **这条路径在经过自己的 G3 审查之前就已经能停靠（决策 8）。** #15171 为崩溃恢复建了它，#18115 让它变成可停靠，但还没有设计按 G3 的用例核对过它。S8a 的 G3 扩展设计把它当作待验证的现有证据，而不是新工作。它在 §7 中的用例必须在任何部署打开 `action-parking.enabled` 之前通过，并且不必等 S8a 的其余部分。
   - **门槛的单元用例已通过（已确认）。** 四种结局在停靠之后和 Harness 死亡之后都按 §7 的要求完成。后台 Shell 的审批同样能停靠并恢复：Allow 之后，所有 `child_run` 记录都属于预留的那一次执行，所以不会启动第二个进程。打开开关之前，§7 要求的 MySQL 8.4 真实进程用例仍待补上。
   - **S8a 仍要覆盖的范围。** 没有 public children 的 Shell profile Session 仍以 `shell_profile` 拒绝。读取端只有在保存的计划带 `publicChildModel` 时才把它当作 Shell 计划（`hosted-approval-continuation.ts:248`、`:288`），而只有 public children 会记录这个字段（`hosted-workspace-tool-turn.ts:4627`），所以这类计划需要另一种识别方式。仍待验证：实际有哪些 Session 落在这里。
-  - 本切片仍然扩展 G3 契约，实现前要单独写一份 G3 扩展设计；它扩展的是现有证据，而不是新增 Broker 语义。已派发的 Shell 继续拒绝。
+  - 本切片仍然扩展 G3 契约，实现前要单独写一份 G3 扩展设计；它扩展的是现有证据，而不是新增 Broker 语义。已派发的 Shell 继续拒绝。这份设计见 [Managed Action Parking S8a](2026-11-24-managed-shell-action-parking.zh-CN.md)。
 - **超过 64 KiB 的计划。** 暂不支持。P0 的拒绝计数会显示它的出现率；只有出现率可观时，才考虑把计划改存为非 inline 资源。
 - **仍然排除。** `todo` 批次、没有 Runtime 的批次、不支持的工具和未计算摘要的调用都保持拒绝；S8 只覆盖派发前的 Shell 和超大计划。
 - **v1/v2。** 不支持。它们只存在于升级前写入的等待，G3 已明确遗留重建需要单独验证，收益随时间归零。

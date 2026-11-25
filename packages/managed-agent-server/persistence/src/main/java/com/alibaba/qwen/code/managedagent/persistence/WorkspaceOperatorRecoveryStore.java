@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -273,7 +274,7 @@ public final class WorkspaceOperatorRecoveryStore {
         if (binding == null || binding.getGeneration() != generation
                 || !binding.getRequest().isManagedContext()
                 || binding.getResourceHandle() == null
-                || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(binding.getResourceHandle().getKind())
+                || !RuntimeProviderKinds.LOCAL_PROCESS.equals(binding.getResourceHandle().getKind())
                 || binding.getResourceHandle().getVersion() != 2
                 || binding.getProvisionSeed() == null || binding.getLease() == null) {
             throw blocked();

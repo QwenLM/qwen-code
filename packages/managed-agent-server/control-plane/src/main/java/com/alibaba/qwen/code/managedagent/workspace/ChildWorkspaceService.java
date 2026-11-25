@@ -20,6 +20,7 @@ import jakarta.annotation.PreDestroy;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -27,6 +28,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -89,7 +91,7 @@ public class ChildWorkspaceService {
     private final String owner;
     private final long renewMillis;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public ChildWorkspaceService(SessionQueryStore sessions, ChildWorkspaceStore store,
             WorkspaceExecutionStore leases, RuntimeWarmer warmer) {
         this(sessions, store, leases, warmer, System::currentTimeMillis,
@@ -470,7 +472,7 @@ public class ChildWorkspaceService {
                     result != null && !merged);
             return null;
         });
-        java.util.Map<String, Object> discarded = columns("outcome_code",
+        Map<String, Object> discarded = columns("outcome_code",
                 claimed.outcomeCode() == null ? "discarded" : claimed.outcomeCode());
         if (pinFailure.get() != null) {
             // The row itself records that a pin was owed and could not be
@@ -531,7 +533,7 @@ public class ChildWorkspaceService {
         }
     }
 
-    private void advance(Row claimed, String toState, java.util.Map<String, Object> columns) {
+    private void advance(Row claimed, String toState, Map<String, Object> columns) {
         if (!store.transition(claimed, owner, toState, columns, clock.get())) {
             throw new ManagedAgentException(409, "child_workspace_claim_lost",
                     "The child Workspace moved on under another claim.");
@@ -583,7 +585,7 @@ public class ChildWorkspaceService {
     private void end(Row latest, String state, String code, String message) {
         boolean landed = APPLIED.equals(latest.state()) || "merged".equals(latest.outcomeCode());
         String outcome = landed ? "merged" : latest.outcomeCode() != null ? latest.outcomeCode() : code;
-        java.util.Map<String, Object> columns = columns("outcome_code", outcome,
+        Map<String, Object> columns = columns("outcome_code", outcome,
                 "last_error", StringUtils.truncate(message, 1024));
         if (DISCARDING.equals(latest.state())) {
             columns.put("finish_request", null);

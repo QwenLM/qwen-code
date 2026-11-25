@@ -57,7 +57,7 @@ jobs:
     outputs:
       sha: '${{ steps.paths.outputs.sha }}'
       tier: '${{ steps.tier.outputs.tier }}'
-      touched: '${{ steps.paths.outputs.touched }}'
+      coverage: '${{ steps.paths.outputs.coverage }}'
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -193,15 +193,12 @@ jobs:
             *) base="$(git rev-parse HEAD^1)" ;;
           esac
           if [[ "${base}" =~ ^0+$ ]]; then
-            touched=true
+            coverage=both
           else
             git fetch --no-tags --depth=1 origin "${base}"
-            # quotePath off: git's default octal-quoted rendering of a
-            # non-ASCII path matches none of the matcher's ^-anchored
-            # patterns and would fail this classification open.
-            touched="$(git -c core.quotePath=false diff --name-only --no-renames "${base}" HEAD | node .github/scripts/managed-agent-gate-scope.mjs)"
+            coverage="$(git diff --name-only --no-renames -z "${base}" HEAD | node .github/scripts/managed-agent-gate-scope.mjs)"
           fi
-          echo "touched=${touched}" >> "${GITHUB_OUTPUT}"
+          echo "coverage=${coverage}" >> "${GITHUB_OUTPUT}"
           echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       # The full suite runs once per head commit, on its first approval:
@@ -211,7 +208,7 @@ jobs:
         id: 'tier'
         env:
           EVENT_NAME: '${{ github.event_name }}'
-          TOUCHED: '${{ steps.paths.outputs.touched }}'
+          COVERAGE: '${{ steps.paths.outputs.coverage }}'
           REVIEW_STATE: '${{ github.event.review.state }}'
           REVIEW_AUTHOR_ASSOCIATION: '${{ github.event.review.author_association }}'
           BASE_REF: '${{ github.event.pull_request.base.ref }}'
@@ -232,20 +229,14 @@ jobs:
     with:
       ref: '${{ needs.scope.outputs.sha }}'
       tier: '${{ needs.scope.outputs.tier }}'
+      coverage: '${{ needs.scope.outputs.coverage }}'
 
-  # Keep the required-check context stable for every run that can satisfy it:
-  # fast/full pull requests, untouched runs, pushes and merge groups. A touched
-  # review that selects no full run keeps a non-required name; a skipped review
-  # job leaves its expression unevaluated, so neither can overwrite a real
-  # required-check result.
+  # Approval runs have their own context so a background result cannot
+  # replace the PR's fast gate. Keep no-op reviews distinct for deduplication.
   gate:
     name: >-
-      ${{ (needs.scope.outputs.tier == 'full' || needs.scope.outputs.touched != 'true' ||
-      ((needs.scope.outputs.tier == 'fast' || needs.scope.outputs.tier == '') &&
-      github.event_name == 'pull_request') ||
-      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' &&
-      github.event.pull_request.state == 'open' && needs.scope.outputs.tier == '') ||
-      (github.event_name != 'pull_request' && github.event_name != 'pull_request_review')) && 'Managed Agent gate' ||
+      ${{ github.event_name != 'pull_request_review' && 'Managed Agent gate' ||
+      (needs.scope.outputs.tier == 'full' || needs.scope.result != 'success') && 'Managed Agent full suite' ||
       'Managed Agent review (no full run)' }}
     needs:
       - 'scope'
@@ -255,18 +246,17 @@ jobs:
     # fast suite cannot leave the context absent or green. A review that is not
     # an approval, or one submitted after the pull request closed, skips with
     # `scope` above; its computed name stays unevaluated, so no skipped check is
-    # published under the required context.
+    # published under the full-suite context.
     if: "${{ always() && (github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.pull_request.state == 'open')) }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:
       - name: 'Report the tier result'
         env:
-          EVENT_NAME: '${{ github.event_name }}'
           SCOPE_RESULT: '${{ needs.scope.result }}'
           SUITE_RESULT: '${{ needs.suite.result }}'
           TIER: '${{ needs.scope.outputs.tier }}'
-          TOUCHED: '${{ needs.scope.outputs.touched }}'
+          COVERAGE: '${{ needs.scope.outputs.coverage }}'
         run: |-
           set -euo pipefail
           if [[ "${SCOPE_RESULT}" != 'success' ]]; then
@@ -274,11 +264,7 @@ jobs:
             exit 1
           fi
           if [[ "${TIER}" == 'none' ]]; then
-            if [[ "${TOUCHED}" == 'true' ]]; then
-              echo 'No full run for this review: not an approval, or an earlier approval run already covers this head.'
-            else
-              echo 'No Managed Agent paths changed.'
-            fi
+            echo "No suite selected for coverage '${COVERAGE}'."
             exit 0
           fi
           if [[ "${SUITE_RESULT}" != 'success' ]]; then
@@ -286,5 +272,5 @@ jobs:
             exit 1
           fi
           if [[ "${TIER}" == 'fast' ]]; then
-            echo 'Fast tier passed. On a pull request the full suite runs on the first approval of this head.'
+            echo "Fast tier passed for coverage '${COVERAGE}'."
           fi
