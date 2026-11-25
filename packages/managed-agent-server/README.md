@@ -442,6 +442,16 @@ owns lifecycle state and tenant/idempotency checks, the public SQL row is the
 Session title's display authority, and the Runtime Broker owns execution
 bindings.
 
+For embedded Java callers, `SessionLifecycleService.getPublicCloseProof(principal,
+sessionId, operationId)` reads the authorized original operation and, once a close
+or delete has completed, returns its matching `RuntimeDrainReceipt` items. For
+session-isolated bindings, every binding must be RELEASED and every receipt must
+match its original binding; it never selects a latest binding and a
+`hasStoppedWriters()` flag alone is not sufficient. Pending or incomplete proof
+is not a stopped proof. Callers that allow only one binding require exactly one
+receipt instead of accepting a partial or ambiguous result. This Java read does
+not add an HTTP route or expose boot credentials.
+
 Turn input and cancellation are recorded in the same table as `submit_input`
 and `cancel` operations. Each is saved with its command, the same route reads
 it back, and a retry under the key resolves to it. The Turn dispatcher stays
