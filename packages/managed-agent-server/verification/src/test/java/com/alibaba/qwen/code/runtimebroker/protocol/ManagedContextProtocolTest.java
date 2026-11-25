@@ -85,14 +85,16 @@ public class ManagedContextProtocolTest {
 
     @Test
     void typedBootSnapshotsExtensionsAndRedactsToken() {
+        String cacheDirectory = Path.of("managed-cache").toAbsolutePath().toString();
+        String cgroupRoot = Path.of("managed-cgroup").toAbsolutePath().toString();
         for (String digest : List.of(
                 ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST,
                 ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST)) {
             Map<String, Object> configuration = new LinkedHashMap<>(
                     ManagedExtensionExecutionProfile.configuration(digest,
-                            "/tmp/managed-cache",
+                            cacheDirectory,
                             ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST
-                                    .equals(digest) ? "/tmp/managed-cgroup" : null));
+                                    .equals(digest) ? cgroupRoot : null));
             Map<String, Object> original = Map.copyOf(configuration);
             ManagedContextProtocol.Boot boot = ManagedContextProtocol.boot(
                     request(digest), seed(), configuration);
@@ -111,16 +113,17 @@ public class ManagedContextProtocolTest {
 
     @Test
     void preservesDeveloperExtensionCgroupRootAdmission() {
+        String cacheDirectory = Path.of("managed-cache").toAbsolutePath().toString();
+        String cgroupRoot = Path.of("managed-cgroup").toAbsolutePath().toString();
         Map<String, Object> configuration = new LinkedHashMap<>(
                 ManagedExtensionExecutionProfile.configuration(
                         ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST,
-                        "/tmp/managed-cache", null));
-        configuration.put("cgroupRoot", "/tmp/managed-cgroup");
+                        cacheDirectory, null));
+        configuration.put("cgroupRoot", cgroupRoot);
         var boot = ManagedContextProtocol.boot(request(
                 ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST),
                 seed(), configuration);
-        assertEquals("/tmp/managed-cgroup",
-                boot.managedExtensions().get("cgroupRoot"));
+        assertEquals(cgroupRoot, boot.managedExtensions().get("cgroupRoot"));
     }
 
     @Test
