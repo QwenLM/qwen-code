@@ -45,6 +45,7 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
@@ -209,6 +210,7 @@ export async function handleResumeSession(
       );
     }
     uiSwapped = true;
+    flushRunUsageOnSessionSwap(config, oldSessionId);
     config.getLlmClient()?.commitTelemetrySwap?.();
     await getInteractiveModSession(config)?.syncSession('resume');
   } catch (error) {
@@ -405,10 +407,11 @@ export async function handleBranchSession(
       projectHistoryToStreamEvents(uiHistoryItems, { config }),
     );
     uiSwapped = true;
-    resetBackgroundStateForSessionSwitch(config);
     // The UI re-key commits the swap: from here on a failure keeps the
     // replay — it belongs to the session the user is on.
+    flushRunUsageOnSessionSwap(config, oldSessionId);
     config.getLlmClient()?.commitTelemetrySwap?.();
+    resetBackgroundStateForSessionSwitch(config);
 
     await getInteractiveModSession(config)?.syncSession('resume');
 

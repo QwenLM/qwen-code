@@ -45,6 +45,12 @@ import {
   normalizeBasePath,
 } from './verify-pr-model-proxy.mjs';
 import {
+  DEFAULT_MODEL_VSOCK_PORT,
+  buildInputManifest,
+  createRoundInputBundle,
+  startInputServer,
+} from './verify-pr-vm-channel.mjs';
+import {
   startCollectorServer,
   validateSocketPathLength,
 } from './verify-pr-vm-collector.mjs';
@@ -214,6 +220,8 @@ export function buildFirecrackerLaunchPlan({
   maxNoFile = 1024,
   guestCid = 3,
   vsockPort = 52,
+  inputVsockPort = null,
+  modelVsockPort = null,
   bootArgs = 'console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/opt/poc/init',
 }) {
   assertRunId(runId);
@@ -237,14 +245,37 @@ export function buildFirecrackerLaunchPlan({
       throw new Error(`firecracker ${label} must be a positive integer`);
     }
   }
+  const seenPorts = new Set([vsockPort]);
+  for (const [label, val] of [
+    ['inputVsockPort', inputVsockPort],
+    ['modelVsockPort', modelVsockPort],
+  ]) {
+    if (val === null) continue;
+    if (!Number.isInteger(val) || val <= 0) {
+      throw new Error(`firecracker ${label} must be a positive integer`);
+    }
+    if (seenPorts.has(val)) {
+      throw new Error(
+        `firecracker ${label} (${val}) collides with another vsock port`,
+      );
+    }
+    seenPorts.add(val);
+  }
   const execName = basename(firecrackerBin);
   const jailRoot = join(jailBaseDir, execName, runId, 'root');
   const hostVsockPath = join(jailRoot, `v.sock_${vsockPort}`);
-  const len = validateSocketPathLength(hostVsockPath, 'linux');
-  if (!len.ok) {
-    throw new Error(
-      `firecracker UDS path exceeds Linux sun_path limit (${len.reason}): use a shorter jailBaseDir or runId`,
-    );
+  const inputVsockPath =
+    inputVsockPort !== null ? join(jailRoot, `v.sock_${inputVsockPort}`) : null;
+  const modelVsockPath =
+    modelVsockPort !== null ? join(jailRoot, `v.sock_${modelVsockPort}`) : null;
+  for (const sockPath of [hostVsockPath, inputVsockPath, modelVsockPath]) {
+    if (!sockPath) continue;
+    const len = validateSocketPathLength(sockPath, 'linux');
+    if (!len.ok) {
+      throw new Error(
+        `firecracker UDS path exceeds Linux sun_path limit (${len.reason}): use a shorter jailBaseDir or runId`,
+      );
+    }
   }
 
   const vmConfig = {
@@ -307,6 +338,8 @@ export function buildFirecrackerLaunchPlan({
     maxNoFile,
     hasNic: false,
     hasDirectoryShare: false,
+    ...(inputVsockPort !== null ? { inputVsockPort } : {}),
+    ...(modelVsockPort !== null ? { modelVsockPort } : {}),
     vmConfig,
   };
 
@@ -316,6 +349,8 @@ export function buildFirecrackerLaunchPlan({
     jailRoot,
     kernelPath: join(jailRoot, 'vmlinuz'),
     hostVsockPath,
+    ...(inputVsockPath !== null ? { inputVsockPort, inputVsockPath } : {}),
+    ...(modelVsockPath !== null ? { modelVsockPort, modelVsockPath } : {}),
     workerPidFile: join(jailRoot, `${execName}.pid`),
     vmConfig,
     argv,
@@ -327,7 +362,12 @@ export function buildFirecrackerLaunchPlan({
       vmmUid,
       expectedExeTokens: [execName],
       workDiskPath: join(jailRoot, 'rootfs.ext4'),
-      socketPaths: [hostVsockPath, join(jailRoot, 'v.sock')],
+      socketPaths: [
+        hostVsockPath,
+        ...(inputVsockPath !== null ? [inputVsockPath] : []),
+        ...(modelVsockPath !== null ? [modelVsockPath] : []),
+        join(jailRoot, 'v.sock'),
+      ],
     },
     launchPolicyDigest: sha256Json(policy),
   };
@@ -355,11 +395,29 @@ export function buildVfkitLaunchPlan({
   cpus = 1,
   memMib = 512,
   vsockPort = 52,
+  inputVsockPort = null,
+  modelVsockPort = null,
   cmdline = 'console=hvc0 root=/dev/vda rw init=/opt/poc/init reboot=k panic=1',
 }) {
   assertRunId(runId);
   if (typeof seatbeltProfile !== 'string' || seatbeltProfile.trim() === '') {
     throw new Error('vfkit requires an explicit enforcing Seatbelt profile');
+  }
+  const seenPorts = new Set([vsockPort]);
+  for (const [label, val] of [
+    ['inputVsockPort', inputVsockPort],
+    ['modelVsockPort', modelVsockPort],
+  ]) {
+    if (val === null) continue;
+    if (!Number.isInteger(val) || val <= 0) {
+      throw new Error(`vfkit ${label} must be a positive integer`);
+    }
+    if (seenPorts.has(val)) {
+      throw new Error(
+        `vfkit ${label} (${val}) collides with another vsock port`,
+      );
+    }
+    seenPorts.add(val);
   }
   for (const [label, val] of [
     ['kernelPath', kernelPath],
@@ -372,11 +430,18 @@ export function buildVfkitLaunchPlan({
     assertCsvSafe(label, val);
   }
   const hostVsockPath = join(socketDir, 'v.sock');
-  const len = validateSocketPathLength(hostVsockPath, 'darwin');
-  if (!len.ok) {
-    throw new Error(
-      `vfkit UDS path exceeds macOS sun_path limit (${len.reason}): use a shorter socketDir`,
-    );
+  const inputVsockPath =
+    inputVsockPort !== null ? join(socketDir, 'in.sock') : null;
+  const modelVsockPath =
+    modelVsockPort !== null ? join(socketDir, 'mp.sock') : null;
+  for (const sockPath of [hostVsockPath, inputVsockPath, modelVsockPath]) {
+    if (!sockPath) continue;
+    const len = validateSocketPathLength(sockPath, 'darwin');
+    if (!len.ok) {
+      throw new Error(
+        `vfkit UDS path exceeds macOS sun_path limit (${len.reason}): use a shorter socketDir`,
+      );
+    }
   }
 
   const argv = [
@@ -407,6 +472,18 @@ export function buildVfkitLaunchPlan({
     `virtio-serial,logFilePath=${guestLogPath}`,
     '--device',
     `virtio-vsock,port=${vsockPort},socketURL=${hostVsockPath}`,
+    ...(inputVsockPath !== null
+      ? [
+          '--device',
+          `virtio-vsock,port=${inputVsockPort},socketURL=${inputVsockPath}`,
+        ]
+      : []),
+    ...(modelVsockPath !== null
+      ? [
+          '--device',
+          `virtio-vsock,port=${modelVsockPort},socketURL=${modelVsockPath}`,
+        ]
+      : []),
     '--device',
     'virtio-rng',
     '--restful-uri',
@@ -420,6 +497,8 @@ export function buildVfkitLaunchPlan({
     cpus,
     memMib,
     vsockPort,
+    ...(inputVsockPort !== null ? { inputVsockPort } : {}),
+    ...(modelVsockPort !== null ? { modelVsockPort } : {}),
     restfulUri: 'none://',
     hasNic: false,
     hasDirectoryShare: false,
@@ -432,6 +511,8 @@ export function buildVfkitLaunchPlan({
     runId,
     kernelPath,
     hostVsockPath,
+    ...(inputVsockPath !== null ? { inputVsockPort, inputVsockPath } : {}),
+    ...(modelVsockPath !== null ? { modelVsockPort, modelVsockPath } : {}),
     socketDir,
     pidFile,
     argv,
@@ -440,7 +521,11 @@ export function buildVfkitLaunchPlan({
       backend: 'vfkit',
       expectedExeTokens: [basename(vfkitBin)],
       workDiskPath: rootfsPath,
-      socketPaths: [hostVsockPath],
+      socketPaths: [
+        hostVsockPath,
+        ...(inputVsockPath !== null ? [inputVsockPath] : []),
+        ...(modelVsockPath !== null ? [modelVsockPath] : []),
+      ],
       socketDir,
     },
     launchPolicyDigest: sha256Json(policy),
@@ -996,7 +1081,8 @@ export async function runHardwareRound({
   platform = `${process.platform}-${process.arch}`,
   sourceKernelPath = null,
   sourceRootfsPath = null,
-  trustedInputDigest,
+  trustedInputDigest = null,
+  roundInput = null,
   modelProxy = null,
   collectorOptions = {},
   launchBackend = null,
@@ -1011,7 +1097,17 @@ export async function runHardwareRound({
       errors: ['contextSha256 must be a 64-hex sha256 digest'],
     };
   }
-  if (!SHA256_RE.test(trustedInputDigest ?? '')) {
+  if (roundInput === null && !SHA256_RE.test(trustedInputDigest ?? '')) {
+    return {
+      ok: false,
+      errors: ['trustedInputDigest must be a 64-hex sha256 digest'],
+    };
+  }
+  if (
+    roundInput !== null &&
+    trustedInputDigest !== null &&
+    !SHA256_RE.test(trustedInputDigest)
+  ) {
     return {
       ok: false,
       errors: ['trustedInputDigest must be a 64-hex sha256 digest'],
@@ -1101,6 +1197,13 @@ export async function runHardwareRound({
       };
     }
   }
+  const effectiveProxySocketPath =
+    modelProxy !== null
+      ? (modelProxy.socketPath ??
+        (modelProxy.listenHost === undefined && plan.modelVsockPath
+          ? plan.modelVsockPath
+          : null))
+      : null;
   if (modelProxy !== null) {
     if (
       typeof modelProxy !== 'object' ||
@@ -1155,7 +1258,7 @@ export async function runHardwareRound({
         errors: ['modelProxy.vmmUid and vmmGid must be provided together'],
       };
     }
-    if (modelProxy.vmmUid !== undefined && !modelProxy.socketPath) {
+    if (modelProxy.vmmUid !== undefined && !effectiveProxySocketPath) {
       return {
         ok: false,
         errors: ['modelProxy.vmmUid and vmmGid require socketPath'],
@@ -1164,6 +1267,49 @@ export async function runHardwareRound({
   }
 
   const isLocalVmm = plan.backend === 'firecracker' || plan.backend === 'vfkit';
+  if (roundInput !== null) {
+    if (typeof roundInput !== 'object' || Array.isArray(roundInput)) {
+      return { ok: false, errors: ['roundInput must be an object'] };
+    }
+    if (isLocalVmm && !plan.inputVsockPath) {
+      return {
+        ok: false,
+        errors: [
+          'roundInput requires plan.inputVsockPath (pass inputVsockPort to launch plan)',
+        ],
+      };
+    }
+    const reqBase = roundInput.baseRefOid ?? contextSnapshot.baseRefOid;
+    const reqHead = roundInput.headRefOid ?? contextSnapshot.headRefOid;
+    if (
+      !FULL_OID_RE.test(reqBase ?? '') ||
+      reqBase !== contextSnapshot.baseRefOid
+    ) {
+      return {
+        ok: false,
+        errors: [
+          'roundInput.baseRefOid must match the host context baseRefOid',
+        ],
+      };
+    }
+    if (
+      !FULL_OID_RE.test(reqHead ?? '') ||
+      reqHead !== contextSnapshot.headRefOid
+    ) {
+      return {
+        ok: false,
+        errors: [
+          'roundInput.headRefOid must match the host context headRefOid',
+        ],
+      };
+    }
+    if (!roundInput.repoDir && !roundInput.bundlePath) {
+      return {
+        ok: false,
+        errors: ['roundInput requires repoDir or prebuilt bundlePath'],
+      };
+    }
+  }
   let kernelDigest = null;
   let rootfsDigest = null;
   if (isLocalVmm) {
@@ -1266,6 +1412,98 @@ export async function runHardwareRound({
   const tokenFile = join(realLauncher, 'token.json');
   const proxyToken = randomBytes(24).toString('hex');
   const proxyNonce = randomBytes(24).toString('hex');
+
+  let effectiveTrustedInputDigest = trustedInputDigest;
+  let preparedInput = null;
+  if (roundInput !== null) {
+    try {
+      let bundleInfo;
+      if (roundInput.repoDir) {
+        bundleInfo = createRoundInputBundle({
+          repoDir: roundInput.repoDir,
+          baseRefOid: contextSnapshot.baseRefOid,
+          headRefOid: contextSnapshot.headRefOid,
+          outPath: join(realLauncher, 'round-input.bundle'),
+          ...(roundInput.maxBundleBytes !== undefined
+            ? { maxBundleBytes: roundInput.maxBundleBytes }
+            : {}),
+        });
+      } else {
+        const bHash = sha256RegularFile(roundInput.bundlePath);
+        if (bHash.error) {
+          throw new Error(`roundInput.bundlePath rejected (${bHash.error})`);
+        }
+        const realBundle = realpathSync(resolve(roundInput.bundlePath));
+        if (withinDir(realVault, realBundle)) {
+          throw new Error(
+            'roundInput.bundlePath must not reside inside vaultDir',
+          );
+        }
+        const bStat = lstatSync(realBundle);
+        if (bStat.nlink !== 1) {
+          throw new Error(
+            'roundInput.bundlePath must be a single-link regular file',
+          );
+        }
+        if (
+          roundInput.bundleSha256 !== undefined &&
+          roundInput.bundleSha256 !== bHash.digest
+        ) {
+          throw new Error(
+            'roundInput.bundlePath bytes do not match bundleSha256',
+          );
+        }
+        if (
+          roundInput.bundleBytes !== undefined &&
+          roundInput.bundleBytes !== bStat.size
+        ) {
+          throw new Error(
+            'roundInput.bundlePath size does not match bundleBytes',
+          );
+        }
+        bundleInfo = {
+          bundlePath: realBundle,
+          bundleSha256: bHash.digest,
+          bundleBytes: bStat.size,
+        };
+      }
+      const manifestModelProxy = modelProxy
+        ? {
+            port: plan.modelVsockPort ?? DEFAULT_MODEL_VSOCK_PORT,
+            basePath: normalizeBasePath(new URL(modelProxy.baseUrl).pathname),
+            token: proxyToken,
+            nonce: proxyNonce,
+          }
+        : null;
+      const built = buildInputManifest({
+        runId: plan.runId,
+        repo: contextSnapshot.repo ?? '',
+        prNumber: contextSnapshot.number ?? contextSnapshot.pr ?? null,
+        baseRefOid: contextSnapshot.baseRefOid,
+        headRefOid: contextSnapshot.headRefOid,
+        bundleSha256: bundleInfo.bundleSha256,
+        bundleBytes: bundleInfo.bundleBytes,
+        modelProxy: manifestModelProxy,
+        entropyHex: roundInput.entropyHex ?? null,
+      });
+      if (
+        trustedInputDigest !== null &&
+        trustedInputDigest !== built.trustedInputDigest
+      ) {
+        return {
+          ok: false,
+          errors: [
+            'trustedInputDigest does not match generated roundInput manifest digest',
+          ],
+        };
+      }
+      effectiveTrustedInputDigest = built.trustedInputDigest;
+      preparedInput = { ...bundleInfo, ...built };
+    } catch (error) {
+      return { ok: false, errors: [`round-input-rejected:${error.message}`] };
+    }
+  }
+
   try {
     writePrivateSafeFile(
       tokenFile,
@@ -1279,6 +1517,7 @@ export async function runHardwareRound({
   let proxyInfo = null;
   let proxySocketOwned = false;
   let proxySocketIdentity = null;
+  let inputServer = null;
   let collector = null;
   let ownershipPath = null;
   let launched = null;
@@ -1303,20 +1542,27 @@ export async function runHardwareRound({
   const startedAt = new Date().toISOString();
   let endedAt = startedAt;
   let destroyedAt = null;
+  const ownedSocketPaths = new Set();
+  let ownedSocketDir = undefined;
+  const syncOwnershipSockets = (extra = {}) => {
+    if (!isLocalVmm || !ownershipPath) return;
+    writeOwnershipRecord(ownershipPath, {
+      ...plan.ownershipTemplate,
+      socketPaths: [...ownedSocketPaths],
+      socketDir: ownedSocketDir,
+      tokenFile,
+      ...extra,
+    });
+  };
 
   try {
     // Establish the recovery record for already-validated per-round assets
     // before listener or process launch. Socket paths are added only after
-    // collector.ready succeeds so refusing a pre-existing socket never deletes
+    // each listener succeeds so refusing a pre-existing path never deletes
     // it during teardown.
     if (isLocalVmm) {
       ownershipPath = join(realLauncher, 'ownership.json');
-      writeOwnershipRecord(ownershipPath, {
-        ...plan.ownershipTemplate,
-        socketPaths: [],
-        socketDir: undefined,
-        tokenFile,
-      });
+      syncOwnershipSockets();
     }
 
     // 1. Optional host-side model proxy bound to this round's token.json
@@ -1330,32 +1576,34 @@ export async function runHardwareRound({
         tokenFile,
         maxRequests: modelProxy.maxRequests,
       });
-      if (modelProxy.socketPath) {
-        const sockLen = validateSocketPathLength(modelProxy.socketPath);
+      if (effectiveProxySocketPath) {
+        const sockLen = validateSocketPathLength(effectiveProxySocketPath);
         if (!sockLen.ok) throw new Error(`model proxy: ${sockLen.reason}`);
         try {
-          lstatSync(modelProxy.socketPath);
+          lstatSync(effectiveProxySocketPath);
           throw new Error(
-            `model proxy: refusing existing socket path ${modelProxy.socketPath}`,
+            `model proxy: refusing existing socket path ${effectiveProxySocketPath}`,
           );
         } catch (error) {
           if (error.code !== 'ENOENT') throw error;
         }
         await new Promise((res, rej) => {
           proxyServer.once('error', rej);
-          proxyServer.listen(modelProxy.socketPath, res);
+          proxyServer.listen(effectiveProxySocketPath, res);
         });
         proxySocketOwned = true;
-        const socketStat = lstatSync(modelProxy.socketPath);
+        const socketStat = lstatSync(effectiveProxySocketPath);
         proxySocketIdentity = { dev: socketStat.dev, ino: socketStat.ino };
-        chmodSync(modelProxy.socketPath, 0o600);
+        chmodSync(effectiveProxySocketPath, 0o600);
         const proxyUid = modelProxy.vmmUid ?? plan.vmmUid ?? null;
         const proxyGid = modelProxy.vmmGid ?? plan.vmmGid ?? null;
         if (Number.isInteger(proxyUid) && Number.isInteger(proxyGid)) {
-          chownSync(modelProxy.socketPath, proxyUid, proxyGid);
+          chownSync(effectiveProxySocketPath, proxyUid, proxyGid);
         }
+        ownedSocketPaths.add(effectiveProxySocketPath);
+        syncOwnershipSockets();
         proxyInfo = {
-          socketPath: modelProxy.socketPath,
+          socketPath: effectiveProxySocketPath,
           token: proxyToken,
           nonce: proxyNonce,
         };
@@ -1379,6 +1627,25 @@ export async function runHardwareRound({
       }
     }
 
+    // 1.5. Optional host-to-guest read-only input server (vsock port 53)
+    if (preparedInput && plan.inputVsockPath) {
+      inputServer = startInputServer({
+        socketPath: plan.inputVsockPath,
+        manifest: preparedInput.manifest,
+        manifestBytes: preparedInput.manifestBytes,
+        bundlePath: preparedInput.bundlePath,
+        tokenFile,
+        vmmUid: plan.vmmUid ?? null,
+        vmmGid: plan.vmmGid ?? null,
+        ...(roundInput.maxReads !== undefined
+          ? { maxReads: roundInput.maxReads }
+          : {}),
+      });
+      await inputServer.ready;
+      ownedSocketPaths.add(plan.inputVsockPath);
+      syncOwnershipSockets();
+    }
+
     // 2. Start bounded content-only collector when plan carries a UDS path
     if (plan.hostVsockPath) {
       collector = startCollectorServer({
@@ -1389,12 +1656,14 @@ export async function runHardwareRound({
         vmmGid: plan.vmmGid ?? null,
       });
       await collector.ready;
-      if (isLocalVmm && ownershipPath) {
-        writeOwnershipRecord(ownershipPath, {
-          ...plan.ownershipTemplate,
-          tokenFile,
-        });
+      ownedSocketPaths.add(plan.hostVsockPath);
+      if (plan.backend === 'firecracker' && plan.jailRoot) {
+        ownedSocketPaths.add(join(plan.jailRoot, 'v.sock'));
       }
+      if (plan.ownershipTemplate?.socketDir) {
+        ownedSocketDir = plan.ownershipTemplate.socketDir;
+      }
+      syncOwnershipSockets();
     }
 
     // 3. Launch hardware backend (or injected driver) and record ownership
@@ -1410,6 +1679,8 @@ export async function runHardwareRound({
         launcherDir: realLauncher,
         proxyInfo,
         collectorSocketPath: plan.hostVsockPath ?? null,
+        inputSocketPath: plan.inputVsockPath ?? null,
+        roundInput: preparedInput,
       });
       if (collector) {
         collectorSummary = await collector.done;
@@ -1429,6 +1700,8 @@ export async function runHardwareRound({
           launcherDir: realLauncher,
           proxyInfo,
           collectorSocketPath: plan.hostVsockPath,
+          inputSocketPath: plan.inputVsockPath ?? null,
+          roundInput: preparedInput,
         });
       } else {
         const child = spawn(plan.argv[0], plan.argv.slice(1), {
@@ -1469,8 +1742,7 @@ export async function runHardwareRound({
         workerPid = child.pid;
         supervisorPid = child.pid;
         workerExe = expectedExeTokens[0];
-        writeOwnershipRecord(ownershipPath, {
-          ...plan.ownershipTemplate,
+        syncOwnershipSockets({
           worker: {
             pid: child.pid,
             expectedExeTokens,
@@ -1478,7 +1750,6 @@ export async function runHardwareRound({
               ? { processGroupId: child.pid }
               : {}),
           },
-          tokenFile,
         });
         let pid = child.pid;
         let supPid = child.pid;
@@ -1501,8 +1772,7 @@ export async function runHardwareRound({
         workerPid = pid;
         supervisorPid = supPid;
         workerExe = plan.ownershipTemplate.expectedExeTokens[0];
-        writeOwnershipRecord(ownershipPath, {
-          ...plan.ownershipTemplate,
+        syncOwnershipSockets({
           worker: {
             pid,
             expectedExeTokens: plan.ownershipTemplate.expectedExeTokens,
@@ -1520,7 +1790,6 @@ export async function runHardwareRound({
                 ],
               }
             : {}),
-          tokenFile,
         });
       }
 
@@ -1532,8 +1801,7 @@ export async function runHardwareRound({
         null;
 
       ownershipPath = join(realLauncher, 'ownership.json');
-      writeOwnershipRecord(ownershipPath, {
-        ...plan.ownershipTemplate,
+      syncOwnershipSockets({
         worker: {
           pid: workerPid,
           expectedExeTokens:
@@ -1559,7 +1827,6 @@ export async function runHardwareRound({
               ],
             }
           : {}),
-        tokenFile,
       });
 
       let collectorFinished = false;
@@ -1614,21 +1881,25 @@ export async function runHardwareRound({
       }
     }
   } finally {
-    // 4. Unconditional teardown: close model proxy & its owned UDS first (so
-    //    no further upstream calls can fly and per-round socketDir is empty
-    //    before reapOwnership rmdirs it), then reap local VMM or destroy
-    //    provider VM, revoke token.json, and verify source golden immutability.
+    // 4. Unconditional teardown: close model proxy & input server UDS first
+    //    (so no further calls can fly and per-round socketDir is empty before
+    //    reapOwnership rmdirs it), then reap local VMM or destroy provider VM,
+    //    revoke token.json, and verify source golden immutability.
+    const replacedSocketPaths = new Set();
     if (proxyServer) {
       let proxyIdentityChanged = false;
-      if (proxySocketOwned && modelProxy?.socketPath) {
+      if (proxySocketOwned && effectiveProxySocketPath) {
         const cleanupError = removeOwnedSocket(
-          modelProxy.socketPath,
+          effectiveProxySocketPath,
           proxySocketIdentity,
         );
         if (cleanupError) {
           errors.push(cleanupError);
           proxyIdentityChanged =
             cleanupError === 'proxy-socket-identity-changed';
+          if (proxyIdentityChanged) {
+            replacedSocketPaths.add(effectiveProxySocketPath);
+          }
         }
       }
       if (proxyServer.listening) {
@@ -1648,8 +1919,37 @@ export async function runHardwareRound({
       }
     }
 
-    const proxyCleanupFailed = errors.some((error) =>
-      error.startsWith('proxy-socket-'),
+    if (inputServer) {
+      const inputClose = await inputServer.close();
+      if (!inputClose.ok && inputClose.error) {
+        errors.push(inputClose.error);
+        if (inputClose.identityChanged && plan.inputVsockPath) {
+          replacedSocketPaths.add(plan.inputVsockPath);
+        }
+      }
+    }
+
+    if (
+      replacedSocketPaths.size > 0 &&
+      ownershipPath &&
+      existsSync(ownershipPath)
+    ) {
+      try {
+        const curOwn = JSON.parse(readFileSync(ownershipPath, 'utf8'));
+        if (Array.isArray(curOwn.socketPaths)) {
+          curOwn.socketPaths = curOwn.socketPaths.filter(
+            (p) => !replacedSocketPaths.has(p),
+          );
+          writeOwnershipRecord(ownershipPath, curOwn);
+        }
+      } catch {
+        // Leave existing ownership record intact if unreadable.
+      }
+    }
+
+    const proxyCleanupFailed = errors.some(
+      (error) =>
+        error.startsWith('proxy-socket-') || error.startsWith('input-socket-'),
     );
     if (isLocalVmm) {
       let reapClean = true;
@@ -1796,7 +2096,7 @@ export async function runHardwareRound({
     diskDestroyed,
     tokenRevoked,
     launchPolicyDigest: plan.launchPolicyDigest,
-    trustedInputDigest,
+    trustedInputDigest: effectiveTrustedInputDigest,
     kernelDigest,
     rootfsDigest,
     supervisorPid,
@@ -1858,7 +2158,9 @@ export async function runHardwareRound({
     outputStatus: collectorSummary.outputStatus,
     teardownStatus,
     sourceRootfsUnchanged,
+    trustedInputDigest: effectiveTrustedInputDigest,
     modelProxyStats: proxyServer ? proxyServer.getStats() : null,
+    inputServerStats: inputServer ? inputServer.getStats() : null,
     executionRecordPath: finalized.executionRecordPath,
     executionRecordSha256: finalized.executionRecordSha256,
     boundaryPath: finalized.boundaryPath,
@@ -1966,6 +2268,24 @@ async function main(argv) {
         }
       }
     }
+    const rawRoundInput =
+      cfg.roundInput &&
+      typeof cfg.roundInput === 'object' &&
+      !Array.isArray(cfg.roundInput)
+        ? cfg.roundInput
+        : null;
+    const resolvedRoundInput = rawRoundInput
+      ? {
+          repoDir: rawRoundInput.repoDir,
+          baseRefOid: rawRoundInput.baseRefOid,
+          headRefOid: rawRoundInput.headRefOid,
+          bundlePath: rawRoundInput.bundlePath,
+          bundleSha256: rawRoundInput.bundleSha256,
+          bundleBytes: rawRoundInput.bundleBytes,
+          maxBundleBytes: rawRoundInput.maxBundleBytes,
+          maxReads: rawRoundInput.maxReads,
+        }
+      : null;
     const result = await runHardwareRound({
       contextPath: cfg.contextPath,
       contextSha256: cfg.contextSha256,
@@ -1976,7 +2296,8 @@ async function main(argv) {
       platform: cfg.platform,
       sourceKernelPath: cfg.sourceKernelPath,
       sourceRootfsPath: cfg.sourceRootfsPath,
-      trustedInputDigest: cfg.trustedInputDigest,
+      trustedInputDigest: cfg.trustedInputDigest ?? null,
+      roundInput: resolvedRoundInput,
       collectorOptions: resolvedCollectorOptions,
       modelProxy: resolvedModelProxy,
       plan,
