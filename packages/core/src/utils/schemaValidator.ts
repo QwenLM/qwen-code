@@ -622,6 +622,9 @@ function inactiveTaggedUnionErrors(
   schema: AnySchema,
 ): Set<ErrorObject> | undefined {
   const inactive = new Set<ErrorObject>();
+  const typeErrorPaths = new Set(
+    errors.filter((e) => e.keyword === 'type').map((e) => e.instancePath),
+  );
   for (const error of errors) {
     if (error.keyword !== 'anyOf' && error.keyword !== 'oneOf') continue;
     if (!error.schemaPath.startsWith('#/')) continue;
@@ -637,33 +640,49 @@ function inactiveTaggedUnionErrors(
       (branch: { $ref?: string }, index) =>
         branch.$ref ?? `${error.schemaPath}/${index}`,
     );
-    const properties = paths.map((path) => {
-      if (!path.startsWith('#/')) return undefined;
-      return valueAtPointer(
+    const fields = input as Record<string, unknown>;
+    const excluded = paths.map((path) => {
+      if (!path.startsWith('#/')) return false;
+      const properties = valueAtPointer(
         schema,
         `${decodeURIComponent(path.slice(1))}/properties`,
-      ) as Record<string, { const?: unknown }> | undefined;
+      ) as Record<string, { const?: unknown; enum?: unknown[] }> | undefined;
+      for (const [key, property] of Object.entries(properties ?? {})) {
+        if (!Object.hasOwn(fields, key)) continue;
+        const allowed = property?.enum;
+        const literal = property?.const;
+        if (literal === undefined && !allowed?.length) continue;
+        if (
+          (literal !== null && typeof literal === 'object') ||
+          allowed?.some((tag) => tag !== null && typeof tag === 'object')
+        ) {
+          continue;
+        }
+        const value = fields[key];
+        if (
+          (literal === undefined || literal === value) &&
+          (!allowed || allowed.includes(value))
+        ) {
+          continue;
+        }
+        // A literal on the malformed field may be a valid string alternative.
+        if (typeof value === 'string') {
+          const text = value.trimStart();
+          const pointerKey = key.replaceAll('~', '~0').replaceAll('/', '~1');
+          if (
+            (text.startsWith('[') || text.startsWith('{')) &&
+            typeErrorPaths.has(`${error.instancePath}/${pointerKey}`)
+          ) {
+            continue;
+          }
+        }
+        return true;
+      }
+      return false;
     });
-    const fields = input as Record<string, unknown>;
-    const mismatches = properties.map(
-      (props) =>
-        Object.entries(props ?? {}).find(
-          ([key, property]) =>
-            Object.hasOwn(fields, key) &&
-            property?.const !== undefined &&
-            typeof property.const !== 'object' &&
-            property.const !== fields[key],
-        )?.[0],
-    );
-    const selected = mismatches.indexOf(undefined);
-    if (selected < 0) return undefined;
-    if (selected !== mismatches.lastIndexOf(undefined)) continue;
-    for (const [index, key] of mismatches.entries()) {
-      if (
-        key === undefined ||
-        properties[selected]?.[key]?.const !== fields[key]
-      )
-        continue;
+    if (excluded.every(Boolean)) return undefined;
+    for (const [index, isExcluded] of excluded.entries()) {
+      if (!isExcluded) continue;
       // Consume just this branch's error at this object or its property. The
       // active payload may reuse the very same definition at another path.
       const path = paths[index];

@@ -160,6 +160,7 @@ import {
 import {
   CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
   estimateContentTokens,
+  estimateModelContentTokens,
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
 } from '../services/tokenEstimation.js';
@@ -3269,7 +3270,7 @@ export class LlmChat {
         ? originalTokenCountOverride.count
         : originalTokenCountIsEstimated
           ? (options?.precomputedEffectiveTokens ??
-            estimateContentTokens(
+            estimateModelContentTokens(
               options?.pendingUserMessage
                 ? [...this.getHistoryShallow(true), options.pendingUserMessage]
                 : this.getHistoryShallow(true),
@@ -3422,7 +3423,7 @@ export class LlmChat {
     // Use the same estimator on both sides so the NOOP gate compares
     // apples to apples. The API-authoritative lastPromptTokenCount is
     // then adjusted by the estimated delta — never replaced wholesale.
-    const beforeEstimate = estimateContentTokens(this.history);
+    const beforeEstimate = estimateModelContentTokens(this.history);
     const projectRoot = this.config.getProjectRoot();
     const targetDir = this.config.getTargetDir?.() ?? projectRoot;
 
@@ -3444,7 +3445,7 @@ export class LlmChat {
       .map((c) => (c.role === 'model' ? stripThoughtPartsFromContent(c) : c))
       .filter((c): c is Content => c !== null);
 
-    const afterEstimate = estimateContentTokens(newHistory);
+    const afterEstimate = estimateModelContentTokens(newHistory);
 
     if (afterEstimate >= beforeEstimate) {
       const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
@@ -3900,6 +3901,11 @@ export class LlmChat {
         // candidates below start from the original parts, so a result is never
         // cut twice.
         const batchBudget = this.config.getToolOutputBatchBudget?.();
+        const budgetNotes = (parts: Part[], budget: number) =>
+          limitModelToolErrorNotes(
+            parts,
+            () => budget - budgetedFunctionResponseTextLength(parts),
+          );
         const pressureBudget = this.pressureToolOutputBudget(
           userContent,
           requestRouteKey,
@@ -3936,7 +3942,10 @@ export class LlmChat {
               preview !== entries &&
               estimatePendingPrompt({
                 ...userContent,
-                parts: preview.flatMap((entry) => entry.responseParts),
+                parts: budgetNotes(
+                  preview.flatMap((entry) => entry.responseParts),
+                  toolOutputBudget,
+                ),
               }) >= auto
             ) {
               const aggregateBudget = batchBudget ?? Number.POSITIVE_INFINITY;
@@ -3952,8 +3961,9 @@ export class LlmChat {
               if (
                 estimatePendingPrompt({
                   ...userContent,
-                  parts: aggregatePreview.flatMap(
-                    (entry) => entry.responseParts,
+                  parts: budgetNotes(
+                    aggregatePreview.flatMap((entry) => entry.responseParts),
+                    aggregateBudget,
                   ),
                 }) < hard
               ) {
@@ -4122,12 +4132,7 @@ export class LlmChat {
           Number.isFinite(toolOutputBudget) &&
           (batchBudget === undefined || batchBudget > 0)
         ) {
-          limitModelToolErrorNotes(
-            budgetedParts,
-            () =>
-              toolOutputBudget -
-              budgetedFunctionResponseTextLength(budgetedParts),
-          );
+          userContent.parts = budgetNotes(budgetedParts, toolOutputBudget);
         }
 
         // Hard-tier rescue: when the estimated prompt size is at or above the
@@ -5285,7 +5290,7 @@ export class LlmChat {
                   contextOverflow.actualTokens ??
                   contextOverflow.limitTokens ??
                   (requestPayloadOverflow.isTooLarge
-                    ? estimateContentTokens(
+                    ? estimateModelContentTokens(
                         self.getHistoryShallow(true),
                         resolveSlimmingConfig(self.config.getChatCompression())
                           .imageTokenEstimate,
@@ -5863,7 +5868,7 @@ export class LlmChat {
             );
             self.history.pop();
             const walkRecoveryEstimate =
-              estimateContentTokens(
+              estimateModelContentTokens(
                 recoveryContents,
                 recoveryImageTokenEstimate,
               ) + ESTIMATE_CLAMP_OVERHEAD_PAD;

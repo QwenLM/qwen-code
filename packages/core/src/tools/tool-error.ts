@@ -6,6 +6,10 @@
 
 import type { Content, Part } from '@google/genai';
 import { ToolErrorType } from '../utils/tool-error-type.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from './tool-output-recovery.js';
 
 export { ToolErrorType };
 
@@ -34,20 +38,30 @@ export function copyModelToolErrorNote(original: Part, updated: Part): void {
 export function limitModelToolErrorNotes(
   parts: Part[],
   remainingBudget: () => number,
-): void {
+): Part[] {
+  let updated: Part[] | undefined;
   let remaining: number | undefined;
-  for (const part of parts) {
-    const response = part.functionResponse?.response;
+  for (const [index, part] of parts.entries()) {
+    const functionResponse = part.functionResponse;
+    const response = functionResponse?.response;
     if (!response) continue;
     const note = modelToolErrorNotes.get(response);
     if (!note) continue;
     remaining ??= remainingBudget();
     if (note.text.length > remaining) {
-      modelToolErrorNotes.delete(response);
+      // A pressure-budget preview must not discard the original candidate's note.
+      const copy = {
+        ...part,
+        functionResponse: { ...functionResponse, response: { ...response } },
+      };
+      const recovery = getToolOutputRecovery(part);
+      if (recovery) setToolOutputRecovery(copy, recovery);
+      (updated ??= [...parts])[index] = copy;
     } else {
       remaining -= note.text.length;
     }
   }
+  return updated ?? parts;
 }
 
 export function withModelToolErrorNotes(contents: Content[]): Content[] {

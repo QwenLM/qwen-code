@@ -414,6 +414,93 @@ describe('SchemaValidator', () => {
     );
 
     it.each([
+      ['const', { const: 'docs' }, { const: 'file' }],
+      ['enum', { enum: ['docs'] }, { enum: ['file'] }],
+    ])(
+      'excludes a branch by its %s tag even when another property mismatches first',
+      (_name, docsTag, fileTag) => {
+        const schema = {
+          anyOf: [
+            obj({ kind: docsTag, data: strings() }),
+            obj({
+              data: { type: 'object' },
+              version: { const: 2 },
+              kind: fileTag,
+            }),
+          ],
+        };
+        const input = { kind: 'docs', version: 1, data: '{"x":,}' };
+        const { report } = validateWithNote(schema, input);
+        expect(report).toHaveBeenCalledExactlyOnceWith(
+          expect.any(String),
+          expect.stringContaining('send it as a JSON array'),
+        );
+        expect(
+          SchemaValidator.validate(schema, { ...input, data: [] }),
+        ).toBeNull();
+        expect(
+          SchemaValidator.validate(schema, { ...input, data: {} }),
+        ).not.toBeNull();
+      },
+    );
+
+    it.each(['array', 'object'])(
+      'rules out a %s alternative by its own version constraint',
+      (type) => {
+        const schema = {
+          anyOf: [
+            obj({ items: { type: 'array', maxItems: 1 } }),
+            obj({ items: { type }, version: { const: 2 } }),
+          ],
+        };
+        const { report } = validateWithNote(schema, {
+          items: '{"x":,}',
+          version: 1,
+        });
+        expect(report).toHaveBeenCalledExactlyOnceWith(
+          expect.any(String),
+          expect.stringContaining('send it as a JSON array'),
+        );
+      },
+    );
+
+    it('keeps a literal string alternative on the candidate field', () => {
+      const schema = {
+        anyOf: [
+          obj({ items: strings() }),
+          obj({ items: { type: 'string', enum: ['auto'] } }),
+        ],
+      };
+      expect(
+        validateWithNote(schema, { items: '[1,]' }).report,
+      ).not.toHaveBeenCalled();
+      expect(validateWithNote(schema, { items: 'auto' }).message).toBeNull();
+    });
+
+    it('combines only the payload types of viable tagged branches', () => {
+      const variant = (data: object, kind = 'docs') =>
+        obj({ data, kind: { const: kind } });
+      const input = { kind: 'docs', data: '{"x":,}' };
+      const alternatives = [
+        variant({ type: 'array', maxItems: 1 }),
+        variant({ type: 'array', minItems: 2 }),
+        variant({ type: 'object' }, 'file'),
+      ];
+      const diagnose = (...extra: object[]) =>
+        validateWithNote({ anyOf: [...alternatives, ...extra] }, input);
+      expect(diagnose().report.mock.calls[0][1]).toContain(
+        'send it as a JSON array',
+      );
+      expect(
+        diagnose(variant({ type: 'object' })).report.mock.calls[0][1],
+      ).toContain('send it as a JSON object');
+      expect(
+        diagnose(variant({ type: 'string', pattern: '^NOTE:' })).report,
+      ).not.toHaveBeenCalled();
+      expect(diagnose(variant({ type: 'string' })).message).toBeNull();
+    });
+
+    it.each([
       anyOf('array', 'object'),
       anyOf('object', 'array'),
       { type: ['array', 'object'] },

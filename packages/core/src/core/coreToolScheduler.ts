@@ -1280,6 +1280,15 @@ type SchedulerToolCallRequestInfo = ToolCallRequestInfo & {
   };
 };
 
+function isOriginalModelToolRequest(request: ToolCallRequestInfo): boolean {
+  return (
+    !request.argsModifiedByMod &&
+    !request.isClientInitiated &&
+    request.source !== 'code_mode' &&
+    (request.executionOrigin?.kind ?? 'model') === 'model'
+  );
+}
+
 function getModelFacingToolName(request: ToolCallRequestInfo): string {
   return (
     (request as SchedulerToolCallRequestInfo).modelFacingName ?? request.name
@@ -3147,6 +3156,7 @@ export class CoreToolScheduler {
   private async resolveToolCallBridgeRequest(
     request: ToolCallRequestInfo,
     signal: AbortSignal,
+    onValidationNote: (note: string) => void,
   ): Promise<SchedulerToolCallRequestInfo> {
     if (
       signal.aborted ||
@@ -3193,6 +3203,9 @@ export class CoreToolScheduler {
       resolveDeferredToolCall(this.toolRegistry, request.args, {
         // Match prepareTools's depth-gated AgentTool policy.
         maxSubagentDepth: this.config.getMaxSubagentDepth(),
+        onValidationNote: isOriginalModelToolRequest(request)
+          ? onValidationNote
+          : undefined,
       }),
     );
     if ('error' in resolution) {
@@ -3417,16 +3430,20 @@ export class CoreToolScheduler {
           'Cannot schedule new tool calls while other tool calls are actively running (executing or awaiting approval).',
         );
       }
+      const bridgeValidationNotes: Array<string | undefined> = [];
       const requestsToProcess = await Promise.all(
         dedupeRequestsByCallId(
           Array.isArray(request) ? request : [request],
-        ).map((item) =>
+        ).map((item, index) =>
           this.resolveToolCallBridgeRequest(
             {
               ...item,
               args: structuredClone(item.args),
             },
             signal,
+            (note) => {
+              bridgeValidationNotes[index] = note;
+            },
           ),
         ),
       );
@@ -3536,6 +3553,7 @@ export class CoreToolScheduler {
 
           if (reqInfo.bridgeResolutionError) {
             let bridgeError = reqInfo.bridgeResolutionError.error;
+            let validationNote = bridgeValidationNotes[requestIndex];
             // Route invalid-envelope bridge errors through the same
             // validation-retry tracking as build() failures so a persistent
             // malformed tool_call loop still receives the early stop
@@ -3549,20 +3567,25 @@ export class CoreToolScheduler {
                 bridgeError.message,
               );
               if (count >= VALIDATION_RETRY_LOOP_THRESHOLD) {
+                validationNote = undefined;
                 bridgeError = new Error(
                   `${bridgeError.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
                 );
               }
             }
+            const response = createErrorResponse(
+              reqInfo,
+              bridgeError,
+              reqInfo.bridgeResolutionError.type,
+              'not_started',
+            );
+            if (validationNote) {
+              setModelToolErrorNote(response.responseParts[0], validationNote);
+            }
             newToolCalls.push({
               status: 'error',
               request: reqInfo,
-              response: createErrorResponse(
-                reqInfo,
-                bridgeError,
-                reqInfo.bridgeResolutionError.type,
-                'not_started',
-              ),
+              response,
               durationMs: 0,
             });
             continue;
@@ -3858,10 +3881,7 @@ export class CoreToolScheduler {
 
           const isOriginalModelInput =
             originalArgs === policyGate.args &&
-            !reqInfo.argsModifiedByMod &&
-            !reqInfo.isClientInitiated &&
-            reqInfo.source !== 'code_mode' &&
-            (reqInfo.executionOrigin?.kind ?? 'model') === 'model';
+            isOriginalModelToolRequest(reqInfo);
           let validationNote: string | undefined;
           const invocationOrError = runInRequestGoalContext(reqInfo, () =>
             this.buildInvocation(

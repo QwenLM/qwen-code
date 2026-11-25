@@ -1252,6 +1252,8 @@ describe('LlmChat', async () => {
       'only dispatches private tool validation detail that fits a %s character budget',
       async (budget, showNote) => {
         mockConfig.getToolOutputBatchBudget = () => budget;
+        mockGeneratorConfig({ contextWindowSize: 8192 });
+        const compress = mockCompress(noop(5000));
         chat.setHistory([
           content('user', { text: 'prompt' }),
           content(
@@ -1260,6 +1262,7 @@ describe('LlmChat', async () => {
             fnCall('tool_search', {}, 'call-2'),
           ),
         ]);
+        chat.setLastPromptTokenCount(5000);
         const error = 'params/docs must be array';
         const note = '; invalid near <<HERE>>';
         const part = fnResponse('structured_output', { error }, 'call-1');
@@ -1294,7 +1297,15 @@ describe('LlmChat', async () => {
           '<<HERE>>',
         );
         expect(JSON.stringify(chat.getHistory())).not.toContain('<<HERE>>');
-        const dispatched = (requestAt(0).contents as Content[])
+        const request = requestAt(0).contents as Content[];
+        const pendingTokens = estimateContentTokens([request.at(-1)!]);
+        expect(compress.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+          5000 + pendingTokens,
+        );
+        expect(requestAt(0).config?.maxOutputTokens).toBe(
+          8192 - 5000 - Math.ceil(pendingTokens * 1.5),
+        );
+        const dispatched = request
           .flatMap((entry) => entry.parts ?? [])
           .filter((part) => part.functionResponse?.id === 'call-1');
         expect(dispatched[0].functionResponse?.response?.['error']).toBe(
@@ -1309,6 +1320,41 @@ describe('LlmChat', async () => {
             injected_content_length: expected.chars,
             injected_estimated_tokens: expected.estimatedTokens,
           }),
+        );
+      },
+    );
+
+    it.each([0, 5000])(
+      'counts historical validation detail once with a prior prompt count of %s',
+      async (priorCount) => {
+        const failure = fnResponse(
+          'structured_output',
+          { error: 'invalid' },
+          'call-1',
+        );
+        const note = '; private validation detail';
+        setModelToolErrorNote(failure, note);
+        chat.setHistory([
+          userText('prompt'),
+          content('model', fnCall('structured_output', {}, 'call-1')),
+          content('user', failure),
+          modelText('done'),
+        ]);
+        chat.setLastPromptTokenCount(priorCount);
+        const compress = mockCompress(noop(priorCount));
+        mockStream(textStream('ok'));
+
+        await sendDrain('continue', 'prompt-history-budget');
+
+        const request = requestAt(0).contents as Content[];
+        expect(
+          request[2].parts?.[0].functionResponse?.response?.['error'],
+        ).toBe('invalid' + note);
+        const expected = priorCount
+          ? priorCount + estimateContentTokens([request.at(-1)!])
+          : estimateContentTokens(request);
+        expect(compress.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+          expected,
         );
       },
     );

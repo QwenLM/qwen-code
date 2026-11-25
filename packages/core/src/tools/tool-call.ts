@@ -11,6 +11,7 @@ import type {
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
+import { buildWithSchemaValidationNote } from '../utils/schemaValidator.js';
 import {
   canonicalToolName,
   resolveRegisteredToolName,
@@ -51,6 +52,7 @@ export type DeferredToolCallResolution =
 export interface DeferredToolCallOptions {
   /** Omission keeps AgentTool excluded in subagent contexts. */
   maxSubagentDepth?: number;
+  onValidationNote?: (note: string) => void;
 }
 
 export const DEFERRED_TOOL_CALL_REFUSAL_PREFIX = '[tool_call bridge refused] ';
@@ -100,10 +102,12 @@ export async function resolveDeferredToolCall(
 
   let invocation: ToolInvocation<ToolCallParams, ToolResult>;
   try {
-    invocation = bridge.build(envelope) as ToolInvocation<
-      ToolCallParams,
-      ToolResult
-    >;
+    invocation = buildWithSchemaValidationNote(
+      envelope,
+      () =>
+        bridge.build(envelope) as ToolInvocation<ToolCallParams, ToolResult>,
+      options?.onValidationNote,
+    );
   } catch (error) {
     return {
       error: bridgeRefusal(

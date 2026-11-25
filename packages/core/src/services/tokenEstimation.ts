@@ -8,6 +8,7 @@ import type {
   Content,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
+import { withModelToolErrorNotes } from '../tools/tool-error.js';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   TOKEN_TO_CHAR_RATIO,
@@ -69,6 +70,17 @@ export function estimateContentTokens(
   return Math.ceil(totalChars / CHARS_PER_TOKEN);
 }
 
+/** Includes private tool diagnostics only for contents sent to the main model. */
+export function estimateModelContentTokens(
+  contents: Content[],
+  imageTokenEstimate?: number,
+): number {
+  return estimateContentTokens(
+    withModelToolErrorNotes(contents),
+    imageTokenEstimate,
+  );
+}
+
 /**
  * Compute an effective prompt-token count for the auto-compaction gate.
  *
@@ -108,7 +120,7 @@ export function estimatePromptTokens(
 ): number {
   const newContent = Array.isArray(userMessage) ? userMessage : [userMessage];
   if (lastPromptTokenCount > 0) {
-    const newContentTokens = estimateContentTokens(
+    const newContentTokens = estimateModelContentTokens(
       newContent,
       imageTokenEstimate,
     );
@@ -125,7 +137,10 @@ export function estimatePromptTokens(
   // skill content, and cache headers — typically ~15-20K of under-estimate.
   // The reactive overflow handler is the safety net if the hard-tier rescue
   // misses for that reason. See review #4168 R3.3.
-  return estimateContentTokens([...history, ...newContent], imageTokenEstimate);
+  return estimateModelContentTokens(
+    [...history, ...newContent],
+    imageTokenEstimate,
+  );
 }
 
 export function getUsageOutputTokenCountForPromptEstimate(

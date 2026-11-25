@@ -48,6 +48,7 @@ import {
 import {
   CHARS_PER_TOKEN,
   estimateContentTokens,
+  estimateModelContentTokens,
   estimatePromptTokens,
 } from './tokenEstimation.js';
 import {
@@ -875,7 +876,7 @@ export class ChatCompressionService {
       candidateTail.length > 0 &&
       tailMatches &&
       retainedPromptId !== undefined &&
-      estimateContentTokens(
+      estimateModelContentTokens(
         [...candidateTail, ...visiblePendingHistory],
         slimmingConfig.imageTokenEstimate,
       ) <= Math.min(COMPACT_MAX_OUTPUT_TOKENS, contextLimit / 5);
@@ -1948,11 +1949,11 @@ export class ChatCompressionService {
         // restoration/temporal context, not the retained tail, a second time.
         newTokenCount += restorationTokenCount;
       } else {
-        const estimatedOriginalVisibleTokenCount = estimateContentTokens(
+        const estimatedOriginalVisibleTokenCount = estimateModelContentTokens(
           curatedHistory,
           slimmingConfig.imageTokenEstimate,
         );
-        const estimatedNewVisibleTokenCount = estimateContentTokens(
+        const estimatedNewVisibleTokenCount = estimateModelContentTokens(
           extraHistory,
           slimmingConfig.imageTokenEstimate,
         );

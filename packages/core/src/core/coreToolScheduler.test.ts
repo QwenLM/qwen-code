@@ -117,6 +117,7 @@ import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  ToolCallTool,
 } from '../tools/tool-call.js';
 import {
   getChannelWorkflowOrigin,
@@ -16391,6 +16392,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
         {
           ...INTERACTIVE_CLI,
           getApprovalMode: () => ApprovalMode.YOLO,
+          getMaxSubagentDepth: () => DEFAULT_MAX_SUBAGENT_DEPTH,
           getTruncateToolOutputThreshold: () => 100,
           getTruncateToolOutputLines: () => 10,
           setApprovalMode: vi.fn(),
@@ -16470,32 +16472,78 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(await send(invalid('c3'))).toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
 
-  it('counts repeated malformed tool arguments with different excerpts as one failure type', async () => {
-    const tool = new SyntheticOutputTool({
-      type: 'object',
-      properties: { docs: { type: 'array' } },
-    });
-    const onErrorPart = vi.fn<(part: Part) => void>();
-    const send = createRetryScheduler([tool], {}, onErrorPart);
-    for (const value of [1, 2, 3]) {
-      const error = await send(
-        makeRequest(String(value), tool.name, { docs: `[{"n":${value}},]` }),
-      );
-      expect(error).toContain('params/docs must be array');
-      expect(error).not.toContain('arrived as a string');
-      expect(error?.includes(RETRY_LOOP_STOP_DIRECTIVE)).toBe(value === 3);
-      const part = onErrorPart.mock.lastCall![0];
-      const [model] = withModelToolErrorNotes([
-        { role: 'user', parts: [part] },
-      ]);
-      const modelError = model.parts?.[0].functionResponse?.response?.['error'];
-      if (value < 3) {
-        expect(modelError).toContain('arrived as a string');
-      } else {
-        expect(modelError).toBe(error);
+  it.each(['direct', 'bridge envelope'])(
+    'counts repeated malformed %s arguments with different excerpts as one failure type',
+    async (kind) => {
+      const tool =
+        kind === 'direct'
+          ? new SyntheticOutputTool({
+              type: 'object',
+              properties: { docs: { type: 'array' } },
+            })
+          : new ToolCallTool();
+      const onErrorPart = vi.fn<(part: Part) => void>();
+      const send = createRetryScheduler([tool], {}, onErrorPart);
+      for (const value of [1, 2, 3]) {
+        const error = await send(
+          makeRequest(
+            String(value),
+            tool.name,
+            kind === 'direct'
+              ? { docs: `[{"n":${value}},]` }
+              : { name: 'read_file', arguments: `{"n":${value},}` },
+          ),
+        );
+        expect(error).toContain(
+          kind === 'direct'
+            ? 'params/docs must be array'
+            : 'params/arguments must be object',
+        );
+        expect(error).not.toContain('arrived as a string');
+        expect(error?.includes(RETRY_LOOP_STOP_DIRECTIVE)).toBe(value === 3);
+        const part = onErrorPart.mock.lastCall![0];
+        const [model] = withModelToolErrorNotes([
+          { role: 'user', parts: [part] },
+        ]);
+        const modelError =
+          model.parts?.[0].functionResponse?.response?.['error'];
+        if (value < 3) {
+          expect(modelError).toContain('arrived as a string');
+        } else {
+          expect(modelError).toBe(error);
+        }
       }
-    }
-  });
+    },
+  );
+
+  it.each([
+    { argsModifiedByMod: true },
+    { isClientInitiated: true },
+    { source: 'code_mode' },
+    { executionOrigin: { kind: 'client' } },
+  ] satisfies Array<Partial<ToolCallRequestInfo>>)(
+    'keeps local bridge envelope diagnostics private for %j',
+    async (origin) => {
+      const tool = new ToolCallTool();
+      const onErrorPart = vi.fn<(part: Part) => void>();
+      const send = createRetryScheduler([tool], {}, onErrorPart);
+      const error = await send({
+        ...makeRequest('local-envelope', tool.name, {
+          name: 'read_file',
+          arguments: '{"label":"local",}',
+        }),
+        ...origin,
+      });
+      expect(error).toContain('params/arguments must be object');
+      expect(error).not.toContain('local');
+      const [model] = withModelToolErrorNotes([
+        { role: 'user', parts: [onErrorPart.mock.lastCall![0]] },
+      ]);
+      expect(model.parts?.[0].functionResponse?.response?.['error']).toBe(
+        error,
+      );
+    },
+  );
 
   it.each([
     [

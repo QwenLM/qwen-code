@@ -27951,13 +27951,30 @@ describe('Session', () => {
             names.map((name, index) => ({
               id: `bridge-${index}`,
               name: core.ToolNames.TOOL_CALL,
-              args: { name, arguments: malformed ? [] : { index } },
+              args: {
+                name,
+                arguments: malformed ? `{"row":${index},}` : { index },
+              },
             })),
             toolLoopState,
           );
 
           expect(toolLoopState.loopDetected).toBe(expectLoop);
           expect(result.parts).toHaveLength(3);
+          if (malformed) {
+            const [model] = withModelToolErrorNotes([
+              { role: 'user', parts: result.parts },
+            ]);
+            for (const [index, part] of result.parts.entries()) {
+              const stored = part.functionResponse?.response?.['error'];
+              expect(stored).toContain('params/arguments must be object');
+              expect(stored).not.toContain('row');
+              const sent =
+                model.parts?.[index].functionResponse?.response?.['error'];
+              if (index < 2) expect(sent).toContain('<<HERE>>');
+              else expect(sent).toBe(stored);
+            }
+          }
           expect([...toolLoopState.invalidToolParamErrors]).toEqual(
             malformed
               ? [[core.ToolNames.TOOL_CALL, 3]]

@@ -18176,7 +18176,11 @@ export class Session implements SessionContext {
           opts.invalidToolParamsName ?? toolName,
           error,
         );
-      if (!loopDetected && opts.validationNote) {
+      if (
+        !activeToolAbortSignal.aborted &&
+        !loopDetected &&
+        opts.validationNote
+      ) {
         setModelToolErrorNote(errorParts[0], opts.validationNote);
         if (modelErrorParts !== errorParts) {
           copyModelToolErrorNote(errorParts[0], modelErrorParts[0]);
@@ -18280,6 +18284,7 @@ export class Session implements SessionContext {
           },
         );
       }
+      let validationNote: string | undefined;
       const resolution = await resolveDeferredToolCall(toolRegistry, args, {
         // Thread the real configured depth so the ACP frontend applies the
         // same depth-gated AgentTool re-admission as the terminal scheduler
@@ -18287,6 +18292,12 @@ export class Session implements SessionContext {
         // all three frontends (wenshao triage follow-up). Omitting it would
         // fail closed, not open, but the corner case should agree everywhere.
         maxSubagentDepth: this.config.getMaxSubagentDepth(),
+        onValidationNote:
+          !appExecution && !codeModeContext
+            ? (note) => {
+                validationNote = note;
+              }
+            : undefined,
       });
       const bridgeCancellation = cancelBeforeExecutionIfAborted(toolName);
       if (bridgeCancellation) return bridgeCancellation;
@@ -18298,6 +18309,7 @@ export class Session implements SessionContext {
           recordInvalidToolParams:
             resolution.errorType === ToolErrorType.INVALID_TOOL_PARAMS,
           invalidToolParamsName: resolution.targetName,
+          validationNote,
         });
       }
       toolName = resolution.tool.name;
