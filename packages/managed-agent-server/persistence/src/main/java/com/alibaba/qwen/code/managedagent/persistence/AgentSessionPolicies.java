@@ -500,9 +500,7 @@ final class AgentSessionPolicies {
                         Integer.class,
                         com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
                         com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
-                                .identity(
-                                        excludingOperationId == null ? "" : excludingOperationId));
+                        excludingOperationId == null ? "" : excludingOperationId);
         return (commands != null && commands > 0)
                 || (operations != null && operations > 0);
     }
