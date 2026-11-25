@@ -12,6 +12,7 @@ import {
 } from './extension-status.js';
 import {
   ExtensionManager,
+  withExtensionTurnDrainWait,
   parseBooleanEnvFlag,
   redactUrlCredentials,
   resolveExtensionTelemetryProxy,
@@ -279,6 +280,7 @@ export interface ExtensionsController {
       skillsOnly?: boolean;
       sessionIds?: readonly string[];
       deadlineMs?: number;
+      waitForTurnDrainMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
         generation: number,
@@ -592,6 +594,7 @@ export function createExtensionsController(
       skillsOnly?: boolean;
       sessionIds?: readonly string[];
       deadlineMs?: number;
+      waitForTurnDrainMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
         generation: number,
@@ -786,12 +789,21 @@ export function createExtensionsController(
           },
         };
         await extensionManager.refreshCache();
-        const event = await run(
-          extensionManager,
-          deadlineController.signal,
-          context,
-          operationId,
-        );
+        const perform = () =>
+          run(
+            extensionManager,
+            deadlineController.signal,
+            context,
+            operationId,
+          );
+        const event = options.waitForTurnDrainMs
+          ? await withExtensionTurnDrainWait(
+              options.waitForTurnDrainMs,
+              deadlineController.signal,
+              assertGenerationOpen,
+              perform,
+            )
+          : await perform();
         mutationEvent = event;
         if (deadline) clearTimeout(deadline);
         invalidateExtensionsStatus();
