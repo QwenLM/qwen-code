@@ -559,6 +559,8 @@ Some rule names automatically cover multiple tools:
 
 > [!note]
 > On Windows, an absolute path keeps its drive letter: `"Read(//D:/keys/**)"` and `"Read(D:/keys/**)"` both work, and either separator is accepted (`D:/keys/**` or `D:\keys/**`). A leading `/` on its own still means "relative to project root", as on every other platform.
+>
+> A network share or WSL folder keeps both of its own leading slashes on top of the `//` prefix, so `\\server\share\proj` is written as `"Read(///server/share/proj/**)"`. `"Read(//server/share/proj/**)"` would mean `/server/share/proj` on the local disk.
 
 **Shell command bypass prevention:**
 

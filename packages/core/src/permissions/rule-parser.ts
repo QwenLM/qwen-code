@@ -46,6 +46,18 @@ function isWindowsAbsolutePath(p: string): boolean {
 }
 
 /**
+ * Escapes the glob metacharacters picomatch would read in a literal path, so a
+ * directory named `Photos [2024]`, `share[1]` or `a|b` matches only itself.
+ * `|` matters most: a trailing one leaves an empty alternation branch that
+ * matches every path. Each character goes in a one-character class, because
+ * `resolvePathPattern` turns backslashes into separators and a backslash
+ * escape would not survive.
+ */
+function escapeGlobLiteral(p: string): string {
+  return p.replace(/[[\]?*{}()!+@|"]/g, (c) => `[${c}]`);
+}
+
+/**
  * No Windows file path starts with `/D:/` — drive paths begin at the drive
  * letter — so the separator the `//` grammar prefix leaves in front of one has
  * to go as well. POSIX roots (`/Users/alice`) are returned unchanged.
@@ -753,11 +765,41 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
         // slashes: persisting the bare `D:\proj/**` form left every "Always
         // Allow" rule unmatchable and re-prompted for the same directory
         // forever (#17802).
+        // The root is classified from the whole leading separator run, so
+        // every spelling of the same directory persists the same rule:
+        //  - A drive path (`D:\proj`, `D://proj`, `//D:/proj`) becomes
+        //    `//D:/proj/**`. A drive root keeps its separator (`//D://**`):
+        //    trimmed to `//D:/**`, the rule would cover the whole drive.
+        //  - A UNC path (`\\server\share`, or `//server/share` on Windows,
+        //    with any number of leading separators) keeps two of them:
+        //    `///server/share/**` resolves back to `//server/share/**`.
+        //  - Any other absolute path gets the `//` prefix. On POSIX `//tmp`
+        //    is just `/tmp`.
+        // Doubled separators inside the path are collapsed, and trailing
+        // ones (`dirname` keeps one on a share root) are dropped, so the rule
+        // matches the paths the tools produce and doesn't end in `//**`.
+        // Glob metacharacters in the directory name are escaped so the rule
+        // covers only that directory.
         const posixDir = toPosixPath(dirPath);
-        const specifier =
-          posixDir.startsWith('/') || isWindowsAbsolutePath(dirPath)
-            ? `//${posixDir.replace(/^\/+/, '')}/**`
-            : `${posixDir}/**`;
+        let lead = 0;
+        while (posixDir[lead] === '/') lead++;
+        let body = posixDir
+          .slice(lead)
+          .replace(/\/{2,}/g, '/')
+          .replace(/\/$/, '');
+        const isDrive = /^[A-Za-z]:(\/|$)/.test(body);
+        if (isDrive && body.length === 2) body = `${body}/`;
+        const isUnc =
+          !isDrive &&
+          lead >= 2 &&
+          body !== '' &&
+          (dirPath.startsWith('\\\\') || process.platform === 'win32');
+        const glob = escapeGlobLiteral(body);
+        const specifier = isUnc
+          ? `///${glob}/**`
+          : isDrive || lead > 0
+            ? `//${glob}/**`
+            : `${glob}/**`;
         return [`${displayName}(${specifier})`];
       }
       return [displayName];
@@ -831,6 +873,8 @@ function cleanPathSpecifier(specifier: string): string {
   let cleaned = specifier;
   // Remove trailing glob patterns like /** or /*
   cleaned = cleaned.replace(/\/\*\*$/, '/').replace(/\/\*$/, '/');
+  // Show escaped glob characters (`[[]`, `[|]`) as the plain character
+  cleaned = cleaned.replace(/\[(.)\]/g, '$1');
   // Convert rule grammar `//absolute` → `/absolute`
   if (cleaned.startsWith('//')) {
     cleaned = cleaned.substring(1);
@@ -1474,6 +1518,9 @@ function stripLeadingVariableAssignments(command: string): string {
  *
  * On Windows an absolute path keeps its drive letter: `D:/dir/**`,
  * `D:\dir/**` and `//D:/dir/**` all resolve to `D:/dir/**`.
+ * A UNC root keeps both of its own separators after the prefix:
+ * `///server/share/**` resolves to `//server/share/**`, while
+ * `//server/share/**` still means `/server/share/**`.
  */
 export function resolvePathPattern(
   specifier: string,
