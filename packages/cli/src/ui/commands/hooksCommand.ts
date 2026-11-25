@@ -42,7 +42,7 @@ const debugLogger = createDebugLogger('HOOKS_COMMAND');
 async function reloadHooksFromSettings(
   config: Config,
   settings: LoadedSettings,
-): Promise<void> {
+): Promise<Error | undefined> {
   const hookSystem = config.getHookSystem();
   if (!hookSystem) {
     return;
@@ -91,10 +91,11 @@ async function reloadHooksFromSettings(
     const paths = systemScopes
       .map((scope) => settings.forScope(scope).path)
       .join(', ');
-    throw new Error(
+    return new Error(
       `System settings could not be read (${paths}); hooks from them are unchanged, and other hook edits were applied.`,
     );
   }
+  return undefined;
 }
 
 /**
@@ -336,7 +337,10 @@ export const hooksCommand: SlashCommand = {
       const { config, settings } = context.services;
       if (config) {
         try {
-          await reloadHooksFromSettings(config, settings);
+          const systemReloadError = await reloadHooksFromSettings(
+            config,
+            settings,
+          );
           for (const warning of config.getHookSystem()?.getConfigWarnings() ??
             []) {
             context.ui.addItem(
@@ -344,6 +348,7 @@ export const hooksCommand: SlashCommand = {
               Date.now(),
             );
           }
+          if (systemReloadError) throw systemReloadError;
         } catch (error) {
           // The menu still opens on the hooks loaded so far.
           debugLogger.warn(`Failed to reload hooks for /hooks: ${error}`);

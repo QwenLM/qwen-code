@@ -279,7 +279,14 @@ describe('/hooks reload with real settings files', () => {
       fs.writeFileSync(settings[scope].path, malformed);
       fs.writeFileSync(
         settings.user.path,
-        JSON.stringify({ hooks: { PostToolUse: hook('echo edited') } }),
+        JSON.stringify({
+          hooks: {
+            PostToolUse: [
+              ...hook('echo edited'),
+              { hooks: [{ type: 'mcp_tool' }] },
+            ],
+          },
+        }),
       );
 
       expect(await hooksCommand.action!(context, '')).toEqual({
@@ -308,6 +315,13 @@ describe('/hooks reload with real settings files', () => {
       );
       expect(entries().some(({ eventName }) => eventName === 'Stop')).toBe(
         false,
+      );
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.WARNING,
+          text: 'Hook #1 in entry #2 for PostToolUse from user config has a missing or unsupported "type" and was skipped.',
+        },
+        expect.any(Number),
       );
       expect(context.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -382,7 +396,7 @@ describe('/hooks reload with real settings files', () => {
     await hooksCommand.action!(context, '');
 
     const warning =
-      'Hook "scan" for PreToolUse from project config has unsupported type "mcp_tool" and was skipped.';
+      'Hook #1 in entry #1 for PreToolUse from project config has a missing or unsupported "type" and was skipped.';
     expect(entries().some(({ eventName }) => eventName === 'PreToolUse')).toBe(
       false,
     );

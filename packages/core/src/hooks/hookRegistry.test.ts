@@ -13,6 +13,7 @@ import type {
 import { HookRegistry } from './hookRegistry.js';
 import { HookEventName, HooksConfigSource, HookType } from './types.js';
 import type { HookConfig, HookDefinition } from './types.js';
+import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 
 type HooksMap = Parameters<HookRegistry['addAgentHooks']>[0];
 interface Sources {
@@ -418,8 +419,8 @@ describe('HookRegistry', () => {
         ]);
         expect(registry.getAllHooks()).toHaveLength(0);
         expect(warnings()).toEqual([
-          'Hook "scan" for PreToolUse from user config has unsupported type "mcp_tool" and was skipped.',
-          'Hook "Verify the tests pass" for PreToolUse from user config has unsupported type "agent" and was skipped.',
+          'Hook #1 in entry #1 for PreToolUse from user config has a missing or unsupported "type" and was skipped.',
+          'Hook #2 in entry #1 for PreToolUse from user config has a missing or unsupported "type" and was skipped.',
         ]);
       });
 
@@ -429,20 +430,28 @@ describe('HookRegistry', () => {
         ]);
         expect(registry.getAllHooks()).toHaveLength(0);
         expect(warnings()).toEqual([
-          'Hook "audit" for PreToolUse from user config has no "url" and was skipped.',
+          'Hook #1 in entry #1 for PreToolUse from user config has no "url" and was skipped.',
         ]);
       });
 
-      it('skips a command hook with args, but not one with an empty list', async () => {
+      it('only skips command hooks with args other than an empty list', async () => {
         const registry = await register([
           { type: HookType.Command, command: 'node', args: ['check.js'] },
           { type: HookType.Command, command: '/hooks/check.sh', args: [] },
+          {
+            type: HookType.Http,
+            url: 'https://audit.example',
+            args: ['extra'],
+          },
+          { type: HookType.Prompt, prompt: 'Review', args: ['extra'] },
         ]);
         expect(registry.getAllHooks().map((e) => e.config)).toMatchObject([
           { command: '/hooks/check.sh' },
+          { url: 'https://audit.example' },
+          { prompt: 'Review' },
         ]);
         expect(warnings()).toEqual([
-          'Hook "node" for PreToolUse from user config uses "args", which Qwen Code does not support yet, and was skipped.',
+          'Hook #1 in entry #1 for PreToolUse from user config uses "args", which Qwen Code does not support yet, and was skipped.',
         ]);
       });
 
@@ -459,14 +468,40 @@ describe('HookRegistry', () => {
         ]);
         expect(registry.getAllHooks()).toHaveLength(2);
         expect(warnings()).toEqual([
-          'Hook "guard.sh" for PreToolUse from user config sets "onFailure", "if", "once", which Qwen Code does not support yet; ignored.',
+          'Hook #1 in entry #1 for PreToolUse from user config sets "onFailure", "if", "once", which Qwen Code does not support yet; ignored.',
         ]);
       });
 
-      it('strips control characters from the hook label', async () => {
-        await register([{ type: 'agent', prompt: 'bad\u0007\u0000name' }]);
+      it('keeps resolved hook values out of warnings and debug diagnostics', async () => {
+        const secret = 'synthetic-hook-credential';
+        const hooks = resolveEnvVarsInObject(
+          [
+            {
+              type: HookType.Command,
+              command: 'audit ${AUDIT_AUTH}',
+              args: ['x'],
+            },
+            {
+              type: HookType.Http,
+              url: 'https://a.test/${AUDIT_AUTH}',
+              onFailure: 'block',
+            },
+            { type: '${AUDIT_AUTH}', name: '${AUDIT_AUTH}' },
+          ],
+          { AUDIT_AUTH: secret },
+        );
+        expect(hooks[0]?.command).toContain(secret);
+        await register(hooks);
+        expect(warnings()).toHaveLength(3);
+        expect(JSON.stringify(warnings())).not.toContain(secret);
+        expect(JSON.stringify(debugWarn.mock.calls)).not.toContain(secret);
+      });
+
+      it('sanitizes and bounds an unknown event name', async () => {
+        const event = `Unknown\u0007${'x'.repeat(80)}`;
+        await init({ user: { [event]: [] } as HooksMap }, mockFeedbackEmitter);
         expect(warnings()).toEqual([
-          'Hook "badname" for PreToolUse from user config has unsupported type "agent" and was skipped.',
+          `Hook event "Unknown${'x'.repeat(53)}..." from user config is not supported and was skipped.`,
         ]);
       });
     });
