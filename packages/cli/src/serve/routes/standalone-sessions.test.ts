@@ -15,6 +15,7 @@ import {
   type ListStandaloneSessionsOptions,
   type StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
+import { SystemOverloadedError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { sendBridgeError } from '../server/error-response.js';
 import { InvalidCursorError } from '../server/session-list.js';
 import { registerStandaloneSessionRoutes } from './standalone-sessions.js';
@@ -155,6 +156,24 @@ describe('standalone session routes', () => {
     expect(response.body).toMatchObject({
       code: 'startup_config_rejected',
       error: 'unsupported effort',
+    });
+  });
+
+  it('returns 503 system_overloaded with Retry-After 15 for a load refusal', async () => {
+    const { app, service } = createHarness();
+    service.create.mockRejectedValueOnce(
+      new SystemOverloadedError('cpu_load', 2.5, 20),
+    );
+    const response = await request(app)
+      .post('/standalone/sessions')
+      .send({ sessionId })
+      .expect(503);
+    expect(response.headers['retry-after']).toBe('15');
+    expect(response.body).toMatchObject({
+      code: 'system_overloaded',
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 20,
     });
   });
 

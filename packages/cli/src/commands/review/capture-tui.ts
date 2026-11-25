@@ -101,6 +101,7 @@ import {
   writeStderrLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { refuseHostExecutionPhase } from './lib/sandboxed-exec.js';
 import {
   resolveOnPath,
   DEFAULT_COLS,
@@ -1305,6 +1306,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       return;
     }
     untilRe = r;
+  }
+
+  const sandboxRefusal = refuseHostExecutionPhase();
+  if (sandboxRefusal) {
+    refuse(sandboxRefusal);
+    return;
   }
 
   const server = captureServerName(process.pid, randomBytes(4).toString('hex'));

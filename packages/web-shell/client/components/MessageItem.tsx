@@ -74,6 +74,7 @@ interface MessageItemProps {
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   sendFailed?: boolean;
+  sendFailedStatus?: 'failed' | 'uncertain';
   onRetrySend?: () => void;
   /**
    * Open the in-place editor for this user message. Return `true` when a host
@@ -126,6 +127,7 @@ export const MessageItem = memo(function MessageItem({
   showRetryHint = false,
   onRetryClick,
   sendFailed = false,
+  sendFailedStatus,
   onRetrySend,
   onEditUserMessage,
   onDeleteMessage,
@@ -226,6 +228,7 @@ export const MessageItem = memo(function MessageItem({
             inputAnnotations={message.inputAnnotations}
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
+            sendFailedStatus={sendFailedStatus}
             onRetrySend={onRetrySend}
             editing={editingUserMessage}
             submittingEdit={submittingUserMessageEdit}
@@ -518,6 +521,7 @@ function areMessageItemPropsEqual(
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
   if (prev.sendFailed !== next.sendFailed) return false;
+  if (prev.sendFailedStatus !== next.sendFailedStatus) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
   if (prev.onDeleteMessage !== next.onDeleteMessage) return false;

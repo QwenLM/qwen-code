@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { LOADER_ALLOWED_ENVIRONMENT_KEYS } from '../utils/load-simple-git.js';
 import {
   checkForExtensionUpdate,
   cloneFromGit,
@@ -73,6 +74,15 @@ vi.mock('simple-git');
 describe('git extension helpers', () => {
   beforeEach(() => {
     vi.stubEnv('GITHUB_TOKEN', '');
+    // The simple-git loader enumerates the ambient indexed operator config
+    // (GIT_CONFIG_COUNT/KEY_n/VALUE_n/PARAMETERS — CI runners set these for
+    // safe.directory) into every client's allowlist, so clear it here: the
+    // pinned-options assertions must not depend on the runner's environment.
+    for (const key of Object.keys(process.env)) {
+      if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)$/i.test(key)) {
+        vi.stubEnv(key, undefined);
+      }
+    }
     resetLocalGitVersionCacheForTesting();
   });
 
@@ -284,6 +294,14 @@ describe('git extension helpers', () => {
       allowUnsafeProtocolOverride: true,
       allowUnsafeFsMonitor: true,
     },
+    // simple-git v4 throws on guarded env keys unless the client names them;
+    // the loader unions in the keys gitEnv() restores.
+    allowEnvironment: [
+      ...LOADER_ALLOWED_ENVIRONMENT_KEYS,
+      'GIT_CONFIG_NOSYSTEM',
+      'GIT_CONFIG_GLOBAL',
+      'GIT_TERMINAL_PROMPT',
+    ],
   };
   const CREDENTIALED_UNSAFE = {
     allowUnsafeConfigPaths: true,
@@ -348,6 +366,7 @@ describe('git extension helpers', () => {
         abort: controller.signal,
         config: ['core.fsmonitor=', 'log.showSignature=false'],
         unsafe: { allowUnsafeFsMonitor: true },
+        allowEnvironment: LOADER_ALLOWED_ENVIRONMENT_KEYS,
       });
       expect(mockGit.clone).toHaveBeenCalledWith(myRepo, './', cloneArgs(true));
       expect(mockGit.getRemotes).toHaveBeenCalledWith(true);
@@ -388,7 +407,19 @@ describe('git extension helpers', () => {
 
       await cloneOrigin({ source: githubRepo, networkPolicy: 'public' });
 
-      expect(simpleGit).toHaveBeenLastCalledWith('/dest', PINNED_GIT_OPTIONS);
+      expect(simpleGit).toHaveBeenLastCalledWith('/dest', {
+        ...PINNED_GIT_OPTIONS,
+        allowEnvironment: [
+          ...LOADER_ALLOWED_ENVIRONMENT_KEYS,
+          // The stubbed ambient GIT_CONFIG_COUNT is enumerated into the
+          // loader's allowance — permits-only, so the restricted child
+          // environment below still never carries it.
+          'git_config_count',
+          'GIT_CONFIG_NOSYSTEM',
+          'GIT_CONFIG_GLOBAL',
+          'GIT_TERMINAL_PROMPT',
+        ],
+      });
       expect(mockGit.env).toHaveBeenCalledWith(
         expect.objectContaining({
           GIT_CONFIG_NOSYSTEM: '1',

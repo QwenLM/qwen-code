@@ -104,19 +104,30 @@ new members from starting. Existing persisted scan/cache bounds remain in force.
 
 Even an unfiltered batch member uses the full persisted catalog to sort the
 merged rows before slicing the page. On a cold cache, each member scans up to
-50,000 persisted summaries. Once the page is selected, the daemon reads worktree,
-PR binding, and artifact summary sidecars for its persisted rows and PR binding
-sidecars for its live-only rows. These fields do not affect page membership or
-the cursor. Persisted rows reuse completed sidecar reads and share in-progress
-reads for the lifetime of the same cached summary. Cancelling one request releases
-its wait without cancelling a read another request still needs. Sidecars for a
-row first requested on a later page reflect the disk state at that row's first read.
+50,000 persisted summaries. The catalog reader opens an ordinary transcript
+once to share bounded head and tail reads across the prompt, source and title.
+Short files share a single read. Managed, ambiguous or concurrently modified
+transcripts use the existing compatible reader. The catalog reopens those
+transcripts safely and uses the verified descriptor for the JSONL stream and
+the legacy source scan. The legacy paginated reader and
+its transcript-derived title fallback retain their existing behavior.
+The catalog reader skips non-regular files and entries whose identity cannot be
+verified by the safe open helper, including symlinks.
+
+Once the page is selected, the daemon reads worktree, PR binding, artifact
+summary and Goal sidecars for its persisted rows and PR binding sidecars for its
+live-only rows. These fields do not affect page membership or the cursor.
+Persisted rows reuse completed sidecar reads and share in-progress reads for the
+lifetime of the same cached summary. Cancelling one request releases its wait
+without cancelling a read another request still needs. Sidecars for a row first
+requested on a later page reflect the disk state at that row's first read.
 
 The persisted snapshot cache is shared with organized reads and expires after
 two seconds. In contrast, the legacy unfiltered GET reads only its bounded
 persisted page (up to 100 rows). Batching reduces HTTP round trips and limits the
-three deferred sidecar reads to page rows. The underlying summary scan and Goal
-projection still cover the catalog.
+four deferred sidecar reads to page rows. The underlying summary scan still
+covers the catalog. DAC uses the same catalog request and response; all source
+changes for these optimizations are confined to Qwen Code.
 
 Add a dedicated route module, reuse the existing session-list and organization
 services, and extract only the pure workspace selector resolution from its HTTP
@@ -130,9 +141,11 @@ With primary and two secondary workspaces, one request returns independently
 owned pages and optional group catalogs. Test subset isolation, source/archive/
 organization filters, pagination, missing and removed entries, generation changes,
 trust behavior, internal exclusion, malformed requests, concurrency, size limits,
-and disconnect cancellation. Verify that only returned rows trigger the three
+and disconnect cancellation. Verify that only returned rows trigger the four
 deferred sidecar reads and that a continuation page preserves sidecar fields,
-live field precedence, and cursor ordering. Verify that existing qualified-route
+live field precedence, and cursor ordering. Compare baseline, Goal-only,
+transcript-only, and combined builds using the same DAC-shaped inputs, measuring
+first reads, cache hits and expired snapshots. Verify that existing qualified-route
 resolution still passes its tests. SDK tests cover serialization, response/error
 preservation, and a single HTTP request. Run build, typecheck, focused tests, and
 a global-CLI baseline followed by local-bundle E2E verification. Review the

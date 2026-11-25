@@ -58,6 +58,9 @@ fetchRetryMaxtimeout: 120000
 fetchTimeout: 300000
 
 overrides:
+  proxy-addr: '^2.0.8'
+  follow-redirects: '^1.16.2'
+  shell-quote: '^1.12.0'
   'glob@10 || 13': '14.0.6'
   'minimatch@9 || 10': '11.0.8'
   qs: '6.17.1'
