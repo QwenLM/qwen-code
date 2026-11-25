@@ -1,0 +1,98 @@
+name: '#18353 Hosted MySQL acceptance'
+on:
+  push:
+    branches: ['ci/18353-hosted-acceptance']
+permissions:
+  contents: read
+jobs:
+  hosted:
+    name: Hosted process acceptance / Linux / MySQL 8.4 / Java 21
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_DATABASE: hosted_harness_test
+          MYSQL_ROOT_PASSWORD: hosted-fixture
+        ports:
+          - '3306/tcp'
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -phosted-fixture"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 'd8c6f0804fc32fd60550b91b2b0936de17572ff4'
+          persist-credentials: false
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: |-
+            packages/sdk-java/**/pom.xml
+            packages/managed-agent-server/**/pom.xml
+          settings-path: '${{ runner.temp }}/setup-java-m2'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Build packaged CLI
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          test -s dist/cli.js
+          test "$(git rev-parse HEAD)" = 'd8c6f0804fc32fd60550b91b2b0936de17572ff4'
+      - name: Install matching Java SDK
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: mvn -B -ntp -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+      - name: Verify Shell and Hooks + MCP with real processes
+        working-directory: packages/managed-agent-server
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+          QWEN_MANAGED_HOOK_CGROUP_ROOT: '/sys/fs/cgroup/18353-hosted'
+        run: |
+          sudo mkdir -p "$QWEN_MANAGED_HOOK_CGROUP_ROOT"
+          sudo chown "$(id -u):$(id -g)" "$QWEN_MANAGED_HOOK_CGROUP_ROOT"
+          test -f "$QWEN_MANAGED_HOOK_CGROUP_ROOT/cgroup.kill"
+          echo $$ | sudo tee "$QWEN_MANAGED_HOOK_CGROUP_ROOT/cgroup.procs"
+          mvn -B -ntp -Phosted-harness-mysql \
+            '-Dit.test=HostedExtensionsIT#hooksAndMcpApprovalResumesOnTheSameOwnerAfterParkingAndHarnessReplacementOnMySql,HostedPublicWorkspaceIT#versionZeroShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql+publicChildrenShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql' \
+            -Dnode.executable="$(command -v node)" \
+            -Dqwen.cli.entry="$GITHUB_WORKSPACE/dist/cli.js" \
+            -Dmysql.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.user=root -Dmysql.password=hosted-fixture verify
+      - name: Confirm every requested case executed
+        run: |
+          python3 - <<'PY'
+          from collections import Counter
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          root = Path('packages/managed-agent-server/verification/target/failsafe-reports')
+          expected = {
+              'hooksAndMcpApprovalResumesOnTheSameOwnerAfterParkingAndHarnessReplacementOnMySql': 1,
+              'versionZeroShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql': 4,
+              'publicChildrenShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql': 5,
+          }
+          cases = Counter()
+          for path in root.glob('TEST-*.xml'):
+              for case in ET.parse(path).getroot().findall('testcase'):
+                  for method in expected:
+                      if case.attrib['name'].split('(')[0] == method:
+                          assert all(case.find(kind) is None for kind in ('error', 'failure', 'skipped')), case.attrib
+                          cases[method] += 1
+          print(dict(cases))
+          assert cases == Counter(expected), (cases, expected)
+          PY
+      - name: Upload Failsafe reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hosted-mysql-reports
+          path: packages/managed-agent-server/verification/target/failsafe-reports
+
