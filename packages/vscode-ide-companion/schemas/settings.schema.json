@@ -884,7 +884,35 @@
             "xhigh",
             "max"
           ],
-          "description": "How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at \"high\"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default."
+          "description": "Default thinking effort for models without a saved effort. Each provider maps it to the tiers it supports. Leave unset to use the model/provider default."
+        },
+        "preferences": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "reasoning": {
+                "type": "object",
+                "properties": {
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ]
+                  }
+                }
+              },
+              "contextWindow": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "description": "Saved reasoning effort and context window per model route."
         },
         "catalogRefresh": {
           "description": "Download the models.dev model catalog in the background at most once every 24 hours. Disable it in managed installations that must not contact models.dev; the bundled and previously downloaded catalog data remain available. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. QWEN_CODE_MODELS_DEV_REFRESH=off in the process environment still wins, and disabling privacy.usageStatisticsEnabled also disables the refresh.",
