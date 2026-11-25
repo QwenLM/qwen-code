@@ -1,0 +1,47 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ContextWindowPanel > keeps both tabs and the TUI skill-share denominator stable > context-window-tab 1`] = `
+" Context ·  Context Window   Skills
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  context-fixture-model · 100K context
+  Prompt: default · full
+  ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 25%
+
+
+  Estimated usage by category (local approximation)
+  ⊙ System prompt:    4%
+  ⊙ System tools:     2%
+  ⊙ Skills:           0.4%
+  ⊙ Messages:         5.5%
+  ⊙ Other:            0.1%
+  ○ Free space:       55%
+  ⊗ Autocompact       20%
+
+  ⚠  Duplicate file reads
+    …/src/a.ts × 3 reads
+
+  Session stats
+    Messages:         6
+    Prompts:          2
+    Tool calls:       4 (3 ok / 1 fail)
+    Lines changed:    +12 / -5
+
+
+ Tab/←→ switch · Esc back
+"
+`;
+
+exports[`ContextWindowPanel > keeps both tabs and the TUI skill-share denominator stable > skills-tab 1`] = `
+" Context ·  Context Window   Skills
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Project
+   └ large-skill — 75%
+
+  User
+   └ small-skill — 25%
+
+
+ Tab/←→ switch · Esc back
+"
+`;
