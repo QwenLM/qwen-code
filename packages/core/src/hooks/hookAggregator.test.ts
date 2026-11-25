@@ -745,6 +745,58 @@ describe('HookAggregator', () => {
       expect(finalOutput.isDenied()).toBe(true);
     });
 
+    // An exit-2 hook is converted to a top-level `decision: 'deny'` with the
+    // stderr as `reason`, and no hookSpecificOutput (hookRunner).
+    const exit2Output: HookOutput = {
+      decision: 'deny',
+      reason: 'guard-hook: BLOCKED',
+    };
+
+    it.each([
+      ['exit-2 first', [exit2Output, preToolUseOutput('allow', 'allow-hook')]],
+      ['exit-2 last', [preToolUseOutput('allow', 'allow-hook'), exit2Output]],
+    ])(
+      'an exit-2 block wins over another hook’s allow (%s)',
+      (_order, outputs) => {
+        const finalOutput = aggregatePreToolUse(outputs)
+          .finalOutput as PreToolUseHookOutput;
+        expect(finalOutput.isDenied()).toBe(true);
+        expect(finalOutput.getPermissionDecisionReason()).toBe(
+          'guard-hook: BLOCKED',
+        );
+      },
+    );
+
+    it('a legacy top-level block wins over another hook’s allow', () => {
+      const finalOutput = aggregatePreToolUse([
+        { decision: 'block', reason: 'legacy-hook: BLOCK' },
+        preToolUseOutput('allow', 'allow-hook'),
+      ]).finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.isDenied()).toBe(true);
+    });
+
+    it('a top-level ask survives a hook that prints plain text', () => {
+      // Plain-text stdout on exit 0 becomes a top-level `decision: 'allow'`.
+      const finalOutput = aggregatePreToolUse([
+        { decision: 'ask', reason: 'ask-hook: CONFIRM' },
+        { decision: 'allow' },
+      ]).finalOutput as PreToolUseHookOutput;
+      expect(finalOutput.isAsk()).toBe(true);
+      expect(finalOutput.getPermissionDecisionReason()).toBe(
+        'ask-hook: CONFIRM',
+      );
+    });
+
+    it('a top-level allow is not promoted to a permissionDecision', () => {
+      const result = aggregatePreToolUse([
+        { decision: 'allow' },
+        { decision: 'allow' },
+      ]);
+      expect(
+        result.finalOutput?.hookSpecificOutput?.['permissionDecision'],
+      ).toBeUndefined();
+    });
+
     it('deny wins over ask', () => {
       const result = aggregatePreToolUse([
         preToolUseOutput('ask', 'ask-hook: ASK'),

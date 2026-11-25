@@ -202,32 +202,45 @@ export class HookAggregator {
       // Extract additional context
       this.extractAdditionalContext(output, additionalContexts);
 
-      // Collect other hookSpecificOutput fields (later values win)
-      if (output.hookSpecificOutput) {
-        // PreToolUse permission decisions aggregate most-restrictive-first
-        // (deny > ask > allow), independent of hook completion/config order.
-        if (isPreToolUse) {
-          const decision = output.hookSpecificOutput['permissionDecision'];
-          if (
-            decision === 'allow' ||
-            decision === 'ask' ||
-            decision === 'deny'
-          ) {
-            const rank = PERMISSION_DECISION_RANK[decision];
-            if (rank > winningPermissionRank) {
-              winningPermissionRank = rank;
-              winningPermissionDecision = decision;
-              winningPermissionReasons.length = 0;
-            }
-            if (rank === winningPermissionRank) {
-              const reason =
-                output.hookSpecificOutput['permissionDecisionReason'];
-              if (typeof reason === 'string' && reason.length > 0) {
-                winningPermissionReasons.push(reason);
-              }
+      // PreToolUse permission decisions aggregate most-restrictive-first
+      // (deny > ask > allow), independent of hook completion/config order.
+      // Each hook's decision is read the way PreToolUseHookOutput reads a
+      // single hook: hookSpecificOutput.permissionDecision first, then a
+      // restrictive top-level `decision`. An exit-2 hook only sets the
+      // top-level `decision: 'deny'`; ranking hookSpecificOutput alone let
+      // another hook's `permissionDecision: 'allow'` override that block.
+      // A top-level allow is not ranked: plain-text output becomes one.
+      if (isPreToolUse) {
+        const specific = output.hookSpecificOutput?.['permissionDecision'];
+        const isSpecific =
+          specific === 'allow' || specific === 'ask' || specific === 'deny';
+        const decision: 'allow' | 'ask' | 'deny' | undefined = isSpecific
+          ? specific
+          : output.decision === 'block' || output.decision === 'deny'
+            ? 'deny'
+            : output.decision === 'ask'
+              ? 'ask'
+              : undefined;
+        if (decision !== undefined) {
+          const rank = PERMISSION_DECISION_RANK[decision];
+          if (rank > winningPermissionRank) {
+            winningPermissionRank = rank;
+            winningPermissionDecision = decision;
+            winningPermissionReasons.length = 0;
+          }
+          if (rank === winningPermissionRank) {
+            const reason = isSpecific
+              ? output.hookSpecificOutput?.['permissionDecisionReason']
+              : output.reason;
+            if (typeof reason === 'string' && reason.length > 0) {
+              winningPermissionReasons.push(reason);
             }
           }
         }
+      }
+
+      // Collect other hookSpecificOutput fields (later values win)
+      if (output.hookSpecificOutput) {
         for (const [key, value] of Object.entries(output.hookSpecificOutput)) {
           if (key === 'artifacts' && Array.isArray(value)) {
             const validArtifacts = value.filter(isToolArtifactLike);
