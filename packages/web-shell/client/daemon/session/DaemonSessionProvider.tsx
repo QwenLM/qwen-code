@@ -1041,6 +1041,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   availabilityRef.current = availabilityController;
   const resolvedBaseUrl = baseUrl ?? workspace?.baseUrl;
   const resolvedToken = token ?? workspace?.token;
+  const resolveSessionClient = useCallback(() => {
+    const adapter = sessionAdapterRef.current;
+    return (
+      workspaceClientRef.current ??
+      (adapter
+        ? adapter.createClient(
+            { baseUrl: resolvedBaseUrl!, token: resolvedToken },
+            DaemonClient,
+          )
+        : createDaemonClient({
+            baseUrl: resolvedBaseUrl!,
+            token: resolvedToken,
+          }))
+    );
+  }, [resolvedBaseUrl, resolvedToken]);
   const sessionContextResolution = useMemo(() => {
     try {
       return {
@@ -2075,18 +2090,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         await Promise.resolve();
         if (disposed) return;
       }
-      const currentAdapter = sessionAdapterRef.current;
-      const client =
-        workspaceClientRef.current ??
-        (currentAdapter
-          ? currentAdapter.createClient(
-              { baseUrl: resolvedBaseUrl!, token: resolvedToken },
-              DaemonClient,
-            )
-          : createDaemonClient({
-              baseUrl: resolvedBaseUrl!,
-              token: resolvedToken,
-            }));
+      const client = resolveSessionClient();
       const restoreStandaloneSession = async (
         id: string,
         request: RestoreStandaloneSessionRequest,
@@ -5466,6 +5470,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     turnNotifications,
     resolvedBaseUrl,
     resolvedToken,
+    resolveSessionClient,
     resolveGeneratedUiScope,
     sessionEffectContext,
     hasSessionAdapter,
@@ -5795,17 +5800,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         },
         createDetachedStandaloneSession: (overrides) => {
           const adapter = sessionAdapterRef.current;
-          const client =
-            workspaceClientRef.current ??
-            (adapter
-              ? adapter.createClient(
-                  { baseUrl: resolvedBaseUrl!, token: resolvedToken },
-                  DaemonClient,
-                )
-              : createDaemonClient({
-                  baseUrl: resolvedBaseUrl!,
-                  token: resolvedToken,
-                }));
+          const client = resolveSessionClient();
           const approvalMode = resolveStandaloneApprovalMode(
             overrides?.approvalMode ??
               createSessionRequestRef.current?.approvalMode,
@@ -5905,6 +5900,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       clientId,
       resolvedBaseUrl,
       resolvedToken,
+      resolveSessionClient,
       restartEventStreamOnPrompt,
       settleAdmittedPrompt,
       turnNotifications,

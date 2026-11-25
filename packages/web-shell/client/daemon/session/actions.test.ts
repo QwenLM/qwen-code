@@ -36,6 +36,7 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types';
+import type { WebShellSessionAdapter } from './session-adapter';
 
 describe('Generated UI action invalidation', () => {
   it('revokes the cleared session before waiting for detach', async () => {
@@ -7880,6 +7881,7 @@ function createActionsHarness(
     settleRestoredActivePrompt?: ReturnType<typeof vi.fn>;
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
+    sessionAdapter?: WebShellSessionAdapter;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreSessionContext?: ReturnType<typeof vi.fn>;
@@ -7930,6 +7932,7 @@ function createActionsHarness(
   const actions = createDaemonSessionActions({
     store: store as never,
     sessionRef,
+    sessionAdapter: opts.sessionAdapter,
     activePromptsRef,
     settledPromptsRef,
     pendingSessionLoadRef,
@@ -9751,5 +9754,67 @@ describe('sendPrompt idempotent admission auto-retry', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('sessionAdapter sendPrompt surfaces stream failure without retrying and settles on turn completion', async () => {
+    const session = Object.assign(createMockSession('sa-prompt'), {
+      restoreStrategy: { kind: 'standalone' as const },
+      waitForEventStream: vi.fn().mockResolvedValue(undefined),
+    });
+    const submitPrompt = vi.fn<WebShellSessionAdapter['submitPrompt']>();
+    const sessionAdapter: WebShellSessionAdapter = {
+      createClient: () => session.client as unknown as DaemonClient,
+      create: async () => session as unknown as DaemonSessionClient,
+      load: async () => session as unknown as DaemonSessionClient,
+      submitPrompt,
+    };
+    const addNotice = vi.fn();
+    const { actions, activePromptsRef, store } = createActionsHarness({
+      session,
+      sessionAdapter,
+      addNotice,
+      connection: {
+        status: 'connected',
+        sessionId: 'sa-prompt',
+        sessionContext: { kind: 'standalone' },
+      },
+    });
+
+    const failing = createDeferred<void>();
+    submitPrompt.mockResolvedValueOnce({
+      promptId: 'p-fail',
+      completion: failing.promise,
+    });
+    const failedTurn = actions.sendPrompt('hello', {
+      idempotencyKey: 'idem-adapter',
+    });
+    await vi.waitFor(() =>
+      expect(activePromptsRef.current.get('sa-prompt')?.reject).toBeDefined(),
+    );
+    failing.reject(new Error('stream interrupted'));
+
+    await expect(failedTurn).rejects.toThrow('stream interrupted');
+    expect(submitPrompt).toHaveBeenCalledTimes(1);
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'send_prompt' }),
+    );
+
+    const hanging = createDeferred<void>();
+    submitPrompt.mockResolvedValueOnce({
+      promptId: 'p-ok',
+      completion: hanging.promise,
+    });
+    const okTurn = actions.sendPrompt('follow up');
+    await vi.waitFor(() =>
+      expect(activePromptsRef.current.get('sa-prompt')?.resolve).toBeDefined(),
+    );
+    activePromptsRef.current
+      .get('sa-prompt')
+      ?.resolve?.({ stopReason: 'end_turn' });
+
+    await expect(okTurn).resolves.toEqual({ stopReason: 'end_turn' });
+    hanging.reject(new Error('late close'));
+    await Promise.resolve();
   });
 });
