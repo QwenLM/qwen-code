@@ -58,6 +58,14 @@ export interface TokenUsageRecord {
   apiDurationMs: number;
 }
 
+/**
+ * Query/export summary counters (`queryTokenUsage`, JSON/CSV exports).
+ * Deliberately preserves raw provider-reported `outputTokens` and
+ * `thoughtsTokens` columns while normalizing `totalTokens` to count reasoning
+ * once according to each record's `authType`. By contrast,
+ * `TokenUsageDayModelTotals` normalizes `outputTokens` into billing output so
+ * dashboard and `/stats` surfaces satisfy `inputTokens + outputTokens === totalTokens`.
+ */
 export interface TokenUsageTotals {
   requests: number;
   inputTokens: number;
@@ -323,7 +331,12 @@ async function readRecordsForMonth(month: string): Promise<TokenUsageRecord[]> {
   return valid;
 }
 
-/** One local day's counters for one model, summed over that day's requests. */
+/**
+ * One local day's counters for one model, summed over that day's requests.
+ * `outputTokens` is normalized to billing output (including `thoughtsTokens`
+ * for providers that report reasoning separately) so dashboard and `/stats`
+ * breakdowns sum to `totalTokens`.
+ */
 export interface TokenUsageDayModelTotals {
   requests: number;
   inputTokens: number;

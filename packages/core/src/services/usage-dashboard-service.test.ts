@@ -5513,6 +5513,112 @@ describe('loadUsageDashboard', () => {
     expect(Object.keys(dash.heatmap)).toEqual([dayKey(now)]);
   });
 
+  it('assigns persisted recordings to roots asynchronously without statSync and bounds stat concurrency', async () => {
+    const now = Date.now();
+    const rootA = path.join(tmpHome, 'runtime-async-a');
+    const rootB = path.join(tmpHome, 'runtime-async-b');
+    const project = path.join(tmpHome, 'proj-async');
+    fs.mkdirSync(rootA, { recursive: true });
+    fs.mkdirSync(rootB, { recursive: true });
+    fs.mkdirSync(project, { recursive: true });
+
+    const records: UsageSummaryRecord[] = [];
+    for (let i = 0; i < 24; i++) {
+      const sessionId = `async-sess-${i}`;
+      const ownerRoot = i % 2 === 0 ? rootA : rootB;
+      const file = new SessionService(project, {
+        runtimeBaseDir: ownerRoot,
+      }).getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          uuid: `u-${i}`,
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date(now - 2_000).toISOString(),
+          type: 'user',
+          cwd: project,
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: `hi ${i}` }] },
+        }) + '\n',
+      );
+      records.push({
+        ...rec({
+          sessionId,
+          project,
+          timestamp: now,
+          startTime: now - 1_000,
+          model: {
+            requests: 1,
+            inputTokens: 100,
+            outputTokens: 50,
+            totalTokens: 150,
+          },
+        }),
+        runScoped: true,
+      });
+    }
+    seed(records);
+
+    const isTargetTranscript = (target: fs.PathLike): boolean =>
+      /async-sess-\d+\.jsonl$/.test(String(target));
+    const origStat = fs.promises.stat.bind(fs.promises);
+    const statSyncSpy = vi.spyOn(fs, 'statSync');
+    let asyncStatCalls = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let statSyncDuringRootAssignment = 0;
+    const statSpy = vi.spyOn(fs.promises, 'stat').mockImplementation((async (
+      target: fs.PathLike,
+      ...rest: unknown[]
+    ) => {
+      if (isTargetTranscript(target)) {
+        asyncStatCalls++;
+        statSyncDuringRootAssignment = Math.max(
+          statSyncDuringRootAssignment,
+          statSyncSpy.mock.calls.filter(([p]) => isTargetTranscript(p)).length,
+        );
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          return await (
+            origStat as (p: fs.PathLike, ...a: unknown[]) => Promise<fs.Stats>
+          )(target, ...rest);
+        } finally {
+          inFlight--;
+        }
+      }
+      return (
+        origStat as (p: fs.PathLike, ...a: unknown[]) => Promise<fs.Stats>
+      )(target, ...rest);
+    }) as typeof fs.promises.stat);
+
+    try {
+      const sources = await loadUsageDashboardSources([rootA, rootB]);
+      expect(asyncStatCalls).toBeGreaterThanOrEqual(24);
+      expect(statSyncDuringRootAssignment).toBe(0);
+      expect(maxInFlight).toBeGreaterThan(1);
+      expect(maxInFlight).toBeLessThanOrEqual(16);
+
+      const scopeA = sources.runtimeScopes?.find((s) =>
+        s.records.some((r) => r.sessionId === 'async-sess-0'),
+      );
+      const scopeB = sources.runtimeScopes?.find((s) =>
+        s.records.some((r) => r.sessionId === 'async-sess-1'),
+      );
+      expect(scopeA).toBeDefined();
+      expect(scopeB).toBeDefined();
+      expect(scopeA).not.toBe(scopeB);
+      expect(scopeA?.records.map((r) => r.sessionId)).toHaveLength(12);
+      expect(scopeB?.records.map((r) => r.sessionId)).toHaveLength(12);
+    } finally {
+      statSpy.mockRestore();
+      statSyncSpy.mockRestore();
+    }
+  });
+
   it('returns zeros for an empty history', async () => {
     const dash = await loadUsageDashboard();
     expect(dash.summary.totalTokens).toBe(0);

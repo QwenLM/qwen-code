@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   getRequestExecutionIds,
   getSuccessfulRequestExecutionIds,
+  MAX_TRACKED_EXECUTION_IDS,
   UiTelemetryService,
   MAIN_SOURCE,
   MAX_FAILURE_SAMPLES,
@@ -2195,5 +2196,66 @@ describe('UiTelemetryService live usage accounting', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('caps tracked execution id sets at MAX_TRACKED_EXECUTION_IDS and preserves overflow across replay snapshots', () => {
+    for (let i = 0; i < MAX_TRACKED_EXECUTION_IDS; i++) {
+      service.addEvent(
+        apiResponse('m', 1, [1, 1, 2, 0, 0], { execution_id: `exec-${i}` }),
+        'long-session',
+      );
+    }
+    // Re-recording an already-tracked id does not trigger overflow.
+    service.addEvent(
+      apiResponse('m', 1, [1, 1, 2, 0, 0], { execution_id: 'exec-0' }),
+      'long-session',
+    );
+    expect(getRequestExecutionIds(service.getLiveMetrics())?.size).toBe(
+      MAX_TRACKED_EXECUTION_IDS,
+    );
+    expect(
+      getSuccessfulRequestExecutionIds(service.getLiveMetrics())?.size,
+    ).toBe(MAX_TRACKED_EXECUTION_IDS);
+
+    // One additional distinct id overflows and drops both sets cleanly.
+    service.addEvent(
+      apiResponse('m', 1, [1, 1, 2, 0, 0], { execution_id: 'exec-overflow' }),
+      'long-session',
+    );
+    expect(getRequestExecutionIds(service.getLiveMetrics())).toBeUndefined();
+    expect(
+      getSuccessfulRequestExecutionIds(service.getLiveMetrics()),
+    ).toBeUndefined();
+    expect(getRequestExecutionIds(service.getMetrics())).toBeUndefined();
+    expect(
+      getRequestExecutionIds(service.getMetricsForSession('long-session')),
+    ).toBeUndefined();
+
+    // Snapshot/restore preserves overflowed state so clones never resurrect a partial set.
+    const snapshot = service.snapshotForReplay('other', 'long-session');
+    service.restoreFromReplaySnapshot(snapshot);
+    service.addEvent(
+      apiResponse('m', 1, [1, 1, 2, 0, 0], {
+        execution_id: 'exec-after-restore',
+      }),
+      'long-session',
+    );
+    expect(getRequestExecutionIds(service.getLiveMetrics())).toBeUndefined();
+    expect(
+      getSuccessfulRequestExecutionIds(service.getLiveMetrics()),
+    ).toBeUndefined();
+
+    // Resetting live metrics starts a fresh bounded bucket.
+    service.resetLiveMetrics();
+    service.addEvent(
+      apiResponse('m', 1, [1, 1, 2, 0, 0], { execution_id: 'exec-fresh' }),
+      'long-session',
+    );
+    expect(getRequestExecutionIds(service.getLiveMetrics())).toEqual(
+      new Set(['exec-fresh']),
+    );
+    expect(getSuccessfulRequestExecutionIds(service.getLiveMetrics())).toEqual(
+      new Set(['exec-fresh']),
+    );
   });
 });

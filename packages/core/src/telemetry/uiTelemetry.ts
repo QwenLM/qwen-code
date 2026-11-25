@@ -262,11 +262,17 @@ const createInitialModelMetrics = (): ModelMetrics => ({
  * for every `bySource` map it touches. Every snapshot/restore clone goes
  * through here so the guard survives a replay rollback.
  */
+export const MAX_TRACKED_EXECUTION_IDS = 10_000;
+
 const executionIdsByMetrics = new WeakMap<SessionMetrics, Set<string>>();
 const successfulExecutionIdsByMetrics = new WeakMap<
   SessionMetrics,
   Set<string>
 >();
+// Once a long-lived session exceeds MAX_TRACKED_EXECUTION_IDS distinct ids,
+// drop both sets and fall back to conservative matching rather than retaining
+// an unbounded set or exposing a truncated partial id list.
+const executionIdsOverflowed = new WeakSet<SessionMetrics>();
 
 export function getRequestExecutionIds(
   metrics: SessionMetrics,
@@ -280,18 +286,35 @@ export function getSuccessfulRequestExecutionIds(
   return successfulExecutionIdsByMetrics.get(metrics);
 }
 
+function overflowExecutionIds(metrics: SessionMetrics): void {
+  executionIdsOverflowed.add(metrics);
+  executionIdsByMetrics.delete(metrics);
+  successfulExecutionIdsByMetrics.delete(metrics);
+}
+
 function recordRequestExecutionId(
   metrics: SessionMetrics,
   executionId: string | undefined,
   successful = false,
 ): void {
-  if (!executionId) return;
+  if (!executionId || executionIdsOverflowed.has(metrics)) return;
   const ids = executionIdsByMetrics.get(metrics) ?? new Set<string>();
+  if (!ids.has(executionId) && ids.size >= MAX_TRACKED_EXECUTION_IDS) {
+    overflowExecutionIds(metrics);
+    return;
+  }
   ids.add(executionId);
   executionIdsByMetrics.set(metrics, ids);
   if (successful) {
     const successfulIds =
       successfulExecutionIdsByMetrics.get(metrics) ?? new Set<string>();
+    if (
+      !successfulIds.has(executionId) &&
+      successfulIds.size >= MAX_TRACKED_EXECUTION_IDS
+    ) {
+      overflowExecutionIds(metrics);
+      return;
+    }
     successfulIds.add(executionId);
     successfulExecutionIdsByMetrics.set(metrics, successfulIds);
   }
@@ -299,13 +322,20 @@ function recordRequestExecutionId(
 
 const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
   const clone = structuredClone(metrics);
-  const executionIds = executionIdsByMetrics.get(metrics);
-  if (executionIds) {
-    executionIdsByMetrics.set(clone, new Set(executionIds));
-  }
-  const successfulExecutionIds = successfulExecutionIdsByMetrics.get(metrics);
-  if (successfulExecutionIds) {
-    successfulExecutionIdsByMetrics.set(clone, new Set(successfulExecutionIds));
+  if (executionIdsOverflowed.has(metrics)) {
+    executionIdsOverflowed.add(clone);
+  } else {
+    const executionIds = executionIdsByMetrics.get(metrics);
+    if (executionIds) {
+      executionIdsByMetrics.set(clone, new Set(executionIds));
+    }
+    const successfulExecutionIds = successfulExecutionIdsByMetrics.get(metrics);
+    if (successfulExecutionIds) {
+      successfulExecutionIdsByMetrics.set(
+        clone,
+        new Set(successfulExecutionIds),
+      );
+    }
   }
   clone.models = Object.assign(
     Object.create(null) as SessionMetrics['models'],

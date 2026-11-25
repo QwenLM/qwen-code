@@ -205,6 +205,38 @@ function isActiveSessionRecord(
   );
 }
 
+const ROOT_ASSIGNMENT_STAT_CONCURRENCY = 16;
+
+function boundedChoiceSums(
+  choiceGroups: ReadonlyArray<readonly number[]>,
+  initialSum: number,
+  maxSum: number,
+  maxStates: number,
+  stopAtTarget?: number,
+): Set<number> {
+  let reachable = new Set<number>([initialSum]);
+  for (const choices of choiceGroups) {
+    const next = new Set<number>();
+    // Iterate choices outside reachable states so the primary branch (e.g. +0
+    // for optional terms) preserves every existing state before spending budget
+    // on newly added sums.
+    for (const choice of choices) {
+      for (const current of reachable) {
+        const candidate = current + choice;
+        if (stopAtTarget !== undefined && candidate === stopAtTarget) {
+          return new Set<number>([stopAtTarget]);
+        }
+        if (candidate <= maxSum && next.size < maxStates) {
+          next.add(candidate);
+        }
+      }
+    }
+    reachable = next;
+    if (reachable.size === 0) break;
+  }
+  return reachable;
+}
+
 function canFormSubsetSum(values: readonly number[], target: number): boolean {
   if (target === 0) return true;
   if (target < 0 || values.length === 0) return false;
@@ -213,20 +245,10 @@ function canFormSubsetSum(values: readonly number[], target: number): boolean {
   if (target > sum) return false;
   if (target === sum) return true;
   if (values.length > 64) return false;
-  let reachable = new Set<number>([0]);
-  for (const value of values) {
-    if (value <= 0 || value > target) continue;
-    const next = new Set(reachable);
-    for (const current of reachable) {
-      const candidate = current + value;
-      if (candidate === target) return true;
-      if (candidate < target && next.size < 4096) {
-        next.add(candidate);
-      }
-    }
-    reachable = next;
-  }
-  return false;
+  const choiceGroups = values
+    .filter((value) => value > 0 && value <= target)
+    .map((value) => [0, value] as const);
+  return boundedChoiceSums(choiceGroups, 0, target, 4096, target).has(target);
 }
 
 function partialLiveModelUsage(
@@ -377,18 +399,15 @@ function partialLiveModelUsage(
   }
   candidateInputSet.add(nonCacheOnlyInput);
   if (cacheOnlyInputs.length > 1 && cacheOnlyInputs.length <= 16) {
-    let sums = new Set<number>([nonCacheOnlyInput]);
-    for (const value of cacheOnlyInputs) {
-      const next = new Set(sums);
-      for (const current of sums) {
-        const candidate = current + value;
-        if (candidate <= metrics.inputTokens && next.size < 256) {
-          next.add(candidate);
-        }
-      }
-      sums = next;
+    const choiceGroups = cacheOnlyInputs.map((value) => [0, value] as const);
+    for (const sum of boundedChoiceSums(
+      choiceGroups,
+      nonCacheOnlyInput,
+      metrics.inputTokens,
+      256,
+    )) {
+      candidateInputSet.add(sum);
     }
-    for (const sum of sums) candidateInputSet.add(sum);
   }
   // For a single unpersisted successful response, 0 < remInput < remCached is impossible.
   const candidateInputs = [...candidateInputSet].filter((candidateInput) => {
@@ -598,21 +617,9 @@ function canMatchPerRowTotal(
     }
   }
   if (rows.length > 64) return false;
-  let reachable = new Set<number>([0]);
-  for (const choices of perRowChoices) {
-    const next = new Set<number>();
-    for (const current of reachable) {
-      for (const choice of choices) {
-        const candidate = current + choice;
-        if (candidate <= targetTotal && next.size < 4096) {
-          next.add(candidate);
-        }
-      }
-    }
-    reachable = next;
-    if (reachable.size === 0) return false;
-  }
-  return reachable.has(targetTotal);
+  return boundedChoiceSums(perRowChoices, 0, targetTotal, 4096).has(
+    targetTotal,
+  );
 }
 
 function tokensCanMatchEquivalentResponses(
@@ -1541,23 +1548,62 @@ export async function loadUsageDashboardSources(
     historyRoots.map((root) => [root, [] as UsageSummaryRecord[]]),
   );
   const candidatesByRecording = new Map<string, Set<string>>();
+  const uniqueRecordings: Array<{
+    key: string;
+    sessionId: string;
+    project: string;
+  }> = [];
   for (const record of persisted) {
     const key = `${record.sessionId}\0${record.project}`;
-    let candidates = candidatesByRecording.get(key);
-    if (!candidates) {
-      candidates = new Set();
-      for (const root of historyRoots) {
-        try {
-          const transcript = new SessionService(record.project, {
-            runtimeBaseDir: root,
-          }).getSessionTranscriptPath(record.sessionId);
-          if (fs.statSync(transcript).isFile()) candidates.add(root);
-        } catch {
-          // Missing or stale paths cannot assign a durable record to a root.
+    if (!candidatesByRecording.has(key)) {
+      candidatesByRecording.set(key, new Set());
+      uniqueRecordings.push({
+        key,
+        sessionId: record.sessionId,
+        project: record.project,
+      });
+    }
+  }
+  const sessionServicesByRootAndProject = new Map<string, SessionService>();
+  const getSessionService = (project: string, root: string): SessionService => {
+    const serviceKey = `${root}\0${project}`;
+    let service = sessionServicesByRootAndProject.get(serviceKey);
+    if (!service) {
+      service = new SessionService(project, { runtimeBaseDir: root });
+      sessionServicesByRootAndProject.set(serviceKey, service);
+    }
+    return service;
+  };
+  let nextRecordingIndex = 0;
+  const workerCount = Math.min(
+    ROOT_ASSIGNMENT_STAT_CONCURRENCY,
+    uniqueRecordings.length,
+  );
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextRecordingIndex < uniqueRecordings.length) {
+        const recording = uniqueRecordings[nextRecordingIndex++]!;
+        const candidates = candidatesByRecording.get(recording.key)!;
+        for (const root of historyRoots) {
+          try {
+            const transcript = getSessionService(
+              recording.project,
+              root,
+            ).getSessionTranscriptPath(recording.sessionId);
+            if ((await fs.promises.stat(transcript)).isFile()) {
+              candidates.add(root);
+              if (candidates.size > 1) break;
+            }
+          } catch {
+            // Missing or stale paths cannot assign a durable record to a root.
+          }
         }
       }
-      candidatesByRecording.set(key, candidates);
-    }
+    }),
+  );
+  for (const record of persisted) {
+    const key = `${record.sessionId}\0${record.project}`;
+    const candidates = candidatesByRecording.get(key)!;
     const owner =
       candidates.size === 1 ? [...candidates][0]! : canonicalGlobalRoot;
     recordsByRoot.get(owner)!.push(record);
