@@ -1914,6 +1914,19 @@ export class ChatCompressionService {
         compressionOutputTokenCount > 0
       ) {
         canCalculateNewTokenCount = true;
+        // The main request counted these hints, but the cold query omitted them.
+        const dispatchedPrefix = withModelToolErrorNotes(prefixToSummarize);
+        const omittedHintTokens =
+          dispatchedPrefix === prefixToSummarize
+            ? 0
+            : estimateContentTokens(
+                dispatchedPrefix,
+                slimmingConfig.imageTokenEstimate,
+              ) -
+              estimateContentTokens(
+                prefixToSummarize,
+                slimmingConfig.imageTokenEstimate,
+              );
         const compressedHistoryTokenCount = Math.max(
           0,
           compressionInputTokenCount -
@@ -1923,7 +1936,8 @@ export class ChatCompressionService {
         newTokenCount = Math.max(
           0,
           originalHistoryTokenCount -
-            compressedHistoryTokenCount +
+            compressedHistoryTokenCount -
+            omittedHintTokens +
             compressionOutputTokenCount,
         );
         if (summaryHistoryChanged) {

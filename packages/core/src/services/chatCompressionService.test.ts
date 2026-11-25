@@ -1787,6 +1787,51 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(JSON.stringify(fullHistory)).not.toContain('<<HERE>>');
   });
 
+  it.each([true, false])(
+    'deducts only summarized, previously sent hints from cold usage (retain tail: %s)',
+    async (retainTail) => {
+      const error = 'params/docs must be array';
+      const tool = 'structured_output';
+      const historical = fnResponse(tool, { error }, 'first');
+      const latest = fnResponse(tool, { error }, 'second');
+      const pending = fnResponse(tool, { error }, 'third');
+      const lastCalls = content(
+        'model',
+        fnCall(tool, {}, 'second'),
+        fnCall(tool, {}, 'third'),
+      );
+      if (retainTail) markApiHistoryPrompt(lastCalls, 'current-prompt');
+      const history = [
+        userText('submit documents'),
+        content('model', fnCall(tool, {}, 'first')),
+        content('user', historical),
+        lastCalls,
+        content('user', latest),
+      ];
+      const { run } = makeFixture({ history, enableCacheControl: false });
+      const cold = spyCold();
+      const pendingUserMessage = content('user', pending);
+      const plain = await run({ pendingUserMessage });
+
+      setModelToolErrorNote(historical, 'h'.repeat(400));
+      setModelToolErrorNote(latest, 'l'.repeat(160));
+      setModelToolErrorNote(pending, 'p'.repeat(240));
+      const noted = await run({
+        pendingUserMessage,
+        originalTokenCount: plain.info.originalTokenCount + 140,
+      });
+
+      expectCompressed(noted);
+      expect(cold.mock.calls[1][1].contents).toEqual(
+        cold.mock.calls[0][1].contents,
+      );
+      expect(noted.newHistory).toEqual(plain.newHistory);
+      expect(noted.info.newTokenCount).toBe(
+        plain.info.newTokenCount + (retainTail ? 40 : 0),
+      );
+    },
+  );
+
   it('preserves per-request tool overrides used by subagent turns', async () => {
     const { generateText, run } = makeFixture();
     const requestTools = [

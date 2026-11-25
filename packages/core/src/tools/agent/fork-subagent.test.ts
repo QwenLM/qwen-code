@@ -8,6 +8,10 @@ import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../tool-names.js';
 import {
+  setModelToolErrorNote,
+  withModelToolErrorNotes,
+} from '../tool-error.js';
+import {
   buildForkExecutionAllowlist,
   buildForkedMessages,
   FORK_PLACEHOLDER_RESULT,
@@ -138,6 +142,32 @@ describe('selectForkHistory', () => {
       firstModel,
     ]);
   });
+
+  it.each(['all', 1] as const)(
+    'preserves model-only diagnostics within the inherited %s window',
+    (turns) => {
+      const error = fnResponse(
+        'list_directory',
+        { error: 'must be array' },
+        'call',
+      );
+      const note = '; invalid JSON near <<HERE>>';
+      setModelToolErrorNote(error, note);
+      const history = [
+        firstUser,
+        content('model', fnCall('list_directory', { ignore: '[1,]' }, 'call')),
+        content('user', error),
+        firstModel,
+      ];
+      const inherited = selectForkHistory(history, turns);
+      const parentRequest = withModelToolErrorNotes(history);
+      expect(
+        parentRequest[2].parts?.[0].functionResponse?.response?.['error'],
+      ).toBe('must be array' + note);
+      expect(withModelToolErrorNotes(inherited)).toEqual(parentRequest);
+      expect(JSON.stringify(inherited)).not.toContain(note);
+    },
+  );
 
   it('counts real user turns rather than tool responses', () => {
     expect(

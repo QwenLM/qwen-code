@@ -512,6 +512,41 @@ describe('SchemaValidator', () => {
       },
     );
 
+    it.each([DRAFT_2020, 'http://json-schema.org/draft-07/schema#'])(
+      'honors tag constraints beside a direct or chained $ref (%s)',
+      ($schema) => {
+        const schema = {
+          $schema,
+          $defs: {
+            Kind: { type: 'string', enum: ['docs', 'file'] },
+            FileKind: { $ref: '#/$defs/Kind', const: 'file' },
+          },
+          oneOf: [
+            obj({
+              items: strings(),
+              kind: { $ref: '#/$defs/Kind', const: 'docs' },
+            }),
+            obj({
+              items: { type: 'object' },
+              kind: { $ref: '#/$defs/FileKind' },
+            }),
+          ],
+        };
+        for (const [kind, items, expected] of [
+          ['docs', '{"x":,}', 'array'],
+          ['file', '[1,]', 'object'],
+        ]) {
+          const { report } = validateWithNote(schema, { kind, items });
+          expect(report).toHaveBeenCalledExactlyOnceWith(
+            expect.any(String),
+            expect.stringContaining(`send it as a JSON ${expected}`),
+          );
+          valid(schema, { kind, items: expected === 'array' ? [] : {} });
+          invalid(schema, { kind, items: expected === 'array' ? {} : [] });
+        }
+      },
+    );
+
     it('keeps the active error when siblings reference the same payload schema', () => {
       const items = { $ref: '#/$defs/Items' };
       const schema = {

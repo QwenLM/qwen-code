@@ -4,6 +4,7 @@ import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { ToolNames } from '../tool-names.js';
+import { copyModelToolErrorNote } from '../tool-error.js';
 import { cloneApiHistory } from '../../utils/api-history-metadata.js';
 import {
   getStartupContextLength,
@@ -286,7 +287,16 @@ export function selectForkHistory(
     }
   }
 
-  return cloneApiHistory(selected);
+  const inherited = cloneApiHistory(selected);
+  // The fork reuses the parent's prompt prefix. Keep its private hints on
+  // the cloned responses so they are rendered only when the model is called.
+  for (const [index, content] of selected.entries()) {
+    if (content.role !== 'user') continue;
+    content.parts?.forEach((part, partIndex) => {
+      copyModelToolErrorNote(part, inherited[index].parts![partIndex]);
+    });
+  }
+  return inherited;
 }
 
 /**

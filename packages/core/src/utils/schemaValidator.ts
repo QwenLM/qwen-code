@@ -626,19 +626,25 @@ type DiagnosticSchema = Record<string, unknown> & {
 function diagnosticConjuncts(
   schema: DiagnosticSchema,
   root: Record<string, unknown>,
+  allowAllOf = true,
 ): DiagnosticSchema[] | undefined {
-  const resolve = (part: DiagnosticSchema) =>
-    resolvePropSchema(part, root, true) as DiagnosticSchema | undefined;
-  const resolved = resolve(schema);
-  if (!resolved || resolved.$ref) return undefined;
-  const parts = [resolved];
-  // Leave deeper or unresolved compositions to Ajv's ordinary error.
-  for (const schemaPart of resolved.allOf ?? []) {
-    const part = resolve(schemaPart);
-    if (!part || part.$ref || part.allOf) return undefined;
-    parts.push(part);
+  const parts: DiagnosticSchema[] = [];
+  for (let depth = 0; schema && depth <= 64; depth++) {
+    // Ajv applies constraints beside $ref at every link in the chain.
+    parts.push(schema);
+    for (const member of schema.allOf ?? []) {
+      if (!allowAllOf) return undefined;
+      const conjuncts = diagnosticConjuncts(member, root, false);
+      if (!conjuncts) return undefined;
+      parts.push(...conjuncts);
+    }
+    if (!schema.$ref) return parts;
+    if (!schema.$ref.startsWith('#/')) return undefined;
+    const target = resolveRef(decodeURIComponent(schema.$ref), root);
+    if (!target) return undefined;
+    schema = target;
   }
-  return parts;
+  return undefined;
 }
 
 // Ajv also reports errors for the other alternatives of a tagged union. A
@@ -794,18 +800,13 @@ function resolveRef(
 function resolvePropSchema(
   propSchema: Record<string, unknown> | undefined,
   rootSchema: Record<string, unknown>,
-  decodeFragment = false,
 ): Record<string, unknown> | undefined {
   if (!propSchema) return undefined;
   let schema = propSchema;
   let depth = 0;
   while (typeof schema['$ref'] === 'string' && depth < 64) {
     depth++;
-    const ref = schema['$ref'];
-    const resolved = resolveRef(
-      decodeFragment && ref.startsWith('#/') ? decodeURIComponent(ref) : ref,
-      rootSchema,
-    );
+    const resolved = resolveRef(schema['$ref'], rootSchema);
     if (!resolved) return propSchema;
     schema = resolved;
   }
