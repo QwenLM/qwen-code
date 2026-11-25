@@ -53,6 +53,7 @@ test('downloads silently, shows an update action in More and restarts in place @
     name: '工作区侧边栏',
   });
   const resizeHandle = sidebar.getByRole('separator');
+  const moreMenu = page.locator('[data-web-shell-sidebar-more]');
   // Desktop adds a 56px rail to the 220px minimum.
   for (const width of [220, 343, 360, 260]) {
     await page.keyboard.press('Escape');
@@ -72,12 +73,26 @@ test('downloads silently, shows an update action in More and restarts in place @
       .toBeCloseTo(Math.max(width, 276), 0);
     await page.getByRole('button', { name: '更多', exact: true }).click();
     await expect(entry).toBeVisible();
-    const buttonBox = (await entry.boundingBox())!;
-    const settingsBox = (await page
-      .getByRole('button', { name: '设置', exact: true })
-      .boundingBox())!;
-    expect(buttonBox.width).toBeGreaterThan(100);
-    expect(buttonBox.y + buttonBox.height).toBeLessThan(settingsBox.y);
+    // Read both rectangles in one frame while the popover animates.
+    const {
+      width: buttonWidth,
+      updateBottom,
+      settingsTop,
+    } = await moreMenu.evaluate((menu) => {
+      const update = menu
+        .querySelector('[data-web-shell-update]')!
+        .getBoundingClientRect();
+      const settings = menu
+        .querySelector('button[aria-label="设置"]')!
+        .getBoundingClientRect();
+      return {
+        width: update.width,
+        updateBottom: update.bottom,
+        settingsTop: settings.top,
+      };
+    });
+    expect(buttonWidth).toBeGreaterThan(100);
+    expect(updateBottom).toBeLessThan(settingsTop);
   }
   await page.screenshot({ path: testInfo.outputPath('update-sidebar.png') });
   await page.keyboard.press('Escape');
