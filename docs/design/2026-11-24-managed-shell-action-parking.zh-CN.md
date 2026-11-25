@@ -2,7 +2,7 @@
 
 [English](2026-11-24-managed-shell-action-parking.md) | [简体中文](2026-11-24-managed-shell-action-parking.zh-CN.md)
 
-状态：提案，实现前设计。日期：2026-11-24。对照 `main` 的 `f38f6fe7c3` 核实，下文的代码引用均对应该提交。[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md) §4.8 要求在实现 S8a 其余部分之前，单独写一份 G3 扩展设计，本文就是这份设计。本文同时完成覆盖面设计决策 8 仍欠着的、对 public-children Shell 路径的 G3 审查。由 #18149（阶段 5）跟踪。标为"待验证"的结论来自代码阅读，未经测试证实，必须在实现前用测试确认。开工前检查 1 和 2（§7.1）已由随本设计提交的测试确认。
+状态：已实现。日期：2026-11-24。对照 `main` 的 `f38f6fe7c3` 核实，下文的代码引用均对应该提交。[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md) §4.8 要求在实现 S8a 其余部分之前，单独写一份 G3 扩展设计，本文就是这份设计。本文同时完成覆盖面设计决策 8 仍欠着的、对 public-children Shell 路径的 G3 审查。由 #18149（阶段 5）跟踪。标为"待验证"的结论来自代码阅读，未经测试证实，必须在实现前用测试确认。开工前检查 1 和 2（§7.1）已由随本设计提交的测试确认。实现补上了 §7.2 的用例，并纠正了设计原先假定的两种形态：后台 Shell 只存在于发布通道上，带 MCP 的公开 Shell Session 永远不会停靠。
 
 ## 1. 问题与现状
 
@@ -43,7 +43,7 @@ public child 准入不要求工具发布，所以 public-children Session 也可
 - 派发后的 Shell。已启动的 Shell 不是等待，它的崩溃恢复不变。
 - 批次里其他 Shell 通道工具：`monitor`、workflow、team、messaging、loop 和 cron 工具，以及私有的 `agent`。它们继续以 `unsupported_tool` 拒绝。
 - 外部 Shell 放置（`hosted-workspace-external-shell/1`）。这段代码不把它当作 Shell profile（`hosted-workspace-profiles.ts:86-96`），它的 Shell 调用以 `unsupported_tool` 拒绝。
-- 生命周期 v1 上带 MCP 的公开 Shell Session。Phase 1 仍然从不挂起它们（`hosted-harness-session.ts:5340-5342`）。
+- 带 MCP 的公开 Shell Session。Phase 1 从不挂起它们（[无状态 Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)，空闲判定）。`hosted-harness-session.ts:5340-5342` 的条件豁免了生命周期 v2，但 Session 只有在 close 或 delete 持有生命周期授权期间才运行在生命周期 v2 上。那时它已经算作活跃工作，也不再接收 Turn。
 
 ## 3. 总体方案
 
@@ -95,27 +95,26 @@ S8a 把"这份计划可以包含 Shell 调用"的判断，从 public-children pi
 owner 和 wake 条件是共享的，且不依赖 profile，所以下面这些形态不需要新代码。当 Harness 在生命周期 v2 上支持 extension package 时，public-children Session 已经可以带 extension Hook 目录或 MCP（`hosted-harness-session.ts:6011-6027`）。去掉 profile 条件后，版本 0 的 Session 也会走到这些形态：
 
 - 带 extension Hook 目录、使用配置作用域 owner 的 Shell profile（S5）。S5 已经在 public-children Session 的发布通道上，为这种形态下的 Shell 调用固定了用例（"resumes a public-children Shell approval with extension Hooks"）。
-- 生命周期 v2 上带 MCP 的 Shell profile（S6b），包括 Hook owner 就是 MCP owner 的情况。这里还没有任何带 Shell 调用的用例：S6b 的用例用的是 MCP profile。
 - Shell Session 上由 wake 启动的 Turn，例如 loop 和 monitor 的 wake（S4）。这里也还没有带 Shell 调用的用例。
 
-§7.2 为每种形态补一个版本 0 的用例。
+§7.2 为每种形态补一个版本 0 的用例。MCP 不在这些形态之中，因为带 MCP 的公开 Shell Session 永远不会挂起（§2）。
 
 ## 5. 派发前 Shell 的 G3 审查（决策 8）
 
 在恢复、执行和清理中，Shell 都没有 public-children 条件，S8a 也只改捕获和识别。因此下面的审查同时适用于 public-children Session 和版本 0 Session。第一列里的"G3 §"指 G3 第 3 步设计的章节，其他章节号指本文。
 
-| G3 要求                                                                   | 派发前 Shell 的证据                                                                 | 状态                                                                             |
-| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| 计划在等待发布之前保存（G3 §4.1）                                         | 与原生文件是同一个生产者。Shell 调用只多一个 `publicationId`                        | 已有                                                                             |
-| 定义、profile 和策略的 pin（G3 §4.1）                                     | `definitionRef` pin 住 profile 和通道，load 不能改变它们（§1）                      | 已有；S8a 读取它们（§4.3）                                                       |
-| 原始调用、Runtime 和预留身份，不经过 `prepareRequests`（G3 §4.2 第 5 步） | `resumeSavedNativeBatch` 按计划重建请求，包括 `publicationId`                       | 已有                                                                             |
-| 等待时没有已派发的工作（G3 §4.3）                                         | 只在最终计划之后才预留（§4.2），Broker 在 prepare 时从不派发                        | 两条通道都已确认（#18231；§7.1 检查 1）                                          |
-| prepare 之间崩溃时重放原来的预留（G3 §4.2 第 5 步）                       | 按精确 key 重放返回原记录；`publicationId`、payload 摘要或 `inputDigest` 变化则冲突 | 两条通道都已确认（#18231；§7.1 检查 1）                                          |
-| Allow 只执行一次；Deny 和过期执行零次（G3 §4.2 第 4、6 步）               | #18231 的门槛用例，停靠之后和 Harness 死亡之后各一遍                                | public children 在两条通道上都已固定（#18231；§7.1 检查 2）；版本 0 Session 待补 |
-| 后台 Shell 不会启动第二个进程                                             | Allow 之后的每条 `child_run` 记录都属于那一个预留的执行                             | public children 在发布通道上已固定；Shell 通道待补                               |
-| 只在安全结算之后释放 Runtime（G3 §4.2 第 7 步）                           | 恢复时记下的清理债务，以及 `held` 豁免（§4.4）                                      | 已有                                                                             |
-| 过期的授权或变化的 pin 永远不会授予执行（G3 §2）                          | Workspace generation、定义和参数的检查（§4.4）                                      | 已有                                                                             |
-| 派发后的 Shell 继续拒绝（G3 §4.3）                                        | 已启动的 Shell 已经越过等待点，停靠永远不会碰到它                                   | 不变                                                                             |
+| G3 要求                                                                   | 派发前 Shell 的证据                                                                 | 状态                                                                       |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 计划在等待发布之前保存（G3 §4.1）                                         | 与原生文件是同一个生产者。Shell 调用只多一个 `publicationId`                        | 已有                                                                       |
+| 定义、profile 和策略的 pin（G3 §4.1）                                     | `definitionRef` pin 住 profile 和通道，load 不能改变它们（§1）                      | 已有；S8a 读取它们（§4.3）                                                 |
+| 原始调用、Runtime 和预留身份，不经过 `prepareRequests`（G3 §4.2 第 5 步） | `resumeSavedNativeBatch` 按计划重建请求，包括 `publicationId`                       | 已有                                                                       |
+| 等待时没有已派发的工作（G3 §4.3）                                         | 只在最终计划之后才预留（§4.2），Broker 在 prepare 时从不派发                        | 两条通道都已确认（#18231；§7.1 检查 1）                                    |
+| prepare 之间崩溃时重放原来的预留（G3 §4.2 第 5 步）                       | 按精确 key 重放返回原记录；`publicationId`、payload 摘要或 `inputDigest` 变化则冲突 | 两条通道都已确认（#18231；§7.1 检查 1）                                    |
+| Allow 只执行一次；Deny 和过期执行零次（G3 §4.2 第 4、6 步）               | #18231 的门槛用例，停靠之后和 Harness 死亡之后各一遍                                | public children 和版本 0 在两条通道上都已固定（#18231；§7.1 检查 2；§7.2） |
+| 后台 Shell 不会启动第二个进程                                             | Allow 之后的每条 `child_run` 记录都属于那一个预留的执行                             | public children 和版本 0 都已固定（§7.2）。只有发布通道有后台 Shell        |
+| 只在安全结算之后释放 Runtime（G3 §4.2 第 7 步）                           | 恢复时记下的清理债务，以及 `held` 豁免（§4.4）                                      | 已有                                                                       |
+| 过期的授权或变化的 pin 永远不会授予执行（G3 §2）                          | Workspace generation、定义和参数的检查（§4.4）                                      | 已有                                                                       |
+| 派发后的 Shell 继续拒绝（G3 §4.3）                                        | 已启动的 Shell 已经越过等待点，停靠永远不会碰到它                                   | 不变                                                                       |
 
 结论：
 
@@ -136,7 +135,7 @@ owner 和 wake 条件是共享的，且不依赖 profile，所以下面这些形
 ### 7.1 开工前检查（实现之前）
 
 1. **Broker，Shell 通道。** Shell 通道的预留（`runtimeProtocol: 3`、`inputDigest`）按精确 key 重放时不派发，并返回原记录。同一 key 下 `inputDigest` 或请求摘要变化时，以 `runtime_idempotency_conflict` 拒绝；执行结算后，同一 key 返回已结算的记录。这是 #18231 中 Broker 测试在 Shell 通道上的对应版本。已由 `RuntimeBrokerServiceTest.shellLanePrepareReplaysTheOriginalReservationUnderItsExactKey` 确认。
-2. **Harness，决策 8 在 Shell 通道上。** 在现有代码上，一个没有 `captureBytes` 的 public-children Session 停靠一个 Shell 审批，经冷 load 后被 Allow。应看到一次使用保存 key 的 `prepare` 和一次 start。Deny、过期以及代用户放行的模式切换，行为与发布通道上相同。已确认：#18231 的用例矩阵 "settles a public-children Shell approval through %s after a %s" 现在也在 Shell 通道上运行，Shell 通道的八个用例全部通过。每个用例都断言保存的计划记录 `publicationId: null`；每个 Allow 或模式切换用例都断言恰好一次 `prepare`，参数是保存的调用 ID、请求摘要和重新计算的 `inputDigest`。把恢复中重新计算 `inputDigest` 的那一步去掉，这些用例就会失败。
+2. **Harness，决策 8 在 Shell 通道上。** 在现有代码上，一个没有 `captureBytes` 的 public-children Session 停靠一个 Shell 审批，经冷 load 后被 Allow。应看到一次使用保存 key 的 `prepare` 和一次 start。Deny、过期以及代用户放行的模式切换，行为与发布通道上相同。已确认：#18231 的用例矩阵（现名 "settles a %s Shell approval through %s after a %s on the %s lane"）也在 Shell 通道上运行，Shell 通道的八个用例全部通过。每个用例都断言保存的计划记录 `publicationId: null`；每个 Allow 或模式切换用例都断言恰好一次 `prepare`，参数是保存的调用 ID、请求摘要和重新计算的 `inputDigest`。把恢复中重新计算 `inputDigest` 的那一步去掉，这些用例就会失败。
 3. **影响哪些 Session。** 从 `suspensionStats` 读取 canary 的 `parkRefusals.shell_profile` 计数。它决定 S8a 的优先级，但不阻塞实现。
 
 ### 7.2 S8a 用例
@@ -144,11 +143,10 @@ owner 和 wake 条件是共享的，且不依赖 profile，所以下面这些形
 每个用例都在停靠之后和 Harness 在等待中死亡之后各跑一遍，两者的 journal 结果必须相同（覆盖面设计 §7，崩溃等价）：
 
 - **版本 0 公开 Shell，每条通道。** Shell 审批经 Allow、Deny、过期以及代用户放行的模式切换完成。Allow 和模式切换按保存的 reservation 预留并执行一次；Deny 和过期执行零次。
-- **后台 Shell，每条通道。** `is_background` 审批恢复后不启动第二个进程，恢复的 Turn 的清理债务保持 `held`，直到进程结束。
+- **后台 Shell，发布通道。** `is_background` 审批恢复后不启动第二个进程，在进程占着 Runtime 期间，恢复的 Turn 的清理债务保持 `held`。只有发布通道放行后台 Shell（`hosted-workspace-tool-turn.ts:2697-2703`）。Shell 通道在询问之前就把 `is_background` 当作校验错误拒绝，所以那里不存在这种等待。
 - **Shell profile 上的文件审批。** 版本 0 公开 Shell Session 上的 `write_file` 审批能停靠并完成。这说明按 profile 的拒绝已经去掉。
 - **Extension Hooks。** 在配置作用域的 Hook owner 上，Shell 调用已完成的 PreToolUse 和 PermissionRequest 不会重跑，Allow 之后它的 PostToolUse 只跑一次。
-- **MCP。** 生命周期 v2 上带 MCP 的 Shell Session 中，Shell 调用能停靠并完成。这覆盖了 Hook owner 就是 MCP owner 的情况。
-- **wake 启动的 Turn。** loop 启动的 Turn 中的 Shell 审批能停靠，并且不经过 coordinator 完成。
+- **wake 启动的 Turn。** monitor 启动的 Turn 中的 Shell 审批能停靠，并且不经过 coordinator 完成。
 - **一致性与拒绝。**
   - team-lead 的等待登记为 `team_lead_profile`，只计一次。
   - 读取端拒绝"带 Shell 调用、但定义不是公开 Shell profile"的计划。停靠资格和每个恢复入口都通过它读取计划，因此都会拒绝同一份计划。
@@ -172,7 +170,7 @@ owner 和 wake 条件是共享的，且不依赖 profile，所以下面这些形
 - **滚动发布与 Harness 回滚。** 低于 S8a 的 Harness 读不了版本 0 的 Shell 计划。它在产生任何效果之前，以普通的可重试恢复拒绝来回应 load，所以在 S8a 下停靠的 Turn 会一直等到较新的 Harness load 它。S1、S5 和 S6b 的计划也是这样。回滚 Harness 之前，先关闭 `action-parking.enabled`，让已停靠的 Turn 恢复完。
 - **失败的方向是安全的。** Shell 工具定义变化、Workspace generation 不同或通道不匹配，都会拒绝恢复，在不执行的情况下结束 Turn。它永远不会用另一个身份去执行 Shell。
 - **指标。** `parkRefusals.shell_profile` 消失，出现 `team_lead_profile`。读取旧 key 的看板需要更新。
-- **作用范围。** 在 `action-parking.enabled` 打开之前，S8a 不起作用；在带 Hooks 或 MCP 的版本 0 Shell Session 上，它只在 S5 和 S6b 已经允许的情况下停靠。
+- **作用范围。** 在 `action-parking.enabled` 打开之前，S8a 不起作用；在带 Hooks 的版本 0 Shell Session 上，它只在 S5 已经允许的情况下停靠；带 MCP 时永远不会停靠（§2）。
 
 ## 10. 开放问题
 
@@ -184,5 +182,5 @@ owner 和 wake 条件是共享的，且不依赖 profile，所以下面这些形
 ## 11. 实现范围
 
 - Harness 生产代码：捕获条件、白名单和身份规则（`hosted-workspace-tool-turn.ts:4626-4656`、`:4737`）；读取端（`hosted-approval-continuation.ts:299-379`）；拒绝原因类型（`hosted-action-parking.ts:20`）。
-- 测试：`hosted-harness-session.approval-parking.test.ts`、`hosted-approval-continuation.test.ts`，以及 Broker 测试 `RuntimeBrokerServiceTest.java`。
+- 测试：`hosted-harness-session.approval-parking.test.ts`、`hosted-harness-session.wake-approval-parking.test.ts`、`hosted-approval-continuation.test.ts`，以及 Broker 测试 `RuntimeBrokerServiceTest.java`。
 - 不改 Java 生产代码、Store、seal 或证书。

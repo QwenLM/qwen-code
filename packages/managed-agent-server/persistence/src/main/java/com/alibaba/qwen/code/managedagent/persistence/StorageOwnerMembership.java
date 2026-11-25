@@ -9,6 +9,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.Set;
 
 public final class StorageOwnerMembership {
     private StorageOwnerMembership() {
@@ -24,7 +25,7 @@ public final class StorageOwnerMembership {
                 + " FROM ma_storage_owner WHERE physical_id = ?" + (lock ? " FOR UPDATE" : ""))) {
             statement.setBytes(1, ManagedSchemaKeys.identity(key));
             try (var rows = statement.executeQuery()) {
-                if (!rows.next() || !java.util.Set.of("LOCAL", "SSH_LOCAL").contains(rows.getString("storage_kind"))) {
+                if (!rows.next() || !Set.of("LOCAL", "SSH_LOCAL").contains(rows.getString("storage_kind"))) {
                     return false;
                 }
                 String holder = ManagedSchemaRows.identity(rows, "holder_id");

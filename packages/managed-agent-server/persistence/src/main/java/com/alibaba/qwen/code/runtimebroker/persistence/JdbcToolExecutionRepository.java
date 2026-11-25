@@ -20,11 +20,13 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** JDBC ledger for idempotent Tool executions. */
 public final class JdbcToolExecutionRepository
@@ -763,13 +765,13 @@ public final class JdbcToolExecutionRepository
         return JdbcRepositorySupport.read(dataSource, connection ->
                 hasActiveByRuntimeSession(connection, bindingId,
                         runtimeGeneration, runtimeSessionId,
-                        java.util.Set.of()));
+                        Set.of()));
     }
 
     @Override
     public boolean hasActiveByRuntimeSession(String bindingId,
             long runtimeGeneration, String runtimeSessionId,
-            java.util.Set<String> excludingExecutionCallIds) {
+            Set<String> excludingExecutionCallIds) {
         return JdbcRepositorySupport.read(dataSource, connection ->
                 hasActiveByRuntimeSession(connection, bindingId,
                         runtimeGeneration, runtimeSessionId,
@@ -806,12 +808,12 @@ public final class JdbcToolExecutionRepository
             String bindingId, long runtimeGeneration, String runtimeSessionId)
             throws SQLException {
         return hasActiveByRuntimeSession(connection, bindingId,
-                runtimeGeneration, runtimeSessionId, java.util.Set.of());
+                runtimeGeneration, runtimeSessionId, Set.of());
     }
 
     static boolean hasActiveByRuntimeSession(Connection connection,
             String bindingId, long runtimeGeneration, String runtimeSessionId,
-            java.util.Set<String> excludingExecutionCallIds)
+            Set<String> excludingExecutionCallIds)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT binding_id, runtime_session_id, execution_call_id FROM"
@@ -896,8 +898,8 @@ public final class JdbcToolExecutionRepository
                     record.getSettledAt());
             JdbcRepositorySupport.setInstant(statement, 11, record.getAbandonedAt());
             JdbcRepositorySupport.setIdentity(statement, 12, record.getLossEvidenceId());
-            statement.setObject(13, record.getAuthorizedDispatchGeneration(), java.sql.Types.BIGINT);
-            statement.setObject(14, record.getAuthorizedBindingVersion(), java.sql.Types.BIGINT);
+            statement.setObject(13, record.getAuthorizedDispatchGeneration(), Types.BIGINT);
+            statement.setObject(14, record.getAuthorizedBindingVersion(), Types.BIGINT);
             JdbcRepositorySupport.setIdentity(statement, 15, record.getExecutionCallId());
             if (statement.executeUpdate() != 1) {
                 throw new SQLException("Tool execution update failed");
@@ -931,8 +933,8 @@ public final class JdbcToolExecutionRepository
                 record.getSettledAt());
         JdbcRepositorySupport.setInstant(statement, 21, record.getAbandonedAt());
         JdbcRepositorySupport.setIdentity(statement, 22, record.getLossEvidenceId());
-        statement.setObject(23, record.getAuthorizedDispatchGeneration(), java.sql.Types.BIGINT);
-        statement.setObject(24, record.getAuthorizedBindingVersion(), java.sql.Types.BIGINT);
+        statement.setObject(23, record.getAuthorizedDispatchGeneration(), Types.BIGINT);
+        statement.setObject(24, record.getAuthorizedBindingVersion(), Types.BIGINT);
     }
 
     static ToolExecutionRecord mapExecution(ResultSet result)

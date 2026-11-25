@@ -308,7 +308,12 @@ documented as-is.
   (slot release is pinned by the primary listener's shutdown tests and by the
   pairing-listener disable test; the local-control service test pins that
   `disable()` settles over a non-answering upgraded peer; the remote-access
-  listener shares the same tracked-destroy release path).
+  listener shares the same tracked-destroy release path; the embed
+  already-closing force-close path is pinned with a non-answering upgraded
+  peer). The daemon drain queues pairing teardown fire-and-forget: both
+  services' close() destroys tracked survivors, so dispose settles promptly
+  even over a non-answering paired peer, and process exit is the final
+  backstop for any socket that outlives the drain.
 
 ## Files affected
 
