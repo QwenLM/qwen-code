@@ -1,25 +1,28 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage;
-import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 
 /** EXTERNAL physical ownership under the caller's transaction; never contacts a worker. */
@@ -100,7 +103,7 @@ public final class JdbcExternalWorkspaceOwnership {
         var seed = binding.getProvisionSeed();
         var handle = binding.getResourceHandle();
         if (seed == null || binding.getLease() == null || !seed.matches(binding.getLease()) || handle == null
-                || handle.getVersion() != 1 || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(handle.getKind())
+                || handle.getVersion() != 1 || !RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(handle.getKind())
                 || binding.getAttestationGeneration() <= 0
                 || !registration.mountRoot().equals(binding.getRequest().getScope().getCanonicalCwd())) {
             throw unavailable();
@@ -232,9 +235,9 @@ public final class JdbcExternalWorkspaceOwnership {
                         || !scope.getCanonicalCwd().equals(row.getString("canonical_cwd"))
                         || !scope.getCapabilityDigest().equals(row.getString("capability_digest"))
                         || !scope.getIsolationClass().equals(row.getString("isolation_class"))
-                        || acquiring && (!session.isAcquirable() || !java.util.Set.of("ACQUIRING", "READY").contains(row.getString("session_state"))
+                        || acquiring && (!session.isAcquirable() || !Set.of("ACQUIRING", "READY").contains(row.getString("session_state"))
                                 || session.getState() == RuntimeSessionRecord.State.READY && !"READY".equals(row.getString("session_state")))
-                        || !acquiring && !java.util.Set.of("ACQUIRING", "READY", "RELEASING", "RELEASED").contains(row.getString("session_state"))
+                        || !acquiring && !Set.of("ACQUIRING", "READY", "RELEASING", "RELEASED").contains(row.getString("session_state"))
                         || row.getBoolean("is_rewind_pending")
                         || ManagedSchemaRows.identity(row, "execution_storage_id") != null
                                 && !physical.equals(ManagedSchemaRows.identity(row, "execution_storage_id"))) {
@@ -378,8 +381,8 @@ public final class JdbcExternalWorkspaceOwnership {
      * The single read of "is this storage registered as EXTERNAL?"; admission and
      * authorization must not drift apart on this answer.
      */
-    public static boolean externalStorage(org.springframework.jdbc.core.JdbcTemplate jdbc,
-            com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
+    public static boolean externalStorage(JdbcTemplate jdbc,
+            ContextBinding binding) {
         return binding != null && jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE tenant_id = ? AND storage_id = ?",
                 String.class, binding.getTenantId(), binding.getStorageId()).contains("EXTERNAL");
     }
@@ -451,9 +454,9 @@ public final class JdbcExternalWorkspaceOwnership {
     }
 
     private static boolean isExternalWorkspaceRequest(
-            com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest request) {
+            RuntimeProvisionRequest request) {
         return request != null
-                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
+                && RuntimeProviderKinds.EXTERNAL_WORKSPACE
                         .equals(request.getProvisionerKind())
                 && request.getScope() != null
                 && request.getScope().getWorkspaceId().equals(request.getStorageId());

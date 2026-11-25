@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="156" viewBox="0 0 920 156">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="920" height="156" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="0" y="19" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">┌───────┬──────────────────────────┬────────┐                                                       </text>
+    <text x="0" y="36" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">│ Short │ Long                     │ Medium │                                                       </text>
+    <text x="0" y="53" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">├───────┼──────────────────────────┼────────┤                                                       </text>
+    <text x="0" y="70" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">│ Tiny  │ This is a very long text │ Not so │                                                       </text>
+    <text x="0" y="87" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">│       │ that definitely needs to │ long   │                                                       </text>
+    <text x="0" y="104" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">│       │ wrap to the next line    │        │                                                       </text>
+    <text x="0" y="121" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">└───────┴──────────────────────────┴────────┘                                                       </text>
+  </g>
+</svg>

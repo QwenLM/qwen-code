@@ -14,9 +14,11 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.dao.DuplicateKeyException;
@@ -24,6 +26,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -138,7 +141,7 @@ final class JournalWriterLifecycle {
     }
 
     WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
-            AcquireWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            AcquireWriterRequest request, RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -286,7 +289,7 @@ final class JournalWriterLifecycle {
     }
 
     WriterGrant renewWriter(String tenantId, String sessionId, String writerToken,
-            RenewWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RenewWriterRequest request, RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -353,7 +356,7 @@ final class JournalWriterLifecycle {
     }
 
     SealReceipt sealWriter(String tenantId, String sessionId, String writerToken,
-            SealWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            SealWriterRequest request, RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -452,7 +455,7 @@ final class JournalWriterLifecycle {
                     tenantId,
                     sessionId);
         } else {
-            List<Object> parameters = new java.util.ArrayList<>();
+            List<Object> parameters = new ArrayList<>();
             parameters.add(now.getTime());
             parameters.add(wake.backgroundHeld());
             parameters.add(effectivePending);
@@ -560,7 +563,7 @@ final class JournalWriterLifecycle {
         byte[] bytes;
         try {
             bytes = JournalStoreRows.JSON.writeValueAsBytes(receipt);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+        } catch (JsonProcessingException failure) {
             throw new IllegalStateException("Ownership release receipt cannot be encoded.", failure);
         }
         ManagedHarnessReleaseRecords.require(receipt);
