@@ -288,13 +288,13 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
  * message or a 4xx status. The SDK parses that body with JSONRPCMessageSchema
  * and surfaces a Zod `invalid_union` issue array that names none of the
  * server's actual response. The ZodError carries no `input` (probed on zod
- * 3.25.76 and 4.x), so the rejected body can only be recovered at the fetch
+ * 3.25.76 and 4.x), so any safe response code must be recovered at the fetch
  * boundary — see `createStreamableHttpCompatibilityFetch`.
  */
 interface NonJsonRpcResponseCapture {
   status: number;
   contentType: string;
-  bodyExcerpt: string;
+  code?: string;
 }
 
 const nonJsonRpcResponseCaptures = new Map<string, NonJsonRpcResponseCapture>();
@@ -323,9 +323,24 @@ function isZodParseError(value: unknown): boolean {
   return Array.isArray(record.issues) || record.name === 'ZodError';
 }
 
+function safeNonJsonRpcCode(value: unknown): string | undefined {
+  if (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    Math.abs(value) <= 999_999_999
+  ) {
+    return String(value);
+  }
+  // Numeric strings are machine codes too; free-form strings are response
+  // content and may themselves be credentials or PII.
+  if (typeof value === 'string' && /^-?\d{1,10}$/.test(value)) return value;
+  return undefined;
+}
+
 /**
- * Replace an opaque Zod parse failure with the server's actual response when
- * the compatibility fetch captured a non-JSON-RPC body for this server.
+ * Replace an opaque Zod parse failure with safe response metadata when the
+ * compatibility fetch captured a non-JSON-RPC body for this server. The raw
+ * body is never retained or surfaced: it may contain credentials or PII.
  * Returns the original error untouched when no capture applies, so success
  * paths and unrelated failures keep their existing behavior.
  */
@@ -342,11 +357,12 @@ export function improveMcpNonJsonRpcError<T>(
   let current: unknown = error;
   for (let depth = 0; depth < 4 && current != null; depth++) {
     if (isZodParseError(current)) {
+      const code = capture.code === undefined ? '' : `, code=${capture.code}`;
       return new Error(
         `MCP server '${serverName}' returned a non-JSON-RPC response ` +
-          `(HTTP ${capture.status}, ${capture.contentType}): ` +
-          `${capture.bodyExcerpt} — the endpoint or its gateway rejected ` +
-          `the request; check credentials or retry later.`,
+          `(HTTP ${capture.status}, ${capture.contentType}${code}) — ` +
+          `the endpoint or its gateway rejected the request; check ` +
+          `credentials or retry later.`,
         { cause: error },
       );
     }
@@ -356,10 +372,11 @@ export function improveMcpNonJsonRpcError<T>(
 }
 
 /**
- * Record a bounded excerpt of a 2xx application/json POST body that is not a
- * JSON-RPC message, so a later Zod parse failure can name the actual response.
- * Reads from a clone (the SDK still consumes the original) with the same
- * KB-scale bound and timeout as the GET-SSE fallback excerpt.
+ * Record safe metadata from a 2xx application/json POST body that is not a
+ * JSON-RPC message, so a later Zod parse failure can identify the response
+ * without exposing its contents. Only the HTTP status, normalized MIME type,
+ * and an allowlisted machine code cross this boundary; the body itself does
+ * not. Reads from a clone (the SDK still consumes the original).
  */
 async function captureNonJsonRpcResponse(
   serverName: string,
@@ -399,8 +416,8 @@ async function captureNonJsonRpcResponse(
   }
   nonJsonRpcResponseCaptures.set(key, {
     status: response.status,
-    contentType,
-    bodyExcerpt: excerpt,
+    contentType: 'application/json',
+    code: safeNonJsonRpcCode((parsed as { code?: unknown }).code),
   });
 }
 
@@ -2773,11 +2790,11 @@ export async function connectToMcpServer(
       );
       const errorMessage =
         (surfacedError as Error).message || String(surfacedError);
-      // Classify on the ORIGINAL error, not the improved message: the improved
-      // message embeds the server-controlled captured body, which may itself
-      // mention ECONNREFUSED/ENOTFOUND (e.g. a gateway reporting an upstream
-      // failure as 200 + JSON). Genuine network failures never carry a capture
-      // (captures require a 2xx response), so their concise message is preserved.
+      // Classify on the ORIGINAL error, not the improved message. The captured
+      // body may mention ECONNREFUSED/ENOTFOUND (e.g. a gateway reporting an
+      // upstream failure as 200 + JSON), but only safe metadata is surfaced.
+      // Genuine network failures never carry a capture (captures require a 2xx
+      // response), so their concise message is preserved.
       const rawMessage = (error as Error)?.message ?? String(error);
       const isNetworkError =
         rawMessage.includes('ENOTFOUND') || rawMessage.includes('ECONNREFUSED');

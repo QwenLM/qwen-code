@@ -10,8 +10,8 @@
  *
  * The SDK parses such bodies with JSONRPCMessageSchema and rejects with an
  * opaque Zod `invalid_union` dump that carries no `input`. The compatibility
- * fetch captures the rejected body at the transport boundary so the surfaced
- * error can name the actual response. These tests drive the REAL SDK client
+ * fetch inspects the rejected body at the transport boundary so the surfaced
+ * error can include a safe machine code without exposing the body. These tests drive the REAL SDK client
  * and transport against a local HTTP server — no SDK mocks — so the Zod
  * failure path is exercised exactly as it is in production.
  */
@@ -24,19 +24,24 @@ import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MCPServerConfig } from '../config/config.js';
+import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import type { ToolRegistry } from './tool-registry.js';
 import {
   _resetNonJsonRpcCapturesForTest,
   connectToMcpServer,
   createStreamableHttpCompatibilityFetch,
+  getMCPServerLastError,
   improveMcpNonJsonRpcError,
+  McpClient,
   removeMCPServerStatus,
 } from './mcp-client.js';
 
+const { debugErrorMock } = vi.hoisted(() => ({ debugErrorMock: vi.fn() }));
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: vi.fn(() => ({
     debug: vi.fn(),
-    error: vi.fn(),
+    error: debugErrorMock,
     info: vi.fn(),
     warn: vi.fn(),
   })),
@@ -61,8 +66,21 @@ const UPSTREAM_200_BODY = JSON.stringify({
   msg: 'upstream connect ECONNREFUSED 10.1.2.3:8080',
 });
 
+const TEST_MARKER = 'TEST-MARKER';
+const SECRET_200_BODY = JSON.stringify({
+  code: 401,
+  msg: 'auth failed',
+  diagnostic: `Authorization: Bearer ${TEST_MARKER}`,
+});
+const SECRET_CODE_200_BODY = JSON.stringify({
+  code: TEST_MARKER,
+  msg: 'auth failed',
+});
+
 type ServerMode =
   | 'auth200'
+  | 'secret200'
+  | 'secretCode200'
   | 'econnrefused200'
   | 'jsonrpc-ok'
   | 'jsonrpc-error'
@@ -76,6 +94,7 @@ describe('non-JSON-RPC 200 response error surface', () => {
 
   beforeEach(async () => {
     _resetNonJsonRpcCapturesForTest();
+    debugErrorMock.mockClear();
     mode = 'auth200';
     server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
@@ -106,6 +125,18 @@ describe('non-JSON-RPC 200 response error surface', () => {
         if (mode === 'auth200') {
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(AUTH_200_BODY);
+          return;
+        }
+        if (mode === 'secret200') {
+          res.writeHead(200, {
+            'content-type': `application/json; diagnostic="${TEST_MARKER}"`,
+          });
+          res.end(SECRET_200_BODY);
+          return;
+        }
+        if (mode === 'secretCode200') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(SECRET_CODE_200_BODY);
           return;
         }
         if (mode === 'econnrefused200') {
@@ -187,7 +218,7 @@ describe('non-JSON-RPC 200 response error surface', () => {
     });
   }
 
-  it("surfaces the gateway's body instead of the Zod issue array", async () => {
+  it('surfaces safe gateway metadata instead of the Zod issue array or raw body', async () => {
     const client = new Client({ name: 'error-surface-test', version: '0.0.1' });
     let caught: unknown;
     try {
@@ -205,27 +236,78 @@ describe('non-JSON-RPC 200 response error surface', () => {
     expect(message).toContain('non-JSON-RPC response');
     expect(message).toContain('HTTP 200');
     expect(message).toContain('application/json');
-    expect(message).toContain('token expired or incorrect');
+    expect(message).toContain('code=401');
+    expect(message).not.toContain('token expired or incorrect');
     expect(message).not.toContain('invalid_union');
     expect((surfaced as Error).cause).toBe(caught);
   });
 
-  it('connectToMcpServer reports the captured body in its connection error', async () => {
+  it('connectToMcpServer reports the captured response code in its connection error', async () => {
     const workspaceContext = {
       getDirectories: () => [],
       onDirectoriesChanged: () => () => {},
     } as unknown as WorkspaceContext;
     await expect(
       connectToMcpServer(serverName, config(), false, workspaceContext),
-    ).rejects.toThrow(/token expired or incorrect/);
+    ).rejects.toThrow(/code=401/);
   });
 
-  it('keeps a captured gateway body that mentions ECONNREFUSED (classify on the raw error)', async () => {
+  it('never exposes upstream secrets in errors, status, or debug logs', async () => {
+    mode = 'secret200';
+    const workspaceContext = {
+      getDirectories: () => [],
+      onDirectoriesChanged: () => () => {},
+    } as unknown as WorkspaceContext;
+    const client = new McpClient(
+      serverName,
+      config(),
+      {} as ToolRegistry,
+      {} as PromptRegistry,
+      workspaceContext,
+      false,
+    );
+    let caught: unknown;
+    try {
+      await client.connect();
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain('code=401');
+    expect((caught as Error).message).not.toContain(TEST_MARKER);
+
+    const lastError = getMCPServerLastError(serverName);
+    expect(lastError).toContain('code=401');
+    expect(lastError).not.toContain(TEST_MARKER);
+
+    expect(debugErrorMock).toHaveBeenCalled();
+    const debugOutput = debugErrorMock.mock.calls.flat().join('\n');
+    expect(debugOutput).toContain('code=401');
+    expect(debugOutput).not.toContain(TEST_MARKER);
+  });
+
+  it('rejects a nonnumeric code as untrusted text rather than a machine code', async () => {
+    mode = 'secretCode200';
+    const client = new Client({ name: 'error-surface-test', version: '0.0.1' });
+    let caught: unknown;
+    try {
+      await client.connect(transport(), { timeout: 10_000 });
+    } catch (error) {
+      caught = error;
+    }
+    const surfaced = improveMcpNonJsonRpcError(serverName, caught, config());
+    const message = (surfaced as Error).message;
+    expect(message).toContain('HTTP 200');
+    expect(message).not.toContain('code=');
+    expect(message).not.toContain(TEST_MARKER);
+  });
+
+  it('keeps safe gateway metadata when the body mentions ECONNREFUSED', async () => {
     // Witness for the network-classification bug: the gateway answered HTTP 200
-    // with a body naming an upstream ECONNREFUSED. The improved message embeds
-    // that server-controlled body, so classifying on it misreads the failure as
-    // a client-side network error and drops the capture. Classification must
-    // read the ORIGINAL error instead.
+    // with a body naming an upstream ECONNREFUSED. The safe metadata keeps
+    // code=502 but drops that server-controlled text, and classification must
+    // read the ORIGINAL error instead of any improved diagnostic.
     mode = 'econnrefused200';
     const workspaceContext = {
       getDirectories: () => [],
@@ -239,7 +321,10 @@ describe('non-JSON-RPC 200 response error surface', () => {
     }
     expect(caught).toBeInstanceOf(Error);
     const message = (caught as Error).message;
-    expect(message).toContain('upstream connect ECONNREFUSED 10.1.2.3:8080');
+    expect(message).toContain('code=502');
+    expect(message).not.toContain(
+      'upstream connect ECONNREFUSED 10.1.2.3:8080',
+    );
     expect(message).not.toContain('server may be down');
   });
 
@@ -339,7 +424,7 @@ describe('non-JSON-RPC 200 response error surface', () => {
     });
     const surfaced = improveMcpNonJsonRpcError(serverName, wrapped, config());
     expect(surfaced).toBeInstanceOf(Error);
-    expect((surfaced as Error).message).toContain('token expired or incorrect');
+    expect((surfaced as Error).message).toContain('code=401');
     expect((surfaced as Error).cause).toBe(wrapped);
   });
 });
