@@ -1078,9 +1078,26 @@ describe('loggers', () => {
       'forked_query',
       'speculation',
       'side-query:session-title',
-    ])('does not record token usage for internal prompt_id %s', (promptId) => {
-      logApiResponse(mockConfig, responseWithUsage(promptId));
+    ])('records actual token usage for internal prompt_id %s', (promptId) => {
+      const event = responseWithUsage(promptId);
+      logApiResponse(mockConfig, event);
 
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).toHaveBeenCalledWith(mockConfig, event);
+    });
+
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])('does not record disabled internal token usage: %s', (promptId) => {
+      const configWithUsageStatsDisabled = {
+        ...mockConfig,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      logApiResponse(configWithUsageStatsDisabled, responseWithUsage(promptId));
       expect(
         tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
       ).not.toHaveBeenCalled();

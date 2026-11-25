@@ -6741,9 +6741,11 @@ export class Config {
         `with every request, which is the cost a rule exists to avoid. Add ` +
         `\`paths:\` to it, or move the content into the extension's context file.`,
     );
-    const extra = memoryContextWarning
-      ? [...ruleWarnings, memoryContextWarning]
-      : ruleWarnings;
+    const extra = [
+      ...ruleWarnings,
+      ...(memoryContextWarning ? [memoryContextWarning] : []),
+      ...(this.getHookSystem()?.getConfigWarnings() ?? []),
+    ];
     return extra.length > 0 ? [...this.warnings, ...extra] : this.warnings;
   }
 
@@ -13069,7 +13071,9 @@ export class Config {
     projection: SessionRestoreProjection | undefined,
   ): void {
     this.pendingSessionRestoreProjection = projection;
-    this.sessionRestoreRuntime = projection?.runtime;
+    this.sessionRestoreRuntime = projection
+      ? { ...projection.runtime, conversationStartTime: projection.startTime }
+      : undefined;
     this.restoredFileHistory = false;
   }
 

@@ -297,9 +297,7 @@ export function UsageDashboardTab() {
           />
           <Metric
             accent="output"
-            value={formatMegaTokens(
-              summary.outputTokens + summary.thoughtsTokens,
-            )}
+            value={formatMegaTokens(summary.outputTokens)}
             label={t('daemon.usage.outputTokens')}
             hint={t('daemon.usage.outputHint')}
           />

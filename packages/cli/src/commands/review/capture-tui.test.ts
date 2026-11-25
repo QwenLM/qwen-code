@@ -4875,6 +4875,65 @@ exit 0
       'SIGTERM',
     ]);
   });
+
+  it('prepends its reap signal handler ahead of pre-registered hooks and cleans it up', async () => {
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-prepend-'));
+    const preRegistered = () => {};
+    let captureHandler: ((...args: unknown[]) => void) | undefined;
+    let captureHandlerPrecededHook = false;
+    const origPath = process.env['PATH'];
+    const origPrepend = process.prependListener.bind(process);
+    const prependSpy = vi.spyOn(process, 'prependListener');
+    process.on('SIGTERM', preRegistered);
+    try {
+      prependSpy.mockImplementation(((
+        event: NodeJS.Signals,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        const result = origPrepend(event, listener);
+        if (event === 'SIGTERM') {
+          captureHandler = listener;
+          const listeners = process.listeners('SIGTERM');
+          captureHandlerPrecededHook =
+            listeners.indexOf(listener) < listeners.indexOf(preRegistered);
+        }
+        return result;
+      }) as typeof process.prependListener);
+      // Provide sleep without tmux so resolveSleep passes and plan.start fails
+      // immediately after installing the reap signal handlers.
+      const binDir = join(dir, 'bin');
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, 'sleep'), '#!/bin/sh\nexit 0\n', {
+        mode: 0o755,
+      });
+      process.env['PATH'] = binDir;
+      await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: dir,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(captureHandler).toBeDefined();
+      expect(captureHandlerPrecededHook).toBe(true);
+      expect(process.listeners('SIGTERM')).not.toContain(captureHandler);
+      expect(process.listeners('SIGTERM')).toContain(preRegistered);
+    } finally {
+      prependSpy.mockRestore();
+      process.removeListener('SIGTERM', preRegistered);
+      if (captureHandler) process.removeListener('SIGTERM', captureHandler);
+      if (origPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = origPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // The command boundary drives REAL tmux — a private-server capture the mocks
