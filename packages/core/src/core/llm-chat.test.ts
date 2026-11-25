@@ -117,7 +117,10 @@ import {
   estimateContentTokens,
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
-import { clampOutputTokensToWindow } from './tokenLimits.js';
+import {
+  clampOutputTokensToWindow,
+  MIN_CLAMPED_OUTPUT_TOKENS,
+} from './tokenLimits.js';
 import {
   EMPTY_AUTO_MEMORY_CATALOG,
   findLatestAutoMemorySnapshot,
@@ -4611,10 +4614,12 @@ describe('LlmChat', async () => {
       await sendDrain('go', 'prompt-id-seed', subagentChat);
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
-      // The effective count, not the bare seed: 123,456 + char/4 of 'go' (1),
-      // lastOutputTokenCount 0. The exact value catches over- and
+      // The gate reads the effective count, not the bare seed: 123,456 +
+      // char/4 of 'go' (1), lastOutputTokenCount 0. The baseline the service
+      // sizes `newTokenCount` from leaves the pending message out (#15486),
+      // so it is the seed itself. The exact values catch over- and
       // under-counting on the send path.
-      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(123_457);
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(123_456);
       expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
         123_457,
       );
@@ -4896,6 +4901,33 @@ describe('LlmChat', async () => {
       expect(coldSpy).not.toHaveBeenCalled();
     });
 
+    it('keeps the pending message in the compaction gate input (#15486)', async () => {
+      // Compression sizes the compacted count from a baseline without the
+      // pending message, but its gate must still read the full effective
+      // count. Here the baseline alone (165K) is below the 167K auto
+      // threshold and only the pending message (10K) takes the prompt over
+      // it, below the 177K hard tier: a gate that read the baseline would
+      // skip a compaction this send needs.
+      chat.setHistory(largeInheritedHistory());
+      chat.setLastPromptTokenCount(165_000);
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      const generateText = vi.fn().mockResolvedValue(snapshotReply());
+      withBaseLlmClient(generateText);
+      mockStream(textStream('done'));
+
+      const events = await sendCollect('y'.repeat(40_000), 'prompt-15486-gate');
+
+      const opts = compressSpy.mock.calls[0][1];
+      expect(opts.force).toBe(false);
+      expect(opts.originalTokenCount).toBe(165_000);
+      expect(opts.precomputedEffectiveTokens).toBe(175_000);
+      expectCompressedEvent(events);
+      expect(generateText).toHaveBeenCalledTimes(1);
+    });
+
     it('routes zero-baseline compression through the cold side query end-to-end (R5-3)', async () => {
       // R3.4 without a provider anchor: at lastPromptTokenCount 0 a non-zero
       // baseline is derived locally and the service skips cache sharing for
@@ -4924,6 +4956,205 @@ describe('LlmChat', async () => {
       expect(generateText).not.toHaveBeenCalled();
       expect(coldSpy).toHaveBeenCalledTimes(1);
     });
+
+    it('sizes the compacted count from the history walk on a first send with no count (#15486)', async () => {
+      // At count 0 both send-path estimates walk the history; the baseline
+      // walks it with the pending turn's parts emptied. The 165K history is
+      // below the 167K auto threshold and the 10K message takes the
+      // effective count over it, below the 177K hard tier. A baseline that
+      // kept the message would carry it into the compacted count, and every
+      // later estimate would add it again.
+      const history: Content[] = [
+        userText('x'.repeat(660_000)),
+        modelText('ack'),
+        userText('follow up'),
+        modelText('response'),
+      ];
+      chat.setHistory(history);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue(
+        snapshotReply() as never,
+      );
+      withBaseLlmClient(vi.fn());
+      mockStream(textStream('done'));
+      const message = 'y'.repeat(40_000);
+
+      expectCompressedEvent(await sendCollect(message, 'prompt-15486-count-0'));
+
+      const opts = compressSpy.mock.calls[0][1];
+      expect(opts.force).toBe(false);
+      expect(opts.originalTokenCount).toBe(estimateContentTokens(history));
+      expect(opts.precomputedEffectiveTokens).toBe(
+        estimateContentTokens([...history, userText(message)]),
+      );
+    });
+
+    it.each([
+      ['tool result', 'cache-sharing'],
+      ['tool result', 'cold'],
+      ['text', 'cache-sharing'],
+      ['text', 'cold'],
+    ] as const)(
+      'does not count a pending %s twice after a hard-tier compaction (%s accounting, #15486)',
+      async (pendingKind, route) => {
+        // C1 in #15486: 64K window (auto 31K, hard 41K). The prior prompt is
+        // 22,000 tokens and the pending message adds about 20K, so the send
+        // crosses hard and the rescue compacts with the real service. The
+        // compacted prompt fits, but a compacted count that still held the
+        // pending message, plus the guard's own copy of it, came to about
+        // 42K and stopped the turn with "Context is too large". Gemini takes
+        // the cache-sharing request (estimated accounting); OpenAI without
+        // cache control takes the cold side query, whose usage drives the
+        // provider-count accounting.
+        mockGeneratorConfig(
+          route === 'cache-sharing'
+            ? { contextWindowSize: 64_000 }
+            : {
+                authType: AuthType.USE_OPENAI,
+                enableCacheControl: false,
+                contextWindowSize: 64_000,
+              },
+        );
+        const isToolResult = pendingKind === 'tool result';
+        const pending: Part = isToolResult
+          ? {
+              functionResponse: {
+                id: 'read-1',
+                name: 'read_file',
+                response: { output: 'y'.repeat(80_000) },
+              },
+            }
+          : { text: 'y'.repeat(80_000) };
+        chat.setHistory([
+          userText('x'.repeat(80_000)),
+          isToolResult
+            ? {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'read-1',
+                      name: 'read_file',
+                      args: { file_path: 'big.txt' },
+                    },
+                  },
+                ],
+              }
+            : modelText('ack'),
+        ]);
+        chat.setLastPromptTokenCount(22_000);
+        // The cold request carries the history (about 20K) plus 1K of
+        // directive, and a pending tool result rides along; pending text
+        // does not.
+        const compressionPromptTokens = isToolResult ? 41_000 : 21_000;
+        const reply = {
+          text: '<state_snapshot>compressed</state_snapshot>',
+          usage: {
+            promptTokenCount: compressionPromptTokens,
+            candidatesTokenCount: 1_500,
+            totalTokenCount: compressionPromptTokens + 1_500,
+          },
+        };
+        const coldSpy = vi
+          .spyOn(sideQueryModule, 'runSideQuery')
+          .mockResolvedValue(reply as never);
+        const generateText = vi.fn().mockResolvedValue(reply);
+        withBaseLlmClient(generateText);
+        mockStream(textStream('done'));
+
+        const events = await sendCollect([pending], 'prompt-15486-c1');
+
+        expect(
+          route === 'cache-sharing' ? generateText : coldSpy,
+        ).toHaveBeenCalledTimes(1);
+        expectCompressedEvent(events);
+        const pendingTokens = estimateContentTokens([
+          { role: 'user', parts: [pending] },
+        ]);
+        expect(infoOf(compressedEvent(events)).newTokenCount).toBeLessThan(
+          pendingTokens,
+        );
+        expectStreamCalls(1);
+      },
+    );
+
+    it.each(['without', 'with'] as const)(
+      'leaves a pending tool result out of the cold compacted count %s a retained tail (#15486)',
+      async (tail) => {
+        // The cold formula has two branches. Without a retained tail the
+        // side query carries the pending tool result, and the service
+        // subtracts it from the query's input count; with one, the query
+        // stops before the retained operation and carries no pending result,
+        // so nothing is subtracted. Either way the compacted count is the
+        // baseline (25K, pending left out) minus the summarized history
+        // (10K) plus the summary (1.5K), and with a tail also the note that
+        // introduces the retained operation. 64K window: the pending result
+        // (about 8K) takes the 25K prompt over the 31K auto threshold.
+        mockGeneratorConfig({
+          authType: AuthType.USE_OPENAI,
+          enableCacheControl: false,
+          contextWindowSize: 64_000,
+        });
+        const pending = fnResponse(
+          'read_file',
+          { output: 'y'.repeat(32_000) },
+          'read-1',
+        );
+        const pendingTokens = estimateContentTokens([content('user', pending)]);
+        const call = content(
+          'model',
+          fnCall('read_file', { file_path: 'big.txt' }, 'read-1'),
+        );
+        const firstPrompt = userText('x'.repeat(40_000));
+        const latestPrompt = userText('read the file');
+        markApiHistoryPrompt(firstPrompt, 'prompt-15486-first');
+        markApiHistoryPrompt(latestPrompt, 'prompt-15486-latest');
+        chat.setHistory(
+          tail === 'with'
+            ? [firstPrompt, modelText('ack'), latestPrompt, call]
+            : [firstPrompt, call],
+        );
+        chat.setLastPromptTokenCount(25_000);
+        const summarizedHistoryTokens = 10_000;
+        const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+        coldSpy.mockResolvedValue({
+          text: '<state_snapshot>compressed</state_snapshot>',
+          usage: {
+            promptTokenCount:
+              1_000 +
+              summarizedHistoryTokens +
+              (tail === 'with' ? 0 : pendingTokens),
+            candidatesTokenCount: 1_500,
+          },
+        } as never);
+        mockStream(textStream('done'));
+
+        const events = await sendCollect([pending], 'prompt-15486-tail');
+
+        expect(coldSpy).toHaveBeenCalledTimes(1);
+        const sideQueryInput = JSON.stringify(coldSpy.mock.calls[0][1]);
+        expect(sideQueryInput.includes('y'.repeat(100))).toBe(
+          tail === 'without',
+        );
+        expectCompressedEvent(events);
+        const info = infoOf(compressedEvent(events));
+        // Summary and acknowledgement, plus the note before a retained tail.
+        expect(info.summaryPrefixLength).toBe(tail === 'with' ? 3 : 2);
+        const tailNoteTokens =
+          tail === 'with'
+            ? estimateContentTokens(chat.getHistory().slice(2, 3))
+            : 0;
+        expect(info.newTokenCount).toBe(
+          25_000 - summarizedHistoryTokens + 1_500 + tailNoteTokens,
+        );
+        expect(chat.getLastPromptTokenCount()).toBe(info.newTokenCount);
+        expectStreamCalls(1);
+      },
+    );
 
     it('clears consecutiveFailures after a forced successful compression', async () => {
       const compressSpy = vi.spyOn(
@@ -5700,10 +5931,16 @@ describe('LlmChat', async () => {
       ).toBe(true);
       expect(recordChatCompression).toHaveBeenCalledTimes(1);
       const recordPayload = recordChatCompression.mock.calls[0][0];
+      // The record's counts describe its snapshot, which carries the pending
+      // turn (below), so they include that turn (#15486).
       expect(recordPayload.info).toEqual(
         expect.objectContaining({
           compressionStatus: CompressionStatus.COMPRESSED,
-          newTokenCount: 40_000,
+          newTokenCount:
+            40_000 +
+            estimateContentTokens([
+              { role: 'user', parts: [{ text: userMessage }] },
+            ]),
         }),
       );
       expect(recordPayload.info.newTokenCountIsEstimated).toBe(true);
@@ -5823,6 +6060,192 @@ describe('LlmChat', async () => {
       ).rejects.toThrow(/Estimated prompt tokens: 178000; hard limit: 177000/i);
 
       expectRolledBack(target, recordChatCompression, 175_500, originalHistory);
+    });
+
+    it('passes the hard-tier baseline to compression without the pending message (#15486)', async () => {
+      // The service reads `originalTokenCount` as the prompt before the
+      // pending message and keeps that message out of `newTokenCount` only on
+      // that reading. The precomputed effective count folds the pending
+      // message in, so it has to come back out here, or the compacted count
+      // carries it and the next estimate adds it a second time.
+      // The previous output stays in the baseline: it is part of the history
+      // the summary replaces.
+      chat.seedResumeTokenCounts(170_000, 500, false);
+      const compressSpy = mockCompressOnce(compressed(170_500, 20_000));
+      mockStream(textStream('sent'));
+
+      await sendDrain('x'.repeat(32_000), 'prompt-15486-baseline');
+
+      const opts = compressSpy.mock.calls[0][1];
+      expect(opts.force).toBe(true);
+      expect(opts.precomputedEffectiveTokens).toBe(178_500);
+      expect(opts.originalTokenCount).toBe(170_500);
+    });
+
+    it('also leaves a memory snapshot sent with the pending message out of the baseline (#15486)', async () => {
+      // The memory catalog changed on this send, so the effective count folds
+      // a fresh snapshot in with the pending message. The post-compaction
+      // estimates add both back, so the baseline must leave both out.
+      mockConfig.getAutoMemoryContext = () => 'c'.repeat(4_000);
+      chat.setLastPromptTokenCount(170_000);
+      const compressSpy = mockCompressOnce(compressed(170_000, 20_000));
+      mockStream(textStream('sent'));
+
+      await sendDrain('x'.repeat(32_000), 'prompt-15486-memory-snapshot');
+
+      const opts = compressSpy.mock.calls[0][1];
+      expect(opts.force).toBe(true);
+      expect(opts.precomputedEffectiveTokens).toBeGreaterThan(179_000);
+      expect(opts.originalTokenCount).toBe(170_000);
+    });
+
+    it.each([
+      // Hard tier: the record is written after the post-compaction guard.
+      ['hard-tier', 170_000, 'x'.repeat(32_000), 8_000],
+      // Between auto and hard: tryCompress writes the record itself.
+      ['auto', 172_000, 'go', 1],
+    ] as const)(
+      'counts the pending message in the %s compression record that stores it (#15486)',
+      async (_tier, seed, message, pendingTokens) => {
+        // Resume replays the recorded snapshot, which keeps the pending
+        // message after the summary, and seeds its count from the record.
+        // The live counts leave that message out because the next send adds
+        // it, so the record has to add it back or a resumed session starts
+        // one message short.
+        const { target, recordChatCompression } = recordingChat();
+        target.setHistory([userText('history'), modelText('ok')]);
+        target.setLastPromptTokenCount(seed);
+        mockCompressOnce(compressed(seed, 20_000));
+        mockStream(textStream('sent'));
+
+        const events = await sendCollect(
+          message,
+          'prompt-15486-record',
+          target,
+        );
+
+        expect(recordChatCompression).toHaveBeenCalledTimes(1);
+        const payload = recordChatCompression.mock.calls[0][0];
+        expect(payload.compressedHistory.at(-1)?.parts?.[0]?.text).toBe(
+          message,
+        );
+        expect(payload.info.originalTokenCount).toBe(seed + pendingTokens);
+        expect(payload.info.newTokenCount).toBe(20_000 + pendingTokens);
+        // Only the record adds the message back. The adopted count and the
+        // live COMPRESSED event keep the compacted count, or the next
+        // estimate counts the message twice again.
+        const compressedEvent = events.find(
+          (event) => event.type === StreamEventType.COMPRESSED,
+        ) as { info: ChatCompressionInfo } | undefined;
+        expect(compressedEvent?.info.newTokenCount).toBe(20_000);
+        expect(target.getLastPromptTokenCount()).toBe(20_000);
+      },
+    );
+
+    describe.each([
+      // Hard tier: the record is written after the post-compaction guard.
+      ['hard-tier', 170_000, 'x'.repeat(32_000)],
+      // Between auto and hard: tryCompress writes the record itself.
+      ['auto', 172_000, 'go'],
+    ] as const)(
+      'the %s compression record counts the pending turn as it is sent (#15486)',
+      (_tier, seed, message) => {
+        const isSnapshot = (part: Part) =>
+          part.partMetadata?.['qwen-code:memory-catalog-snapshot'] === true;
+
+        /**
+         * Sends `pending` through a compaction and returns the record payload
+         * with the turn the request carried after it. Resume replays that
+         * turn and seeds its count from the record, so the record must add
+         * back exactly what the request carried.
+         */
+        async function compactAndSend(history: Content[], pending: Part[]) {
+          const recordChatCompression = vi.fn();
+          const target = newChat({
+            recorder: {
+              recordAssistantTurn: vi.fn(),
+              recordChatCompression,
+              recordMemoryCatalogSnapshot: vi.fn(),
+            },
+          });
+          target.setHistory(history);
+          target.setLastPromptTokenCount(seed);
+          mockCompressOnce(compressed(seed, 20_000));
+          mockStream(textStream('sent'));
+
+          await sendCollect(pending, 'prompt-15486-record-as-sent', target);
+
+          expect(recordChatCompression).toHaveBeenCalledTimes(1);
+          const payload = recordChatCompression.mock.calls[0][0];
+          const sentTurn = (requestAt(0).contents as Content[]).at(-1)!;
+          const sentTokens = estimateContentTokens([sentTurn]);
+          return { payload, sentTurn, sentTokens, target };
+        }
+
+        it('adds a fresh memory snapshot sent with the pending message', async () => {
+          mockConfig.getAutoMemoryContext = () => 'c'.repeat(4_000);
+
+          const { payload, sentTurn, sentTokens } = await compactAndSend(
+            [userText('history'), modelText('ok')],
+            [{ text: message }],
+          );
+
+          expect(sentTurn.parts?.some(isSnapshot)).toBe(true);
+          expect(payload.info.newTokenCount).toBe(20_000 + sentTokens);
+          expect(payload.info.originalTokenCount).toBe(seed + sentTokens);
+        });
+
+        it('adds the snapshot again when compaction drops the one in history', async () => {
+          // Before compaction the catalog is already in history, so the
+          // pre-compaction estimate attaches no snapshot. The summary drops
+          // it, and the send after compaction attaches the catalog again.
+          const catalog = 'c'.repeat(4_000);
+          mockConfig.getAutoMemoryContext = () => catalog;
+
+          const { payload, sentTurn, sentTokens } = await compactAndSend(
+            [
+              content('user', getAutoMemorySnapshot([], catalog)!),
+              modelText('ok'),
+            ],
+            [{ text: message }],
+          );
+
+          expect(sentTurn.parts?.some(isSnapshot)).toBe(true);
+          expect(payload.info.newTokenCount).toBe(20_000 + sentTokens);
+        });
+
+        it('leaves out a replayed snapshot the request strips, and keeps it in the record', async () => {
+          mockConfig.getAutoMemoryContext = () => '';
+          const replayed = getAutoMemorySnapshot([], 'r'.repeat(40_000))!;
+
+          const { payload, sentTurn, sentTokens } = await compactAndSend(
+            [userText('history'), modelText('ok')],
+            [{ text: message }, replayed],
+          );
+
+          expect(sentTurn.parts?.some(isSnapshot)).toBe(false);
+          expect(payload.info.newTokenCount).toBe(20_000 + sentTokens);
+          // The count is corrected, not the replay: the record still stores
+          // the turn as it was replayed.
+          expect(payload.compressedHistory.at(-1)?.parts).toContain(replayed);
+        });
+      },
+    );
+
+    it('keeps the pending message out of an estimated baseline that was not precomputed (#15486)', async () => {
+      // Count 0, so the baseline is a local estimate. The service's gate adds
+      // the pending message to it, so the baseline itself must not.
+      const history = [userText('x'.repeat(40_000)), modelText('ack')];
+      chat.setHistory(history);
+      const compressSpy = mockCompressOnce(noop());
+
+      await chat.tryCompress('prompt-15486-fallback', true, undefined, {
+        pendingUserMessage: userText('y'.repeat(8_000)),
+      });
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(
+        estimateContentTokens(history),
+      );
     });
 
     it('does not treat the image token estimate as output tokens after hard-rescue compression', async () => {
@@ -6879,6 +7302,47 @@ describe('LlmChat', async () => {
       await sendDrain('hi', 'prompt-estimated-clamp-pad', chatInstance);
 
       expect(sentMaxOutputTokens()).toBe(9_919);
+    });
+
+    it('keeps the output floor after compaction on a window smaller than the pad (#15486)', async () => {
+      // 16K window, compacted to 4,805 estimated tokens. The 20K pad alone is
+      // larger than the window, which drove max_tokens to 1 for a prompt
+      // that fits; the floor is capped by the unpadded estimate instead.
+      mockGeneratorConfig({ contextWindowSize: 16_000 });
+      mockCompressOnce(
+        compressed(25_668, 4_805, [userText('summary'), modelText('ok')]),
+        noop(4_805),
+      );
+      mockStream(textStream('first send after compression'));
+
+      const chatInstance = newChat({
+        history: [userText('history'), modelText('response')],
+      });
+      await chatInstance.tryCompress('prompt-small-window-compression', true);
+      expect(chatInstance.isLastPromptTokenCountEstimated()).toBe(true);
+
+      await sendDrain('hi', 'prompt-small-window-clamp', chatInstance);
+
+      expect(sentMaxOutputTokens()).toBe(MIN_CLAMPED_OUTPUT_TOKENS);
+    });
+
+    it('keeps capping the floor by the padded estimate on a fresh session (#15486)', async () => {
+      // At count 0 the estimate is a history walk that misses the
+      // instructions and tool definitions the pad stands for (about 18K in
+      // the E2E dry-run above), so the pad still caps the floor: here
+      // 32000 − (estimate + 20000) rather than the 4,000 floor.
+      mockGeneratorConfig({ contextWindowSize: 32_000 });
+      mockCompress(noop());
+      mockStream(textStream('first send'));
+      const history = [userText('x'.repeat(40_000)), modelText('ok')];
+      // Before the send: the chat appends the turn to this same array.
+      const estimate = estimateContentTokens([...history, userText('hi')]);
+      const chatInstance = newChat({ history });
+
+      await sendDrain('hi', 'prompt-fresh-padded-floor', chatInstance);
+
+      expect(sentMaxOutputTokens()).toBe(32_000 - (estimate + 20_000));
+      expect(sentMaxOutputTokens()).toBeLessThan(MIN_CLAMPED_OUTPUT_TOKENS);
     });
 
     /** A fresh 40K-window chat seeded with an estimated 79-token count. */
@@ -15236,6 +15700,255 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('keeps the output floor on a recovery send when the walk pad exceeds a small window (#15486)', async () => {
+      // 16K window: the recovery walk is padded by 20K, which alone exceeds
+      // the window, so every recovery send went out with max_tokens 1. The
+      // floor is capped by the unpadded estimate instead.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 16_000,
+      });
+      mockCompress(noop(5_000));
+      serveStreams(
+        streamOf(
+          textChunk('partial essay…', 'MAX_TOKENS', {
+            promptTokenCount: 5_000,
+            totalTokenCount: 9_000,
+          }),
+        ),
+        textStream(' …and done.'),
+      );
+
+      chat.setLastPromptTokenCount(5_000);
+      await drain(
+        await sendOn('claude-sonnet-4-6', 'hi', 'prompt-recovery-small-window'),
+      );
+
+      expectStreamCalls(2);
+      expect(requestAt(0).config?.maxOutputTokens).toBe(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+      expect(requestAt(1).config?.maxOutputTokens).toBe(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+    });
+
+    it.each([
+      // The check on #15486: the usage-based estimate is about 22.8K and the
+      // walk about 14.5K, so the padded walk (about 34.5K) is past the
+      // window and capping the floor by it gave max_tokens 1. The fresh
+      // usage covers the walk and leaves about 10K, so the floor holds.
+      ['leaves room', 18_000, 4_766, MIN_CLAMPED_OUTPUT_TOKENS],
+      // Usage that fills the window still gets 1: the floor follows the
+      // count, not the smaller unpadded walk.
+      ['fills the window', 29_000, 3_766, 1],
+    ] as const)(
+      'caps a recovery floor on a 32K window by fresh usage that %s (#15486)',
+      async (_case, promptTokenCount, outputTokenCount, expected) => {
+        mockGeneratorConfig({
+          model: 'claude-sonnet-4-6',
+          contextWindowSize: 32_768,
+        });
+        mockCompress(noop(promptTokenCount));
+        serveStreams(
+          streamOf(
+            textChunk('p'.repeat(18_000), 'MAX_TOKENS', {
+              promptTokenCount,
+              totalTokenCount: promptTokenCount + outputTokenCount,
+            }),
+          ),
+          textStream(' …and done.'),
+        );
+
+        chat.setHistory([userText('x'.repeat(40_000)), modelText('ok')]);
+        chat.setLastPromptTokenCount(promptTokenCount);
+        await drain(
+          await sendOn('claude-sonnet-4-6', 'hi', 'prompt-recovery-32k'),
+        );
+
+        expectStreamCalls(2);
+        // The first reply used its whole grant and was cut there.
+        expect(requestAt(0).config?.maxOutputTokens).toBe(outputTokenCount);
+        expect(requestAt(1).config?.maxOutputTokens).toBe(expected);
+      },
+    );
+
+    it('keeps capping a recovery floor by the padded walk when no count covers the walk (#15486)', async () => {
+      // No provider count: the recovery estimate is the history walk plus the
+      // pad, and the pad stands for overhead the walk cannot see, so it still
+      // caps the floor. 64K window: a 10K walk leaves the first send a wide
+      // grant; the ~31K partial reply then brings the padded walk within 4K
+      // of the window, so the recovery gets less than the 4,000 floor.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 64_000,
+      });
+      mockCompress(noop());
+      serveStreams(
+        streamOf(textChunk('p'.repeat(124_000), 'MAX_TOKENS')),
+        textStream(' …and done.'),
+      );
+
+      chat.setHistory([userText('x'.repeat(40_000)), modelText('ok')]);
+      await drain(
+        await sendOn('claude-sonnet-4-6', 'hi', 'prompt-recovery-fresh'),
+      );
+
+      expectStreamCalls(2);
+      expect(requestAt(0).config?.maxOutputTokens).toBeGreaterThan(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+      expect(requestAt(1).config?.maxOutputTokens).toBeLessThan(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+    });
+
+    it('keeps capping a recovery floor by the padded walk when a positive count falls below the walk (#15486)', async () => {
+      // A provider count that misses content the walk sees cannot stand in for
+      // the overhead the pad covers. 16K window: the count-based estimate is
+      // about 5.6K and the walk about 15.4K, so the padded walk is past the
+      // window and the recovery gets 1. Capping by the count would grant
+      // 4,000 and overflow the window, with no reactive recovery in the loop.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 16_000,
+      });
+      mockCompress(noop(1_000));
+      serveStreams(
+        streamOf(
+          textChunk('p'.repeat(20_000), 'MAX_TOKENS', {
+            promptTokenCount: 1_000,
+            totalTokenCount: 5_000,
+          }),
+        ),
+        textStream(' …and done.'),
+      );
+
+      chat.setHistory([userText('x'.repeat(40_000)), modelText('ok')]);
+      chat.setLastPromptTokenCount(1_000);
+      await drain(
+        await sendOn('claude-sonnet-4-6', 'hi', 'prompt-recovery-stale-count'),
+      );
+
+      expectStreamCalls(2);
+      // The first send starts from the count and gets more than the floor,
+      // so the recovery's ceiling does not hide which cap set its floor.
+      expect(requestAt(0).config?.maxOutputTokens).toBeGreaterThan(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+      expect(requestAt(1).config?.maxOutputTokens).toBeLessThan(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+    });
+
+    it('caps a recovery floor by the count when the count-based estimate equals the walk (#15486)', async () => {
+      // The guard is inclusive. A first run measures the walk the recovery
+      // sees and its recovery message; a second run reports usage that makes
+      // the count-based estimate (prompt + output + 1.5 × the message) equal
+      // to that walk. 32,768 window: capped by the count the floor is 4,000,
+      // capped by the padded walk it would be 1.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 32_768,
+      });
+      mockCompress(noop(18_000));
+      const output = 4_766;
+      const truncatedReply = (promptTokenCount: number) =>
+        streamOf(
+          textChunk('p'.repeat(20_000), 'MAX_TOKENS', {
+            promptTokenCount,
+            totalTokenCount: promptTokenCount + output,
+          }),
+        );
+      const run = async (target: LlmChat) => {
+        target.setHistory([userText('x'.repeat(40_000)), modelText('ok')]);
+        target.setLastPromptTokenCount(18_000);
+        await drain(
+          await sendOn(
+            'claude-sonnet-4-6',
+            'hi',
+            'prompt-recovery-equal',
+            target,
+          ),
+        );
+      };
+
+      serveStreams(truncatedReply(18_000), textStream(' …and done.'));
+      await run(newChat());
+      expectStreamCalls(2);
+      expect(requestAt(0).config?.maxOutputTokens).toBe(output);
+      const recoveryContents = requestAt(1).contents as Content[];
+      const walk = estimateContentTokens(recoveryContents);
+      const messageTokens = Math.ceil(
+        estimateContentTokens([recoveryContents.at(-1)!]) * 1.5,
+      );
+
+      serveStreams(
+        truncatedReply(walk - output - messageTokens),
+        textStream(' …and done.'),
+      );
+      await run(newChat());
+
+      expectStreamCalls(4);
+      expect(estimateContentTokens(requestAt(3).contents as Content[])).toBe(
+        walk,
+      );
+      expect(requestAt(3).config?.maxOutputTokens).toBe(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+    });
+
+    it.each([
+      // No ceiling of its own: the recovery gets the floor.
+      [undefined, MIN_CLAMPED_OUTPUT_TOKENS],
+      // A caller's ceiling below the floor still bounds the recovery.
+      [2_000, 2_000],
+    ] as const)(
+      'lets a recovery send outgrow a first grant the pad squeezed on a fresh session (ceiling %s, #15486)',
+      async (ceiling, expected) => {
+        // A fresh session has no count, so its first send pads the history walk
+        // and a 32,768 window leaves a few hundred tokens. The truncated reply
+        // brings provider usage showing about 10K free. The recovery re-clamps
+        // against the window itself, so it must not also inherit that squeezed
+        // first grant as its ceiling; the request's own ceiling still applies.
+        mockGeneratorConfig({
+          model: 'claude-sonnet-4-6',
+          contextWindowSize: 32_768,
+        });
+        mockCompress(noop());
+        // The first grant is known only once the first request is built.
+        let firstGrant = 0;
+        streamMock().mockImplementation(async (request) => {
+          if (streamMock().mock.calls.length === 1) {
+            firstGrant = request.config?.maxOutputTokens ?? 0;
+            return streamOf(
+              textChunk('p'.repeat(2_040), 'MAX_TOKENS', {
+                promptTokenCount: 21_000,
+                totalTokenCount: 21_000 + firstGrant,
+              }),
+            );
+          }
+          return textStream(' …and done.');
+        });
+
+        chat.setHistory([userText('x'.repeat(49_000)), modelText('ok')]);
+        await drain(
+          await chat.sendMessageStream(
+            'claude-sonnet-4-6',
+            {
+              message: 'hi',
+              ...(ceiling ? { config: { maxOutputTokens: ceiling } } : {}),
+            },
+            'prompt-recovery-fresh-squeeze',
+          ),
+        );
+
+        expectStreamCalls(2);
+        expect(firstGrant).toBeLessThan(MIN_CLAMPED_OUTPUT_TOKENS);
+        expect(requestAt(1).config?.maxOutputTokens).toBe(expected);
+      },
+    );
+
     it('re-clamps recovery sends even when an intermediate response omits usage metadata', async () => {
       // Codex round 4: the FIRST truncated response reports usage, the SECOND
       // omits it; the count-based estimate freezes while history grows ~64K
@@ -16703,8 +17416,9 @@ describe('LlmChat', async () => {
       [string, string, Parameters<LlmChat['tryCompress']>[3], number, boolean]
     >([
       // Auto-compaction publishes the precomputed effective count (API base +
-      // estimated pending message / previous output): a projection, so it
-      // keeps the `~` marker (review probe on #9568).
+      // estimated pending message / previous output) minus the pending
+      // message, which the service adds itself (#15486): still a projection,
+      // so it keeps the `~` marker (review probe on #9568).
       [
         'marks the precomputed effective count as estimated even when the stored API count is authoritative',
         'p-precomputed-effective-estimated',
@@ -16713,7 +17427,20 @@ describe('LlmChat', async () => {
           pendingUserMessage: userText('next'),
           trigger: 'auto',
         },
-        6200,
+        6199, // 6200 − char/4 of 'next' (1)
+        true,
+      ],
+      // The fallback never goes below zero, even when the pending turn's
+      // estimate exceeds the effective count the caller passed (#15486).
+      [
+        'clamps the fallback original count at zero when the pending turn exceeds the effective count',
+        'p-precomputed-effective-clamped',
+        {
+          precomputedEffectiveTokens: 500,
+          pendingUserMessage: userText('x'.repeat(4_000)),
+          trigger: 'auto',
+        },
+        0, // 500 − char/4 of 4,000 characters (1,000), clamped
         true,
       ],
       // No provider count: the limit/config/default fallback is a projection.
@@ -16749,6 +17476,40 @@ describe('LlmChat', async () => {
 
       expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(sentCount);
       expect(info.originalTokenCountIsEstimated).toBe(estimated);
+    });
+
+    it('takes a memory snapshot out with the pending message when only the effective count is passed (#15486)', async () => {
+      // A caller that passes no baseline gets the pending turn subtracted as
+      // the request carries it. With a catalog the request attaches a
+      // snapshot to the message, so subtracting the bare message would leave
+      // the snapshot in the original count, and the compacted count would
+      // carry it into every later estimate.
+      const catalog = 'c'.repeat(4_000);
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const compressSpy = mockCompressionService('compressed');
+      const history = [userText('a'), modelText('b')];
+      chat.setHistory(history);
+      chat.seedResumeTokenCounts(5000, 0, false);
+      const pending = userText('next');
+      const snapshot = getAutoMemorySnapshot([...history, pending], catalog);
+      expect(snapshot).toBeDefined();
+      const turnTokens = estimateContentTokens([
+        { ...pending, parts: [...(pending.parts ?? []), snapshot!] },
+      ]);
+      // The snapshot alone is about 1,000 tokens, so the readings differ.
+      expect(turnTokens - estimateContentTokens([pending])).toBeGreaterThan(
+        900,
+      );
+
+      await chat.tryCompress('p-fallback-memory-snapshot', true, undefined, {
+        precomputedEffectiveTokens: 6200,
+        pendingUserMessage: pending,
+        trigger: 'auto',
+      });
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(
+        6200 - turnTokens,
+      );
     });
   });
 
