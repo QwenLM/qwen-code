@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -126,8 +127,7 @@ public final class ToolPublicationStore {
         String tenant = runtimeScope.getTenantId();
         String workspace = runtimeScope.getWorkspaceId();
         String session = execution.getHarnessSessionId();
-        String scope = hash(JSON.createArrayNode().add(tenant).add(workspace)
-                .add(session).toString());
+        String scope = ManagedIdentityRefs.publicationScopeRef(tenant, workspace, session);
         return transactions.execute(status -> {
             ProducerBinding grant = producerGrantLocked(scope, publicationId, publicationToken);
             JsonNode binding = grant.binding();
@@ -229,7 +229,7 @@ public final class ToolPublicationStore {
                                 "SELECT token_hash, state, expires_at, binding_digest,"
                                     + " binding_json, tenant_id, workspace_id, session_id, CASE"
                                     + " WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined FROM"
-                                    + " ma_output_capture WHERE scope_key = ? AND publication_id ="
+                                    + " ma_output_capture WHERE scope_ref = ? AND publication_id ="
                                     + " ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId).getFirst();
         long nowEpoch = ToolPublicationRetentionStore.now(jdbc);
@@ -299,7 +299,7 @@ public final class ToolPublicationStore {
         String tenant = text(key, "tenantId");
         String workspace = text(key, "workspaceId");
         String session = text(key, "sessionId");
-        String scope = hash(JSON.createArrayNode().add(tenant).add(workspace).add(session).toString());
+        String scope = ManagedIdentityRefs.publicationScopeRef(tenant, workspace, session);
         JsonNode candidate = request.get("binding");
         String id = candidate == null ? text(request, "publicationId") : text(candidate, "publicationId");
         PublicationTarget target = lockPublicationPlacement(key, id, candidate, false);
@@ -319,7 +319,7 @@ public final class ToolPublicationStore {
                 text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken, target.placement(), false);
         String operation = text(request, "operation");
         List<Row> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture"
-                        + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
+                        + " WHERE scope_ref = ? AND publication_id = ? FOR UPDATE",
                 (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
                         r.getString("session_id"), r.getString("binding_json"),
                         r.getString("binding_digest"), r.getString("token_hash"),
@@ -350,13 +350,13 @@ public final class ToolPublicationStore {
             long allocation = bytes + ToolPublicationContract.PRODUCER_BYTES
                     + ToolPublicationContract.ADMISSION_BYTES;
             quotas.requireCapacity(tenant, scope, allocation, writer.now());
-            jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id,"
-                            + " session_id, publication_id, execution_key, capture_id, binding_json,"
+            jdbc.update("INSERT INTO ma_output_capture (scope_ref, tenant_id, workspace_id,"
+                            + " session_id, publication_id, execution_call_id, capture_id, binding_json,"
                         + " binding_digest, token_hash, state, expires_at, capture_bytes,"
                         + " producer_bytes, admission_bytes, capture_held_bytes,"
                         + " producer_held_bytes, admission_held_bytes, is_write_evidence) VALUES (?,"
                         + " ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, TRUE)",
-                    scope, tenant, workspace, session, id, hash(text(candidate, "executionCallId")),
+                    scope, tenant, workspace, session, id, text(candidate, "executionCallId"),
                     text(candidate, "captureId"), candidate.toString(), digest, tokenHash, expires, bytes,
                     ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES,
                     bytes, ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES);
@@ -372,7 +372,7 @@ public final class ToolPublicationStore {
                     "Original writer is fenced");
             long expires = evidence.requireEvidence(binding, writerToken, writer, false);
             jdbc.update(
-                    "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", expires_at = ? WHERE scope_key = ? AND"
+                    "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", expires_at = ? WHERE scope_ref = ? AND"
                             + " publication_id = ?",
                     expires, scope, id);
             return grant(id, row.withState("OPEN", expires));
@@ -384,12 +384,13 @@ public final class ToolPublicationStore {
                     || "cancelled".equals(execution.getExecutionStatus()) && execution.getDispatchGeneration() == 0),
                     "Execution has no authoritative not-started proof");
             Long published = jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource"
-                    + " WHERE scope_key = ? AND publication_id = ?", Long.class, scope, id);
+                    + " WHERE scope_ref = ? AND publication_id = ?", Long.class, scope, id);
             Long attempted = jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
-                    + " WHERE scope_key = ? AND publication_id = ?", Long.class, scope, id);
+                    + " WHERE scope_kind = 'PUBLICATION' AND scope_id = ? AND publication_id = ?",
+                    Long.class, scope, id);
             require(published == 0 && attempted == 0 && "OPEN".equals(jdbc.queryForObject(
                                                     "SELECT producer_phase FROM ma_output_capture"
-                                                        + " WHERE scope_key = ? AND publication_id"
+                                                        + " WHERE scope_ref = ? AND publication_id"
                                                         + " = ?", String.class, scope, id)),
                     "Publication has accepted producer work");
             state = "NOT_STARTED";
@@ -402,7 +403,7 @@ public final class ToolPublicationStore {
                     + " producer_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE"
                     + " producer_used_bytes END, admission_held_bytes = CASE WHEN ? = 'NOT_STARTED'"
                     + " THEN 0 WHEN producer_phase IN ('FINISHED', 'REFERENCED') THEN"
-                    + " admission_held_bytes ELSE admission_used_bytes END WHERE scope_key = ? AND"
+                    + " admission_held_bytes ELSE admission_used_bytes END WHERE scope_ref = ? AND"
                     + " publication_id = ?", state, state, state, state, scope, id);
         return grant(id, row.withState(state, null));
     }
@@ -491,7 +492,7 @@ public final class ToolPublicationStore {
     }
 
     private Row findPublicationRow(String scope, String publicationId) {
-        List<Row> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_key = ?"
+        List<Row> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_ref = ?"
                         + " AND publication_id = ?",
                 (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
                         r.getString("session_id"), r.getString("binding_json"), r.getString("binding_digest"),
@@ -513,8 +514,8 @@ public final class ToolPublicationStore {
 
     private PublicationTarget lockPublicationPlacement(JsonNode key, String publicationId, JsonNode candidate,
             boolean requirePlacement) {
-        String scope = hash(JSON.createArrayNode().add(text(key, "tenantId"))
-                .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
+        String scope = ManagedIdentityRefs.publicationScopeRef(text(key, "tenantId"),
+                text(key, "workspaceId"), text(key, "sessionId"));
         Row row = findPublicationRow(scope, publicationId);
         JsonNode binding = candidate;
         if (row != null) {
@@ -580,10 +581,6 @@ public final class ToolPublicationStore {
         return false;
     }
 
-    ToolExecutionRecord lockOriginalAcknowledgementResult(JsonNode key, String publicationId, JsonNode finished) {
-        throw new IllegalStateException("Original acknowledgement is no longer supported");
-    }
-
     // The admission lanes' entry: placement or the Session root, then root
     // and head, as collection does (design 2026-11-04-managed-publication-placement).
     void lockAdmissionLane(JsonNode key, String publicationId, JsonNode original,
@@ -592,10 +589,6 @@ public final class ToolPublicationStore {
         lockOriginalSettledResult(key, publicationId, original);
         sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), writerId, writerGeneration, writerToken, placement, false);
-    }
-
-    void requireStagedCall(JsonNode key, String publicationId) {
-        // No CSI ambient check needed; all publications are ordinary.
     }
 
     private static JsonNode grant(String id, Row row) {
@@ -625,10 +618,6 @@ public final class ToolPublicationStore {
         private ActivationLapsedException() {
             super("Original activation expired");
         }
-    }
-
-    private static String hash(String text) {
-        return ToolPublicationContract.sha256(text.getBytes(StandardCharsets.UTF_8));
     }
 
     private static boolean equalHash(String left, String right) {

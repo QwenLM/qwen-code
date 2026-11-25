@@ -6,13 +6,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, Suspense } from 'react';
+import { act, startTransition, Suspense, useState } from 'react';
 import type {
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types.js';
-import type { SessionChatController } from './contract.js';
+import type { QuestionAnswer, SessionChatController } from './contract.js';
 import { regionsToCapabilities } from './capabilities.js';
 
 const captured = vi.hoisted(() => ({
@@ -117,6 +117,7 @@ type QuestionConfirm = (
   id: string,
   optionId: string,
   answers?: Record<string, string>,
+  structuredAnswers?: readonly QuestionAnswer[],
 ) => Promise<boolean>;
 type ApprovalConfirm = (id: string, optionId: string) => Promise<void>;
 
@@ -220,6 +221,34 @@ describe('ChatSurface', () => {
     ]);
     expect(controller.respondApproval).not.toHaveBeenCalled();
     expect(accepted).toBe(true);
+  });
+
+  it('forwards structured question answers without re-decoding rendered labels', async () => {
+    const request = permissionRequest('q1');
+    const controller = fakeController({
+      pendingQuestions: [{ id: 'q1', request }],
+    });
+    mountReact(<ChatSurface controller={controller} />);
+    const onConfirm = captured.question?.onConfirm as QuestionConfirm;
+    const structured = [
+      {
+        questionId: 'notes',
+        value: 'Dry run, Verbose',
+        optionIds: ['dry'],
+        text: 'Verbose',
+      },
+    ] as const;
+    expect(
+      await onConfirm(
+        'q1',
+        'submit',
+        {
+          '0': 'Dry run, Verbose',
+        },
+        structured,
+      ),
+    ).toBe(true);
+    expect(controller.respondQuestion).toHaveBeenCalledWith('q1', structured);
   });
 
   it('routes the question reject option through respondApproval, not respondQuestion', async () => {
@@ -777,6 +806,64 @@ describe('ChatSurface', () => {
     expect(captured.transcript?.historyCapacityReached).toBe(true);
   });
 
+  it('defaults history pagination facts to the controller while letting page props override them', () => {
+    // Light one controller pagination fact at a time so every per-field
+    // fallback is distinguished from its siblings (kills cross-wiring).
+    const keys = [
+      'hasOlderHistory',
+      'loadingOlderHistory',
+      'historyCapacityReached',
+      'historyPaginationError',
+    ] as const;
+    for (let i = 0; i < keys.length; i++) {
+      const controller = fakeController({
+        hasOlderHistory: i === 0,
+        loadingOlderHistory: i === 1,
+        historyCapacityReached: i === 2,
+        historyPaginationError: i === 3,
+      });
+      mountReact(<ChatSurface controller={controller} />);
+      expect([
+        captured.transcript?.hasOlderHistory,
+        captured.transcript?.loadingOlderHistory,
+        captured.transcript?.historyCapacityReached,
+        captured.transcript?.historyPaginationError,
+      ]).toEqual(keys.map((_, j) => i === j));
+      cleanupReact();
+    }
+    // Explicit false page props must override true controller facts (pins ??
+    // against || on all four pagination flags).
+    const allTrue = fakeController({
+      hasOlderHistory: true,
+      loadingOlderHistory: true,
+      historyCapacityReached: true,
+      historyPaginationError: true,
+    });
+    const container = mountReact(<ChatSurface controller={allTrue} />);
+    expect([
+      captured.transcript?.hasOlderHistory,
+      captured.transcript?.loadingOlderHistory,
+      captured.transcript?.historyCapacityReached,
+      captured.transcript?.historyPaginationError,
+    ]).toEqual([true, true, true, true]);
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={allTrue}
+        hasOlderHistory={false}
+        loadingOlderHistory={false}
+        historyCapacityReached={false}
+        historyPaginationError={false}
+      />,
+    );
+    expect([
+      captured.transcript?.hasOlderHistory,
+      captured.transcript?.loadingOlderHistory,
+      captured.transcript?.historyCapacityReached,
+      captured.transcript?.historyPaginationError,
+    ]).toEqual([false, false, false, false]);
+  });
+
   it('forwards the composer draft scope for a new chat', () => {
     const controller = fakeController({ sessionId: '' });
     mountReact(
@@ -1175,6 +1262,581 @@ describe('ChatSurface', () => {
     expect(
       container.querySelector('[data-testid="admission-locked-banner"]'),
     ).toBeNull();
+    // Settling a parked submit as 'rejected' while s3 is visible must NOT lock
+    // s2 on return (pins result.admission === 'unknown' on the parked branch).
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'third in s2',
+        undefined,
+        undefined,
+        vi.fn(),
+        undefined,
+      );
+    });
+    rerenderReact(container, <ChatSurface controller={s3} onError={onError} />);
+    await act(async () => {
+      resolveS2?.({ admission: 'rejected' });
+    });
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    expect(captured.editor?.submitDisabled).toBe(false);
+    expect(
+      container.querySelector('[data-testid="admission-locked-banner"]'),
+    ).toBeNull();
+  });
+
+  it('scopes cancel settlement errors to the session that requested the stop', async () => {
+    let resolveS1Cancel: ((value: { admission: string }) => void) | undefined;
+    const s1 = fakeController({
+      sessionId: 's1',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveS1Cancel = resolve;
+          }),
+      ),
+    });
+    let rejectS2Cancel: ((reason: unknown) => void) | undefined;
+    const s2 = fakeController({
+      sessionId: 's2',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((_resolve, reject) => {
+            rejectS2Cancel = reject;
+          }),
+      ),
+    });
+    let resolveS3Cancel: ((value: { admission: string }) => void) | undefined;
+    const s3 = fakeController({
+      sessionId: 's3',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveS3Cancel = resolve;
+          }),
+      ),
+    });
+    const onError = vi.fn();
+    const container = mountReact(
+      <ChatSurface controller={s1} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    // Switch s1 -> s2 before s1's cancel settles: s1's unconfirmed cancel must
+    // not report on s2.
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    await act(async () => {
+      resolveS1Cancel?.({ admission: 'unknown' });
+    });
+    expect(onError).not.toHaveBeenCalled();
+    // Start a cancel in s2, switch to s3, and reject s2's cancel: s3 stays silent.
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s3} onError={onError} />);
+    await act(async () => {
+      rejectS2Cancel?.(new Error('transport failed'));
+    });
+    expect(onError).not.toHaveBeenCalled();
+    // Start a cancel in s3, round-trip s3 -> s1 -> s3, then settle s3's cancel
+    // as 'rejected' while back on s3: s3 is active again and receives the error.
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s1} onError={onError} />);
+    rerenderReact(container, <ChatSurface controller={s3} onError={onError} />);
+    await act(async () => {
+      resolveS3Cancel?.({ admission: 'rejected' });
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    onError.mockClear();
+    // Start a cancel in an unallocated '' new chat, switch '' -> s1 -> '' (a
+    // brand-new '' chat), then settle the abandoned '' cancel as 'unknown':
+    // the rotated owner token keeps the brand-new '' chat silent.
+    let resolveUnallocCancel:
+      | ((value: { admission: string }) => void)
+      | undefined;
+    const unalloc1 = fakeController({
+      sessionId: '',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveUnallocCancel = resolve;
+          }),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={unalloc1} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s1} onError={onError} />);
+    const unalloc2 = fakeController({ sessionId: '' });
+    rerenderReact(
+      container,
+      <ChatSurface controller={unalloc2} onError={onError} />,
+    );
+    await act(async () => {
+      resolveUnallocCancel?.({ admission: 'unknown' });
+    });
+    expect(onError).not.toHaveBeenCalled();
+    // An unallocated '' chat that stays active (no switch) must still report
+    // both an unconfirmed cancel and a rejected cancel transport (R1-2).
+    const activeUnallocUnknown = fakeController({
+      sessionId: '',
+      cancel: vi.fn(async () => ({
+        admission: 'unknown',
+        target: { sessionId: '' },
+      })),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={activeUnallocUnknown} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+    onError.mockClear();
+    const activeUnallocThrow = fakeController({
+      sessionId: '',
+      cancel: vi.fn(async () => {
+        throw new Error('stop transport error');
+      }),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={activeUnallocThrow} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+    onError.mockClear();
+    // R2-4: any transition out of an unallocated '' chat ('' -> 'abc',
+    // including a mid-flight session allocation) is treated as a session
+    // switch, so an in-flight cancel started under '' stays silent.
+    let resolveAllocCancel:
+      | ((value: { admission: string }) => void)
+      | undefined;
+    const unallocToAlloc = fakeController({
+      sessionId: '',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveAllocCancel = resolve;
+          }),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={unallocToAlloc} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    const allocated = fakeController({ sessionId: 'abc' });
+    rerenderReact(
+      container,
+      <ChatSurface controller={allocated} onError={onError} />,
+    );
+    await act(async () => {
+      resolveAllocCancel?.({ admission: 'unknown' });
+    });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('scopes cancel settlement errors to the active turn within the same session', async () => {
+    const onError = vi.fn();
+    // Negative 1: same session S, T1 stop delayed, S advances to T2 -> no error against T2.
+    let resolveT1Cancel:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s1T1 = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't1',
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveT1Cancel = resolve;
+          }),
+      ),
+    });
+    const container = mountReact(
+      <ChatSurface controller={s1T1} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    // Swap to a second controller snapshot with the same sessionId but newer activeTurnId.
+    let rejectT2Cancel: ((reason: unknown) => void) | undefined;
+    const s1T2 = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't2',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((_resolve, reject) => {
+            rejectT2Cancel = reject;
+          }),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T2} onError={onError} />,
+    );
+    await act(async () => {
+      resolveT1Cancel?.({
+        admission: 'unknown',
+        target: { sessionId: 's1', turnId: 't1' },
+      });
+    });
+    expect(onError).not.toHaveBeenCalled();
+
+    // Negative 2: same session S, T2 stop throws after S advances to idle (activeTurnId undefined).
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    const s1Idle = fakeController({ sessionId: 's1', activeTurnId: undefined });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1Idle} onError={onError} />,
+    );
+    await act(async () => {
+      rejectT2Cancel?.(new Error('delayed stop throw'));
+    });
+    expect(onError).not.toHaveBeenCalled();
+
+    // Negative 3: result.target.turnId identifies t1 when dispatch had no activeTurnId,
+    // and S is now idle (activeTurnId undefined) -> silent (pins resultTurnId ?? cancelTurnId).
+    let resolveResultTagged:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s1UnknownDispatch = fakeController({
+      sessionId: 's1',
+      activeTurnId: undefined,
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveResultTagged = resolve;
+          }),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1UnknownDispatch} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1Idle} onError={onError} />,
+    );
+    await act(async () => {
+      resolveResultTagged?.({
+        admission: 'rejected',
+        target: { sessionId: 's1', turnId: 't1' },
+      });
+    });
+    expect(onError).not.toHaveBeenCalled();
+
+    // Positive: same session S and same turn T3 still active -> reports on both
+    // unknown settlement and thrown transport.
+    const s1T3Unknown = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't3',
+      cancel: vi.fn(async () => ({
+        admission: 'unknown',
+        target: { sessionId: 's1', turnId: 't3' },
+      })),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T3Unknown} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+    onError.mockClear();
+
+    const s1T3Throw = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't3',
+      cancel: vi.fn(async () => {
+        throw new Error('stop transport error');
+      }),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T3Throw} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+    onError.mockClear();
+
+    // Round-trip S1(T4) -> S2 -> S1(T5): returning to S1 after T5 started stays silent;
+    // returning to S1 while T4 is still active reports.
+    let resolveT4Cancel:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s1T4 = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't4',
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveT4Cancel = resolve;
+          }),
+      ),
+    });
+    const s2 = fakeController({ sessionId: 's2', activeTurnId: 'other' });
+    const s1T5 = fakeController({ sessionId: 's1', activeTurnId: 't5' });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T4} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T5} onError={onError} />,
+    );
+    await act(async () => {
+      resolveT4Cancel?.({
+        admission: 'unknown',
+        target: { sessionId: 's1', turnId: 't4' },
+      });
+    });
+    expect(onError).not.toHaveBeenCalled();
+
+    let resolveT5Cancel:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s1T5Pending = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't5',
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveT5Cancel = resolve;
+          }),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T5Pending} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    // Return to s1 with a fresh controller instance carrying the preserved
+    // activeTurnId ('t5'), matching useDaemonChatController's seeded rebuild.
+    const s1T5Returned = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't5',
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T5Returned} onError={onError} />,
+    );
+    await act(async () => {
+      resolveT5Cancel?.({
+        admission: 'unknown',
+        target: { sessionId: 's1', turnId: 't5' },
+      });
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+    onError.mockClear();
+
+    // R2-1: a stop pressed while submitting (no dispatch turnId, no stamped
+    // result turnId) must still report if the turn is admitted before the stop
+    // settles.
+    let resolveSubmittingCancel:
+      | ((value: { admission: string; target: { sessionId: string } }) => void)
+      | undefined;
+    const s1Submitting = fakeController({
+      sessionId: 's1',
+      activeTurnId: undefined,
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string; target: { sessionId: string } }>(
+            (resolve) => {
+              resolveSubmittingCancel = resolve;
+            },
+          ),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1Submitting} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    const s1AdmittedP6 = fakeController({
+      sessionId: 's1',
+      activeTurnId: 'p6',
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1AdmittedP6} onError={onError} />,
+    );
+    await act(async () => {
+      resolveSubmittingCancel?.({
+        admission: 'unknown',
+        target: { sessionId: 's1' },
+      });
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+  });
+
+  it('reports a cancel error against the committed session when an incoming switch render is discarded before commit and stays silent after unmount (R2-5 / P2)', async () => {
+    const onError = vi.fn();
+    let resolveS1Cancel:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s1 = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't1',
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveS1Cancel = resolve;
+          }),
+      ),
+    });
+    let resolveS2Cancel:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s2 = fakeController({
+      sessionId: 's2',
+      activeTurnId: 't2',
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveS2Cancel = resolve;
+          }),
+      ),
+    });
+    let pendingSuspense: Promise<void> | null = null;
+    function SuspendingSibling() {
+      if (pendingSuspense) {
+        throw pendingSuspense;
+      }
+      return null;
+    }
+    let switchTo: ((next: SessionChatController) => void) | undefined;
+    function TransitionHost() {
+      const [active, setActive] = useState<SessionChatController>(s1);
+      switchTo = (next) => {
+        startTransition(() => {
+          setActive(next);
+        });
+      };
+      return (
+        <Suspense fallback={null}>
+          <ChatSurface controller={active} onError={onError} />
+          <SuspendingSibling />
+        </Suspense>
+      );
+    }
+    mountReact(<TransitionHost />);
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    // Start a concurrent transition to s2 while a sibling suspends:
+    // ChatSurface's render body runs with s2 (updating render-time refs),
+    // React discards that render without committing the fallback, and s1
+    // remains the committed tree on screen. Settling s1's cancel as 'unknown'
+    // during this window must still report chat.stopNotConfirmed (pins
+    // commit-time refs — R2-5).
+    let resolveSuspense!: () => void;
+    pendingSuspense = new Promise<void>((resolve) => {
+      resolveSuspense = resolve;
+    });
+    await act(async () => {
+      switchTo?.(s2);
+    });
+    // Confirm the discarded render actually ran ChatSurface with s2 while s1
+    // stayed committed on screen.
+    expect(captured.editor?.sessionId).toBe('s2');
+    await act(async () => {
+      resolveS1Cancel?.({
+        admission: 'unknown',
+        target: { sessionId: 's1', turnId: 't1' },
+      });
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+    onError.mockClear();
+    // Commit s2, start a cancel on s2, then unmount before it settles: a
+    // settlement after unmount must stay silent (P2).
+    pendingSuspense = null;
+    await act(async () => {
+      resolveSuspense();
+    });
+    expect(captured.editor?.sessionId).toBe('s2');
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    cleanupReact();
+    await act(async () => {
+      resolveS2Cancel?.({
+        admission: 'unknown',
+        target: { sessionId: 's2', turnId: 't2' },
+      });
+    });
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('preserves a parked in-flight latch when the switch render is discarded before commit (R1-4)', async () => {
@@ -1261,5 +1923,34 @@ describe('ChatSurface', () => {
     });
     expect(s1Commit).toHaveBeenCalledTimes(1);
     expect(captured.editor?.submitDisabled).toBe(false);
+  });
+
+  it('defaults host-context integrations closed and forwards opt-in flags and approvalDisabled to AskUserQuestion', () => {
+    const question = permissionRequest('q-disabled');
+    const controller = fakeController({
+      pendingQuestions: [{ id: 'q-disabled', request: question }],
+    });
+    const container = mountReact(
+      <ChatSurface controller={controller} approvalDisabled />,
+    );
+    expect(captured.transcript?.sessionViewportEnabled).toBe(false);
+    expect(captured.editor?.workspaceFeaturesEnabled).toBe(false);
+    expect(captured.editor?.visibleToolbarActions).toEqual([]);
+    expect(captured.question?.disabled).toBe(true);
+
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={controller}
+        approvalDisabled={false}
+        sessionViewportEnabled
+        workspaceFeaturesEnabled
+        visibleToolbarActions={['model', 'voice']}
+      />,
+    );
+    expect(captured.transcript?.sessionViewportEnabled).toBe(true);
+    expect(captured.editor?.workspaceFeaturesEnabled).toBe(true);
+    expect(captured.editor?.visibleToolbarActions).toEqual(['model', 'voice']);
+    expect(captured.question?.disabled).toBe(false);
   });
 });

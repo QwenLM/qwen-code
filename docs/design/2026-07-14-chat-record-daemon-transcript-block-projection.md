@@ -514,7 +514,6 @@ The following behavior remains in the CLI:
 
 - `Config`/tool-registry enrichment;
 - localized CLI history-gap text;
-- `messageRewriter.interceptUpdate`;
 - asynchronous `sendUpdate` failure handling;
 - combining replay errors and dangling-cleanup errors in an `AggregateError`; and
 - live-only goals, stop hooks, and other unpersisted events.

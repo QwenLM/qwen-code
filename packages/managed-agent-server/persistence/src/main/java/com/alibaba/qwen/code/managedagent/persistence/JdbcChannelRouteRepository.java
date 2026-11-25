@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
@@ -21,7 +22,7 @@ import java.util.Optional;
 public final class JdbcChannelRouteRepository implements ChannelRouteRepository {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String SELECT = "SELECT " + ManagedSchemaProjection.OPERATION.columns("o") + " FROM ma_request_receipt r JOIN ma_operation o"
-            + " ON o.operation_key = r.result_operation_key AND o.operation_kind = 'CHANNEL_INGRESS'"
+            + " ON o.operation_ref = r.result_operation_ref AND o.operation_kind = 'CHANNEL_INGRESS'"
             + " WHERE r.namespace = 'CHANNEL_INGRESS'";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -41,9 +42,8 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
                 candidate.accountGeneration(), candidate.platformEventId(), candidate.semanticRevision());
         transactions.executeWithoutResult(status -> {
             long now = databaseNow();
-            String scope = ManagedSchemaKeys.key("CHANNEL", candidate.tenantId(), candidate.channelInstanceId());
-            String target = ManagedSchemaKeys.key(candidate.sessionId());
-            String operation = ManagedSchemaKeys.operationKey(OperationKind.CHANNEL_INGRESS, scope, target, route);
+            String operation = ManagedIdentityRefs.operationRef(OperationKind.CHANNEL_INGRESS.name(),
+                    candidate.tenantId(), "CHANNEL", candidate.channelInstanceId(), candidate.sessionId(), route);
             String receipt = ManagedSchemaKeys.receiptKey(ReceiptNamespace.CHANNEL_INGRESS, candidate.tenantId(),
                     ReceiptScope.CHANNEL, candidate.channelInstanceId(), route);
             var body = JSON.createObjectNode().put("version", 1).put("channelId", candidate.channelInstanceId())
@@ -59,20 +59,22 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
             String request = body.toString();
             String digest = ManagedSchemaKeys.key(candidate.channelInstanceId(), Long.toString(candidate.accountGeneration()),
                     candidate.platformEventId(), Long.toString(candidate.semanticRevision()));
-            int admitted = jdbc.update("INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
-                            + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, request_digest,"
-                            + " channel_id, account_generation, semantic_revision, session_id, state, result_operation_key,"
-                            + " gmt_create, gmt_modified) VALUES (?, 'CHANNEL_INGRESS', ?, ?, 'CHANNEL', ?, ?, ?, ?, ?,"
+            int admitted = jdbc.update("INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_id,"
+                            + " scope_kind, scope_ref, scope_id, idempotency_key, idempotency_digest, request_digest,"
+                            + " channel_id, account_generation, semantic_revision, session_id, state, result_operation_ref,"
+                            + " gmt_create, gmt_modified) VALUES (?, 'CHANNEL_INGRESS', ?, 'CHANNEL', ?, ?, ?, ?, ?,"
                             + " ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)",
-                    receipt, ManagedSchemaKeys.key(candidate.tenantId()), candidate.tenantId(), scope,
-                    candidate.channelInstanceId(), route, ManagedSchemaKeys.key(route), digest,
+                    receipt, candidate.tenantId(),
+                    ManagedSchemaKeys.identity(ManagedIdentityRefs.receiptScopeRef(candidate.tenantId(), candidate.channelInstanceId())),
+                    ManagedSchemaKeys.identity(candidate.channelInstanceId()), route, ManagedSchemaKeys.key(route), digest,
                     candidate.channelInstanceId(), candidate.accountGeneration(), candidate.semanticRevision(),
-                    candidate.sessionId(), operation, now, now);
+                    candidate.sessionId(), ManagedSchemaKeys.identity(operation), now, now);
             if (admitted == 1) {
-                jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id,"
-                                + " session_id, target_kind, target_key, request_digest, request_json, result_json, phase, state,"
-                                + " gmt_create, gmt_modified) VALUES (?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
-                        operation, scope, route, candidate.tenantId(), candidate.sessionId(), target, digest, request,
+                jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id,"
+                                + " session_id, target_kind, target_id, request_digest, request_json, result_json, phase, state,"
+                                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ManagedSchemaKeys.identity(operation), "CHANNEL", ManagedSchemaKeys.identity(candidate.channelInstanceId()),
+                        route, candidate.tenantId(), candidate.sessionId(), ManagedSchemaKeys.identity(candidate.sessionId()), digest, request,
                         candidate.inputId() == null ? null : JSON.createObjectNode().put("inputId", candidate.inputId()).toString(),
                         "admitted".equals(candidate.state()) ? "ADMITTED" : "STAGING", candidate.state(), now, now);
             }
@@ -92,9 +94,9 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
     public Optional<ChannelRoute> find(String tenantId, String routeKey) {
         ChannelStoreSupport.requireId(tenantId, "tenantId");
         ChannelStoreSupport.requireId(routeKey, "routeKey");
-        List<ChannelRoute> rows = jdbc.query(SELECT + " AND r.tenant_key = ? AND r.idempotency_digest = ?"
+        List<ChannelRoute> rows = jdbc.query(SELECT + " AND r.idempotency_digest = ?"
                         + " AND r.tenant_id = ? AND r.idempotency_key = ?", this::row,
-                ManagedSchemaKeys.key(tenantId), ManagedSchemaKeys.key(routeKey), tenantId, routeKey);
+                ManagedSchemaKeys.key(routeKey), tenantId, routeKey);
         if (rows.size() > 1) {
             throw new IllegalStateException("channel route key collision");
         }
@@ -108,12 +110,11 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
         if (old == null) {
             return null;
         }
-        String scope = ManagedSchemaKeys.key("CHANNEL", tenantId, old.channelInstanceId());
-        String operation = ManagedSchemaKeys.operationKey(OperationKind.CHANNEL_INGRESS, scope,
-                ManagedSchemaKeys.key(old.sessionId()), routeKey);
+        String operation = ManagedIdentityRefs.operationRef(OperationKind.CHANNEL_INGRESS.name(),
+                tenantId, "CHANNEL", old.channelInstanceId(), old.sessionId(), routeKey);
         int changed = jdbc.update("UPDATE ma_operation SET state = 'admitted', phase = 'ADMITTED', result_json = ?,"
-                        + " gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'CHANNEL_INGRESS' AND state = 'staged'",
-                JSON.createObjectNode().put("inputId", inputId).toString(), databaseNow(), operation);
+                        + " gmt_modified = ? WHERE operation_ref = ? AND operation_kind = 'CHANNEL_INGRESS' AND state = 'staged'",
+                JSON.createObjectNode().put("inputId", inputId).toString(), databaseNow(), ManagedSchemaKeys.identity(operation));
         ChannelRoute current = find(tenantId, routeKey).orElse(null);
         return changed == 1 || current != null && "admitted".equals(current.state()) && inputId.equals(current.inputId())
                 ? current : null;
@@ -126,7 +127,7 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
         if (limit < 1 || limit > 100) {
             throw new IllegalArgumentException("limit must be in [1, 100]");
         }
-        List<Object> args = new ArrayList<>(List.of(ManagedSchemaKeys.key(tenantId), tenantId, channelInstanceId));
+        List<Object> args = new ArrayList<>(List.of(tenantId, channelInstanceId));
         String cursor = "";
         if (before != null) {
             cursor = " AND (r.gmt_create < ? OR r.gmt_create = ? AND r.idempotency_key < ?)";
@@ -135,7 +136,7 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
             args.add(before.routeKey());
         }
         args.add(limit + 1);
-        List<ChannelRoute> rows = jdbc.query(SELECT + " AND r.tenant_key = ? AND r.tenant_id = ? AND r.channel_id = ?"
+        List<ChannelRoute> rows = jdbc.query(SELECT + " AND r.tenant_id = ? AND r.channel_id = ?"
                 + cursor + " ORDER BY r.gmt_create DESC, r.idempotency_key DESC LIMIT ?", this::row, args.toArray());
         boolean more = rows.size() > limit;
         return new RoutePage(more ? rows.subList(0, limit) : rows, more);

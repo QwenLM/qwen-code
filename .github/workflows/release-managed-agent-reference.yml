@@ -331,18 +331,9 @@ jobs:
             # resolver rewrites its bookkeeping through hardlinked seeds, so
             # this build must never reach the host-shared ~/.m2.
             repo="${RUNNER_TEMP}/m2-repo"
+            # Unlike sdk-java.yml's immutable older-ref callers, this
+            # workflow always builds its own workflow revision.
             seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
-            if [ ! -f "${seed_helper}" ]; then
-              # Missing helper tooling for an older checkout must stay tied
-              # to this workflow revision, not to an unsafe host cache.
-              seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
-              curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
-                "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
-                -o "${seed_helper}" || {
-                  echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
-                  exit 1
-              }
-            fi
             source "${seed_helper}"
             MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"
           fi

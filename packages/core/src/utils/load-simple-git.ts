@@ -10,11 +10,68 @@ import type {
   SimpleGitOptions,
 } from 'simple-git';
 import { NO_EXEC_CONFIG_SETTINGS } from './gitUtils.js';
+import {
+  GIT_METADATA_RESTORE_KEYS,
+  REMOTE_GIT_TRANSPORT_KEYS,
+} from './git-branches.js';
 
 export type SimpleGitModule = {
   CheckRepoActions: typeof CheckRepoActions;
   simpleGit: SimpleGitFactory;
 };
+
+// gitEnv() (utils/git-branches.ts) scrubs ambient git variables and then
+// deliberately restores exactly these operator-set ones. simple-git v4's
+// environment guard throws when a task env names a guarded key the client
+// did not opt into, so every client from this loader names them — the
+// worktree service alone applies `.env(gitEnv())` at ~25 call sites.
+// Derived from gitEnv()'s own restore set (plus GIT_ALLOW_PROTOCOL, which
+// gitEnv() restores on a separate filtered path) so the two cannot drift.
+export const GIT_ENV_RESTORED_KEYS = [
+  ...GIT_METADATA_RESTORE_KEYS,
+  'GIT_ALLOW_PROTOCOL',
+] as const;
+
+/**
+ * Every guarded name this loader opts its clients into: the set `gitEnv()`
+ * restores for `.env()` clients, plus the ambient operator configuration a
+ * client that inherits `process.env` would otherwise lose to the v4 guard —
+ * transport credentials, TLS client certificates, the SSH variant, the
+ * no-prompt switch and the operator's config-tier pins (global, system and
+ * the no-system switch). Naming a key only lets a
+ * value already in the child environment survive; it never injects one, so
+ * the `.env(gitEnv())` clients keep their scrub. Exec-capable keys
+ * (GIT_EXEC_PATH, GIT_PROXY_COMMAND, editors, …) stay unnamed on purpose:
+ * the guard deleting them is the hardening this loader exists for.
+ */
+export const LOADER_ALLOWED_ENVIRONMENT_KEYS = [
+  ...GIT_ENV_RESTORED_KEYS,
+  ...REMOTE_GIT_TRANSPORT_KEYS,
+  'GIT_SSL_CERT',
+  'GIT_SSL_KEY',
+  'GIT_SSH_VARIANT',
+  'GIT_TERMINAL_PROMPT',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_NOSYSTEM',
+  'GIT_CONFIG_SYSTEM',
+] as const;
+
+// simple-git v4's environment guard matches allowEnvironment by exact
+// lowercase name, so the indexed operator config (`GIT_CONFIG_COUNT`,
+// `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n`, `GIT_CONFIG_PARAMETERS`) cannot
+// be named as a wildcard. Enumerate the ambient instances instead: a client
+// that inherits process.env keeps the operator's command-scoped config
+// (safe.directory for dubious ownership, credential headers), while
+// `.env(gitEnv())` clients never carry these names — gitEnv() scrubs every
+// `GIT_*` it does not restore — so naming them permits, never injects.
+const AMBIENT_GIT_CONFIG_ENV_NAME =
+  /^git_config_(?:count|parameters|key_\d+|value_\d+)$/;
+
+function ambientGitConfigEnvironment(): string[] {
+  return Object.keys(process.env)
+    .map((key) => key.toLowerCase())
+    .filter((key) => AMBIENT_GIT_CONFIG_ENV_NAME.test(key));
+}
 
 let simpleGitModulePromise: Promise<SimpleGitModule> | undefined;
 
@@ -58,6 +115,15 @@ function guardFsmonitor(factory: SimpleGitFactory): SimpleGitFactory {
       ...options,
       config: [...(options?.config ?? []), ...NO_EXEC_CONFIG_SETTINGS],
       unsafe: { ...options?.unsafe, allowUnsafeFsMonitor: true },
+      // v4 deletes every guarded key the client did not name, so a client
+      // that never applies `.env()` loses the operator's SSH/askpass
+      // identity. Naming a key only lets one already in the child env
+      // survive, so the `.env(gitEnv())` clients keep their scrub.
+      allowEnvironment: [
+        ...LOADER_ALLOWED_ENVIRONMENT_KEYS,
+        ...ambientGitConfigEnvironment(),
+        ...(options?.allowEnvironment ?? []),
+      ],
     };
     return baseDir === undefined ? factory(merged) : factory(baseDir, merged);
   };

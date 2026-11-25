@@ -38,9 +38,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.time.Duration;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -179,8 +177,8 @@ class ChildWorkspaceServiceTest {
         assertThat(project.resolve("f.txt")).hasContent("PARENT\nb\nc\nd\nCHILD");
         assertThat(project.resolve("new.txt")).hasContent("new");
         assertThat(root.resolve(ChildWorktreeOperations.childDirectory(ready.childWorkspaceId()))).doesNotExist();
-        assertThat(jdbc.queryForList("SELECT holder_key FROM ma_storage_owner"
-                + " WHERE storage_key = ?", String.class, storageKey(parent.workspace()))).containsOnlyNulls();
+        assertThat(jdbc.queryForList("SELECT holder_id FROM ma_storage_owner"
+                + " WHERE physical_id = ?", String.class, storageKey(parent.workspace()))).containsOnlyNulls();
         assertPinsGone(ready);
         assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE))
                 .isEqualTo(merged);
@@ -355,7 +353,7 @@ class ChildWorkspaceServiceTest {
         for (String started : List.of(JdbcChildWorkspaceStore.MERGING, JdbcChildWorkspaceStore.APPLYING,
                 JdbcChildWorkspaceStore.APPLIED)) {
             updateChild("UPDATE ma_workspace SET child_state = ?, finish_request = 'merge'"
-                    + " WHERE tenant_id = ? AND child_run_id = X'72756e2d34'", started, parent.tenantId());
+                    + " WHERE tenant_id = ? AND child_run_id = 'run-4'", started, parent.tenantId());
             assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-4",
                     JdbcChildWorkspaceStore.DISCARD), "child_workspace_finishing");
         }
@@ -701,7 +699,7 @@ class ChildWorkspaceServiceTest {
     void aBusyStorageParksTheStepWithoutSpendingAnAttempt() throws Exception {
         var parent = createSession("project");
         String key = storageKey(parent.workspace());
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'a-tool-turn' WHERE storage_key = ?", key);
+        jdbc.update("UPDATE ma_storage_owner SET holder_id = 'a-tool-turn' WHERE physical_id = ?", key);
 
         Row parked = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         assertThat(parked.state()).isEqualTo(JdbcChildWorkspaceStore.PREPARING);
@@ -713,7 +711,7 @@ class ChildWorkspaceServiceTest {
         service.scan();
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
                 .isEqualTo(JdbcChildWorkspaceStore.PREPARING);
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL WHERE storage_key = ?", key);
+        jdbc.update("UPDATE ma_storage_owner SET holder_id = NULL WHERE physical_id = ?", key);
         clock.addAndGet(ChildWorkspaceService.BUSY_DELAY_MS);
         service.scan();
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
@@ -1194,7 +1192,7 @@ class ChildWorkspaceServiceTest {
                 sleep(10);
             }
             assertThat(jdbc.queryForList("SELECT maintenance_id FROM ma_storage_owner"
-                    + " WHERE storage_key = ? AND maintenance_id IS NOT NULL", String.class, key)).hasSize(1);
+                    + " WHERE physical_id = ? AND maintenance_id IS NOT NULL", String.class, key)).hasSize(1);
             // Another worker takes the row over. Done in SQL, not by waiting
             // out the claim, which the running step keeps renewing.
             assertThat(jdbc.update("UPDATE ma_operation SET claim_owner = 'thief',"
@@ -1208,8 +1206,8 @@ class ChildWorkspaceServiceTest {
             assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).doesNotExist();
             // The worker that gave up its claim still freed the storage it
             // held, though its generation is no longer the row's.
-            assertThat(jdbc.queryForList("SELECT holder_key FROM ma_storage_owner"
-                    + " WHERE storage_key = ?", String.class, key)).containsOnlyNulls();
+            assertThat(jdbc.queryForList("SELECT holder_id FROM ma_storage_owner"
+                    + " WHERE physical_id = ?", String.class, key)).containsOnlyNulls();
             long blocked = Long.parseLong(Files.readString(pid).strip());
             for (int wait = 0; wait < 100 && ProcessHandle.of(blocked).map(ProcessHandle::isAlive).orElse(false);
                     wait++) {
@@ -1229,7 +1227,7 @@ class ChildWorkspaceServiceTest {
         assertThat(indexColumns("ma_operation", "idx_ma_operation_due"))
                 .containsExactly("operation_kind", "delivery_state", "available_at");
         assertThat(indexColumns("ma_operation", "idx_ma_operation_storage"))
-                .containsExactly("storage_key", "operation_kind", "state");
+                .containsExactly("storage_id", "operation_kind", "state");
         assertThat(indexColumns("ma_storage_owner", "idx_execution_lease_maintenance"))
                 .containsExactly("maintenance_id");
     }
@@ -1305,7 +1303,7 @@ class ChildWorkspaceServiceTest {
     }
 
     private StoreModels.SessionRecord createSession(String cwd) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         tenants.add(tenant);
         com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage.register(jdbc, tenant, "storage");
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
@@ -1365,15 +1363,15 @@ class ChildWorkspaceServiceTest {
 
     /** The holder of the storage's lease when a maintenance hold holds it, else null. */
     private String holder(ContextBinding storage) throws Exception {
-        List<String> holders = jdbc.queryForList("SELECT holder_key FROM ma_storage_owner"
-                + " WHERE storage_key = ? AND maintenance_id IS NOT NULL", String.class, storageKey(storage));
+        List<String> holders = jdbc.queryForList("SELECT holder_id FROM ma_storage_owner"
+                + " WHERE physical_id = ? AND maintenance_id IS NOT NULL", String.class, storageKey(storage));
         return holders.isEmpty() ? null : holders.getFirst();
     }
 
-    private static String maintenanceHolder(Row claimed) throws Exception {
-        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(("child-workspace\u0000"
-                + claimed.childWorkspaceId() + "\u0000" + claimed.claimGeneration())
-                .getBytes(StandardCharsets.UTF_8)));
+    private static String maintenanceHolder(Row claimed) {
+        return com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.HOLDER_REF_BYTES,
+                "child-workspace", claimed.childWorkspaceId(), Long.toString(claimed.claimGeneration()));
     }
 
     private static String storageKeyOf(ContextBinding binding) {

@@ -6,6 +6,8 @@
 
 修订（2026-11-19）—— CSI 冷归档 #17415（`0c2458a3ca0f`，2026-11-16；设计记录：`2026-11-13-managed-kubernetes-java-archive.md`）。该归档把 Kubernetes runtime、Resident Workspace / Workspace CSI 后端、Kubernetes Harness pool discovery 的 Java 源码移入 `packages/sdk-java/managed-kubernetes-archive/`（构建之外的冷源码归档），并从 live server 删除 CSI 专属的 schema 列、配置、端点与维护入口。对本设计的后果：A4 整体丢弃；A1 的 CSI 专属部分（profile 能力围栏，职责 3，以及 CSI 维护调用点）与 A2 的 `CsiNativeActivationProof` 头检查在 live server 中已不复存在。A 批现为 A2 / A5 / A1（非 CSI）。描述已归档机制的章节作为历史记录保留并标注作废。归档未触碰 TypeScript，因此 worker 侧 CSI session 代码仍在，但其 server 侧准入对应物已归档。
 
+修订（2026-11-22）—— #17427 退役了 worker 侧私有 CSI session 客户端（`hosted-csi-*` 会话路由、工具轮次与批量恢复），并移除 `QWEN_HOSTED_CSI_SESSION_STORE_URL` 接入选项；`managed-csi-*` worker 协议族仍为活跃。上文「worker 侧 CSI session 代码仍在」仅描述 #17415 当时的状态。
+
 ## 问题
 
 managed server 携带多套独立的「版本」机制。它们外观相似但职责不同，其中只有一部分是向下兼容产物。盲目全删会连带删掉活的功能不变量。本设计对每套机制区分：(a) 没有保护对象的滚动升级/旧 reader 限制（pre-production 可删），与 (b) 必须保留（或刻意重新表达）的活功能编码/能力不变量。目标是删除 (a)、以最小可辩护的变更集统一或保留 (b)，沿用 `2026-11-12-managed-agent-tier1-convergence.md` 的先例。
