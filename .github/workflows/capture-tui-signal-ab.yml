@@ -1,0 +1,73 @@
+name: 'Capture TUI SIGTERM A/B'
+
+on:
+  push:
+    branches: ['codex/capture-tui-signal-ab-20261125']
+
+permissions:
+  contents: 'read'
+
+jobs:
+  compare:
+    name: 'Compare base and PR on Linux ARM64'
+    runs-on: ['self-hosted', 'linux', 'arm64']
+    timeout-minutes: 40
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - uses: './.github/actions/self-hosted-node'
+      - name: 'Check tmux and log runtime versions'
+        shell: 'bash'
+        run: |
+          uname -sm
+          node -p 'JSON.stringify({ node: process.version, libuv: process.versions.uv })'
+          tmux -V
+      - name: 'Prepare test dependencies'
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+      - name: 'Run both implementations against the same test'
+        shell: 'bash'
+        env:
+          BASE_SHA: '6aa87a5ea579ebb86f2231105d38d8c4b7554e96'
+          PR_SHA: '08ddc09937e03d4fe0b5d4819617286451c99485'
+          TEST_NAME: 'dies OF the signal even when it lands during the render window'
+        run: |
+          source_file=packages/cli/src/commands/review/capture-tui.ts
+          baseline=$(mktemp "$GITHUB_WORKSPACE/packages/cli/src/commands/review/capture-tui-ab-base-XXXXXXXX.ts")
+          trap 'rm -f -- "$baseline"' EXIT
+          git show "$BASE_SHA:$source_file" > "$baseline"
+          test "$(git hash-object "$baseline")" = "$(git rev-parse "$BASE_SHA:$source_file")"
+          test "$(git hash-object "$source_file")" = "$(git rev-parse "$PR_SHA:$source_file")"
+          printf 'Base %s, PR %s\n' "$BASE_SHA" "$PR_SHA"
+          printf 'Test fixture %s\n' "$(git hash-object packages/cli/src/commands/review/capture-tui.test.ts)"
+          cd packages/cli
+
+          run_case() {
+            local label=$1 source=$2 status=0
+            local report="$RUNNER_TEMP/capture-tui-signal-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$label.json"
+            echo "::group::$label"
+            QWEN_CAPTURE_TUI_COMPARISON_SOURCE="$source" ../../node_modules/.bin/vitest run \
+              src/commands/review/capture-tui.test.ts --testNamePattern "$TEST_NAME" --retry=0 \
+              --reporter=default --reporter=json --outputFile.json="$report" || status=$?
+            echo '::endgroup::'
+            node --input-type=module - "$report" "$label" "$status" <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs';
+          const [report, label, exitCode] = process.argv.slice(2);
+          const results = JSON.parse(readFileSync(report, 'utf8')).testResults;
+          const matches = results.flatMap((file) => file.assertionResults).filter(
+            (testCase) => testCase.title === process.env.TEST_NAME,
+          );
+          const status = matches.length === 1 ? matches[0].status : 'missing';
+          const summary = `${label}: ${status} (Vitest exit ${exitCode})`;
+          console.log(summary);
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+          if (status !== 'passed' || exitCode !== '0') process.exitCode = 1;
+          NODE
+          }
+
+          baseline_status=0
+          pr_status=0
+          run_case baseline "$baseline" || baseline_status=$?
+          run_case pr "$GITHUB_WORKSPACE/$source_file" || pr_status=$?
+          test "$baseline_status" -eq 0 && test "$pr_status" -eq 0
