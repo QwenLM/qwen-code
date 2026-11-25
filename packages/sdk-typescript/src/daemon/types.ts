@@ -1220,6 +1220,21 @@ export interface DaemonStatusReport {
     error?: string;
     sessions: { active: number };
     permissions: { pending: number; policy: string };
+    /**
+     * Load-based fresh-session admission state. Additive — older daemons
+     * omit this field, and `enabled: false` marks the operator opt-out or
+     * an injected bridge. While `overloaded`, new child spawns are refused
+     * with 503 `system_overloaded`; live sessions and the control plane stay
+     * open. `reason` is widened to string per the SDK convention.
+     */
+    loadAdmission?: {
+      enabled: boolean;
+      overloaded: boolean;
+      reason: string | null;
+      loadRatio: number;
+      eventLoopLagP99Ms: number;
+      sampledAtMs: number;
+    };
     channel: { live: boolean };
     // Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
     // widened to string to avoid coupling the wire type to the daemon's unions.
@@ -2604,6 +2619,11 @@ export interface DaemonArtifactLibraryMemberError {
   status: number;
   code: string;
   message: string;
+  snapshotSize?: number;
+  maxBytes?: number;
+  dimension?: 'snapshot' | 'line' | 'index' | 'replay' | 'artifact_library';
+  measuredBytes?: number;
+  retryable?: boolean;
 }
 
 export interface DaemonWorkspaceArtifactLibraryResult {

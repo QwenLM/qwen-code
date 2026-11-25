@@ -147,6 +147,7 @@ export {
   BridgeChannelQuarantinedError,
   InvalidRewindTargetError,
   TotalSessionLimitExceededError,
+  SystemOverloadedError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   // Multi-client permission coordination errors.
   CancelSentinelCollisionError,

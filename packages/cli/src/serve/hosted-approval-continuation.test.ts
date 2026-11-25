@@ -39,6 +39,7 @@ import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { hostedDurableMcpOwnerId } from './hosted-mcp-session.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -856,22 +857,43 @@ it.each([
     owner: 'hooks',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'none',
     extensionConfig: false,
     verdict: 'refuse',
   },
   {
-    owner: 'mcp',
+    owner: 'mcp with a plan saved on the Turn owner',
     hooks: false,
-    mcp: true,
+    mcp: 'durable',
+    planOwner: 'turn',
     commandStep: 'none',
     extensionConfig: false,
     verdict: 'refuse',
+  },
+  {
+    owner: 'mcp on an activation-scoped owner',
+    hooks: false,
+    mcp: 'activation',
+    planOwner: 'mcp',
+    commandStep: 'none',
+    extensionConfig: false,
+    verdict: 'refuse',
+  },
+  {
+    owner: 'mcp with a plan saved on its durable owner',
+    hooks: false,
+    mcp: 'durable',
+    planOwner: 'mcp',
+    commandStep: 'none',
+    extensionConfig: false,
+    verdict: 'pass',
   },
   {
     owner: 'hooks with a stale commandStep revision',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'stale',
     extensionConfig: true,
     verdict: 'refuse',
@@ -880,6 +902,7 @@ it.each([
     owner: 'hooks with a matching commandStep revision',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'matching',
     extensionConfig: true,
     verdict: 'pass',
@@ -888,13 +911,14 @@ it.each([
     owner: 'hooks with extensions and no commandStep',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'none',
     extensionConfig: true,
     verdict: 'refuse',
   },
 ])(
   'the saved-batch owner gate: $owner ($verdict)',
-  async ({ hooks, mcp, commandStep, extensionConfig, verdict }) => {
+  async ({ hooks, mcp, planOwner, commandStep, extensionConfig, verdict }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'g3-a6-owner-'));
     const sessionKey = {
       tenantId: 'tenant',
@@ -933,6 +957,11 @@ it.each([
     });
     try {
       const promptId = randomUUID();
+      // S6b: an MCP Session resumes a plan saved on its own durable owner.
+      const mcpOwner =
+        mcp === 'activation'
+          ? 'hooks-activation-a6'
+          : hostedDurableMcpOwnerId(sessionKey, undefined);
       const turn = new HostedWorkspaceToolTurn(
         { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
         session,
@@ -957,6 +986,14 @@ it.each([
           ...(mcp
             ? {
                 mcp: {
+                  broker: new HostedWorkspaceBroker(
+                    {
+                      baseUrl: 'http://127.0.0.1:1',
+                      token: 'fixture-no-traffic',
+                    },
+                    sessionKey,
+                    mcpOwner,
+                  ),
                   ensureReady: async () => undefined,
                 } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
               }
@@ -982,7 +1019,10 @@ it.each([
             bindingId: 'binding-1',
             generation: '1',
             workspaceGeneration: '1',
-            runtimeSessionId: hostedRuntimeSessionId(promptId),
+            runtimeSessionId:
+              mcp && planOwner === 'mcp'
+                ? mcpOwner
+                : hostedRuntimeSessionId(promptId),
           },
         },
         parts: [],
