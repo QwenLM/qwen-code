@@ -1262,7 +1262,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         body.put(
                 "resultDigest",
                 com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.metadata(result)
-                        .get("resultDigest"));
+                        .resultDigest());
         if (com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.executionProtocol(reference)
                 == 3) {
             body.put("receipt", receipt);
