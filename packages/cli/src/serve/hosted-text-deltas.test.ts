@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -173,6 +173,52 @@ describe('HostedTextDeltaStream', () => {
         .filter((event) => event.kind === 'message.delta')
         .map((event) => event.payload['messageId']);
       expect(ids).toEqual([first, second]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('bounds wake command identities without changing message identities', async () => {
+    const session = await openSession(root);
+    try {
+      const stream = new HostedTextDeltaStream(
+        session,
+        `wake-recovery:${'a'.repeat(64)}`,
+      );
+      await stream.delta('first');
+      const first = stream.takeMessageId();
+      await stream.delta('second');
+      const second = stream.takeMessageId();
+      const deltas = session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .filter((event) => event.kind === 'message.delta');
+      expect(deltas).toHaveLength(2);
+      expect(deltas.map((event) => event.payload['messageId'])).toEqual([
+        first,
+        second,
+      ]);
+      await stream.retractOriginal(first!, {
+        sourceBootId: 'boot-1',
+        sourceEventEpoch: 'epoch-1',
+        sourceActivation: session.activation,
+      });
+      const commands = (
+        await readFile(path.join(root, `${SESSION_ID}.jsonl`), 'utf8')
+      )
+        .trim()
+        .split('\n')
+        .map(
+          (line) =>
+            JSON.parse(line) as { managedSession?: Record<string, unknown> },
+        )
+        .map((record) => record.managedSession?.['commandId'])
+        .filter(
+          (id): id is string =>
+            typeof id === 'string' && id.startsWith('assistant-'),
+        );
+      expect(commands).toHaveLength(3);
+      expect(commands.every((id) => id.length <= 128)).toBe(true);
+      expect(new Set(commands).size).toBe(3);
     } finally {
       await session.close();
     }

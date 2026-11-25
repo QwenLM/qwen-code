@@ -2,13 +2,17 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.RecoveryWorker;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.dao.PessimisticLockingFailureException;
@@ -16,6 +20,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -23,7 +28,9 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -32,8 +39,8 @@ import java.util.Set;
 import static com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.*;
 
 /** Offline derived metadata only; no Session writer or authority mutation. */
-public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.managedagent.contracts.workspace.RecoveryWorker.Session {
-    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+public final class WorkspaceRecoveryStore implements RecoveryWorker.Session {
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private static final RequestDigests SKILL_DIGESTS = new RequestDigests();
     private static final int PAGE = 32;
@@ -116,7 +123,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             registration = parse((String) capture.get("registration_json"));
             try {
                 guard.verifyCapturedRegistration(JSON.treeToValue(registration, WorkspaceStorageGuard.RecoveryRegistration.class));
-            } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            } catch (JsonProcessingException error) {
                 throw failure("source_drift");
             }
         } else {
@@ -421,7 +428,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             byte[] bytes = Files.readAllBytes(manifest);
             check(digest.equals(hash(bytes)), "manifest_digest_conflict");
             validateManifest(parse(bytes));
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw failure("bundle_io_failed");
         }
         return transactions.execute(status -> {
@@ -595,11 +602,11 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
         var heads = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'"
                 + (lockHead ? " FOR UPDATE" : ""),
                 (result, index) -> {
-                    var value = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(result);
+                    var value = ManagedSchemaRows.read(result);
                     value.put("writer_lease_until", ManagedSchemaTime.timestamp(result, "writer_lease_until"));
                     Timestamp lease = ManagedSchemaTime.timestamp(result, "writer_lease_until");
                     value.put("writer_lease_fingerprint", lease == null ? null
-                            : LocalDateTime.ofInstant(lease.toInstant(), java.time.ZoneOffset.UTC).toString());
+                            : LocalDateTime.ofInstant(lease.toInstant(), ZoneOffset.UTC).toString());
                     return value;
                 }, tenant, session);
         check(heads.size() <= 1, "source_drift");
@@ -631,7 +638,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.state = 'REFERENCED' AND r.deletion_operation_ref IS NOT NULL"
                 + " AND f.owner_kind IN ('JOURNAL','SESSION_RECORD') LIMIT 1" + currentRead, String.class, tenant, session).isEmpty(),
                 "source_drift");
-        var captureScopes = new java.util.LinkedHashSet<String>();
+        var captureScopes = new LinkedHashSet<String>();
         captureScopes.add(ManagedIdentityRefs.publicationScopeRef(tenant, (String) row.get("workspace_id"), session));
         if (!heads.isEmpty()) {
             captureScopes.add(ManagedIdentityRefs.publicationScopeRef(tenant, (String) heads.getFirst().get("workspace_id"), session));
