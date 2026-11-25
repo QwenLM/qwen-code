@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.preflight;
 
 import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.harness.HarnessNegotiation;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilities;
@@ -14,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.preflight.ServerEnvironment.Format;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
+import com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
@@ -1755,7 +1757,7 @@ public final class ManagedAgentPreflight {
         }
         if ("ssh-process".equals(broker.getProvisioner())) {
             try {
-                new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry().validateSelected(properties);
+                new RuntimeProviderRegistry().validateSelected(properties);
                 return new Check("tool-path", Status.PASS, "SSH Workspace files configuration accepted", null);
             } catch (RuntimeException error) {
                 return new Check("tool-path", Status.FAIL, rootMessage(error), "correct the SSH Runtime configuration");
@@ -1849,9 +1851,9 @@ public final class ManagedAgentPreflight {
             }
         }
         try {
-            var registry = new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry();
+            var registry = new RuntimeProviderRegistry();
             registry.validateSelected(properties);
-            for (String kind : com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties)
+            for (String kind : RuntimeBackendSelection.from(properties)
                     .kinds().stream().sorted().toList()) {
                 for (var check : registry.require(kind).preflight(properties)) {
                     checks.add(new Check(check.name(), Status.valueOf(check.status().name()),
@@ -2040,7 +2042,7 @@ public final class ManagedAgentPreflight {
         }
         String kind = properties.getRuntimeBroker().getProvisioner();
         try {
-            if (!new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
+            if (!new RuntimeProviderRegistry()
                     .require(kind).usesLocalWorkspace()) {
                 return new Check("workspace", Status.SKIP,
                         "the remote worker owns the mount root; no local directory required", null);

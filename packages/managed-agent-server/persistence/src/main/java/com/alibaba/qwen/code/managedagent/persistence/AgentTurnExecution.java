@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 final class AgentTurnExecution {
     private final AgentEventJournal eventJournal;
@@ -691,7 +692,7 @@ final class AgentTurnExecution {
         // The fenced writer excludes late admission. Replay completed results in the
         // idle journal. Owed cleanup remains protected and does not block cancelling
         // an unadmitted Turn.
-        java.util.Set<String> accepted;
+        Set<String> accepted;
         try {
             accepted = JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
                     tenantId, sessionId, true,

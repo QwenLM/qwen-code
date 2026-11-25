@@ -1,0 +1,89 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { Part, Content } from '@google/genai';
+import type { Config } from '../config/config.js';
+import { BRAND_CLI_NAME } from '../config/brand.js';
+import { getFolderStructure } from './getFolderStructure.js';
+
+export const INITIAL_HISTORY_LENGTH = 1;
+
+/**
+ * Generates a string describing the current workspace directories and their structures.
+ * @param {Config} config - The runtime configuration and services.
+ * @returns {Promise<string>} A promise that resolves to the directory context string.
+ */
+export async function getDirectoryContextString(
+  config: Config,
+): Promise<string> {
+  const workspaceContext = config.getWorkspaceContext();
+  const workspaceDirectories = workspaceContext.getDirectories();
+
+  const folderStructures = await Promise.all(
+    workspaceDirectories.map((dir) =>
+      getFolderStructure(dir, {
+        fileService: config.getFileService(),
+      }),
+    ),
+  );
+
+  const folderStructure = folderStructures.join('\n');
+  const dirList = workspaceDirectories.map((dir) => `  - ${dir}`).join('\n');
+
+  return `- **Workspace Directories:**\n${dirList}
+- **Directory Structure:**
+
+${folderStructure}`;
+}
+
+/**
+ * Retrieves environment-related information to be included in the chat context.
+ * This includes the current working directory, date, operating system, and folder structure.
+ * Optionally, it can also include the full file context if enabled.
+ * @param {Config} config - The runtime configuration and services.
+ * @returns A promise that resolves to an array of `Part` objects containing environment information.
+ */
+export async function getEnvironmentContext(config: Config): Promise<Part[]> {
+  const platform = process.platform;
+  const directoryContext = await getDirectoryContextString(config);
+  const tempDir = config.storage.getProjectTempDir();
+  // Tiered context model (see issue #11488):
+  // - Tier 1 (global): system instruction only
+  // - Tier 2 (extension + project + local): first user message (here)
+  // - Tier 3 (subdirectory): tool output (JIT)
+  const environmentMemory = config.getSessionMemory();
+
+  const context = `
+<session_context>
+This is the ${BRAND_CLI_NAME}. We are setting up the context for our chat.
+My operating system is: ${platform}
+The project's temporary directory is: ${tempDir}
+${directoryContext}
+
+${environmentMemory}
+</session_context>`.trim();
+
+  const initialParts: Part[] = [{ text: context }];
+
+  return initialParts;
+}
+
+export async function getInitialChatHistory(
+  config: Config,
+  extraHistory?: Content[],
+): Promise<Content[]> {
+  const envParts = await getEnvironmentContext(config);
+  const envContextString = envParts.map((part) => part.text || '').join('\n\n');
+
+  return [
+    {
+      role: 'user',
+      parts: [{ text: envContextString }],
+    },
+    ...(extraHistory ?? []),
+  ];
+}

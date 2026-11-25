@@ -4,7 +4,9 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -180,8 +182,11 @@ class AgentDefinitionCompilerTest {
         String accepted = "{\"model\":{\"id\":\"configured\"},"
                 + "\"instructions\":\"" + "界".repeat(21845) + "\","
                 + "\"tools\":[],\"permission_policy\":{}}";
-        assertThat(AgentDefinitionCompiler.compile(accepted, false, "yolo",
-                FILES_ONLY, List.of("configured")).toolProfile()).isNull();
+        var compiled = AgentDefinitionCompiler.compile(accepted, false,
+                "yolo", FILES_ONLY, List.of("configured"));
+        assertThat(compiled.toolProfile()).isNull();
+        assertThat(compiled.modelId()).isEqualTo("configured");
+        assertThat(compiled.instructions()).isEqualTo("界".repeat(21845));
         assertThatThrownBy(() -> AgentDefinitionCompiler.compile(
                 accepted.replace("界\"", "界界\""), false, "yolo",
                 FILES_ONLY, List.of("configured")))
@@ -202,8 +207,16 @@ class AgentDefinitionCompilerTest {
                 + "\"definition_digest\":\"" + "b".repeat(64) + "\"}}";
         String base = definition(hostedProfile(WorkspaceToolProfiles.MCP), "{\"approval_mode\":\"default\"}");
         String configured = base.substring(0, base.length() - 1) + pins;
-        assertThat(AgentDefinitionCompiler.compile(configured, true, "yolo", List.of(WorkspaceToolProfiles.MCP))
-                .toolProfile()).isEqualTo(WorkspaceToolProfiles.MCP);
+        var compiled = AgentDefinitionCompiler.compile(configured, true,
+                "yolo", List.of(WorkspaceToolProfiles.MCP));
+        assertThat(compiled.toolProfile()).isEqualTo(WorkspaceToolProfiles.MCP);
+        assertThat(compiled.skills()).containsExactly(Map.of("name", "review",
+                "description", "Review", "body", "Read the diff."));
+        assertThat(compiled.mcpServers()).containsExactly(Map.of("serverId",
+                "docs", "serverRevision", 1L, "definitionDigest", "a".repeat(64)));
+        assertThat(compiled.hookCatalog()).isEqualTo(Map.of("catalogId", "review",
+                "catalogRevision", 1L, "definitionDigest", "b".repeat(64)));
+        assertThat(compiled.hookCatalogPresent()).isTrue();
         assertThat(AgentDefinitionCompiler.compile(configured.replace(WorkspaceToolProfiles.MCP, WorkspaceToolProfiles.SHELL),
                 true, "default", List.of(WorkspaceToolProfiles.SHELL)).toolProfile()).isEqualTo(WorkspaceToolProfiles.SHELL);
         assertThatThrownBy(() -> AgentDefinitionCompiler.compile(configured, true, "yolo", FILES_ONLY))
@@ -212,5 +225,26 @@ class AgentDefinitionCompilerTest {
         assertThatThrownBy(() -> AgentDefinitionCompiler.compile(base, true, "yolo", List.of(WorkspaceToolProfiles.MCP)))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getDetails()).containsEntry("field", "mcp_servers"));
+    }
+
+    @Test
+    void pinnedProjectionDoesNotReapplyAdmissionAllowlists() {
+        Map<String, Object> content = new HashMap<>();
+        content.put("model", Map.of("id", "retired-model"));
+        content.put("instructions", "Keep the original instructions.");
+        content.put("hook_catalog", null);
+        content.put("metadata", Map.of("approval_mode", "default"));
+
+        var compiled = AgentDefinitionCompiler.fromPinnedContent(content,
+                false, "auto-edit", null);
+
+        assertThat(compiled.modelId()).isEqualTo("retired-model");
+        assertThat(compiled.instructions()).isEqualTo("Keep the original instructions.");
+        assertThat(compiled.approvalMode()).isEqualTo("auto-edit");
+        assertThat(compiled.toolProfile()).isNull();
+        assertThat(compiled.skills()).isEmpty();
+        assertThat(compiled.mcpServers()).isEmpty();
+        assertThat(compiled.hookCatalog()).isNull();
+        assertThat(compiled.hookCatalogPresent()).isTrue();
     }
 }

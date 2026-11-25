@@ -7,6 +7,9 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.PublishToolResultRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.dao.DuplicateKeyException;
@@ -16,18 +19,19 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 final class JournalResourceWrites {
     private final JournalFencing fencing;
     private final JournalStoreRows storeRows;
     private final JdbcTemplate jdbc;
-    private final com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings;
+    private final ManagedAgentSettings settings;
 
     JournalResourceWrites(JournalFencing fencing,
             JournalStoreRows storeRows,
             JdbcTemplate jdbc,
-            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings) {
+            ManagedAgentSettings settings) {
         this.fencing = fencing;
         this.storeRows = storeRows;
         this.jdbc = jdbc;
@@ -51,7 +55,7 @@ final class JournalResourceWrites {
     }
 
     ToolResultResourceRef publishAgentSkills(String tenantId,
-            String workspaceId, String sessionId, List<java.util.Map<String, Object>> skills) {
+            String workspaceId, String sessionId, List<Map<String, Object>> skills) {
         JournalStoreRows.validateScope(tenantId, workspaceId, sessionId);
         return publishAgentResource(tenantId, workspaceId, sessionId,
                 "managed-agent-skills", "agent-skills-", AgentDefinitionExtensions.skillsBytes(skills));
@@ -114,7 +118,7 @@ final class JournalResourceWrites {
 
     ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -232,7 +236,7 @@ final class JournalResourceWrites {
                     if (resource.byteLength()
                             > ManagedSessionStoreModels.inlineResourceBytes(resource.kind())
                             && !ossEnabled()) {
-                        throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                        throw new ManagedAgentException(
                                 501, ManagedSessionStoreModels.ERROR_OSS_DISABLED,
                                 "Resources larger than the inline limit require the disabled"
                                         + " OSS storage path.");

@@ -8,6 +8,7 @@ import type { Part } from '@google/genai';
 import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import { managedCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-command-id.js';
 import type { ManagedInvocationObservation } from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
@@ -452,7 +453,9 @@ export async function executeHostedTurn(
       );
     if (attempt?.payload['state'] === 'started') {
       const activation = session.managed.activation;
-      const commandId = `${attempt.payload['attemptId']}:abandoned`;
+      const commandId = managedCommandId(
+        `${attempt.payload['attemptId']}:abandoned`,
+      );
       await authority.appendExecutionEvent(
         {
           operation: 'hostedModelAttempt',
