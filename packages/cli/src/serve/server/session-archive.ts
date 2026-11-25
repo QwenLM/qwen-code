@@ -37,6 +37,7 @@ import {
   logWorktreeCleanupPreserve,
   preclassifyWorktreeCleanup,
   verifyWorktreeCleanupOwnership,
+  withWorktreeArchiveMove,
 } from './worktree-orphan-cleanup.js';
 
 export interface DaemonArchiveSessionsResult {
@@ -683,7 +684,9 @@ export async function deleteDaemonSessions(params: {
             }
           };
           try {
-            await bridge.closeSession(sessionId);
+            await bridge.closeSession(sessionId, undefined, {
+              forDeletion: true,
+            });
           } catch (error) {
             // A 'session_closing' refusal means a bridge-internal
             // auto-close (last-detach, idle reaper) is in flight — the
@@ -1110,7 +1113,9 @@ export async function archiveDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'active', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
@@ -1296,7 +1301,9 @@ export async function unarchiveDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'archived', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;

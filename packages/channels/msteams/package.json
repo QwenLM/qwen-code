@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-msteams",
-  "version": "0.26.9",
+  "version": "0.28.3",
   "description": "Microsoft Teams channel adapter for Qwen Code",
   "repository": {
     "type": "git",
@@ -32,14 +32,14 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@microsoft/agents-hosting": "1.9.1",
-    "@microsoft/agents-activity": "1.9.1"
+    "@microsoft/agents-hosting": "1.10.2",
+    "@microsoft/agents-activity": "1.10.2"
   },
   "devDependencies": {
     "typescript": "^5.0.0",
-    "@qwen-code/channel-base": "0.26.9"
+    "@qwen-code/channel-base": "0.28.3"
   },
   "peerDependencies": {
-    "@qwen-code/channel-base": "0.23.0 || 0.26.9"
+    "@qwen-code/channel-base": "0.23.0 || 0.28.3"
   }
 }

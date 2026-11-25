@@ -487,6 +487,8 @@ export interface SendPromptOptions {
   retry?: boolean;
   /** Fired after local validation, immediately before dispatch to the daemon. */
   onAdmissionStarted?: () => void;
+  /** Caller-generated key used to deduplicate retried prompt admissions. */
+  idempotencyKey?: string;
   /** Revalidates the caller before every HTTP attempt, including client recovery. */
   beforeDispatch?: (clientId: string | undefined) => void;
   /**
@@ -614,6 +616,7 @@ export interface DaemonSessionActions {
       | 'files'
       | 'inputAnnotations'
       | 'retry'
+      | 'idempotencyKey'
       | 'onAdmissionStarted'
       | 'onAdmitted'
     >,
@@ -745,6 +748,13 @@ export interface DaemonSessionActions {
     pr: Omit<DaemonSessionPrInfo, 'issues'>,
   ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
+  /**
+   * Report a per-turn satisfied/not-satisfied mark to telemetry.
+   * Best-effort: with no live session this is a no-op, and failures are
+   * logged, never surfaced as notices — the local mark never depends on
+   * the outcome.
+   */
+  rateAssistantTurn(promptId: string, rating: 'up' | 'down'): Promise<void>;
   generateSessionContent(
     prompt: string,
     opts?: { signal?: AbortSignal },

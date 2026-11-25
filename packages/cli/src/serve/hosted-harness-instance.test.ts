@@ -75,6 +75,33 @@ describe('Hosted Harness instance lifecycle', () => {
     expect(JSON.stringify(metrics.body)).not.toContain('tenantId');
   });
 
+  it('reports suspension counts on the metrics route only', async () => {
+    const app = express();
+    const contract = {
+      ...createHostedHarnessContract(digest, bootId, [], 'pod-a'),
+      instanceId: 'pod-a',
+    };
+    const suspension = { cleanSuspensions: 2, coldOpens: 1 };
+    new HostedHarnessInstance(
+      contract,
+      () => ({
+        attachedSessions: 0,
+        activeTurns: 0,
+        openingSessions: 0,
+        pendingInputs: 0,
+        heldResources: 0,
+        pendingPublications: 0,
+      }),
+      undefined,
+      () => suspension,
+    ).register(app);
+    const route = '/internal/hosted-harness/v1';
+    const metrics = await headers(supertest(app).get(`${route}/metrics`));
+    expect(metrics.body.suspension).toEqual(suspension);
+    const snapshot = await headers(supertest(app).get(`${route}/instance`));
+    expect(snapshot.body).not.toHaveProperty('suspension');
+  });
+
   it('requires a complete placement and leaves the local contract opt-in', () => {
     expect(
       createHostedHarnessContract(digest, bootId, [], undefined).features,

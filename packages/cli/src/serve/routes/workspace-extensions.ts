@@ -1889,6 +1889,19 @@ export function registerWorkspaceExtensionRoutes(
     ) {
       return;
     }
+    const rawWait = req.query['waitForTurnDrainMs'];
+    if (
+      rawWait !== undefined &&
+      (typeof rawWait !== 'string' ||
+        !/^\d{1,6}$/.test(rawWait) ||
+        Number(rawWait) > 300_000)
+    ) {
+      res.status(400).json({
+        code: 'invalid_turn_drain_wait',
+        error: 'waitForTurnDrainMs must be an integer between 0 and 300000',
+      });
+      return;
+    }
     primaryController.runQueuedExtensionMutation(
       operation,
       failureContext,
@@ -1896,6 +1909,7 @@ export function registerWorkspaceExtensionRoutes(
       run,
       {
         manager,
+        waitForTurnDrainMs: Number(rawWait ?? 0),
         operationBasePath: '/extensions/operations',
         onRuntimeReconciled: (runtime, generation) => {
           const applied = appliedGenerationByWorkspaceId.get(

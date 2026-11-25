@@ -26,6 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWriteFileSync } from './atomicFileWrite.js';
 import readline from 'node:readline';
+import { addAbortSignal } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
 import {
@@ -43,6 +44,7 @@ type JsonlReadOptions = {
 
 type JsonlReadLinesOptions = {
   signal?: AbortSignal;
+  stream?: fs.ReadStream;
 };
 
 interface ParsedJsonlLine<T> {
@@ -210,11 +212,13 @@ async function readLinesWithIntegrityInternal<T = unknown>(
   options: JsonlReadLinesOptions = {},
   budget: 'records' | 'lines' = 'records',
 ): Promise<{ records: T[]; complete: boolean }> {
-  let fileStream: fs.ReadStream | undefined;
+  let fileStream = options.stream;
   let rl: readline.Interface | undefined;
   try {
     options.signal?.throwIfAborted();
-    fileStream = options.signal
+    if (fileStream && options.signal)
+      addAbortSignal(options.signal, fileStream);
+    fileStream ??= options.signal
       ? fs.createReadStream(filePath, { signal: options.signal })
       : fs.createReadStream(filePath);
     rl = readline.createInterface({

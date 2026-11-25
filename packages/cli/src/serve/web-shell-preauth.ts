@@ -48,6 +48,7 @@ export const WEB_SHELL_PAGE_PATHS = [
   '/scheduled-tasks',
   '/pr-watches',
   '/goals',
+  '/artifacts',
   '/settings',
 ] as const;
 

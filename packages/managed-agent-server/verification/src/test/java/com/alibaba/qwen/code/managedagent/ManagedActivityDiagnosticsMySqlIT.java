@@ -27,11 +27,15 @@ class ManagedActivityDiagnosticsMySqlIT extends ManagedActivityDiagnosticsTest {
     @Test
     void activityIndexSupportsSessionDomainKeysetReads() {
         var jdbc = new org.springframework.jdbc.core.JdbcTemplate(database.source());
-        var plan = jdbc.queryForList("EXPLAIN SELECT record_resource_id, gmt_create, record_key FROM ma_session_record"
-                + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND domain = ? AND delivery_state IS NULL"
-                + " ORDER BY gmt_create DESC, record_key DESC LIMIT 512", "scope",
+        var plan = jdbc.queryForList("EXPLAIN SELECT record_resource_id, gmt_create, record_id FROM ma_session_record"
+                + " WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ? AND domain = ? AND delivery_state IS NULL"
+                + " ORDER BY gmt_create DESC, record_id DESC LIMIT 512", "tenant", "session",
                 "hosted_tool_diagnostic");
         assertThat(plan).hasSize(1);
-        assertThat(String.valueOf(plan.getFirst().get("possible_keys"))).contains("idx_ma_record_session_delivery");
+        // possible_keys still lists the index even when the planner chooses
+        // another one plus a filesort, so pin the chosen key and the absence
+        // of a filesort instead.
+        assertThat(String.valueOf(plan.getFirst().get("key"))).isEqualTo("idx_ma_record_session_delivery");
+        assertThat(String.valueOf(plan.getFirst().get("Extra"))).doesNotContain("Using filesort");
     }
 }

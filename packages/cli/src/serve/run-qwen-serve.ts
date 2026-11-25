@@ -9,6 +9,7 @@ import {
   readOperatorSandboxSettings,
   InvalidExecutionSandboxConfigError,
 } from '../config/execution-sandbox-settings.js';
+import { QWEN_CODE_MANAGED_RUNTIME_ENV } from '../config/acp-channel-fallback.js';
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
@@ -30,10 +31,7 @@ import express, {
 } from 'express';
 import { resolveChannelLocale } from '../utils/channel-locale.js';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import {
-  validateHostedHarnessProfile,
-  HOSTED_CSI_SESSION_STORE_URL_ENV,
-} from './hosted-harness-profile.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
@@ -180,6 +178,7 @@ import {
   type ServeChannelSelection,
   type ChannelWebhookConfigSource,
 } from './types.js';
+import type { LoadAdmissionMonitor } from './load-admission.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type {
   WorkspaceGenerationGuard,
@@ -2382,6 +2381,7 @@ async function loadServeRuntimeModules() {
     workspaceProvidersStatusModule,
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
+    loadAdmissionModule,
     workspaceRegistryModule,
     workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
@@ -2398,6 +2398,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-providers-status.js'),
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
+    import('./load-admission.js'),
     import('./workspace-registry.js'),
     import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
@@ -2425,6 +2426,9 @@ async function loadServeRuntimeModules() {
       workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
     createTotalSessionAdmissionController:
       totalSessionAdmissionModule.createTotalSessionAdmissionController,
+    createLoadAdmissionMonitor: loadAdmissionModule.createLoadAdmissionMonitor,
+    DISABLED_LOAD_ADMISSION_SNAPSHOT:
+      loadAdmissionModule.DISABLED_LOAD_ADMISSION_SNAPSHOT,
     createWorkspaceRegistry: workspaceRegistryModule.createWorkspaceRegistry,
     createWorkspaceSessionOwnerIndex:
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
@@ -3481,6 +3485,11 @@ function installServeBrokenPipeGuard(): void {
   process.stderr.on('error', ignoreEpipe);
 }
 
+// Refcount of co-resident hosted-harness daemons in this process; the shared
+// process.env marker is restored to the ambient value only at last release.
+let managedMarkerDepth = 0;
+let managedMarkerAmbient: string | undefined;
+
 async function runQwenServeImpl(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps,
@@ -3541,18 +3550,59 @@ async function runQwenServeImpl(
     (optsIn.profile === 'hosted-harness'
       ? process.env[HOSTED_HARNESS_CAPABILITY_DIGEST_ENV]
       : undefined);
-  const hostedCsiSessionStoreUrl =
-    optsIn.hostedCsiSessionStoreUrl ??
-    process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
   validateHostedHarnessProfile({
     ...optsIn,
     token,
     requireAuth:
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
-    hostedCsiSessionStoreUrl,
   });
+  // The Hosted Harness is the Managed Agent's session host. Stamp the
+  // attribution marker before the base env freeze so the in-process Hosted
+  // turns (loadCliConfig's ACP fallback reads process.env) and every spawned
+  // child inherit it. The stamp is refcounted: co-resident embedded daemons
+  // share process.env, so the ambient value is restored only when the last
+  // hosted harness closes. Other profiles never touch the shared slot; they
+  // drop an inherited marker from their own base env copy only, so an
+  // independent daemon's children do not inherit a co-resident harness's (or
+  // the launcher's) marker while the harness keeps its attribution (same
+  // rule as `qwen daemon start`'s START_ENV_DROP, applied per daemon).
+  // Registered with the lifecycle immediately so a startup failure before
+  // the loader scrub still restores an embedded caller's env. scrubApplied
+  // is a single-slot setter, so the later combined registration replaces
+  // this one for the startup-failure catch; the shutdown handler calls this
+  // restore explicitly next to the loader restore, so a successful close
+  // releases the refcount exactly once.
+  const previousManagedRuntimeMarker =
+    process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
+  if (optsIn.profile === 'hosted-harness') {
+    if (managedMarkerDepth === 0) {
+      managedMarkerAmbient = previousManagedRuntimeMarker;
+    }
+    managedMarkerDepth += 1;
+    process.env[QWEN_CODE_MANAGED_RUNTIME_ENV] = '1';
+  }
+  // One-shot per boot: the shutdown block and the startup-failure catch are
+  // independent callers (a runtimeReady rejection closes the handle and then
+  // rejects into the catch), so a second call must not decrement again.
+  let managedMarkerReleased = false;
+  const restoreManagedRuntimeMarker = (): void => {
+    if (optsIn.profile !== 'hosted-harness') return;
+    if (managedMarkerReleased) return;
+    managedMarkerReleased = true;
+    managedMarkerDepth -= 1;
+    if (managedMarkerDepth > 0) return;
+    if (managedMarkerAmbient === undefined) {
+      delete process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
+    } else {
+      process.env[QWEN_CODE_MANAGED_RUNTIME_ENV] = managedMarkerAmbient;
+    }
+  };
+  loggerLifecycle.scrubApplied(restoreManagedRuntimeMarker);
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  if (optsIn.profile !== 'hosted-harness') {
+    delete baseEnv[QWEN_CODE_MANAGED_RUNTIME_ENV];
+  }
   const liveConversationWorkspace =
     deps.liveConversationWorkspace ??
     new ConversationWorkspace({
@@ -3610,7 +3660,10 @@ async function runQwenServeImpl(
   const restoreScrubbedLoaderEnv = (): void => {
     loaderEnvScrub.release();
   };
-  loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
+  loggerLifecycle.scrubApplied(() => {
+    restoreScrubbedLoaderEnv();
+    restoreManagedRuntimeMarker();
+  });
 
   // An empty --hostname (an unset variable in an alias or compose file) makes
   // Node bind every interface; treat it as operator error rather than an
@@ -3696,7 +3749,6 @@ async function runQwenServeImpl(
     ),
     token,
     hostedHarnessCapabilityDigest,
-    hostedCsiSessionStoreUrl,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -4970,6 +5022,10 @@ async function runQwenServeImpl(
   // bucket plus the window-scoped event-loop histogram it resets each seal.
   // Torn down together with the event-loop monitor on runtime restart/stop.
   let daemonMetricsSampler: { dispose(): void } | undefined;
+  // Load-based fresh-session admission monitor: same teardown group as the
+  // metrics sampler, recreated per buildRuntime next to the admission
+  // controller it feeds.
+  let loadAdmissionMonitor: LoadAdmissionMonitor | undefined;
   // Low-frequency sweep refreshing bound-PR state snapshots (open → merged).
   // The refresh module loads via dynamic import (see start site) because it
   // pulls the SessionService chain, which must stay out of the pre-listen
@@ -5020,6 +5076,8 @@ async function runQwenServeImpl(
     daemonEventLoopMonitor = undefined;
     const metricsSampler = daemonMetricsSampler;
     daemonMetricsSampler = undefined;
+    const loadMonitor = loadAdmissionMonitor;
+    loadAdmissionMonitor = undefined;
     const prRefreshTimer = sessionPrRefreshTimer;
     sessionPrRefreshTimer = undefined;
     sessionPrRefreshGeneration += 1;
@@ -5038,6 +5096,15 @@ async function runQwenServeImpl(
     } catch (err) {
       daemonLog.warn(
         `metrics sampler dispose error: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    try {
+      loadMonitor?.dispose();
+    } catch (err) {
+      daemonLog.warn(
+        `load admission monitor dispose error: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -6010,6 +6077,16 @@ async function runQwenServeImpl(
         mcpAuthenticationActive = false;
       };
     };
+    // Retire any prior monitor before building a new one so a runtime
+    // rebuild (buildRuntime re-entry) can't leak the old interval +
+    // histogram — symmetric with the metrics sampler below.
+    loadAdmissionMonitor?.dispose();
+    // An injected bridge never receives freshSessionAdmission, so a monitor
+    // there would report enabled:true for a gate that never runs.
+    loadAdmissionMonitor =
+      opts.loadAdmission !== false && deps.bridge === undefined
+        ? runtime.createLoadAdmissionMonitor()
+        : undefined;
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
         maxTotalSessions: opts.maxTotalSessions,
@@ -6019,6 +6096,9 @@ async function runQwenServeImpl(
             : bridgeRef
               ? [bridgeRef]
               : [],
+        ...(loadAdmissionMonitor
+          ? { loadAdmission: loadAdmissionMonitor }
+          : {}),
       },
     );
     const sessionOwnerIndex = runtime.createWorkspaceSessionOwnerIndex();
@@ -9266,6 +9346,9 @@ async function runQwenServeImpl(
       }),
       getMetricsSeries: () => metricsRing.snapshot(),
       getTotalSessionAdmissionSnapshot: totalSessionAdmission.snapshot,
+      getLoadAdmissionSnapshot: () =>
+        loadAdmissionMonitor?.snapshot() ??
+        runtime.DISABLED_LOAD_ADMISSION_SNAPSHOT,
       getChildHeapPolicySnapshot: () => managedChildHeapPolicy?.snapshot(),
       ...(childHeapPolicy
         ? {
@@ -11048,9 +11131,6 @@ async function runQwenServeImpl(
               ?.locals?.['conversationRuntimeActivity'] as
               | { sealAndWait?: () => Promise<void> }
               | undefined;
-            const initiallyMountedCsiStop = initiallyMountedApp?.locals?.[
-              'stopHostedCsiSessions'
-            ] as (() => Promise<void>) | undefined;
             // Calling an async function runs through its first await
             // synchronously. Seal an already-mounted runtime before close()
             // yields so no management request can enter the shutdown window.
@@ -11065,7 +11145,6 @@ async function runQwenServeImpl(
               initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
             const initialConversationActivityWait =
               initiallyMountedConversationActivity?.sealAndWait?.();
-            const initialCsiWait = initiallyMountedCsiStop?.();
             let processRegistryShutdown: Promise<Error | undefined> | undefined;
             const startProcessRegistryShutdown = () => {
               processRegistryShutdown ??= managedProcessRegistry
@@ -11187,6 +11266,7 @@ async function runQwenServeImpl(
                     await daemonLog.close();
                   }
                   restoreScrubbedLoaderEnv();
+                  restoreManagedRuntimeMarker();
                   if (finalErr) rej(finalErr);
                   else res();
                 });
@@ -11250,11 +11330,6 @@ async function runQwenServeImpl(
                 ) {
                   await conversationActivity?.sealAndWait?.();
                 }
-                const csiStop = appForCleanup?.locals?.[
-                  'stopHostedCsiSessions'
-                ] as (() => Promise<void>) | undefined;
-                await initialCsiWait;
-                if (csiStop !== initiallyMountedCsiStop) await csiStop?.();
                 stopTrustPolicyMonitor(appForCleanup);
                 const waitForTrustPolicyIdle = appForCleanup?.locals?.[
                   'waitForTrustPolicyIdle'

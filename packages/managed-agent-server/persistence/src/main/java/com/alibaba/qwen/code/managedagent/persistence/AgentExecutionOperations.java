@@ -15,12 +15,9 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -112,12 +109,11 @@ final class AgentExecutionOperations {
             throw new ManagedAgentException(409, "compaction_revision_conflict",
                     "The Session compaction revision has changed.");
         }
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         if (sessionPolicies.hasOpenOperation(tenantId, sessionId)
                 || sessionPolicies.hasActiveTurn(tenantId, sessionId) || sessionPolicies.hasDecidableAction(session)
-                || !jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE session_scope_key = ?"
+                || !jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
                         + " AND record_kind = 'DOMAIN' AND domain IN ('hook_execution', 'history_maintenance')"
-                        + " AND settled_at IS NULL LIMIT 1", scope).isEmpty()
+                        + " AND settled_at IS NULL LIMIT 1", tenantId, sessionId).isEmpty()
                 || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                         + " AND status = 'RECOVERY_BLOCKED' LIMIT 1", tenantId, sessionId).isEmpty()
                 || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ? AND session_id = ?"
@@ -135,29 +131,28 @@ final class AgentExecutionOperations {
         if (model != null && model.modelId() != null) {
             request.put("modelSelection", Map.of("modelId", model.modelId(), "revision", model.revision()));
         }
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind,"
-                + " target_key, target_id, phase, request_json, idempotency_digest, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, target_kind,"
+                + " target_id, phase, request_json, idempotency_digest, tenant_id, session_id,"
                 + " operation_id, operation_kind, actor_digest, idempotency_key, request_digest, state,"
-                + " admission_stage, delivery_state, session_status_before, actor_key, available_at,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'SESSION', ?, ?, 'PENDING', ?, ?, ?, ?, ?,"
+                + " admission_stage, delivery_state, session_status_before, actor_id, available_at,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, 'SESSION', ?, 'PENDING', ?, ?, ?, ?, ?,"
                 + " 'CONTEXT_COMPRESSION', ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?, ?)",
-                AgentStoreRows.sessionOperationKey(tenantId, sessionId, OperationKind.CONTEXT_COMPRESSION, operationId),
-                scope, scope, AgentStoreRows.sessionOperationTarget(sessionId), sessionId, storeRows.writeJson(request),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationKey(tenantId, sessionId, OperationKind.CONTEXT_COMPRESSION, operationId)),
+                ManagedSchemaKeys.identity(sessionId), ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)), storeRows.writeJson(request),
                 ManagedSchemaKeys.key(key), tenantId, sessionId, operationId, actorDigest, key, digest,
-                session.status(), ManagedWorkspaceRegistry.actorKey(tenantId, actorId), now, now, now);
+                session.status(), actorId, now, now, now);
         return new OperationAdmission(lifecycleOperations.findOperation(tenantId, sessionId, operationId).orElseThrow(), false);
     }
 
     ContextCompressionState contextCompressionState(String tenantId, String sessionId) {
         ensureCompactionProjection(tenantId, sessionId);
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         List<Long> revisions = jdbc.queryForList("SELECT revision FROM ma_session_record WHERE"
-                + " session_scope_key = ? AND record_key = ? AND record_kind = 'DOMAIN'", Long.class,
-                scope, ManagedExtensionProjection.recordKey(sessionId, "hosted_context_compaction", "latest"));
+                + " tenant_id = ? AND session_id = ? AND domain = 'hosted_context_compaction' AND record_id = 'latest' AND record_kind = 'DOMAIN'", Long.class,
+                tenantId, sessionId);
         List<String> operations = jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE"
-                + " scope_key = ? AND operation_kind = 'CONTEXT_COMPRESSION' AND target_key = ?"
+                + " scope_kind = 'SESSION' AND scope_id = ? AND operation_kind = 'CONTEXT_COMPRESSION' AND target_id = ?"
                 + " AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED') ORDER BY gmt_create LIMIT 1",
-                String.class, scope, AgentStoreRows.sessionOperationTarget(sessionId));
+                String.class, ManagedSchemaKeys.identity(sessionId), ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)));
         return new ContextCompressionState(revisions.isEmpty() ? 0 : revisions.getFirst(),
                 operations.isEmpty() ? null : operations.getFirst());
     }
@@ -168,12 +163,12 @@ final class AgentExecutionOperations {
         }
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
-        sessionIds.forEach(id -> arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, id)));
+        arguments.addAll(sessionIds);
         Map<String, ContextCompressionState> result = new HashMap<>();
         Set<String> indexed = new HashSet<>();
         sessionIds.forEach(id -> result.put(id, new ContextCompressionState(0, null)));
         jdbc.query("SELECT session_id, revision FROM ma_session_record WHERE tenant_id = ?"
-                + " AND session_scope_key IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
+                + " AND session_id IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
                 + " AND record_kind = 'DOMAIN' AND domain = 'hosted_context_compaction'",
                 (RowCallbackHandler) row -> {
                     indexed.add(row.getString("session_id"));
@@ -198,7 +193,7 @@ final class AgentExecutionOperations {
             }
         }
         jdbc.query("SELECT session_id, operation_id FROM ma_operation WHERE tenant_id = ?"
-                + " AND scope_key IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
+                + " AND session_id IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
                 + " AND operation_kind = 'CONTEXT_COMPRESSION' AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')",
                 (RowCallbackHandler) row -> {
                     String id = row.getString("session_id");
@@ -209,18 +204,17 @@ final class AgentExecutionOperations {
     }
 
     void ensureCompactionProjection(String tenantId, String sessionId) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        String key = ManagedExtensionProjection.recordKey(sessionId, "hosted_context_compaction", "latest");
-        if (!jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE session_scope_key = ? AND record_key = ?",
-                scope, key).isEmpty()) {
+        if (!jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
+                + " AND domain = 'hosted_context_compaction' AND record_id = 'latest'",
+                tenantId, sessionId).isEmpty()) {
             return;
         }
         var transactions = new org.springframework.transaction.support.TransactionTemplate(
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
-        transactions.executeWithoutResult(status -> backfillCompactionProjection(tenantId, sessionId, scope, key));
+        transactions.executeWithoutResult(status -> backfillCompactionProjection(tenantId, sessionId));
     }
 
-    void backfillCompactionProjection(String tenantId, String sessionId, String scope, String key) {
+    void backfillCompactionProjection(String tenantId, String sessionId) {
         var heads = jdbc.queryForList("SELECT workspace_id, journal_revision, compacted_through_revision FROM"
                 + " ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
                 tenantId, sessionId);
@@ -274,11 +268,11 @@ final class AgentExecutionOperations {
             byte[] empty = "{}".getBytes(StandardCharsets.UTF_8);
             String digest = DigestUtils.sha256Hex(empty);
             resourceId = "compaction-state:" + digest;
-            jdbc.update("INSERT IGNORE INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id,"
+            jdbc.update("INSERT IGNORE INTO ma_resource (tenant_id, workspace_id,"
                     + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
-                    + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 2, ?, 'MYSQL_INLINE', ?,"
+                    + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, 1, 2, ?, 'MYSQL_INLINE', ?,"
                     + " 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                    ManagedSchemaKeys.key(scope, resourceId), scope, tenantId, workspace, sessionId, resourceId,
+                    tenantId, workspace, sessionId, resourceId,
                     "managed-context-compaction-empty", digest, empty);
         } else {
             var ref = latest.path("payload").path("summaryRef");
@@ -289,8 +283,8 @@ final class AgentExecutionOperations {
             }
             resourceId = ref.path("resourceId").asText();
             var resources = jdbc.queryForList("SELECT sha256, byte_length, kind FROM ma_resource WHERE"
-                    + " session_scope_key = ? AND resource_id = ? AND state IN ('REFERENCED', 'PUBLISHED')",
-                    scope, resourceId);
+                    + " tenant_id = ? AND session_id = ? AND resource_id = ? AND state IN ('REFERENCED', 'PUBLISHED')",
+                    tenantId, sessionId, resourceId);
             if (resources.size() != 1 || !ref.path("digest").asText().equals(resources.getFirst().get("sha256"))
                     || !ref.path("kind").asText().equals(resources.getFirst().get("kind"))
                     || ref.path("byteLength").asLong() != ((Number) resources.getFirst().get("byte_length")).longValue()) {
@@ -298,15 +292,18 @@ final class AgentExecutionOperations {
             }
         }
         long now = storeRows.lifecycleDatabaseTime();
-        int inserted = jdbc.update("INSERT IGNORE INTO ma_session_record (session_scope_key, record_key, tenant_id,"
+        int inserted = jdbc.update("INSERT IGNORE INTO ma_session_record (tenant_id,"
                 + " workspace_id, session_id, domain, record_id, revision, record_resource_id, gmt_create, settled_at,"
-                + " first_sequence) VALUES (?, ?, ?, ?, ?, 'hosted_context_compaction', ?, ?, ?, ?, ?, ?)",
-                scope, key, tenantId, workspace, sessionId, "latest", revision, resourceId, now, now, revision);
+                + " first_sequence) VALUES (?, ?, ?, 'hosted_context_compaction', ?, ?, ?, ?, ?, ?)",
+                tenantId, workspace, sessionId, "latest", revision, resourceId, now, now, revision);
         if (inserted == 1) {
-            jdbc.update("INSERT IGNORE INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
-                    + " resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES"
-                    + " (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, revision,
-                    ManagedSchemaKeys.key(scope, resourceId), tenantId, workspace, sessionId, resourceId, now);
+            jdbc.update("INSERT IGNORE INTO ma_resource_ref (owner_kind, owner_ref, owner_revision,"
+                    + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES"
+                    + " ('SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?)",
+                    ManagedSchemaKeys.identity(com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                            com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES,
+                            sessionId, "hosted_context_compaction", "latest")), revision,
+                    tenantId, workspace, sessionId, resourceId, now);
         }
     }
 
@@ -316,9 +313,9 @@ final class AgentExecutionOperations {
     }
 
     Map<String, Object> contextCompressionRequest(String tenantId, String sessionId, String operationId) {
-        return jdbc.queryForList("SELECT request_json FROM ma_operation WHERE scope_key = ?"
+        return jdbc.queryForList("SELECT request_json FROM ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ?"
                 + " AND operation_kind = 'CONTEXT_COMPRESSION' AND operation_id = ?", String.class,
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), operationId).stream()
+                ManagedSchemaKeys.identity(sessionId), operationId).stream()
                 .findFirst().map(storeRows::readMap).orElse(Map.of());
     }
 
@@ -333,10 +330,10 @@ final class AgentExecutionOperations {
         int changed = jdbc.update("UPDATE ma_operation SET state = 'RUNNING', delivery_state = 'LEASED',"
                 + " claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?),"
                 + " claim_generation = claim_generation + 1, attempt_count = attempt_count + 1 WHERE"
-                + " scope_key = ? AND operation_kind = 'CONTEXT_COMPRESSION' AND operation_id = ?"
+                + " scope_kind = 'SESSION' AND scope_id = ? AND operation_kind = 'CONTEXT_COMPRESSION' AND operation_id = ?"
                 + " AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED') AND available_at <= "
                 + ManagedSchemaTime.SQL_NOW + " AND (claim_owner IS NULL OR claim_until < " + ManagedSchemaTime.SQL_NOW + ")",
-                owner, duration.toMillis(), ManagedSessionStore.sessionScopeKey(tenantId, sessionId), operationId);
+                owner, duration.toMillis(), ManagedSchemaKeys.identity(sessionId), operationId);
         return changed == 1 ? lifecycleOperations.findOperation(tenantId, sessionId, operationId) : Optional.empty();
     }
 
@@ -429,13 +426,13 @@ final class AgentExecutionOperations {
         }
         Boolean leaseLive =
                 jdbc.queryForObject(
-                        "SELECT claim_until > " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE scope_key = ? AND operation_kind IN "
+                        "SELECT claim_until > " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_kind IN "
                                 + AgentStoreRows.SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
+                                + " AND target_id = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ? FOR UPDATE",
                         Boolean.class,
-                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                        AgentStoreRows.sessionOperationTarget(sessionId),
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         tenantId,
                         sessionId,
                         operationId);
@@ -481,15 +478,15 @@ final class AgentExecutionOperations {
                             + " 'FAILED', delivery_state = 'CONFIRMED',"
                             + " failure_code = ?, claim_owner = NULL,"
                             + " claim_until = NULL, gmt_modified = ?,"
-                            + " completed_at = ? WHERE scope_key = ? AND operation_kind IN "
+                            + " completed_at = ? WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_kind IN "
                             + AgentStoreRows.SESSION_OPERATION_KINDS
-                            + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
+                            + " AND target_id = ? AND tenant_id = ? AND session_id = ? AND"
                             + " operation_id = ?",
                     failure,
                     now,
                     now,
-                    ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                    AgentStoreRows.sessionOperationTarget(sessionId),
+                    ManagedSchemaKeys.identity(sessionId),
+                    ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                     tenantId,
                     sessionId,
                     operationId);
@@ -505,17 +502,17 @@ final class AgentExecutionOperations {
         jdbc.update(
                 "UPDATE ma_operation SET phase = 'COMPLETED', state = 'COMPLETED', delivery_state ="
                     + " 'CONFIRMED', receipt_id = ?, result_context_revision = ?, claim_owner ="
-                    + " NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE scope_key"
+                    + " NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE scope_kind = 'SESSION' AND scope_id"
                     + " = ? AND operation_kind IN "
                         + AgentStoreRows.SESSION_OPERATION_KINDS
-                        + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
+                        + " AND target_id = ? AND tenant_id = ? AND session_id = ? AND"
                         + " operation_id = ?",
                 AgentStoreRows.publicId("rcpt"),
                 result,
                 now,
                 now,
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                AgentStoreRows.sessionOperationTarget(sessionId),
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                 tenantId,
                 sessionId,
                 operationId);
@@ -540,14 +537,14 @@ final class AgentExecutionOperations {
                                 + " 'FAILED', delivery_state = 'CONFIRMED',"
                                 + " failure_code = ?, claim_owner = NULL,"
                                 + " claim_until = NULL, gmt_modified = ?,"
-                                + " completed_at = ? WHERE scope_key = ? AND operation_kind IN "
+                                + " completed_at = ? WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_kind IN "
                                 + AgentStoreRows.SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
+                                + " AND target_id = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         failureCode,
                         now,
                         now,
-                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                        AgentStoreRows.sessionOperationTarget(sessionId),
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         tenantId,
                         sessionId,
                         operationId,
@@ -589,15 +586,24 @@ final class AgentExecutionOperations {
         }
         // The task row is the projection its own commits update, so the
         // locking read serializes this admission with the transition that
-        // would settle the task.
+        // would settle the task. Resolve the public task id (the minted
+        // record-key hash) to its raw (domain, record_id) tuple with a
+        // non-locking read, then lock only that resolved row and re-verify it
+        // under the lock, so cancelling one task never locks the Session's
+        // other task rows or hashes them under the lock.
+        String taskRecordKey = taskId.substring("task_".length());
+        String[] identity = ManagedExtensionQueries.recordIdentity(jdbc, tenantId, sessionId, taskRecordKey);
+        if (identity == null) {
+            throw new ManagedAgentException(404, "task_not_found",
+                    "The task was not found.");
+        }
         List<String[]> task = jdbc.query("SELECT task_kind, task_state FROM"
                         + " ma_session_record WHERE"
-                        + " session_scope_key = ? AND record_key = ?"
+                        + " tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?"
                         + " AND task_kind IS NOT NULL FOR UPDATE",
                 (result, row) -> new String[] {result.getString("task_kind"),
                         result.getString("task_state")},
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                taskId.substring("task_".length()));
+                tenantId, sessionId, identity[0], identity[1]);
         if (task.isEmpty()) {
             throw new ManagedAgentException(404, "task_not_found",
                     "The task was not found.");
@@ -619,18 +625,16 @@ final class AgentExecutionOperations {
         long now = storeRows.lifecycleDatabaseTime();
         String operationId = AgentStoreRows.publicId("op");
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
-                    + " target_kind, target_key, target_id, phase, request_json,"
+                "INSERT INTO ma_operation (operation_ref, scope_kind, scope_id,"
+                    + " target_kind, target_id, phase, request_json,"
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
                     + " actor_digest, idempotency_key, request_digest, state, admission_stage,"
                     + " delivery_state, session_status_before, task_id, available_at, gmt_create,"
-                    + " gmt_modified) VALUES (?, ?, ?, 'SESSION', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
+                    + " gmt_modified) VALUES (?, 'SESSION', ?, 'SESSION', ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
                     + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?, ?)",
-                AgentStoreRows.sessionOperationKey(tenantId, sessionId, OperationKind.TASK_CANCEL, operationId),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                AgentStoreRows.sessionOperationTarget(sessionId),
-                sessionId,
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationKey(tenantId, sessionId, OperationKind.TASK_CANCEL, operationId)),
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                 storeRows.writeJson(
                         Map.of(
                                 "schemaVersion",
@@ -752,8 +756,8 @@ final class AgentExecutionOperations {
      */
     AcceptanceVerdict turnInputAcceptance(String tenantId, String sessionId, String operationId) {
         String turnId = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE"
-                        + " scope_key = ? AND operation_kind = 'SUBMIT_INPUT' AND operation_id = ?",
-                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        + " scope_kind = 'SESSION' AND scope_id = ? AND operation_kind = 'SUBMIT_INPUT' AND operation_id = ?",
+                String.class, ManagedSchemaKeys.identity(sessionId),
                 operationId).stream().findFirst().orElse(null);
         TurnRecord turn = turnId == null ? null
                 : storeRows.findTurn(tenantId, sessionId, turnId).orElse(null);
@@ -788,18 +792,16 @@ final class AgentExecutionOperations {
     JournalEvidence journalEvidence(String tenantId, String sessionId, String operation, String commandId) {
         return jdbc.queryForObject("SELECT (SELECT content_digest"
                         + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND command_key_hash = ?) AS admitted_digest, (SELECT COUNT(*) FROM"
-                        + " ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
-                        + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
+                        + " AND command_ref = ?) AS admitted_digest, (SELECT COUNT(*) FROM"
+                        + " ma_session_head WHERE tenant_id = ? AND harness_session_id = ? AND"
+                        + " session_id = ? AND head_kind = 'MANAGED_SESSION'"
                         + " AND state IN ('DELETING', 'DELETED') AND"
                         + " COALESCE(compacted_through_revision, 0) = 0) AS sealed",
                 (result, row) -> new JournalEvidence(result.getString("admitted_digest"),
                         result.getLong("sealed") > 0),
                 tenantId, sessionId,
-                JdbcManagedSessionStore.commandKeyHash(operation, commandId),
-                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId,
-                sessionId);
+                ManagedSchemaKeys.identity(com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.commandRef(operation, commandId)),
+                tenantId, sessionId, sessionId);
     }
 
     boolean settleTaskCancel(String tenantId, String sessionId,
@@ -856,12 +858,12 @@ final class AgentExecutionOperations {
             default -> throw new IllegalArgumentException(
                     "Unknown task cancel outcome " + outcome.status());
         };
-        arguments.addAll(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), AgentStoreRows.sessionOperationTarget(sessionId), tenantId, sessionId, operationId, owner, claimGeneration));
+        arguments.addAll(List.of(ManagedSchemaKeys.identity(sessionId), ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)), tenantId, sessionId, operationId, owner, claimGeneration));
         return jdbc.update(
                         update
-                                + " WHERE scope_key = ? AND operation_kind IN "
+                                + " WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_kind IN "
                                 + AgentStoreRows.SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
+                                + " AND target_id = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ? AND operation_kind = 'TASK_CANCEL'"
                                 + claim,
                         arguments.toArray())
@@ -885,7 +887,8 @@ final class AgentExecutionOperations {
                         + " workspace_id = ? AND actor_id = ? AND role IN"
                         + " ('READER', 'OPERATOR', 'OWNER')",
                 String.class, session.tenantId(),
-                session.workspace().getWorkspaceId(), operation.actorKey());
+                session.workspace().getWorkspaceId(),
+                new String(operation.actorKey(), StandardCharsets.UTF_8));
         return !roles.isEmpty() && WorkspaceAccess.valueOf(roles.getFirst())
                 .atLeast(WorkspaceAccess.OPERATOR);
     }

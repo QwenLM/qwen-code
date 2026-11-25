@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStor
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -46,7 +47,7 @@ public class ChildLifecycleAdmissions {
     public OperationAdmission admitChildClose(String tenantId,
             String parentSessionId, String childSessionId,
             String childRunId) {
-        String actor = "child:" + parentSessionId;
+        String actor = ChildActorId.of(parentSessionId);
         return store.beginChildClose(tenantId, parentSessionId, childSessionId, childRunId,
                 digests.digest(Map.of("actorId", actor)),
                 "child-close-" + childRunId,
