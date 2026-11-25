@@ -83,6 +83,11 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import { assertWritableOutPath } from './lib/paths.js';
+import {
+  describeExecutionBoundary,
+  refuseHostExecutionPhase,
+  type ReviewExecutionBoundary,
+} from './lib/sandboxed-exec.js';
 
 export interface AbArmReport {
   arm: 'a' | 'b';
@@ -124,6 +129,8 @@ export interface AbDriveReport {
    */
   identicalOutput: boolean | null;
   note: string;
+  /** Structured execution boundary metadata for this host tmux A/B drive. */
+  executionBoundary?: ReviewExecutionBoundary;
 }
 
 export interface AbDriveArgs {
@@ -301,6 +308,18 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     return fail(
       `--arm-a and --arm-b resolve to the same directory (${realA}) — an A/B needs two trees, and a self-comparison licenses "the PR changes nothing" from nothing.`,
     );
+  }
+
+  // Sandbox policy gate sits AFTER pure-input validation and BEFORE touching
+  // tmux: under `required`, `tiered`, or `QWEN_REVIEW_FORCE_HARDWARE=1`, host
+  // tmux execution cannot provide an isolated boundary, so fail closed.
+  const sandboxRefusal = refuseHostExecutionPhase();
+  if (sandboxRefusal) {
+    return fail(sandboxRefusal, {
+      executionBoundary: describeExecutionBoundary({
+        verdict: { kind: 'refused', reason: sandboxRefusal },
+      }),
+    });
   }
 
   // tmux availability is checked AFTER every pure-input guard above: a
@@ -839,6 +858,7 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     b,
     identicalOutput,
     note,
+    executionBoundary: describeExecutionBoundary({ backend: 'direct' }),
   };
 }
 

@@ -1146,8 +1146,19 @@ export class HostedMcpSession {
     if (!(await this.park())) await this.closeResources({ terminal: false });
   }
 
-  private async park(): Promise<boolean> {
-    const configurations = this.configurations();
+  /**
+   * Whether a suspension now would park this owner rather than drain it. An
+   * Action park reads it first, because a drained owner comes back under a
+   * new connection generation and its tool names no longer match the saved
+   * batch.
+   */
+  parkable(): boolean {
+    return this.keptConfigurations() !== undefined && this.broker.mcpParkable;
+  }
+
+  private keptConfigurations(
+    configurations = this.configurations(),
+  ): Map<string, McpConfiguration> | undefined {
     const kept = new Map<string, McpConfiguration>();
     for (const pin of this.selectedServers) {
       if (pin.state !== 'enabled') continue;
@@ -1170,7 +1181,14 @@ export class HostedMcpSession {
           entry.connectionGeneration === null,
       )
     )
-      return false;
+      return undefined;
+    return kept;
+  }
+
+  private async park(): Promise<boolean> {
+    const configurations = this.configurations();
+    const kept = this.keptConfigurations(configurations);
+    if (!kept) return false;
     // Not the reuse form: a recovery-blocked turn may have handed the mount
     // back, and a parked owner must hold it to be found and reclaimed.
     await this.acquireOwner();

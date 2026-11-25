@@ -4380,6 +4380,33 @@ describe('Settings Loading and Merging', () => {
   );
 
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
+    it.each([undefined, 'off', 'en'])(
+      'ignores workspace display translation when the user value is %s',
+      (displayLanguage) => {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({ general: { displayLanguage } });
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify({
+                general: { displayLanguage: 'zh-CN' },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.isTrusted).toBe(true);
+        expect(settings.merged.general?.displayLanguage).toBe(displayLanguage);
+        expect(getSettingsWarnings(settings)).toEqual(
+          expect.arrayContaining([
+            expect.stringContaining('general.displayLanguage'),
+          ]),
+        );
+      },
+    );
+
     it.each([undefined, 0, 25])(
       'ignores workspace memory budget zero while preserving user budget %s',
       (budget) => {

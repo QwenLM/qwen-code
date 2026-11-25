@@ -41,8 +41,11 @@ public final class JdbcParkedMcpOwners implements ParkedMcpOwners {
 
     @Override
     public Optional<Duration> sealedFor(Owner owner) {
+        // A seal that parked a Turn keeps the owner whose catalog that Turn's
+        // continuation pins; writer acquisition clears the certificate.
         return jdbc.queryForList("SELECT " + ManagedSchemaTime.SQL_NOW + " - gmt_modified FROM ma_session_head"
-                + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION' AND state = 'SEALED'",
+                + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION' AND state = 'SEALED'"
+                + " AND wake_seal_parked_prompt_id IS NULL",
                 Long.class, owner.tenantId(), owner.harnessSessionId())
                 .stream().findFirst().map(Duration::ofMillis);
     }
