@@ -963,60 +963,41 @@ describe('LlmClient Goal admission', () => {
     expect(runtime.dispatch).not.toHaveBeenCalled();
   });
 
-  it.each(['blocked', 'throwing'] as const)(
-    '%s owner ToolResult hook closes its parked approval',
-    async (hookExit) => {
-      const { client, config, runtime } = setupGoalClient();
-      withoutGoal(runtime);
-      const store = pendingGoalProposalStore(proposal('ship it', 'owner-key'));
-      Object.assign(config, { takePendingGoalProposal: store.take });
-      enableHooks(
-        config,
-        hookExit === 'throwing'
-          ? throwingBus('hook exploded')
-          : blockingBus('policy denied'),
-        'UserPromptSubmit',
-      );
+  it('settles a parked approval after its ToolResult without a prompt hook', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    withoutGoal(runtime);
+    nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
+    const store = pendingGoalProposalStore(proposal('ship it', 'owner-key'));
+    useProposals(config, store.take);
+    const messageBus = throwingBus('unexpected prompt hook');
+    enableHooks(config, messageBus, 'UserPromptSubmit');
 
-      const ownerStream = toolResult(
-        client,
-        'owner-key',
-        'propose_goal',
-        'approved',
-      );
-      let events: unknown[] = [];
-      if (hookExit === 'throwing') {
-        await expect(drain(ownerStream)).rejects.toThrow('hook exploded');
-      } else {
-        events = await collect(ownerStream);
-      }
+    await drain(toolResult(client, 'owner-key', 'propose_goal', 'approved'));
 
-      expect(store.get()).toBeUndefined();
-      if (hookExit === 'blocked') {
-        expectCreated(runtime);
-        expect(eventIndex(events, LlmEventType.GoalState)).toBeLessThan(
-          eventIndex(events, LlmEventType.UserPromptSubmitBlocked),
-        );
-      } else {
-        expect(runtime.dispatch).not.toHaveBeenCalled();
-      }
-    },
-  );
+    expect(messageBus.request).not.toHaveBeenCalled();
+    expect(turnMocks.run).toHaveBeenCalledOnce();
+    expect(store.get()).toBeUndefined();
+    expectCreated(runtime);
+  });
 
   it.each(['Stop-hook', 'next-speaker'] as const)(
-    'settles after a blocked %s continuation ends the owner turn',
+    'settles after a %s continuation without another prompt hook',
     async (continuation) => {
       const { client, config, runtime } = setupGoalClient();
       withoutGoal(runtime);
       const store = pendingGoalProposalStore();
+      let stopHookCount = 0;
       let userPromptSubmitCount = 0;
       const messageBus = {
         request: vi.fn(async (request: { eventName: string }) => {
           if (request.eventName === 'Stop') {
-            return {
-              output: { decision: 'block', reason: 'Keep working' },
-              stopHookCount: 1,
-            };
+            stopHookCount += 1;
+            return stopHookCount === 1
+              ? {
+                  output: { decision: 'block', reason: 'Keep working' },
+                  stopHookCount: 1,
+                }
+              : { output: {} };
           }
           userPromptSubmitCount += 1;
           return userPromptSubmitCount === 1
@@ -1024,20 +1005,22 @@ describe('LlmClient Goal admission', () => {
             : { output: { decision: 'block', reason: 'policy denied' } };
         }),
       };
-      useProposals(config, store.take);
+      useProposals(config, store.take, { getMaxSessionTurns: vi.fn(() => 0) });
       enableHooks(
         config,
         messageBus,
         'UserPromptSubmit',
         ...(continuation === 'Stop-hook' ? ['Stop'] : []),
       );
+      nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
       if (continuation === 'next-speaker') {
-        nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'model' });
+        nextSpeakerMocks.check.mockResolvedValueOnce({ next_speaker: 'model' });
       }
 
       await drain(proposingQuery(client, store, 'owner-key'));
 
-      expect(turnMocks.run).toHaveBeenCalledOnce();
+      expect(turnMocks.run).toHaveBeenCalledTimes(2);
+      expect(userPromptSubmitCount).toBe(1);
       expect(store.get()).toBeUndefined();
       expect(runtime.dispatch).toHaveBeenCalledTimes(1);
       expectCreated(runtime);

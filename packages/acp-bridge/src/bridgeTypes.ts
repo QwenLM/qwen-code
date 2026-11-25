@@ -1527,6 +1527,8 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /** Set at a client-facing prompt admission boundary. */
+  userPrompt?: true;
   /**
    * Internal originator for a daemon-owned mid-turn message promoted into the
    * normal prompt FIFO. It was authenticated when the message was enqueued, so
@@ -1690,6 +1692,7 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
 export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
+export const DAEMON_USER_PROMPT_META_KEY = 'qwen.daemon.userPrompt';
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 export const IMAGE_ONLY_PROMPT_TEXT = '[image]';

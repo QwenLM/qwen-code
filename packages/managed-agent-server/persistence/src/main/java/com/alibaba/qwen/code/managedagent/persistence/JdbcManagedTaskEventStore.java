@@ -15,14 +15,18 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.TreeMap;
 import java.util.function.Supplier;
 
@@ -62,7 +66,7 @@ public class JdbcManagedTaskEventStore
     public JdbcManagedTaskEventStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(
-                java.util.Objects.requireNonNull(jdbc.getDataSource(), "dataSource")));
+                Objects.requireNonNull(jdbc.getDataSource(), "dataSource")));
     }
 
     /** One committed task event, as the journal row holds it. */
@@ -278,7 +282,7 @@ public class JdbcManagedTaskEventStore
                                 }
                                 ends.put(entry.getKey(), entry.getValue().longValue());
                             });
-                        } catch (java.io.IOException exception) {
+                        } catch (IOException exception) {
                             throw new IllegalStateException("The task's output range cursor is corrupt", exception);
                         }
                     }
@@ -310,7 +314,7 @@ public class JdbcManagedTaskEventStore
                         List<String> refs = new ArrayList<>();
                         node.path("artifactRefs").forEach(ref -> refs.add(ref.textValue()));
                         return new CursorState(refs, Map.of());
-                    } catch (java.io.IOException exception) {
+                    } catch (IOException exception) {
                         throw new IllegalStateException("The task cursor resource is corrupt", exception);
                     }
                 }, resourceId, tenantId, sessionId, "task-artifact-refs/1")
@@ -336,7 +340,7 @@ public class JdbcManagedTaskEventStore
                 tenantId, workspace, sessionId, resourceId, bytes.length, digest, bytes);
         Boolean same = jdbc.queryForObject("SELECT inline_bytes,sha256,byte_length,kind,schema_version,state FROM ma_resource"
                         + " WHERE resource_id = ? AND tenant_id = ? AND session_id = ?",
-                (row, index) -> java.util.Arrays.equals(bytes, row.getBytes("inline_bytes"))
+                (row, index) -> Arrays.equals(bytes, row.getBytes("inline_bytes"))
                         && digest.equals(row.getString("sha256")) && bytes.length == row.getLong("byte_length")
                         && "task-artifact-refs/1".equals(row.getString("kind")) && row.getInt("schema_version") == 1
                         && "REFERENCED".equals(row.getString("state")),
@@ -367,7 +371,7 @@ public class JdbcManagedTaskEventStore
     }
 
     private <T> T transaction(Supplier<T> action) {
-        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
             return action.get();
         }
         return transactions.execute(status -> action.get());

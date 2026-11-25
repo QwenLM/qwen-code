@@ -10,12 +10,14 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.Sessio
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiFunction;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.failed;
@@ -34,7 +36,7 @@ final class RuntimeExecutionRecovery {
     private final RuntimeTransport transport;
     private final RuntimeExecutionReconciler executionReconciler;
     private final AtomicBoolean closed;
-    private volatile java.util.function.BiFunction<String, String, CompletionStage<SessionContext>> adoptedSessions;
+    private volatile BiFunction<String, String, CompletionStage<SessionContext>> adoptedSessions;
 
     RuntimeExecutionRecovery(RuntimeBindingRegistry bindingRegistry,
             RuntimeExecutionState executionState,
@@ -54,7 +56,7 @@ final class RuntimeExecutionRecovery {
     }
 
     void setAdoptedSessionLookup(
-            java.util.function.BiFunction<String, String, CompletionStage<SessionContext>> lookup) {
+            BiFunction<String, String, CompletionStage<SessionContext>> lookup) {
         this.adoptedSessions = lookup;
     }
 
@@ -399,7 +401,7 @@ final class RuntimeExecutionRecovery {
                     || executionRepository.hasActiveByRuntimeSession(
                             context.binding().getBindingId(),
                             context.binding().getGeneration(), runtimeId,
-                            new java.util.HashSet<>(context.backgroundProcesses()))) {
+                            new HashSet<>(context.backgroundProcesses()))) {
                 throw conflict("runtime_session_busy",
                         "Runtime Session has an active operation");
             }

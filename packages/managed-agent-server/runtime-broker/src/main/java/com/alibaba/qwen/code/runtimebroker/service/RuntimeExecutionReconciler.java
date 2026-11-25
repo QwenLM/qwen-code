@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.service;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.ExecutionReconciliation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeExecutionStatus;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
@@ -15,7 +16,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -27,9 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.evidenceUnavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.MAX_CAS_ATTEMPTS;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.RUNTIME_STATUS_STATES;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.immutableMap;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
@@ -80,9 +78,6 @@ final class RuntimeExecutionReconciler {
     void cancelPendingOperations() {
         reconciliations.values().forEach(future -> future.cancel(false));
     }
-
-    static final Set<String> RUNTIME_STATUS_FIELDS = Set.of(
-            "state", "result");
 
     CompletionStage<ToolExecutionRecord> measuredResult(ToolExecutionRecord original, int attempt) {
         if (!original.isSettled() || !RuntimeToolMeasurements.selected(original.getReference())
@@ -219,7 +214,7 @@ final class RuntimeExecutionReconciler {
             Map<String, Object> durable = publicationVerifier.finished(unknown);
             if (durable != null) {
                 return CompletableFuture.completedFuture(absorbRuntimeStatus(unknown,
-                        Map.of("state", "settled", "result", durable), false));
+                        requireRuntimeStatus(Map.of("state", "settled", "result", durable)), false));
             }
         }
         CompletableFuture<SessionContext> local = bindingRegistry.session(
@@ -353,7 +348,7 @@ final class RuntimeExecutionReconciler {
                 throw new CompletionException(unwrap(error));
             }
             try {
-                return absorbRuntimeStatus(unknown, status, takeover);
+                return absorbRuntimeStatus(unknown, requireRuntimeStatus(status), takeover);
             } catch (RuntimeBrokerException failure) {
                 if (takeover && "runtime_execution_status_invalid".equals(failure.getCode())) {
                     return new ExecutionReconciliation(unknown,
@@ -397,26 +392,18 @@ final class RuntimeExecutionReconciler {
                                 : ExecutionReconciliation.Outcome.IN_FLIGHT, runtimeState);
     }
 
-    ExecutionReconciliation absorbRuntimeStatus(
-            ToolExecutionRecord unknown, Map<String, Object> status, boolean takeover) {
-        if (status == null) {
-            throw invalidStatus(null);
+    static RuntimeExecutionStatus requireRuntimeStatus(Map<String, Object> status) {
+        try {
+            return RuntimeExecutionStatus.from(status);
+        } catch (IllegalArgumentException exception) {
+            throw invalidStatus(exception);
         }
-        for (Object field : status.keySet()) {
-            if (!(field instanceof String)
-                    || !RUNTIME_STATUS_FIELDS.contains(field)) {
-                throw invalidStatus(null);
-            }
-        }
-        Object state = status.get("state");
-        if (!(state instanceof String)
-                || !RUNTIME_STATUS_STATES.contains(state)
-                || "settled".equals(state)
-                        != status.containsKey("result")) {
-            throw invalidStatus(null);
-        }
-        String runtimeState = (String) state;
-        if (!"settled".equals(runtimeState)) {
+    }
+
+    ExecutionReconciliation absorbRuntimeStatus(ToolExecutionRecord unknown,
+            RuntimeExecutionStatus status, boolean takeover) {
+        String runtimeState = status.state().wireName();
+        if (status.state() != RuntimeExecutionStatus.State.SETTLED) {
             ToolExecutionRecord latest = executionRepository
                     .findByExecutionCallId(unknown.getExecutionCallId());
             ToolExecutionRecord current = latest == null ? unknown : latest;
@@ -426,9 +413,8 @@ final class RuntimeExecutionReconciler {
                             runtimeState)
                     : notUnknown(current, runtimeState);
         }
-        Map<String, Object> result;
+        Map<String, Object> result = status.result();
         try {
-            result = immutableMap(status.get("result"), "status result");
             // Validate before writing, so an invalid result is reported as
             // the Runtime's fault rather than as a repository failure. A
             // not_started status is accepted only as the Runtime's own
