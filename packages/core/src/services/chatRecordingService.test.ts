@@ -158,6 +158,15 @@ const attributionSnapshot = {
 };
 
 vi.mock('node:path');
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  assertSessionArchiveGeneration: vi.fn(),
+  readSessionArchiveGeneration: vi.fn(),
+  withSessionArchiveWriteLockSync: vi.fn((_path, run) => run()),
+}));
 vi.mock('node:child_process');
 vi.mock('node:crypto', () => ({
   randomUUID: vi.fn(),
