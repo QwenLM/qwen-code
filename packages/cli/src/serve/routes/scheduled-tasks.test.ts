@@ -3403,6 +3403,9 @@ describe('scheduled-tasks routes', () => {
       expect(patch.status).toBe(200);
       expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
       expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+      // A yearly cron is up to ~366 days out from the pinned midnight; the bound
+      // rejects a far-future anchor without assuming which year the test runs in.
+      expect(patch.body.nextRunAt).toBeLessThanOrEqual(now + 366 * 86_400_000);
     } finally {
       vi.useRealTimers();
     }
