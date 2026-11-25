@@ -653,6 +653,8 @@ class NotebookEditInvocation extends BaseToolInvocation<
         };
       }
 
+      signal.throwIfAborted();
+
       await this.config.getFileSystemService().writeTextFile({
         path: this.params.notebook_path,
         content: prepared.updatedContent,
@@ -757,6 +759,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
         ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
+      if (signal.aborted && error === signal.reason) throw error;
       const message = error instanceof Error ? error.message : String(error);
       return {
         llmContent: `Error writing notebook: ${message}`,

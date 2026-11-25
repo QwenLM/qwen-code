@@ -236,7 +236,7 @@ describe('WriteFileTool', () => {
   );
 
   it.each([true, false])(
-    'propagates an ordinary pre-write error when aborted=%s',
+    'propagates the abort or an ordinary pre-write error when aborted=%s',
     async (aborted) => {
       const parent = unread('parent.txt', 'original bytes');
       const controller = new AbortController();
@@ -250,7 +250,9 @@ describe('WriteFileTool', () => {
         new WriteFileTool(config)
           .build({ file_path: path.join(parent, 'child.txt'), content: 'new' })
           .execute(controller.signal),
-      ).rejects.toMatchObject({ code: 'EEXIST' });
+      ).rejects.toMatchObject(
+        aborted ? { name: 'AbortError' } : { code: 'EEXIST' },
+      );
       expect(fs.readFileSync(parent, 'utf8')).toBe('original bytes');
     },
   );
@@ -809,6 +811,35 @@ describe('WriteFileTool', () => {
       expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
       expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
+    });
+
+    it('rejects without creating the file or its directory when aborted during trackEdit', async () => {
+      const filePath = p('aborted_dir', 'aborted_file.txt');
+      const controller = new AbortController();
+      const reason = new Error('aborted during trackEdit');
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mockFileHistoryService.trackEdit.mockImplementationOnce(() => {
+        entered();
+        return held;
+      });
+
+      const execution = build(filePath, 'new content').execute(
+        controller.signal,
+      );
+      await started;
+      controller.abort(reason);
+      release();
+
+      await expect(execution).rejects.toBe(reason);
+      expect(fs.existsSync(filePath)).toBe(false);
+      expect(fs.existsSync(path.dirname(filePath))).toBe(false);
     });
 
     it('should overwrite an existing file and return diff', async () => {

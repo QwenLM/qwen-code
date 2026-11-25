@@ -931,4 +931,34 @@ describe('NotebookEditTool', () => {
     expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
     expect(readNotebook(filePath).cells[0].source).toEqual(['x = 100']);
   });
+
+  it('rejects without modifying the notebook when aborted during trackEdit', async () => {
+    const filePath = writeSeeded('aborted.ipynb', nb45([CODE_A]));
+    const controller = new AbortController();
+    const reason = new Error('aborted during trackEdit');
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockFileHistoryService.trackEdit.mockImplementationOnce(() => {
+      entered();
+      return held;
+    });
+
+    const execution = buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    }).execute(controller.signal);
+    await started;
+    controller.abort(reason);
+    release();
+
+    await expect(execution).rejects.toBe(reason);
+    expect(readNotebook(filePath).cells[0].source).toEqual(['x = 1']);
+  });
 });

@@ -1320,6 +1320,35 @@ describe('EditTool', () => {
       expect(readText(filePath)).toBe(initialContent);
     });
 
+    it('rejects without creating the file or its directory when aborted during trackEdit', async () => {
+      const newFile = path.join(rootDir, 'aborted_dir', 'aborted_file.txt');
+      const controller = new AbortController();
+      const reason = new Error('aborted during trackEdit');
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mockFileHistoryService.trackEdit.mockImplementationOnce(() => {
+        entered();
+        return held;
+      });
+
+      const execution = tool
+        .build(edit(newFile, '', 'new content'))
+        .execute(controller.signal);
+      await started;
+      controller.abort(reason);
+      release();
+
+      await expect(execution).rejects.toBe(reason);
+      expect(fs.existsSync(newFile)).toBe(false);
+      expect(fs.existsSync(path.dirname(newFile))).toBe(false);
+    });
+
     // The Edit tool feeds the commit-attribution singleton on success so
     // commit notes can later report per-file AI/human ratios. Service-level
     // tests for `recordEdit` exist; these guard the wiring at the tool
