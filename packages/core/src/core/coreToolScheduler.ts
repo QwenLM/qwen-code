@@ -2019,6 +2019,9 @@ export class CoreToolScheduler {
   // Sanitized PreToolUse additionalContext keyed by callId. Held until the
   // batch's terminal assembly and cleared with the batch's hook owners.
   private readonly preToolUseContexts = new Map<string, string>();
+  // Calls whose tool hook returned `continue: false` without blocking, with
+  // the reason; set on their final responses when the batch completes.
+  private readonly hookStopReasons = new Map<string, string>();
   // Hook context of code-mode nested calls, keyed by the parent exec callId.
   // A nested result is a value for the script, not for the model, so its
   // context is delivered with the parent's result instead.
@@ -6203,6 +6206,9 @@ export class CoreToolScheduler {
       // awaited headlessly behind the scheduler (its confirmation belongs to
       // the outer tool call), so there an 'ask' fails closed as a deny.
       blockReason = result.blockReason || 'Tool execution blocked by hook';
+      if (result.blockType === 'stop') {
+        this.hookStopReasons.set(callId, blockReason);
+      }
     } else if (fixedPolicy && result.updatedInput) {
       blockReason =
         'PreToolUse updatedInput is not supported for policy-owned tool calls, which skip the permission flow; the tool was not run.';
@@ -6849,6 +6855,9 @@ export class CoreToolScheduler {
         toolResult = await promise;
       }
       producerToolResult = toolResult;
+      if (toolResult.hookStopReason !== undefined) {
+        this.hookStopReasons.set(callId, toolResult.hookStopReason);
+      }
       observeProducerOutput = (
         response: CoreToolCallResponseInfo,
         replacement = false,
@@ -7207,13 +7216,19 @@ export class CoreToolScheduler {
                   }
                 : {
                     success: true,
-                    shouldStop: r.shouldStop,
+                    shouldStop: r.shouldStop || r.endsTurn === true,
                     hasAdditionalContext: !!r.additionalContext,
-                    blockType: r.shouldStop ? 'stop' : undefined,
+                    blockType: r.shouldStop || r.endsTurn ? 'stop' : undefined,
                   };
             },
           );
           if (cancelIfFinished()) return;
+          if (postHookResult.endsTurn) {
+            this.hookStopReasons.set(
+              callId,
+              postHookResult.stopReason || 'No reason provided',
+            );
+          }
 
           // Capture additional context from hook; appended after the
           // model-facing truncation below.
@@ -7759,6 +7774,12 @@ export class CoreToolScheduler {
             this.postToolUseFailureEndMeta,
           );
           if (cancelIfFinished()) return;
+          if (failureHookResult.endsTurn) {
+            this.hookStopReasons.set(
+              callId,
+              failureHookResult.stopReason || 'No reason provided',
+            );
+          }
 
           // Append additional context from hook if provided
           if (
@@ -8235,6 +8256,12 @@ export class CoreToolScheduler {
             this.postToolUseFailureEndMeta,
           );
           if (cancelIfFinished(cancelMessage)) return;
+          if (failureHookResult.endsTurn) {
+            this.hookStopReasons.set(
+              callId,
+              failureHookResult.stopReason || 'No reason provided',
+            );
+          }
 
           // Append additional context from hook if provided
           if (
@@ -8385,14 +8412,16 @@ export class CoreToolScheduler {
                     }
                   : {
                       success: true,
-                      shouldStop: r.shouldStop,
+                      shouldStop: r.shouldStop || r.endsTurn === true,
                       hasAdditionalContext: !!r.additionalContext,
                       hasArtifacts: !!r.artifacts?.length,
-                      blockType: r.shouldStop ? 'stop' : undefined,
-                      postBatchStop: r.shouldStop,
-                      postBatchStopReason: r.shouldStop
-                        ? r.stopReason || 'no reason given'
-                        : undefined,
+                      blockType:
+                        r.shouldStop || r.endsTurn ? 'stop' : undefined,
+                      postBatchStop: r.shouldStop || r.endsTurn === true,
+                      postBatchStopReason:
+                        r.shouldStop || r.endsTurn
+                          ? r.stopReason || 'no reason given'
+                          : undefined,
                     },
             );
           const batchParentSpan = this.postToolBatchSpanCallId
@@ -8436,6 +8465,20 @@ export class CoreToolScheduler {
             }
           }
 
+          const lastCallId = completedCalls.at(-1)?.request.callId;
+          if (
+            batchHookResult.endsTurn &&
+            lastCallId !== undefined &&
+            !completedCalls.some(({ request }) =>
+              this.hookStopReasons.has(request.callId),
+            )
+          ) {
+            this.hookStopReasons.set(
+              lastCallId,
+              batchHookResult.stopReason || 'No reason provided',
+            );
+          }
+
           completedCalls = withPostToolBatchAdditionalContext(
             completedCalls,
             batchHookResult.additionalContext,
@@ -8445,6 +8488,12 @@ export class CoreToolScheduler {
             batchHookResult.artifacts,
           );
         }
+        completedCalls = completedCalls.map((call) => {
+          const hookStopReason = this.hookStopReasons.get(call.request.callId);
+          return hookStopReason === undefined
+            ? call
+            : { ...call, response: { ...call.response, hookStopReason } };
+        });
 
         // After PostToolBatch so a batch stop cannot erase it, and before the
         // final budget so the batch/send caps still bound it. A call whose
@@ -8577,6 +8626,7 @@ export class CoreToolScheduler {
           for (const call of completedCalls) {
             this.hookOwners.delete(call.request.callId);
             this.preToolUseContexts.delete(call.request.callId);
+            this.hookStopReasons.delete(call.request.callId);
             this.nestedHookContexts.delete(call.request.callId);
             this.failureContextsForParent.delete(call.request.callId);
             this.finalizeToolSpan(call.request.callId, true);

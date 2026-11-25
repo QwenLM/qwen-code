@@ -480,7 +480,7 @@ describe('toolHookTriggers', () => {
       expect(await post(busWithOutput({}))).toEqual({ shouldStop: false });
     });
 
-    it('should return shouldStop: true with stop reason when execution should stop', async () => {
+    it('ends the turn on continue: false without a blocking decision', async () => {
       const result = await post(
         busWithOutput({
           continue: false,
@@ -489,8 +489,25 @@ describe('toolHookTriggers', () => {
       );
 
       expect(result).toEqual({
-        shouldStop: true,
+        shouldStop: false,
+        endsTurn: true,
         stopReason: 'Execution stopped by policy',
+      });
+    });
+
+    it('keeps a blocking continue: false as a call stop', async () => {
+      // The prompt and function runners write both fields when they block.
+      const result = await post(
+        busWithOutput({
+          continue: false,
+          decision: 'block',
+          stopReason: 'Blocked by prompt hook',
+        }),
+      );
+
+      expect(result).toEqual({
+        shouldStop: true,
+        stopReason: 'Blocked by prompt hook',
       });
     });
 
@@ -511,7 +528,8 @@ describe('toolHookTriggers', () => {
       );
 
       expect(result).toEqual({
-        shouldStop: true,
+        shouldStop: false,
+        endsTurn: true,
         stopReason: 'Blocked after audit',
         additionalContext: 'Audit details',
         artifacts: [audit],
@@ -600,15 +618,30 @@ describe('toolHookTriggers', () => {
       });
     });
 
-    it('should surface stop decisions', async () => {
+    it('ends the turn on continue: false without a blocking decision', async () => {
       const bus = busWithOutput({
         continue: false,
         stopReason: 'stop after batch',
       });
 
       expect(await firePostToolBatchHook(bus, [])).toEqual({
-        shouldStop: true,
+        shouldStop: false,
+        endsTurn: true,
         stopReason: 'stop after batch',
+        additionalContext: undefined,
+      });
+    });
+
+    it('keeps a blocking continue: false as a batch stop', async () => {
+      const bus = busWithOutput({
+        continue: false,
+        decision: 'block',
+        stopReason: 'blocked batch',
+      });
+
+      expect(await firePostToolBatchHook(bus, [])).toEqual({
+        shouldStop: true,
+        stopReason: 'blocked batch',
         additionalContext: undefined,
       });
     });
@@ -713,6 +746,26 @@ describe('toolHookTriggers', () => {
       );
 
       expect(result).toEqual({ additionalContext });
+    });
+
+    it('ends the turn on continue: false without a blocking decision', async () => {
+      expect(
+        await failure(
+          busWithOutput({ continue: false, stopReason: 'give up on this' }),
+        ),
+      ).toEqual({ endsTurn: true, stopReason: 'give up on this' });
+    });
+
+    it('ignores a blocking continue: false', async () => {
+      expect(
+        await failure(
+          busWithOutput({
+            continue: false,
+            decision: 'block',
+            stopReason: 'Blocked by prompt hook',
+          }),
+        ),
+      ).toEqual({});
     });
 
     it('returns PostToolUseFailure artifacts', async () => {

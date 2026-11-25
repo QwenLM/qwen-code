@@ -58,6 +58,11 @@ export type AgentLoopStopReason =
   | 'duplicate_provider_call'
   /** A tool result asked to end the turn (`parts` holds the results). */
   | 'tool_ended_turn'
+  /**
+   * A tool hook returned `continue: false` (`parts` holds the results,
+   * `hookStopReason` the reason to show).
+   */
+  | 'hook_stopped'
   /** A surface callback ended the loop. */
   | 'surface_ended'
   | 'max_session_turns'
@@ -73,6 +78,7 @@ export interface AgentLoopResult {
   parts?: Part[];
   /** The same responses by call, as the batch returned them. */
   responses?: ToolBatchResult['responses'];
+  hookStopReason?: string;
 }
 
 export interface AgentLoopRound {
@@ -337,9 +343,16 @@ export async function runAgentLoop(
       calls,
       batchOptions(options, duplicates, executor),
     );
-    const { parts, responses } = batch;
+    const { parts, responses, hookStopReason } = batch;
     if (batch.stop) {
-      return { reason: batch.stop, rounds, turn, parts, responses };
+      return {
+        reason: batch.stop,
+        rounds,
+        turn,
+        parts,
+        responses,
+        ...(hookStopReason !== undefined ? { hookStopReason } : {}),
+      };
     }
     if (options.maxRounds !== undefined && rounds >= options.maxRounds) {
       return { reason: 'next_round', rounds, turn, parts, responses };
@@ -511,6 +524,8 @@ export interface ToolBatchResult {
     record?: () => void;
   }>;
   stop?: AgentLoopStopReason;
+  /** With `stop: 'hook_stopped'`, the first stopping call's reason. */
+  hookStopReason?: string;
 }
 
 /**
@@ -668,10 +683,12 @@ export async function runToolBatch(
     toRun.map(({ name }) => name),
   );
   let terminateTurn = false;
+  let hookStopReason: string | undefined;
   for (const [index, request] of toRun.entries()) {
     const call = completedByCallId.get(request.callId);
     if (!call || !launches.get(request.callId)) continue;
     terminateTurn ||= call.response.terminateTurn === true;
+    hookStopReason ??= call.response.hookStopReason;
     // A plan-mode entry's siblings never ran.
     if (
       !call.recorded &&
@@ -777,6 +794,9 @@ export async function runToolBatch(
   if (ended) return { parts, responses, stop: 'surface_ended' };
   if (terminateTurn && (host.endsOnTerminateTurn?.() ?? true)) {
     return { parts, responses, stop: 'tool_ended_turn' };
+  }
+  if (hookStopReason !== undefined) {
+    return { parts, responses, stop: 'hook_stopped', hookStopReason };
   }
   return { parts, responses };
 }

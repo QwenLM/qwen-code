@@ -823,6 +823,8 @@ type RunToolResult = {
    * boundary, such as Goal checkpoints and workspace-agent hand-offs.
    */
   terminateTurn?: boolean;
+  /** A tool hook returned `continue: false`: the turn ends, with this reason. */
+  hookStopReason?: string;
   /**
    * Hook additionalContext of a code-mode nested call. Its parts are a value
    * for the exec script, so the parent exec delivers this to the model.
@@ -12230,13 +12232,17 @@ export class Session implements SessionContext {
   ): Promise<boolean> {
     // Loop protection keeps its own stop path, with the telemetry and the
     // context message that go with it, so it wins a batch that trips both.
+    // A hook stop ends channel turns too: the hook asked for it.
+    const hookStop = toolRun.hookStopReason;
     if (
-      toolRun.terminateTurn !== true ||
       toolRun.loopDetected ||
-      channelTurn ||
-      hasChannelDelivery
+      (hookStop === undefined &&
+        (toolRun.terminateTurn !== true || channelTurn || hasChannelDelivery))
     ) {
       return false;
+    }
+    if (hookStop !== undefined) {
+      await this.messageEmitter.emitStopHookNotice(hookStop);
     }
     this.todoStopGuard.suspend();
     this.#preserveUnsentMessageHistory(
@@ -16839,6 +16845,9 @@ export class Session implements SessionContext {
       stopAfterPermissionCancel: batch.stopAfterPermissionCancel,
       ...(toolLoopState.loopDetected ? { loopDetected: true } : {}),
       ...(batch.stop === 'tool_ended_turn' ? { terminateTurn: true } : {}),
+      ...(batch.stop === 'hook_stopped' && batch.hookStopReason !== undefined
+        ? { hookStopReason: batch.hookStopReason }
+        : {}),
       repeatedToolFailureBatch: {
         complete: batch.results.length === requests.length,
         observations,
@@ -20723,8 +20732,10 @@ export class Session implements SessionContext {
               );
             }
 
-            // If hook indicates to stop, return an error response
-            if (postHookResult.shouldStop) {
+            // If hook indicates to stop, return an error response. These
+            // turns run outside the shared batch and keep that behavior for a
+            // `continue: false` too.
+            if (postHookResult.shouldStop || postHookResult.endsTurn) {
               this.#stopMovedShell(this.movableShells.get(callId));
               const stopMessage =
                 postHookResult.stopReason ||

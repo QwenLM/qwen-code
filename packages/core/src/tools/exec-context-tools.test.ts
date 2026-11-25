@@ -173,6 +173,24 @@ describe('exec context tool results', () => {
     expect(outputText(result)).not.toContain('toolResults');
   });
 
+  it.each([
+    [{ hookStopReason: 'halt' }],
+    [
+      {
+        hookStopReason: 'halt',
+        error: new Error('halt'),
+        executionStatus: 'not_started' as const,
+      },
+    ],
+  ])('ends the script and carries a nested hook stop: %o', async (response) => {
+    const { run, dispatch } = setup(ToolNames.READ_FILE, response, 'read');
+    const result = await run(
+      'try { await tools.write_file({}); } catch {} await tools.write_file({});',
+    );
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.hookStopReason).toBe('halt');
+  });
+
   it('keeps nonterminal goal proposals callable without ending the script', async () => {
     const { run, dispatch } = setup(
       ToolNames.UPDATE_GOAL,

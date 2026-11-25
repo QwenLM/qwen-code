@@ -25961,6 +25961,33 @@ describe('useLlmStream', () => {
         expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['read_a']);
       });
 
+      it('ends the turn on a tool hook stop, with its results in history and the reason shown', async () => {
+        completeBatchesWith(() => ({ hookStopReason: 'budget spent' }));
+        rounds([toolRequest('read_a')]);
+        const client = mockConfig.getLlmClient();
+        const { result } = renderTestHook([], client);
+
+        await act(async () => {
+          await result.current.submitQuery('Read the file.');
+        });
+
+        await waitFor(() => {
+          expect(mockAddItem).toHaveBeenCalledWith(
+            { type: 'info', text: 'A hook stopped the turn: budget spent' },
+            expect.any(Number),
+          );
+        });
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'read_a' }),
+            }),
+          ],
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
       it('stops without a continuation when the model was switched after a quota error', async () => {
         completeBatches();
         rounds([toolRequest('read_a')]);

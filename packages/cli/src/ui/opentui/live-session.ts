@@ -2050,11 +2050,22 @@ export async function* livePromptEvents(
       for (const { request, response } of answeredOnly)
         dualOutput?.emitToolResult(request, response);
     }
-    if (cancelled || shared?.stop === 'tool_ended_turn') {
+    const hookStopReason =
+      shared?.stop === 'hook_stopped' ? shared.hookStopReason : undefined;
+    if (
+      cancelled ||
+      shared?.stop === 'tool_ended_turn' ||
+      hookStopReason !== undefined
+    ) {
+      // A Goal turn that a tool or a tool hook ended finishes its Goal turn.
       const permit =
         shared &&
-        completed.find((call) => call.response.terminateTurn)?.request
-          .goalContext;
+        completed.find(
+          (call) =>
+            call.response.terminateTurn ||
+            (hookStopReason !== undefined &&
+              call.response.hookStopReason !== undefined),
+        )?.request.goalContext;
       let events: ServerLlmStreamEvent[] = [];
       try {
         if (responseParts.length > 0) {
@@ -2084,6 +2095,14 @@ export async function* livePromptEvents(
         throw error;
       }
       endBatchInteraction(cancelled ? 'cancelled' : 'ok');
+      if (!cancelled && hookStopReason !== undefined && isCurrentSession()) {
+        yield {
+          type: 'info',
+          text: t('A hook stopped the turn: {{reason}}', {
+            reason: hookStopReason,
+          }),
+        };
+      }
       for (const event of events) {
         if (!isCurrentSession()) return;
         dualOutput?.processEvent(event);

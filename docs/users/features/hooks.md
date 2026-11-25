@@ -535,6 +535,8 @@ Hook output supports three categories of fields:
 2. **Top-level Decision**: `decision`, `reason` (used by some events)
 3. **Event-specific Control**: `hookSpecificOutput` (must include `hookEventName`)
 
+On the tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`), `continue: false` ends the turn. The calls of the current batch finish, their results are kept in the conversation, the model gets no further request in this turn, and `stopReason` (or `reason`) is shown to the user. In a subagent, the subagent stops and its parent is told why. When the same output also blocks (`decision: "block"` or `"deny"`, a PreToolUse `permissionDecision: "deny"`, or exit code 2), the block wins and the turn goes on, as on `Stop`. In daemon sessions (Web Shell, IDEs), scheduled (cron) turns, background-notification turns, restored turns and the continuation a blocking `Stop` hook asks for do not end the turn yet: there a PreToolUse or PostToolUse `continue: false` fails only that call, as in earlier versions.
+
 ```json
 {
   "continue": true,
@@ -617,6 +619,8 @@ In Code Mode (`tools.codeModeOnly`), a call made from an `exec` script returns i
 
 A PermissionRequest hook's `decision.updatedInput` is checked the same way: one that is not a JSON object stops the call, and a replacement is validated and checked against the permission rules before it runs, and the hook's `"allow"` counts only as the approval of that replacement. A replacement that needs a decision the hook cannot make, such as an answer from the user, goes to the approval prompt instead; in ACP sessions it is not run. In AUTO mode, a replacement is reviewed again before it runs.
 
+`continue: false` without a deny stops the call before it runs; its result is the error `stopReason`. The other calls of the batch still run, and then the turn ends.
+
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
 **Example Output**:
@@ -655,6 +659,7 @@ A PermissionRequest hook's `decision.updatedInput` is checked the same way: one 
 - `decision`: "allow", "deny", "block" (defaults to "allow" if not specified)
 - `reason`: reason for the decision
 - `hookSpecificOutput.additionalContext`: additional information to be included
+- `continue: false`: the tool's result is kept, and the turn ends after the batch. Together with `decision: "block"` or `"deny"`, the result is instead replaced by an error carrying `stopReason`, and the turn goes on.
 
 **Example Output**:
 
@@ -690,6 +695,7 @@ A PermissionRequest hook's `decision.updatedInput` is checked the same way: one 
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: error handling information, appended after the error in the tool result the model sees next. This applies both when the tool returns an error and when it throws. For a call made from a Code Mode `exec` script, it goes to the `exec` call's result instead (see [PreToolUse](#pretooluse)). `<` and `>` are escaped.
+- `continue: false`: the turn ends after the batch (see [Hook Output Structure](#hook-output-structure)). It has no effect when the call was interrupted.
 - Standard hook output fields
 
 **Example Output**:
@@ -729,8 +735,9 @@ A PermissionRequest hook's `decision.updatedInput` is checked the same way: one 
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: appended to the result of the last call in the batch, after a blank line. `<` and `>` are escaped.
-- `decision`: `"block"` or `"deny"` stops the batch, and so does `continue: false` or exit code 2. The last call's result is replaced by an error that carries `stopReason`, or `reason` when there is no `stopReason`. The other results are kept, and `additionalContext` is still appended.
-- `stopReason` / `reason`: the text of that error.
+- `decision`: `"block"` or `"deny"` stops the batch, and so does exit code 2. The last call's result is replaced by an error that carries `stopReason`, or `reason` when there is no `stopReason`. The other results are kept, `additionalContext` is still appended, and the turn goes on.
+- `continue: false` without a blocking decision keeps every result and ends the turn.
+- `stopReason` / `reason`: the text of that error, or of the notice when the turn ends.
 
 If the hooks fail, or do not finish within 15 seconds, the batch continues with its results unchanged.
 

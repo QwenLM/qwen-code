@@ -7208,6 +7208,35 @@ describe('Session', () => {
       expect(send).toHaveBeenCalledOnce();
     });
 
+    it('ends the turn and shows the reason when a tool hook stops it', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      runAcpToolBatchSpy.mockImplementation(
+        async (
+          host: unknown,
+          options: { requests: core.ToolCallRequestInfo[] },
+        ) => ({
+          ...(await runEachTool(host, options)),
+          stop: 'hook_stopped',
+          hookStopReason: 'budget spent',
+        }),
+      );
+      const send = useSharedRounds([readCall('call-read'), finished()]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(send).toHaveBeenCalledOnce();
+      expect(updates()).toContainEqual({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'stop_hook_notice',
+          qwenDiscreteMessage: true,
+          stopReason: 'budget spent',
+        },
+      });
+    });
+
     it('refuses a Goal approval the turn cannot own', async () => {
       useTool(core.Kind.Read, 'read_file');
       useSharedRounds([readCall('call-read'), finished()]);

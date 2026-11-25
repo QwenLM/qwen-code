@@ -682,6 +682,51 @@ describe('runAgentLoop', () => {
     expect((await stops(false)).reason).toBe('completed');
   });
 
+  it('stops on a hook stop with the first reason, on every surface', async () => {
+    const respond = (r: ToolCallRequestInfo) =>
+      r.callId === 'c1'
+        ? okResponse(r)
+        : okResponse(r, { hookStopReason: `stop ${r.callId}` });
+    const { client, sends } = fakeClient([
+      [
+        requestEvent(toolRequest('c1')),
+        requestEvent(toolRequest('c2')),
+        requestEvent(toolRequest('c3')),
+      ],
+      [content],
+    ]);
+
+    const result = await runAgentLoop({
+      client,
+      config: fakeConfig().config,
+      signal: new AbortController().signal,
+      first: first(),
+      executor: fakeExecutor(respond).executor,
+      host: { endsOnTerminateTurn: () => false },
+    });
+
+    expect(result.reason).toBe('hook_stopped');
+    expect(result.hookStopReason).toBe('stop c2');
+    expect(ids(result.parts)).toEqual(['c1', 'c2', 'c3']);
+    expect(sends).toHaveLength(1);
+  });
+
+  it('lets a Goal tool that ends the turn win over a hook stop', async () => {
+    const respond = (r: ToolCallRequestInfo) =>
+      okResponse(r, { terminateTurn: true, hookStopReason: 'stop' });
+    const { client } = fakeClient([[requestEvent(toolRequest('c1'))]]);
+
+    const result = await runAgentLoop({
+      client,
+      config: fakeConfig().config,
+      signal: new AbortController().signal,
+      first: first(),
+      executor: fakeExecutor(respond).executor,
+    });
+
+    expect(result.reason).toBe('tool_ended_turn');
+  });
+
   it('ends after the batch when a result callback asks', async () => {
     const { client, sends } = fakeClient([[requestEvent(toolRequest('c1'))]]);
     const { config, recordToolResult } = fakeConfig();

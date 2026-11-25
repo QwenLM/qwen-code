@@ -7025,9 +7025,26 @@ export const useLlmStream = (
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
-      const terminatesTurn = llmTools.some(
-        (toolCall) => toolCall.response.terminateTurn === true,
-      );
+      const hookStopReason = shared
+        ? llmTools.find(
+            (toolCall) => toolCall.response.hookStopReason !== undefined,
+          )?.response.hookStopReason
+        : undefined;
+      if (hookStopReason !== undefined) {
+        addItem(
+          {
+            type: 'info',
+            text: t('A hook stopped the turn: {{reason}}', {
+              reason: hookStopReason,
+            }),
+          },
+          Date.now(),
+        );
+      }
+      // A tool hook's stop ends the turn as a tool that ends it does.
+      const terminatesTurn =
+        hookStopReason !== undefined ||
+        llmTools.some((toolCall) => toolCall.response.terminateTurn === true);
       if (terminatesTurn && toolGoalBinding) {
         llmClient.addHistory({ role: 'user', parts: responsesToSend });
         let goalFinishFailed = false;

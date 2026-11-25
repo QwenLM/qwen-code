@@ -2866,6 +2866,17 @@ export async function runNonInteractive(
             return settled;
           },
         };
+        const ended = (result: AgentLoopResult): AgentLoopResult => {
+          if (result.reason !== 'hook_stopped') return result;
+          // The turn ends here, so the results answer the calls in history.
+          llmClient.addHistory({ role: 'user', parts: result.parts ?? [] });
+          if (outputFormat === OutputFormat.TEXT) {
+            process.stderr.write(
+              `A hook stopped the turn: ${sanitizeTerminalText(result.hookStopReason ?? '')}\n`,
+            );
+          }
+          return result;
+        };
         return runAgentLoop({
           client: llmClient,
           config,
@@ -3058,7 +3069,7 @@ export async function runNonInteractive(
               suppressedOutputBody(structuredSubmission !== undefined),
             endsOnTerminateTurn: scope.endsOnTerminateTurn,
           },
-        });
+        }).then(ended);
       };
 
       let currentPromptId = prompt_id;

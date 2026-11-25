@@ -530,6 +530,7 @@ const TERMINATE_MODE_LEVEL: Record<
   [AgentTerminateMode.GOAL]: null,
   [AgentTerminateMode.CANCELLED]: null,
   [AgentTerminateMode.SHUTDOWN]: null,
+  [AgentTerminateMode.HOOK_STOPPED]: 'warning',
 };
 
 /**
