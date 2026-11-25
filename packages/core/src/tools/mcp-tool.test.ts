@@ -3057,13 +3057,11 @@ describe('DiscoveredMCPTool', () => {
       // SdkError(REQUEST_TIMEOUT), never with JSON-RPC -32001.
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
       const client: McpDirectClient = {
-        callTool: vi
-          .fn()
-          .mockRejectedValue(
-            new SdkError(SdkErrorCode.RequestTimeout, 'Request timed out', {
-              timeout: 1,
-            }),
-          ),
+        callTool: vi.fn().mockRejectedValue(
+          new SdkError(SdkErrorCode.RequestTimeout, 'Request timed out', {
+            timeout: 1,
+          }),
+        ),
       };
       const mockConfig = {
         getToolRegistry: () => ({
