@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static com.alibaba.qwen.code.daemon.ManagedHttpTransport.encode;
 import static com.alibaba.qwen.code.daemon.ManagedHttpTransport.hex;
@@ -14,7 +15,7 @@ import static com.alibaba.qwen.code.daemon.ManagedHttpTransport.sha256;
 
 /**
  * Signed client for the standalone Managed Agent Server's public API.
- * Request and response maps use the field names in the public OpenAPI contract.
+ * Structured requests and responses follow the public OpenAPI contract.
  * Write methods take caller-owned idempotency keys and never replay a mutation.
  */
 public final class ManagedAgentClient {
@@ -36,96 +37,97 @@ public final class ManagedAgentClient {
         return extensions;
     }
 
-    public Map<String, Object> createAgent(Map<String, ?> definition, String idempotencyKey) {
-        return write("POST", API, definition, idempotencyKey, 202);
+    public ManagedAgentDefinition createAgent(ManagedAgentDefinitionRequest definition, String idempotencyKey) {
+        return new ManagedAgentDefinition(write("POST", API, definition.toJson(), idempotencyKey, 202));
     }
 
-    public Map<String, Object> getAgent(String agentId, String revision) {
-        return get(query(API + "/" + segment(agentId), "revision", revision));
+    public ManagedAgentDefinition getAgent(String agentId, String revision) {
+        return new ManagedAgentDefinition(get(query(API + "/" + segment(agentId), "revision", revision)));
     }
 
-    public Map<String, Object> updateAgent(String agentId, Map<String, ?> definition, String idempotencyKey) {
-        return write("POST", API + "/" + segment(agentId), definition, idempotencyKey, 202);
+    public ManagedAgentDefinition updateAgent(String agentId, ManagedAgentDefinitionRequest definition, String idempotencyKey) {
+        return new ManagedAgentDefinition(write("POST", API + "/" + segment(agentId), definition.toJson(), idempotencyKey, 202));
     }
 
-    public Map<String, Object> listWorkspaces(String cursor, Integer limit) {
-        return get(page(WORKSPACES, cursor, limit));
+    public ManagedWorkspace.Page listWorkspaces(String cursor, Integer limit) {
+        return new ManagedWorkspace.Page(get(page(WORKSPACES, cursor, limit)));
     }
 
-    public Map<String, Object> getWorkspace(String workspaceId) {
-        return get(WORKSPACES + "/" + segment(workspaceId));
+    public ManagedWorkspace getWorkspace(String workspaceId) {
+        return new ManagedWorkspace(get(WORKSPACES + "/" + segment(workspaceId)));
     }
 
     /** Admits a session with the supplied workspace, skills and extension pins. */
-    public Map<String, Object> createSession(Map<String, ?> selection, String idempotencyKey) {
-        return write("POST", SESSIONS, selection, idempotencyKey, 202);
+    public ManagedSession createSession(ManagedCreateSessionRequest request, String idempotencyKey) {
+        return new ManagedSession(write("POST", SESSIONS, request.toJson(), idempotencyKey, 202));
     }
 
-    /** Null filters use the server defaults. Use next_cursor from a page to continue. */
-    public Map<String, Object> listSessions(String cursor, Integer limit, String archiveState, String titleQuery) {
+    /** Use null filters for server defaults. Archive state accepts all, archived or unarchived. */
+    public ManagedPage<ManagedSession> listSessions(String cursor, Integer limit, String archiveState, String titleQuery) {
         String route = query(page(SESSIONS, cursor, limit), "archive_state", archiveState);
-        return get(query(route, "title_query", titleQuery));
+        return new ManagedPage<>(get(query(route, "title_query", titleQuery)), ManagedSession::new);
     }
 
-    public Map<String, Object> getSession(String sessionId) {
-        return get(session(sessionId));
+    public ManagedSession getSession(String sessionId) {
+        return new ManagedSession(get(session(sessionId)));
     }
 
-    public Map<String, Object> renameSession(String sessionId, String title, String idempotencyKey) {
-        return write("PATCH", session(sessionId), Map.of("title", title), idempotencyKey, 200);
+    public ManagedSession renameSession(String sessionId, String title, String idempotencyKey) {
+        return new ManagedSession(write("PATCH", session(sessionId), Map.of("title", title), idempotencyKey, 200));
     }
 
-    public Map<String, Object> closeSession(String sessionId, String idempotencyKey) {
-        return write("POST", session(sessionId) + "/close", null, idempotencyKey, 202);
+    public ManagedOperation closeSession(String sessionId, String idempotencyKey) {
+        return new ManagedOperation(write("POST", session(sessionId) + "/close", null, idempotencyKey, 202));
     }
 
-    public Map<String, Object> archiveSession(String sessionId, String idempotencyKey) {
-        return write("POST", session(sessionId) + "/archive", null, idempotencyKey, 202);
+    public ManagedOperation archiveSession(String sessionId, String idempotencyKey) {
+        return new ManagedOperation(write("POST", session(sessionId) + "/archive", null, idempotencyKey, 202));
     }
 
-    public Map<String, Object> unarchiveSession(String sessionId, String idempotencyKey) {
-        return write("POST", session(sessionId) + "/unarchive", null, idempotencyKey, 200);
+    public ManagedSession unarchiveSession(String sessionId, String idempotencyKey) {
+        return new ManagedSession(write("POST", session(sessionId) + "/unarchive", null, idempotencyKey, 200));
     }
 
-    public Map<String, Object> deleteSession(String sessionId, String idempotencyKey) {
-        return write("DELETE", session(sessionId), null, idempotencyKey, 202);
+    public ManagedOperation deleteSession(String sessionId, String idempotencyKey) {
+        return new ManagedOperation(write("DELETE", session(sessionId), null, idempotencyKey, 202));
     }
 
-    public Map<String, Object> getSessionOperation(String sessionId, String operationId) {
-        return get(session(sessionId) + "/operations/" + segment(operationId));
+    public ManagedOperation getSessionOperation(String sessionId, String operationId) {
+        return new ManagedOperation(get(session(sessionId) + "/operations/" + segment(operationId)));
     }
 
     /** Submits public input blocks and returns the admission receipt. */
-    public Map<String, Object> submitTurn(String sessionId, List<? extends Map<String, ?>> input,
+    public ManagedTurnAdmission submitTurn(String sessionId, List<ManagedInput> input,
             String idempotencyKey) {
-        return write("POST", session(sessionId) + "/events",
-                Map.of("type", "agent.session.input.message", "input", input), idempotencyKey, 202);
+        List<Map<String, Object>> blocks = input.stream().map(ManagedInput::toJson).collect(Collectors.toList());
+        return new ManagedTurnAdmission(write("POST", session(sessionId) + "/events",
+                Map.of("type", "agent.session.input.message", "input", blocks), idempotencyKey, 202));
     }
 
-    public Map<String, Object> submitText(String sessionId, String text, String idempotencyKey) {
-        return submitTurn(sessionId, List.of(Map.of("type", "input_text", "text", text)), idempotencyKey);
+    public ManagedTurnAdmission submitText(String sessionId, String text, String idempotencyKey) {
+        return submitTurn(sessionId, List.of(ManagedInput.text(text)), idempotencyKey);
     }
 
-    public Map<String, Object> cancelTurn(String sessionId, String turnId, String idempotencyKey) {
-        return write("POST", session(sessionId) + "/events",
-                Map.of("type", "agent.session.cancel", "turn_id", turnId), idempotencyKey, 202);
+    public ManagedTurnAdmission cancelTurn(String sessionId, String turnId, String idempotencyKey) {
+        return new ManagedTurnAdmission(write("POST", session(sessionId) + "/events",
+                Map.of("type", "agent.session.cancel", "turn_id", turnId), idempotencyKey, 202));
     }
 
-    public Map<String, Object> listTurns(String sessionId, String cursor, Integer limit) {
-        return get(page(session(sessionId) + "/turns", cursor, limit));
+    public ManagedPage<ManagedTurn> listTurns(String sessionId, String cursor, Integer limit) {
+        return new ManagedPage<>(get(page(session(sessionId) + "/turns", cursor, limit)), ManagedTurn::new);
     }
 
-    public Map<String, Object> getTurn(String sessionId, String turnId) {
-        return get(session(sessionId) + "/turns/" + segment(turnId));
+    public ManagedTurn getTurn(String sessionId, String turnId) {
+        return new ManagedTurn(get(session(sessionId) + "/turns/" + segment(turnId)));
     }
 
-    public Map<String, Object> listItems(String sessionId, Long after, String cursor, Integer limit) {
-        return get(query(page(session(sessionId) + "/items", cursor, limit), "after", after));
+    public ManagedItem.Page listItems(String sessionId, Long after, String cursor, Integer limit) {
+        return new ManagedItem.Page(get(query(page(session(sessionId) + "/items", cursor, limit), "after", after)));
     }
 
-    public Map<String, Object> listEvents(String sessionId, Long after, Integer limit) {
+    public ManagedEventPage listEvents(String sessionId, Long after, Integer limit) {
         String route = query(session(sessionId) + "/events", "after", after);
-        return get(query(route, "limit", limit));
+        return new ManagedEventPage(get(query(route, "limit", limit)));
     }
 
     /**
@@ -143,50 +145,54 @@ public final class ManagedAgentClient {
         return new ManagedAgentEventStream(transport.openEventStream(request), after);
     }
 
-    public Map<String, Object> listActions(String sessionId, String cursor, Integer limit, Boolean includeChildren) {
-        return get(query(page(session(sessionId) + "/actions", cursor, limit), "include_children", includeChildren));
+    public ManagedPage<ManagedAction> listActions(String sessionId, String cursor, Integer limit, Boolean includeChildren) {
+        String route = page(session(sessionId) + "/actions", cursor, limit);
+        return new ManagedPage<>(get(query(route, "include_children", includeChildren)), ManagedAction::new);
     }
 
-    public Map<String, Object> getAction(String sessionId, String actionId) {
-        return get(session(sessionId) + "/actions/" + segment(actionId));
+    public ManagedAction getAction(String sessionId, String actionId) {
+        return new ManagedAction(get(session(sessionId) + "/actions/" + segment(actionId)));
     }
 
-    public Map<String, Object> respondToAction(String sessionId, String actionId, Map<String, ?> response,
+    public ManagedOperation respondToAction(String sessionId, String actionId, ManagedActionResponse response,
             String idempotencyKey) {
-        return write("POST", session(sessionId) + "/actions/" + segment(actionId) + "/responses",
-                response, idempotencyKey, 202);
+        return new ManagedOperation(write("POST", session(sessionId) + "/actions/" + segment(actionId) + "/responses",
+                response.toJson(), idempotencyKey, 202));
     }
 
-    public Map<String, Object> getRecovery(String sessionId) {
-        return get(session(sessionId) + "/recovery");
+    public ManagedRecovery getRecovery(String sessionId) {
+        return new ManagedRecovery(get(session(sessionId) + "/recovery"));
     }
 
-    public Map<String, Object> recheckRecovery(String sessionId, String turnId) {
-        return json("POST", session(sessionId) + "/recovery/recheck", Map.of("turnId", turnId), null, 202);
+    public ManagedRecovery recheckRecovery(String sessionId, String turnId) {
+        return new ManagedRecovery(json("POST", session(sessionId) + "/recovery/recheck",
+                Map.of("turnId", turnId), null, 202));
     }
 
-    public Map<String, Object> getResources(String sessionId) {
-        return get(session(sessionId) + "/resources");
+    public ManagedResources getResources(String sessionId) {
+        return new ManagedResources(get(session(sessionId) + "/resources"));
     }
 
-    public Map<String, Object> getHookCatalog(String sessionId) {
-        return get(session(sessionId) + "/hook-catalog");
+    public ManagedHookCatalog getHookCatalog(String sessionId) {
+        return new ManagedHookCatalog(get(session(sessionId) + "/hook-catalog"));
     }
 
-    public Map<String, Object> getMcpCatalog(String sessionId) {
-        return get(session(sessionId) + "/mcp-catalog");
+    public ManagedMcpCatalog getMcpCatalog(String sessionId) {
+        return new ManagedMcpCatalog(get(session(sessionId) + "/mcp-catalog"));
     }
 
-    public Map<String, Object> getMcpManagement(String sessionId) {
-        return get(session(sessionId) + "/mcp-management");
+    public ManagedMcpManagementSnapshot getMcpManagement(String sessionId) {
+        return new ManagedMcpManagementSnapshot(get(session(sessionId) + "/mcp-management"));
     }
 
-    public Map<String, Object> submitMcpManagement(String sessionId, Map<String, ?> command, String idempotencyKey) {
-        return write("POST", session(sessionId) + "/mcp-management/commands", command, idempotencyKey, 200);
+    public ManagedMcpManagementSnapshot submitMcpManagement(String sessionId, ManagedMcpManagementCommand command,
+            String idempotencyKey) {
+        return new ManagedMcpManagementSnapshot(write("POST", session(sessionId) + "/mcp-management/commands",
+                command.toJson(), idempotencyKey, 200));
     }
 
-    public Map<String, Object> getMcpManagementOperation(String sessionId, String operationId) {
-        return get(session(sessionId) + "/mcp-management/commands/" + segment(operationId));
+    public ManagedMcpManagementSnapshot getMcpManagementOperation(String sessionId, String operationId) {
+        return new ManagedMcpManagementSnapshot(get(session(sessionId) + "/mcp-management/commands/" + segment(operationId)));
     }
 
     private Map<String, Object> get(String route) {
