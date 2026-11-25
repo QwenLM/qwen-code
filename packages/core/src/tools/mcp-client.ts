@@ -511,15 +511,13 @@ export function createStreamableHttpCompatibilityFetch(
       return response;
     }
 
-    const responseBody = await readResponseBodyExcerpt(response);
     await response.body?.cancel().catch(() => {
       // Best-effort body cleanup before returning a synthetic 405.
     });
     debugLogger.warn(
       `MCP server '${mcpServerName}' rejected the optional Streamable HTTP ` +
         `GET SSE stream with HTTP ${response.status}; continuing without ` +
-        `the standalone GET stream. POST request streams remain enabled.` +
-        (responseBody ? ` Response body: ${JSON.stringify(responseBody)}` : ''),
+        `the standalone GET stream. POST request streams remain enabled.`,
     );
 
     return new Response(null, {
