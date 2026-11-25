@@ -10,7 +10,10 @@ import type { SubscriptionScene } from '@qwen-code/qwen-code-core/qwen/subscript
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
-import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 
 export function isSubscriptionSceneModel(
   model: AvailableModel,
@@ -34,9 +37,10 @@ export async function refreshSubscriptionCatalog(
 ): Promise<string | undefined> {
   if (!new QwenSubscriptionSession().isSignedIn()) return undefined;
   try {
-    if (scene) await config.refreshSubscriptionScenes(signal);
-    else await config.refreshSubscriptionModels(signal);
-    return undefined;
+    const result = scene
+      ? await config.refreshSubscriptionScenes(signal)
+      : await config.refreshSubscriptionModels(signal);
+    return result.cached ? SUBSCRIPTION_MODELS_CACHED : undefined;
   } catch (error) {
     signal?.throwIfAborted();
     return error instanceof SubscriptionOAuthError

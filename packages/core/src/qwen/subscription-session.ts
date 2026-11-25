@@ -28,6 +28,8 @@ import {
 import { fetchWithPolicy } from '../utils/fetch.js';
 import { subscriptionHttpError } from './subscription-errors.js';
 import {
+  subscriptionCatalogFields,
+  synchronizeSubscriptionThinkingStrength,
   subscriptionModelsResponseSchema,
   subscriptionScenesResponseSchema,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
@@ -49,6 +51,7 @@ const credentialSchema = z.object({
   signInAttempt: z.string().min(1).optional(),
   baseUrl: z.string(),
   clientId: z.string(),
+  ...subscriptionCatalogFields,
   tokens: z
     .object({
       access_token: z.string().min(1),
@@ -71,6 +74,7 @@ type Credentials = z.infer<typeof credentialSchema>;
 const CREDENTIAL_CHECK_INTERVAL_MS = 500;
 
 export class QwenSubscriptionSession {
+  private static readonly catalogRequests = new Map<string, symbol>();
   private readonly config = getQwenOAuthConfig();
   private readonly client = new QwenSubscriptionOAuthClient();
   private readonly filePath = path.join(
@@ -443,6 +447,22 @@ export class QwenSubscriptionSession {
           ...(modelMetadata.length ? { modelMetadata } : {}),
         };
       },
+      (credentials) =>
+        credentials.models === undefined
+          ? undefined
+          : {
+              models: credentials.models,
+              modelMetadata: credentials.modelMetadata,
+            },
+      (credentials, catalog) => {
+        Object.assign(
+          credentials,
+          synchronizeSubscriptionThinkingStrength(
+            { ...catalog, scenes: credentials.scenes },
+            'models',
+          ),
+        );
+      },
       signal,
       cliVersion,
     );
@@ -456,6 +476,19 @@ export class QwenSubscriptionSession {
     const result = await this.getCatalog(
       '/models/scenes',
       (value) => subscriptionScenesResponseSchema.parse(value).data,
+      (credentials) => credentials.scenes,
+      (credentials, scenes) => {
+        const catalog = synchronizeSubscriptionThinkingStrength(
+          {
+            models: credentials.models ?? [],
+            modelMetadata: credentials.modelMetadata,
+            scenes,
+          },
+          'scenes',
+        );
+        credentials.modelMetadata = catalog.modelMetadata;
+        credentials.scenes = catalog.scenes;
+      },
       signal,
       cliVersion,
     );
@@ -465,81 +498,119 @@ export class QwenSubscriptionSession {
   private async getCatalog<T>(
     endpoint: '/models' | '/models/scenes',
     parse: (value: unknown) => T,
+    readCatalog: (credentials: Credentials) => T | undefined,
+    saveCatalog: (credentials: Credentials, catalog: T) => void,
     signal?: AbortSignal,
     cliVersion?: string,
   ): Promise<{ catalog: T; cached: boolean }> {
-    const snapshot = await this.locked(async (assertCanCommit) => {
-      const credentials = await this.read();
-      if (!credentials?.tokens || !this.matches(credentials))
-        throw new SubscriptionOAuthError('session_changed');
-      if (credentials.tokens.expiresAt <= Date.now() + 30_000)
-        await this.refresh(credentials, assertCanCommit, signal);
-      return {
-        revision: credentials.revision,
-        token: credentials.tokens!.access_token,
-      };
-    }, signal);
-    const current = async () => {
-      const credentials = await this.read();
-      if (
-        !credentials?.tokens ||
-        !this.matches(credentials) ||
-        credentials.revision !== snapshot.revision
-      )
-        throw new SubscriptionOAuthError('session_changed');
-      return credentials;
+    const key = `${this.filePath}\0${endpoint}`;
+    const revision = Symbol();
+    QwenSubscriptionSession.catalogRequests.set(key, revision);
+    const assertLatest = () => {
+      if (QwenSubscriptionSession.catalogRequests.get(key) !== revision)
+        throw new DOMException(
+          'Model catalog request was superseded.',
+          'AbortError',
+        );
     };
     try {
-      const request = (token: string) =>
-        fetchWithPolicy(`${QWEN_SUBSCRIPTION_BASE_URL}${endpoint}`, {
-          timeoutMs: 5000,
-          maxBytes: 1024 * 1024,
-          maxRedirects: 0,
-          retryTransient: false,
-          readErrorBody: true,
-          headers: {
-            Accept: 'application/json',
-            Authorization: `Bearer ${token}`,
-            'User-Agent': `QwenCode/${cliVersion || 'unknown'} (${process.platform}; ${process.arch})`,
-          },
-          signal,
-        });
-      let response = await request(snapshot.token);
-      if (response.kind === 'response' && response.status === 401) {
-        const token = await this.locked(async (assertCanCommit) => {
-          const credentials = await current();
-          if (credentials.tokens!.access_token === snapshot.token)
-            await this.refresh(credentials, assertCanCommit, signal);
-          return credentials.tokens!.access_token;
-        }, signal);
-        response = await request(token);
-      }
-      signal?.throwIfAborted();
-      if (response.kind !== 'response')
-        throw new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
-      if (response.status !== 200) {
-        let body: unknown;
-        try {
-          body = JSON.parse(response.body.toString('utf8'));
-        } catch {
-          /* No business message in a non-JSON response. */
+      const snapshot = await this.locked(async (assertCanCommit) => {
+        const credentials = await this.read();
+        if (!credentials?.tokens || !this.matches(credentials))
+          throw new SubscriptionOAuthError('session_changed');
+        if (credentials.tokens.expiresAt <= Date.now() + 30_000)
+          await this.refresh(credentials, assertCanCommit, signal);
+        return {
+          revision: credentials.revision,
+          token: credentials.tokens!.access_token,
+        };
+      }, signal);
+      const current = async () => {
+        const credentials = await this.read();
+        if (
+          !credentials?.tokens ||
+          !this.matches(credentials) ||
+          credentials.revision !== snapshot.revision
+        )
+          throw new SubscriptionOAuthError('session_changed');
+        return credentials;
+      };
+      try {
+        const request = (token: string) =>
+          fetchWithPolicy(`${QWEN_SUBSCRIPTION_BASE_URL}${endpoint}`, {
+            timeoutMs: 5000,
+            maxBytes: 1024 * 1024,
+            maxRedirects: 0,
+            retryTransient: false,
+            readErrorBody: true,
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${token}`,
+              'User-Agent': `QwenCode/${cliVersion || 'unknown'} (${process.platform}; ${process.arch})`,
+            },
+            signal,
+          });
+        let response = await request(snapshot.token);
+        if (response.kind === 'response' && response.status === 401) {
+          const token = await this.locked(async (assertCanCommit) => {
+            const credentials = await current();
+            if (credentials.tokens!.access_token === snapshot.token)
+              await this.refresh(credentials, assertCanCommit, signal);
+            return credentials.tokens!.access_token;
+          }, signal);
+          response = await request(token);
         }
-        throw subscriptionHttpError(response.status, body, response.retryAfter);
+        signal?.throwIfAborted();
+        if (response.kind !== 'response')
+          throw new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
+        if (response.status !== 200) {
+          let body: unknown;
+          try {
+            body = JSON.parse(response.body.toString('utf8'));
+          } catch {
+            /* No business message in a non-JSON response. */
+          }
+          throw subscriptionHttpError(
+            response.status,
+            body,
+            response.retryAfter,
+          );
+        }
+        const catalog = parse(JSON.parse(response.body.toString('utf8')));
+        await this.locked(async (assertCanCommit) => {
+          const credentials = await current();
+          if (QwenSubscriptionSession.catalogRequests.get(key) !== revision)
+            return;
+          const previous = JSON.stringify(credentials);
+          saveCatalog(credentials, catalog);
+          const updated = credentialSchema.parse(credentials);
+          if (JSON.stringify(updated) !== previous)
+            await this.write(updated, () => {
+              assertCanCommit();
+              assertLatest();
+            });
+        }, signal).catch(async (error: unknown) => {
+          if (QwenSubscriptionSession.catalogRequests.get(key) === revision)
+            throw error;
+          await this.locked(current, signal);
+        });
+        return { catalog, cached: false };
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (
+          error instanceof SubscriptionOAuthError &&
+          (error.stage || !error.status || error.status < 500)
+        )
+          throw error;
+        const cached = readCatalog(await this.locked(current, signal));
+        if (cached !== undefined) return { catalog: cached, cached: true };
+        throw error instanceof SubscriptionOAuthError
+          ? error
+          : new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
       }
-      const catalog = parse(JSON.parse(response.body.toString('utf8')));
-      await this.locked(current, signal);
-      return { catalog, cached: false };
-    } catch (error) {
-      signal?.throwIfAborted();
-      if (
-        error instanceof SubscriptionOAuthError &&
-        (error.stage || !error.status || error.status < 500)
-      )
-        throw error;
-      await this.locked(current, signal);
-      throw error instanceof SubscriptionOAuthError
-        ? error
-        : new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
+    } finally {
+      if (QwenSubscriptionSession.catalogRequests.get(key) === revision)
+        QwenSubscriptionSession.catalogRequests.delete(key);
     }
   }
 }

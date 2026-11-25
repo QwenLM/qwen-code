@@ -13,6 +13,7 @@ import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscript
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import {
+  SUBSCRIPTION_MODELS_CACHED,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
   type SubscriptionSceneCatalog,
 } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
@@ -505,8 +506,8 @@ async function handleVoiceStatus(
       const identity = session.getIdentity();
       const revision = catalog ? ++catalog.revision : undefined;
       if (catalog) {
+        if (catalog.identity !== identity) catalog.scenes = undefined;
         catalog.identity = identity;
-        catalog.scenes = {};
       }
       if (identity) {
         const signal = requestAbortSignal(req, res);
@@ -520,6 +521,7 @@ async function handleVoiceStatus(
           assertRefreshOwner();
           if (catalog && catalog.revision === revision) {
             catalog.scenes = result.scenes;
+            if (result.cached) modelCatalogWarning = SUBSCRIPTION_MODELS_CACHED;
           }
         } catch (error) {
           signal.throwIfAborted();

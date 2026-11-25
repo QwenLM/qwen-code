@@ -54,7 +54,10 @@ import {
 } from '../workspace-skills-refresh-policy.js';
 
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
-import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { loadSettings } from '../../config/settings.js';
 import {
@@ -1868,7 +1871,9 @@ export function createDaemonWorkspaceService(
         )
           subscriptionModelCatalog = {
             identity: refreshIdentity,
-            available: !child.modelCatalogWarning,
+            available:
+              !child.modelCatalogWarning ||
+              child.modelCatalogWarning === SUBSCRIPTION_MODELS_CACHED,
           };
         if (options?.subscriptionSignedOut) {
           assertActiveGeneration();

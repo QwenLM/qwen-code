@@ -6,7 +6,10 @@
 
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
-import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { isSubscriptionSessionExpired } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { filterModelEntriesForDisplay } from '../utils/model-display-order.js';
 import {
@@ -16020,6 +16023,7 @@ class QwenAgent implements Agent {
         let configsRefreshed = 0;
         let configsFailed = 0;
         let modelCatalogWarning: string | undefined;
+        let subscriptionCatalogAvailable = false;
         const subscriptionSession = new QwenSubscriptionSession();
         const refreshModels =
           params['refreshModels'] === true && subscriptionSession.isSignedIn();
@@ -16030,7 +16034,10 @@ class QwenAgent implements Agent {
           subscriptionSession.getIdentity() === subscriptionIdentity;
         if (refreshModels) {
           try {
-            await this.config.refreshSubscriptionModels();
+            const catalog = await this.config.refreshSubscriptionModels();
+            subscriptionCatalogAvailable = true;
+            if (catalog.cached)
+              modelCatalogWarning = SUBSCRIPTION_MODELS_CACHED;
           } catch {
             modelCatalogWarning = SUBSCRIPTION_MODELS_UNAVAILABLE;
             debugLogger.debug(
@@ -16046,7 +16053,8 @@ class QwenAgent implements Agent {
 
         const updateSubscriptionCatalog = (config: Config) => {
           if (!canCopyCatalog()) return;
-          if (modelCatalogWarning) config.invalidateSubscriptionModels();
+          if (!subscriptionCatalogAvailable)
+            config.invalidateSubscriptionModels();
           else config.copySubscriptionModelsFrom(this.config);
         };
 

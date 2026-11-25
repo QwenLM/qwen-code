@@ -10,6 +10,8 @@ import path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { QwenSubscriptionSession } from './subscription-session.js';
+import { ModelsConfig } from '../models/modelsConfig.js';
+import { AuthType } from '../core/contentGenerator.js';
 import { SubscriptionOAuthError } from './subscription-oauth-client.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from './oauth-config.js';
 import {
@@ -105,10 +107,10 @@ function sceneResponse(data: unknown, status = 200) {
   };
 }
 
-it('fetches fresh models and scenes without persisting either catalog', async () => {
+it('persists both catalogs and restores them without a startup request', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
-  const credentials = await fs.readFile(file, 'utf8');
+  const credentials = JSON.parse(await fs.readFile(file, 'utf8'));
   modelFetch.mockResolvedValueOnce(modelResponse(['chat-model']));
   expect(await session.getModels()).toEqual({
     models: ['chat-model'],
@@ -133,10 +135,23 @@ it('fetches fresh models and scenes without persisting either catalog', async ()
       }),
     }),
   );
-  expect(await fs.readFile(file, 'utf8')).toBe(credentials);
+  expect(JSON.parse(await fs.readFile(file, 'utf8'))).toMatchObject({
+    revision: credentials.revision,
+    tokens: credentials.tokens,
+    models: ['chat-model'],
+    scenes,
+  });
+  const restored = new ModelsConfig({
+    initialAuthType: AuthType.QWEN_SUBSCRIPTION,
+  });
+  expect(restored.hasSubscriptionCatalog()).toBe(true);
+  expect(restored.hasSubscriptionCatalog('image')).toBe(true);
+  expect(restored.getSubscriptionModelIds()).toEqual(['chat-model']);
+  expect(restored.getSubscriptionModelIds('image')).toEqual(['image-model']);
+  expect(modelFetch).toHaveBeenCalledTimes(3);
 });
 
-it('does not restore previously fetched scenes after a failed request or restart', async () => {
+it('uses the cached scene directory after transient failure and replaces it with a successful empty directory', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   modelFetch.mockResolvedValueOnce(
@@ -144,14 +159,13 @@ it('does not restore previously fetched scenes after a failed request or restart
   );
   await session.getScenes();
   modelFetch.mockRejectedValue(new Error('offline'));
-  await expect(session.getScenes()).rejects.toThrow(
-    SUBSCRIPTION_MODELS_UNAVAILABLE,
-  );
-  await expect(new QwenSubscriptionSession().getScenes()).rejects.toThrow(
-    SUBSCRIPTION_MODELS_UNAVAILABLE,
-  );
+  const cached = { scenes: { image: [{ id: 'image-model' }] }, cached: true };
+  expect(await session.getScenes()).toEqual(cached);
+  expect(await new QwenSubscriptionSession().getScenes()).toEqual(cached);
   modelFetch.mockResolvedValueOnce(sceneResponse({}));
   expect(await session.getScenes()).toEqual({ cached: false, scenes: {} });
+  expect(new ModelsConfig().getSubscriptionModelIds('image')).toEqual([]);
+  expect(new ModelsConfig().hasSubscriptionCatalog('image')).toBe(true);
   expect(session.isSignedIn()).toBe(true);
 });
 
@@ -195,10 +209,10 @@ it('does not commit old account scenes after signout and reauthorization', async
   expect(await pending).toMatchObject({ code: 'session_changed' });
 });
 
-it('returns simultaneous chat and scene updates without changing credentials', async () => {
+it('merges simultaneous chat and scene cache updates without changing credentials', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
-  const credentials = await fs.readFile(file, 'utf8');
+  const credentials = JSON.parse(await fs.readFile(file, 'utf8'));
   modelFetch.mockImplementation(async (url: string) =>
     url.endsWith('/scenes')
       ? sceneResponse({ voice: [{ id: 'voice-model' }] })
@@ -210,8 +224,89 @@ it('returns simultaneous chat and scene updates without changing credentials', a
       { scenes: { voice: [{ id: 'voice-model' }] }, cached: false },
     ],
   );
-  expect(await fs.readFile(file, 'utf8')).toBe(credentials);
+  expect(JSON.parse(await fs.readFile(file, 'utf8'))).toMatchObject({
+    revision: credentials.revision,
+    tokens: credentials.tokens,
+    models: ['chat-model'],
+    scenes: { voice: [{ id: 'voice-model' }] },
+  });
 });
+
+it('does not rewrite an unchanged cache but still requests fresh models', async () => {
+  const session = new QwenSubscriptionSession();
+  await session.signIn(() => {});
+  modelFetch.mockResolvedValue(
+    sceneResponse([
+      {
+        id: 'served',
+        display_name: 'Served',
+        input_modalities: ['text', 'image'],
+        context_window_tokens: 1000000,
+      },
+    ]),
+  );
+  await session.getModels();
+  await fs.utimes(file, 1, 1);
+  const previous = await fs.readFile(file, 'utf8');
+  await session.getModels();
+  expect(modelFetch).toHaveBeenCalledTimes(2);
+  expect(await fs.readFile(file, 'utf8')).toBe(previous);
+  expect((await fs.stat(file)).mtimeMs).toBe(1000);
+});
+
+it('does not restore a directory after logout or for another OAuth environment', async () => {
+  const session = new QwenSubscriptionSession();
+  await session.signIn(() => {});
+  modelFetch.mockResolvedValue(modelResponse(['served']));
+  await session.getModels();
+  const credentials = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.writeFile(
+    file,
+    JSON.stringify({ ...credentials, clientId: 'other' }),
+  );
+  expect(new ModelsConfig().hasSubscriptionCatalog()).toBe(false);
+  expect(new ModelsConfig().getSubscriptionModelIds()).toEqual([]);
+  await fs.writeFile(file, JSON.stringify(credentials));
+  await session.signOut();
+  expect(new ModelsConfig().hasSubscriptionCatalog()).toBe(false);
+  expect(new ModelsConfig().getSubscriptionModelIds()).toEqual([]);
+});
+
+it.each(['models', 'scenes'] as const)(
+  'does not persist an older %s response after a newer request finishes',
+  async (catalog) => {
+    const session = new QwenSubscriptionSession();
+    await session.signIn(() => {});
+    let finish!: (value: ReturnType<typeof modelResponse>) => void;
+    const response = (id: string) =>
+      catalog === 'models'
+        ? modelResponse([id])
+        : sceneResponse({ image: [{ id }] });
+    modelFetch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const fetch = (source: QwenSubscriptionSession) =>
+      catalog === 'models' ? source.getModels() : source.getScenes();
+    const older = fetch(session).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(modelFetch).toHaveBeenCalledOnce());
+    modelFetch.mockResolvedValueOnce(response('newest'));
+    await fetch(new QwenSubscriptionSession());
+    finish(response('stale'));
+    expect(await older).toMatchObject(
+      catalog === 'models'
+        ? { models: ['stale'], cached: false }
+        : { scenes: { image: [{ id: 'stale' }] }, cached: false },
+    );
+    expect(
+      new ModelsConfig().getSubscriptionModelIds(
+        catalog === 'models' ? undefined : 'image',
+      ),
+    ).toEqual(['newest']);
+  },
+);
 
 it('checks persisted login independently of the selected provider and model cache', async () => {
   const session = new QwenSubscriptionSession();
@@ -281,7 +376,7 @@ it('does not treat credentials for another OAuth environment as signed in', asyn
   expect(session.isSignedIn()).toBe(false);
 });
 
-it('loads every served model without retaining a catalog across token refresh', async () => {
+it('retains the directory across token refresh', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   const ids = ['qwen3.8-max', 'qwen3.7-flash', 'future-model'];
@@ -293,12 +388,10 @@ it('loads every served model without retaining a catalog across token refresh', 
   );
   await expire();
   await session.getAccessToken();
-  expect(JSON.parse(await fs.readFile(file, 'utf8'))).not.toHaveProperty(
-    'models',
-  );
+  expect(JSON.parse(await fs.readFile(file, 'utf8')).models).toEqual(ids);
 });
 
-it('ignores a legacy disk catalog and strips it on the next credential write', async () => {
+it('restores an existing directory through credential writes', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   const credentials = JSON.parse(await fs.readFile(file, 'utf8'));
@@ -312,21 +405,23 @@ it('ignores a legacy disk catalog and strips it on the next credential write', a
     }),
   );
   modelFetch.mockRejectedValue(new Error('network failure'));
-  await expect(session.getModels()).rejects.toThrow(
-    SUBSCRIPTION_MODELS_UNAVAILABLE,
-  );
-  await expect(session.getScenes()).rejects.toThrow(
-    SUBSCRIPTION_MODELS_UNAVAILABLE,
-  );
+  expect(await session.getModels()).toMatchObject({
+    models: ['legacy'],
+    cached: true,
+  });
+  expect(await session.getScenes()).toEqual({
+    scenes: { image: [{ id: 'legacy-image' }] },
+    cached: true,
+  });
   await expire();
   await session.getAccessToken();
   const saved = JSON.parse(await fs.readFile(file, 'utf8'));
-  for (const key of ['models', 'modelMetadata', 'scenes'])
-    expect(saved).not.toHaveProperty(key);
+  expect(saved.models).toEqual(['legacy']);
+  expect(saved.scenes).toEqual({ image: [{ id: 'legacy-image' }] });
 });
 
 it.each(['network failure', 'empty response', 'server failure'])(
-  'reports %s even after a previously successful model request',
+  'uses the cached directory for %s after a previously successful request',
   async (failure) => {
     const session = new QwenSubscriptionSession();
     await session.signIn(() => {});
@@ -338,7 +433,10 @@ it.each(['network failure', 'empty response', 'server failure'])(
       modelFetch.mockResolvedValue(
         modelResponse([], failure === 'server failure' ? 503 : 200),
       );
-    await expect(session.getModels()).rejects.toThrow();
+    expect(await session.getModels()).toMatchObject({
+      models: ['served'],
+      cached: true,
+    });
     expect(await session.getUserInfo()).toEqual(user);
   },
 );
@@ -388,7 +486,7 @@ it('validates optional metadata per field on every model response', async () => 
   expect(await session.getModels()).toEqual({ ...catalog, cached: false });
 
   modelFetch.mockResolvedValue(modelResponse([], 503));
-  await expect(session.getModels()).rejects.toMatchObject({ status: 503 });
+  expect(await session.getModels()).toEqual({ ...catalog, cached: true });
 
   modelFetch.mockResolvedValue(modelResponse(catalog.models));
   expect(await session.getModels()).toEqual({
@@ -435,14 +533,15 @@ it('validates thinking strengths without rejecting unknown levels', async () => 
   };
   expect(await session.getModels()).toEqual({ ...catalog, cached: false });
   modelFetch.mockResolvedValue(modelResponse([], 503));
-  await expect(new QwenSubscriptionSession().getModels()).rejects.toMatchObject(
-    { status: 503 },
-  );
+  expect(await new QwenSubscriptionSession().getModels()).toEqual({
+    ...catalog,
+    cached: true,
+  });
   modelFetch.mockResolvedValue(modelResponse(catalog.models));
   await session.getModels();
 });
 
-it('returns scene thinking strengths from each response without disk fallback', async () => {
+it('retains scene thinking strengths in the directory cache', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   const scenes = {
@@ -456,9 +555,10 @@ it('returns scene thinking strengths from each response without disk fallback', 
   modelFetch.mockResolvedValue(sceneResponse(scenes));
   expect(await session.getScenes()).toEqual({ scenes, cached: false });
   modelFetch.mockResolvedValue(sceneResponse({}, 503));
-  await expect(new QwenSubscriptionSession().getScenes()).rejects.toMatchObject(
-    { status: 503 },
-  );
+  expect(await new QwenSubscriptionSession().getScenes()).toEqual({
+    scenes,
+    cached: true,
+  });
   modelFetch.mockResolvedValue(
     sceneResponse({ fast: [{ id: 'scene-reasoner' }] }),
   );

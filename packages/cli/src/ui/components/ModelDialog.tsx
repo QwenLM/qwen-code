@@ -390,6 +390,8 @@ export function ModelDialog({
           : isCompactionModelMode
             ? 'compaction'
             : undefined;
+  const showCatalogLoading =
+    catalogLoading && !config?.hasSubscriptionCatalog?.(scene);
   useEffect(() => {
     if (!config || !subscriptionSignedIn) {
       setCatalogLoading(false);
@@ -952,6 +954,10 @@ export function ModelDialog({
   );
 
   const initialIndex = useMemo(() => {
+    const highlightedIndex = MODEL_OPTIONS.findIndex(
+      (option) => option.value === highlightedValue,
+    );
+    if (highlightedIndex !== -1) return highlightedIndex;
     const index = MODEL_OPTIONS.findIndex(
       (option) => option.value === preferredKey,
     );
@@ -959,14 +965,20 @@ export function ModelDialog({
     return isAdvisorModelMode && advisorModelSetting && MODEL_OPTIONS.length > 1
       ? 1
       : 0;
-  }, [MODEL_OPTIONS, preferredKey, isAdvisorModelMode, advisorModelSetting]);
+  }, [
+    MODEL_OPTIONS,
+    highlightedValue,
+    preferredKey,
+    isAdvisorModelMode,
+    advisorModelSetting,
+  ]);
 
   const handleHighlight = useCallback((value: string) => {
     setHighlightedValue(value);
   }, []);
 
   const highlightedEntry = useMemo(() => {
-    const key = highlightedValue ?? preferredKey;
+    const key = MODEL_OPTIONS[initialIndex]?.value ?? preferredKey;
     return availableModelEntries.find(
       ({ authType: t2, model, isRuntime, snapshotId }) => {
         const v =
@@ -981,7 +993,8 @@ export function ModelDialog({
       },
     );
   }, [
-    highlightedValue,
+    MODEL_OPTIONS,
+    initialIndex,
     preferredKey,
     availableModelEntries,
     isAdvisorModelMode,
@@ -1459,8 +1472,9 @@ export function ModelDialog({
               : '')}
       </Text>
 
-      {catalogLoading && <Text>{t('Loading models from provider…')}</Text>}
-      {!hasModels ? (
+      {showCatalogLoading ? (
+        <Text>{t('Loading models from provider…')}</Text>
+      ) : !hasModels ? (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.status.warning}>
             {t(
@@ -1481,7 +1495,7 @@ export function ModelDialog({
       ) : (
         <Box marginTop={1}>
           <DescriptiveRadioButtonSelect
-            isFocused={!catalogLoading}
+            isFocused={!showCatalogLoading}
             items={MODEL_OPTIONS}
             onSelect={handleSelect}
             onHighlight={handleHighlight}
@@ -1492,7 +1506,7 @@ export function ModelDialog({
         </Box>
       )}
 
-      {highlightedEntry && (
+      {!showCatalogLoading && highlightedEntry && (
         <Box marginTop={1} flexDirection="column">
           <Box
             borderStyle="single"
@@ -1544,11 +1558,13 @@ export function ModelDialog({
         </Box>
       )}
 
-      <Box marginTop={1} flexDirection="column">
-        <Text color={theme.text.secondary}>
-          {t('Enter to select, ↑↓ to navigate, Esc to close')}
-        </Text>
-      </Box>
+      {!showCatalogLoading && (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={theme.text.secondary}>
+            {t('Enter to select, ↑↓ to navigate, Esc to close')}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }

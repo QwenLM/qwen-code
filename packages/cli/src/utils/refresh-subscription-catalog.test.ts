@@ -6,7 +6,10 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { refreshSubscriptionCatalog } from './refresh-subscription-catalog.js';
-import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 
 const account = vi.hoisted(() => ({ signedIn: true }));
 vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
@@ -45,5 +48,11 @@ it('reports discovery failure without falling back to an old directory', async (
   scenes.mockRejectedValueOnce(new Error('offline'));
   expect(await refreshSubscriptionCatalog(config, true)).toBe(
     SUBSCRIPTION_MODELS_UNAVAILABLE,
+  );
+});
+it('reports the existing cache warning when transient discovery falls back', async () => {
+  scenes.mockResolvedValueOnce({ cached: true });
+  expect(await refreshSubscriptionCatalog(config, true)).toBe(
+    SUBSCRIPTION_MODELS_CACHED,
   );
 });

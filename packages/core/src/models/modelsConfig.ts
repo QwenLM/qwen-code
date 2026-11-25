@@ -15,9 +15,10 @@ import {
   QWEN_SUBSCRIPTION_BASE_URL,
 } from '../qwen/oauth-config.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
-import type {
-  SubscriptionScene,
-  SubscriptionModelMetadata,
+import {
+  readCachedSubscriptionCatalog,
+  type SubscriptionScene,
+  type SubscriptionModelMetadata,
 } from '../qwen/subscription-models.js';
 import { SubscriptionOAuthError } from '../qwen/subscription-oauth-client.js';
 import { normalizeOpenAiWireBaseUrl } from '../core/openaiContentGenerator/constants.js';
@@ -180,6 +181,8 @@ export class ModelsConfig {
   }
 
   constructor(options: ModelsConfigOptions = {}) {
+    this.subscriptionCatalogIdentity =
+      readCachedSubscriptionCatalog()?.revision;
     this.modelRegistry = new ModelRegistry(
       options.modelProvidersConfig,
       options.providerProtocolConfig,
@@ -331,6 +334,14 @@ export class ModelsConfig {
     return this.modelRegistry.getSubscriptionModelIds(scene);
   }
 
+  hasSubscriptionCatalog(scene?: SubscriptionScene): boolean {
+    return (
+      this.subscriptionCatalogIdentity ===
+        new QwenSubscriptionSession().getIdentity() &&
+      this.modelRegistry.hasSubscriptionCatalog(scene)
+    );
+  }
+
   async refreshSubscriptionModels(
     signal?: AbortSignal,
     cliVersion?: string,
@@ -347,6 +358,7 @@ export class ModelsConfig {
           false,
           revision,
         );
+        signal?.throwIfAborted();
         this.modelRegistry.invalidateSubscriptionCatalog(false);
         throw error;
       });
@@ -372,6 +384,7 @@ export class ModelsConfig {
           true,
           revision,
         );
+        signal?.throwIfAborted();
         this.modelRegistry.invalidateSubscriptionCatalog(true);
         throw error;
       });

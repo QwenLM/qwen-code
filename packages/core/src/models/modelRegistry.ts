@@ -10,6 +10,7 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
 import {
+  readCachedSubscriptionCatalog,
   synchronizeSubscriptionThinkingStrength,
   type SubscriptionModelMetadata,
   type SubscriptionScene,
@@ -234,6 +235,10 @@ export class ModelRegistry {
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
     this.modelProvidersConfig = modelProvidersConfig;
+    const cached = readCachedSubscriptionCatalog();
+    this.subscriptionModels = cached?.models;
+    this.subscriptionMetadata = cached?.modelMetadata;
+    this.subscriptionScenes = cached?.scenes;
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
@@ -516,6 +521,14 @@ export class ModelRegistry {
         `Model "${config.id}" in authType "${authType}" has multiple selector-only flags. It will be unreachable in at least one model selector.`,
       );
     }
+  }
+
+  hasSubscriptionCatalog(scene?: SubscriptionScene): boolean {
+    return scene
+      ? !this.subscriptionScenesUnavailable &&
+          this.subscriptionScenes !== undefined
+      : !this.subscriptionModelsUnavailable &&
+          this.subscriptionModels !== undefined;
   }
 
   getSubscriptionModelIds(scene?: SubscriptionScene): string[] {

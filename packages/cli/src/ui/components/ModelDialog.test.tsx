@@ -93,6 +93,7 @@ const renderComponent = (
   const recordSlashCommand = vi.fn();
 
   const mockConfig = {
+    hasSubscriptionCatalog: vi.fn(() => true),
     refreshSubscriptionModels: vi.fn().mockResolvedValue({ cached: false }),
     refreshSubscriptionScenes: vi.fn().mockResolvedValue({ cached: false }),
     // --- Functions used by ModelDialog ---
@@ -198,6 +199,107 @@ describe('<ModelDialog />', () => {
       await waitFor(() =>
         expect(second.queryByText('Loading models from provider…')).toBeNull(),
       );
+    },
+  );
+
+  it('shows only loading until the first directory request completes when no cache exists', async () => {
+    let finish!: (value: { models: string[]; cached: boolean }) => void;
+    const refresh = vi.fn(
+      () =>
+        new Promise<{ models: string[]; cached: boolean }>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const dialog = renderComponent(
+      {},
+      {
+        hasSubscriptionCatalog: () => false,
+        refreshSubscriptionModels: refresh,
+      },
+    );
+    expect(dialog.getByText('Loading models from provider…')).toBeDefined();
+    expect(mockedSelect).not.toHaveBeenCalled();
+    await act(async () => finish({ models: [], cached: false }));
+    expect(dialog.queryByText('Loading models from provider…')).toBeNull();
+    expect(mockedSelect).toHaveBeenCalled();
+  });
+
+  it.each(['unchanged', 'changed', 'removed-highlight'] as const)(
+    'keeps a cached directory interactive and reconciles the highlighted route during refresh (%s)',
+    async (scenario) => {
+      const changed = scenario !== 'unchanged';
+      const api = {
+        id: 'api',
+        label: 'API',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.example/v1',
+      };
+      const subscription = {
+        id: 'cached',
+        label: 'Cached',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        baseUrl: 'https://subscription.example/v1',
+      };
+      let models = [subscription, api];
+      let finish!: (value: { models: string[]; cached: boolean }) => void;
+      const refresh = vi.fn(
+        () =>
+          new Promise<{ models: string[]; cached: boolean }>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const dialog = renderComponent(
+        {},
+        {
+          hasSubscriptionCatalog: () => true,
+          getAllConfiguredModels: () => models,
+          getSubscriptionModelIds: () =>
+            models
+              .filter((model) => model.authType === AuthType.QWEN_SUBSCRIPTION)
+              .map(({ id }) => id),
+          getAuthType: () => AuthType.USE_OPENAI,
+          getModel: () => 'api',
+          getModelsConfig: vi.fn().mockReturnValue({
+            getGenerationConfig: () => ({ baseUrl: api.baseUrl }),
+          }),
+          refreshSubscriptionModels: refresh,
+        },
+      );
+      const current = () => mockedSelect.mock.calls.at(-1)![0];
+      expect(dialog.queryByText('Loading models from provider…')).toBeNull();
+      expect(current().isFocused).toBe(true);
+      const before = current().items.map(({ value }) => value);
+      const apiValue = before.find((value) =>
+        String(value).startsWith('openai:'),
+      )!;
+      const highlighted =
+        scenario === 'removed-highlight' ? before[0]! : apiValue;
+      act(() => current().onHighlight?.(highlighted));
+      if (changed) models = [{ ...subscription, id: 'new', label: 'New' }, api];
+      await act(async () =>
+        finish({
+          models: models
+            .filter((model) => model.authType === AuthType.QWEN_SUBSCRIPTION)
+            .map(({ id }) => id),
+          cached: false,
+        }),
+      );
+      expect(dialog.queryByText('Loading models from provider…')).toBeNull();
+      expect(current().isFocused).toBe(true);
+      expect(current().items[current().initialIndex!]?.value).toBe(
+        scenario === 'removed-highlight' ? apiValue : highlighted,
+      );
+      expect(dialog.getByText(/Base URL/)).toBeDefined();
+      if (changed) {
+        expect(current().items.map(({ value }) => value)).not.toContain(
+          before[0],
+        );
+        expect(
+          current().items.some(({ value }) => String(value).includes(':new')),
+        ).toBe(true);
+      } else expect(current().items.map(({ value }) => value)).toEqual(before);
+      expect(dialog.mockSettings.setValue).not.toHaveBeenCalled();
+      expect(dialog.mockConfig.switchModel).not.toHaveBeenCalled();
     },
   );
 
@@ -1848,6 +1950,7 @@ describe('<ModelDialog />', () => {
   });
 
   it('highlights the cross-auth row for a bare fast-model setting', () => {
+    account.signedIn = false;
     // `/model --fast deepseek-v4-flash` validates across all providers and
     // persists the bare model id. When the dialog re-opens, it must locate
     // the right row even though the setting carries no authType prefix —
@@ -1914,6 +2017,7 @@ describe('<ModelDialog />', () => {
   });
 
   it('highlights the cross-auth row for a bare vision-model setting', () => {
+    account.signedIn = false;
     // `/model --vision qwen-vl-max` validates across all providers and persists
     // the bare model id. When the dialog re-opens in vision mode, the
     // preferred-entry resolution must locate that row even though the setting
@@ -1980,6 +2084,7 @@ describe('<ModelDialog />', () => {
   });
 
   it('highlights the matching baseUrl for duplicate vision-model settings', () => {
+    account.signedIn = false;
     const selectedBaseUrl = 'https://token-plan.example.com/v1';
     const mockSettings = {
       isTrusted: true,
@@ -2166,6 +2271,7 @@ describe('<ModelDialog />', () => {
   it.each(['fast', 'compaction', 'vision', 'image'] as const)(
     'falls back to the same-id row when the pinned endpoint matches none (%s, #12760)',
     (mode) => {
+      account.signedIn = false;
       // A project that declares its own `modelProviders` replaces the user's, so
       // a globally pinned endpoint can match no row here. Without a same-id
       // fallback the dialog highlights the current auth's first row and Enter
@@ -2790,6 +2896,7 @@ describe('<ModelDialog />', () => {
   });
 
   it('updates initialIndex when config context changes', () => {
+    account.signedIn = false;
     const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
     const mockGetAuthType = vi.fn(() => 'qwen-oauth');
     const mockGetModelsConfig = vi.fn(() => ({

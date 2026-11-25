@@ -6281,6 +6281,10 @@ export class Config {
     return this.modelsConfig.getSubscriptionModelIds(scene);
   }
 
+  hasSubscriptionCatalog(scene?: SubscriptionScene): boolean {
+    return this.modelsConfig.hasSubscriptionCatalog(scene);
+  }
+
   async refreshSubscriptionModels(signal?: AbortSignal) {
     const result = await this.modelsConfig.refreshSubscriptionModels(
       signal,

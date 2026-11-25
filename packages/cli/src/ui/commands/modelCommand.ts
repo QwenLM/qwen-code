@@ -13,7 +13,10 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import {
   persistSubscriptionModel,
   prepareSubscriptionModelPersistence,
@@ -1397,7 +1400,14 @@ export const modelCommand: SlashCommand = {
         Date.now(),
       );
       try {
-        await config.refreshSubscriptionModels(context.abortSignal);
+        const result = await config.refreshSubscriptionModels(
+          context.abortSignal,
+        );
+        if (result.cached)
+          context.ui.addItem(
+            { type: MessageType.WARNING, text: SUBSCRIPTION_MODELS_CACHED },
+            Date.now(),
+          );
       } catch (error) {
         return {
           type: 'message',

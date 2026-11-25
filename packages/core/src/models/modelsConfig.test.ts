@@ -19,6 +19,51 @@ import type { ConfigSource, ConfigSources } from '../utils/configResolver.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 
 describe('ModelsConfig', () => {
+  it.each(['models', 'scenes'] as const)(
+    'keeps the existing %s directory when a background picker refresh is cancelled',
+    async (catalog) => {
+      const config = new ModelsConfig();
+      const controller = new AbortController();
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account');
+      const fetch = vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        catalog === 'models' ? 'getModels' : 'getScenes',
+      );
+      const refresh = (signal?: AbortSignal) =>
+        catalog === 'models'
+          ? config.refreshSubscriptionModels(signal)
+          : config.refreshSubscriptionScenes(signal);
+      try {
+        fetch.mockResolvedValueOnce({
+          models: ['cached'],
+          scenes: { voice: [{ id: 'cached' }] },
+          cached: false,
+        });
+        await refresh();
+        fetch.mockImplementationOnce(
+          (...args) =>
+            new Promise<never>((_resolve, reject) => {
+              const signal = args[0]!;
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+        );
+        const pending = refresh(controller.signal);
+        controller.abort();
+        await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+        const scene = catalog === 'models' ? undefined : 'voice';
+        expect(config.hasSubscriptionCatalog(scene)).toBe(true);
+        expect(config.getSubscriptionModelIds(scene)).toEqual(['cached']);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
   describe('subscription directory runtime reconciliation', () => {
     afterEach(() => vi.restoreAllMocks());
 
@@ -291,6 +336,11 @@ describe('ModelsConfig', () => {
         fetch.mockRejectedValueOnce(new Error('newest failure'));
         await expect(refresh()).rejects.toThrow('newest failure');
         expect(ids()).toEqual([]);
+        expect(
+          config.hasSubscriptionCatalog(
+            catalog === 'models' ? undefined : 'image',
+          ),
+        ).toBe(false);
       } finally {
         vi.restoreAllMocks();
       }
