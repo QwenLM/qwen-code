@@ -22,6 +22,7 @@ import {
   createContentGenerator,
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import {
   DEFAULT_DASHSCOPE_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
@@ -274,6 +275,9 @@ function buildInheritedAgentContentGeneratorConfig(
 
   if (modelId && modelId !== parentConfig.model) {
     nextConfig.thinkingMandatory = undefined;
+    if (sameProvider) {
+      nextConfig.contextWindowSize = tokenLimit(modelId, 'input');
+    }
   }
 
   nextConfig.apiKey = resolveCredentialField(
@@ -492,6 +496,13 @@ function applyResolvedModelConfig(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;
     }
+  }
+  if (
+    sameProvider &&
+    targetConfig.model !== parentConfig.model &&
+    resolvedModel.generationConfig.contextWindowSize === undefined
+  ) {
+    targetConfig.contextWindowSize = tokenLimit(targetConfig.model, 'input');
   }
 }
 

@@ -179,14 +179,10 @@ function estimateResponseSchemaTokens(schema: unknown): number {
  * that read no ceiling stay uncapped — which is also what they did before, and
  * the point of not emitting.
  *
- * `resolvedContextWindowSize` is the window of the model the request is
- * actually sent to, resolved by `resolveForModel` against that target (its
- * registry-declared window, else the catalog/curated one). It is preferred
- * over `contentGeneratorConfig.contextWindowSize`, which on a per-model route
- * is inherited from `{ ...parentConfig }` and therefore describes the
- * *session* model whenever the target's registry entry declares no window of
- * its own — the default for a same-provider fast model, which is where side
- * queries go unless the caller pins one.
+ * `resolvedContextWindowSize` comes from the active config for the current
+ * model. For a separately routed model it comes from that target's registry
+ * entry or catalog window, including when the target shares a model ID with
+ * the session but uses a different endpoint.
  *
  * Call after `resolveForModel` so `model` is the resolved target and
  * `contents` is the slimmed payload actually sent. Caveats:
@@ -335,11 +331,9 @@ export interface ResolvedGeneratorForModel {
   retryErrorCodes?: readonly number[];
   model: string;
   /**
-   * Context window of the model this request is actually sent to, resolved
-   * against that target: its registry-declared `contextWindowSize`, else
-   * `tokenLimit(target, 'input')`. `undefined` when the request falls back to
-   * the session generator, whose `contentGeneratorConfig.contextWindowSize`
-   * then describes the window the request is handed.
+   * Configured window for the active model, or the registry/catalog window
+   * for a separately routed model. On fallback to the session generator,
+   * callers use its `contentGeneratorConfig.contextWindowSize` instead.
    */
   contextWindowSize?: number;
 }
@@ -904,6 +898,7 @@ export class BaseLlmClient {
           retryAuthType: mainAuthType,
           retryErrorCodes: mainRetryErrorCodes,
           model: requestModel,
+          contextWindowSize: mainGeneratorConfig?.contextWindowSize,
         };
       }
     }
@@ -925,14 +920,8 @@ export class BaseLlmClient {
     const retryErrorCodes =
       resolvedModel?.generationConfig?.retryErrorCodes ?? mainRetryErrorCodes;
     const targetModel = resolvedModel?.id ?? requestModel;
-    // `contentGeneratorConfig` is built from `{ ...parentConfig }` and
-    // `applyResolvedModelConfig` overwrites `contextWindowSize` only when the
-    // registry declares one, so for a same-provider target it carries the
-    // *session* model's window. Resolve the window against the target instead.
-    // The session value stays authoritative only on the fallback route, where
-    // the session generator really is the one sending the request — detected
-    // by identity, since that fallback hands back the very object
-    // `mainGeneratorConfig` was read from.
+    // Fallback returns the session config by identity. Its window describes
+    // the generator that sends the request, even when the target differs.
     const fellBackToSessionGenerator =
       contentGeneratorConfig === mainGeneratorConfig;
 
