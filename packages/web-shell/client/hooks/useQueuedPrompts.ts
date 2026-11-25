@@ -29,6 +29,7 @@ import {
 import type {
   DaemonInputAnnotation,
   DaemonMidTurnMessagesResult,
+  DaemonMidTurnTarget,
   DaemonPendingPromptSummary,
   DaemonSessionAttachmentReference,
   DaemonTranscriptStore,
@@ -41,6 +42,17 @@ import {
 import { IMAGE_ONLY_PROMPT_TEXT } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { EditorHandle } from './useComposerCore';
+import {
+  deleteMidTurnAdmission,
+  loadMidTurnAdmissions,
+  midTurnDraftOwner,
+  readMidTurnCancelGeneration,
+  saveMidTurnAdmission,
+  saveMidTurnCancelGeneration,
+  type MidTurnDraft,
+  type MidTurnDraftAdmission,
+} from './mid-turn-drafts';
+import { base64ToBlob } from '../utils/base64';
 import { removeInjectedFromQueue } from '../midTurnDedup';
 import { isCommandPrompt } from '../utils/localCommandQueue';
 import type { getTranslator } from '../i18n';
@@ -81,6 +93,7 @@ interface UseQueuedPromptsArgs {
    * the legacy local fallback used by older daemons.
    */
   canQueryMidTurn: boolean;
+  canRecoverMidTurnDrafts?: boolean;
   /** Whether `session_prompt` advertises the native prompt queue routes.
    * OpenAPI hosts can send prompts without exposing the daemon queue. */
   canQueryPendingPrompts: boolean;
@@ -499,7 +512,10 @@ export interface UseQueuedPromptsResult {
     inputAnnotations?: DaemonInputAnnotation[],
     onAdmitted?: () => void,
     submittedPrompt?: string,
+    onDraftStored?: () => void,
   ) => boolean;
+  /** Fence local preparation immediately and refresh after the cancel request settles. */
+  cancelMidTurnDrafts: () => (() => void) | undefined;
   removeQueuedPrompt: (id: number) => void;
   insertQueuedPrompt: (id: number) => Promise<void>;
   /** Ask the daemon to deliver the queued mid-turn messages now. */
@@ -519,6 +535,7 @@ export function useQueuedPrompts({
   clientId,
   canMutateMidTurn,
   canQueryMidTurn,
+  canRecoverMidTurnDrafts = false,
   canQueryPendingPrompts,
   canInjectMidTurnMedia,
   workspaceFileActions,
@@ -610,6 +627,31 @@ export function useQueuedPrompts({
   const latestWorkspaceCwdRef = useRef(workspaceCwd);
   const latestConnectedRef = useRef(connected);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
+  const midTurnTargetRef = useRef<
+    | {
+        sessionId: string;
+        target?: DaemonMidTurnTarget;
+      }
+    | undefined
+  >(undefined);
+  const draftOwner =
+    canRecoverMidTurnDrafts && sessionId && clientId
+      ? midTurnDraftOwner(sessionId, clientId)
+      : undefined;
+  const draftOwnerRef = useRef(draftOwner);
+  draftOwnerRef.current = draftOwner;
+  const liveAdmissionsRef = useRef(
+    new Map<
+      string,
+      {
+        owner: string;
+        controller: AbortController;
+        target: DaemonMidTurnTarget;
+      }
+    >(),
+  );
+  const localCancelGenerationsRef = useRef(new Map<string, number>());
+  const draftRecoveryChainRef = useRef(Promise.resolve());
   const explicitInsertGenerationsRef = useRef<Map<number, number>>(new Map());
   const submitAbortControllersRef = useRef<Map<number, AbortController>>(
     new Map(),
@@ -750,6 +792,17 @@ export function useQueuedPrompts({
     queuedPromptsRef.current = next;
     setQueuedPrompts(next);
   }, []);
+
+  const finishUncommittedMidTurn = useCallback(
+    (messageId: string) => {
+      pendingMidTurnAdmissionsRef.current.delete(messageId);
+      const callback = completionCallbacksRef.current.get(messageId);
+      completionCallbacksRef.current.delete(messageId);
+      removeDaemonOwnedPrompt(messageId);
+      callback?.();
+    },
+    [removeDaemonOwnedPrompt],
+  );
 
   latestSessionIdRef.current = sessionId;
   latestWorkspaceCwdRef.current = workspaceCwd;
@@ -1652,6 +1705,168 @@ export function useQueuedPrompts({
     [],
   );
 
+  const recoverMidTurnDrafts = useCallback(
+    (snapshot: DaemonMidTurnMessagesResult, targetSessionId: string) => {
+      const owner = draftOwnerRef.current;
+      if (!owner) return;
+      const isCurrent = () =>
+        owner === draftOwnerRef.current &&
+        targetSessionId === latestSessionIdRef.current &&
+        !writeBlockedRef.current;
+      const recover = async () => {
+        if (!isCurrent()) return;
+        const admissions = await loadMidTurnAdmissions(owner).catch(() => []);
+        const localById = new Map(
+          admissions.map((draft) => [draft.messageId, draft]),
+        );
+        const recoveries = snapshot.recoveries ?? [];
+        const recoveryIds = new Set(recoveries.map((draft) => draft.messageId));
+        const knownIds = new Set([
+          ...snapshot.messages.map((message) => message.messageId),
+          ...snapshot.settledMessageIds,
+          ...snapshot.promotedMessageIds,
+        ]);
+        const drafts: MidTurnDraft[] = [];
+        const acknowledge: string[] = [];
+        for (const recovery of recoveries) {
+          if (!isCurrent()) return;
+          finishUncommittedMidTurn(recovery.messageId);
+          const local = localById.get(recovery.messageId);
+          if (local) {
+            drafts.push(local);
+          } else {
+            if (contentHasDegradedMedia(recovery.content)) {
+              reportError(
+                new Error(MEDIA_UNAVAILABLE_PLACEHOLDER),
+                t('queue.editFailed'),
+              );
+            }
+            const images = contentToImages(recovery.content);
+            if (
+              recovery.content?.some(
+                (block) => block.type === 'image' && !('data' in block),
+              )
+            )
+              break;
+            const files = await Promise.allSettled(
+              (contentToFiles(recovery.content) ?? []).map(async (file) => {
+                const attachment = await sessionActions.readAttachment(
+                  file.attachmentId!,
+                );
+                return {
+                  ...file,
+                  attachmentId: undefined,
+                  data: base64ToBlob(attachment.data, attachment.mimeType),
+                };
+              }),
+            );
+            const failures = files.filter((file) => file.status === 'rejected');
+            for (const failed of failures)
+              reportError(failed.reason, t('queue.editFailed'));
+            if (
+              failures.some(
+                ({ reason }) =>
+                  !(
+                    reason instanceof DaemonHttpError &&
+                    (reason.status === 404 || reason.status === 410)
+                  ),
+              )
+            )
+              break;
+            drafts.push({
+              ...recovery,
+              images,
+              files: files.flatMap((file) =>
+                file.status === 'fulfilled' ? [file.value] : [],
+              ),
+            });
+          }
+          acknowledge.push(recovery.messageId);
+        }
+        for (const draft of admissions) {
+          if (!isCurrent()) return;
+          const { messageId, request, target } = draft;
+          if (
+            recoveryIds.has(messageId) ||
+            liveAdmissionsRef.current.has(messageId)
+          )
+            continue;
+          if (knownIds.has(messageId)) {
+            await deleteMidTurnAdmission(owner, messageId);
+            continue;
+          }
+          if (request) {
+            const state = await sessionActions.getMidTurnMessages({
+              messageId,
+            });
+            if (!isCurrent() || !state) continue;
+            if (state.disposition === 'owned') {
+              // A recovery arriving after the initiating GET still holds a
+              // local copy until the next reconciliation applies the batch.
+              if (
+                !state.recoveries?.some((item) => item.messageId === messageId)
+              ) {
+                await deleteMidTurnAdmission(owner, messageId);
+              }
+              continue;
+            }
+            if (state.disposition !== 'unknown') continue;
+            const generation =
+              localCancelGenerationsRef.current.get(owner) ??
+              readMidTurnCancelGeneration(owner);
+            if (
+              state.cancelGeneration === undefined ||
+              state.cancelGeneration <= target.cancelGeneration
+            ) {
+              if (generation >= target.cancelGeneration) continue;
+              const result = await sessionActions.enqueueMidTurnMessage(
+                request.text,
+                {
+                  messageId,
+                  target,
+                  content: request.content,
+                  draftText: request.draftText,
+                },
+              );
+              if (result.accepted) {
+                await deleteMidTurnAdmission(owner, messageId);
+                continue;
+              }
+            }
+          }
+          drafts.push(draft);
+        }
+        const editor = editorRef.current;
+        if (!isCurrent() || !drafts.length || !editor?.recoverMidTurnDrafts)
+          return;
+        if (!(await editor.recoverMidTurnDrafts(targetSessionId, drafts)))
+          return;
+        if (acknowledge.length && isCurrent()) {
+          await sessionActions.consumeMidTurnRecovery(
+            acknowledge,
+            targetSessionId,
+          );
+          for (const recovery of recoveries) {
+            if (acknowledge.includes(recovery.messageId) && recovery.error) {
+              reportError(new Error(recovery.error), t('queue.queueFailed'));
+            }
+          }
+        }
+        for (const draft of drafts) {
+          if (localById.has(draft.messageId)) {
+            await deleteMidTurnAdmission(owner, draft.messageId);
+          }
+        }
+      };
+      draftRecoveryChainRef.current = draftRecoveryChainRef.current
+        .then(recover)
+        .catch((error: unknown) => {
+          if (isCurrent()) reportError(error, t('queue.queueFailed'));
+        });
+    },
+    [editorRef, finishUncommittedMidTurn, reportError, sessionActions, t],
+  );
+
   const reconcileMidTurnMessages = useCallback(
     async (
       targetSessionId: string,
@@ -1675,8 +1890,21 @@ export function useQueuedPrompts({
         console.warn('Failed to refresh mid-turn messages', error);
       }
       if (!snapshot || !isCurrent()) {
+        if (isCurrent() && draftOwnerRef.current) {
+          recoverMidTurnDrafts(
+            { messages: [], settledMessageIds: [], promotedMessageIds: [] },
+            targetSessionId,
+          );
+        }
         if (isCurrent()) await refreshPendingPrompts(targetSessionId);
         return undefined;
+      }
+      if (draftOwnerRef.current) {
+        midTurnTargetRef.current = {
+          sessionId: targetSessionId,
+          target: snapshot.target,
+        };
+        recoverMidTurnDrafts(snapshot, targetSessionId);
       }
       // The pending snapshot must post-date the mid-turn snapshot above: the
       // fence default refuses to join a GET dispatched before this call,
@@ -1695,10 +1923,34 @@ export function useQueuedPrompts({
     [
       applyMidTurnSnapshot,
       pruneMissingMidTurnRows,
+      recoverMidTurnDrafts,
       refreshPendingPrompts,
       sessionActions,
     ],
   );
+
+  const cancelMidTurnDrafts = useCallback(() => {
+    const owner = draftOwnerRef.current;
+    const sessionId = latestSessionIdRef.current;
+    if (!owner || !sessionId) return undefined;
+    const turn = midTurnTargetRef.current;
+    let generation =
+      turn?.sessionId === sessionId
+        ? (turn.target?.cancelGeneration ?? -1)
+        : -1;
+    for (const admission of liveAdmissionsRef.current.values()) {
+      if (admission.owner !== owner) continue;
+      generation = Math.max(generation, admission.target.cancelGeneration);
+      admission.controller.abort();
+    }
+    if (generation >= 0) {
+      localCancelGenerationsRef.current.set(owner, generation);
+      saveMidTurnCancelGeneration(owner, generation);
+    }
+    return () => {
+      void reconcileMidTurnMessages(sessionId);
+    };
+  }, [reconcileMidTurnMessages]);
 
   const restoreQueuedPrompts = useCallback((prompts: QueuedPrompt[]) => {
     const currentSessionId = latestSessionIdRef.current;
@@ -1998,8 +2250,11 @@ export function useQueuedPrompts({
     if (!versionChanged) {
       if (!canQueryMidTurn && queuedPromptsRef.current.length > 0) return;
       if (!sessionActive && !canQueryMidTurn) return;
-      if (initialRefreshSessionIdRef.current === sessionId) return;
-      initialRefreshSessionIdRef.current = sessionId;
+      const key = canRecoverMidTurnDrafts
+        ? JSON.stringify([sessionId, clientId, sessionActive])
+        : sessionId;
+      if (initialRefreshSessionIdRef.current === key) return;
+      initialRefreshSessionIdRef.current = key;
     }
 
     if (canQueryMidTurn) {
@@ -2010,9 +2265,11 @@ export function useQueuedPrompts({
   }, [
     pendingPromptVersion,
     connected,
+    clientId,
     sessionId,
     sessionActive,
     canQueryMidTurn,
+    canRecoverMidTurnDrafts,
     ownerToken,
     refreshPendingPrompts,
     reconcileMidTurnMessages,
@@ -2029,6 +2286,17 @@ export function useQueuedPrompts({
     for (const event of pendingPromptEvents) {
       if (event.data.sessionId !== sessionId) continue;
       handled.push(event);
+      if (event.type === 'mid_turn_message_recovery') {
+        for (const messageId of event.data.messageIds)
+          finishUncommittedMidTurn(messageId);
+        continue;
+      }
+      if (event.type === 'mid_turn_message_rejected') {
+        const { messageId, reason } = event.data;
+        finishUncommittedMidTurn(messageId);
+        reportError(new Error(reason), t('queue.queueFailed'));
+        continue;
+      }
       const promptId = event.data.promptId;
       if (!promptId) continue;
       const pendingMidTurnPrompt =
@@ -2255,6 +2523,9 @@ export function useQueuedPrompts({
     rememberCompletedPromptId,
     hideSettledServerPrompt,
     removeDaemonOwnedPrompt,
+    finishUncommittedMidTurn,
+    reportError,
+    t,
   ]);
 
   /**
@@ -3127,6 +3398,9 @@ export function useQueuedPrompts({
       inputAnnotations?: DaemonInputAnnotation[],
       onAdmitted?: () => void,
       submittedPrompt?: string,
+      onDraftStored?: () => void,
+      explicitInsert = false,
+      onDraftStoreFailed?: () => void,
     ) => {
       const trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
@@ -3159,7 +3433,7 @@ export function useQueuedPrompts({
         canInjectMidTurnMedia &&
         workspaceFileActions !== undefined;
       const shouldInsertMidTurn =
-        !hostHoldQueuedPromptsRef.current &&
+        (explicitInsert || !hostHoldQueuedPromptsRef.current) &&
         latestSessionActiveRef.current &&
         (imageList.length === 0 || canSendMidTurnMedia) &&
         (fileList.length === 0 || canSendMidTurnFiles) &&
@@ -3177,6 +3451,25 @@ export function useQueuedPrompts({
         midTurnMessageId &&
         targetSessionId
       ) {
+        const draftOwner = draftOwnerRef.current;
+        const turn = midTurnTargetRef.current;
+        const target =
+          turn?.sessionId === targetSessionId ? turn.target : undefined;
+        if (
+          canRecoverMidTurnDrafts &&
+          (!draftOwner ||
+            !target ||
+            target.cancelGeneration <=
+              (localCancelGenerationsRef.current.get(draftOwner) ??
+                readMidTurnCancelGeneration(draftOwner)))
+        ) {
+          void reconcileMidTurnMessages(targetSessionId);
+          reportError(
+            new Error('The turn changed before the message could be queued.'),
+            t('queue.queueFailed'),
+          );
+          return false;
+        }
         const targetIsCurrent = () =>
           isCurrentOwnerTokenRef.current(ownerToken) &&
           latestSessionIdRef.current === targetSessionId &&
@@ -3208,6 +3501,18 @@ export function useQueuedPrompts({
             : undefined,
           payloadCompleteness: 'complete',
         };
+        const admission =
+          draftOwner && target
+            ? ({
+                messageId: midTurnMessageId,
+                target,
+                order: performance.timeOrigin + performance.now(),
+                text: restoreAdmission.text,
+                images: restoreAdmission.images,
+                files: restoreAdmission.files,
+                inputAnnotations: restoreAdmission.inputAnnotations,
+              } satisfies MidTurnDraftAdmission)
+            : undefined;
         if (
           imageList.length > 0 ||
           fileList.length > 0 ||
@@ -3222,8 +3527,19 @@ export function useQueuedPrompts({
         if (onComplete) {
           settleCompletionCallback(midTurnMessageId, onComplete);
         }
-        const abort = midTurnEnqueueAbortRef.current ?? new AbortController();
-        midTurnEnqueueAbortRef.current = abort;
+        const abort = admission
+          ? new AbortController()
+          : (midTurnEnqueueAbortRef.current ?? new AbortController());
+        if (admission && draftOwner) {
+          liveAdmissionsRef.current.set(midTurnMessageId, {
+            owner: draftOwner,
+            target: admission.target,
+            controller: abort,
+          });
+        } else {
+          midTurnEnqueueAbortRef.current = abort;
+        }
+        let draftStored = false;
         let enqueueStarted = false;
         let enqueueDispatched = false;
         let uploadedAttachmentReferences: DaemonSessionAttachmentReference[] =
@@ -3262,7 +3578,13 @@ export function useQueuedPrompts({
         // Check the caller policy before paying for reads and uploads; the
         // SDK wrapper still re-checks the latest policy at dispatch time.
         void Promise.resolve()
-          .then(() => {
+          .then(async () => {
+            if (admission && draftOwner) {
+              await saveMidTurnAdmission(draftOwner, admission);
+              draftStored = true;
+              onDraftStored?.();
+              abort.signal.throwIfAborted();
+            }
             const blocked = dispatchPolicyRef.current?.(
               annotated?.displayText ?? trimmed,
             );
@@ -3360,11 +3682,27 @@ export function useQueuedPrompts({
               setQueuedPrompts(queuedPromptsRef.current);
             }
             enqueueStarted = true;
+            if (admission && draftOwner) {
+              await saveMidTurnAdmission(draftOwner, {
+                ...admission,
+                request: {
+                  text: annotated?.displayText ?? trimmed,
+                  draftText: trimmed,
+                  content: uploadedAttachmentReferences,
+                },
+              });
+              if (!targetIsCurrent())
+                throw new DOMException('Session changed', 'AbortError');
+              abort.signal.throwIfAborted();
+            }
             return await sessionActions.enqueueMidTurnMessage(
               annotated?.displayText ?? trimmed,
               {
                 signal: abort.signal,
                 messageId: midTurnMessageId,
+                ...(admission
+                  ? { target: admission.target, draftText: trimmed }
+                  : {}),
                 onAdmissionStarted: () => {
                   enqueueDispatched = true;
                 },
@@ -3375,6 +3713,29 @@ export function useQueuedPrompts({
             );
           })
           .then(async (result) => {
+            if (admission && draftOwner) {
+              liveAdmissionsRef.current.delete(midTurnMessageId);
+              if (result.accepted) {
+                await deleteMidTurnAdmission(draftOwner, midTurnMessageId);
+                if (targetIsCurrent()) onAdmitted?.();
+              } else {
+                await saveMidTurnAdmission(draftOwner, admission);
+                await removeUploadedAttachments();
+                if (targetIsCurrent()) {
+                  completionCallbacksRef.current.delete(midTurnMessageId);
+                  pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
+                  removeDaemonOwnedPrompt(midTurnMessageId);
+                  if (result.reason !== 'turn_cancelled')
+                    reportError(
+                      new Error('Daemon rejected mid-turn message'),
+                      t('queue.queueFailed'),
+                    );
+                }
+              }
+              if (targetIsCurrent())
+                await reconcileMidTurnMessages(targetSessionId);
+              return;
+            }
             if (!result.accepted) {
               if (!enqueueDispatched) {
                 enqueueStarted = false;
@@ -3397,6 +3758,7 @@ export function useQueuedPrompts({
               // ends.
               if (
                 targetIsCurrent() &&
+                result.reason !== 'turn_cancelled' &&
                 (result.reason === 'session_idle' ||
                   latestRawStreamingStateRef.current === 'idle')
               ) {
@@ -3430,6 +3792,13 @@ export function useQueuedPrompts({
               queuedPromptsRef.current = next;
               setQueuedPrompts(next);
               if (!targetIsCurrent()) return;
+              if (result.reason === 'turn_cancelled') {
+                restoreQueuedPromptsToEditor(
+                  [restoreAdmission],
+                  targetSessionId,
+                );
+                return;
+              }
               await reconcileMidTurnMessages(targetSessionId);
               if (!targetIsCurrent()) return;
               reportError(
@@ -3452,6 +3821,28 @@ export function useQueuedPrompts({
             }
           })
           .catch(async (error: unknown) => {
+            if (admission && draftOwner) {
+              if (!enqueueDispatched) {
+                if (draftStored)
+                  await saveMidTurnAdmission(draftOwner, admission).catch(
+                    () => undefined,
+                  );
+                await removeUploadedAttachments();
+              }
+              liveAdmissionsRef.current.delete(midTurnMessageId);
+              if (targetIsCurrent()) {
+                if (!enqueueDispatched) {
+                  completionCallbacksRef.current.delete(midTurnMessageId);
+                  pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
+                  removeDaemonOwnedPrompt(midTurnMessageId);
+                }
+                if (!draftStored) onDraftStoreFailed?.();
+                if (!abort.signal.aborted)
+                  reportError(error, t('queue.queueFailed'));
+                await reconcileMidTurnMessages(targetSessionId);
+              }
+              return;
+            }
             if (error instanceof PromptDispatchBlockedError)
               enqueueStarted = false;
             if (!enqueueStarted) await removeUploadedAttachments();
@@ -3529,7 +3920,7 @@ export function useQueuedPrompts({
             setQueuedPrompts(next);
             reportError(error, t('queue.queueFailed'));
           });
-        return true;
+        return !admission || !onDraftStored;
       }
 
       const prompt: QueuedPrompt = {
@@ -3591,6 +3982,13 @@ export function useQueuedPrompts({
           if (current[index]?.midTurnState === undefined) return;
           if (latestSessionIdRef.current !== targetSessionId) return;
           if (!result.accepted) {
+            if (result.reason === 'turn_cancelled') {
+              const next = current.filter((item) => item.id !== prompt.id);
+              queuedPromptsRef.current = next;
+              setQueuedPrompts(next);
+              restoreQueuedPromptsToEditor([prompt], targetSessionId);
+              return;
+            }
             fallbackToPendingPrompt(prompt.id);
             return;
           }
@@ -3627,8 +4025,10 @@ export function useQueuedPrompts({
     [
       canInjectMidTurnMedia,
       canQueryMidTurn,
+      canRecoverMidTurnDrafts,
       fallbackToPendingPrompt,
       reconcileMidTurnMessages,
+      removeDaemonOwnedPrompt,
       releaseChainedPrompt,
       reportError,
       restoreQueuedPromptsToEditor,
@@ -4149,6 +4549,40 @@ export function useQueuedPrompts({
         return;
       }
 
+      if (canRecoverMidTurnDrafts) {
+        setQueuedPromptFlags(id, { isInserting: true });
+        const removeInserted = () => {
+          const next = queuedPromptsRef.current.filter(
+            (item) => item.id !== id,
+          );
+          queuedPromptsRef.current = next;
+          setQueuedPrompts(next);
+          for (const [key, held] of heldPromptsByOwnerRef.current) {
+            heldPromptsByOwnerRef.current.set(
+              key,
+              held.filter((item) => item.id !== id),
+            );
+          }
+        };
+        const resetInsertion = () =>
+          setQueuedPromptFlags(id, { isInserting: false });
+        const liveCount = liveAdmissionsRef.current.size;
+        enqueuePrompt(
+          prompt.text,
+          undefined,
+          undefined,
+          prompt.onComplete,
+          undefined,
+          prompt.onAdmitted,
+          prompt.submittedPrompt,
+          removeInserted,
+          true,
+          resetInsertion,
+        );
+        if (liveAdmissionsRef.current.size === liveCount) resetInsertion();
+        return;
+      }
+
       const messageId = canQueryMidTurn ? `webui_${randomUUID()}` : undefined;
       const targetSessionId = prompt.sessionId ?? latestSessionIdRef.current;
       const promptOwnerKey = queueOwnerKey(
@@ -4413,6 +4847,8 @@ export function useQueuedPrompts({
     [
       canMutateMidTurn,
       canQueryMidTurn,
+      canRecoverMidTurnDrafts,
+      enqueuePrompt,
       reconcileMidTurnMessages,
       reportError,
       sessionActions,
@@ -4723,6 +5159,7 @@ export function useQueuedPrompts({
     queuedPrompts: visibleQueuedPrompts,
     queuedTexts,
     enqueuePrompt,
+    cancelMidTurnDrafts,
     removeQueuedPrompt,
     insertQueuedPrompt,
     sendQueuedPromptNow,

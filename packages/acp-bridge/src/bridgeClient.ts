@@ -31,7 +31,10 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
 // so a rename can't silently break the protocol.
-import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
+import {
+  MID_TURN_MESSAGE_INJECTED_EVENT,
+  MID_TURN_MESSAGE_REJECTED_EVENT,
+} from './daemonEventTypes.js';
 import {
   parseBackgroundNotificationTurn,
   ACTIVE_WORK_HEARTBEAT_VERSION,
@@ -40,15 +43,19 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
+  MAX_MID_TURN_DRAIN_ITEMS,
   MID_TURN_GOAL_HANDOFF_METHOD,
-  MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
+  MID_TURN_QUEUE_RECORDED_METHOD,
+  MID_TURN_QUEUE_SETTLE_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   type ActiveWorkHoldV1,
   type ActiveWorkSnapshotV1,
 } from './bridgeTypes.js';
 import type {
   BackgroundNotificationTurn,
+  BridgeCommittedMidTurnMessage,
+  BridgeMidTurnOwnership,
   BridgeSessionState,
   BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
@@ -56,6 +63,13 @@ import type {
   MidTurnQueueEntry,
   PendingPromptEntry,
 } from './bridgeTypes.js';
+import {
+  finishMidTurnMessage,
+  recoverMidTurnMessages,
+  setMidTurnOwnership,
+  terminalMidTurnOwnership,
+  type MidTurnRecoveryEntry,
+} from './mid-turn-queue.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import {
   isWorkflowAncestorTrustResponse,
@@ -733,6 +747,11 @@ export interface BridgeClientSessionEntry {
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  midTurnRecoveries?: MidTurnRecoveryEntry[];
+  midTurnOwnership?: Map<string, BridgeMidTurnOwnership>;
+  persistMidTurnOwnership?: (records: BridgeMidTurnOwnership[]) => void;
+  commitMidTurnMessages?: (messages: BridgeCommittedMidTurnMessage[]) => void;
+  clearCommittedMidTurnMessages?: (messageIds: string[]) => void;
   /**
    * Bounded ring of drained mid-turn message ids. Owned by the full
    * `SessionEntry` in `bridge.ts`; surfaced on this narrowed view so the
@@ -855,20 +874,6 @@ function requeueMidTurnMessages(
 }
 
 /** Removes and returns the queued messages that are not queue-only, in order. */
-function takeUserMidTurnMessages(
-  queue: MidTurnQueueEntry[],
-): MidTurnQueueEntry[] {
-  const taken = queue.filter((message) => !message.queueOnly);
-  if (taken.length > 0) {
-    queue.splice(
-      0,
-      queue.length,
-      ...queue.filter((message) => message.queueOnly),
-    );
-  }
-  return taken;
-}
-
 export function clearGoalTurn(
   entry: Pick<
     BridgeClientSessionEntry,
@@ -1062,7 +1067,11 @@ export class BridgeClient implements Client {
      * Trailing and optional so existing direct constructors stay
      * source-compatible.
      */
-    private readonly onAutomaticTurnEnded?: (sessionId: string) => void,
+    private readonly onAutomaticTurnEnded?: (
+      sessionId: string,
+      turnId: string | undefined,
+      reason: unknown,
+    ) => void,
     private readonly onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler,
     private readonly onBackgroundTurnStart?: (
       sessionId: string,
@@ -1637,7 +1646,7 @@ export class BridgeClient implements Client {
       promptId: turnId,
       data: { sessionId, reason, turnId },
     });
-    this.onAutomaticTurnEnded?.(sessionId);
+    this.onAutomaticTurnEnded?.(sessionId, turnId, reason);
   }
 
   /**
@@ -1775,6 +1784,24 @@ export class BridgeClient implements Client {
       );
       return {};
     }
+    if (method === MID_TURN_QUEUE_SETTLE_METHOD) {
+      return this.settleMidTurnQueue(params);
+    }
+    if (method === MID_TURN_QUEUE_RECORDED_METHOD) {
+      const { sessionId, messageIds } = params;
+      if (
+        typeof sessionId !== 'string' ||
+        !Array.isArray(messageIds) ||
+        !messageIds.every((id): id is string => typeof id === 'string')
+      )
+        throw RequestError.invalidParams();
+      if (this.ownsSession(sessionId)) {
+        this.resolveEntry(sessionId)?.clearCommittedMidTurnMessages?.(
+          messageIds,
+        );
+      }
+      return {};
+    }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
     }
@@ -1799,7 +1826,8 @@ export class BridgeClient implements Client {
     if (
       requestedPromptId !== undefined &&
       (typeof requestedPromptId !== 'string' ||
-        !ownsActivePrompt(entry, requestedPromptId) ||
+        (!ownsActivePrompt(entry, requestedPromptId) &&
+          requestedPromptId !== entry.goalTurnId) ||
         (entry.promptActive === true &&
           requestedPromptId !== entry.activePromptId))
     ) {
@@ -1807,7 +1835,10 @@ export class BridgeClient implements Client {
     }
     // The child knows which execution is draining during a prompt handoff.
     // Capture ownership before attachment I/O can yield to the next turn.
-    const promptId = requestedPromptId ?? currentTurnMetadata(entry).promptId;
+    const promptId =
+      requestedPromptId ??
+      entry.goalTurnId ??
+      currentTurnMetadata(entry).promptId;
     const queuedBefore = [...entry.midTurnMessageQueue];
     // A send-now request that arrives while this drain resolves attachments
     // waits for its answer, so the child never sees the request ahead of a
@@ -1829,32 +1860,28 @@ export class BridgeClient implements Client {
         sendNow();
       });
     };
-    // A send-now drain takes only the user's own messages: queue-only steering
-    // keeps its tool-boundary delivery and the settle path its caller drives.
-    const drained =
-      params['userInputOnly'] === true
-        ? takeUserMidTurnMessages(entry.midTurnMessageQueue)
-        : entry.midTurnMessageQueue.splice(0);
-    if (drained.length > 0) {
-      // Claim the ids before media I/O yields so retries and removals cannot
-      // observe a drained message as neither queued nor settled.
-      for (const item of drained) {
-        entry.settledMidTurnMessageIds.push(item.messageId);
-      }
-      if (
-        entry.settledMidTurnMessageIds.length >
-        MID_TURN_RECONCILIATION_RING_SIZE
-      ) {
-        entry.settledMidTurnMessageIds.splice(
-          0,
-          entry.settledMidTurnMessageIds.length -
-            MID_TURN_RECONCILIATION_RING_SIZE,
-        );
+    const leaseId = randomUUID();
+    const drained = queuedBefore
+      .filter((item) =>
+        item.queueOnly
+          ? params['userInputOnly'] !== true
+          : params['leaseUserInput'] === true &&
+            promptId !== undefined &&
+            !item.lease &&
+            !item.promoted &&
+            (item.targetPromptId === undefined ||
+              item.targetPromptId === promptId),
+      )
+      .slice(0, MAX_MID_TURN_DRAIN_ITEMS);
+    for (const item of drained) {
+      if (item.queueOnly) {
+        finishMidTurnMessage(entry, item);
+      } else {
+        item.targetPromptId = promptId;
+        item.lease = { id: leaseId, controller: new AbortController() };
       }
     }
-    // Shared across every message in this drain: one stored attachment that
-    // several queued messages reference is read and base64-encoded once
-    // instead of once per message.
+    // Preserve the existing private steering attachment budget.
     const attachmentMemo = new Map<string, Promise<ContentBlock>>();
     const serializedAttachmentIds = new Set<string>();
     const items: Array<{
@@ -1862,81 +1889,114 @@ export class BridgeClient implements Client {
       displayText: string;
       content: ContentBlock[];
       queueOnly?: true;
+      leaseId?: string;
       _meta?: Record<string, unknown>;
       attachmentReferences?: SessionAttachmentReference[];
     }> = [];
     try {
       for (const item of drained) {
+        const signal = item.lease?.controller.signal;
+        if (signal?.aborted) continue;
         let degraded = 0;
         const planned = (item.content ?? []).filter((block) => {
           if (!isSessionAttachmentReference(block)) return true;
-          if (serializedAttachmentIds.has(block.attachmentId)) {
+          if (
+            item.queueOnly &&
+            serializedAttachmentIds.has(block.attachmentId)
+          ) {
             degraded += 1;
             return false;
           }
-          serializedAttachmentIds.add(block.attachmentId);
+          if (item.queueOnly) serializedAttachmentIds.add(block.attachmentId);
           return true;
         });
-        let resolvedBlocks: ContentBlock[];
-        let attachmentReferences: SessionAttachmentReference[];
         try {
-          resolvedBlocks = await entry.attachments.resolveContent(
-            planned,
-            attachmentMemo,
-          );
-          attachmentReferences = planned.filter(isSessionAttachmentReference);
+          let resolvedBlocks: ContentBlock[];
+          let attachmentReferences: SessionAttachmentReference[];
+          try {
+            resolvedBlocks = await entry.attachments.resolveContent(
+              planned,
+              signal ? undefined : attachmentMemo,
+              signal,
+            );
+            attachmentReferences = planned.filter(isSessionAttachmentReference);
+          } catch (error) {
+            if (
+              !item.queueOnly ||
+              !(error instanceof SessionAttachmentReferenceError)
+            )
+              throw error;
+            const perBlock = await entry.attachments.resolveContentDegrading(
+              planned,
+              signal ? undefined : attachmentMemo,
+              signal,
+            );
+            resolvedBlocks = perBlock.resolvedBlocks;
+            attachmentReferences = perBlock.retainedBlocks.filter(
+              isSessionAttachmentReference,
+            );
+            degraded += perBlock.degraded;
+          }
+          if (signal?.aborted) continue;
+          const content: ContentBlock[] = [
+            ...(item.text ? [{ type: 'text' as const, text: item.text }] : []),
+            ...resolvedBlocks,
+          ];
+          items.push({
+            messageId: item.messageId,
+            displayText: item.text,
+            content:
+              degraded > 0 ? withAttachmentDegradationMarker(content) : content,
+            ...(item.queueOnly ? { queueOnly: true } : { leaseId }),
+            ...(attachmentReferences.length > 0
+              ? { attachmentReferences }
+              : {}),
+          });
         } catch (error) {
-          // Only a gone/invalid reference degrades — per block, so one dead
-          // reference drops itself and keeps its siblings. Any other error
-          // (fd exhaustion, I/O failure) propagates instead of silently
-          // destroying every message sharing the attachment.
-          if (!(error instanceof SessionAttachmentReferenceError)) throw error;
-          writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} degraded attachment for message ${JSON.stringify(item.messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+          if (item.queueOnly) throw error;
+          if (signal?.aborted) continue;
+          recoverMidTurnMessages(
+            { ...entry, midTurnRecoveries: (entry.midTurnRecoveries ??= []) },
+            [item],
+            error instanceof Error ? error.message : String(error),
           );
-          const perBlock = await entry.attachments.resolveContentDegrading(
-            planned,
-            attachmentMemo,
-          );
-          resolvedBlocks = perBlock.resolvedBlocks;
-          attachmentReferences = perBlock.retainedBlocks.filter(
-            isSessionAttachmentReference,
-          );
-          degraded += perBlock.degraded;
         }
-        let content: ContentBlock[] = [
-          ...(item.text ? [{ type: 'text' as const, text: item.text }] : []),
-          ...resolvedBlocks,
-        ];
-        if (degraded > 0) content = withAttachmentDegradationMarker(content);
-        items.push({
-          messageId: item.messageId,
-          displayText: item.text,
-          content,
-          ...(item.queueOnly ? { queueOnly: true } : {}),
-          ...(attachmentReferences.length > 0 ? { attachmentReferences } : {}),
-        });
       }
     } catch (error) {
-      // Non-media resolution failure after the splice + settle above: the
-      // store still holds the bytes, so hand the messages back to the queue
-      // for the next drain instead of losing them, and take their ids back
-      // out of the settled ring so a same-id retry is not acked as already
-      // delivered.
-      const requeued = new Set(drained.map((queued) => queued.messageId));
+      const privateMessages = drained.filter((item) => item.queueOnly);
+      const requeued = new Set(
+        privateMessages.map((queued) => queued.messageId),
+      );
       const ring = entry.settledMidTurnMessageIds;
       const kept = ring.filter((id) => !requeued.has(id));
       ring.splice(0, ring.length, ...kept);
-      requeueMidTurnMessages(entry.midTurnMessageQueue, queuedBefore, drained);
+      requeueMidTurnMessages(
+        entry.midTurnMessageQueue,
+        queuedBefore,
+        privateMessages,
+      );
+      recoverMidTurnMessages(
+        { ...entry, midTurnRecoveries: (entry.midTurnRecoveries ??= []) },
+        entry.midTurnMessageQueue.filter((item) => item.lease?.id === leaseId),
+        error instanceof Error ? error.message : String(error),
+      );
       writeStderrLine(
-        `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed, requeued ${drained.length} message(s): ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+        `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
       );
       answered();
       throw error;
     }
-    // Queue-only entries are private coordinator steering, not UI transcript.
-    const echoed = drained.filter((item) => !item.queueOnly);
-    const messages = drained.map((item) => item.text);
+    const liveItems = items.filter(
+      (item) =>
+        item.queueOnly ||
+        entry.midTurnMessageQueue.some(
+          (queued) =>
+            queued.messageId === item.messageId && queued.lease?.id === leaseId,
+        ),
+    );
+    const messages = liveItems
+      .filter((item) => item.queueOnly)
+      .map((item) => item.displayText);
     // Structured twin of `messages` carrying any queued media blocks. The ACP
     // child prefers `items` when present and falls back to `messages`, so
     // text-only entries surface as a single text block and old children keep
@@ -1946,38 +2006,161 @@ export class BridgeClient implements Client {
       (prompt) =>
         prompt.state === 'queued' && !prompt.abortController.signal.aborted,
     );
-    if (echoed.length > 0) {
-      // `publish()` never throws — it returns `undefined` on a closed bus (see
-      // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
-      // around publish()"). Capture the result instead. A dropped frame is
-      // teardown-only: the child still gets the spliced messages below, but the
-      // browser must recover the handoff from the reconciliation ring.
-      const published = entry.events.publish({
-        type: MID_TURN_MESSAGE_INJECTED_EVENT,
-        ...(promptId ? { promptId } : {}),
-        data: {
-          sessionId: entry.sessionId,
-          messages: echoed.map((item) => item.text),
-          messageIds: echoed.map((item) => item.messageId),
-          // Carry the structured `items` twin (content blocks per message) so
-          // the browser-side echo renderer can show attached images alongside
-          // the message text. Older consumers that don't read this field keep
-          // working unchanged.
-          items: echoed.map((item) => ({
-            ...(item.content && item.content.length > 0
-              ? { content: item.content }
-              : {}),
-          })),
-        },
-      });
-      writeStderrLine(
-        published
-          ? `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} injected into running turn`
-          : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} echo frame dropped (bus closed); reconciliation required`,
-      );
-    }
     answered();
-    return { messages, items, hasQueuedPrompt };
+    return { messages, items: liveItems, hasQueuedPrompt };
+  }
+
+  private settleMidTurnQueue(
+    params: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const { sessionId, leaseId, outcomes } = params;
+    const committedMessageIds: string[] = [];
+    if (
+      typeof sessionId !== 'string' ||
+      typeof leaseId !== 'string' ||
+      !Array.isArray(outcomes)
+    ) {
+      throw RequestError.invalidParams();
+    }
+    if (!this.ownsSession(sessionId)) return { committedMessageIds };
+    const entry = this.resolveEntry(sessionId);
+    if (!entry || entry.closing || entry.workspaceChangeFence !== undefined)
+      return { committedMessageIds };
+    const owner = {
+      ...entry,
+      midTurnRecoveries: (entry.midTurnRecoveries ??= []),
+    };
+    const accepted: Array<{
+      item: MidTurnQueueEntry;
+      payload: BridgeCommittedMidTurnMessage;
+    }> = [];
+    const seen = new Set<string>();
+    const validParts = (
+      parts: unknown,
+    ): parts is BridgeCommittedMidTurnMessage['parts'] =>
+      Array.isArray(parts) &&
+      parts.length > 0 &&
+      parts.every(
+        (part) =>
+          isRecord(part) &&
+          (typeof part['text'] === 'string' ||
+            isRecord(part['inlineData']) ||
+            isRecord(part['fileData'])),
+      );
+    for (const value of outcomes) {
+      if (
+        !isRecord(value) ||
+        typeof value['messageId'] !== 'string' ||
+        seen.has(value['messageId'])
+      )
+        continue;
+      seen.add(value['messageId']);
+      const item = entry.midTurnMessageQueue.find(
+        (queued) =>
+          queued.messageId === value['messageId'] &&
+          queued.lease?.id === leaseId,
+      );
+      if (!item) continue;
+      const kind = value['kind'];
+      const reason = value['reason'];
+      const parts = value['parts'];
+      const transcriptParts = value['transcriptParts'];
+      const historyPromptId = value['historyPromptId'];
+      const hookContext = value['hookContext'];
+      if (kind === 'reject' && typeof reason === 'string') {
+        setMidTurnOwnership(owner, [terminalMidTurnOwnership(item)]);
+        finishMidTurnMessage(entry, item);
+        entry.events.publish({
+          type: MID_TURN_MESSAGE_REJECTED_EVENT,
+          ...(item.targetPromptId ? { promptId: item.targetPromptId } : {}),
+          data: { sessionId, messageId: item.messageId, reason },
+        });
+        entry.events.publish({
+          type: 'pending_prompt_completed',
+          promptId: item.messageId,
+          data: {
+            sessionId,
+            promptId: item.messageId,
+            state: 'removed',
+            error: reason,
+          },
+        });
+      } else if (kind === 'release' && !item.promoted) {
+        delete item.lease;
+      } else if (
+        kind === 'allow' &&
+        typeof value['displayText'] === 'string' &&
+        validParts(parts) &&
+        (transcriptParts === undefined || validParts(transcriptParts)) &&
+        (historyPromptId === undefined ||
+          typeof historyPromptId === 'string') &&
+        (hookContext === undefined || typeof hookContext === 'string')
+      ) {
+        const attachmentReferences = item.content?.filter(
+          isSessionAttachmentReference,
+        );
+        accepted.push({
+          item,
+          payload: {
+            messageId: item.messageId,
+            parts,
+            ...(transcriptParts ? { transcriptParts } : {}),
+            displayText: item.text,
+            ...(item.draftText !== undefined
+              ? { originalText: item.draftText }
+              : {}),
+            ...(item.promoted ? { promoted: true } : {}),
+            ...(historyPromptId ? { historyPromptId } : {}),
+            ...(hookContext ? { hookContext } : {}),
+            ...(attachmentReferences?.length ? { attachmentReferences } : {}),
+          },
+        });
+      } else {
+        recoverMidTurnMessages(
+          owner,
+          [item],
+          typeof reason === 'string'
+            ? reason
+            : 'Mid-turn input was not checked.',
+        );
+      }
+    }
+    if (!accepted.length) return { committedMessageIds };
+    try {
+      if (!entry.commitMidTurnMessages)
+        throw new Error('Mid-turn commit storage is unavailable.');
+      entry.commitMidTurnMessages(accepted.map(({ payload }) => payload));
+    } catch (error) {
+      recoverMidTurnMessages(
+        owner,
+        accepted.map(({ item }) => item),
+        error instanceof Error ? error.message : String(error),
+      );
+      return { committedMessageIds };
+    }
+    for (const { item } of accepted) {
+      finishMidTurnMessage(entry, item, !item.promoted);
+      committedMessageIds.push(item.messageId);
+    }
+    const first = accepted[0]!.item;
+    const published = entry.events.publish({
+      type: MID_TURN_MESSAGE_INJECTED_EVENT,
+      ...(first.targetPromptId ? { promptId: first.targetPromptId } : {}),
+      data: {
+        sessionId,
+        messages: accepted.map(({ item }) => item.text),
+        messageIds: committedMessageIds,
+        items: accepted.map(({ item }) =>
+          item.content?.length ? { content: item.content } : {},
+        ),
+        ...(first.promoted ? { promoted: true } : {}),
+      },
+    });
+    if (!published)
+      writeStderrLine(
+        `[mid-turn] session=${sessionId} echo frame dropped (bus closed); committed input is recoverable from the transcript`,
+      );
+    return { committedMessageIds };
   }
 
   private async handleExternalToolGuardPrepare(
@@ -2896,9 +3079,18 @@ export class BridgeClient implements Client {
         typeof turnId === 'string' && turnId.length > 0 && turnId.length <= 256
           ? turnId
           : undefined;
-      if (entry.goalTurnId !== goalTurnId) clearGoalTurn(entry, this.mediator);
+      const previousGoalTurnId = entry.goalTurnId;
+      if (previousGoalTurnId !== goalTurnId)
+        clearGoalTurn(entry, this.mediator);
       entry.goalTurnActive = true;
       entry.goalTurnId = goalTurnId;
+      if (previousGoalTurnId && previousGoalTurnId !== goalTurnId) {
+        this.onAutomaticTurnEnded?.(
+          sessionId,
+          previousGoalTurnId,
+          'superseded',
+        );
+      }
       this.onGoalTurnStart?.(sessionId);
       return;
     }
@@ -2914,10 +3106,18 @@ export class BridgeClient implements Client {
         typeof turnId === 'string' && turnId === entry.retiringGoalTurnId;
       // A malformed Goal terminal must not pin future loads to live replay
       // or strand the queue when its turn_complete cannot be published.
-      if (source === 'goal' && !retiringGoal) {
-        if (turnId !== entry.goalTurnId) return;
-        clearGoalTurn(entry, this.mediator);
-        this.onAutomaticTurnEnded?.(sessionId);
+      if (source === 'goal') {
+        if (!retiringGoal) {
+          if (turnId !== entry.goalTurnId) return;
+          clearGoalTurn(entry, this.mediator);
+        }
+        this.onAutomaticTurnEnded?.(
+          sessionId,
+          typeof turnId === 'string' ? turnId : undefined,
+          params['midTurnHandoff'] === true && reason === 'cancelled'
+            ? 'mid_turn_handoff'
+            : reason,
+        );
       }
       if (
         typeof reason !== 'string' ||

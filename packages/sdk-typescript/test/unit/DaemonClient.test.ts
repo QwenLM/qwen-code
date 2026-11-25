@@ -8997,6 +8997,38 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('prepares a stable id with the host turn and reuses it on the wire', async () => {
+      const target = { promptId: 'turn-1', cancelGeneration: 3 };
+      const { fetch, calls } = recordingFetch((call) =>
+        call.method === 'GET'
+          ? jsonResponse(200, {
+              messages: [],
+              settledMessageIds: [],
+              promotedMessageIds: [],
+              target,
+            })
+          : jsonResponse(200, { accepted: false, reason: 'turn_cancelled' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const prepared = await client.prepareMidTurnMessage('s-1', {
+        clientId: 'browser-1',
+      });
+      expect(prepared).toMatchObject({ messageId: expect.any(String), target });
+      await expect(
+        client.enqueueMidTurnMessage('s-1', 'steer', {
+          ...prepared!,
+          clientId: 'browser-1',
+          draftText: '@file steer',
+        }),
+      ).resolves.toEqual({ accepted: false, reason: 'turn_cancelled' });
+      expect(JSON.parse(calls[1]?.body as string)).toEqual({
+        message: 'steer',
+        ...prepared,
+        draftText: '@file steer',
+      });
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('browser-1');
+    });
+
     it('omits the content field when no media blocks are attached', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { accepted: true }),
@@ -9096,6 +9128,43 @@ describe('DaemonClient', () => {
       expect(forwarded?.aborted).toBe(false);
       ctrl.abort();
       expect(forwarded?.aborted).toBe(true);
+    });
+  });
+
+  it('reconciles and acknowledges draft recovery under the session client identity', async () => {
+    const snapshot = {
+      messages: [],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+      cancelGeneration: 4,
+      recoveries: [{ messageId: 'mid/1', text: 'restore this' }],
+      disposition: 'owned',
+    };
+    const { fetch, calls } = recordingFetch((call) =>
+      call.method === 'GET'
+        ? jsonResponse(200, snapshot)
+        : new Response(null, { status: 204 }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await expect(
+      client.getMidTurnMessages('s/1', {
+        clientId: 'browser-1',
+        messageId: 'mid/1',
+      }),
+    ).resolves.toEqual(snapshot);
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/s%2F1/mid-turn-messages?messageId=mid%2F1',
+    );
+    await client.consumeMidTurnRecovery('s/1', ['mid/1'], {
+      clientId: 'browser-1',
+    });
+    expect(calls[1]).toMatchObject({
+      url: 'http://daemon/session/s%2F1/mid-turn-messages/recovery/consume',
+      method: 'POST',
+      headers: { 'x-qwen-client-id': 'browser-1' },
+    });
+    expect(JSON.parse(calls[1]?.body as string)).toEqual({
+      messageIds: ['mid/1'],
     });
   });
 

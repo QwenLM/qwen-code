@@ -385,12 +385,19 @@ export class HookSystem {
     prompt: string,
     signal?: AbortSignal,
     submittedPrompt?: string,
+    requireVerdict?: true,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
       prompt,
       signal,
       submittedPrompt,
+      ...(requireVerdict ? [true as const] : []),
     );
+    if (requireVerdict && !result.success) {
+      throw (
+        result.errors[0] ?? new Error('UserPromptSubmit hook execution failed')
+      );
+    }
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
       : undefined;

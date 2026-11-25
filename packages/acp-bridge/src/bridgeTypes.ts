@@ -5,6 +5,7 @@
  */
 
 import type { BundledGeneratedUiStatus } from '@qwen-code/qwen-code-core/config/generated-ui.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import type {
   ApprovalMode,
@@ -1534,7 +1535,7 @@ export interface BridgeClientRequestContext {
    * that require a live client must re-check attachment. Transport routes never
    * populate this field from request input.
    */
-  promotedMidTurn?: { originatorClientId?: string };
+  promotedMidTurn?: { originatorClientId?: string; leaseId: string };
   /**
    * Internal synchronous admission signal. The bridge invokes it only after
    * the prompt owns a pending-queue slot. Transport routes never populate it
@@ -1743,6 +1744,51 @@ export interface BridgeHeartbeatState {
  * prompts; older clients can omit it.
  */
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+export const MAX_MID_TURN_DRAIN_ITEMS = 10;
+export const MID_TURN_QUEUE_SETTLE_METHOD = 'craft/settleMidTurnQueue';
+export const MID_TURN_QUEUE_RECORDED_METHOD = 'craft/recordedMidTurnMessages';
+export const MID_TURN_QUEUE_RECOVER_METHOD =
+  'craft/recoverCommittedMidTurnMessages';
+export const MID_TURN_LEASE_META_KEY = 'qwen.midTurnLease';
+export const MID_TURN_RECOVERY_PENDING_META_KEY = 'qwen.midTurnRecoveryPending';
+export const MID_TURN_HANDOFF_META_KEY = 'qwen.midTurnHandoff';
+
+export interface BridgeCommittedMidTurnMessage {
+  messageId: string;
+  parts: NonNullable<NonNullable<ChatRecord['message']>['parts']>;
+  transcriptParts?: BridgeCommittedMidTurnMessage['parts'];
+  displayText: string;
+  originalText?: string;
+  hookContext?: string;
+  attachmentReferences?: SessionAttachmentReference[];
+  promoted?: true;
+  historyPromptId?: string;
+}
+
+export type BridgeMidTurnOutcome =
+  | ({ kind: 'allow' } & BridgeCommittedMidTurnMessage)
+  | { messageId: string; kind: 'reject' | 'error'; reason: string }
+  | { messageId: string; kind: 'release' };
+
+export interface BridgeMidTurnTarget {
+  promptId: string;
+  cancelGeneration: number;
+}
+
+export interface BridgeMidTurnRecovery {
+  messageId: string;
+  text: string;
+  content?: BridgePromptContentBlock[];
+  error?: string;
+}
+
+export interface BridgeMidTurnOwnership {
+  messageId: string;
+  clientId?: string;
+  anonymous?: true;
+  state: 'pending' | 'recovery' | 'terminal';
+  draft?: BridgeMidTurnRecovery;
+}
 // A drain with `userInputOnly: true` (sent for send-now) takes only messages
 // that are not queue-only; hosts that ignore the flag drain everything.
 
@@ -1854,6 +1900,11 @@ export interface MidTurnQueueEntry {
    */
   content?: BridgePromptContentBlock[];
   originatorClientId?: string;
+  recoveryClientId?: string;
+  draftText?: string;
+  targetPromptId?: string;
+  lease?: { id: string; controller: AbortController };
+  promoted?: { controller: AbortController };
   queueOnly?: boolean;
   onSettledWithoutDrain?: () => void;
 }
@@ -1867,6 +1918,10 @@ export interface BridgeMidTurnMessagesSnapshot {
   messages: Array<Pick<MidTurnQueueEntry, 'messageId' | 'text' | 'content'>>;
   settledMessageIds: string[];
   promotedMessageIds: string[];
+  target?: BridgeMidTurnTarget;
+  cancelGeneration?: number;
+  recoveries?: BridgeMidTurnRecovery[];
+  disposition?: 'owned' | 'unknown';
 }
 
 /**
@@ -3257,11 +3312,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       rejectIfIdle?: boolean;
       queueOnly?: boolean;
       onSettledWithoutDrain?: () => void;
+      target?: BridgeMidTurnTarget;
+      draftText?: string;
       /** Applied only if the message is promoted into a new prompt. */
       eventDetailMode?: LiveReplayMode;
       content?: readonly BridgePromptContentBlock[];
     },
-  ): { accepted: boolean; messageId?: string; reason?: 'session_idle' };
+  ): {
+    accepted: boolean;
+    messageId?: string;
+    reason?: 'session_idle' | 'turn_cancelled';
+  };
 
   createSessionAttachmentUpload(
     sessionId: string,
@@ -3379,7 +3440,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getMidTurnMessages(
     sessionId: string,
     context?: BridgeClientRequestContext,
+    messageId?: string,
   ): BridgeMidTurnMessagesSnapshot;
+
+  consumeMidTurnRecoveries(
+    sessionId: string,
+    messageIds: readonly string[],
+    context?: BridgeClientRequestContext,
+  ): { consumedMessageIds: string[] };
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).

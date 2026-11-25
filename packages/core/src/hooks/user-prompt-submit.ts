@@ -27,6 +27,7 @@ export async function runUserPromptSubmit(
   submittedPrompt: string | undefined,
   signal?: AbortSignal,
   owner?: HookExecutionOwner,
+  requireVerdict?: true,
 ): Promise<UserPromptSubmitDecision | undefined> {
   if (
     config.getDisableAllHooks?.() ||
@@ -35,25 +36,50 @@ export async function runUserPromptSubmit(
     return undefined;
   }
   const messageBus = config.getMessageBus?.();
-  if (!messageBus) return undefined;
-  const response = await messageBus.request<
-    HookExecutionRequest,
-    HookExecutionResponse
-  >(
-    {
-      type: MessageBusType.HOOK_EXECUTION_REQUEST,
-      owner: owner ?? captureHookExecutionOwner(config),
-      eventName: 'UserPromptSubmit',
-      input: {
-        prompt,
-        ...(submittedPrompt !== undefined
-          ? { submitted_prompt: submittedPrompt }
-          : {}),
-      },
-      ...(signal ? { signal } : {}),
+  if (!messageBus) {
+    if (requireVerdict)
+      throw new Error('UserPromptSubmit hook bus unavailable');
+    return undefined;
+  }
+  const hookController = requireVerdict ? new AbortController() : undefined;
+  const hookSignal = hookController
+    ? signal
+      ? AbortSignal.any([signal, hookController.signal])
+      : hookController.signal
+    : signal;
+  const request: Omit<HookExecutionRequest, 'correlationId'> = {
+    type: MessageBusType.HOOK_EXECUTION_REQUEST,
+    owner: owner ?? captureHookExecutionOwner(config),
+    eventName: 'UserPromptSubmit',
+    input: {
+      prompt,
+      ...(submittedPrompt !== undefined
+        ? { submitted_prompt: submittedPrompt }
+        : {}),
     },
-    MessageBusType.HOOK_EXECUTION_RESPONSE,
-  );
+    ...(hookSignal ? { signal: hookSignal } : {}),
+    ...(requireVerdict ? { requirePromptVerdict: true } : {}),
+  };
+  const response = requireVerdict
+    ? await messageBus
+        .request<
+          HookExecutionRequest,
+          HookExecutionResponse
+        >(request, MessageBusType.HOOK_EXECUTION_RESPONSE, undefined, hookSignal)
+        .catch((error: unknown) => {
+          hookController?.abort(error);
+          throw error;
+        })
+    : await messageBus.request<HookExecutionRequest, HookExecutionResponse>(
+        request,
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+  if (requireVerdict && response.success !== true) {
+    const error =
+      response.error ?? new Error('UserPromptSubmit hook execution failed');
+    hookController?.abort(error);
+    throw error;
+  }
   const output = response.output
     ? createHookOutput('UserPromptSubmit', response.output)
     : undefined;

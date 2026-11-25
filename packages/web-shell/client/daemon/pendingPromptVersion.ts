@@ -5,11 +5,15 @@
  */
 
 import {
+  MID_TURN_MESSAGE_RECOVERY_EVENT,
+  MID_TURN_MESSAGE_REJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
 } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonMidTurnMessageRecoveryEvent,
+  DaemonMidTurnMessageRejectedEvent,
   DaemonPendingPromptAddedEvent,
   DaemonPendingPromptStartedEvent,
   DaemonPendingPromptCompletedEvent,
@@ -39,6 +43,8 @@ let version = 0;
 let events: PendingPromptSidechannelEvent[] = [];
 
 export type PendingPromptSidechannelEvent =
+  | DaemonMidTurnMessageRecoveryEvent
+  | DaemonMidTurnMessageRejectedEvent
   | DaemonPendingPromptAddedEvent
   | DaemonPendingPromptStartedEvent
   | DaemonPendingPromptCompletedEvent
@@ -107,6 +113,8 @@ export function publishPendingPromptEvent(event: unknown): boolean {
   events = [...events, parsed].slice(-MAX_PENDING_PROMPT_EVENTS);
   notifyPendingPromptEvents();
   if (
+    parsed.type === MID_TURN_MESSAGE_RECOVERY_EVENT ||
+    parsed.type === MID_TURN_MESSAGE_REJECTED_EVENT ||
     parsed.type === PENDING_PROMPT_ADDED_EVENT ||
     parsed.type === PENDING_PROMPT_STARTED_EVENT ||
     parsed.type === PENDING_PROMPT_COMPLETED_EVENT
@@ -134,6 +142,20 @@ function parsePendingPromptEvent(
   if (!data || typeof data !== 'object') return undefined;
   const dataRecord = data as Record<string, unknown>;
   if (typeof dataRecord['sessionId'] !== 'string') return undefined;
+  if (
+    type === MID_TURN_MESSAGE_RECOVERY_EVENT &&
+    Array.isArray(dataRecord['messageIds']) &&
+    dataRecord['messageIds'].every((id) => typeof id === 'string')
+  ) {
+    return event as DaemonMidTurnMessageRecoveryEvent;
+  }
+  if (
+    type === MID_TURN_MESSAGE_REJECTED_EVENT &&
+    typeof dataRecord['messageId'] === 'string' &&
+    typeof dataRecord['reason'] === 'string'
+  ) {
+    return event as DaemonMidTurnMessageRejectedEvent;
+  }
   if (
     (type === PENDING_PROMPT_ADDED_EVENT ||
       type === PENDING_PROMPT_STARTED_EVENT ||

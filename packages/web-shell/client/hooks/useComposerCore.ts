@@ -52,6 +52,7 @@ import {
 } from './useIsTouchComposer';
 import type { CommandInfo } from '../adapters/types';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
+import type { MidTurnDraft } from './mid-turn-drafts';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useOptionalComposerWorkspace } from './useComposerWorkspace.js';
 import {
@@ -1034,6 +1035,10 @@ export interface EditorHandle extends WebShellComposerApi {
   retryLast(): void;
   restoreImages(images: readonly PromptImage[]): void;
   restoreFiles(files: readonly PromptFile[]): void;
+  recoverMidTurnDrafts?(
+    sessionId: string,
+    drafts: readonly MidTurnDraft[],
+  ): Promise<boolean>;
   restoreInputAnnotations?(
     inputAnnotations: readonly DaemonInputAnnotation[],
   ): void;
@@ -1328,6 +1333,7 @@ interface ComposerReferenceDraft {
   text: string;
   inlineTags: InlineTagPlacement[];
   tags: WebShellComposerTag[];
+  recoveredMessageIds?: string[];
 }
 
 const REFERENCE_DRAFT_PREFIX = '\0qwen-file-draft:1:';
@@ -1412,24 +1418,51 @@ function saveComposerDraft(
   storageKey: string | undefined,
   text: string,
   references?: Omit<ComposerReferenceDraft, 'text'>,
-): void {
-  if (!storageKey) return;
+  newRecoveredMessageIds: readonly string[] = [],
+): boolean {
+  if (!storageKey) return false;
   try {
+    const recoveredMessageIds = [
+      ...new Set([
+        ...readDraftRecoveryReceipts(storageKey),
+        ...newRecoveredMessageIds,
+      ]),
+    ];
     if (
-      references &&
-      (references.inlineTags.length || references.tags.length)
+      recoveredMessageIds.length > 0 ||
+      (references && (references.inlineTags.length || references.tags.length))
     ) {
       localStorage.setItem(
         storageKey,
-        REFERENCE_DRAFT_PREFIX + JSON.stringify({ text, ...references }),
+        REFERENCE_DRAFT_PREFIX +
+          JSON.stringify({
+            text,
+            inlineTags: references?.inlineTags ?? [],
+            tags: references?.tags ?? [],
+            recoveredMessageIds,
+          }),
       );
     } else if (text) {
       localStorage.setItem(storageKey, text);
     } else {
       localStorage.removeItem(storageKey);
     }
+    return true;
   } catch {
-    // Ignore storage failures in private browsing or restricted contexts.
+    return false;
+  }
+}
+
+function readDraftRecoveryReceipts(storageKey: string): string[] {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw?.startsWith(REFERENCE_DRAFT_PREFIX)) return [];
+    const { recoveredMessageIds } = JSON.parse(
+      raw.slice(REFERENCE_DRAFT_PREFIX.length),
+    ) as ComposerReferenceDraft;
+    return Array.isArray(recoveredMessageIds) ? recoveredMessageIds : [];
+  } catch {
+    return [];
   }
 }
 
@@ -2697,7 +2730,7 @@ export function useComposerCore(
     setComposerTagsState(next);
     publishDraftContentRef.current();
   }, []);
-  function referenceDraft(view: EditorView | null) {
+  const referenceDraft = useCallback((view: EditorView | null) => {
     if (!persistFileReferencesRef.current) return undefined;
     return {
       inlineTags: view
@@ -2707,7 +2740,7 @@ export function useComposerCore(
         : [],
       tags: composerTagsRef.current.filter((tag) => tag.kind === 'file'),
     };
-  }
+  }, []);
   const referenceEffects = useCallback(
     (draft: ComposerReferenceDraft | null) => {
       return (
@@ -2986,7 +3019,7 @@ export function useComposerCore(
       saveCurrentDraftRef.current = () => undefined;
       scheduleDraftSaveRef.current = () => undefined;
     };
-  }, []);
+  }, [referenceDraft]);
 
   useEffect(() => {
     if (persistFileReferences) scheduleDraftSaveRef.current();
@@ -4713,6 +4746,7 @@ export function useComposerCore(
     composerDraftStorageKey,
     isTouchComposer,
     resetImageIngestion,
+    referenceDraft,
     referenceEffects,
     sessionId,
     setComposerTags,
@@ -5893,6 +5927,95 @@ export function useComposerCore(
     },
     [],
   );
+  const appliedRecoveryIds = useRef(new Map<string, Set<string>>());
+  const recoverMidTurnDrafts = useCallback(
+    async (sourceSessionId: string, drafts: readonly MidTurnDraft[]) => {
+      const owner = draftIdentityRef.current;
+      const key = owner.storageKey;
+      if (!key || owner.sessionId !== sourceSessionId) return false;
+      const shared = findComposerDraftSession(key);
+      await shared?.loaded;
+      if (
+        draftIdentityRef.current.sessionId !== sourceSessionId ||
+        !composerMountedRef.current
+      ) {
+        return false;
+      }
+      const view = viewRef.current;
+      if (!view && !isTouchComposer) return false;
+      const seen = appliedRecoveryIds.current.get(key) ?? new Set<string>();
+      for (const id of readDraftRecoveryReceipts(key)) seen.add(id);
+      appliedRecoveryIds.current.set(key, seen);
+      const incoming = drafts.filter((draft) => !seen.has(draft.messageId));
+      const text = incoming
+        .map((draft) => draft.text)
+        .filter(Boolean)
+        .join('\n');
+      if (text) {
+        historyBrowseActiveRef.current = false;
+        const current = getText();
+        const prefix = current ? `${text}\n` : text;
+        if (view) {
+          view.dispatch({ changes: { from: 0, insert: prefix } });
+        } else {
+          setMobileText(prefix + current);
+        }
+        let offset = 0;
+        const annotations = [];
+        for (const draft of incoming) {
+          if (!draft.text) continue;
+          for (const annotation of draft.inputAnnotations ?? []) {
+            annotations.push({
+              ...annotation,
+              start: annotation.start + offset,
+              end: annotation.end + offset,
+            });
+          }
+          offset += draft.text.length + 1;
+        }
+        restoreInputAnnotations(annotations);
+      }
+      for (const draft of incoming) seen.add(draft.messageId);
+      if (!saveComposerDraft(key, getText(), referenceDraft(view), [...seen]))
+        return false;
+      const media = drafts.filter(
+        (draft) => draft.images?.length || draft.files?.length,
+      );
+      if (media.length === 0) return true;
+      if (!shared) return false;
+      const unseen = media.filter(
+        (draft) => !shared.hasRecoveredAttachments(draft.messageId),
+      );
+      const taken = new Set(pastedFilesRef.current.map((file) => file.name));
+      const files = unseen
+        .flatMap((draft) => draft.files ?? [])
+        .map((file) => {
+          const name = dedupeAttachmentName(
+            sanitizeAttachmentName(file.name),
+            taken,
+          );
+          taken.add(name);
+          return { ...file, name };
+        });
+      return await shared.recoverAttachments(
+        {
+          images: [
+            ...pastedImagesRef.current,
+            ...unseen.flatMap((draft) => draft.images ?? []),
+          ],
+          files: [...pastedFilesRef.current, ...files],
+        },
+        unseen.map((draft) => draft.messageId),
+      );
+    },
+    [
+      getText,
+      isTouchComposer,
+      referenceDraft,
+      restoreInputAnnotations,
+      setMobileText,
+    ],
+  );
   const handle = useMemo<EditorHandle>(() => {
     return {
       clearText,
@@ -5908,6 +6031,7 @@ export function useComposerCore(
       retryLast,
       restoreImages,
       restoreFiles,
+      recoverMidTurnDrafts,
       restoreInputAnnotations,
       submit,
     };
@@ -5921,6 +6045,7 @@ export function useComposerCore(
     hasInput,
     insertText,
     removeTopTag,
+    recoverMidTurnDrafts,
     restoreImages,
     restoreFiles,
     restoreInputAnnotations,

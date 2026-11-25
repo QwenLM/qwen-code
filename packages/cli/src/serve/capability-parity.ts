@@ -154,6 +154,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_mid_turn_send_now: NO_MANAGED_EQUIVALENT(
     'Managed consumes queued guidance automatically at safe model boundaries',
   ),
+  session_mid_turn_draft_recovery: NO_MANAGED_EQUIVALENT(
+    'ACP assigns cancelled guidance to its originating client for draft recovery',
+  ),
   session_cancel: { standing: 'managed', evidence: 'surface:TURN_CANCEL' },
   session_events: { standing: 'managed', evidence: 'surface:TAIL_EVENTS' },
   session_artifacts: { standing: 'managed', evidence: 'surface:ARTIFACT_LIST' },

@@ -322,6 +322,7 @@ export class HookEventHandler {
     prompt: string,
     signal?: AbortSignal,
     submittedPrompt?: string,
+    requireVerdict?: true,
   ): Promise<AggregatedHookResult> {
     const input: UserPromptSubmitInput = {
       ...this.createBaseInput(HookEventName.UserPromptSubmit),
@@ -337,6 +338,7 @@ export class HookEventHandler {
       input,
       undefined,
       signal,
+      requireVerdict,
     );
   }
 
@@ -965,6 +967,7 @@ export class HookEventHandler {
     input: HookInput,
     context?: HookEventContext,
     signal?: AbortSignal,
+    requirePromptVerdict?: true,
   ): Promise<AggregatedHookResult> {
     if (this.managedDispatcher) {
       if (!this.managedDispatcher.hasHooksForEvent(eventName)) {
@@ -1049,7 +1052,14 @@ export class HookEventHandler {
       // Merge hook configs from registry plan and session hooks
       const registryHookConfigs = plan?.hookConfigs || [];
       const sessionHookConfigs = sessionHooks.map((entry) => entry.config);
-      const allHookConfigs = [...registryHookConfigs, ...sessionHookConfigs];
+      const allHookConfigs = [
+        ...registryHookConfigs,
+        ...sessionHookConfigs,
+      ].map((config) =>
+        requirePromptVerdict && config.type === 'command' && config.async
+          ? { ...config, async: false }
+          : config,
+      );
 
       if (allHookConfigs.length === 0) {
         return {
@@ -1188,6 +1198,74 @@ export class HookEventHandler {
         results,
         eventName,
       );
+      if (requirePromptVerdict) {
+        let failure: Error | undefined;
+        let blockReason: string | undefined;
+        for (const result of results) {
+          const output = result.output;
+          if (result.outcome === 'blocking' || result.exitCode === 2) {
+            blockReason ??=
+              (typeof output?.reason === 'string' && output.reason) ||
+              'No reason provided';
+            continue;
+          }
+          if (
+            !result.success ||
+            result.error ||
+            (result.outcome !== undefined && result.outcome !== 'success') ||
+            result.isAsync
+          ) {
+            failure ??=
+              result.error ??
+              new Error(
+                `UserPromptSubmit hook failed${result.exitCode === undefined ? '' : ` (exit ${result.exitCode})`}`,
+              );
+            continue;
+          }
+          if (
+            output &&
+            (typeof output !== 'object' ||
+              Array.isArray(output) ||
+              (output.continue !== undefined &&
+                typeof output.continue !== 'boolean') ||
+              (output.stopReason !== undefined &&
+                typeof output.stopReason !== 'string') ||
+              (output.reason !== undefined &&
+                typeof output.reason !== 'string') ||
+              (output.decision !== undefined &&
+                !['allow', 'approve', 'block', 'deny'].includes(
+                  output.decision,
+                )) ||
+              (output.hookSpecificOutput !== undefined &&
+                (!output.hookSpecificOutput ||
+                  typeof output.hookSpecificOutput !== 'object' ||
+                  Array.isArray(output.hookSpecificOutput) ||
+                  (output.hookSpecificOutput['additionalContext'] !==
+                    undefined &&
+                    typeof output.hookSpecificOutput['additionalContext'] !==
+                      'string'))))
+          ) {
+            failure ??= new Error('Invalid UserPromptSubmit hook output');
+            continue;
+          }
+          if (
+            output?.decision === 'block' ||
+            output?.decision === 'deny' ||
+            output?.continue === false
+          ) {
+            blockReason ??=
+              output.stopReason || output.reason || 'No reason provided';
+          }
+        }
+        if (blockReason !== undefined) {
+          aggregated.success = true;
+          aggregated.finalOutput = { decision: 'block', reason: blockReason };
+        } else if (failure) {
+          aggregated.success = false;
+          aggregated.errors = [failure];
+          aggregated.finalOutput = undefined;
+        }
+      }
 
       // Process common hook output fields centrally
       this.processCommonHookOutputFields(aggregated);

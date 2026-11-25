@@ -35,6 +35,9 @@
  * remains in the build for in-repo cli vitest resolution.
  */
 
+import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import v8 from 'node:v8';
 import { runInNewContext } from 'node:vm';
@@ -67,7 +70,14 @@ import type {
 import { createAcpSessionBridge } from '../bridge.js';
 import { isNotCurrentlyGeneratingCancelError } from '../bridgeErrors.js';
 import type { BridgeOptions } from '../bridgeOptions.js';
-import { PROMPT_CANCEL_METHOD, type AcpSessionBridge } from '../bridgeTypes.js';
+import {
+  MID_TURN_LEASE_META_KEY,
+  MID_TURN_QUEUE_DRAIN_METHOD,
+  MID_TURN_QUEUE_RECORDED_METHOD,
+  MID_TURN_QUEUE_SETTLE_METHOD,
+  PROMPT_CANCEL_METHOD,
+  type AcpSessionBridge,
+} from '../bridgeTypes.js';
 import type { AcpChannel } from '../channel.js';
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -106,10 +116,24 @@ export { markChannelFactoryForwardsChildEnv as attestChannelFactoryForwardsChild
 export function makeBridge(
   opts: Partial<BridgeOptions> = {},
 ): AcpSessionBridge {
-  return createAcpSessionBridge({
+  const runtimeRoot = path.join(tmpdir(), `qwen-bridge-test-${randomUUID()}`);
+  const bridge = createAcpSessionBridge({
     boundWorkspace: WS_A,
     ...opts,
+    artifactSnapshotRuntimeBaseDir:
+      opts.artifactSnapshotRuntimeBaseDir ?? runtimeRoot,
   });
+  if (opts.artifactSnapshotRuntimeBaseDir === undefined) {
+    const shutdown = bridge.shutdown.bind(bridge);
+    bridge.shutdown = async () => {
+      try {
+        await shutdown();
+      } finally {
+        await rm(runtimeRoot, { recursive: true, force: true });
+      }
+    };
+  }
+  return bridge;
 }
 
 export interface FakeAgentOpts {
@@ -131,6 +155,7 @@ export interface FakeAgentOpts {
     p: PromptRequest,
     self: FakeAgent,
   ) => Promise<PromptResponse> | PromptResponse;
+  autoCommitMidTurnPromotions?: boolean;
   cancelImpl?: (p: CancelNotification, self: FakeAgent) => Promise<void> | void;
   /** Make the fake expose only standard ACP cancellation. */
   promptCancelExtension?: boolean;
@@ -345,6 +370,64 @@ export function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
     () => handle.agent,
     agentStream,
   );
+  const request = handle.agentConnection.extMethod.bind(handle.agentConnection);
+  const commit = async (
+    sessionId: string,
+    leaseId: string,
+    items: ReadonlyArray<{ messageId: string; displayText: string }>,
+  ) => {
+    const result = await request(MID_TURN_QUEUE_SETTLE_METHOD, {
+      sessionId,
+      leaseId,
+      outcomes: items.map(({ messageId, displayText }) => ({
+        kind: 'allow',
+        messageId,
+        displayText,
+        parts: [{ text: displayText || '[test attachment]' }],
+      })),
+    });
+    await request(MID_TURN_QUEUE_RECORDED_METHOD, {
+      sessionId,
+      messageIds: result['committedMessageIds'],
+    });
+  };
+  const prompt = handle.agent.prompt.bind(handle.agent);
+  handle.agent.prompt = async (incoming) => {
+    const lease = incoming._meta?.[MID_TURN_LEASE_META_KEY] as
+      | { leaseId: string; messageId: string }
+      | undefined;
+    if (lease && opts.autoCommitMidTurnPromotions !== false) {
+      const displayText =
+        incoming.prompt.find((block) => block.type === 'text')?.text ?? '';
+      await commit(incoming.sessionId, lease.leaseId, [
+        { ...lease, displayText },
+      ]);
+    }
+    return prompt(incoming);
+  };
+  // Existing bridge scenarios use the convenience drain and model a successful
+  // child's full handshake. Protocol tests explicitly request and settle leases.
+  handle.agentConnection.extMethod = async (method, params) => {
+    if (
+      method !== MID_TURN_QUEUE_DRAIN_METHOD ||
+      params['leaseUserInput'] !== undefined
+    )
+      return request(method, params);
+    const answer = await request(method, { ...params, leaseUserInput: true });
+    const items = answer['items'] as Array<{
+      leaseId?: string;
+      messageId: string;
+      displayText: string;
+    }>;
+    const leased = items.filter(({ leaseId }) => leaseId !== undefined);
+    if (leased.length)
+      await commit(String(params['sessionId']), leased[0]!.leaseId!, leased);
+    return {
+      ...answer,
+      messages: items.map(({ displayText }) => displayText),
+      items: items.map(({ leaseId: _leaseId, ...item }) => item),
+    };
+  };
   handle.channel = {
     stream: clientStream,
     exited,

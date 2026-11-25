@@ -42,6 +42,7 @@ import type {
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
+  DaemonMidTurnTarget,
   DaemonRemoveMidTurnMessageResult,
   DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
@@ -1200,6 +1201,8 @@ export class DaemonSessionClient {
       signal?: AbortSignal;
       eventDetailMode?: 'full' | 'summary';
       messageId?: string;
+      target?: DaemonMidTurnTarget;
+      draftText?: string;
       content?: PromptContentBlock[];
     },
   ): Promise<DaemonMidTurnMessageResult> {
@@ -1209,9 +1212,21 @@ export class DaemonSessionClient {
         ? { eventDetailMode: opts.eventDetailMode }
         : {}),
       ...(opts?.messageId ? { messageId: opts.messageId } : {}),
+      ...(opts?.target ? { target: opts.target } : {}),
+      ...(opts?.draftText !== undefined ? { draftText: opts.draftText } : {}),
       ...(opts?.content && opts.content.length > 0
         ? { content: opts.content }
         : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /** Capture a stable id and host turn before preparing attachments. */
+  prepareMidTurnMessage(opts?: {
+    signal?: AbortSignal;
+  }): Promise<{ messageId: string; target: DaemonMidTurnTarget } | undefined> {
+    return this.client.prepareMidTurnMessage(this.sessionId, {
+      ...opts,
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -1243,22 +1258,35 @@ export class DaemonSessionClient {
    */
   async getMidTurnMessages(opts?: {
     signal?: AbortSignal;
+    messageId?: string;
   }): Promise<DaemonMidTurnMessagesResult> {
     const result = await this.client.getMidTurnMessages(this.sessionId, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.messageId ? { messageId: opts.messageId } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
+    const hydrate = async <T extends { content?: PromptContentBlock[] }>(
+      message: T,
+    ): Promise<T> =>
+      message.content
+        ? {
+            ...message,
+            content: await this.hydrateContent(message.content, opts?.signal),
+          }
+        : message;
     return {
       ...result,
-      messages: await Promise.all(
-        result.messages.map(async (message) => ({
-          ...message,
-          ...(message.content
-            ? { content: await this.hydrateContent(message.content) }
-            : {}),
-        })),
-      ),
+      messages: await Promise.all(result.messages.map(hydrate)),
+      ...(result.recoveries
+        ? { recoveries: await Promise.all(result.recoveries.map(hydrate)) }
+        : {}),
     };
+  }
+
+  consumeMidTurnRecovery(messageIds: readonly string[]): Promise<void> {
+    return this.client.consumeMidTurnRecovery(this.sessionId, messageIds, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
   }
 
   async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {

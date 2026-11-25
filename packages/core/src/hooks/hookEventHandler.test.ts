@@ -343,6 +343,72 @@ describe('HookEventHandler', () => {
         expect(input).not.toHaveProperty('submitted_prompt');
       },
     );
+
+    it.each([
+      { result: { success: false, exitCode: 1 }, success: false },
+      {
+        result: {
+          success: true,
+          outcome: 'timeout' as const,
+          error: new Error('Hook timed out'),
+        },
+        success: false,
+      },
+      {
+        result: { success: false, exitCode: 2 },
+        success: true,
+        decision: 'block',
+      },
+      {
+        result: {
+          success: true,
+          output: { hookSpecificOutput: { additionalContext: false } },
+        },
+        success: false,
+      },
+      {
+        result: {
+          success: true,
+          output: { continue: false, reason: 'policy' },
+        },
+        success: true,
+        decision: 'block',
+      },
+      { result: { success: true }, success: true },
+    ])(
+      'requires a determinate verdict for queued input ($result)',
+      async ({ result, success, decision }) => {
+        const hookConfig = commandHook('do something', { async: true });
+        arrange([hookConfig], {
+          results: [
+            {
+              hookConfig,
+              eventName: HookEventName.UserPromptSubmit,
+              duration: 1,
+              ...result,
+            },
+          ],
+        });
+        const verdict = await hookEventHandler.fireUserPromptSubmitEvent(
+          'queued',
+          undefined,
+          undefined,
+          true,
+        );
+        expect(verdict.success).toBe(success);
+        expect(verdict.finalOutput?.decision).toBe(decision);
+        expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+          [expect.objectContaining({ async: false })],
+          HookEventName.UserPromptSubmit,
+          expect.anything(),
+          expect.anything(),
+          expect.anything(),
+          undefined,
+          expect.anything(),
+        );
+        vi.mocked(logHookCall).mockClear();
+      },
+    );
   });
 
   describe('fireInstructionsLoadedEvent', () => {

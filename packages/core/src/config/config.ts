@@ -4521,6 +4521,7 @@ export class Config {
                       input['submitted_prompt'].trim().length > 0
                       ? input['submitted_prompt']
                       : undefined,
+                    ...(request.requirePromptVerdict ? [true as const] : []),
                   );
                   break;
                 case 'UserPromptExpansion':

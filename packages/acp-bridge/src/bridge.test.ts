@@ -43174,9 +43174,11 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       accepted: true,
       messageId: expect.any(String),
     });
-    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
-      expect.objectContaining({ promptId: result.messageId, text: 'later' }),
-    ]);
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+        expect.objectContaining({ promptId: result.messageId, text: 'later' }),
+      ]),
+    );
     await new Promise((r) => setTimeout(r, 10));
     release();
     await vi.waitFor(() =>
@@ -43274,7 +43276,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
   it.each([
     ['forwards it once the drain has answered', 'resolved'],
     ['drops it when the input is gone by then', 'removed'],
-    ['forwards it once the failed drain has requeued its input', 'rejected'],
+    ['forwards it after the failed item returns to draft', 'rejected'],
   ] as const)(
     'holds a send-now request while a drain resolves attachments: %s',
     async (_label, outcome) => {
@@ -43339,13 +43341,14 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
         if (outcome === 'rejected') {
           gate.reject(new Error('attachment read failed'));
-          await expect(drain).rejects.toThrow();
+          await expect(drain).resolves.toMatchObject({ messages: [] });
           const queue = bridge.getMidTurnMessages(session.sessionId, client);
           expect(queue.messages.map((message) => message.messageId)).toEqual([
-            'm1',
             'm2',
           ]);
-          expect(queue.settledMessageIds).not.toContain('m1');
+          expect(queue.recoveries).toEqual([
+            { messageId: 'm1', text: 'first', error: 'attachment read failed' },
+          ]);
         } else {
           gate.resolve([]);
           await expect(drain).resolves.toMatchObject({ messages: ['first'] });
@@ -43601,6 +43604,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         sessionId,
         source: 'goal',
         reason: 'cancelled',
+        midTurnHandoff: true,
         promptId: `${sessionId}########1`,
       });
       await reading.promise;
@@ -43811,7 +43815,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     // The message stays queued (the teardown will discard it): a promotion
     // attempt would splice it and the closing sendPrompt gate would drop it,
     // vanishing it from every ring.
-    expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
+    expect(bridge.getMidTurnMessages(session.sessionId)).toMatchObject({
       messages: [
         expect.objectContaining({
           messageId: 'closing-queued',
@@ -43848,11 +43852,8 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         'client-mid-late',
       ),
     ).toEqual({ accepted: true, messageId: 'client-mid-late' });
-    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
-      expect.objectContaining({
-        promptId: 'client-mid-late',
-        text: 'late request',
-      }),
+    expect(bridge.getMidTurnMessages(session.sessionId).messages).toEqual([
+      { messageId: 'client-mid-late', text: 'late request' },
     ]);
 
     await new Promise((r) => setTimeout(r, 10));
@@ -43907,65 +43908,78 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     { label: 'valid', reason: 'end_turn' },
     { label: 'empty', reason: '' },
     { label: 'oversized', reason: 'x'.repeat(129) },
-  ])(
-    'promotes what the ending Goal turn never drained ($label reason)',
-    async ({ reason }) => {
-      const response = deferred<PromptResponse>();
-      const handle = makeChannel({ promptImpl: () => response.promise });
-      const bridge = makeBridge({ channelFactory: async () => handle.channel });
-      try {
-        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+  ])('settles unclaimed Goal input ($label reason)', async ({ reason }) => {
+    const response = deferred<PromptResponse>();
+    const handle = makeChannel({ promptImpl: () => response.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-        await handle.agentConnection.extNotification('_qwencode/start_turn', {
-          sessionId: session.sessionId,
-          source: 'goal',
-        });
-        expect(
-          bridge.enqueueMidTurnMessage(
-            session.sessionId,
-            'never drained',
-            { clientId: session.clientId },
-            'goal-undrained',
-            { rejectIfIdle: true },
-          ),
-        ).toEqual({ accepted: true, messageId: 'goal-undrained' });
-        expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
-        expect(handle.agent.promptCalls).toHaveLength(0);
+      await handle.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId: session.sessionId,
+        source: 'goal',
+      });
+      expect(
+        bridge.enqueueMidTurnMessage(
+          session.sessionId,
+          'never drained',
+          { clientId: session.clientId },
+          'goal-undrained',
+          { rejectIfIdle: true },
+        ),
+      ).toEqual({ accepted: true, messageId: 'goal-undrained' });
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+      expect(handle.agent.promptCalls).toHaveLength(0);
 
-        // A Goal turn owns no prompt slot, so its end is the only signal that can
-        // settle what its last drain missed, even if the reason is malformed.
-        await handle.agentConnection.extNotification('_qwencode/end_turn', {
-          sessionId: session.sessionId,
-          reason,
-          source: 'goal',
-          promptId: `${session.sessionId}########1`,
-        });
+      // The host also settles unclaimed input for invalid terminal frames.
+      await handle.agentConnection.extNotification('_qwencode/end_turn', {
+        sessionId: session.sessionId,
+        reason,
+        source: 'goal',
+        promptId: `${session.sessionId}########1`,
+      });
 
-        await vi.waitFor(() => {
-          expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
-            expect.objectContaining({
-              promptId: 'goal-undrained',
-              text: 'never drained',
-            }),
-          ]);
-          expect(handle.agent.promptCalls).toHaveLength(1);
-        });
-        expect(
-          bridge.getMidTurnMessages(session.sessionId, {
-            clientId: session.clientId,
-          }).messages,
-        ).toEqual([]);
-
-        response.resolve({ stopReason: 'end_turn' });
+      if (reason !== 'end_turn') {
         await vi.waitFor(() =>
-          expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+          expect(
+            bridge.getMidTurnMessages(session.sessionId, {
+              clientId: session.clientId,
+            }).recoveries,
+          ).toEqual([
+            {
+              messageId: 'goal-undrained',
+              text: 'never drained',
+              error: expect.any(String),
+            },
+          ]),
         );
-      } finally {
-        response.resolve({ stopReason: 'end_turn' });
-        await bridge.shutdown();
+        expect(handle.agent.promptCalls).toHaveLength(0);
+        return;
       }
-    },
-  );
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+          expect.objectContaining({
+            promptId: 'goal-undrained',
+            text: 'never drained',
+          }),
+        ]);
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      expect(
+        bridge.getMidTurnMessages(session.sessionId, {
+          clientId: session.clientId,
+        }).messages,
+      ).toEqual([]);
+
+      response.resolve({ stopReason: 'end_turn' });
+      await vi.waitFor(() =>
+        expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+      );
+    } finally {
+      response.resolve({ stopReason: 'end_turn' });
+      await bridge.shutdown();
+    }
+  });
 
   it('clears an autonomous Goal approval when Send now promotes queued input', async () => {
     const turnId = 'goal-turn';
@@ -43976,6 +43990,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
             sessionId: params['sessionId'],
             source: 'goal',
             reason: 'cancelled',
+            midTurnHandoff: true,
             promptId: `${params['sessionId']}########1`,
             turnId,
           });
@@ -44203,6 +44218,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       expect(
         bridge.getMidTurnMessages(sessionId, { clientId }).messages,
       ).toEqual([
+        { messageId: 'slow', text: 'draining' },
         expect.objectContaining({
           messageId: 'goal-input',
           text: 'still queued',
@@ -44484,7 +44500,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('still delivers a message whose deletion missed while a failing drain held it', async () => {
+  it('revokes a deleted lease while another attachment fails', async () => {
     let release: (() => void) | undefined;
     const handle = makeChannel({
       promptImpl: async () => {
@@ -44544,18 +44560,19 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
           sessionId: session.sessionId,
           userInputOnly: true,
         }),
-      ).rejects.toBeDefined();
+      ).resolves.toMatchObject({ messages: [], items: [] });
     } finally {
       readFile.mockRestore();
     }
-    // The client was told the message is no longer its to change, so it is
-    // delivered as that answer says rather than dropped.
-    expect(deleteAnswer).toEqual({ removed: false });
+    expect(deleteAnswer).toEqual({ removed: true });
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, context).recoveries,
+    ).toMatchObject([{ messageId: 'u1', text: 'first', content: [reference] }]);
     const next = await handle.agentConnection.extMethod(
       'craft/drainMidTurnQueue',
       { sessionId: session.sessionId },
     );
-    expect(next['messages']).toEqual(['first', 'second']);
+    expect(next['messages']).toEqual([]);
 
     release?.();
     await prompt;
@@ -44718,7 +44735,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       bridge.getMidTurnMessages(session.sessionId, {
         clientId: session.clientId,
       }),
-    ).toEqual({
+    ).toMatchObject({
       messages: [],
       settledMessageIds: ['stable-deleted'],
       promotedMessageIds: [],
@@ -45020,7 +45037,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('ignores legacy audio when matching a promoted mid-turn retry', async () => {
+  it('rejects a mid-turn id already used by an independent ordinary prompt', async () => {
     const done = deferred<void>();
     const handle = makeChannel({
       promptImpl: async () => {
@@ -45053,7 +45070,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         undefined,
         'promoted-audio',
       ),
-    ).toEqual({ accepted: true, messageId: 'promoted-audio' });
+    ).toEqual({ accepted: false });
 
     done.resolve();
     await prompt;
@@ -45118,7 +45135,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('degrades expired media at settle without skipping later messages', async () => {
+  it('pins an attachment through natural promotion', async () => {
     const prompts: unknown[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
@@ -45156,22 +45173,22 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId },
       'normal-message',
     );
-    await bridge.removeSessionAttachment(
-      session.sessionId,
-      reference.attachmentId,
-      {
-        clientId: session.clientId,
-      },
-    );
+    await expect(
+      bridge.removeSessionAttachment(
+        session.sessionId,
+        reference.attachmentId,
+        {
+          clientId: session.clientId,
+        },
+      ),
+    ).resolves.toBe(false);
 
     releases[0]!();
     await first;
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
     expect(prompts[1]).toEqual([
-      {
-        type: 'text',
-        text: 'expired attachment\n[Attachment is no longer available]',
-      },
+      { type: 'text', text: 'expired attachment' },
+      expect.objectContaining({ type: 'image' }),
     ]);
     releases[1]!();
     await vi.waitFor(() => expect(prompts).toHaveLength(3));
@@ -45183,10 +45200,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('keeps resolvable siblings when one reference is removed before settle', async () => {
-    // The settle-time degrade must drop only the removed reference: the
-    // sibling the store still holds reaches the model instead of being
-    // swallowed by a wholesale marker.
+  it('keeps both attachments referenced by a pending steering message', async () => {
     const prompts: unknown[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
@@ -45224,31 +45238,19 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       'mixed-media',
       { content: [removed, kept] },
     );
-    await bridge.removeSessionAttachment(
-      session.sessionId,
-      removed.attachmentId,
-      {
+    await expect(
+      bridge.removeSessionAttachment(session.sessionId, removed.attachmentId, {
         clientId: session.clientId,
-      },
-    );
+      }),
+    ).resolves.toBe(false);
 
     releases[0]!();
     await first;
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
     expect(prompts[1]).toEqual([
-      {
-        type: 'text',
-        text: 'two images\n[Attachment is no longer available]',
-      },
-      {
-        type: 'image',
-        data: 'AQI=',
-        mimeType: 'image/png',
-        _meta: {
-          'qwen.daemon.attachmentContext':
-            expect.stringContaining('"absolutePath":'),
-        },
-      },
+      { type: 'text', text: 'two images' },
+      expect.objectContaining({ type: 'image' }),
+      expect.objectContaining({ type: 'image' }),
     ]);
     releases[1]!();
     await vi.waitFor(() =>
@@ -45257,7 +45259,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('keeps a resolvable sibling when one reference dies between admission and dispatch', async () => {
+  it('pins attachments until queued promotion dispatch', async () => {
     const prompts: unknown[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
@@ -45311,32 +45313,18 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     // m1 promoted to running; m2 admitted queued behind it.
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
 
-    await bridge.removeSessionAttachment(
-      session.sessionId,
-      removed.attachmentId,
-      {
+    await expect(
+      bridge.removeSessionAttachment(session.sessionId, removed.attachmentId, {
         clientId: session.clientId,
-      },
-    );
+      }),
+    ).resolves.toBe(false);
 
     releases[1]!();
     await vi.waitFor(() => expect(prompts).toHaveLength(3));
-    // The dispatch-time degrade drops only the dead reference; the stored
-    // sibling still reaches the model.
     expect(prompts[2]).toEqual([
-      {
-        type: 'text',
-        text: 'm2\n[Attachment is no longer available]',
-      },
-      {
-        type: 'image',
-        data: 'AQI=',
-        mimeType: 'image/png',
-        _meta: {
-          'qwen.daemon.attachmentContext':
-            expect.stringContaining('"absolutePath":'),
-        },
-      },
+      { type: 'text', text: 'm2' },
+      expect.objectContaining({ type: 'image' }),
+      expect.objectContaining({ type: 'image' }),
     ]);
     releases[2]!();
     await vi.waitFor(() =>
@@ -45345,7 +45333,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('degrades media removed between admission and dispatch in place, keeping FIFO order and one terminal', async () => {
+  it('pins promoted attachments while preserving FIFO order and one terminal', async () => {
     const prompts: unknown[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
@@ -45403,13 +45391,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await first;
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
 
-    await bridge.removeSessionAttachment(
-      session.sessionId,
-      reference.attachmentId,
-      {
-        clientId: session.clientId,
-      },
-    );
+    await expect(
+      bridge.removeSessionAttachment(
+        session.sessionId,
+        reference.attachmentId,
+        {
+          clientId: session.clientId,
+        },
+      ),
+    ).resolves.toBe(false);
     // An ordinary prompt admitted after the media message must stay behind it.
     const p3 = bridge.sendPrompt(
       session.sessionId,
@@ -45419,14 +45409,10 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     );
 
     releases[1]!();
-    // The degraded prompt keeps its FIFO position instead of re-admitting at
-    // the tail behind p3.
     await vi.waitFor(() => expect(prompts).toHaveLength(3));
     expect(prompts[2]).toEqual([
-      {
-        type: 'text',
-        text: 'm2\n[Attachment is no longer available]',
-      },
+      { type: 'text', text: 'm2' },
+      expect.objectContaining({ type: 'image' }),
     ]);
     releases[2]!();
     await vi.waitFor(() => expect(prompts).toHaveLength(4));
@@ -45437,8 +45423,6 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
     );
 
-    // One terminal per promptId, and the degraded turn completes normally —
-    // a re-admitted fallback would publish turn_error then a second terminal.
     const terminalsFor = (promptId: string) =>
       events.filter(
         (e) =>
@@ -45451,10 +45435,10 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         expect(terms).toHaveLength(1);
         expect(terms[0]?.type).toBe('turn_complete');
       }
-      // No second admission: exactly one started event for the degraded turn.
       expect(
         events.filter(
-          (e) => e.type === 'pending_prompt_started' && e.promptId === 'mid-m2',
+          (e) =>
+            e.type === 'mid_turn_message_injected' && e.promptId === 'mid-m2',
         ),
       ).toHaveLength(1);
     });
@@ -45462,7 +45446,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('degrades in place on a fully detached session instead of racing the deferred close', async () => {
+  it('keeps a detached promotion and its pinned attachment before idle close', async () => {
     const prompts: unknown[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
@@ -45514,21 +45498,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
 
     // Media disappears between admission and dispatch (async arm).
-    await bridge.removeSessionAttachment(
-      session.sessionId,
-      reference.attachmentId,
-    );
+    await expect(
+      bridge.removeSessionAttachment(session.sessionId, reference.attachmentId),
+    ).resolves.toBe(false);
 
     releases[1]!();
-    // The degraded prompt must still reach the child — a re-admitted
-    // fallback loses the race with the deferred close-on-prompt-complete
-    // on a detached session and is swallowed by `session_closing`.
     await vi.waitFor(() => expect(prompts).toHaveLength(3));
     expect(prompts[2]).toEqual([
-      {
-        type: 'text',
-        text: 'm2\n[Attachment is no longer available]',
-      },
+      { type: 'text', text: 'm2' },
+      expect.objectContaining({ type: 'image' }),
     ]);
     releases[2]!();
     await vi.waitFor(() =>
@@ -45645,7 +45623,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await first;
     await vi.waitFor(() => expect(prompts).toEqual(['first', 'follow up']));
     expect(goalApprovalMeta).toEqual([true, undefined]);
-    expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
+    expect(bridge.getMidTurnMessages(session.sessionId)).toMatchObject({
       messages: [],
       settledMessageIds: [],
       promotedMessageIds: ['webui-follow-up'],
@@ -45671,6 +45649,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const prompts: string[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
+      autoCommitMidTurnPromotions: false,
       promptImpl: async (req) => {
         prompts.push(
           (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
@@ -45765,7 +45744,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('keeps the queue across a back-to-back prompt FIFO, clearing only at true idle', async () => {
+  it('promotes unclaimed input without injecting into an already queued ordinary prompt', async () => {
     const releases: Array<() => void> = [];
     const handle = makeChannel({
       promptImpl: async () => {
@@ -45806,37 +45785,28 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         sessionId: session.sessionId,
       }),
     ).toEqual({ messages: [], items: [], hasQueuedPrompt: true });
-    expect(
-      bridge.enqueueMidTurnMessage(session.sessionId, 'x', {
-        clientId: session.clientId,
-      }),
-    ).toEqual({
-      accepted: true,
-      messageId: expect.any(String),
+    const steering = bridge.enqueueMidTurnMessage(session.sessionId, 'x', {
+      clientId: session.clientId,
     });
+    expect(steering).toEqual({ accepted: true, messageId: expect.any(String) });
 
-    releases[0]!(); // settle p1 — session still busy (p2 pending), so NOT idle
-    await new Promise((r) => setTimeout(r, 10));
-    // Survived the p1→p2 boundary: the clear only fires at true idle.
+    releases[0]!();
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
     expect(
       await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
         sessionId: session.sessionId,
       }),
     ).toEqual({
-      messages: ['x'],
-      items: [
-        {
-          messageId: expect.any(String),
-          displayText: 'x',
-          content: [{ type: 'text', text: 'x' }],
-        },
-      ],
-      hasQueuedPrompt: false,
+      messages: [],
+      items: [],
+      hasQueuedPrompt: true,
     });
-    expect((await injected).promptId).toBe('prompt-2');
 
     releases[1]!();
     await Promise.all([p1, p2]);
+    expect((await injected).promptId).toBe(steering.messageId);
+    await vi.waitFor(() => expect(releases).toHaveLength(3));
+    releases[2]!();
     abort.abort();
     await bridge.shutdown();
   });
@@ -46110,6 +46080,14 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         { clientId: attached.clientId },
         'client-mid-1',
       ),
+    ).toEqual({ accepted: false });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'note',
+        { clientId: session.clientId },
+        'client-mid-1',
+      ),
     ).toEqual({ accepted: true, messageId: 'client-mid-1' });
 
     const snapshot = bridge.getMidTurnMessages(session.sessionId);
@@ -46217,7 +46195,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       bridge.getMidTurnMessages(session.sessionId, {
         clientId: session.clientId,
       }),
-    ).toEqual({
+    ).toMatchObject({
       messages: [
         {
           messageId: admission.messageId,
@@ -46301,7 +46279,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       bridge.getMidTurnMessages(session.sessionId, {
         clientId: session.clientId,
       }),
-    ).toEqual({
+    ).toMatchObject({
       messages: [
         {
           messageId: 'media-snap',
@@ -46480,7 +46458,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       bridge.getMidTurnMessages(session.sessionId, {
         clientId: session.clientId,
       }),
-    ).toEqual({
+    ).toMatchObject({
       messages: [],
       settledMessageIds: [admission.messageId],
       promotedMessageIds: [],
@@ -46644,7 +46622,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() =>
       expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
     );
-    expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
+    expect(bridge.getMidTurnMessages(session.sessionId)).toMatchObject({
       messages: [],
       settledMessageIds: [],
       promotedMessageIds: [m1.messageId, m2.messageId, m3.messageId],
@@ -46801,11 +46779,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('publishes pending_prompt_started for a promoted message that starts immediately', async () => {
-    // The settle-window case: the POST lands after the turn settled, so the
-    // message is promoted and starts without a queued phase. Only the started
-    // event tells the originator to render the user message (its own stream
-    // echo is suppressed and no client-side row exists).
+  it('publishes a chat echo when the promoted message commits', async () => {
     const prompts: string[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
@@ -46845,18 +46819,16 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       expect(
         events.some(
           (event) =>
-            event.type === 'pending_prompt_started' &&
+            event.type === 'mid_turn_message_injected' &&
             event.promptId === 'late-started' &&
-            (event.data as { text?: string }).text === 'settled late' &&
-            event.originatorClientId === session.clientId,
+            (event.data as { promoted?: boolean }).promoted === true,
         ),
       ).toBe(true),
     );
-    // An immediate start never queues: the added event would be unpaired.
     expect(
       events.filter(
         (event) =>
-          event.type === 'pending_prompt_added' &&
+          event.type === 'pending_prompt_started' &&
           event.promptId === 'late-started',
       ),
     ).toEqual([]);

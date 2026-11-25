@@ -67,6 +67,8 @@ import type {
   PendingPromptEntry,
 } from './bridgeTypes.js';
 import {
+  MID_TURN_QUEUE_DRAIN_METHOD,
+  MID_TURN_QUEUE_SETTLE_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from './bridgeTypes.js';
@@ -4170,12 +4172,16 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const resolvedEntry = entry
       ? {
           ...entry,
+          activePromptId:
+            entry.activePromptId ??
+            (entry.backgroundTurn ? undefined : 'test-turn'),
+          commitMidTurnMessages: vi.fn(),
           attachments: entry.attachments ?? new SessionAttachmentStore(),
           pendingPromptList: entry.pendingPromptList ?? [],
           settledMidTurnMessageIds: entry.settledMidTurnMessageIds ?? [],
         }
       : undefined;
-    return new BridgeClient(
+    const client = new BridgeClient(
       ((sid: string) =>
         sid === sessionId ? resolvedEntry : undefined) as never,
       thrower as never,
@@ -4188,6 +4194,36 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       undefined,
       ownsSession as never,
     );
+    const request = client.extMethod.bind(client);
+    client.extMethod = async (method, params) => {
+      if (method !== MID_TURN_QUEUE_DRAIN_METHOD)
+        return request(method, params);
+      const answer = await request(method, { ...params, leaseUserInput: true });
+      const items = answer['items'] as Array<{
+        leaseId?: string;
+        messageId: string;
+        displayText: string;
+      }>;
+      const leased = items.filter(({ leaseId }) => leaseId !== undefined);
+      if (leased.length) {
+        await request(MID_TURN_QUEUE_SETTLE_METHOD, {
+          sessionId,
+          leaseId: leased[0]!.leaseId,
+          outcomes: leased.map(({ messageId, displayText }) => ({
+            messageId,
+            kind: 'allow',
+            displayText,
+            parts: [{ text: displayText }],
+          })),
+        });
+      }
+      return {
+        ...answer,
+        messages: items.map(({ displayText }) => displayText),
+        items: items.map(({ leaseId: _leaseId, ...item }) => item),
+      };
+    };
+    return client;
   }
 
   it.each(['new-rpc', 'old-auto', 'unknown', 42])(
@@ -4378,8 +4414,8 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     // Stable ids land in the reconciliation ring so a client that missed the
     // echo frame (or refreshed) can tell "already injected" from "dropped".
     expect(entry.settledMidTurnMessageIds).toEqual([
-      'mid-1',
       'internal',
+      'mid-1',
       'anonymous-ui',
       'mid-2',
     ]);
@@ -4486,7 +4522,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     }
   });
 
-  it('degrades a attachmentId reused across drained messages after its first use', async () => {
+  it('preserves a referenced image in each independently leased message', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionAttachmentStore();
     const read = vi.spyOn(fsp, 'readFile');
@@ -4526,31 +4562,32 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             content: [
               {
                 type: 'text',
-                text: 'b\n[Attachment is no longer available]',
+                text: 'b',
               },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
             ],
           },
           {
             content: [
               {
                 type: 'text',
-                text: 'c\n[Attachment is no longer available]',
+                text: 'c',
               },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
             ],
           },
           {
             content: [
               {
                 type: 'text',
-                text: 'd\n[Attachment is no longer available]',
+                text: 'd',
               },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
             ],
           },
         ],
       });
-      // Cross-message reuse is unsupported: only the first occurrence is
-      // serialized, so one stored blob cannot amplify the drain response.
-      expect(read).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledTimes(4);
     } finally {
       read.mockRestore();
       await media.close();
@@ -4589,8 +4626,13 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     });
     await Promise.resolve();
 
-    expect(entry.midTurnMessageQueue).toEqual([]);
-    expect(entry.settledMidTurnMessageIds).toEqual(['mid-slow']);
+    expect(entry.midTurnMessageQueue).toEqual([
+      expect.objectContaining({
+        messageId: 'mid-slow',
+        lease: expect.objectContaining({ id: expect.any(String) }),
+      }),
+    ]);
+    expect(entry.settledMidTurnMessageIds).toEqual([]);
 
     release();
     await expect(drain).resolves.toMatchObject({
@@ -4599,7 +4641,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     });
   });
 
-  it('degrades an expired media item without blocking later messages', async () => {
+  it('returns an expired media item to draft without blocking later messages', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const queued = {
       messageId: 'mid-expired',
@@ -4629,17 +4671,8 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         sessionId: 'sess:expired',
       }),
     ).resolves.toMatchObject({
-      messages: ['look at this', 'keep going'],
+      messages: ['keep going'],
       items: [
-        {
-          messageId: 'mid-expired',
-          content: [
-            {
-              type: 'text',
-              text: 'look at this\n[Attachment is no longer available]',
-            },
-          ],
-        },
         {
           messageId: 'mid-ok',
           content: [{ type: 'text', text: 'keep going' }],
@@ -4649,7 +4682,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
 
     expect(entry.midTurnMessageQueue).toEqual([]);
     expect(entry.settledMidTurnMessageIds).toEqual(['mid-expired', 'mid-ok']);
-    expect(publish).toHaveBeenCalledOnce();
+    expect(publish.mock.calls.map(([event]) => event.type)).toEqual([
+      'mid_turn_message_recovery',
+      'mid_turn_message_injected',
+    ]);
   });
 
   it('drains every valid attachment reference even when their total exceeds 16 MiB', async () => {
@@ -4690,10 +4726,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     }
   });
 
-  it('requeues drained messages when media resolution fails with a non-media error', async () => {
-    // A transient fs error (fd exhaustion) must not silently degrade the
-    // media of every queued message: the store still holds the bytes, so the
-    // drain surfaces the error and hands the messages back for the next one.
+  it('recovers the failed media item while admitting the next leased message', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionAttachmentStore();
     const readFile = vi
@@ -4722,40 +4755,24 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         client.extMethod('craft/drainMidTurnQueue', {
           sessionId: 'sess:emfile',
         }),
-      ).rejects.toThrow('too many open files');
-      // Requeued for the next drain; the settled ring no longer claims the
-      // ids, and nothing was echoed to the browser.
-      expect(entry.midTurnMessageQueue.map((item) => item.messageId)).toEqual([
-        'mid-a',
-        'mid-b',
-      ]);
-      expect(entry.settledMidTurnMessageIds).toEqual([]);
-      expect(publish).not.toHaveBeenCalled();
-
-      // The retry drain re-reads the still-stored bytes and delivers both.
-      await expect(
-        client.extMethod('craft/drainMidTurnQueue', {
-          sessionId: 'sess:emfile',
-        }),
       ).resolves.toMatchObject({
-        items: [
-          {
-            messageId: 'mid-a',
-            content: [
-              { type: 'text', text: 'a' },
-              { type: 'image', data: 'AQID', mimeType: 'image/png' },
-            ],
-          },
-          { messageId: 'mid-b', content: [{ type: 'text', text: 'b' }] },
-        ],
+        items: [{ messageId: 'mid-b', content: [{ type: 'text', text: 'b' }] }],
       });
+      expect(entry.midTurnMessageQueue).toEqual([]);
+      expect(entry.settledMidTurnMessageIds).toEqual(['mid-a', 'mid-b']);
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mid_turn_message_recovery',
+          data: expect.objectContaining({ messageIds: ['mid-a'] }),
+        }),
+      );
     } finally {
       readFile.mockRestore();
       await media.close();
     }
   });
 
-  it('requeues a failed send-now drain in its original order', async () => {
+  it('recovers a failed send-now item without reordering the rest of the queue', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionAttachmentStore();
     const queue: MidTurnQueueEntry[] = [];
@@ -4792,21 +4809,15 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           sessionId: 'sess:emfile-partial',
           userInputOnly: true,
         }),
-      ).rejects.toThrow('too many open files');
-      expect(queue.map((item) => item.messageId)).toEqual([
-        'u1',
-        'q1',
-        'u2',
-        'u3',
-      ]);
-      expect(entry.settledMidTurnMessageIds).toEqual([]);
-      expect(publish).not.toHaveBeenCalled();
+      ).resolves.toMatchObject({ messages: ['u2'] });
+      expect(queue.map((item) => item.messageId)).toEqual(['q1', 'u3']);
+      expect(entry.settledMidTurnMessageIds).toEqual(['u1', 'u2']);
 
       await expect(
         client.extMethod('craft/drainMidTurnQueue', {
           sessionId: 'sess:emfile-partial',
         }),
-      ).resolves.toMatchObject({ messages: ['u1', 'q1', 'u2', 'u3'] });
+      ).resolves.toMatchObject({ messages: ['q1', 'u3'] });
     } finally {
       readFile.mockRestore();
       await media.close();
@@ -4853,17 +4864,15 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           sessionId: 'sess:emfile-settled',
           userInputOnly: true,
         }),
-      ).rejects.toThrow('too many open files');
-      expect(queue.map((item) => item.messageId)).toEqual(['u1', 'u2', 'u3']);
+      ).resolves.toMatchObject({ messages: ['u2'] });
+      expect(queue.map((item) => item.messageId)).toEqual(['u3']);
     } finally {
       readFile.mockRestore();
       await media.close();
     }
   });
 
-  it('keeps a resolvable sibling when one reference is gone at drain', async () => {
-    // One dead reference must drop only itself, not the whole message's
-    // media: the sibling the store still holds reaches the child.
+  it('preserves valid attachment references in a recovered draft', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionAttachmentStore();
     try {
@@ -4875,6 +4884,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       await media.remove(gone.attachmentId);
       const entry = {
         sessionId: 'sess:mixed',
+        midTurnRecoveries: [],
         midTurnMessageQueue: [
           { messageId: 'mid-mixed', text: 'mixed', content: [gone, live] },
         ],
@@ -4889,20 +4899,16 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           sessionId: 'sess:mixed',
         }),
       ).resolves.toMatchObject({
-        items: [
-          {
-            messageId: 'mid-mixed',
-            content: [
-              {
-                type: 'text',
-                text: 'mixed\n[Attachment is no longer available]',
-              },
-              { type: 'image', data: 'AQID', mimeType: 'image/png' },
-            ],
-            attachmentReferences: [live],
-          },
-        ],
+        items: [],
       });
+      expect(entry.midTurnRecoveries).toMatchObject([
+        {
+          messageId: 'mid-mixed',
+          text: 'mixed',
+          content: expect.arrayContaining([live]),
+          error: expect.any(String),
+        },
+      ]);
     } finally {
       await media.close();
     }

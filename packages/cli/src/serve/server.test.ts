@@ -742,6 +742,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_attachment_list',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
+  'session_mid_turn_draft_recovery',
   'session_mid_turn_send_now',
   'session_cancel',
   'session_events',
@@ -13554,12 +13555,12 @@ describe('createServeApp', () => {
         accepted: true,
         messageId: 'mid-default',
       });
-      // Trimmed before enqueue, and the client id is forwarded for the bridge's
-      // ownership check + originator stamping.
+      // The bridge retains the original whitespace for recovery and uses the
+      // client id for ownership and originator stamping.
       expect(bridge.enqueueMidTurnCalls).toEqual([
         {
           sessionId: 's-1',
-          message: 'hello',
+          message: '  hello  ',
           context: { clientId: 'client-9' },
           messageId: 'client-mid-1',
           options: { rejectIfIdle: true },

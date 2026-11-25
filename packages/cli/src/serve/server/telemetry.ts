@@ -542,6 +542,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'GET /session/:id/mid-turn-messages',
   },
   {
+    method: 'POST',
+    path: '/session/:id/mid-turn-messages/recovery/consume',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mid-turn-messages/recovery/consume',
+  },
+  {
     method: 'GET',
     path: '/session/:id/pending-prompts',
     attribution: 'handler_resolved',

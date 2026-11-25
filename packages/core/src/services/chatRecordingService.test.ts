@@ -608,6 +608,46 @@ describe('ChatRecordingService', () => {
       return { record: await flushed(), attachmentReferences };
     }
 
+    it('records a committed steer once across concurrent writes and recovery', async () => {
+      const actualJsonl = await vi.importActual<typeof jsonl>(
+        '../utils/jsonl-utils.js',
+      );
+      vi.mocked(jsonl.parseLineTolerant).mockImplementation(
+        actualJsonl.parseLineTolerant,
+      );
+      mockLease.readTranscript = vi.fn(async () =>
+        vi
+          .mocked(jsonl.writeLine)
+          .mock.calls.map(([, record]) => JSON.stringify(record))
+          .join('\n'),
+      );
+      const parts = [{ text: 'follow-up' }, { text: hookText }];
+      const options = hookPayload('follow-up');
+      await expect(
+        Promise.all([
+          svc.recordCommittedMidTurnUserMessage(parts, 'steer-1', options),
+          svc.recordCommittedMidTurnUserMessage(parts, 'steer-1', options),
+        ]),
+      ).resolves.toEqual([true, false]);
+      const record = await flushed();
+      expect(record).toMatchObject({
+        type: 'user',
+        subtype: 'mid_turn_user_message',
+        daemonPromptId: 'steer-1',
+        message: { role: 'user', parts },
+        systemPayload: options,
+      });
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: { messages: [record] },
+        lastCompletedUuid: record.uuid,
+      } as ReturnType<Config['getResumedSessionData']>);
+      const restarted = activateRecording(new ChatRecordingService(mockConfig));
+      await expect(
+        restarted.recordCommittedMidTurnUserMessage(parts, 'steer-1', options),
+      ).resolves.toBe(false);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
     it("records a Mod's prompt as the Mod's, not the person's", async () => {
       svc.recordUserMessage(
         [{ text: 'framed' }],

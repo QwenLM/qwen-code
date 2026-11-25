@@ -842,6 +842,10 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canRecoverMidTurnDrafts =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_draft_recovery',
+    ) === true;
   const canSendMidTurnNow =
     connection.capabilities?.features.includes('session_mid_turn_send_now') ===
     true;
@@ -851,6 +855,7 @@ export function ChatPane({
     queuedPrompts,
     queuedTexts,
     enqueuePrompt,
+    cancelMidTurnDrafts,
     removeQueuedPrompt,
     insertQueuedPrompt,
     sendQueuedPromptNow,
@@ -871,6 +876,7 @@ export function ChatPane({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canRecoverMidTurnDrafts,
     canQueryPendingPrompts:
       connection.capabilities?.features.includes('session_prompt') === true,
     canInjectMidTurnMedia,
@@ -1405,6 +1411,7 @@ export function ChatPane({
               undefined,
               undefined,
               text,
+              ...(canRecoverMidTurnDrafts ? ([commitAccepted] as const) : []),
             )
           : enqueuePrompt(
               trimmed,
@@ -1414,6 +1421,7 @@ export function ChatPane({
               inputAnnotations,
               notifyFirstPromptAdmitted,
               text,
+              ...(canRecoverMidTurnDrafts ? ([commitAccepted] as const) : []),
             );
       if (queued !== false && catalogOwnerCwd) {
         sessionCatalogController.invalidateWorkspace(catalogOwnerCwd);
@@ -1422,6 +1430,7 @@ export function ChatPane({
     },
     [
       actions,
+      canRecoverMidTurnDrafts,
       executionMode,
       planMode,
       setComposerMode,
@@ -1607,12 +1616,12 @@ export function ChatPane({
   );
 
   const handleCancel = useCallback(() => {
+    const refreshDrafts = cancelMidTurnDrafts?.();
     actions
       .cancel()
-      .catch((error: unknown) =>
-        reportError(error, 'Failed to cancel request'),
-      );
-  }, [actions, reportError]);
+      .catch((error: unknown) => reportError(error, 'Failed to cancel request'))
+      .finally(refreshDrafts);
+  }, [actions, cancelMidTurnDrafts, reportError]);
 
   const reviewSourceRef = useRef({ messages, artifactsByTurn });
   reviewSourceRef.current = { messages, artifactsByTurn };

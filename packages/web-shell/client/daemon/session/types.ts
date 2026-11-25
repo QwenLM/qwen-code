@@ -24,6 +24,7 @@ import type {
   DaemonSessionAttachmentData,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
+  DaemonMidTurnTarget,
   DaemonRemoveMidTurnMessageResult,
   DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
@@ -805,6 +806,8 @@ export interface DaemonSessionActions {
     opts?: {
       signal?: AbortSignal;
       messageId?: string;
+      target?: DaemonMidTurnTarget;
+      draftText?: string;
       content?: PromptContentBlock[];
       onAdmissionStarted?: () => void;
     },
@@ -833,7 +836,12 @@ export interface DaemonSessionActions {
    */
   getMidTurnMessages(opts?: {
     signal?: AbortSignal;
+    messageId?: string;
   }): Promise<DaemonMidTurnMessagesResult | undefined>;
+  consumeMidTurnRecovery(
+    messageIds: readonly string[],
+    sessionId: string,
+  ): Promise<void>;
   getPendingPrompts(
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonPendingPromptsResult>;

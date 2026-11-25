@@ -14691,6 +14691,10 @@ export function App({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canRecoverMidTurnDrafts =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_draft_recovery',
+    ) === true;
   const canSendMidTurnNow =
     connection.capabilities?.features.includes('session_mid_turn_send_now') ===
     true;
@@ -14703,6 +14707,7 @@ export function App({
     queuedPrompts,
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
+    cancelMidTurnDrafts,
     removeQueuedPrompt,
     insertQueuedPrompt,
     sendQueuedPromptNow,
@@ -14727,6 +14732,7 @@ export function App({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canRecoverMidTurnDrafts,
     canQueryPendingPrompts:
       connection.capabilities?.features.includes('session_prompt') === true,
     canInjectMidTurnMedia,
@@ -14865,6 +14871,7 @@ export function App({
     translate: t,
   });
 
+  const midTurnPreparationGenerationRef = useRef(0);
   const enqueuePrompt = useCallback(
     (
       text: string,
@@ -14902,6 +14909,15 @@ export function App({
           annotations,
           undefined,
           submittedPrompt,
+          ...(canRecoverMidTurnDrafts
+            ? ([
+                () => {
+                  if (commitComposerAccepted) commitComposerAccepted();
+                  else if (connectionRef.current.sessionId === sessionId)
+                    editorRef.current?.clear();
+                },
+              ] as const)
+            : []),
         );
         if (result !== false) {
           if (commitComposerAccepted) {
@@ -14931,6 +14947,7 @@ export function App({
       const prepare = prepareSubmitRef.current;
       const submitBefore = onSubmitBeforeRef.current;
       if (prepare || submitBefore) {
+        const prepareGeneration = midTurnPreparationGenerationRef.current;
         const sourceOwner = sessionOwnerGuard.capture();
         const sourceSessionId = connectionRef.current.sessionId;
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
@@ -14950,6 +14967,8 @@ export function App({
           getComposerWorkspaceCwd() === sourceWorkspaceCwd;
         const submissionOwnerIsCurrent = () =>
           submissionSessionIsCurrent() &&
+          (!canRecoverMidTurnDrafts ||
+            prepareGeneration === midTurnPreparationGenerationRef.current) &&
           !sessionWriteBlockedRef.current &&
           sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
           composerSourceVersionRef.current === sourceVersion;
@@ -15014,6 +15033,7 @@ export function App({
       );
     },
     [
+      canRecoverMidTurnDrafts,
       getComposerWorkspaceCwd,
       reportError,
       rawEnqueuePrompt,
@@ -22151,6 +22171,7 @@ export function App({
   const hasQueuedPrompts = queuedPrompts.length > 0;
   const handleCancel = useCallback(() => {
     const owner = sessionOwnerGuard.capture();
+    midTurnPreparationGenerationRef.current += 1;
     const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
     drainGenerationRef.current++;
@@ -22173,11 +22194,16 @@ export function App({
           requestedAt: Date.now(),
         }
       : null;
-    sessionActions.cancel().catch((error: unknown) => {
-      if (!owner.isCurrent()) return;
-      reportError(error, 'Failed to cancel request');
-    });
+    const refreshDrafts = cancelMidTurnDrafts?.();
+    sessionActions
+      .cancel()
+      .catch((error: unknown) => {
+        if (!owner.isCurrent()) return;
+        reportError(error, 'Failed to cancel request');
+      })
+      .finally(refreshDrafts);
   }, [
+    cancelMidTurnDrafts,
     sessionActions,
     reportError,
     pushToast,

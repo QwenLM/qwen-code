@@ -27,6 +27,7 @@ const SCHEMA: IndexedDbSchema = {
 export interface ComposerDraftAttachments {
   images: PromptImage[];
   files: PromptFile[];
+  recoveredMessageIds?: string[];
 }
 
 export interface ComposerDraftAttachmentStore {
@@ -112,10 +113,18 @@ function readStoredAttachments(
   stored: unknown,
 ): ComposerDraftAttachments | undefined {
   if (!stored || typeof stored !== 'object') return undefined;
-  const { images, files } = stored as Partial<ComposerDraftAttachments>;
+  const { images, files, recoveredMessageIds } =
+    stored as Partial<ComposerDraftAttachments>;
   return {
     images: Array.isArray(images) ? images.filter(isPromptImage) : [],
     files: Array.isArray(files) ? files.filter(isPromptFile) : [],
+    ...(Array.isArray(recoveredMessageIds)
+      ? {
+          recoveredMessageIds: recoveredMessageIds.filter(
+            (id) => typeof id === 'string',
+          ),
+        }
+      : {}),
   };
 }
 

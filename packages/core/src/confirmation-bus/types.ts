@@ -112,6 +112,7 @@ export interface HookExecutionRequest {
   eventName: string;
   input: Record<string, unknown>;
   correlationId: string;
+  requirePromptVerdict?: true;
   /** Optional AbortSignal to cancel hook execution */
   signal?: AbortSignal;
 }

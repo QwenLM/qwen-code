@@ -326,6 +326,8 @@ export function normalizeDaemonEvent(
     case 'mid_turn_message_injected':
       return normalizeMidTurnMessageInjected(event, base);
 
+    case 'mid_turn_message_recovery':
+    case 'mid_turn_message_rejected':
     case 'pending_prompt_added':
     case 'pending_prompt_started':
     case 'pending_prompt_completed':
@@ -748,27 +750,46 @@ function normalizeMidTurnMessageInjected(
   const messageIds = Array.isArray(data['messageIds'])
     ? data['messageIds']
     : [];
-  return messages.map((text, index) => {
+  return messages.flatMap((text, index): DaemonUiEvent[] => {
     const item = Array.isArray(items) ? items[index] : undefined;
     const messageId = messageIds[index];
-    return {
-      ...base,
-      type: 'status',
-      text,
-      source: 'mid_turn_message_injected',
-      data: {
-        ...data,
-        messages: [text],
-        ...(Array.isArray(items)
-          ? { items: item !== undefined ? [item] : [] }
-          : {}),
-        ...(typeof messageId === 'string'
-          ? { messageIds: [messageId] }
-          : Array.isArray(data['messageIds'])
-            ? { messageIds: [] }
+    if (data['promoted'] === true && typeof messageId === 'string') {
+      const content: unknown[] = text ? [{ type: 'text', text }] : [];
+      if (isRecord(item) && Array.isArray(item['content'])) {
+        content.push(...item['content']);
+      }
+      return content.flatMap((block) =>
+        normalizeSessionUpdate(
+          {
+            ...event,
+            type: 'session_update',
+            data: { sessionUpdate: 'user_message_chunk', content: block },
+          },
+          { ...base, promptId: messageId },
+          {},
+        ),
+      );
+    }
+    return [
+      {
+        ...base,
+        type: 'status',
+        text,
+        source: 'mid_turn_message_injected',
+        data: {
+          ...data,
+          messages: [text],
+          ...(Array.isArray(items)
+            ? { items: item !== undefined ? [item] : [] }
             : {}),
+          ...(typeof messageId === 'string'
+            ? { messageIds: [messageId] }
+            : Array.isArray(data['messageIds'])
+              ? { messageIds: [] }
+              : {}),
+        },
       },
-    };
+    ];
   });
 }
 
