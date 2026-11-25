@@ -16,6 +16,7 @@ import {
 } from './hosted-harness-session.test-helper.js';
 import {
   mockApprovalTurn,
+  mockPublicShellApproval,
   statsOf,
   statusOf,
 } from './hosted-harness-session-suspension.test-helper.js';
@@ -43,14 +44,36 @@ import {
 describe('idle suspension', () => {
   beforeEach(setupHostedTextSession);
 
+  // The wake Turn's approval: a file write, or with `shell` a Shell call on a
+  // version-0 Shell Session's Shell lane, whose load reattaches the monitor
+  // run's deliveries.
+  async function mockWakeApproval(turnId: string, shell: boolean) {
+    if (!shell) return mockApprovalTurn(turnId);
+    await mockPublicShellApproval(false, true, turnId);
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'listStagedDeliveries',
+    ).mockResolvedValue([]);
+  }
+
+  const executedToolName = () =>
+    (
+      JSON.parse(
+        vi.mocked(HostedWorkspaceBroker.prototype.execute).mock.calls[0]![1],
+      ) as { toolName: string }
+    ).toolName;
+
   // A wake Turn has no coordinator row, so its own pump is the only thing
   // that can resume it after the Harness dies inside its approval wait. A
   // Store fault while reading the saved continuation only delays it.
-  async function resumeMonitorWakeAfterDeath(fault: boolean) {
+  async function resumeMonitorWakeAfterDeath(fault: boolean, shell = false) {
     domainEnablement.monitorRun = true;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
     const turnId = 'monitor-1:notify:1';
-    mockApprovalTurn(turnId);
+    const toolProfile = shell
+      ? 'hosted-workspace-shell/1'
+      : 'hosted-workspace-files/1';
+    await mockWakeApproval(turnId, shell);
     const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
     const saved = vi.spyOn(
       approvalContinuation,
@@ -74,7 +97,7 @@ describe('idle suspension', () => {
           sessionId: SESSION_ID,
           sessionScope: 'thread',
           managedSessionStore: store(),
-          toolProfile: 'hosted-workspace-files/1',
+          toolProfile,
           approvalMode: 'default',
           approvalTimeoutMs: 60_000,
         })
@@ -145,7 +168,7 @@ describe('idle suspension', () => {
       )
         .send({
           managedSessionStore: store(),
-          toolProfile: 'hosted-workspace-files/1',
+          toolProfile,
           passiveManagedRuntimeRecovery: true,
         })
         .expect(200);
@@ -194,6 +217,9 @@ describe('idle suspension', () => {
         { timeout: 5000 },
       );
       expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      expect(executedToolName()).toBe(
+        shell ? 'run_shell_command' : 'write_file',
+      );
       expect(state.model).toHaveBeenLastCalledWith(
         expect.objectContaining({ resumeFromToolResults: expect.any(Array) }),
       );
@@ -219,7 +245,10 @@ describe('idle suspension', () => {
   // certificate that claims its own wake, and the passive load decision
   // delivery sends resumes it through the pump. Without the control plane's
   // bit the wait stays resident.
-  async function parkMonitorWakeApproval(advertised: boolean) {
+  async function parkMonitorWakeApproval(advertised: boolean, shell = false) {
+    const toolProfile = shell
+      ? 'hosted-workspace-shell/1'
+      : 'hosted-workspace-files/1';
     domainEnablement.monitorRun = true;
     state.wakeDispatch = true;
     state.actionParking = true;
@@ -227,7 +256,7 @@ describe('idle suspension', () => {
     state.wakeStamps.length = 0;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
     const turnId = 'monitor-1:notify:1';
-    mockApprovalTurn(turnId);
+    await mockWakeApproval(turnId, shell);
     const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
     // The direct journal writes below do not count as admitted route work.
     const armIdle = vi
@@ -251,7 +280,7 @@ describe('idle suspension', () => {
           sessionId: SESSION_ID,
           sessionScope: 'thread',
           managedSessionStore: store(),
-          toolProfile: 'hosted-workspace-files/1',
+          toolProfile,
           approvalMode: 'default',
           approvalTimeoutMs: 60_000,
         })
@@ -352,7 +381,7 @@ describe('idle suspension', () => {
         )
           .send({
             managedSessionStore: store(),
-            toolProfile: 'hosted-workspace-files/1',
+            toolProfile,
             passiveManagedRuntimeRecovery: true,
           })
           .expect(200);
@@ -396,6 +425,9 @@ describe('idle suspension', () => {
         expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(
           1,
         );
+        expect(executedToolName()).toBe(
+          shell ? 'run_shell_command' : 'write_file',
+        );
         expect(
           (await read()).events.some(
             (event) =>
@@ -427,6 +459,9 @@ describe('idle suspension', () => {
 
   it('keeps a monitor wake approval resident without the wake parking bit', () =>
     parkMonitorWakeApproval(false));
+
+  it('parks a monitor wake Shell approval on a version-0 Shell Session', () =>
+    parkMonitorWakeApproval(true, true));
 
   // S4b (#18149): a channel or pr_event Turn's approval wait parks like any
   // wake Turn's, and after its Harness dies in the wait the pump resumes it
@@ -656,6 +691,9 @@ describe('idle suspension', () => {
 
   it('resumes a monitor wake approval after its Harness dies in the wait', () =>
     resumeMonitorWakeAfterDeath(false));
+
+  it('resumes a monitor wake Shell approval on a version-0 Shell Session after its Harness dies in the wait', () =>
+    resumeMonitorWakeAfterDeath(false, true));
 
   it('retries a wake approval continuation read that a Store fault failed', () =>
     resumeMonitorWakeAfterDeath(true));

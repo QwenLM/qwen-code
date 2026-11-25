@@ -113,9 +113,8 @@ final class AgentTurnExecution {
                 tenantId, sessionId, turnId, owner);
     }
 
-    boolean markTurnRecoveryBlocked(String tenantId,
-            String sessionId, String turnId, String owner,
-            String errorCode, String errorMessage) {
+    boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
+            String turnId, String owner, String errorCode, String errorMessage) {
         long now = clock.millis();
         Long retryAfter = AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(errorCode)
                 ? now + 15_000L : null;
