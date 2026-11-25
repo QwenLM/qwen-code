@@ -19,5 +19,4 @@ Invoke `dist/main.js` directly rather than `qwen` from `node_modules/.bin`: both
 
 - Usage statistics are off unless `privacy.usageStatisticsEnabled` is set to `true`.
 - Without `security.auth.selectedType`, the CLI uses the OpenAI-compatible provider auth.
-- `/upgrade` opens the Qwen subscription plans for signed-in subscribers.
 - `qwen serve` and `qwen channel` explain that they are not supported yet and exit with status 1.

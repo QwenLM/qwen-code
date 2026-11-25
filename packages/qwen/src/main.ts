@@ -21,8 +21,4 @@ void runCli({
     );
     return createCommandDeclarations();
   },
-  createFramework: async (signal, settings, mode, input) => {
-    const { createCliFramework } = await import('./entry-frameworks.js');
-    return createCliFramework(signal, settings, mode, input);
-  },
 });

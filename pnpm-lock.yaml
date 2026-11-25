@@ -1918,15 +1918,9 @@ importers:
       '@qwen-code/cli':
         specifier: workspace:*
         version: link:../harness/cli
-      '@qwen-code/core':
-        specifier: workspace:*
-        version: link:../harness/core
       '@qwen-code/resource':
         specifier: workspace:*
         version: link:../harness/resource
-      open:
-        specifier: ^10.2.0
-        version: 10.2.0
     devDependencies:
       typescript:
         specifier: 5.8.3
