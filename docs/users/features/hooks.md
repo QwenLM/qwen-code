@@ -376,7 +376,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | `PostToolUse`         | After successful tool execution                                        | Tool id                                                          |
 | `PostToolUseFailure`  | After tool execution fails                                             | Tool id                                                          |
 | `PostToolBatch`       | Once after every tool call in a batch has resolved                     | None (always fires)                                              |
-| `UserPromptSubmit`    | Before supported model invocations                                     | None                                                             |
+| `UserPromptSubmit`    | Before a fresh user message enters the model                           | None                                                             |
 | `UserPromptExpansion` | After a slash command expands into a prompt, before the prompt is sent | Command name, without the leading `/`                            |
 | `SessionStart`        | When session starts or resumes                                         | Source (`startup`, `resume`, `clear`, `compact`)                 |
 | `SessionEnd`          | When session ends                                                      | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)            |
@@ -749,7 +749,7 @@ If the hooks fail, or do not finish within 15 seconds, the batch continues with 
 
 #### UserPromptSubmit
 
-**Purpose**: Executed before supported model invocations to validate, block, or enrich their input. On the core/headless path, the event currently covers `UserQuery`, `ToolResult`, and `Hook` sends, while `Retry`, `Steer`, `Cron`, `Notification`, and `Teammate` sends are skipped. It can therefore occur on continuation paths, and `prompt` must not be assumed to be raw user input. The ACP session path has its own invocation policy: retries and newly dispatched background tasks can still invoke legacy hooks; continue, restored-question, and runtime-goal turns do not.
+**Purpose**: Runs once when admitting a fresh user message, including a user message steered into an active turn. It can validate, block, or enrich that message. Tool results, Stop-driven continuations, model-request retries, and automated prompts skip the event. If a hook blocks a steering message, tool results in the same continuation can still proceed. ACP cancellation can preserve a message that the host has already delivered. This history operation skips the event.
 
 **Event-specific fields**:
 
@@ -760,9 +760,9 @@ If the hooks fail, or do not finish within 15 seconds, the batch continues with 
 }
 ```
 
-`submitted_prompt` is optional. It is present on supported interactive TUI submissions and first-turn headless `UserQuery` sends. On the ACP session path used by ACP clients, `serve`, and daemon hosts, a fresh turn must carry an explicit submission declaration. Missing, non-string, empty, or whitespace-only declarations omit the field; the value is never reconstructed from `prompt` or a display label. Retries, continuations, and channel-classified turns omit it. The channel exclusion includes both automated events and human messages relayed through channel adapters.
+`submitted_prompt` is optional. It is present on supported interactive TUI submissions and first-turn headless `UserQuery` sends. On the ACP session path used by ACP clients, `serve`, and daemon hosts, a fresh turn includes this field when it carries an explicit nonblank string declaration. Its value comes from the declaration, independently of `prompt` or a display label. Channel-classified turns omit this field, including human messages relayed through channel adapters.
 
-Web Shell provides the original composer text at its submission boundary. Realtime voice handoffs do not declare provenance because their request text comes from model-generated tool arguments. Other ACP/daemon SDK clients can opt in per request with `_meta: { "qwen.submittedPrompt": "original submitted text" }`, captured before resource or model-only expansion. Existing clients without this declaration continue running legacy hooks but do not trigger provenance-gated Auto Recall. Do not add the declaration globally to an SDK transport: scheduled tasks, Live task runs, sub-session spawns, model-authored cross-session messages, and promoted mid-turn messages must not acquire it automatically. The private `qwen.daemon.submittedPrompt` key is reserved for the daemon-to-child hop and is stripped from external callers. These declarations are caller-supplied provenance, not proof of human authorship or authorization.
+Web Shell provides the original composer text at its submission boundary. Realtime voice handoffs omit the declaration because their request text comes from model-generated tool arguments. Other ACP/daemon SDK clients can opt in per request with `_meta: { "qwen.submittedPrompt": "original submitted text" }`, captured before resource or model-only expansion. An eligible user message with a missing declaration still runs the hook. Provenance-gated consumers such as Auto Recall require the declaration. The private `qwen.daemon.submittedPrompt` key is reserved for the daemon-to-child hop and is stripped from external callers.
 
 On the ACP path, the initial legacy `prompt` is the request's text blocks joined with a space before resource, attachment, slash-command, or model-only expansion. It does not expose the complete expanded model input. `submitted_prompt` can equal that text, but comes only from the explicit declaration and preserves its original whitespace. On the core/headless path, legacy `prompt` represents the current model-bound text for the hook invocation. Neither field is a complete DLP inspection surface.
 

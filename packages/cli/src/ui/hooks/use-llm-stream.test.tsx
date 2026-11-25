@@ -70,7 +70,11 @@ import {
   MAX_INLINE_IMAGE_ENCODED_LENGTH,
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
-import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
+import type {
+  DirectUserAdmission,
+  QueuedGoalTurn,
+  QueuedMessage,
+} from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import {
@@ -82,6 +86,9 @@ import {
   framePasteExpansion,
   REWRITE_CHANGED_PASTE,
 } from '../utils/paste-placeholders.js';
+
+const queuedSteers = (...texts: string[]): QueuedMessage[] =>
+  texts.map((text) => ({ text, key: text, deferUntilIdle: false }));
 
 // --- MOCKS ---
 const pendingToolPersistence = vi.hoisted(() => ({
@@ -5921,6 +5928,7 @@ describe('useLlmStream', () => {
     mockConfig.getGoalRuntime = vi.fn(() => runtime);
     mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+
     const makeCompletedTool = (
       callId: string,
       goalContext?: GoalTurnPermit,
@@ -7177,18 +7185,26 @@ describe('useLlmStream', () => {
         } as unknown as AnyToolInvocation,
       }) as unknown as TrackedCompletedToolCall;
 
+    const request = vi.fn().mockResolvedValue({
+      output: { hookSpecificOutput: { additionalContext: 'steer context' } },
+    });
+    mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
+    mockConfig.hasHooksForEvent = vi.fn(
+      (event) => event === 'UserPromptSubmit',
+    );
+
     // A plain steer resolved before the delayed command is both appended to the
     // pending submission and eligible for restoration when Esc aborts the drain.
-    let queuedSteerMessages: string[] = [];
+    let queuedSteerMessages: QueuedMessage[] = [];
     const midTurnDrainRef = {
-      current: vi.fn<() => string[]>(() => {
+      current: vi.fn<() => QueuedMessage[]>(() => {
         const drained = queuedSteerMessages;
         queuedSteerMessages = [];
         return drained;
       }),
     };
     const midTurnRestoreRef = {
-      current: vi.fn<(messages: string[]) => void>(),
+      current: vi.fn<(messages: QueuedMessage[]) => void>(),
     };
     let releaseSlashCommand: (() => void) | undefined;
     mockHandleSlashCommand.mockImplementation(
@@ -7280,7 +7296,7 @@ describe('useLlmStream', () => {
     );
     rerender();
     client.addHistory.mockClear();
-    queuedSteerMessages = ['steer it this way', '/goal pause'];
+    queuedSteerMessages = queuedSteers('steer it this way', '/goal pause');
     const batch = act(async () => {
       await capturedOnComplete?.([
         completedTool('done-tool'),
@@ -7318,8 +7334,12 @@ describe('useLlmStream', () => {
       }),
     );
     expect(midTurnRestoreRef.current).toHaveBeenCalledWith([
-      'steer it this way',
+      expect.objectContaining({
+        text: 'steer it this way',
+        promptHook: { additionalContext: 'steer context' },
+      }),
     ]);
+    expect(request).toHaveBeenCalledOnce();
     // The only second model call is the explicit Steer; the cancelled batch
     // itself never reached the model.
     expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
@@ -8190,8 +8210,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -8281,8 +8301,8 @@ describe('useLlmStream', () => {
     });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([steeredPrompt])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(steeredPrompt))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8348,8 +8368,8 @@ describe('useLlmStream', () => {
 
   it('does not expose the main steer queue to detached tool continuations', async () => {
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValue(['keep this follow-up on the main turn']);
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValue(queuedSteers('keep this follow-up on the main turn'));
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const detachedController = new AbortController();
 
@@ -8416,8 +8436,8 @@ describe('useLlmStream', () => {
     mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([goalCommand])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(goalCommand))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8478,8 +8498,8 @@ describe('useLlmStream', () => {
     });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([goalCommand])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(goalCommand))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8542,13 +8562,15 @@ describe('useLlmStream', () => {
       });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([
-        '/goal first',
-        'plain before final goal',
-        '/goal final',
-        'plain after final goal',
-      ])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(
+        queuedSteers(
+          '/goal first',
+          'plain before final goal',
+          '/goal final',
+          'plain after final goal',
+        ),
+      )
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8603,8 +8625,8 @@ describe('useLlmStream', () => {
       .mockResolvedValueOnce({ type: 'handled' });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce(['/goal first', '/goal clear'])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers('/goal first', '/goal clear'))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8653,8 +8675,8 @@ describe('useLlmStream', () => {
       () => new Promise(() => {}),
     );
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([steeredPrompt])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(steeredPrompt))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8701,7 +8723,7 @@ describe('useLlmStream', () => {
     });
 
     expect(steerInput).toBeUndefined();
-    expect(restoreSteer).toHaveBeenCalledWith([steeredPrompt]);
+    expect(restoreSteer).toHaveBeenCalledWith(queuedSteers(steeredPrompt));
     expect(mockAddItem).not.toHaveBeenCalledWith(
       { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
       expect.any(Number),
@@ -8727,8 +8749,8 @@ describe('useLlmStream', () => {
         }),
     );
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce(messages)
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(...messages))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8780,7 +8802,7 @@ describe('useLlmStream', () => {
     });
 
     expect(steerInput).toBeUndefined();
-    expect(restoreSteer).toHaveBeenCalledWith(messages);
+    expect(restoreSteer).toHaveBeenCalledWith(queuedSteers(...messages));
   });
 
   it('resolves mid-turn @ image messages before submitting tool results', async () => {
@@ -8860,8 +8882,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9032,8 +9054,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9152,8 +9174,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9275,8 +9297,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9403,8 +9425,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9516,8 +9538,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9626,8 +9648,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9733,8 +9755,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -26556,7 +26578,7 @@ describe('useLlmStream', () => {
           [toolRequest('read_a')],
           [{ type: ServerLlmEventType.Content, value: 'Read.' }],
         );
-        let queued = ['Also check b.'];
+        let queued = queuedSteers('Also check b.');
         const midTurnDrainRef = {
           current: vi.fn(() => {
             const drained = queued;
@@ -26617,7 +26639,7 @@ describe('useLlmStream', () => {
               releaseCommand = () => resolve(false);
             }),
         );
-        let queued = ['/goal status', 'Also check b.'];
+        let queued = queuedSteers('/goal status', 'Also check b.');
         const midTurnDrainRef = {
           current: vi.fn(() => {
             const drained = queued;
