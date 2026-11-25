@@ -1953,4 +1953,79 @@ describe('ChatSurface', () => {
     expect(captured.editor?.visibleToolbarActions).toEqual(['model', 'voice']);
     expect(captured.question?.disabled).toBe(false);
   });
+
+  it('forwards Managed host seams for transcript, decision wrapper, AskUserQuestion draft/submitDisabled, and composer overrides', () => {
+    const question = permissionRequest('q-managed');
+    const onDraftChange = vi.fn();
+    const onComposerSubmit = vi.fn(() => false as const);
+    const controller = fakeController({
+      sessionId: 'managed-s1',
+      phase: 'failed',
+      pendingQuestions: [{ id: 'q-managed', request: question }],
+    });
+    const container = mountReact(
+      <ChatSurface
+        controller={controller}
+        transcriptClassName="custom-transcript"
+        transcriptProps={{ hideSessionTimeline: true }}
+        decisionTestId="managed-approval"
+        decisionClassName="custom-decision"
+        decisionHeader={<div data-testid="dec-hdr">Header</div>}
+        decisionFooter={<div data-testid="dec-ftr">Footer</div>}
+        askUserInitialDraft={{ q1: { optionIds: [], text: 'draft' } }}
+        askUserOnDraftChange={onDraftChange}
+        askUserSubmitDisabled
+        hideComposerWhenCardActive={false}
+        composerClassName="custom-composer"
+        composerCancelEnabled
+        onComposerSubmit={onComposerSubmit}
+        composerProps={{
+          sessionId: undefined,
+          isRunning: true,
+          dialogOpen: false,
+          placeholderText: 'Custom placeholder',
+        }}
+        composerFooter={<div data-testid="cmp-ftr">Queue</div>}
+      />,
+    );
+    expect(captured.transcript?.hideSessionTimeline).toBe(true);
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="dec-hdr"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="dec-ftr"]')).not.toBeNull();
+    expect(captured.question?.initialDraft).toEqual({
+      q1: { optionIds: [], text: 'draft' },
+    });
+    expect(captured.question?.onDraftChange).toBe(onDraftChange);
+    expect(captured.question?.submitDisabled).toBe(true);
+    // hideComposerWhenCardActive=false keeps composer visible alongside card.
+    expect(captured.editor?.dialogOpen).toBe(false);
+    expect(captured.editor?.sessionId).toBeUndefined();
+    expect(captured.editor?.isRunning).toBe(true);
+    expect(captured.editor?.onCancel).toBeTypeOf('function');
+    expect(captured.editor?.placeholderText).toBe('Custom placeholder');
+    expect(container.querySelector('[data-testid="cmp-ftr"]')).not.toBeNull();
+    expect(captured.editor?.onSubmit('hi', undefined, undefined)).toBe(false);
+    expect(onComposerSubmit).toHaveBeenCalledTimes(1);
+
+    // composerCancelEnabled=false suppresses isRunning and onCancel;
+    // composerVisible=false unmounts the composer region.
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={controller}
+        composerCancelEnabled={false}
+        composerProps={{ isRunning: true }}
+      />,
+    );
+    expect(captured.editor?.isRunning).toBe(false);
+    expect(captured.editor?.onCancel).toBeUndefined();
+
+    rerenderReact(
+      container,
+      <ChatSurface controller={controller} composerVisible={false} />,
+    );
+    expect(container.querySelector('[data-testid="chat-editor"]')).toBeNull();
+  });
 });

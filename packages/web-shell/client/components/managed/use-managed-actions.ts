@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  ManagedAgentOperationObserver,
   ManagedAgentPendingAction,
   ManagedAgentActionResponse,
   ManagedAgentProvider,
@@ -90,7 +91,8 @@ export interface ManagedActionsState {
   respond(
     action: ManagedAgentPendingAction,
     response: ManagedAgentActionResponse,
-  ): Promise<void>;
+    observer?: ManagedAgentOperationObserver,
+  ): Promise<boolean>;
   /** Reads the pending approvals again now. */
   retry(): void;
 }
@@ -352,16 +354,17 @@ export function useManagedActions(
     async (
       requested: ManagedAgentPendingAction,
       response: ManagedAgentActionResponse,
-    ) => {
-      if (current.current.owner !== owner) return;
+      observer?: ManagedAgentOperationObserver,
+    ): Promise<boolean> => {
+      if (current.current.owner !== owner) return false;
       const key = managedActionKey(requested);
       const target = current.current.actions.find(
         (entry) =>
           managedActionKey(entry) === key && !current.current.answered.has(key),
       );
       const actionReader = current.current.reader;
-      if (!target || !actionReader) return;
-      if (inFlight.current.get(key) === owner) return;
+      if (!target || !actionReader) return false;
+      if (inFlight.current.get(key) === owner) return false;
       inFlight.current.set(key, owner);
       setSubmitting((current) => new Set(current).add(key));
       const isPending = () =>
@@ -386,12 +389,13 @@ export function useManagedActions(
           target.kind === 'question' && typeof submitted !== 'string'
             ? await questionResponseKey(target, submitted.answers)
             : `${target.actionId}:${submitted}`;
-        if (!isPending()) return;
+        if (!isPending()) return false;
         await actionReader.respond(target, submitted, {
           clientId,
           idempotencyKey,
+          ...observer,
         });
-        if (!isPending()) return;
+        if (!isPending()) return false;
         setAnswered((current) => new Set(current).add(key));
         setAnswerErrors((current) => {
           const next = new Map(current);
@@ -404,6 +408,7 @@ export function useManagedActions(
           return next;
         });
         setRevision((value) => value + 1);
+        return true;
       } catch (failure) {
         if (
           typeof failure === 'object' &&
@@ -440,7 +445,7 @@ export function useManagedActions(
             return next;
           });
           setRevision((value) => value + 1);
-          return;
+          return true;
         }
         setAnswered((current) => {
           const next = new Set(current);

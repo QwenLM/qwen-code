@@ -87,6 +87,11 @@ export interface ManagedChatControllerDeps {
   // Optional clock used to filter expired actions (defaults to Date.now).
   readonly now?: () => number;
 
+  // Keep expired actions visible in pendingApprovals / pendingQuestions so a
+  // host can show a disabled expired state; respondApproval / respondQuestion
+  // still reject expired submissions fail-closed.
+  readonly retainExpiredActions?: boolean;
+
   // Pass-through status and capability facts.
   readonly statusFacts: ChatStatusFacts;
   readonly capabilities: ChatCapabilities;
@@ -438,6 +443,11 @@ interface TrackedOperation {
   backendOperationId?: string;
   boundTurnId?: string;
   boundActionId?: string;
+  boundActionKey?: string;
+}
+
+function pendingActionKey(action: ManagedAgentPendingAction): string {
+  return JSON.stringify([action.sessionId, action.actionId]);
 }
 
 function projectTurnOutcomeForKind(
@@ -473,7 +483,8 @@ export function createManagedChatController(
   let seq = 0;
   let inFlightDispatches = 0;
   let tracked: TrackedOperation[] = [];
-  const inFlightActionIds = new Set<string>();
+  const inFlightActionIds = new Map<string, number>();
+  const inFlightActionKeys = new Set<string>();
   const bufferedOperationSettlement = new Map<
     string,
     {
@@ -508,11 +519,11 @@ export function createManagedChatController(
     }
   };
 
-  const hasLiveAction = (actionId: string): boolean =>
+  const hasLiveAction = (actionKey: string): boolean =>
     tracked.some(
       (entry) =>
         (entry.kind === 'approval' || entry.kind === 'question') &&
-        entry.target.requestId === actionId &&
+        entry.boundActionKey === actionKey &&
         !isTerminalOperation(entry.state),
     );
 
@@ -598,7 +609,7 @@ export function createManagedChatController(
     }
     // Only keep an early buffer entry while this action itself is in flight;
     // cross-attempt isolation is independently enforced by dispatchSequence.
-    if (inFlightActionIds.has(event.actionId)) {
+    if ((inFlightActionIds.get(event.actionId) ?? 0) > 0) {
       bufferedActionOutcome.set(event.actionId, {
         outcome: event.outcome,
         dispatchSequence: seq,
@@ -727,23 +738,29 @@ export function createManagedChatController(
     const questions: PendingQuestion[] = [];
     const signatures: string[] = [];
     for (const action of deps.pendingActions) {
-      if (isActionExpired(action, nowMs)) continue;
+      if (!deps.retainExpiredActions && isActionExpired(action, nowMs))
+        continue;
       const request =
         action.kind === 'question'
           ? toManagedQuestionPermissionRequest(action)
-          : toManagedPermissionRequest(action, messages);
+          : toManagedPermissionRequest(
+              action,
+              action.sessionId === deps.sessionId ? messages : [],
+            );
+      const cacheKey = pendingActionKey(action);
       const signature = JSON.stringify([
+        action.sessionId,
         action.actionId,
         action.kind,
         action.inputRevision,
         action.policyRevision,
         request,
       ]);
-      const previous = pendingProjection?.requests.get(action.actionId);
+      const previous = pendingProjection?.requests.get(cacheKey);
       const stableRequest =
         previous?.signature === signature ? previous.request : request;
       requests.set(
-        action.actionId,
+        cacheKey,
         previous?.signature === signature
           ? previous
           : { signature, request: stableRequest },
@@ -878,12 +895,14 @@ export function createManagedChatController(
       const action = deps.pendingActions.find(
         (candidate) => candidate.actionId === requestId,
       );
+      const actionKey = action ? pendingActionKey(action) : undefined;
       if (
         !action ||
+        !actionKey ||
         action.kind === 'question' ||
         isActionExpired(action, getNow()) ||
-        inFlightActionIds.has(requestId) ||
-        hasLiveAction(requestId) ||
+        inFlightActionKeys.has(actionKey) ||
+        hasLiveAction(actionKey) ||
         !action.options.some((option) => option.id === optionId)
       ) {
         return {
@@ -891,7 +910,11 @@ export function createManagedChatController(
           target: opTarget,
         };
       }
-      inFlightActionIds.add(requestId);
+      inFlightActionKeys.add(actionKey);
+      inFlightActionIds.set(
+        requestId,
+        (inFlightActionIds.get(requestId) ?? 0) + 1,
+      );
       try {
         return await dispatchIntent(
           'approval',
@@ -899,6 +922,7 @@ export function createManagedChatController(
           () => deps.submitApproval(requestId, optionId),
           (entry) => {
             entry.boundActionId = requestId;
+            entry.boundActionKey = actionKey;
             const buffered = bufferedActionOutcome.get(requestId);
             if (
               buffered !== undefined &&
@@ -913,7 +937,10 @@ export function createManagedChatController(
           },
         );
       } finally {
-        inFlightActionIds.delete(requestId);
+        inFlightActionKeys.delete(actionKey);
+        const remaining = (inFlightActionIds.get(requestId) ?? 1) - 1;
+        if (remaining <= 0) inFlightActionIds.delete(requestId);
+        else inFlightActionIds.set(requestId, remaining);
       }
     },
     async respondQuestion(
@@ -925,11 +952,13 @@ export function createManagedChatController(
         (candidate): candidate is ManagedAgentPendingQuestionAction =>
           candidate.actionId === requestId && candidate.kind === 'question',
       );
+      const actionKey = action ? pendingActionKey(action) : undefined;
       if (
         !action ||
+        !actionKey ||
         isActionExpired(action, getNow()) ||
-        inFlightActionIds.has(requestId) ||
-        hasLiveAction(requestId)
+        inFlightActionKeys.has(actionKey) ||
+        hasLiveAction(actionKey)
       ) {
         return {
           admission: 'rejected',
@@ -943,7 +972,11 @@ export function createManagedChatController(
           target: opTarget,
         };
       }
-      inFlightActionIds.add(requestId);
+      inFlightActionKeys.add(actionKey);
+      inFlightActionIds.set(
+        requestId,
+        (inFlightActionIds.get(requestId) ?? 0) + 1,
+      );
       try {
         return await dispatchIntent(
           'question',
@@ -951,6 +984,7 @@ export function createManagedChatController(
           () => deps.submitQuestion(requestId, normalized),
           (entry) => {
             entry.boundActionId = requestId;
+            entry.boundActionKey = actionKey;
             const buffered = bufferedActionOutcome.get(requestId);
             if (
               buffered !== undefined &&
@@ -965,7 +999,10 @@ export function createManagedChatController(
           },
         );
       } finally {
-        inFlightActionIds.delete(requestId);
+        inFlightActionKeys.delete(actionKey);
+        const remaining = (inFlightActionIds.get(requestId) ?? 1) - 1;
+        if (remaining <= 0) inFlightActionIds.delete(requestId);
+        else inFlightActionIds.set(requestId, remaining);
       }
     },
     get statusFacts() {

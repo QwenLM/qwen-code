@@ -4330,10 +4330,14 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(respond).toHaveBeenCalledWith(action, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenCalledWith(
+      action,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
@@ -4381,10 +4385,14 @@ describe('ManagedSessionsPage', () => {
       allow().click();
       await flush();
     });
-    expect(respond).toHaveBeenCalledExactlyOnceWith(first, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenCalledExactlyOnceWith(
+      first,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]')?.textContent,
     ).toContain('Child session request · child-b');
@@ -4393,10 +4401,14 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(respond).toHaveBeenLastCalledWith(second, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenLastCalledWith(
+      second,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
@@ -4420,6 +4432,11 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     await act(async () => flush());
     const card = container.querySelector('[data-testid="managed-approval"]')!;
+    expect(
+      container.querySelector('[data-testid="chat-surface"]'),
+    ).not.toBeNull();
+    expect(mocks.client.subscribeEvents).toHaveBeenCalledTimes(1);
+    expect(listPending).toHaveBeenCalledTimes(1);
     expect(card.querySelector('[role="alertdialog"]')).toBeNull();
     expect(card.querySelector('[data-web-shell-ask-panel]')).not.toBeNull();
     expect(card.querySelector('form')).toBeNull();
@@ -4478,7 +4495,15 @@ describe('ManagedSessionsPage', () => {
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
     await act(async () => flush());
-    expect(respond.mock.calls[0]).toEqual(respond.mock.calls[1]);
+    expect(respond.mock.calls[0][0]).toEqual(respond.mock.calls[1][0]);
+    expect(respond.mock.calls[0][1]).toEqual(respond.mock.calls[1][1]);
+    expect({
+      clientId: respond.mock.calls[0][2]?.clientId,
+      idempotencyKey: respond.mock.calls[0][2]?.idempotencyKey,
+    }).toEqual({
+      clientId: respond.mock.calls[1][2]?.clientId,
+      idempotencyKey: respond.mock.calls[1][2]?.idempotencyKey,
+    });
     expect(respond.mock.calls[0][1]).toEqual({
       kind: 'question',
       answers: [
