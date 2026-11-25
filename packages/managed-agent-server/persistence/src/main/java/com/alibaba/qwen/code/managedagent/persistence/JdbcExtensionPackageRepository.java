@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -28,10 +29,11 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
 
-@org.springframework.stereotype.Repository
+@Repository
 public class JdbcExtensionPackageRepository implements ExtensionPackageRepository {
     private static final TypeReference<Map<String, String>> SETTINGS = new TypeReference<>() { };
     private static final TypeReference<List<String>> KEYS = new TypeReference<>() { };
@@ -59,7 +61,7 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             if (existing != null) {
                 Package saved = publication(tenant, workspace, existing);
                 if (!digest.equals(existing.packageDigest()) || !decode(encodedManifest, Manifest.class).equals(saved.manifest())
-                        || !java.util.Objects.equals(source, saved.source())) {
+                        || !Objects.equals(source, saved.source())) {
                     throw new ManagedAgentException(409, "extension_source_changed", "The prepared extension no longer matches the original publication.");
                 }
                 return existing;

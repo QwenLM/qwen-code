@@ -52,7 +52,7 @@ class ManagedRuntimeCapacityTest {
         worker.createContext(ManagedContextProtocol.ATTEST_PATH, exchange -> {
             exchange.getRequestBody().readAllBytes();
             byte[] proof = JsonCodec.encode(ManagedContextProtocol.attestationResponse(
-                    ManagedContextProtocol.boot(REQUEST, attestedSeed.get())));
+                    ManagedContextProtocol.boot(REQUEST, attestedSeed.get()).toWire()));
             exchange.getResponseHeaders().set("Cache-Control", "no-store");
             exchange.getResponseHeaders().set("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, proof.length);

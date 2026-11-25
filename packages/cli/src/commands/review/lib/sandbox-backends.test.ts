@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { createServer, type Server } from 'node:net';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   buildReviewBackendPlan,
   probeHostReviewBackends,
@@ -260,4 +263,66 @@ describe('selectReviewSandboxBackend', () => {
       expect(sel.plan.ready).toBe(true);
     }
   });
+
+  const dirs: string[] = [];
+  const servers: Server[] = [];
+  afterEach(async () => {
+    for (const s of servers.splice(0)) {
+      await new Promise<void>((r) => s.close(() => r()));
+    }
+    for (const d of dirs.splice(0)) {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'returns hardware-bridge when host microVM prerequisites AND a valid UDS bridge socket are ready, and refuses invalid sockets',
+    async () => {
+      const dir = mkdtempSync(join('/tmp', 'qvm-sel-'));
+      dirs.push(dir);
+      const sock = join(dir, 'fc.sock');
+      const srv = createServer();
+      servers.push(srv);
+      await new Promise<void>((r) => srv.listen(sock, r));
+
+      const bridge = selectReviewSandboxBackend({
+        executionClass: 'hardware-isolated',
+        containerRuntime: 'docker',
+        hostProbe: emptyProbe({
+          platform: 'linux',
+          hasKvm: true,
+          hasFirecracker: true,
+          hasJailer: true,
+          firecrackerKernel: '/opt/vm/vmlinux',
+          firecrackerRootfs: '/opt/vm/rootfs.ext4',
+          bridgeSocketPath: sock,
+          workerPidFile: '/run/fc.pid',
+        }),
+      });
+      expect(bridge.kind).toBe('hardware-bridge');
+      if (bridge.kind === 'hardware-bridge') {
+        expect(bridge.backend).toBe('firecracker');
+        expect(bridge.socketPath).toBe(sock);
+        expect(bridge.workerPidFile).toBe('/run/fc.pid');
+      }
+
+      const missingSock = selectReviewSandboxBackend({
+        executionClass: 'hardware-isolated',
+        containerRuntime: 'docker',
+        hostProbe: emptyProbe({
+          platform: 'linux',
+          hasKvm: true,
+          hasFirecracker: true,
+          hasJailer: true,
+          firecrackerKernel: '/opt/vm/vmlinux',
+          firecrackerRootfs: '/opt/vm/rootfs.ext4',
+          bridgeSocketPath: join(dir, 'does-not-exist.sock'),
+        }),
+      });
+      expect(missingSock.kind).toBe('refused');
+      if (missingSock.kind === 'refused') {
+        expect(missingSock.reason).toContain('bridge socket invalid');
+      }
+    },
+  );
 });

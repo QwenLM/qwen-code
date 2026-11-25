@@ -107,7 +107,7 @@ describe('Hosted Harness no-tool session', () => {
       );
       const warm = vi.spyOn(HostedWorkspaceBroker.prototype, 'warm');
       state.model.mockImplementationOnce(async (input) => {
-        expect(input.recallUserInput).toBe(true);
+        expect(input.userPrompt).toBe(true);
         if (bound) {
           expect(input.memory).toBeDefined();
           const tools = await input.toolTurn!.declarations(input.signal);
