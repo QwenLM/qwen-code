@@ -20,6 +20,27 @@ const routes = [
   ['release-chrome-extension', 'publish'],
   ['build-and-publish-image', 'build-and-push-to-ghcr'],
 ];
+const canonicalPreflightBootstrap = `set -euo pipefail
+bootstrap=$(mktemp -d "\${RUNNER_TEMP:?}/release-bootstrap.XXXXXX")
+trap 'rm -rf -- "$bootstrap"' EXIT
+export GH_CONFIG_DIR="$bootstrap/gh"
+mkdir -p "$GH_CONFIG_DIR"
+for script in prepare-release-runner.sh check-disk-floor.sh; do
+  gh api "repos/\${GITHUB_REPOSITORY}/contents/.github/scripts/\${script}?ref=\${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script"
+done
+bash "$bootstrap/prepare-release-runner.sh"
+node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
+bash "$bootstrap/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"`;
+
+const isInlinePreflight = (step) =>
+  step?.uses === undefined &&
+  step?.if === "${{ runner.environment == 'self-hosted' }}" &&
+  step?.['working-directory'] === '${{ runner.temp }}' &&
+  step?.shell === 'bash' &&
+  step?.env?.GH_TOKEN === '${{ github.token }}' &&
+  step?.env?.WORKFLOW_SHA === '${{ github.workflow_sha }}' &&
+  step?.run === canonicalPreflightBootstrap;
+
 // The VSCode build is a matrix: only the universal leg is architecture-free.
 const matrixLeg = (file, id) =>
   file === 'release-vscode-companion' && id === 'build';
@@ -71,9 +92,7 @@ describe('downstream release pool', () => {
           }),
         ).toBe('ubuntu-latest');
       }
-      const init = job.steps.findIndex(
-        (s) => s.uses === '$/.github/actions/prepare-release-runner',
-      );
+      const init = job.steps.findIndex(isInlinePreflight);
       expect(init).toBe(id === 'build-and-push-to-ghcr' ? 1 : 0);
       for (const setup of job.steps.filter((s) =>
         s.uses?.startsWith('actions/setup-node@'),
@@ -83,37 +102,30 @@ describe('downstream release pool', () => {
     },
   );
 
-  // The preflight wipes the workspace before actions/checkout, so it must use
-  // the '$/' self-repository reference: a './' local action resolves against
-  // GITHUB_WORKSPACE and would need a checkout first (and on a persistent
-  // machine would execute whatever tree the previous job left behind).
-  it('runs the shared preflight from the running commit, before checkout', () => {
-    const action = parse(
-      readFileSync('.github/actions/prepare-release-runner/action.yml', 'utf8'),
-    );
-    const [step] = action.runs.steps;
-    expect(action.runs.using).toBe('composite');
-    expect(step.if).toContain("runner.environment == 'self-hosted'");
-    expect(step['working-directory']).toBe('${{ runner.temp }}');
-    expect(step.env.WORKFLOW_SHA).toBe('${{ github.workflow_sha }}');
-    expect(step.run).toContain('set -euo pipefail');
-    expect(step.run).toContain('export GH_CONFIG_DIR="$bootstrap/gh"');
-    expect(step.run).toContain('?ref=${WORKFLOW_SHA}');
-    expect(step.run).toContain('bash "$bootstrap/prepare-release-runner.sh"');
-    expect(step.run).toContain('Release hosts require Node 22');
-    expect(step.run).toContain('bash "$bootstrap/check-disk-floor.sh"');
-
-    for (const [file, id] of routes) {
+  // The preflight wipes the workspace before actions/checkout, so it cannot
+  // use a './' local action (which resolves against GITHUB_WORKSPACE and would
+  // need a checkout first) and must not use a '$/' self-repository action
+  // (which downloads the entire ~100 MB repository archive during Set up job).
+  // Instead, every routed job runs the exact same inline bootstrap in
+  // runner.temp to fetch the pinned scripts at github.workflow_sha via gh api.
+  it('runs the shared inline preflight from the running commit, before checkout', () => {
+    for (const [file, id] of [
+      ...routes,
+      ['release-sdk', 'build-sdk'],
+      ['audio-capture-prebuilds', 'build'],
+      ['audio-capture-prebuilds', 'collect'],
+    ]) {
       const steps = workflow(file).jobs[id].steps;
-      const uses = steps.map((s) => s.uses);
-      const preflight = uses.indexOf(
-        '$/.github/actions/prepare-release-runner',
+      const preflight = steps.findIndex(isInlinePreflight);
+      const checkout = steps.findIndex((s) =>
+        s.uses?.startsWith('actions/checkout@'),
       );
-      const checkout = uses.findIndex((u) =>
-        u?.startsWith('actions/checkout@'),
-      );
-      expect(preflight).toBeGreaterThanOrEqual(0);
-      if (checkout !== -1) expect(preflight).toBeLessThan(checkout);
+      expect(preflight, `${file}/${id}`).toBeGreaterThanOrEqual(0);
+      if (checkout !== -1)
+        expect(preflight, `${file}/${id}`).toBeLessThan(checkout);
+      for (const step of steps) {
+        expect(String(step.uses ?? ''), `${file}/${id}`).not.toMatch(/^\$\//);
+      }
     }
   });
 
@@ -277,9 +289,7 @@ describe('audio release slots', () => {
       ).with.ref,
     ).toBe('${{ inputs.ref || github.sha }}');
     for (const job of [audio.jobs.build, audio.jobs.collect]) {
-      expect(job.steps[0].uses).toBe(
-        '$/.github/actions/prepare-release-runner',
-      );
+      expect(isInlinePreflight(job.steps[0])).toBe(true);
     }
   });
 
