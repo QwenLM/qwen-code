@@ -6,13 +6,13 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import type { DaemonEvent, DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import { splitInsightSegments } from '@qwen-code/qwen-code-core/utils/insight-segments.js';
 import {
   MAX_NOTIFICATION_SOURCE_LENGTH,
   notificationTextLines,
 } from '../../notification-text.js';
 import {
   assistantBlockRendersAsSystemNotice,
-  splitInsightSegments,
 } from '../../adapters/transcriptToMessages.js';
 import { extractPendingPermission } from '../../adapters/transcriptAdapter.js';
 import { isAskUserPermission } from '../../utils/askUserPermission.js';
