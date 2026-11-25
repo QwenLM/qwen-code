@@ -17,7 +17,7 @@ export type HostedContinuationCaptureRefusal =
   | 'not_native_batch'
   | 'todo_batch'
   | 'no_runtime'
-  | 'shell_profile'
+  | 'team_lead_profile'
   | 'hooks_activation_owner'
   | 'hooks_memory_batch'
   | 'hook_unsettled'

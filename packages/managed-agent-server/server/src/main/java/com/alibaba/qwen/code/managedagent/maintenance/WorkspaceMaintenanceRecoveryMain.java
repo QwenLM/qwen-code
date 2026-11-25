@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.persistence.WorkspaceMaintenanceRecove
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -31,7 +32,7 @@ public final class WorkspaceMaintenanceRecoveryMain {
         var properties = new ManagedAgentProperties();
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount(args[1], args[4], args[5])));
-        var guard = reconcile ? new WorkspaceStorageGuard(jdbc, manager, properties, new com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader()) : null;
+        var guard = reconcile ? new WorkspaceStorageGuard(jdbc, manager, properties, new NativeStorageIdentityReader()) : null;
         var recovery = new WorkspaceMaintenanceRecovery(jdbc, manager, guard);
         var binding = new ContextBinding(args[1], args[2], Long.parseLong(args[3]), args[4], ".",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
