@@ -36,7 +36,7 @@ class RuntimeBrokerHttpExecutorTest {
                 fixture.connect();
             }
             await().atMost(5, TimeUnit.SECONDS).until(() -> fixture.executor.getQueue().size() == 64);
-            try (Socket rejected = fixture.open()) {
+            try (Socket rejected = fixture.connectSocket()) {
                 assertDisconnected(rejected);
             }
             assertEquals(32, fixture.executor.getLargestPoolSize());
@@ -138,6 +138,13 @@ class RuntimeBrokerHttpExecutorTest {
                 socket.close();
                 throw failure;
             }
+        }
+
+        private Socket connectSocket() throws Exception {
+            Socket socket = new Socket();
+            socket.connect(new InetSocketAddress("127.0.0.1", server.getBaseUri().getPort()), 5000);
+            socket.setSoTimeout(5000);
+            return socket;
         }
 
         @Override

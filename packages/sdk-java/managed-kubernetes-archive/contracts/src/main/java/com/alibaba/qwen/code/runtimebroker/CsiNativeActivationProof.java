@@ -558,7 +558,7 @@ public final class CsiNativeActivationProof {
                     ((ObjectNode) binding).put("state", "settled");
                 }
             }
-            command = "harness:" + phase + ":" + activation.activationId() + ":" + execution + ":" + previousSequence;
+            command = boundedCommandId("harness:" + phase + ":" + activation.activationId() + ":" + execution + ":" + previousSequence);
         } else {
             require("results_ready".equals(phase) && previous.pendingBatch() == null && previous.attempt() != null
                     && "output_committed".equals(previous.attempt().stage()));
@@ -681,7 +681,7 @@ public final class CsiNativeActivationProof {
         require(checkpointId.equals(id(event, "eventId")) && checkpointId.equals(id(payload, "checkpointId"))
                 && number(payload.get("coveredSequence")) == previousSequence
                 && predecessor.equals(id(payload, "previousCheckpointId")) && "durable_wait".equals(text(payload, "boundary"))
-                && ("harness:await_runtime:" + activation.activationId() + ":" + executions + ":" + previousSequence)
+                && boundedCommandId("harness:await_runtime:" + activation.activationId() + ":" + executions + ":" + previousSequence)
                         .equals(id(metadata, "commandId")));
         JsonNode ref = payload.path("stateRef");
         JsonNode state = readCheckpoint(ref, resources);
@@ -1054,10 +1054,10 @@ public final class CsiNativeActivationProof {
         long ordinal = previous.nextDeltaOrdinal();
         // A retry before the first delta resets the Hosted stream without
         // emitting a retraction; assistant commits otherwise retain its ordinal.
-        if (prior == null && ("assistant-delta:" + turnId + ":" + messageId + ":0").equals(id(metadata, "commandId"))) {
+        if (prior == null && boundedCommandId("assistant-delta:" + turnId + ":" + messageId + ":0").equals(id(metadata, "commandId"))) {
             ordinal = 0;
         }
-        String commandId = "assistant-delta:" + turnId + ":" + messageId + ":" + ordinal;
+        String commandId = boundedCommandId("assistant-delta:" + turnId + ":" + messageId + ":" + ordinal);
         require(commandId.equals(id(metadata, "commandId"))
                 && commandId.equals(id(transaction.events().getFirst(), "eventId"))
                 && (prior == null || messageId.equals(prior.messageId())));
@@ -1076,7 +1076,7 @@ public final class CsiNativeActivationProof {
         require(stream != null && stream.messageId().equals(id(payload, "messageId"))
                 && previous.input().inputId().equals(id(payload, "turnId"))
                 && stream.firstSequence() == number(payload.get("fromSequence")));
-        String commandId = "assistant-retract:" + previous.input().inputId() + ":" + stream.messageId();
+        String commandId = boundedCommandId("assistant-retract:" + previous.input().inputId() + ":" + stream.messageId());
         require(commandId.equals(id(metadata, "commandId"))
                 && commandId.equals(id(transaction.events().getFirst(), "eventId"))
                 && sha256(utf8(stream.messageId() + ":" + stream.firstSequence()))
@@ -2121,6 +2121,11 @@ public final class CsiNativeActivationProof {
 
     public static String sha256(byte[] bytes) {
         return DigestUtils.sha256Hex(bytes);
+    }
+
+    private static String boundedCommandId(String value) {
+        return value.length() <= 128 ? value
+                : value.substring(0, 56) + ":sha256:" + sha256(utf8(value));
     }
 
     private static void require(boolean condition) {
