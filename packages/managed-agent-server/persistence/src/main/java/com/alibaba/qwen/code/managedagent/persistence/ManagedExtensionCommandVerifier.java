@@ -21,6 +21,7 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.StreamSupport;
 
 /** Reads command permissions from the committed journal, never from caller-supplied approval data. */
 @Component
@@ -55,7 +56,7 @@ public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCo
         ManagedExtensionRecords.requireOperationGrant(grant);
         long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
         check(grant.get("expiresAt").longValue() > now);
-        check(java.util.stream.StreamSupport.stream(grant.get("resourceScope").get("phases").spliterator(), false)
+        check(StreamSupport.stream(grant.get("resourceScope").get("phases").spliterator(), false)
                 .anyMatch(phase -> phase.equals(operation.get("action"))));
         JsonNode recordRef = grant.get("resourceScope").get("recordRef");
         var projection = jdbc.query("SELECT revision, record_resource_id, operation_id FROM ma_session_record"
@@ -115,7 +116,7 @@ public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCo
             check("managed-extension-config-bundle".equals(bundle.path("kind").asText())
                     && bundle.path("formatVersion").asInt() == 1 && bundle.get("configRevision").equals(operation.get("revision"))
                     && bundle.path("packages").isArray()
-                    && java.util.stream.StreamSupport.stream(bundle.get("packages").spliterator(), false)
+                    && StreamSupport.stream(bundle.get("packages").spliterator(), false)
                     .anyMatch(entry -> operation.get("extensionId").equals(entry.path("pin").get("extensionId"))));
         }
     }

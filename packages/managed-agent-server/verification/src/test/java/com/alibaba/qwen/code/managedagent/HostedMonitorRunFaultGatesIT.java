@@ -533,8 +533,13 @@ class HostedMonitorRunFaultGatesIT {
                 assertThat(report.path("reload").path("status").asInt())
                         .as(name + " a settled launch reloads").isEqualTo(200);
                 // The reload restored the held Runtime and dispatched nothing.
-                assertThat(report.path("reloadOps").findValuesAsText("op"))
-                        .containsExactly("active-holds");
+                assertThat(report.path("reloadOps")).hasSize(3);
+                assertThat(report.path("reloadOps").get(0).path("op").asText())
+                        .isEqualTo("publisher");
+                assertThat(report.path("reloadOps").get(1).path("op").asText())
+                        .isEqualTo("/internal/runtime-broker/v1/harness-sessions/" + sessionId + "/staged-deliveries/list");
+                assertThat(report.path("reloadOps").get(2).path("op").asText())
+                        .isEqualTo("active-holds");
                 assertThat(report.path("bgAliveAfterReload").asBoolean())
                         .isTrue();
                 // The restored obligation: the reloaded close drained the

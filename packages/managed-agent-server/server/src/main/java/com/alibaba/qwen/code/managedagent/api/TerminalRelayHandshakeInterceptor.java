@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.ServerHttpRequest;
@@ -30,7 +31,7 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
     /** Keep in sync with the Web Shell's bearer subprotocol prefix. */
     public static final String BEARER_SUBPROTOCOL_PREFIX = "qwen-bearer.";
     private static final Pattern SESSION_PATH = Pattern.compile(
-            "^" + com.alibaba.qwen.code.managedagent.security.PublicSurface
+            "^" + PublicSurface
                     .TERMINAL_UPGRADE_PATH.replace("*", "([^/]+)") + "$");
     private static final Pattern PATH_SAFE = Pattern.compile("[A-Za-z0-9._-]{1,256}");
 
@@ -52,7 +53,7 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
         // The router's own normalized path (decoded, matrix-stripped), the
         // same derivation the header filters exempt on — a hand-rolled
         // context-strip could disagree with them on an encoded spelling.
-        String path = com.alibaba.qwen.code.managedagent.security.PublicSurface
+        String path = PublicSurface
                 .pathWithinApplication(http);
         Matcher matcher = SESSION_PATH.matcher(path);
         if (!matcher.matches()) {

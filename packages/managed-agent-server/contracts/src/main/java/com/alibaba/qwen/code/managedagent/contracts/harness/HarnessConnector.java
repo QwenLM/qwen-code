@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 
@@ -133,19 +135,19 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsPackagePreparation() { return false; }
 
-    public record PreparedPackage(Map<String, Object> descriptor, java.io.InputStream archive) implements AutoCloseable {
-        @Override public void close() throws java.io.IOException { archive.close(); }
+    public record PreparedPackage(Map<String, Object> descriptor, InputStream archive) implements AutoCloseable {
+        @Override public void close() throws IOException { archive.close(); }
     }
 
-    public default PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public default PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
         throw new UnsupportedOperationException("Managed package preparation is unavailable");
     }
 
-    public default Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public default Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
         throw new UnsupportedOperationException("Managed package inspection is unavailable");
     }
 
-    public default Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public default Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
         throw new UnsupportedOperationException("Managed package preview is unavailable");
     }
 
