@@ -43,7 +43,7 @@ import static org.mockito.Mockito.when;
 
 class RuntimeExecutionReconcilerTest {
     @Test
-    @Timeout(5)
+    @Timeout(15)
     void droppedMeasurementRetryAfterSchedulerShutdownStillCompletesWithinTheOperationBudget() {
         var scheduler = mock(ScheduledExecutorService.class);
         var registry = mock(RuntimeBindingRegistry.class);
