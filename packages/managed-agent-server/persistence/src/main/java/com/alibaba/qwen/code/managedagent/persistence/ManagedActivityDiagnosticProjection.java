@@ -1,14 +1,17 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.ActivityPage;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -16,11 +19,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
@@ -122,7 +128,7 @@ final class ManagedActivityDiagnosticProjection {
                     }
                 }
             }
-            java.util.Set<JsonNode> responseIds = new java.util.HashSet<>();
+            Set<JsonNode> responseIds = new HashSet<>();
             if ("message.committed".equals(kind) && "tool_result".equals(payload.path("role").asText())) {
                 JsonNode result = message(payload.path("contentRef"), resources);
                 for (JsonNode part : result.path("message").path("parts")) {
@@ -165,8 +171,8 @@ final class ManagedActivityDiagnosticProjection {
                 ManagedActivityDiagnostics.gap(summary, reason.asText());
             }
         } else if ("tool.measured".equals(kind)) {
-            com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.closed(payload,
-                    java.util.Set.of("executionCallId", "toolOutcomeRef", "measurementsRef"), "tool measurement carrier");
+            ManagedExtensionRecords.closed(payload,
+                    Set.of("executionCallId", "toolOutcomeRef", "measurementsRef"), "tool measurement carrier");
             require(summary != null, "Measured execution is outside activity coverage.");
             String execution = payload.path("executionCallId").asText();
             JsonNode link = state.find(ManagedActivityDiagnostics.LINKS, execution);
@@ -275,7 +281,7 @@ final class ManagedActivityDiagnosticProjection {
             // Publication already verified the external object; do not fetch it under the Session fence.
             return null;
         }
-        return com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory.toolOutcomeBody(ref, referenced -> {
+        return ManagedCheckpointHistory.toolOutcomeBody(ref, referenced -> {
             StoredResource part = resources.apply(referenced.path("resourceId").asText());
             requireReference(part, referenced);
             return part.bytes();
@@ -370,7 +376,7 @@ final class ManagedActivityDiagnosticProjection {
         }
         String journalOwnerRef = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session);
         if (summary == null) {
-            summary = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode().put("schemaVersion", 1)
+            summary = JsonNodeFactory.instance.objectNode().put("schemaVersion", 1)
                     .put("reducerVersion", 1).putNull("epochId").putNull("startEventId").putNull("startedAt")
                     .putNull("coverageStartSequence").put("readiness", "clearing")
                     .put("rebuiltThroughSequence", "0").put("rebuiltThroughRevision", "0")
@@ -441,7 +447,7 @@ final class ManagedActivityDiagnosticProjection {
             boolean complete = true;
             long observed = transaction.events() == 0 ? completedSequence : transaction.first() - 1;
             int observedCount = 0;
-            for (JsonNode record : com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory.records(raw)) {
+            for (JsonNode record : ManagedCheckpointHistory.records(raw)) {
                 JsonNode event = record.path("managedSession");
                 if (!"managed_session_event_v1".equals(record.path("subtype").asText())) {
                     continue;
@@ -540,7 +546,7 @@ final class ManagedActivityDiagnosticProjection {
                 tenant, workspace, session, resource, ManagedActivityDiagnostics.PROJECTION_KIND, bytes.length, digest, bytes);
         StoredResource saved = store.readResource(tenant, session, resource);
         require(saved.kind().equals(ManagedActivityDiagnostics.PROJECTION_KIND) && saved.schemaVersion() == 1
-                && java.util.Arrays.equals(saved.bytes(), bytes), "Activity projection digest conflict.");
+                && Arrays.equals(saved.bytes(), bytes), "Activity projection digest conflict.");
         return resource;
     }
 

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -22,7 +23,7 @@ public final class ManagedHistoryMaintenanceRecords {
     private ManagedHistoryMaintenanceRecords() {}
 
     public static void requireRecord(JsonNode body) {
-        Set<String> fields = new java.util.HashSet<>(Set.of("schemaVersion", "kind", "operationId", "expectedCompactionRevision",
+        Set<String> fields = new HashSet<>(Set.of("schemaVersion", "kind", "operationId", "expectedCompactionRevision",
                 "historyCutSequence", "requestRef", "phase", "attempt", "candidateRef", "outcome",
                 "failureCode", "compactionRevision", "run"));
         long version = count(body == null ? null : body.get("schemaVersion"), 1, 2, "schemaVersion");

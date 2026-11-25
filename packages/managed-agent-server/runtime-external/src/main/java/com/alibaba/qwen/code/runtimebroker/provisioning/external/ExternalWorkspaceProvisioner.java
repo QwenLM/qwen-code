@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceAcquisitionVerifier;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -43,7 +44,7 @@ import java.util.concurrent.CompletionStage;
  * reply or the boot document. Any disagreement is a permanent refusal.
  */
 public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvisioner
-        implements com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceAcquisitionVerifier {
+        implements ExternalWorkspaceAcquisitionVerifier {
     public static final String KIND = "external-workspace";
     /** The shipped worker contract's storage discriminator. */
     static final String STORAGE_KIND = "external";
