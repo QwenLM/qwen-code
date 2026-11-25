@@ -11,6 +11,7 @@ export type VoiceTransport =
   | 'qwen-asr-chat'
   | 'qwen-asr-realtime'
   | 'dashscope-task-realtime'
+  | 'dashscope-multimodal-asr'
   | 'unsupported';
 
 /** Map a model id to the ASR transport it uses, or 'unsupported'. */
@@ -25,7 +26,23 @@ export function resolveVoiceTransport(model: string): VoiceTransport {
   if (/^(fun-asr|paraformer).*realtime(?:-|$)/.test(id)) {
     return 'dashscope-task-realtime';
   }
+  // qwen-audio-3.0-asr-flash / -2026-xx-xx only. The end anchor keeps the
+  // -streaming and -filetrans siblings out: they use different APIs.
+  if (/^qwen-audio-\d+\.\d+-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(id)) {
+    return 'dashscope-multimodal-asr';
+  }
   return 'unsupported';
+}
+
+/**
+ * Transports that transcribe a whole recording in one request, i.e. the batch
+ * path used by the daemon/workspace voice endpoint. The realtime transports need
+ * a streaming connection instead and are rejected on the batch endpoint.
+ */
+export function isBatchVoiceTransport(transport: VoiceTransport): boolean {
+  return (
+    transport === 'qwen-asr-chat' || transport === 'dashscope-multimodal-asr'
+  );
 }
 
 /**

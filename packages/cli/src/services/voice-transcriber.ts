@@ -863,6 +863,133 @@ async function transcribeViaQwenAsr(
   return text;
 }
 
+// DashScope-native route for the qwen-audio-*-asr-flash family. It has no
+// OpenAI-compatible chat/completions route, so the baseUrl path is ignored and
+// only the origin is reused.
+const MULTIMODAL_ASR_PATH =
+  '/api/v1/services/aigc/multimodal-generation/generation';
+const DEFAULT_AUDIO_SAMPLE_RATE = 16_000;
+
+interface MultimodalAsrResponse {
+  text?: unknown;
+}
+
+/** Sample rate from a canonical RIFF/WAVE header (bytes 24-27), if readable. */
+function readWavSampleRate(data: Uint8Array): number | undefined {
+  if (data.length < 28) {
+    return undefined;
+  }
+  const header = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+  if (
+    header.subarray(0, 4).toString('latin1') !== 'RIFF' ||
+    header.subarray(8, 12).toString('latin1') !== 'WAVE'
+  ) {
+    return undefined;
+  }
+  const sampleRate = header.readUInt32LE(24);
+  return sampleRate > 0 ? sampleRate : undefined;
+}
+
+/**
+ * Transcribe via the DashScope-native multimodal-generation endpoint: the audio
+ * is sent as an `input_audio` content part inside `input.messages`, format and
+ * sample rate go in `parameters`, and the transcript is the top-level `text`
+ * string. Unlike the chat transport there is no keyterm bias or language option
+ * documented for this family, so none is sent.
+ */
+async function transcribeViaDashScopeMultimodalAsr(
+  audio: RecordedVoiceAudio,
+  voiceConfig: VoiceTranscriptionConfig,
+  options: {
+    abortSignal?: AbortSignal;
+    onEgress?: () => void;
+  },
+  fetchFn: typeof fetch,
+): Promise<string> {
+  if (audio.data.byteLength > MAX_AUDIO_BYTES) {
+    throw new Error(
+      'Recording is too long for transcription (max ~5 minutes / 10 MB). Try a shorter dictation.',
+    );
+  }
+  const dataUrl = `data:${audio.mimeType};base64,${Buffer.from(audio.data).toString('base64')}`;
+  const sampleRate = readWavSampleRate(audio.data) ?? DEFAULT_AUDIO_SAMPLE_RATE;
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-DashScope-SSE': 'disable',
+  };
+  if (voiceConfig.apiKey) {
+    headers['Authorization'] = `Bearer ${voiceConfig.apiKey}`;
+  }
+
+  let response: Response;
+  try {
+    options.onEgress?.();
+    response = await fetchFn(
+      `${new URL(voiceConfig.baseUrl).origin}${MULTIMODAL_ASR_PATH}`,
+      {
+        method: 'POST',
+        headers,
+        redirect: 'manual',
+        body: JSON.stringify({
+          model: voiceConfig.model,
+          input: {
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'input_audio',
+                    input_audio: { data: dataUrl },
+                  },
+                ],
+              },
+            ],
+          },
+          parameters: {
+            format: inputAudioFormat(audio.mimeType),
+            sample_rate: String(sampleRate),
+          },
+        }),
+        signal: transcriptionAbortSignal(options.abortSignal),
+      },
+    );
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      throw new Error(
+        `Voice transcription timed out after ${INFERENCE_TIMEOUT_MS / 1000}s. Check ASR service health and retry.`,
+      );
+    }
+    throw error;
+  }
+
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error('Voice transcription request redirected.');
+  }
+
+  if (!response.ok) {
+    let details = '';
+    try {
+      details = sanitizeVoiceErrorMessage(
+        await response.text(),
+        voiceConfig.apiKey,
+      );
+    } catch {
+      details = '';
+    }
+    const suffix = details ? `: ${details}` : '';
+    throw new Error(
+      `Voice transcription request failed (${response.status} ${response.statusText})${suffix}`,
+    );
+  }
+
+  const json = (await response.json()) as MultimodalAsrResponse;
+  if (typeof json.text !== 'string') {
+    throw new Error('Voice transcription response did not include text.');
+  }
+  return json.text.trim();
+}
+
 export async function transcribeVoiceAudio(
   audio: RecordedVoiceAudio,
   args: TranscribeVoiceAudioArgs,
@@ -886,6 +1013,16 @@ export async function transcribeVoiceAudio(
         {
           language,
           keytermsContext,
+          abortSignal: args.abortSignal,
+          ...(args.onEgress ? { onEgress: args.onEgress } : {}),
+        },
+        fetchFn,
+      );
+    case 'dashscope-multimodal-asr':
+      return transcribeViaDashScopeMultimodalAsr(
+        audio,
+        voiceConfig,
+        {
           abortSignal: args.abortSignal,
           ...(args.onEgress ? { onEgress: args.onEgress } : {}),
         },

@@ -4355,7 +4355,8 @@ export type DaemonVoiceMode = 'hold' | 'tap';
 export type DaemonVoiceTransport =
   | 'qwen-asr-chat'
   | 'qwen-asr-realtime'
-  | 'dashscope-task-realtime';
+  | 'dashscope-task-realtime'
+  | 'dashscope-multimodal-asr';
 
 export interface DaemonVoiceModelDescriptor {
   name?: string;

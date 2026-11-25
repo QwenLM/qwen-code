@@ -3695,7 +3695,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'auth.purpose.imageHint':
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
-    'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+    'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, qwen-audio-3.0-asr-flash, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
   'model.setAdvisor': 'Set Advisor Model',
   'model.setImage': 'Set Image Model',
   'model.useMain': 'Use main model',
@@ -8694,7 +8694,7 @@ const ZH: Messages = {
   'auth.purpose.imageHint':
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
-    '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+    '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、qwen-audio-3.0-asr-flash、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
   'model.setAdvisor': '设置顾问模型',
   'model.setImage': '设置生图模型',
   'model.useMain': '使用主模型',

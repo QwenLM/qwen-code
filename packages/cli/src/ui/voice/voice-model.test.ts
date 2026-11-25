@@ -7,8 +7,10 @@
 import { describe, expect, it } from 'vitest';
 import { AuthType, type AvailableModel } from '@qwen-code/qwen-code-core';
 import {
+  isBatchVoiceTransport,
   isSelectableVoiceModel,
   isTranscribableVoiceModel,
+  type VoiceTransport,
 } from './voice-model.js';
 
 function model(overrides: Partial<AvailableModel>): AvailableModel {
@@ -41,6 +43,9 @@ describe('voice model guards', () => {
     expect(
       isSelectableVoiceModel(model({ id: 'qwen3-asr-flash-realtime' })),
     ).toBe(true);
+    expect(
+      isSelectableVoiceModel(model({ id: 'qwen-audio-3.0-asr-flash' })),
+    ).toBe(true);
   });
 
   it('isSelectableVoiceModel rejects ids with no ASR transport', () => {
@@ -50,5 +55,25 @@ describe('voice model guards', () => {
     expect(
       isSelectableVoiceModel(model({ id: 'qwen3-asr-flash-filetrans' })),
     ).toBe(false);
+    expect(
+      isSelectableVoiceModel(
+        model({ id: 'qwen-audio-3.0-asr-flash-streaming' }),
+      ),
+    ).toBe(false);
   });
+
+  const transportCases: Array<[VoiceTransport, boolean]> = [
+    ['qwen-asr-chat', true],
+    ['dashscope-multimodal-asr', true],
+    ['qwen-asr-realtime', false],
+    ['dashscope-task-realtime', false],
+    ['unsupported', false],
+  ];
+
+  it.each(transportCases)(
+    'isBatchVoiceTransport(%s) reports batch capability %s',
+    (transport, expected) => {
+      expect(isBatchVoiceTransport(transport)).toBe(expected);
+    },
+  );
 });
