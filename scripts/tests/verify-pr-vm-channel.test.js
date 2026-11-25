@@ -744,6 +744,8 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
         '    print(0)',
       ].join('\n'),
     ]);
+    expect(runtimeIpv6Loopback.status, runtimeIpv6Loopback.stderr).toBe(0);
+    expect(['0', '1']).toContain(runtimeIpv6Loopback.stdout.trim());
     const ipv6Loopback = runtimeIpv6Loopback.stdout.trim() === '1';
 
     const root = mkdtempSync('/tmp/qc-bridge-v6-');
