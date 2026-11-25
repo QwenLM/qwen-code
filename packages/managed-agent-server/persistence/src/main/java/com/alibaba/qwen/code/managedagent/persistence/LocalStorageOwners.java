@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityRea
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -124,18 +125,17 @@ final class LocalStorageOwners {
     static void requireNonOverlapping(JdbcTemplate jdbc, StorageIdentityReader.Identity identity) {
         WorkspaceStorageKindGuard.lockDomain(jdbc, "local-storage-host/" + identity.hostId());
         String key = physicalKey(identity);
-        var owners = jdbc.queryForList("SELECT physical_id, mount_root FROM ma_storage_owner"
-                + " WHERE mount_host_id = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", identity.hostId());
-        for (var owner : owners) {
-            String root = (String) owner.get("mount_root");
-            byte[] stored = (byte[]) owner.get("physical_id");
-            if ((stored == null || !java.util.Arrays.equals(stored, key.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
-                    && root != null
-                    && (contains(root, identity.root()) || contains(identity.root(), root))) {
-                throw new RuntimeBrokerException(409, "storage_overlapping_roots",
-                        "Workspace directory overlaps an existing physical owner.", false);
-            }
-        }
+        jdbc.query("SELECT physical_id, mount_root FROM ma_storage_owner"
+                + " WHERE mount_host_id = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE",
+                row -> {
+                    String root = row.getString("mount_root");
+                    if (!key.equals(ManagedSchemaRows.identity(row, "physical_id"))
+                            && root != null
+                            && (contains(root, identity.root()) || contains(identity.root(), root))) {
+                        throw new RuntimeBrokerException(409, "storage_overlapping_roots",
+                                "Workspace directory overlaps an existing physical owner.", false);
+                    }
+                }, identity.hostId());
     }
 
     private static boolean contains(String root, String candidate) {
