@@ -27,7 +27,7 @@ let workspace: string;
 test.skip(process.platform === 'win32', 'Daemon harness requires POSIX');
 test.setTimeout(120_000);
 
-test.beforeAll(async () => {
+test.beforeAll(async ({ browserName: _browserName }, testInfo) => {
   root = await realpath(
     await mkdtemp(join(tmpdir(), 'qwen-shared-input-history-')),
   );
@@ -44,16 +44,17 @@ test.beforeAll(async () => {
     writeFile(join(workspace, '.qwen', 'settings.json'), settings),
     writeFile(join(home, 'settings.json'), settings),
   ]);
+  const configuredBaseUrl =
+    testInfo.project.use.baseURL ??
+    process.env['PLAYWRIGHT_BASE_URL'] ??
+    `http://127.0.0.1:${Number(process.env['PLAYWRIGHT_PORT'] ?? 5174)}`;
+  const allowedOrigin = new URL(configuredBaseUrl).origin;
   daemon = await spawnDaemon({
     workspaceCwd: workspace,
     token,
     cliBin: join(repoRoot, 'dist/cli.js'),
     bootTimeoutMs: 30_000,
-    extraArgs: [
-      '--enable-session-shell',
-      '--allow-origin',
-      process.env['PLAYWRIGHT_BASE_URL'] ?? 'http://127.0.0.1:5174',
-    ],
+    extraArgs: ['--enable-session-shell', '--allow-origin', allowedOrigin],
     envDrop: [/^QWEN_/, /^OPENAI_/, /^ANTHROPIC_/, /^AWS_/],
     env: {
       HOME: home,
@@ -71,7 +72,9 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await daemon?.dispose();
-  await rm(root, { recursive: true, force: true });
+  if (root) {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 const editor = (page: Page) => page.locator(editorSelector).first();
