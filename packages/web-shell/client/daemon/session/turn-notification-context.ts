@@ -11,9 +11,7 @@ import {
   MAX_NOTIFICATION_SOURCE_LENGTH,
   notificationTextLines,
 } from '../../notification-text.js';
-import {
-  assistantBlockRendersAsSystemNotice,
-} from '../../adapters/transcriptToMessages.js';
+import { assistantBlockRendersAsSystemNotice } from '../../adapters/transcriptToMessages.js';
 import { extractPendingPermission } from '../../adapters/transcriptAdapter.js';
 import { isAskUserPermission } from '../../utils/askUserPermission.js';
 import type {
