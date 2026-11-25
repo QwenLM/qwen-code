@@ -44,6 +44,14 @@ public final class ManagedDefinitionInputProviders {
         return requireProvider(definitions, providerId);
     }
 
+    public ManagedAgentDefinitionSource definitionFor(String agentKey) {
+        if (definitions.size() != 1) {
+            throw new ManagedAgentException(400, "definition_provider_required",
+                    "Select a provider before resolving the current definition of " + agentKey);
+        }
+        return requireProvider(definitions, definitions.keySet().iterator().next());
+    }
+
     public AgentBootstrapBundleSource bundle(String providerId) {
         return requireProvider(bootstrapBundles, providerId);
     }
@@ -53,6 +61,13 @@ public final class ManagedDefinitionInputProviders {
         if (!access.atLeast(WorkspaceAccess.OPERATOR)) {
             throw new ManagedAgentException(403, "definition_scope_forbidden",
                     "The caller cannot prepare a definition in this Workspace.");
+        }
+    }
+
+    public void requirePreRegistered() {
+        if (mode != DefinitionInputMode.PRE_REGISTERED) {
+            throw new ManagedAgentException(409, "definition_input_mode_conflict",
+                    "Pre-registered input is unavailable in SPI mode.");
         }
     }
 

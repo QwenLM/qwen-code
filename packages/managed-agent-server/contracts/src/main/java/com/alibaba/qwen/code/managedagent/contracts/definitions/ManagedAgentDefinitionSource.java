@@ -3,6 +3,9 @@ package com.alibaba.qwen.code.managedagent.contracts.definitions;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.AgentBootstrapBundleSource.BundleRef;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinitionRequest;
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
 
 import java.time.Instant;
 import java.util.List;
@@ -24,7 +27,15 @@ public interface ManagedAgentDefinitionSource {
         }
     }
 
-    sealed interface Selection permits Current, Exact {
+    sealed interface Selection permits Current, Exact, PreRegistered {
+    }
+
+    record PreRegistered(AgentDefinitionRequest definition) implements Selection {
+        public PreRegistered {
+            if (definition == null) {
+                throw new IllegalArgumentException("definition is required");
+            }
+        }
     }
 
     record Current(String agentKey) implements Selection {
@@ -72,6 +83,11 @@ public interface ManagedAgentDefinitionSource {
         }
     }
 
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+    @JsonSubTypes({
+            @JsonSubTypes.Type(value = InlineSkill.class, name = "inline"),
+            @JsonSubTypes.Type(value = ExtensionUse.class, name = "extension")
+    })
     sealed interface SkillInput permits InlineSkill, ExtensionUse {
     }
 

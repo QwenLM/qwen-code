@@ -55,7 +55,12 @@ public class JdbcManagedAgentDefinitionStore
         }
         DefinitionRevision created = new DefinitionRevision(agentId, 1,
                 digest, definitionJson, now);
-        insertRevision(tenantId, created);
+        try {
+            insertRevision(tenantId, created);
+        } catch (DuplicateKeyException error) {
+            throw new ConcurrentWriteException("agent_definition_conflict",
+                    "The agent definition was created concurrently.");
+        }
         return record(tenantId, idempotencyKey, requestDigest, created, now);
     }
 
