@@ -35,6 +35,7 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import * as storageUtils from '../utils/sessionStorageUtils.js';
 import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
 import { postProcessSummary } from './postCompactAttachments.js';
+import { _legacyTranscriptWriteHookForTest } from './legacy-session-transcript-writer.js';
 import {
   collectSessionTurnState,
   computeInitialTurnFromHistory,
@@ -177,6 +178,11 @@ vi.mock('node:crypto', () => ({
   })),
 }));
 vi.mock('../utils/jsonl-utils.js');
+vi.mock('./legacy-session-transcript-writer.js', () => ({
+  _legacyTranscriptWriteHookForTest: { write: undefined },
+  appendLegacySessionTranscriptLine: (...args: unknown[]) =>
+    mockLegacyTranscriptAppend(...args),
+}));
 // The goal sidecar does real fs/promises I/O; this suite mocks the sync fs
 // surface instead. Mock only the mutations (the projection stays real) so
 // the journal-hook cases can assert calls and inject failures.
@@ -187,6 +193,7 @@ vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
   deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
 }));
 
+const mockLegacyTranscriptAppend = vi.hoisted(() => vi.fn());
 const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
 );
@@ -254,9 +261,16 @@ describe('ChatRecordingService', () => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
-    // writeLine is async; a settled Promise lets the service's writeChain
-    // advance when flushed.
-    vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);
+    // The Legacy transcript writer is async; keep recorder state-machine
+    // tests independent of the real filesystem. Lease tests retain their
+    // generic JSONL seam and forward into the same recorder observation spy.
+    mockLegacyTranscriptAppend.mockReset().mockResolvedValue(undefined);
+    _legacyTranscriptWriteHookForTest.write = (...args) =>
+      mockLegacyTranscriptAppend(...args);
+    vi.mocked(jsonl.writeLine).mockImplementation((filePath, value) => {
+      const record = value as ChatRecord;
+      return mockLegacyTranscriptAppend(filePath, record.sessionId, record);
+    });
 
     mockLease = {
       sessionId: 'test-session-id',
@@ -288,6 +302,8 @@ describe('ChatRecordingService', () => {
   }
 
   afterEach(() => {
+    _legacyTranscriptWriteHookForTest.write = undefined;
+    mockLegacyTranscriptAppend.mockReset();
     vi.restoreAllMocks();
   });
 
@@ -361,10 +377,11 @@ describe('ChatRecordingService', () => {
   type UserArgs = Parameters<ChatRecordingService['recordUserMessage']>;
   type RestOf<T> = T extends [unknown, ...infer R] ? R : never;
 
-  const writes = () =>
-    vi.mocked(jsonl.writeLine).mock.calls.map((call) => call[1] as ChatRecord);
-  const written = (index = 0) =>
-    vi.mocked(jsonl.writeLine).mock.calls.at(index)![1] as ChatRecord;
+  const legacyWriteMock = () => vi.mocked(mockLegacyTranscriptAppend);
+  const legacyCalls = () => legacyWriteMock().mock.calls;
+  const legacyWrites = () => legacyCalls().map((call) => call[2] as ChatRecord);
+  const writes = () => legacyWrites();
+  const written = (index = 0) => legacyWrites().at(index)!;
   const subtypes = (records: ChatRecord[]) =>
     records.map((record) => record.subtype);
   const appended = () =>
@@ -417,7 +434,7 @@ describe('ChatRecordingService', () => {
     target: ChatRecordingService,
     payload = modelPayload(),
   ) {
-    vi.mocked(jsonl.writeLine).mockClear();
+    legacyWriteMock().mockClear();
     await expect(target.recordSessionModel(payload)).resolves.toBe(true);
   }
 
@@ -425,9 +442,11 @@ describe('ChatRecordingService', () => {
     it('publishes the recorded timestamp only after a successful human write', async () => {
       const notify = vi.fn();
       svc.setLastUserPromptRecordedCallback(notify);
-      const held = holdNext(vi.mocked(jsonl.writeLine));
+      const held = holdNext(legacyWriteMock());
       user('question');
-      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalled());
+      await vi.waitFor(() =>
+        expect(mockLegacyTranscriptAppend).toHaveBeenCalled(),
+      );
       expect(notify).not.toHaveBeenCalled();
       held.resolve!();
       await svc.flush();
@@ -440,7 +459,7 @@ describe('ChatRecordingService', () => {
     it('does not advance metadata when a human write fails', async () => {
       const notify = vi.fn();
       svc.setLastUserPromptRecordedCallback(notify);
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      legacyWriteMock().mockRejectedValueOnce(new Error('disk full'));
       user('not persisted');
       await expect(svc.flush()).rejects.toThrow('disk full');
       expect(notify).not.toHaveBeenCalled();
@@ -651,7 +670,7 @@ describe('ChatRecordingService', () => {
       svc.recordUserMessage(userParts, undefined, undefined, 'prompt-1');
       const record = await flushed();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(record.uuid).toBe('00000000-0000-0000-0000-000000000001');
       expect(record.parentUuid).toBeNull();
       expect(record.type).toBe('user');
@@ -842,7 +861,7 @@ describe('ChatRecordingService', () => {
       user('same prompt', undefined, undefined, undefined, 'daemon-prompt-1');
       await svc.flush();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(written()).toMatchObject({
         type: 'user',
         daemonPromptId: 'daemon-prompt-1',
@@ -942,7 +961,7 @@ describe('ChatRecordingService', () => {
       svc.recordMidTurnUserMessage(modelFacingParts, 'save logs');
       const record = await flushed();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(record.type).toBe('user');
       expect(record.subtype).toBe('mid_turn_user_message');
       expect(record.message).toEqual({ role: 'user', parts: modelFacingParts });
@@ -1325,7 +1344,7 @@ describe('ChatRecordingService', () => {
           if ((record as ChatRecord).subtype === 'branch_checkpoint') {
             throw writeError;
           }
-          return jsonl.writeLine('/test/session.jsonl', record);
+          return Promise.resolve();
         },
       );
 
@@ -1480,7 +1499,7 @@ describe('ChatRecordingService', () => {
       it('does not touch the projection when the journal append fails', async () => {
         // The projection refresh runs only after the strict append resolves;
         // a failed append must leave the sidecar and the catalog clock alone.
-        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+        vi.mocked(mockLegacyTranscriptAppend).mockRejectedValueOnce(
           new Error('disk full'),
         );
 
@@ -1516,7 +1535,7 @@ describe('ChatRecordingService', () => {
       await svc.flush();
       const persistedCursor = svc.getTranscriptCursor();
 
-      const held = holdNext(vi.mocked(jsonl.writeLine));
+      const held = holdNext(legacyWriteMock());
       const strict = svc.recordGoalState('goal-record', goalPayload);
       user('queued after strict record');
       await Promise.resolve();
@@ -1630,11 +1649,11 @@ describe('ChatRecordingService', () => {
 
     it('returns the first record for a repeated key without writing', async () => {
       const first = await svc.recordExternalAgentRecordStrict(mention());
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       await expect(
         svc.recordExternalAgentRecordStrict(mention()),
       ).resolves.toEqual({ ...first, created: false });
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('does not read a fresh transcript to build its index', async () => {
@@ -1663,7 +1682,7 @@ describe('ChatRecordingService', () => {
         timestamp: persistedMention.timestamp,
         created: false,
       });
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
 
       // A new key is written and joins the index; the transcript is read once.
       const other = await restarted.recordExternalAgentRecordStrict(
@@ -1684,7 +1703,7 @@ describe('ChatRecordingService', () => {
       await expect(
         restarted.recordExternalAgentRecordStrict(mention()),
       ).rejects.toThrow('EIO');
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
       // The next attempt reads again and finds the record.
       await expect(
         restarted.recordExternalAgentRecordStrict(mention()),
@@ -1745,7 +1764,7 @@ describe('ChatRecordingService', () => {
       await expect(
         notifyStrict(new ChatRecordingService(mockConfig)),
       ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('restores session model bindings for duplicate suppression', async () => {
@@ -1755,20 +1774,20 @@ describe('ChatRecordingService', () => {
         sessionModel: { modelId: 'qwen3-coder-plus', authType: 'openai' },
       });
       await recordModelFresh(service);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('restores session model bindings from a full-record replay', async () => {
       resumeWithSessionModel('qwen3-coder-plus');
       await recordModelFresh(legacyRecorder());
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('skips a non-string session_model payload during full-record replay', async () => {
       resumeWithSessionModel(42);
       expect(() => legacyRecorder()).not.toThrow();
       await recordModelFresh(legacyRecorder());
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
     });
   });
 
@@ -1967,7 +1986,7 @@ describe('ChatRecordingService', () => {
       svc.rewindRecording(2, { truncatedCount: 1 });
       expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', null]);
       await svc.flush();
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
     });
 
     it('drops display projections from rewound user turns', async () => {
@@ -1979,7 +1998,7 @@ describe('ChatRecordingService', () => {
 
       expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', 'C']);
       await svc.flush();
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
     });
 
     it('compensates the rewind splice for the display-text cap window', async () => {
@@ -2001,7 +2020,7 @@ describe('ChatRecordingService', () => {
         Array.from({ length: 17 }, (_, index) => `visible ${index + 5}`),
       );
       await svc.flush();
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
     });
 
     it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
@@ -2021,7 +2040,7 @@ describe('ChatRecordingService', () => {
       svc.rewindRecording(0, { truncatedCount: 2 });
       const rewind = await flushed();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(rewind.subtype).toBe('rewind');
       expect(rewind.parentUuid).toBe('pre-resume-parent');
     });
@@ -2083,7 +2102,7 @@ describe('ChatRecordingService', () => {
           'persisted response',
         ]),
       );
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      legacyWriteMock().mockRejectedValueOnce(new Error('disk full'));
 
       user('new message');
 
@@ -2101,7 +2120,7 @@ describe('ChatRecordingService', () => {
 
       await svc.recordUserTextElements(payload);
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       const record = written();
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('user_text_elements');
@@ -2111,7 +2130,7 @@ describe('ChatRecordingService', () => {
 
   describe('recordGoalTurnEnd', () => {
     it('waits for the durable system record and copies the Goal permit', async () => {
-      const held = holdNext(vi.mocked(jsonl.writeLine));
+      const held = holdNext(legacyWriteMock());
       const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
       const pending = svc.recordGoalTurnEnd('finish', permit);
       permit.turnId = 'changed';
@@ -2134,7 +2153,7 @@ describe('ChatRecordingService', () => {
     });
 
     it('rejects a failed append instead of reporting a persisted boundary', async () => {
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      legacyWriteMock().mockRejectedValueOnce(new Error('disk full'));
       await expect(
         svc.recordGoalTurnEnd('finish', goalPermit('turn', 1, 'goal')),
       ).rejects.toThrow('disk full');
@@ -2263,7 +2282,7 @@ describe('ChatRecordingService', () => {
       svc.recordTurnResult(payload);
       const record = await flushed();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('turn_result');
       expect(record.systemPayload).toEqual(payload);
@@ -2348,7 +2367,7 @@ describe('ChatRecordingService', () => {
           endedAt: 1500,
         }),
       ).not.toThrow();
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     describe('session identity pinning', () => {
@@ -2362,10 +2381,10 @@ describe('ChatRecordingService', () => {
         );
         target.recordTurnResult({ ...completed });
         await target.flush();
-        return vi.mocked(jsonl.writeLine).mock.calls.at(index) as [
-          string,
-          ChatRecord,
-        ];
+        const call = vi
+          .mocked(mockLegacyTranscriptAppend)
+          .mock.calls.at(index)!;
+        return [call[0], call[2]] as [string, ChatRecord];
       }
 
       it('keeps late turn_result writes on the pinned pre-rotation session', async () => {
@@ -2373,7 +2392,7 @@ describe('ChatRecordingService', () => {
         outgoing.pinSessionIdentity('test-session-id');
         const [filePath, record] = await recordAfterRotation(outgoing);
 
-        expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+        expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
         expect(filePath).toContain('test-session-id.jsonl');
         expect(record.sessionId).toBe('test-session-id');
       });
@@ -2405,7 +2424,7 @@ describe('ChatRecordingService', () => {
       user('Hello, world!');
       svc.recordAtCommand(payload);
       const [userRecord, systemRecord] = await flushedAll();
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(2);
       expect(userRecord.type).toBe('user');
       expect(systemRecord.type).toBe('system');
       expect(systemRecord.subtype).toBe('at_command');
@@ -2469,7 +2488,7 @@ describe('ChatRecordingService', () => {
       svc.recordFileHistorySnapshot(oldSnapshot);
       const record = await flushed();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('file_history_snapshot');
       expect(payloadJson(record)).toEqual({ snapshots: [oldJson] });
@@ -2479,7 +2498,7 @@ describe('ChatRecordingService', () => {
       svc.recordFileHistorySnapshotBatch([oldSnapshot, updatedSnapshot]);
       const record = await flushed();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('file_history_snapshot');
       expect(payloadJson(record)).toEqual({
@@ -2491,7 +2510,7 @@ describe('ChatRecordingService', () => {
       svc.recordFileHistorySnapshot(oldSnapshot);
       svc.recordFileHistorySnapshot(updatedSnapshot);
       const [first, second] = await flushedAll();
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(2);
       expect(payloadJson(first)).toEqual({ snapshots: [oldJson] });
       expect(payloadJson(second)).toEqual({ snapshots: [updatedJson] });
     });
@@ -2500,7 +2519,7 @@ describe('ChatRecordingService', () => {
       svc.recordFileHistorySnapshotBatch([oldSnapshot, failedSnapshot]);
       const record = await flushed();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(payloadJson(record)).toEqual({ snapshots: [oldJson, failedJson] });
     });
 
@@ -2516,7 +2535,7 @@ describe('ChatRecordingService', () => {
       svc.recordFileHistorySnapshot(updatedSnapshot);
       svc.rewindRecording(0, { truncatedCount: 1 }, [oldSnapshot]);
       const [staleSnapshot, rewind, snapshots] = await flushedAll();
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(3);
       expect(staleSnapshot.subtype).toBe('file_history_snapshot');
       expect(rewind.subtype).toBe('rewind');
       expect(payloadJson(snapshots)).toEqual({ snapshots: [oldJson] });
@@ -2529,7 +2548,7 @@ describe('ChatRecordingService', () => {
       reply(parts);
       const record = await flushed();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(record.type).toBe('assistant');
       // The service wraps parts in a Content object using createModelContent
       expect(record.message).toEqual({ role: 'model', parts });
@@ -2682,7 +2701,7 @@ describe('ChatRecordingService', () => {
       svc.recordToolResult(toolResultParts);
       const record = await flushed(2);
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(3);
       expect(record.type).toBe('tool_result');
       // The service wraps parts in a Content object using createUserContent
       expect(record.message).toEqual({ role: 'user', parts: toolResultParts });
@@ -2931,7 +2950,7 @@ describe('ChatRecordingService', () => {
       svc.recordSlashCommand({ phase: 'invocation', rawCommand: '/about' });
       const record = await flushed();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('slash_command');
       expect(record.systemPayload).toMatchObject({
@@ -2959,26 +2978,26 @@ describe('ChatRecordingService', () => {
       // service settles in one microtask: Config.shutdown awaits flush on
       // every exit path, even for sessions that never recorded anything.
       await expect(svc.flush()).resolves.toBeUndefined();
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('permanently stops recording after a failed write', async () => {
       const writeError = new Error('simulated EACCES');
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(writeError);
+      legacyWriteMock().mockRejectedValueOnce(writeError);
       user('first');
       user('second');
       await expect(svc.flush()).rejects.toBe(writeError);
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
 
       reply('third');
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       await expect(svc.flush()).rejects.toBe(writeError);
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
     });
 
     it('scopes a write failure to the recorder instance', async () => {
-      vi.mocked(jsonl.writeLine)
+      legacyWriteMock()
         .mockRejectedValueOnce(new Error('disk full'))
         .mockResolvedValue(undefined);
       user('first');
@@ -2988,11 +3007,11 @@ describe('ChatRecordingService', () => {
       next.recordUserMessage([{ text: 'new session' }]);
       await expect(next.flush()).resolves.toBeUndefined();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(2);
     });
 
     it('normalizes a non-Error rejection and keeps it sticky', async () => {
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce('disk full');
+      legacyWriteMock().mockRejectedValueOnce('disk full');
       user('first');
 
       let firstFailure: unknown;
@@ -3007,7 +3026,7 @@ describe('ChatRecordingService', () => {
 
     it('notifies once with the failed record session id', async () => {
       const write = deferred();
-      vi.mocked(jsonl.writeLine).mockReturnValueOnce(write.promise);
+      legacyWriteMock().mockReturnValueOnce(write.promise);
       const listener = vi.fn();
       const service = withListener(listener);
 
@@ -3020,7 +3039,7 @@ describe('ChatRecordingService', () => {
       await expect(service.flush()).rejects.toBe(writeError);
       service.recordUserMessage([{ text: 'after failure' }]);
       await expect(service.flush()).rejects.toBe(writeError);
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
       expect(listener).toHaveBeenCalledOnce();
       expect(listener).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -3031,7 +3050,7 @@ describe('ChatRecordingService', () => {
     it('allows a replacement recorder to notify independently', async () => {
       const firstListener = vi.fn();
       const secondListener = vi.fn();
-      vi.mocked(jsonl.writeLine)
+      legacyWriteMock()
         .mockRejectedValueOnce(new Error('first failure'))
         .mockRejectedValueOnce(new Error('second failure'));
 
@@ -3055,7 +3074,7 @@ describe('ChatRecordingService', () => {
         const syncFailure = withListener(() => {
           throw new Error('listener threw');
         });
-        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+        vi.mocked(mockLegacyTranscriptAppend).mockRejectedValueOnce(
           new Error('sync observer write failure'),
         );
         syncFailure.recordUserMessage([{ text: 'first' }]);
@@ -3066,7 +3085,7 @@ describe('ChatRecordingService', () => {
         const asyncFailure = withListener(async () => {
           throw new Error('listener rejected');
         });
-        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+        vi.mocked(mockLegacyTranscriptAppend).mockRejectedValueOnce(
           new Error('async observer write failure'),
         );
         asyncFailure.recordUserMessage([{ text: 'second' }]);
@@ -3084,7 +3103,7 @@ describe('ChatRecordingService', () => {
   describe('recordSessionModel', () => {
     it('appends a session_model record and skips identical payloads', async () => {
       await recordModelFresh(svc);
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
       expect(written()).toMatchObject({
         type: 'system',
         subtype: 'session_model',
@@ -3092,13 +3111,13 @@ describe('ChatRecordingService', () => {
       });
 
       await recordModelFresh(svc);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('writes a new record when the model changes', async () => {
       await recordModel();
       await recordModelFresh(svc, modelPayload('qwen3-coder-flash'));
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
     });
 
     it('canonicalizes a runtime-prefixed modelId before writing', async () => {
@@ -3112,7 +3131,7 @@ describe('ChatRecordingService', () => {
       });
 
       await recordModelFresh(svc, prefixed());
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('re-anchors the live session model onto the rewind branch', async () => {
@@ -3120,7 +3139,7 @@ describe('ChatRecordingService', () => {
       await recordModel();
       user('second');
       await recordModel('qwen3-coder-flash');
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
 
       svc.rewindRecording(1, { truncatedCount: 1 });
       const records = await flushedAll();
@@ -3132,13 +3151,13 @@ describe('ChatRecordingService', () => {
       });
 
       await recordModelFresh(svc, modelPayload('qwen3-coder-flash'));
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('writes a second record when only the isRuntime flag differs', async () => {
       await recordModel();
       await recordModelFresh(svc, modelPayload(undefined, { isRuntime: true }));
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
       expect(written().systemPayload).toEqual({
         modelId: 'qwen3-coder-plus',
         authType: 'openai',
@@ -3152,7 +3171,7 @@ describe('ChatRecordingService', () => {
         svc,
         modelPayload(undefined, { baseUrl: 'https://b.example/v1' }),
       );
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
     });
 
     it('skips a payload identical on the isRuntime and baseUrl dimensions', async () => {
@@ -3163,7 +3182,7 @@ describe('ChatRecordingService', () => {
         });
       await svc.recordSessionModel(both());
       await recordModelFresh(svc, both());
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('re-anchors the pending new binding when a rewind lands mid-write', async () => {
@@ -3173,11 +3192,11 @@ describe('ChatRecordingService', () => {
 
       // Hold the next session_model write at the IO layer so the rewind
       // lands inside the pending-write window.
-      vi.mocked(jsonl.writeLine).mockClear();
-      const held = holdNext(vi.mocked(jsonl.writeLine));
+      legacyWriteMock().mockClear();
+      const held = holdNext(legacyWriteMock());
       const pendingSwitch = recordModel('qwen3-coder-flash');
       await vi.waitFor(() => {
-        expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(1);
+        expect(legacyWriteMock().mock.calls.length).toBe(1);
       });
 
       svc.rewindRecording(1, { truncatedCount: 1 });
@@ -3221,7 +3240,7 @@ describe('ChatRecordingService', () => {
         sessionWorkflowMode: { enabled: false },
       });
       await service.recordSessionWorkflowMode(false);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
       expect(service.getSessionWorkflowMode()).toBe(false);
     });
 
@@ -3230,7 +3249,7 @@ describe('ChatRecordingService', () => {
       await svc.recordSessionWorkflowMode(false);
       user('second');
       await svc.recordSessionWorkflowMode(true);
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       svc.rewindRecording(1, { truncatedCount: 1 });
       const records = await flushedAll();
       expect(subtypes(records)).toEqual(['rewind', 'session_workflow_mode']);
@@ -3243,13 +3262,15 @@ describe('ChatRecordingService', () => {
       await svc.recordSessionWorkflowMode(false);
       user('second');
       await svc.flush();
-      vi.mocked(jsonl.writeLine).mockClear();
-      const held = holdNext(vi.mocked(jsonl.writeLine));
+      legacyWriteMock().mockClear();
+      const held = holdNext(legacyWriteMock());
       const pending = svc.recordSessionWorkflowMode(true);
-      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+      await vi.waitFor(() =>
+        expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce(),
+      );
 
       svc.rewindRecording(1, { truncatedCount: 1 });
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
       held.resolve?.();
       await pending;
       const records = await flushedAll();
@@ -3267,68 +3288,52 @@ describe('ChatRecordingService', () => {
       await svc.recordSessionWorkflowMode(false);
       user('second');
       await svc.flush();
-      vi.mocked(jsonl.writeLine).mockClear();
-      const held = holdNext(vi.mocked(jsonl.writeLine));
+      legacyWriteMock().mockClear();
+      const held = holdNext(legacyWriteMock());
       const pending = svc.recordSessionWorkflowMode(true);
       const failure = pending.catch((error: unknown) => error);
-      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+      await vi.waitFor(() =>
+        expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce(),
+      );
 
       svc.rewindRecording(1, { truncatedCount: 1 });
       const writeError = new Error('disk full');
       held.reject?.(writeError);
       expect(await failure).toBe(writeError);
       await expect(svc.flush()).rejects.toBe(writeError);
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
       expect(svc.getSessionWorkflowMode()).toBe(false);
     });
 
-    it('strictly reports append failure and does not poison deduplication', async () => {
+    it('latches a legacy append failure and refuses subsequent writes', async () => {
       const service = legacyRecorder();
-      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
-        throw new Error('disk-full');
-      });
+      user('create transcript before barrier');
+      await service.flush();
+      legacyWriteMock().mockRejectedValueOnce(new Error('disk-full'));
       await expect(service.recordSessionWorkflowMode(true)).rejects.toThrow(
         'disk-full',
       );
       expect(service.getSessionWorkflowMode()).toBeUndefined();
-      await service.recordSessionWorkflowMode(true);
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      await expect(service.recordSessionWorkflowMode(true)).rejects.toThrow();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(2);
     });
 
-    it('does not re-anchor a mode rejected before the legacy write queue', async () => {
+    it('does not rewrite a failed workflow mode after recorder failure latches', async () => {
       const service = new ChatRecordingService(mockConfig, undefined, false, {
         lastCompletedUuid: 'projected-leaf',
         turnParentUuids: [null],
         sessionWorkflowMode: { enabled: false },
       });
-      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
-        throw new Error('temporary file creation failure');
-      });
-      let settled = false;
-      let rewound = false;
-      const failure = service.recordSessionWorkflowMode(true).catch((error) => {
-        settled = true;
-        return error;
-      });
-      for (let step = 0; step < 20 && !settled; step++) {
-        await Promise.resolve();
-        if (service.getSessionWorkflowMode() === true) {
-          service.rewindRecording(0, { truncatedCount: 1 });
-          rewound = true;
-          break;
-        }
-      }
-      expect(await failure).toBeInstanceOf(Error);
-      if (!rewound) service.rewindRecording(0, { truncatedCount: 1 });
+      user('create transcript before barrier');
       await service.flush();
-      expect(subtypes(writes())).toEqual(['rewind', 'session_workflow_mode']);
-      expect(writes().at(-1)?.systemPayload).toEqual({ enabled: false });
-      expect(writes()).not.toContainEqual(
-        expect.objectContaining({
-          subtype: 'session_workflow_mode',
-          systemPayload: { enabled: true },
-        }),
+      legacyWriteMock().mockRejectedValueOnce(new Error('append failure'));
+
+      await expect(service.recordSessionWorkflowMode(true)).rejects.toThrow(
+        'append failure',
       );
+      expect(service.getSessionWorkflowMode()).toBe(false);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(2);
+      await expect(service.flush()).rejects.toThrow('append failure');
     });
 
     it('refuses a same-value request after writer ownership is lost', async () => {
@@ -3343,14 +3348,14 @@ describe('ChatRecordingService', () => {
 
   describe('recordSessionApprovalMode', () => {
     it('appends normalized approval state and skips identical payloads', async () => {
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       await expect(
         svc.recordSessionApprovalMode({
           mode: ApprovalMode.PLAN,
         }),
       ).resolves.toBe(true);
 
-      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const record = legacyWriteMock().mock.calls[0][2] as ChatRecord;
       expect(record).toMatchObject({
         type: 'system',
         subtype: 'session_approval_mode',
@@ -3360,14 +3365,14 @@ describe('ChatRecordingService', () => {
         },
       });
 
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       await expect(
         svc.recordSessionApprovalMode({
           mode: ApprovalMode.PLAN,
           prePlanMode: ApprovalMode.DEFAULT,
         }),
       ).resolves.toBe(true);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
 
       await expect(
         svc.recordSessionApprovalMode({
@@ -3376,10 +3381,9 @@ describe('ChatRecordingService', () => {
           planExecutionMode: ApprovalMode.YOLO,
         }),
       ).resolves.toBe(true);
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
       expect(
-        (vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord)
-          .systemPayload,
+        (legacyWriteMock().mock.calls[0][2] as ChatRecord).systemPayload,
       ).toEqual({
         mode: ApprovalMode.PLAN,
         prePlanMode: ApprovalMode.DEFAULT,
@@ -3393,12 +3397,12 @@ describe('ChatRecordingService', () => {
         turnParentUuids: [null],
         sessionApprovalMode: { mode: ApprovalMode.YOLO },
       });
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
 
       await expect(
         service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
       ).resolves.toBe(true);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('restores approval state from a full-record replay', async () => {
@@ -3421,12 +3425,12 @@ describe('ChatRecordingService', () => {
         lastCompletedUuid: 'approval-1',
       } as unknown as ReturnType<Config['getResumedSessionData']>);
       const service = new ChatRecordingService(mockConfig, undefined, false);
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
 
       await expect(
         service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
       ).resolves.toBe(true);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('re-anchors the supplied live approval state onto the rewind branch', async () => {
@@ -3436,16 +3440,14 @@ describe('ChatRecordingService', () => {
       });
       svc.recordUserMessage([{ text: 'second' }]);
       await svc.flush();
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
 
       svc.rewindRecording(1, { truncatedCount: 1 }, undefined, {
         mode: ApprovalMode.DEFAULT,
       });
       await svc.flush();
 
-      const written = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.map((call) => call[1] as ChatRecord);
+      const written = legacyWrites();
       expect(written.map((record) => record.subtype)).toEqual([
         'rewind',
         'session_approval_mode',
@@ -3464,9 +3466,9 @@ describe('ChatRecordingService', () => {
       svc.recordUserMessage([{ text: 'second' }]);
       await svc.flush();
 
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       let releaseWrite: (() => void) | undefined;
-      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+      vi.mocked(mockLegacyTranscriptAppend).mockImplementationOnce(
         () =>
           new Promise<void>((resolve) => {
             releaseWrite = resolve;
@@ -3476,7 +3478,7 @@ describe('ChatRecordingService', () => {
         mode: ApprovalMode.YOLO,
       });
       await vi.waitFor(() => {
-        expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(1);
+        expect(legacyWriteMock().mock.calls.length).toBe(1);
       });
 
       svc.rewindRecording(1, { truncatedCount: 1 });
@@ -3484,9 +3486,7 @@ describe('ChatRecordingService', () => {
       await pendingChange;
       await svc.flush();
 
-      const written = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.map((call) => call[1] as ChatRecord);
+      const written = legacyWrites();
       const rewindIndex = written.findIndex(
         (record) => record.subtype === 'rewind',
       );
@@ -3496,33 +3496,32 @@ describe('ChatRecordingService', () => {
       });
     });
 
-    it('retries an identical approval state after a synchronous failure', async () => {
-      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
-      writeFileSpy.mockImplementationOnce(() => {
-        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
-      });
+    it('latches an approval append failure and refuses later writes', async () => {
+      legacyWriteMock().mockRejectedValueOnce(
+        Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }),
+      );
       const service = new ChatRecordingService(mockConfig, undefined, false);
 
       await expect(
         service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
       ).resolves.toBe(false);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
 
       await expect(
         service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
-      ).resolves.toBe(true);
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      ).resolves.toBe(false);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
     });
 
-    it('does not suppress a later mode after a failed write races a newer one', async () => {
+    it('latches a failed approval write and skips already queued descendants', async () => {
       const service = new ChatRecordingService(mockConfig, undefined, false, {
         lastCompletedUuid: 'projected-leaf',
         turnParentUuids: [null],
         sessionApprovalMode: { mode: ApprovalMode.DEFAULT },
       });
-      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
-        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
-      });
+      legacyWriteMock().mockRejectedValueOnce(
+        Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }),
+      );
 
       const failed = service.recordSessionApprovalMode({
         mode: ApprovalMode.YOLO,
@@ -3531,41 +3530,37 @@ describe('ChatRecordingService', () => {
         mode: ApprovalMode.PLAN,
       });
       await expect(failed).resolves.toBe(false);
-      await expect(later).resolves.toBe(true);
-      const writesBefore = vi.mocked(jsonl.writeLine).mock.calls.length;
-
-      await expect(
-        service.recordSessionApprovalMode({ mode: ApprovalMode.DEFAULT }),
-      ).resolves.toBe(true);
-      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
-        writesBefore + 1,
-      );
+      await expect(later).resolves.toBe(false);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
+      await expect(service.flush()).rejects.toMatchObject({
+        code: 'ENOSPC',
+      });
     });
 
     it('rejects a Plan predecessor that is itself Plan', async () => {
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       await expect(
         svc.recordSessionApprovalMode({
           mode: ApprovalMode.PLAN,
           prePlanMode: ApprovalMode.PLAN,
         }),
       ).resolves.toBe(false);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('rejects Plan as its own execution mode', async () => {
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       await expect(
         svc.recordSessionApprovalMode({
           mode: ApprovalMode.PLAN,
           planExecutionMode: ApprovalMode.PLAN,
         }),
       ).resolves.toBe(false);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('ignores predecessor data on a non-Plan record', async () => {
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       await expect(
         svc.recordSessionApprovalMode({
           mode: ApprovalMode.YOLO,
@@ -3574,7 +3569,7 @@ describe('ChatRecordingService', () => {
         }),
       ).resolves.toBe(true);
 
-      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const record = legacyWriteMock().mock.calls[0][2] as ChatRecord;
       expect(record.systemPayload).toEqual({ mode: ApprovalMode.YOLO });
     });
   });
@@ -3583,32 +3578,54 @@ describe('ChatRecordingService', () => {
     const transcriptPath = () =>
       '/test/project/root/.gemini/projects/test-project/chats/test-session-id.jsonl';
 
-    it('creates the transcript with owner-only permissions', async () => {
+    it('writes Legacy records through the dedicated secure transcript writer', async () => {
       const service = new ChatRecordingService(mockConfig, undefined, false);
 
       service.recordUserMessage([{ text: 'hello' }]);
       await service.flush();
 
-      expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledWith(
         transcriptPath(),
-        '',
-        expect.objectContaining({ flag: 'wx', mode: 0o600 }),
+        'test-session-id',
+        expect.objectContaining({ type: 'user' }),
       );
     });
 
-    it('tightens a transcript left world-readable by an earlier version', async () => {
+    it('does not touch a Managed transcript that a lease still owns', async () => {
       const service = new ChatRecordingService(mockConfig, undefined, false);
       vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
         throw Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
       });
-      const chmodSync = vi
-        .spyOn(fs, 'chmodSync')
+      // A Managed-owned transcript: its head names the execution engine.
+      const managedHead = `${JSON.stringify({
+        type: 'system',
+        subtype: 'session_execution_engine',
+        systemPayload: { engine: 'managed' },
+      })}\n`;
+      const headBytes = Buffer.from(managedHead, 'utf8');
+      vi.spyOn(fs, 'statSync').mockReturnValue({
+        size: headBytes.length,
+      } as unknown as fs.Stats);
+      vi.spyOn(fs, 'openSync').mockReturnValue(42);
+      vi.spyOn(fs, 'readSync').mockImplementation(((
+        _fd: number,
+        buffer: ArrayBufferView,
+      ) => {
+        const target = Buffer.isBuffer(buffer)
+          ? buffer
+          : Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+        headBytes.copy(target);
+        return headBytes.length;
+      }) as typeof fs.readSync);
+      const fchmodSync = vi
+        .spyOn(fs, 'fchmodSync')
         .mockImplementation(() => undefined);
 
       service.recordUserMessage([{ text: 'hello' }]);
       await service.flush();
 
-      expect(chmodSync).toHaveBeenCalledWith(transcriptPath(), 0o600);
+      // Touching the mode would fail the lease's next append.
+      expect(fchmodSync).not.toHaveBeenCalled();
     });
   });
 
@@ -3625,11 +3642,10 @@ describe('ChatRecordingService', () => {
       lastCompletedUuid: 'leased-projected-leaf',
       turnParentUuids: [null],
     });
-    const throwFsError = (code: string) => () => {
-      throw Object.assign(new Error(code), { code });
-    };
     const failNextFileWrite = (code: string) =>
-      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(throwFsError(code));
+      legacyWriteMock().mockRejectedValueOnce(
+        Object.assign(new Error(code), { code }),
+      );
 
     it('reanchors session source after more than the tail window is appended', async () => {
       await expect(
@@ -3679,14 +3695,14 @@ describe('ChatRecordingService', () => {
       expect(written().parentUuid).toBe('projected-leaf');
       expect(service.getCurrentCustomTitle()).toBe('Projected title');
       expect(service.getCurrentTitleSource()).toBe('manual');
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       await expect(service.recordParentSession('parent-session')).resolves.toBe(
         true,
       );
       await expect(
         service.recordSessionSource('channel', 'channel-main'),
       ).resolves.toBe(true);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('activates a leased recorder from reduced state', async () => {
@@ -3720,44 +3736,39 @@ describe('ChatRecordingService', () => {
       service.recordUserMessage([{ text: 'legacy' }]);
       await service.flush();
 
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
     });
 
-    it('retries an identical session_model payload after a synchronous failure', async () => {
+    it('latches an identical session_model append failure', async () => {
       failNextFileWrite('ENOSPC');
       const service = legacyRecorder();
 
       await expect(service.recordSessionModel(modelPayload())).resolves.toBe(
         false,
       );
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
 
       await expect(service.recordSessionModel(modelPayload())).resolves.toBe(
-        true,
+        false,
       );
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
     });
 
-    it('retries directory setup after a synchronous failure', async () => {
-      const mkdirSpy = vi.spyOn(fs, 'mkdirSync');
-      mkdirSpy.mockImplementationOnce(throwFsError('EACCES'));
-      mkdirSpy.mockImplementation(() => undefined);
-
-      const writeSpy = vi.spyOn(fs, 'writeFileSync');
-      writeSpy.mockImplementationOnce(throwFsError('ENOENT'));
-      writeSpy.mockImplementation(() => undefined);
-
+    it('does not queue a transcript write when initial directory setup fails', () => {
+      const mkdirSpy = vi.spyOn(fs, 'mkdirSync').mockImplementation((dir) => {
+        if (String(dir).endsWith('/chats')) {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        }
+        return undefined;
+      });
       const service = legacyRecorder();
-      service.recordUserMessage([{ text: 'retry me' }]);
-      await expect(service.flush()).resolves.toBeUndefined();
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
 
-      service.recordUserMessage([{ text: 'retry me' }]);
-      await expect(service.flush()).resolves.toBeUndefined();
-
-      expect(mkdirSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
-      expect(written().parentUuid).toBeNull();
+      service.recordUserMessage([{ text: 'first' }]);
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
+      expect(mkdirSpy).toHaveBeenCalledWith(
+        '/test/project/root/.gemini/projects/test-project/chats',
+        { recursive: true },
+      );
     });
 
     it('does not notify for a synchronous conversation-file failure', () => {
@@ -3768,7 +3779,7 @@ describe('ChatRecordingService', () => {
       service.recordUserMessage([{ text: 'retry me' }]);
 
       expect(listener).not.toHaveBeenCalled();
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(mockLegacyTranscriptAppend).not.toHaveBeenCalled();
     });
 
     it('caches successful directory setup', async () => {
@@ -3785,17 +3796,17 @@ describe('ChatRecordingService', () => {
       expect(mkdirSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('retries an identical attribution snapshot after a synchronous failure', async () => {
+    it('latches an attribution snapshot append failure', async () => {
       failNextFileWrite('EACCES');
       const service = legacyRecorder();
 
       service.recordAttributionSnapshot(attributionSnapshot);
-      await service.flush();
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      await expect(service.flush()).rejects.toThrow('EACCES');
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
 
       service.recordAttributionSnapshot(attributionSnapshot);
-      await service.flush();
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      await service.flush().catch(() => undefined);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
     });
   });
 
@@ -3816,7 +3827,7 @@ describe('ChatRecordingService', () => {
       svc.recordAttributionSnapshot({ ...baseSnapshot, promptCount: 1 });
       svc.recordAttributionSnapshot({ ...baseSnapshot, promptCount: 2 });
       await svc.flush();
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(3);
     });
 
     it('refreshes the cached git branch at the attribution turn boundary', async () => {
@@ -3841,7 +3852,7 @@ describe('ChatRecordingService', () => {
       svc.recordAttributionSnapshot(baseSnapshot);
       svc.recordAttributionSnapshot(baseSnapshot);
       await svc.flush();
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
     });
 
     // After rewindRecording the previous attribution snapshot lives on the
@@ -3852,31 +3863,29 @@ describe('ChatRecordingService', () => {
       user('turn 1');
       svc.recordAttributionSnapshot(baseSnapshot);
       await svc.flush();
-      const beforeRewind = vi.mocked(jsonl.writeLine).mock.calls.length;
+      const beforeRewind = legacyWriteMock().mock.calls.length;
 
       svc.rewindRecording(0, { truncatedCount: 0 });
       // Same snapshot bytes — without the rewind reset this would dedup.
       svc.recordAttributionSnapshot(baseSnapshot);
       await svc.flush();
       // 1 rewind record + 1 fresh snapshot = 2 more writes after rewind.
-      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
-        beforeRewind + 2,
-      );
+      expect(legacyWriteMock().mock.calls.length).toBe(beforeRewind + 2);
     });
 
     it('should not retry an identical snapshot after a write failure', async () => {
       const writeError = new Error('disk full');
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(writeError);
+      legacyWriteMock().mockRejectedValueOnce(writeError);
       svc.recordAttributionSnapshot(baseSnapshot);
       await expect(svc.flush()).rejects.toBe(writeError);
 
       svc.recordAttributionSnapshot(baseSnapshot);
       await expect(svc.flush()).rejects.toBe(writeError);
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
     });
 
     it('should handle fire-and-forget rejection while flush reports it', async () => {
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      legacyWriteMock().mockRejectedValueOnce(new Error('disk full'));
       const unhandled: unknown[] = [];
       const handler = (err: unknown) => unhandled.push(err);
       process.on('unhandledRejection', handler);
@@ -3892,7 +3901,7 @@ describe('ChatRecordingService', () => {
 
     it('stops queued normal writes when a strict artifact write fails', async () => {
       const strictWrite = deferred();
-      vi.mocked(jsonl.writeLine)
+      legacyWriteMock()
         .mockImplementationOnce(() => strictWrite.promise)
         .mockResolvedValue(undefined);
 
@@ -3902,18 +3911,18 @@ describe('ChatRecordingService', () => {
 
       await expect(strict).rejects.toThrow('disk full');
       await expect(svc.flush()).rejects.toThrow('disk full');
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
 
       user('next message');
       await expect(
         svc.recordSessionArtifactSnapshot(artifactSnapshot()),
       ).rejects.toThrow('disk full');
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
     });
 
     it('rejects strict artifact records after a previous strict write failed', async () => {
       const writeError = new Error('corrupt journal');
-      vi.mocked(jsonl.writeLine)
+      legacyWriteMock()
         .mockRejectedValueOnce(writeError)
         .mockResolvedValue(undefined);
 
@@ -3924,12 +3933,12 @@ describe('ChatRecordingService', () => {
         svc.recordSessionArtifactSnapshot(artifactSnapshot()),
       ).rejects.toBe(writeError);
       await expect(svc.flush()).rejects.toBe(writeError);
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledTimes(1);
     });
 
     it('does not let anchor size estimation preempt a strict writer result', async () => {
       await svc.recordCustomTitle('durable-title');
-      vi.mocked(jsonl.writeLine).mockClear();
+      legacyWriteMock().mockClear();
       const circular: Record<string, unknown> = {};
       circular['self'] = circular;
       const payload = {
@@ -3944,7 +3953,7 @@ describe('ChatRecordingService', () => {
       await expect(
         svc.recordSessionArtifactEvent(payload),
       ).resolves.toBeUndefined();
-      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(mockLegacyTranscriptAppend).toHaveBeenCalledOnce();
     });
 
     it('keeps artifact journal records out of the active conversation chain', async () => {

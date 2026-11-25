@@ -27,6 +27,7 @@ import {
   readManagedExecutionEvidenceSync,
 } from '../utils/sessionStorageUtils.js';
 import { withoutCompactionTranscriptHint } from './compaction-transcript-hint.js';
+import { appendLegacySessionTranscriptLine } from './legacy-session-transcript-writer.js';
 import {
   SessionExecutionEngineError,
   type SessionExecutionEngine,
@@ -44,7 +45,6 @@ import type {
 import { createModelContent, createUserContent } from '../core/genai-compat.js';
 import { getToolCallFingerprint } from '../core/toolCallIdUtils.js';
 import { canonicalToolName } from '../tools/tool-names.js';
-import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -2196,7 +2196,11 @@ export class ChatRecordingService {
               this.createConversationFile(legacyConversationFile);
               this.cacheConversationFile(legacyConversationFile);
             }
-            await jsonl.writeLine(legacyConversationFile, record);
+            await appendLegacySessionTranscriptLine(
+              legacyConversationFile,
+              record.sessionId,
+              record,
+            );
             lock.assertHeld();
             afterWrite?.(legacyConversationFile);
           } finally {

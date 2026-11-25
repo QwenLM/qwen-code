@@ -22,11 +22,13 @@ import {
 import { openSyncNoFollow } from './no-follow-open.js';
 import {
   readLocalJournalBytes,
-  readLocalJournalFirstLine,
   readLocalJournalHeader,
   readLocalSnapshotDomainBody,
 } from './local-managed-journal-snapshot.js';
-import { ManagedSessionRecordError } from './managed-session-format.js';
+import {
+  MANAGED_SESSION_LIMITS,
+  ManagedSessionRecordError,
+} from './managed-session-format.js';
 
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
 export const LITE_READ_BUF_SIZE = 64 * 1024;
@@ -968,17 +970,59 @@ export function isManagedExecutionTranscriptSync(filePath: string): boolean {
 export function readManagedExecutionEvidenceSync(
   filePath: string,
 ): boolean | undefined {
-  let head: string;
+  // Reject non-regular directory entries *before* opening: openSyncNoFollow
+  // opens with plain O_RDONLY (no O_NONBLOCK), and POSIX blocks that open on
+  // a FIFO until a writer appears — the process would hang before reaching
+  // the fstat guard below. The fd re-checks still cover the TOCTOU window.
+  let before: fs.Stats;
   try {
-    head = readTranscriptHeadOrThrowSync(filePath);
+    before = fs.lstatSync(filePath);
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
       ? false
       : undefined;
   }
-  // One parse pass serves both gates; a line is parsed only when it could
-  // name the header subtype (the wrapped marker) or the owner subtype (the
-  // bare string), literally or through a `\u` escape.
+  if (!before.isFile() || before.isSymbolicLink()) return undefined;
+  let fd: number | undefined;
+  try {
+    fd = openSyncNoFollow(filePath);
+    const stats = fs.fstatSync(fd);
+    if (!stats.isFile()) return undefined;
+    // A zero-length transcript has no ownership evidence: `false`, matching
+    // the documented contract, so `Config.finishManagedWriter` can release
+    // the lease of a failed Managed activation against an empty transcript.
+    if (stats.size === 0) return false;
+    return readManagedExecutionEvidenceFromFdSync(fd, filePath);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? false
+      : undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
+/**
+ * Reads Managed owner evidence through an already-verified transcript fd.
+ * Ownership classification and any caller action can therefore stay bound to
+ * the same inode instead of reopening a potentially replaced pathname.
+ */
+function readManagedExecutionEvidenceFromFdSync(
+  fd: number,
+  filePath: string,
+): boolean | undefined {
+  let head: string;
+  try {
+    head = readTranscriptHeadFromFdSync(fd);
+  } catch {
+    return undefined;
+  }
   const found = head.split('\n').some((line) => {
     if (
       !line.includes(MANAGED_HEADER_MARKER) &&
@@ -993,18 +1037,106 @@ export function readManagedExecutionEvidenceSync(
     );
   });
   if (found) return true;
+
   try {
-    const first = readLocalJournalFirstLine(filePath);
-    if (first === undefined) return false;
-    const { records } = parseLineTolerantWithIntegrity(first, filePath);
-    return (
-      records.some(isManagedHeaderRecord) || records.some(isManagedOwnerRecord)
-    );
+    for (const line of readLocalJournalPrefixLinesFromFdSync(fd)) {
+      // Classify the first physical line the way the old reader did — even
+      // when a crash tore off its trailing newline — so consumers gating on
+      // `=== false` (Managed-activation refusal, lease release) keep working.
+      const text = line.bytes.toString('utf-8');
+      const { records } = parseLineTolerantWithIntegrity(text, filePath);
+      if (
+        records.some(isManagedHeaderRecord) ||
+        records.some(isManagedOwnerRecord)
+      ) {
+        return true;
+      }
+      if (records.some(isExecutionEngineOwnerRecord)) {
+        // A valid `version: 1` Legacy owner record proves Legacy; anything
+        // else owner-shaped (bad version/payload, mixed records) is
+        // ambiguous evidence, never proof that the transcript is Legacy.
+        return isLegacyOwnerRecord(records) ? false : undefined;
+      }
+      // The first line carries no ownership evidence: the transcript is
+      // Legacy regardless of whether the line was newline-terminated.
+      return false;
+    }
+    return false;
   } catch (error) {
-    return error instanceof ManagedSessionRecordError ||
-      (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? false
-      : undefined;
+    // A bound violation is "no Managed evidence in view", not "unreadable":
+    // the old reader mapped ManagedSessionRecordError to `false`, and callers
+    // such as Config.finishManagedWriter release the lease on `false` but
+    // keep it held until process exit on `undefined`.
+    return error instanceof ManagedSessionRecordError ? false : undefined;
+  }
+}
+
+/** Every record on the line is a valid `version: 1` Legacy owner record. */
+function isLegacyOwnerRecord(records: readonly unknown[]): boolean {
+  return records.every((record) => {
+    if (!record || typeof record !== 'object') return false;
+    const candidate = record as Record<string, unknown>;
+    if (candidate['type'] !== 'system') return false;
+    if (candidate['subtype'] !== EXECUTION_ENGINE_SUBTYPE) return false;
+    const payload = candidate['systemPayload'];
+    return (
+      !!payload &&
+      typeof payload === 'object' &&
+      !Array.isArray(payload) &&
+      (payload as Record<string, unknown>)['version'] === 1 &&
+      (payload as Record<string, unknown>)['engine'] === 'legacy'
+    );
+  });
+}
+
+function isExecutionEngineOwnerRecord(record: unknown): boolean {
+  if (!record || typeof record !== 'object') return false;
+  const candidate = record as Record<string, unknown>;
+  return (
+    candidate['type'] === 'system' &&
+    candidate['subtype'] === EXECUTION_ENGINE_SUBTYPE
+  );
+}
+
+function readTranscriptHeadFromFdSync(fd: number): string {
+  const fileSize = fs.fstatSync(fd).size;
+  if (fileSize === 0) return '';
+  const buffer = Buffer.alloc(LITE_READ_BUF_SIZE);
+  const length = Math.min(fileSize, LITE_READ_BUF_SIZE);
+  const read = fs.readSync(fd, buffer, 0, length, 0);
+  return buffer.toString('utf-8', 0, read);
+}
+
+function* readLocalJournalPrefixLinesFromFdSync(
+  fd: number,
+): Generator<{ bytes: Buffer; complete: boolean }> {
+  const buffer = Buffer.alloc(LITE_READ_BUF_SIZE);
+  let pending = Buffer.alloc(0);
+  let offset = 0;
+  for (;;) {
+    const count = fs.readSync(fd, buffer, 0, buffer.length, offset);
+    if (count === 0) {
+      if (pending.length > 0) yield { bytes: pending, complete: false };
+      return;
+    }
+    offset += count;
+    pending = Buffer.concat([pending, buffer.subarray(0, count)]);
+    let newline: number;
+    while ((newline = pending.indexOf(10)) >= 0) {
+      const bytes = pending.subarray(0, newline);
+      if (bytes.length > MANAGED_SESSION_LIMITS.maxEventBytes) {
+        throw new ManagedSessionRecordError(
+          'Transcript ownership record exceeds the read bound.',
+        );
+      }
+      pending = pending.subarray(newline + 1);
+      yield { bytes, complete: true };
+    }
+    if (pending.length > MANAGED_SESSION_LIMITS.maxEventBytes) {
+      throw new ManagedSessionRecordError(
+        'Transcript ownership record exceeds the read bound.',
+      );
+    }
   }
 }
 

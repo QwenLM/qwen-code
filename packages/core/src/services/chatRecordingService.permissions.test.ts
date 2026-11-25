@@ -9,88 +9,291 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Config } from '../config/config.js';
-import { ApprovalMode } from '../config/approval-mode.js';
-import { AuthType } from '../utils/auth-type.js';
-import { ChatRecordingService } from './chatRecordingService.js';
-
-vi.mock('node:child_process');
+import * as jsonl from '../utils/jsonl-utils.js';
+import { appendLegacySessionTranscriptLine } from './legacy-session-transcript-writer.js';
 
 // Permissions are an OS-level property, so these cases drive the recorder
 // against a real temporary directory instead of the mocked fs the rest of the
-// suite uses. They cover the three ways a transcript can come into existence:
-// fresh creation, appending to a file an earlier version left world-readable,
-// and recreation after the file disappears mid-session.
-describe('ChatRecordingService transcript permissions', () => {
-  const sessionId = 'permission-probe-session';
-  let projectDir: string;
-  let transcriptPath: string;
+// suite uses. They cover the ways a transcript can come into existence — fresh
+// creation, appending to a file an earlier version left world-readable,
+// recreation after mid-session deletion — plus the races around the tail probe
+// and the ownership checks before an existing file is tightened.
+//
+// Skipped on Windows: Node's Windows filesystem reports 0666 for any writable
+// regular file regardless of the mode used to create it, so POSIX mode
+// assertions there are meaningless.
+describe.skipIf(process.platform === 'win32')(
+  'ChatRecordingService transcript permissions',
+  () => {
+    const sessionId = 'permission-probe-session';
+    let projectDir: string;
+    let transcriptPath: string;
 
-  beforeEach(() => {
-    vi.mocked(execFileSync).mockReturnValue('main\n');
-    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-chat-perms-'));
-    transcriptPath = path.join(projectDir, 'chats', `${sessionId}.jsonl`);
-  });
+    beforeEach(() => {
+      projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-chat-perms-'));
+      transcriptPath = path.join(projectDir, 'chats', `${sessionId}.jsonl`);
+    });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-    fs.rmSync(projectDir, { recursive: true, force: true });
-  });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    });
 
-  const buildService = () =>
-    new ChatRecordingService(
-      {
-        getSessionId: () => sessionId,
-        getProjectRoot: () => projectDir,
-        getCliVersion: () => '0.0.0-test',
-        storage: {
-          getProjectDir: () => projectDir,
-          getProjectTempDir: () => projectDir,
-        },
-        getModel: () => 'test-model',
-        getAuthType: () => AuthType.USE_GEMINI,
-        getApprovalMode: () => ApprovalMode.DEFAULT,
-        getFastModel: () => undefined,
-        isInteractive: () => false,
-        getDebugMode: () => false,
-        getToolRegistry: () => ({ getTool: () => undefined }),
-        getResumedSessionData: () => undefined,
-        getSessionService: () => vi.fn(),
-      } as unknown as Config,
-      undefined,
-      false,
+    const modeOf = (filePath: string) => fs.statSync(filePath).mode & 0o777;
+
+    const MANAGED_OWNER_LINE = `${JSON.stringify({
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 1, engine: 'managed' },
+    })}\n`;
+
+    it('creates the transcript with owner-only permissions', async () => {
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'first',
+      });
+
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
+
+    it('tightens a world-readable transcript left by an earlier version', async () => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, '', { flag: 'wx', mode: 0o644 });
+
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'existing',
+      });
+
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
+
+    it('preserves an existing owner-read-only mode when group access is removed', async () => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, '', { flag: 'wx', mode: 0o444 });
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'first',
+      }).catch(() => undefined);
+      // The owner mode is never expanded to make an otherwise unwritable file
+      // writable; POSIX mode tightening can only remove group/other bits.
+      expect(modeOf(transcriptPath)).toBe(0o444);
+    });
+
+    it('does not touch a Managed transcript that a lease still owns', async () => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, MANAGED_OWNER_LINE, {
+        flag: 'wx',
+        mode: 0o644,
+      });
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'must not append',
+        }),
+      ).rejects.toThrow(/belongs to managed/);
+
+      expect(modeOf(transcriptPath)).toBe(0o644);
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(MANAGED_OWNER_LINE);
+    });
+
+    it('refuses a symlink transcript without modifying its target', async () => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      const target = path.join(projectDir, 'outside.jsonl');
+      const original = `${JSON.stringify({ private: 'sentinel' })}\n`;
+      fs.writeFileSync(target, original, { mode: 0o644 });
+      fs.symlinkSync(target, transcriptPath);
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          private: 'must not leak',
+        }),
+      ).rejects.toThrow();
+
+      expect(fs.readFileSync(target, 'utf8')).toBe(original);
+      expect(modeOf(target)).toBe(0o644);
+    });
+
+    it('refuses a symlink installed after the transcript fd is opened', async () => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      const originalPath = `${transcriptPath}.original`;
+      const sentinel = path.join(projectDir, 'race-target.jsonl');
+      const originalBytes = `${JSON.stringify({ keep: 'original' })}\n`;
+      fs.writeFileSync(transcriptPath, '', { mode: 0o600 });
+      fs.writeFileSync(sentinel, originalBytes, { mode: 0o600 });
+      const realLstatSync = fs.lstatSync.bind(fs);
+      let lstatCalls = 0;
+      vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
+        const result = realLstatSync(...args);
+        if (args[0] === transcriptPath && ++lstatCalls === 2) {
+          fs.renameSync(transcriptPath, originalPath);
+          fs.symlinkSync(sentinel, transcriptPath);
+          return realLstatSync(transcriptPath, args[1] as { bigint: true });
+        }
+        return result;
+      });
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          private: 'must not leak',
+        }),
+      ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
+
+      expect(fs.readFileSync(sentinel, 'utf8')).toBe(originalBytes);
+      expect(fs.readFileSync(originalPath, 'utf8')).toBe('');
+      expect(fs.lstatSync(transcriptPath).isSymbolicLink()).toBe(true);
+    });
+
+    it('refuses conflicting Legacy and Managed ownership records', async () => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(
+        transcriptPath,
+        `${JSON.stringify({
+          type: 'system',
+          subtype: 'session_execution_engine',
+          systemPayload: { version: 1, engine: 'legacy' },
+        })}\n${MANAGED_OWNER_LINE}`,
+        { mode: 0o600 },
+      );
+      const original = fs.readFileSync(transcriptPath, 'utf8');
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'must not append',
+        }),
+      ).rejects.toMatchObject({ name: 'SessionExecutionEngineError' });
+
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+    });
+
+    it('refuses an owner record whose version cannot be verified', async () => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      const original = `${JSON.stringify({
+        type: 'system',
+        subtype: 'session_execution_engine',
+        systemPayload: { version: 2, engine: 'legacy' },
+      })}\n`;
+      fs.writeFileSync(transcriptPath, original, { mode: 0o600 });
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'must not append',
+        }),
+      ).rejects.toThrow(/ownership could not be verified/);
+
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+    });
+
+    it('refuses a directory at the transcript path', async () => {
+      fs.mkdirSync(transcriptPath, { recursive: true });
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'must not write',
+        }),
+      ).rejects.toThrow();
+
+      expect(fs.statSync(transcriptPath).isDirectory()).toBe(true);
+    });
+
+    it.runIf(process.platform !== 'win32')(
+      'refuses a FIFO at the transcript path without blocking',
+      async () => {
+        fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+        execFileSync('mkfifo', [transcriptPath]);
+        const writeSpy = vi.spyOn(fs, 'writeSync');
+        await expect(
+          appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+            message: 'must not write',
+          }),
+        ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
+        expect(writeSpy).not.toHaveBeenCalled();
+        expect(fs.lstatSync(transcriptPath).isFIFO()).toBe(true);
+      },
     );
 
-  const modeOf = (filePath: string) => fs.statSync(filePath).mode & 0o777;
+    it('recreates a transcript deleted mid-session with owner-only permissions', async () => {
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'first',
+      });
+      expect(modeOf(transcriptPath)).toBe(0o600);
 
-  const appendOneTurn = async (service: ChatRecordingService) => {
-    service.recordUserMessage([{ text: 'permission probe' }]);
-    await service.flush();
-  };
+      fs.rmSync(transcriptPath);
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'second',
+      });
 
-  it('creates the transcript with owner-only permissions', async () => {
-    await appendOneTurn(buildService());
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
 
-    expect(modeOf(transcriptPath)).toBe(0o600);
-  });
+    it('keeps appending to the pinned file descriptor if the path is unlinked', async () => {
+      const probed = path.join(projectDir, 'chats', 'probe-race.jsonl');
+      fs.mkdirSync(path.dirname(probed), { recursive: true });
+      fs.writeFileSync(probed, `${JSON.stringify({ seed: true })}\n`, {
+        mode: 0o600,
+      });
+      let openedFd: number | undefined;
+      const realOpenSync = fs.openSync.bind(fs);
+      const realCloseSync = fs.closeSync.bind(fs);
+      vi.spyOn(fs, 'openSync').mockImplementation((...args) => {
+        const fd = realOpenSync(...args);
+        if (args[0] === probed) openedFd = fd;
+        return fd;
+      });
+      vi.spyOn(fs, 'closeSync').mockImplementation((fd) => {
+        if (fd === openedFd) fs.rmSync(probed, { force: true });
+        return realCloseSync(fd);
+      });
 
-  it('tightens a world-readable transcript left by an earlier version', async () => {
-    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
-    fs.writeFileSync(transcriptPath, '', { flag: 'wx', mode: 0o644 });
+      await appendLegacySessionTranscriptLine(probed, sessionId, {
+        after: 'probe',
+      });
 
-    await appendOneTurn(buildService());
+      expect(fs.existsSync(probed)).toBe(false);
+      const entries = fs.readdirSync(path.dirname(probed));
+      expect(entries).toHaveLength(0);
+    });
 
-    expect(modeOf(transcriptPath)).toBe(0o600);
-  });
+    it('recreates owner-only when sync JSONL writer loses the path after the tail probe', () => {
+      // Keep the generic JSONL writer coverage: it protects the unrelated
+      // writeLineSync path from regressing while transcript appends use their
+      // own descriptor-bound writer.
+      // Mirror the async race above for writeLineSync: delete the path when
+      // the read-only tail descriptor closes, before appendFileSync opens it.
+      const probed = path.join(projectDir, 'chats', 'sync-probe-race.jsonl');
+      fs.mkdirSync(path.dirname(probed), { recursive: true });
+      // Start world-readable so the test also fails if the probe hook is
+      // missed and the existing file is merely appended to in place.
+      fs.writeFileSync(probed, `${JSON.stringify({ seed: true })}\n`, {
+        mode: 0o644,
+      });
 
-  it('recreates a transcript deleted mid-session with owner-only permissions', async () => {
-    const service = buildService();
-    await appendOneTurn(service);
-    expect(modeOf(transcriptPath)).toBe(0o600);
+      const realOpenSync = fs.openSync.bind(fs);
+      const realCloseSync = fs.closeSync.bind(fs);
+      let probeFd: number | undefined;
+      let sawProbeClose = false;
+      vi.spyOn(fs, 'openSync').mockImplementation((...args) => {
+        const fd = realOpenSync(...args);
+        const flags = args[1];
+        if (
+          args[0] === probed &&
+          typeof flags === 'number' &&
+          (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0
+        ) {
+          probeFd = fd;
+        }
+        return fd;
+      });
+      vi.spyOn(fs, 'closeSync').mockImplementation((fd) => {
+        if (fd === probeFd) {
+          probeFd = undefined;
+          sawProbeClose = true;
+          fs.rmSync(probed, { force: true });
+        }
+        return realCloseSync(fd);
+      });
 
-    fs.rmSync(transcriptPath);
-    await appendOneTurn(service);
+      jsonl.writeLineSync(probed, { after: 'sync probe' });
 
-    expect(modeOf(transcriptPath)).toBe(0o600);
-  });
-});
+      expect(sawProbeClose).toBe(true);
+      expect(modeOf(probed)).toBe(0o600);
+    });
+  },
+);
