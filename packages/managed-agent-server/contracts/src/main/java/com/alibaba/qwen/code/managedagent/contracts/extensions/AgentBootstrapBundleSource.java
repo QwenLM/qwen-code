@@ -13,7 +13,8 @@ public interface AgentBootstrapBundleSource {
             Long expectedLength) {
         public BundleRef {
             if (providerId == null || !providerId.matches("[a-z][a-z0-9-]{0,63}")
-                    || resourceId == null || resourceId.isBlank()
+                    || resourceId == null || resourceId.isBlank() || resourceId.length() > 512
+                    || resourceId.chars().anyMatch(Character::isISOControl)
                     || sourceRevision == null
                     || !sourceRevision.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
                     || "latest".equalsIgnoreCase(sourceRevision)) {

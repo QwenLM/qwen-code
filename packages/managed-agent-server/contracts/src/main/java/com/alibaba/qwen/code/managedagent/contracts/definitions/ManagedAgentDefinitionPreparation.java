@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent.contracts.definitions;
 
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation.PreparedBundle;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition;
 
 import java.time.Instant;
+import java.util.List;
 
 public interface ManagedAgentDefinitionPreparation {
     PrepareReceipt prepare(Command command);
@@ -30,11 +32,13 @@ public interface ManagedAgentDefinitionPreparation {
         }
     }
 
-    record PrepareReceipt(OperationRef operation, AgentDefinition definition) {
+    record PrepareReceipt(OperationRef operation, AgentDefinition definition,
+            List<PreparedBundle> bundles) {
         public PrepareReceipt {
-            if (operation == null || definition == null) {
+            if (operation == null || definition == null || bundles == null) {
                 throw new IllegalArgumentException("PrepareReceipt is incomplete");
             }
+            bundles = List.copyOf(bundles);
         }
     }
 }

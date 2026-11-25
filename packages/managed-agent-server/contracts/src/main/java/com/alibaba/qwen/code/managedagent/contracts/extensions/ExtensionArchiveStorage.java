@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.contracts.extensions;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Optional;
 
 /** Private, durable immutable storage shared by every replica using the Managed catalog. */
 public interface ExtensionArchiveStorage {
@@ -9,7 +10,12 @@ public interface ExtensionArchiveStorage {
 
     /** Atomically create a complete object; an existing identical object is success, never overwrite it. */
     void putIfAbsent(Key key, long byteLength, InputStream content) throws IOException;
+    record Info(long byteLength) {}
+
+    Optional<Info> stat(Key key) throws IOException;
+
     InputStream open(Key key) throws IOException;
+
     /** Validate configuration only. Storage I/O must have finite timeouts and must not replay unknown writes. */
     void validateConfiguration();
 }

@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
 import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionSource;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation.PreparedBundle;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition;
 
+import java.util.List;
 import java.util.Optional;
 
 public interface ManagedDefinitionPreparationStore {
@@ -13,11 +15,13 @@ public interface ManagedDefinitionPreparationStore {
     }
 
     record Preparation(State state, ManagedAgentDefinitionSource.Definition input,
-            AgentDefinition definition) {
+            AgentDefinition definition, List<PreparedBundle> bundles) {
         public Preparation {
-            if (state == null) {
-                throw new IllegalArgumentException("Preparation state is required");
+            if (state == null || state == State.PREPARED && (definition == null || bundles == null)
+                    || state == State.RESOLVED && input == null) {
+                throw new IllegalArgumentException("Preparation is incomplete");
             }
+            bundles = bundles == null ? null : List.copyOf(bundles);
         }
     }
 
@@ -28,7 +32,7 @@ public interface ManagedDefinitionPreparationStore {
             ManagedAgentDefinitionSource.Definition input, String resultJson, long now);
 
     void complete(String tenantId, String scopeId, String operationKey,
-            AgentDefinition definition, String resultJson, long now);
+            AgentDefinition definition, List<PreparedBundle> bundles, String resultJson, long now);
 
     Optional<Preparation> find(String tenantId, String scopeId, String operationKey,
             String requestDigest);
