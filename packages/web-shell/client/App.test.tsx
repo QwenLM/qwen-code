@@ -51162,6 +51162,29 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it('keeps an explicitly opened scheduled-tasks page when its rail entry is omitted', async () => {
+    const { container } = renderApp(
+      { sidebar: { primaryNav: { items: ['newTask'] } } },
+      undefined,
+      false,
+      true,
+    );
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page'),
+    ).toBe('scheduledTasks');
+    expect(window.location.pathname).toBe('/scheduled-tasks');
+  });
+
   it('dismisses the Scheduled Tasks page when an approval becomes pending', async () => {
     // The scheduled-tasks fullPage overlay covers the chat footer where the
     // approval renders, so an approval must close it too (like the panel).

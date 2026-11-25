@@ -12072,15 +12072,20 @@ export function App({
         ? settingsAvailable &&
           hostSidebar?.footer !== false &&
           (hostSidebar?.footer?.items?.includes('settings') ?? true)
-        : projectFeaturesAvailable &&
-          (page !== 'live' || liveSidebarEnabled) &&
-          (page !== 'pr-watches' || prWatchesAvailable) &&
-          (page !== 'artifacts' || workspaceArtifactLibraryAvailable) &&
-          (page !== 'channel-events' || channelNavigationEnabled) &&
-          (hostSidebar?.primaryNav?.items?.some(
-            (item) => item === primaryItem,
-          ) ??
-            true));
+        : (projectFeaturesAvailable &&
+            (page !== 'live' || liveSidebarEnabled) &&
+            (page !== 'pr-watches' || prWatchesAvailable) &&
+            (page !== 'artifacts' || workspaceArtifactLibraryAvailable) &&
+            (page !== 'channel-events' || channelNavigationEnabled) &&
+            (hostSidebar?.primaryNav?.items?.some(
+              (item) => item === primaryItem,
+            ) ??
+              true)) ||
+          // An explicit scheduled-tasks opening can also come from the task
+          // surfaces, not only a primary navigation entry.
+          (page === 'scheduled-tasks' &&
+            projectFeaturesAvailable &&
+            visibleNavigationPage === page));
     if (navigationAppliedRef.current === navigation.revision && allowed) return;
     navigationAppliedRef.current = navigation.revision;
     navigationSettledRef.current = false;
@@ -12115,6 +12120,7 @@ export function App({
     settingsAvailable,
     hostSidebar?.footer,
     hostSidebar?.primaryNav?.items,
+    visibleNavigationPage,
     liveSidebarEnabled,
     prWatchesAvailable,
     workspaceArtifactLibraryAvailable,

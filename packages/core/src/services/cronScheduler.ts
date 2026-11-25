@@ -693,7 +693,8 @@ export class CronScheduler {
    * awaited — reporting success while the on-disk entry could
    * survive would let the task resurface in another session or after a
    * restart. On write failure the job is restored and the error rethrown.
-   * Returns true if the job existed.
+   * Returns false for a missing job or a runtimeOnly durable candidate, even
+   * when a runtime entry exists.
    */
   async delete(
     id: string,

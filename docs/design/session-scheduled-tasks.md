@@ -22,6 +22,8 @@ Cron cancellation is session-scoped. A durable identifier must never fall back t
 
 When session cron and a loop wakeup share an ID, the snapshot `source` (`cron` or `wakeup`) is part of the runtime identity used by tabs, Environment state, busy/cancelled state, and the cancellation request through every transport. The selected candidate is cancelled by its exact type, not re-resolved through a generic ID deletion. An omitted `source` remains compatible only with an unambiguous session-only candidate; multiple candidates are refused as `ambiguous` rather than guessed. A same-ID durable candidate is not eligible for deletion through this request. Restored tab references retain the session task source as well; a legacy ID-only reference does not infer a type when several candidates exist.
 
+An explicitly opened scheduled-task view keeps its navigation outcome when its rail entry is omitted; this does not bypass workspace or capability availability. Closing the view still returns to chat normally.
+
 ## 3. Owner and workspace routing
 
 Every read or mutation has an owner session and a route selected from the verified registration record:

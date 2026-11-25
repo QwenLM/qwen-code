@@ -22,6 +22,8 @@ cron 的取消是会话级的。拿到持久任务 ID 后绝不能回退去删�
 
 同一个 ID 下的 session cron 和 loop wakeup 还需用快照中的 `source`（`cron` 或 `wakeup`）精确区分。该 `source` 参与 tab、Environment、busy/cancelled 状态及取消请求在各传输层中的运行时身份。停止操作按最终所选候选的类型精确取消，不再通过通用 ID 删除重新选择。省略 `source` 的旧调用只对无歧义的 session-only 候选保持兼容；多个候选必须以 `ambiguous` 拒绝，不能猜测。即使 durable 候选与它同 ID，也不能由这条请求删除。恢复 tab 的引用同样保留 session 任务的 `source`；只含 ID 的旧引用存在多个候选时，不推断任务类型。
 
+用户已显式打开 scheduled-tasks 页面时，即使 rail 没有这项入口，也保留其导航结果；这不绕过 workspace 能力检查。退出页面仍按常规返回 chat。
+
 ## 3. owner 与 workspace 路由
 
 每次读取或变更都必须有 owner session，以及由核验过的注册记录选出的路由：
