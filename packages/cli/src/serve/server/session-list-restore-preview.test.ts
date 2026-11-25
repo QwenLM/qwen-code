@@ -79,9 +79,10 @@ function summaries(target: RetentionTestRuntime, sessionId: string) {
 
 async function removedRecord(
   target: RetentionTestRuntime,
-  options: { slug?: string; writeBinding?: boolean } = {},
+  options: { sessionId?: string; slug?: string; writeBinding?: boolean } = {},
 ) {
   const session = await makeRetainedSession(target, {
+    sessionId: options.sessionId,
     slug: options.slug ?? 'preview-removed',
     dirty: true,
   });
@@ -591,6 +592,115 @@ describe('worktree restoration preview metadata', () => {
     );
     expect(searchRow).toBeDefined();
     expect(searchRow?.session.worktree?.canRestore).toBe(false);
+  });
+
+  it('fences an uppercase legacy UUID session in list preview when retirement lookup only matches lowercase', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const upperId = '550E8400-E29B-41D4-A716-446655440901';
+    const record = await removedRecord(target, {
+      sessionId: upperId,
+      slug: 'upper-fenced-preview',
+    });
+
+    const openBridge = {
+      listSessions: () => [],
+      getSessionRetirement: () => undefined,
+    } as unknown as AcpSessionBridge;
+    const openListed = await runWithWorkspaceRuntimeStorage(
+      target.runtime,
+      () =>
+        listWorkspaceSessionsForResponse(
+          openBridge,
+          target.repo,
+          { size: 20 },
+          {
+            mergeLive: false,
+            runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+          },
+        ),
+    );
+    expect(
+      openListed.sessions.find((s) => s.sessionId === record.id)?.worktree
+        ?.canRestore,
+    ).toBe(true);
+
+    // Bridge answers ONLY the normalized lowercase key, never the raw uppercase key.
+    const lowercaseOnlyBridge = {
+      listSessions: () => [],
+      getSessionRetirement: (candidateId: string) =>
+        candidateId === upperId.toLowerCase()
+          ? {
+              sessionId: upperId.toLowerCase(),
+              operationId: 'op-upper-fenced',
+              eventEpoch: 'epoch-1',
+              state: 'retired',
+            }
+          : undefined,
+    } as unknown as AcpSessionBridge;
+    const fencedListed = await runWithWorkspaceRuntimeStorage(
+      target.runtime,
+      () =>
+        listWorkspaceSessionsForResponse(
+          lowercaseOnlyBridge,
+          target.repo,
+          { size: 20 },
+          {
+            mergeLive: false,
+            runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+          },
+        ),
+    );
+    expect(
+      fencedListed.sessions.find((s) => s.sessionId === record.id)?.worktree
+        ?.canRestore,
+    ).toBe(false);
+  });
+
+  it('rejects an interrupted unarchive twin in list preview when snapshot metadata slug does not match', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target, {
+      slug: 'expected-twin-slug',
+    });
+    const activeDir = path.dirname(record.sidecarPath);
+    const archivedDir = path.dirname(
+      target.service.getWorktreeSessionPathForArchiveState(
+        record.id,
+        'archived',
+      ),
+    );
+    fs.mkdirSync(archivedDir, { recursive: true });
+    const metaName = `${record.archiveKey.slice(0, -'.tar.gz'.length)}.json`;
+    const activeMetaPath = path.join(activeDir, metaName);
+    const parsedMeta = JSON.parse(fs.readFileSync(activeMetaPath, 'utf8'));
+    fs.writeFileSync(
+      activeMetaPath,
+      JSON.stringify({ ...parsedMeta, slug: 'mismatched-twin-slug' }),
+    );
+    fs.linkSync(
+      path.join(activeDir, record.archiveKey),
+      path.join(archivedDir, record.archiveKey),
+    );
+    fs.linkSync(activeMetaPath, path.join(archivedDir, metaName));
+
+    const openBridge = {
+      listSessions: () => [],
+      getSessionRetirement: () => undefined,
+    } as unknown as AcpSessionBridge;
+    const listed = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+      listWorkspaceSessionsForResponse(
+        openBridge,
+        target.repo,
+        { size: 20 },
+        {
+          mergeLive: false,
+          runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+        },
+      ),
+    );
+    expect(
+      listed.sessions.find((s) => s.sessionId === record.id)?.worktree
+        ?.canRestore,
+    ).toBe(false);
   });
 
   it('attests the selected runtime root once for multiple preview records', async () => {

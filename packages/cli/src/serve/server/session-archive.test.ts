@@ -4857,6 +4857,61 @@ describe('retained snapshot archive lifecycle', () => {
     ).toBe(false);
   });
 
+  it('refuses to link a sourceOnly member during interrupted recovery if it gains a foreign hardlink before link', async () => {
+    const target = makeRetentionRepo(root, 'interrupted-foreign-nlink-race');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const destinationDir = path.dirname(archivedSidecar);
+    const destinationSnapshot = path.join(
+      destinationDir,
+      path.basename(sourcePair.snapshotPath),
+    );
+    const destinationMeta = path.join(
+      destinationDir,
+      path.basename(sourcePair.metaPath),
+    );
+    const record = await readWorktreeSessionStrict(state.sidecarPath);
+    if (record.state !== 'valid') throw new Error('Missing owner record');
+    await writeWorktreeSession(archivedSidecar, record.session);
+    fs.mkdirSync(destinationDir, { recursive: true });
+    // Phase 1 mid crash: tar is linked, meta is sourceOnly (nlink === 1).
+    fs.linkSync(sourcePair.snapshotPath, destinationSnapshot);
+
+    const foreignLink = path.join(root, 'concurrent-foreign-meta-link.json');
+    const origLstat = fs.promises.lstat.bind(fs.promises);
+    let metaLstatCount = 0;
+    const lstatSpy = vi
+      .spyOn(fs.promises, 'lstat')
+      .mockImplementation(async (targetPath, options) => {
+        if (String(targetPath) === sourcePair.metaPath) {
+          metaLstatCount += 1;
+          // 1st lstat is inside classifyInterruptedSnapshotMove (sees nlink === 1).
+          // 2nd lstat is right before fs.link in finishInterruptedSnapshotMove:
+          // add an external hardlink so nlink rises to 2 without replacing inode.
+          if (metaLstatCount === 2) {
+            fs.linkSync(sourcePair.metaPath, foreignLink);
+          }
+        }
+        return origLstat(targetPath, options as never);
+      });
+
+    try {
+      await expect(
+        moveWorktreeSnapshotsWithSession(target.service, state.id, 'archived'),
+      ).rejects.toThrow(/Snapshot source changed during move/);
+    } finally {
+      lstatSpy.mockRestore();
+    }
+    expect(metaLstatCount).toBeGreaterThanOrEqual(2);
+    expect(fs.existsSync(destinationMeta)).toBe(false);
+    expect(fs.existsSync(sourcePair.metaPath)).toBe(true);
+  });
+
   it('rolls back a post-link identity probe failure and retries', async () => {
     const target = makeRetentionRepo(root, 'primary');
     const state = await removedBinding(target);

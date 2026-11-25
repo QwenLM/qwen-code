@@ -53,7 +53,9 @@ import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
+import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { SessionArchiveCoordinator } from './session-archive.js';
+import { listWorkspaceSessionsForResponse } from './session-list.js';
 import {
   executeWorktreeCleanup,
   preclassifyWorktreeCleanup,
@@ -1285,6 +1287,81 @@ describe('worktree retention with real repositories', () => {
     );
     await expectRetainedSnapshot(target, evicted);
     expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('invalidates the persisted session list cache after sweeping a checkout so a subsequent paginated read scans fresh', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const evicted = await makeRetainedSession(target, {
+      slug: 'evicted-cache-bust',
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest-cache-bust',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+
+    const listBridge = {
+      listSessions: () => [],
+      getSessionRetirement: () => undefined,
+    } as unknown as AcpSessionBridge;
+    const warm = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+      listWorkspaceSessionsForResponse(
+        listBridge,
+        target.repo,
+        { size: 20 },
+        {
+          paginateMerged: true,
+          mergeLive: false,
+          runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+        },
+      ),
+    );
+    expect(warm.sessions.map((s) => s.sessionId).sort()).toEqual(
+      [evicted.id, newest.id].sort(),
+    );
+
+    // Add a third session directly on disk within the 2s list cache TTL.
+    // Without sweep invalidating persistedSessionListCache, the next paginated
+    // read inside the TTL serves the cached 2-row snapshot and misses extraId.
+    const extraId = randomUUID();
+    const extraTranscript = path.join(
+      path.dirname(evicted.transcriptPath),
+      `${extraId}.jsonl`,
+    );
+    fs.writeFileSync(
+      extraTranscript,
+      JSON.stringify({
+        uuid: 'u-extra',
+        parentUuid: null,
+        sessionId: extraId,
+        timestamp: '2026-01-03T00:00:00.000Z',
+        type: 'user',
+        cwd: target.repo,
+        version: '0.28.3',
+        message: { role: 'user', parts: [{ text: 'added before sweep' }] },
+      }) + '\n',
+    );
+
+    const outcome = await sweep(target);
+    expect(outcome.removed).toEqual([evicted.id]);
+
+    const after = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+      listWorkspaceSessionsForResponse(
+        listBridge,
+        target.repo,
+        { size: 20 },
+        {
+          paginateMerged: true,
+          mergeLive: false,
+          runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+        },
+      ),
+    );
+    expect(after.sessions.map((s) => s.sessionId)).toContain(extraId);
+    const evictedRow = after.sessions.find((s) => s.sessionId === evicted.id);
+    expect(evictedRow?.worktree?.worktreeRemoved).toBeDefined();
+    expect(evictedRow?.worktree?.canRestore).toBe(true);
   });
 
   it('skips a session with a case-variant duplicate in the other archive state', async () => {
