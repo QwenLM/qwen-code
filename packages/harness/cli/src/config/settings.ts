@@ -714,6 +714,7 @@ function loadSettingsFile(
         const errorMessage = formatValidationError(
           validationResult.error,
           filePath,
+          settingsObject,
         );
         errorsSink.push({
           message: errorMessage,

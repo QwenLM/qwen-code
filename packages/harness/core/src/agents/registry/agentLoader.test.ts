@@ -173,7 +173,9 @@ Body`);
         const error = await parseAgentMarkdown(filePath).catch((e) => e);
         expect(error).toBeInstanceOf(AgentLoadError);
         expect(error.message).toContain('Validation failed');
-        expect(error.message).toContain('description: Required');
+        expect(error.message).toContain(
+          'description: Invalid input: expected string, received undefined',
+        );
       });
 
       it('should only show local agent errors when kind is inferred as local (via local-specific keys)', async () => {
@@ -186,7 +188,9 @@ Body`);
         const error = await parseAgentMarkdown(filePath).catch((e) => e);
         expect(error).toBeInstanceOf(AgentLoadError);
         expect(error.message).toContain('Validation failed');
-        expect(error.message).toContain('description: Required');
+        expect(error.message).toContain(
+          'description: Invalid input: expected string, received undefined',
+        );
       });
 
       it('should silently strip unknown keys (no strict mode)', async () => {

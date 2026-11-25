@@ -754,7 +754,9 @@ describe('settings-validation', () => {
         expect(result.error.issues.length).toBeGreaterThan(0);
         // Should complain about missing 'name'
         const issue = result.error.issues.find(
-          (i) => i.code === 'invalid_type' && i.message.includes('Required'),
+          (i) =>
+            i.code === 'invalid_type' &&
+            i.message.includes('received undefined'),
         );
         expect(issue).toBeDefined();
       }
@@ -778,6 +780,7 @@ describe('settings-validation', () => {
         const formatted = formatValidationError(
           result.error,
           '/path/to/settings.json',
+          invalidSettings,
         );
 
         expect(formatted).toContain('/path/to/settings.json');

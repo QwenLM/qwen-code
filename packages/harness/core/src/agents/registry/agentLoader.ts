@@ -65,11 +65,11 @@ const nameSchema = z.string().min(1, 'Name must be a non-empty string');
 const mcpServerSchema = z.object({
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   cwd: z.string().optional(),
   url: z.string().optional(),
   http_url: z.string().optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   tcp: z.string().optional(),
   type: z.enum(['sse', 'http']).optional(),
   timeout: z.number().optional(),
@@ -147,7 +147,7 @@ const localAgentSchema = z
                   ...hookBaseFields,
                   type: z.literal('http'),
                   url: z.string(),
-                  headers: z.record(z.string()).optional(),
+                  headers: z.record(z.string(), z.string()).optional(),
                   allowedEnvVars: z.array(z.string()).optional(),
                 }),
                 z.object({

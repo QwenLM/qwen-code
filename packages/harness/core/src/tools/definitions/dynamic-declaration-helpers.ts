@@ -13,7 +13,6 @@
 import os from 'node:os';
 import { type FunctionDeclaration } from '@google/genai';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   SHELL_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
@@ -42,6 +41,7 @@ import {
 } from './tool-prompts/index.js';
 import { isBashPtyToolsEnabled } from '../bash-pty-feature-gate.js';
 import type { PromptBundle } from '../../prompts/types.js';
+import { zodToToolJsonSchema } from '../../utils/zodToolJsonSchema.js';
 
 /** Default foreground timeout for Bash in milliseconds (2 minutes). */
 export const defaultTimeoutMs = 120000;
@@ -360,13 +360,10 @@ const ACTIVATE_SKILL_DECLARATION: FunctionDeclaration = (() => {
       .optional()
       .describe('Optional arguments to pass to the skill.'),
   });
-  const { $schema: _$schema, ...parametersJsonSchema } =
-    zodToJsonSchema(schema);
-
   return {
     name: SKILL_TOOL_NAME,
     description: getActivateSkillDescription(),
-    parametersJsonSchema,
+    parametersJsonSchema: zodToToolJsonSchema(schema),
   };
 })();
 

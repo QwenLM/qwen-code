@@ -186,9 +186,9 @@ function buildEnumSchema(
   } else {
     return z.union(
       values.map((v) => z.literal(v)) as [
-        z.ZodLiteral<unknown>,
-        z.ZodLiteral<unknown>,
-        ...Array<z.ZodLiteral<unknown>>,
+        z.ZodLiteral<string | number | boolean>,
+        z.ZodLiteral<string | number | boolean>,
+        ...Array<z.ZodLiteral<string | number | boolean>>,
       ],
     );
   }
@@ -441,12 +441,31 @@ export function validateSettings(
   return result;
 }
 
+/** Names the JSON type of a settings value, as shown in validation errors. */
+function describeReceivedType(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'number' && Number.isNaN(value)) return 'nan';
+  return typeof value;
+}
+
+function getIssueInput(data: unknown, path: readonly PropertyKey[]): unknown {
+  let current = data;
+  for (const part of path) {
+    if (typeof current !== 'object' || current === null) return undefined;
+    current = (current as Record<PropertyKey, unknown>)[part];
+  }
+  return current;
+}
+
 /**
- * Format a Zod error into a helpful error message
+ * Format a Zod error into a helpful error message. `data` is the validated
+ * input; it supplies the received type of `invalid_type` issues.
  */
 export function formatValidationError(
   error: z.ZodError,
   filePath: string,
+  data?: unknown,
 ): string {
   const lines: string[] = [];
   lines.push(`Invalid configuration in ${filePath}:`);
@@ -456,11 +475,11 @@ export function formatValidationError(
   const displayedIssues = error.issues.slice(0, MAX_ERRORS_TO_DISPLAY);
 
   for (const issue of displayedIssues) {
-    const path = issue.path.reduce(
+    const path = issue.path.reduce<string>(
       (acc, curr) =>
         typeof curr === 'number'
           ? `${acc}[${curr}]`
-          : `${acc ? acc + '.' : ''}${curr}`,
+          : `${acc ? acc + '.' : ''}${String(curr)}`,
       '',
     );
     lines.push(`Error in: ${path || '(root)'}`);
@@ -468,7 +487,7 @@ export function formatValidationError(
 
     if (issue.code === 'invalid_type') {
       const expected = issue.expected;
-      const received = issue.received;
+      const received = describeReceivedType(getIssueInput(data, issue.path));
       lines.push(`Expected: ${expected}, but received: ${received}`);
     }
     lines.push('');

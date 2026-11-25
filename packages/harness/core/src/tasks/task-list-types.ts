@@ -13,7 +13,7 @@ export const TASK_STATUSES = ['pending', 'in_progress', 'completed'] as const;
 export const TaskListStatusSchema = z.enum(TASK_STATUSES);
 export type TaskListStatus = z.infer<typeof TaskListStatusSchema>;
 
-export const TaskMetadataSchema = z.record(z.unknown());
+export const TaskMetadataSchema = z.record(z.string(), z.unknown());
 
 export const TaskListItemSchema = z.object({
   businessInfo: z

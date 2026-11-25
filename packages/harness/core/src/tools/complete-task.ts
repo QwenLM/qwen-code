@@ -19,7 +19,7 @@ import {
 } from './definitions/base-declarations.js';
 import { type OutputConfig } from '../agents/types.js';
 import { type z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+import { zodToToolPropertyJsonSchema } from '../utils/zodToolJsonSchema.js';
 import { boundedProducerPayload } from './producer-result-bounds.js';
 
 /**
@@ -53,19 +53,10 @@ export class CompleteTaskTool<
     outputConfig?: OutputConfig<z.ZodTypeAny>,
   ): unknown {
     if (outputConfig) {
-      const jsonSchema = zodToJsonSchema(outputConfig.schema);
-      const {
-        $schema: _$schema,
-        definitions: _definitions,
-        ...schema
-      } = jsonSchema;
-      return {
-        type: 'object',
-        properties: {
-          [outputConfig.outputName]: schema,
-        },
-        required: [outputConfig.outputName],
-      };
+      return zodToToolPropertyJsonSchema(
+        outputConfig.outputName,
+        outputConfig.schema,
+      );
     }
     return {
       type: 'object',

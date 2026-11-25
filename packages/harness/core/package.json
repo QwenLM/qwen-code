@@ -69,8 +69,7 @@
     "undici": "7.29.0",
     "web-tree-sitter": "^0.25.10",
     "yauzl": "3.4.0",
-    "zod": "^3.25.76",
-    "zod-to-json-schema": "^3.25.1"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "keytar": "^7.9.0"

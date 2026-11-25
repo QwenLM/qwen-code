@@ -619,6 +619,7 @@ it('uses the supplied schema for validation, recovery, defaults and merge rules'
       .object({
         mcpServers: z
           .record(
+            z.string(),
             z.object({
               command: z.string().optional(),
               disabled: z.boolean().optional(),

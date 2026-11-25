@@ -700,10 +700,10 @@ export const HostActionEventSchema = lazySchema(
       .object({
         type: z.literal('feedback'),
         subtype: z.literal('action'),
-        uuid: z.string().uuid(),
+        uuid: z.guid(),
         action: z.enum(HOST_ACTIONS),
         session_id: z.string().min(1),
-        parent_result_uuid: z.string().uuid(),
+        parent_result_uuid: z.guid(),
       })
       .strict() satisfies z.ZodType<HostActionEvent>,
 );

@@ -72,7 +72,9 @@ function formatMcpValidationReason(
     const path =
       relativePath.length > 0
         ? relativePath
-            .map((part) => (typeof part === 'number' ? `[${part}]` : part))
+            .map((part) =>
+              typeof part === 'number' ? `[${part}]` : String(part),
+            )
             .join('.')
             .replace('.[', '[')
         : '(root)';
@@ -152,20 +154,29 @@ function deleteAtPath(
   return true;
 }
 
-function isMissingRequiredIssue(issue: ZodIssue): boolean {
-  if (issue.code !== 'invalid_type') {
-    return false;
-  }
+// Settings come from JSON, so issue paths never contain symbol keys.
+function settingsIssuePath(issue: ZodIssue): Array<string | number> {
+  return issue.path.map((part) =>
+    typeof part === 'symbol' ? String(part) : part,
+  );
+}
+
+function isMissingRequiredIssue(
+  settings: Record<string, unknown>,
+  issue: ZodIssue,
+): boolean {
+  // A missing enum field is reported as invalid_value, not invalid_type.
   return (
-    'received' in issue &&
-    (issue as { received?: unknown }).received === 'undefined'
+    (issue.code === 'invalid_type' || issue.code === 'invalid_value') &&
+    getValueAtPath(settings, settingsIssuePath(issue)) === undefined
   );
 }
 
 function getDeletionPathForIssue(
+  settings: Record<string, unknown>,
   issue: ZodIssue,
 ): Array<string | number> | undefined {
-  const path = [...issue.path];
+  const path = settingsIssuePath(issue);
   if (path.length === 0) {
     return undefined;
   }
@@ -175,7 +186,7 @@ function getDeletionPathForIssue(
     return path.slice(0, firstArrayIndex + 1);
   }
 
-  if (isMissingRequiredIssue(issue) && path.length > 1) {
+  if (isMissingRequiredIssue(settings, issue) && path.length > 1) {
     return path.slice(0, -1);
   }
 
@@ -187,12 +198,18 @@ function removeUnrecognizedKeysForIssue(
   issue: ZodIssue,
 ): { changed: boolean; path: string } {
   if (issue.code !== 'unrecognized_keys') {
-    return { changed: false, path: formatSettingsIssuePath(issue.path) };
+    return {
+      changed: false,
+      path: formatSettingsIssuePath(settingsIssuePath(issue)),
+    };
   }
 
-  const target = getValueAtPath(settings, issue.path);
+  const target = getValueAtPath(settings, settingsIssuePath(issue));
   if (!isRecord(target)) {
-    return { changed: false, path: formatSettingsIssuePath(issue.path) };
+    return {
+      changed: false,
+      path: formatSettingsIssuePath(settingsIssuePath(issue)),
+    };
   }
 
   let changed = false;
@@ -203,7 +220,7 @@ function removeUnrecognizedKeysForIssue(
     }
   }
 
-  const issuePath = formatSettingsIssuePath(issue.path);
+  const issuePath = formatSettingsIssuePath(settingsIssuePath(issue));
   return {
     changed,
     path: issue.keys.length === 1 ? `${issuePath}.${issue.keys[0]}` : issuePath,
@@ -214,7 +231,7 @@ function pruneRecoverableSettingsIssue(
   settings: Record<string, unknown>,
   issue: ZodIssue,
 ): { changed: boolean; path: string } {
-  const issuePath = formatSettingsIssuePath(issue.path);
+  const issuePath = formatSettingsIssuePath(settingsIssuePath(issue));
   const ui = settings['ui'];
   if (issuePath === 'ui.language' && isRecord(ui)) {
     // Keep the invalid value in originalSettings, but use the required English
@@ -228,9 +245,12 @@ function pruneRecoverableSettingsIssue(
     return unrecognized;
   }
 
-  const deletionPath = getDeletionPathForIssue(issue);
+  const deletionPath = getDeletionPathForIssue(settings, issue);
   if (!deletionPath) {
-    return { changed: false, path: formatSettingsIssuePath(issue.path) };
+    return {
+      changed: false,
+      path: formatSettingsIssuePath(settingsIssuePath(issue)),
+    };
   }
 
   return {
@@ -268,7 +288,10 @@ export function sanitizeRecoverableSettingsValidationIssues(
       }
 
       // Capture before pruning: this pass may remove the group itself.
-      const originalPath = originalHookSettingsPath(settings, issue.path);
+      const originalPath = originalHookSettingsPath(
+        settings,
+        settingsIssuePath(issue),
+      );
       const pruned = pruneRecoverableSettingsIssue(settings, issue);
       if (!pruned.changed) {
         continue;

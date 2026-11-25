@@ -47,4 +47,40 @@ describe('HostActionEventSchema', () => {
       }),
     ).toThrow();
   });
+
+  it('accepts version-less GUIDs in uuid and parent_result_uuid', () => {
+    const guid = '11111111-1111-1111-1111-111111111111';
+    expect(
+      HostActionEventSchema().safeParse({
+        ...base,
+        action: 'copy_text',
+        uuid: guid,
+      }).success,
+    ).toBe(true);
+    expect(
+      HostActionEventSchema().safeParse({
+        ...base,
+        action: 'copy_text',
+        parent_result_uuid: guid,
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects malformed uuid and parent_result_uuid', () => {
+    const malformed = '11111111-1111-1111-1111-11111111111';
+    expect(
+      HostActionEventSchema().safeParse({
+        ...base,
+        action: 'copy_text',
+        uuid: malformed,
+      }).success,
+    ).toBe(false);
+    expect(
+      HostActionEventSchema().safeParse({
+        ...base,
+        action: 'copy_text',
+        parent_result_uuid: malformed,
+      }).success,
+    ).toBe(false);
+  });
 });

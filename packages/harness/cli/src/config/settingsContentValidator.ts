@@ -49,7 +49,7 @@ export function createSettingsContentValidator(
     // Validate against schema
     const result = validation.safeParse(parsed);
     if (!result.success && result.error) {
-      return formatValidationError(result.error, filePath);
+      return formatValidationError(result.error, filePath, parsed);
     }
 
     return null;

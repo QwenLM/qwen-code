@@ -241,14 +241,10 @@ export const PERMISSION_DENIED_HOOK_RETRY_MESSAGE =
  * fields, which breaks `satisfies z.ZodType<MessageWithRequiredField>`.
  * `z.unknown().refine(...)` keeps the field strictly required.
  */
-function brandedPlaceholder<T>(): z.ZodType<T, z.ZodTypeDef, T> {
+function brandedPlaceholder<T>(): z.ZodType<T, T> {
   return z
     .unknown()
-    .refine((v) => v !== undefined && v !== null) as unknown as z.ZodType<
-    T,
-    z.ZodTypeDef,
-    T
-  >;
+    .refine((v) => v !== undefined && v !== null) as unknown as z.ZodType<T, T>;
 }
 
 /** 用户消息（Anthropic `MessageParam`）。有 TS 类型，无运行时校验。 */

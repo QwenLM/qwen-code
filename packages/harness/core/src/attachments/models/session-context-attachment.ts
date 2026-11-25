@@ -22,7 +22,8 @@ export const SESSION_CONTEXT_FIELDS = [
   'perforceMode',
 ] as const;
 
-export const sessionContextSchema = z.record(
+// Fields are sparse: a snapshot carries only the values that were collected.
+export const sessionContextSchema = z.partialRecord(
   z.enum(SESSION_CONTEXT_FIELDS),
   z.string(),
 );

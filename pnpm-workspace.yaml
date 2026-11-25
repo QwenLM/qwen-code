@@ -117,13 +117,6 @@ overrides:
   # repository already installs, exports the same `stdout` (false without a
   # TTY, which turns colours off).
   'openapi-typescript>supports-color': '7.2.0'
-  # packages/harness/core is still on zod 3, and its zod-to-json-schema takes
-  # zod as a peer. The hoisted layout keeps one directory per name and
-  # version, so harness core's 3.25.2 would share the root copy that
-  # @modelcontextprotocol/sdk resolves against zod 4, and harness core's zod 3
-  # schemas would fail to typecheck against zod 4's types. A version nothing
-  # else uses is nested beside harness core's own zod.
-  '@qwen-code/core>zod-to-json-schema': '3.25.1'
 
 allowBuilds:
   '@google/genai': true

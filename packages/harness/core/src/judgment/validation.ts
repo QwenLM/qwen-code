@@ -13,7 +13,7 @@ const questionSchema = z.discriminatedUnion('type', [
     type: z.literal('choice'),
     instructions: z.string(),
     criteria: z
-      .record(z.string().nullable())
+      .record(z.string(), z.string().nullable())
       .refine((value) => Object.keys(value).length > 0, 'must contain choices'),
   }),
   z.object({
@@ -29,7 +29,7 @@ const questionSchema = z.discriminatedUnion('type', [
     criteria: z.array(z.string()).min(2),
   }),
 ]);
-const questionsSchema = z.record(questionSchema);
+const questionsSchema = z.record(z.string(), questionSchema);
 
 export function validateJudgmentRequest(request: JudgmentRequest): void {
   questionsSchema.parse(request.questions);
@@ -63,18 +63,19 @@ const probability = z.number().finite().min(0).max(1);
 const responseSchema = z.object({
   model: z.string().min(1),
   answers: z.record(
+    z.string(),
     z.discriminatedUnion('type', [
       z.object({
         type: z.literal('choice'),
         choice: z.string(),
-        probabilities: z.record(probability).optional(),
+        probabilities: z.record(z.string(), probability).optional(),
         confidence: probability.optional(),
       }),
       z.object({ type: z.literal('noul'), noul: probability }),
       z.object({
         type: z.literal('score'),
         score: z.number().finite(),
-        probabilities: z.record(probability).optional(),
+        probabilities: z.record(z.string(), probability).optional(),
         confidence: probability.optional(),
       }),
     ]),

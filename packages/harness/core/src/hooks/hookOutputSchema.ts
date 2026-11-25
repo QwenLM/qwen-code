@@ -40,7 +40,7 @@ const preToolUseSpecific = z.object({
   hookEventName: z.literal('PreToolUse'),
   permissionDecision: permissionBehaviorSchema.optional(),
   permissionDecisionReason: z.string().optional(),
-  updatedInput: z.record(z.unknown()).optional(),
+  updatedInput: z.record(z.string(), z.unknown()).optional(),
   additionalContext: z.string().optional(),
 });
 
@@ -143,13 +143,13 @@ const worktreeRemoveSpecific = z.object({
 const elicitationSpecific = z.object({
   hookEventName: z.literal('Elicitation'),
   action: elicitationActionSchema,
-  content: z.record(z.unknown()).optional(),
+  content: z.record(z.string(), z.unknown()).optional(),
 });
 
 const elicitationResultSpecific = z.object({
   hookEventName: z.literal('ElicitationResult'),
   action: elicitationActionSchema,
-  content: z.record(z.unknown()).optional(),
+  content: z.record(z.string(), z.unknown()).optional(),
 });
 
 const taskCreatedSpecific = z.object({
@@ -166,7 +166,7 @@ const permissionRequestSpecific = z.object({
     .union([
       z.object({
         behavior: z.literal('allow'),
-        updatedInput: z.record(z.unknown()).optional(),
+        updatedInput: z.record(z.string(), z.unknown()).optional(),
         updatedPermissions: z.array(permissionUpdateSchema).optional(),
       }),
       z.object({

@@ -34,11 +34,11 @@ const stringOrStringArray = z.union([z.string(), z.array(z.string())]);
 const mcpServerSchema = z.object({
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   cwd: z.string().optional(),
   url: z.string().optional(),
   http_url: z.string().optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   tcp: z.string().optional(),
   type: z.enum(['sse', 'http']).optional(),
   timeout: z.number().optional(),
@@ -104,7 +104,7 @@ const agentFrontmatterSchema = z
                   ...hookBaseFields,
                   type: z.literal('http'),
                   url: z.string(),
-                  headers: z.record(z.string()).optional(),
+                  headers: z.record(z.string(), z.string()).optional(),
                   allowedEnvVars: z.array(z.string()).optional(),
                 }),
                 z.object({
@@ -369,9 +369,7 @@ function normalizeMcpServers(
   return specs.length > 0 ? specs : undefined;
 }
 
-function semanticBoolean<T extends z.ZodType>(
-  inner: T,
-): z.ZodEffects<T, z.output<T>, unknown> {
+function semanticBoolean<T extends z.ZodType>(inner: T) {
   return z.preprocess(
     (value: unknown) =>
       value === 'true' ? true : value === 'false' ? false : value,

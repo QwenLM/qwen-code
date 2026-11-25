@@ -46,7 +46,6 @@ overrides:
   archiver-utils@3>glob: 14.0.6
   readdir-glob@1: 4.0.0
   openapi-typescript>supports-color: 7.2.0
-  '@qwen-code/core>zod-to-json-schema': 3.25.1
 
 pnpmfileChecksum: sha256-b0V9SY1TSIiCxINsouSA6TYfHvvbUQE/zRG+CjPvEhA=
 
@@ -1396,7 +1395,7 @@ importers:
     dependencies:
       '@agentclientprotocol/sdk':
         specifier: ^0.22.1
-        version: 0.22.1(zod@3.25.76)
+        version: 0.22.1(zod@4.6.7)
       '@alcalzone/ansi-tokenize':
         specifier: ^0.3.0
         version: 0.3.0
@@ -1408,7 +1407,7 @@ importers:
         version: 0.3.6
       '@google/genai':
         specifier: 1.30.0
-        version: 1.30.0(@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@3.25.76))(supports-color@7.2.0)
+        version: 1.30.0(@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@4.6.7))(supports-color@7.2.0)
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0
@@ -1527,8 +1526,8 @@ importers:
         specifier: ~3.2.1
         version: 3.2.1
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       '@types/gradient-string':
         specifier: ^1.1.6
@@ -1577,10 +1576,10 @@ importers:
     dependencies:
       '@anthropic-ai/sdk':
         specifier: ^0.81.0
-        version: 0.81.0(zod@3.25.76)
+        version: 0.81.0(zod@4.6.7)
       '@google/genai':
         specifier: 1.30.0
-        version: 1.30.0(@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@3.25.76))(supports-color@7.2.0)
+        version: 1.30.0(@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@4.6.7))(supports-color@7.2.0)
       '@lydell/node-pty':
         specifier: 1.1.0
         version: 1.1.0
@@ -1676,7 +1675,7 @@ importers:
         version: 4.0.7
       openai:
         specifier: ^6.49.0
-        version: 6.49.0(ws@8.21.3)(zod@3.25.76)
+        version: 6.49.0(ws@8.21.3)(zod@4.6.7)
       picomatch:
         specifier: ^4.0.1
         version: 4.0.5
@@ -1723,11 +1722,8 @@ importers:
         specifier: 3.4.0
         version: 3.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-      zod-to-json-schema:
-        specifier: 3.25.1
-        version: 3.25.1(zod@3.25.76)
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       '@types/fast-levenshtein':
         specifier: ^0.0.4
@@ -1765,7 +1761,7 @@ importers:
     dependencies:
       '@google/genai':
         specifier: 1.30.0
-        version: 1.30.0(@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@3.25.76))(supports-color@7.2.0)
+        version: 1.30.0(@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@4.6.7))(supports-color@7.2.0)
       chokidar:
         specifier: ^4.0.3
         version: 4.0.3
@@ -1785,8 +1781,8 @@ importers:
         specifier: ^3.1.1
         version: 3.1.1
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       '@types/js-yaml':
         specifier: ^4.0.9
@@ -12571,11 +12567,6 @@ packages:
     peerDependencies:
       zod: ^3.25 || ^4
 
-  zod-to-json-schema@3.25.1:
-    resolution: {integrity: sha512-pM/SU9d3YAggzi6MtR4h7ruuQlqKtad8e9S0fmxcMi+ueAK5Korys/aWcV9LIIHTVbj01NdzxcnXSN+O74ZIVA==}
-    peerDependencies:
-      zod: ^3.25 || ^4
-
   zod-to-json-schema@3.25.2:
     resolution: {integrity: sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA==}
     peerDependencies:
@@ -12586,6 +12577,9 @@ packages:
 
   zod@4.6.6:
     resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
+
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
   zrender@6.1.0:
     resolution: {integrity: sha512-oEGMDB6pOP2S6OwRR4PdVv610zrjnA3Bh+JnSG12fYJlBKjtNAoEb5fSUoCOOINlH96I2fU38/A2UpRKs67xYQ==}
@@ -12606,9 +12600,9 @@ snapshots:
     dependencies:
       zod: 4.6.6
 
-  '@agentclientprotocol/sdk@0.22.1(zod@3.25.76)':
+  '@agentclientprotocol/sdk@0.22.1(zod@4.6.7)':
     dependencies:
-      zod: 3.25.76
+      zod: 4.6.7
 
   '@alcalzone/ansi-tokenize@0.3.0':
     dependencies:
@@ -12639,11 +12633,11 @@ snapshots:
     transitivePeerDependencies:
       - encoding
 
-  '@anthropic-ai/sdk@0.81.0(zod@3.25.76)':
+  '@anthropic-ai/sdk@0.81.0(zod@4.6.7)':
     dependencies:
       json-schema-to-ts: 3.1.1
     optionalDependencies:
-      zod: 3.25.76
+      zod: 4.6.7
 
   '@asamuzakjp/css-color@3.2.0':
     dependencies:
@@ -13491,12 +13485,12 @@ snapshots:
       '@gitbeaker/core': 42.5.0
       '@gitbeaker/requester-utils': 42.5.0
 
-  '@google/genai@1.30.0(@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@3.25.76))(supports-color@7.2.0)':
+  '@google/genai@1.30.0(@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@4.6.7))(supports-color@7.2.0)':
     dependencies:
       google-auth-library: 10.6.2(supports-color@7.2.0)
       ws: 8.21.3
     optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.32.2(supports-color@7.2.0)(zod@3.25.76)
+      '@modelcontextprotocol/sdk': 1.32.2(supports-color@7.2.0)(zod@4.6.7)
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -14079,7 +14073,7 @@ snapshots:
       eventsource-parser: 3.1.1
       jose: 6.2.12
       pkce-challenge: 5.0.0
-      zod: 4.6.6
+      zod: 4.6.7
 
   '@modelcontextprotocol/client@2.4.0':
     dependencies:
@@ -14093,7 +14087,7 @@ snapshots:
 
   '@modelcontextprotocol/core@2.0.0':
     dependencies:
-      zod: 4.6.6
+      zod: 4.6.7
 
   '@modelcontextprotocol/core@2.4.0':
     dependencies:
@@ -14151,6 +14145,29 @@ snapshots:
       zod-to-json-schema: 3.25.2(zod@4.6.6)
     transitivePeerDependencies:
       - supports-color
+
+  '@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@4.6.7)':
+    dependencies:
+      '@hono/node-server': 2.1.7(hono@4.13.18)
+      ajv: 8.20.0
+      ajv-formats: 3.0.1(ajv@8.20.0)
+      content-type: 1.0.5
+      cors: 2.8.5
+      cross-spawn: 7.0.6
+      eventsource: 3.0.7
+      eventsource-parser: 3.1.1
+      express: 5.2.1(supports-color@7.2.0)
+      express-rate-limit: 8.7.2(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)
+      hono: 4.13.18
+      jose: 6.2.12
+      json-schema-typed: 8.0.2
+      pkce-challenge: 5.0.0
+      raw-body: 3.0.2
+      zod: 4.6.7
+      zod-to-json-schema: 3.25.2(zod@4.6.7)
+    transitivePeerDependencies:
+      - supports-color
+    optional: true
 
   '@mswjs/interceptors@0.39.5':
     dependencies:
@@ -21637,10 +21654,10 @@ snapshots:
       ws: 8.21.3
       zod: 4.6.6
 
-  openai@6.49.0(ws@8.21.3)(zod@3.25.76):
+  openai@6.49.0(ws@8.21.3)(zod@4.6.7):
     optionalDependencies:
       ws: 8.21.3
-      zod: 3.25.76
+      zod: 4.6.7
 
   openapi-typescript@7.13.0(typescript@5.8.3):
     dependencies:
@@ -24473,10 +24490,6 @@ snapshots:
     dependencies:
       zod: 4.6.6
 
-  zod-to-json-schema@3.25.1(zod@3.25.76):
-    dependencies:
-      zod: 3.25.76
-
   zod-to-json-schema@3.25.2(zod@3.25.76):
     dependencies:
       zod: 3.25.76
@@ -24485,9 +24498,16 @@ snapshots:
     dependencies:
       zod: 4.6.6
 
+  zod-to-json-schema@3.25.2(zod@4.6.7):
+    dependencies:
+      zod: 4.6.7
+    optional: true
+
   zod@3.25.76: {}
 
   zod@4.6.6: {}
+
+  zod@4.6.7: {}
 
   zrender@6.1.0:
     dependencies:
