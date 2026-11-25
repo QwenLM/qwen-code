@@ -1232,6 +1232,46 @@ describe('loadStatsData — per-request ledger accounting', () => {
     }
   });
 
+  it('ignores in-window corrupt records missing models when computing ledger deltas', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 15, 12, 0, 0));
+    try {
+      const yesterday = new Date(2026, 5, 14, 12, 0, 0).getTime();
+      const prevWeek = new Date(2026, 5, 6, 12, 0, 0).getTime();
+      const corruptInCurrent = {
+        ...makeRecord({
+          sessionId: 'corrupt-current-week',
+          startTime: yesterday - 1000,
+          timestamp: yesterday,
+        }),
+        models: undefined,
+      } as unknown as UsageSummaryRecord;
+      const corruptInPrev = {
+        ...makeRecord({
+          sessionId: 'corrupt-prev-week',
+          startTime: prevWeek - 1000,
+          timestamp: prevWeek,
+        }),
+        models: undefined,
+      } as unknown as UsageSummaryRecord;
+      mockedLoadUsageHistory.mockResolvedValue([
+        corruptInCurrent,
+        corruptInPrev,
+      ]);
+      vi.mocked(loadLedgerOrEmpty).mockResolvedValueOnce(
+        new Map([
+          [dayKey(yesterday), ledgerDay({ requests: 2, inputTokens: 200 })],
+          [dayKey(prevWeek), ledgerDay({ requests: 1, inputTokens: 100 })],
+        ]),
+      );
+      const result = await loadStatsData('week');
+      expect(reportTokens(result.report)).toBe(200);
+      expect(result.delta?.tokens).toBe(100);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     { range: 'week' as const, days: 20 },
     { range: 'month' as const, days: 70 },

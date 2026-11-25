@@ -1363,6 +1363,42 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(history[0]?.files).toEqual({ linesAdded: 0, linesRemoved: 0 });
   });
 
+  it('does not throw in rebuildCoversRun when either a run or rebuild omits models', () => {
+    const base = persistedRec('missing-models-cover', 100);
+    const runWithoutModels = {
+      ...base,
+      runScoped: true,
+      requestExecutionIds: ['req-1'],
+      models: undefined,
+    } as unknown as UsageSummaryRecord;
+    const validRebuild: UsageSummaryRecord = {
+      ...base,
+      transcriptRebuild: true,
+      requestExecutionIds: ['req-1'],
+    };
+    const validRun: UsageSummaryRecord = {
+      ...base,
+      runScoped: true,
+      requestExecutionIds: ['req-1'],
+    };
+    const rebuildWithoutModels = {
+      ...base,
+      transcriptRebuild: true,
+      requestExecutionIds: ['req-1'],
+      models: undefined,
+    } as unknown as UsageSummaryRecord;
+
+    expect(() =>
+      dedupBySessionId([runWithoutModels, validRebuild]),
+    ).not.toThrow();
+    expect(() =>
+      dedupBySessionId([validRun, rebuildWithoutModels]),
+    ).not.toThrow();
+    expect(dedupBySessionId([validRun, rebuildWithoutModels])).toContainEqual(
+      validRun,
+    );
+  });
+
   it('does not let a beforeMs-truncated cache entry cause Phase 1.5 to skip newer transcript activity', async () => {
     const sessionId = 'truncated-cache-no-skip';
     const project = '/repro/truncated-cache';
