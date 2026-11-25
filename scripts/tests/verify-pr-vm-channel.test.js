@@ -729,4 +729,84 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
       expect(reply).toBe('ERR bundle-invalid\n');
     }
   });
+
+  it('bridges loopback HTTP to IPv4 and allowlisted IPv6 ::1 listeners', async () => {
+    const hasIpv6 = await runAsync('python3', [
+      '-c',
+      'import socket; print(int(socket.has_ipv6))',
+    ]);
+    if (hasIpv6.stdout.trim() === '0') {
+      // The listener is allowed only where the kernel provides loopback IPv6.
+      return;
+    }
+
+    const root = mkdtempSync('/tmp/qc-bridge-v6-');
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const proxySock = join(root, 'm.sock');
+    const responseBody = 'synthetic-v6-nonce';
+    const upstream = net.createServer((sock) => {
+      sock.once('data', () => {
+        sock.end(
+          `HTTP/1.1 200 OK\r\nContent-Length: ${responseBody.length}\r\nConnection: close\r\n\r\n${responseBody}`,
+        );
+      });
+    });
+    await new Promise((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(proxySock, resolve);
+    });
+    cleanups.push(() => upstream.close());
+
+    const httpHealth = async (host, port) =>
+      new Promise((resolve, reject) => {
+        const client = net.createConnection({ host, port }, () => {
+          client.end('GET /__health HTTP/1.1\r\nConnection: close\r\n\r\n');
+        });
+        const chunks = [];
+        client.on('data', (chunk) => chunks.push(chunk));
+        client.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        client.on('error', reject);
+      });
+
+    for (const listen of ['127.0.0.1', '::1', 'localhost']) {
+      const bridge = spawn(
+        'python3',
+        [
+          GUEST_VSOCK_PY,
+          'model-bridge',
+          '--unix',
+          proxySock,
+          '--listen',
+          listen,
+          '--local-port',
+          '0',
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      cleanups.push(() => {
+        if (bridge.exitCode === null) bridge.kill('SIGTERM');
+      });
+      let stderr = '';
+      bridge.stderr.on('data', (chunk) => {
+        stderr += chunk.toString('utf8');
+      });
+
+      try {
+        const [ready] = await Promise.race([
+          once(bridge.stdout, 'data'),
+          once(bridge, 'exit').then(([code]) => {
+            throw new Error(`bridge exited ${code}: ${stderr}`);
+          }),
+        ]);
+        const readyInfo = JSON.parse(ready.toString('utf8').trim());
+        const health = await httpHealth(readyInfo.host, readyInfo.port);
+        expect(health).toContain('200 OK');
+        expect(health.endsWith(responseBody)).toBe(true);
+        expect(health).not.toContain('socket.gaierror');
+      } finally {
+        bridge.kill('SIGTERM');
+        await once(bridge, 'exit');
+      }
+    }
+  });
 });

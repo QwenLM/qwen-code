@@ -226,12 +226,13 @@ def cmd_model_bridge(args):
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    family = socket.AF_INET6 if args.listen == "::1" else socket.AF_INET
+    server = socket.socket(family, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((args.listen, args.local_port))
     server.listen(32)
     server.settimeout(0.25)
-    host, port = server.getsockname()
+    host, port = server.getsockname()[:2]
     sys.stdout.write(json.dumps({"host": host, "port": port}) + "\n")
     sys.stdout.flush()
 
