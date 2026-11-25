@@ -26,6 +26,7 @@ import {
   extractJsonStringField,
   unescapeJsonString,
 } from '../utils/sessionStorageUtils.js';
+import { isLifecycleUiTelemetryEvent } from '../utils/transcript-records.js';
 
 const debugLogger = createDebugLogger('USAGE_HISTORY');
 
@@ -671,7 +672,13 @@ async function summarizeTranscriptFile(
                 | { uiEvent?: UiEvent }
                 | undefined;
               const event = payload?.uiEvent;
-              if (!event || typeof event !== 'object') continue;
+              if (
+                !event ||
+                typeof event !== 'object' ||
+                isLifecycleUiTelemetryEvent(event)
+              ) {
+                continue;
+              }
               const eventName = event['event.name'];
               const usageEvent =
                 eventName === 'qwen-code.api_response' ||

@@ -22,6 +22,7 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { getHeapStatistics } from 'node:v8';
 import type { Content, Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import { userPromptTimestamp } from './last-user-prompt-time.js';
@@ -32,7 +33,10 @@ import {
   localManagedSessionKey,
   readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
-import { readManagedSessionRecordsAndTitle } from '../managed-runtime/managed-session-message-projection.js';
+import {
+  ManagedSessionProjectionLimitError,
+  readManagedSessionRecordsAndTitle,
+} from '../managed-runtime/managed-session-message-projection.js';
 import {
   MANAGED_SESSION_HEADER_SUBTYPE,
   ManagedSessionRecordError,
@@ -93,6 +97,7 @@ import {
 } from './session-artifact-persistence.js';
 import {
   aggregateTranscriptRecordFragments,
+  isLifecycleUiTelemetryEvent,
   isUserPromptSubmitContextPartText,
   isTranscriptConversationRecord,
   projectUserTranscriptForDisplay,
@@ -113,7 +118,10 @@ export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_TURN_INDEX_VERSION = 1 as const;
-export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 1024 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_LINE_BYTES = 32 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES = 256 * 1024 * 1024;
+const SESSION_TRANSCRIPT_MAX_PROMPT_TIME_BYTES = 256 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 // Hard source-byte ceiling for one backward page, counting everything the
 // turn-alignment and pair extensions add above the soft `maxBytes`
@@ -149,16 +157,43 @@ export class SessionTranscriptSnapshotUnavailableError extends Error {
 
 class EmptySessionTranscriptError extends SessionTranscriptSnapshotUnavailableError {}
 
+export type SessionTranscriptLimitDimension =
+  | 'snapshot'
+  | 'line'
+  | 'index'
+  | 'replay'
+  | 'artifact_library';
+
 export class SessionTranscriptTooLargeError extends Error {
+  readonly dimension: SessionTranscriptLimitDimension;
+  readonly measuredBytes?: number;
+  readonly retryable?: boolean;
+
   constructor(
     readonly sessionId: string,
     readonly snapshotSize: number,
     readonly maxBytes: number,
+    details?: {
+      dimension?: SessionTranscriptLimitDimension;
+      measuredBytes?: number;
+      retryable?: boolean;
+    },
   ) {
-    super(
-      `Transcript snapshot for session ${sessionId} is too large to index (${snapshotSize} bytes, max ${maxBytes} bytes)`,
-    );
+    const dimension = details?.dimension ?? 'snapshot';
+    const measuredBytes = details?.measuredBytes;
+    const message =
+      dimension === 'snapshot'
+        ? `Transcript snapshot for session ${sessionId} is too large to index (${snapshotSize} bytes, max ${maxBytes} bytes)`
+        : `Transcript ${dimension} for session ${sessionId} exceeds limit (${measuredBytes ?? snapshotSize} bytes, max ${maxBytes} bytes; file size ${snapshotSize} bytes)`;
+    super(message);
     this.name = 'SessionTranscriptTooLargeError';
+    this.dimension = dimension;
+    if (measuredBytes !== undefined) {
+      this.measuredBytes = measuredBytes;
+    }
+    if (details?.retryable !== undefined) {
+      this.retryable = details.retryable;
+    }
   }
 }
 
@@ -396,12 +431,7 @@ function buildManagedSessionRestoreProjection(
       const uiEvent = (
         record.systemPayload as UiTelemetryRecordPayload | undefined
       )?.uiEvent;
-      if (
-        uiEvent &&
-        uiEvent['event.name'] !== 'request_lifecycle' &&
-        uiEvent['event.name'] !== 'tool_lifecycle' &&
-        uiEvent['event.name'] !== 'hook_lifecycle'
-      ) {
+      if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
         uiTelemetryEvents.push(uiEvent as UiEvent);
       }
     }
@@ -557,6 +587,7 @@ interface UuidIndexEntry {
   apiHistoryCompressionCandidate: boolean;
   resumeTokenCountsCandidate: boolean;
   attributionSnapshotCandidate: boolean;
+  uiTelemetryCandidate: boolean;
   goalRecoveryCandidate: boolean;
   turnHint: SessionTurnRecordHint;
   navigationKind?: SessionTranscriptNavigationTurnKind;
@@ -629,6 +660,11 @@ const INDEX_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 // an oversized entry can take a slot a warm small index held (at most three
 // oversized entries fit the class budget).
 const INDEX_CACHE_OVERSIZED_MAX_BYTES = 256 * 1024 * 1024;
+// Hard refusal ceiling for dense-record index builds, decoupled from the
+// 256 MiB cache-admission budget so terse 60-120 MiB transcripts continue to
+// serve uncached (as on base) while extreme multi-million-record dense files
+// still fail closed before exhausting a 1 GiB heap.
+export const SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES = 512 * 1024 * 1024;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const INDEX_ENTRY_BASE_BYTES = 256;
 const INDEX_SEGMENT_BYTES = 64;
@@ -759,6 +795,10 @@ function trimPromptTimeScopes(): void {
 const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
 let indexCacheOversizedMaxBytesForTest: number | undefined;
+let maxIndexEstimateBytesForTest: number | undefined;
+let availableHeapBudgetForTest: number | undefined;
+let maxLineBytesForTest: number | undefined;
+let maxAllReplayBytesForTest: number | undefined;
 let expandedPageBytesForTest: number | undefined;
 let cooperativeReadByteBudgetForTest: number | undefined;
 let cooperativeReadTimeBudgetMsForTest: number | undefined;
@@ -907,6 +947,15 @@ function isAttributionSnapshotCandidate(record: ChatRecord): boolean {
     isObjectRecord(record.systemPayload) &&
     'snapshot' in record.systemPayload
   );
+}
+
+function isRestoreUiTelemetryCandidate(record: ChatRecord): boolean {
+  if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
+    return false;
+  }
+  const uiEvent = (record.systemPayload as UiTelemetryRecordPayload | undefined)
+    ?.uiEvent;
+  return isObjectRecord(uiEvent) && !isLifecycleUiTelemetryEvent(uiEvent);
 }
 
 function isFiniteNonNegativeInteger(value: unknown): value is number {
@@ -1858,8 +1907,60 @@ function getIndexCacheOversizedMaxBytes(): number {
   return indexCacheOversizedMaxBytesForTest ?? INDEX_CACHE_OVERSIZED_MAX_BYTES;
 }
 
+function getMaxIndexEstimateBytes(): number {
+  return (
+    maxIndexEstimateBytesForTest ?? SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES
+  );
+}
+
+export function getSessionTranscriptMaxLineBytes(): number {
+  return maxLineBytesForTest ?? SESSION_TRANSCRIPT_MAX_LINE_BYTES;
+}
+
+function getMaxAllReplayBytes(): number {
+  return maxAllReplayBytesForTest ?? SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES;
+}
+
 function estimateStringBytes(value: string | null | undefined): number {
   return value ? value.length * INDEX_STRING_BYTES : 0;
+}
+
+function estimatePhysicalRecordHintBytes(record: PhysicalRecordHint): number {
+  return (
+    INDEX_HINT_BASE_BYTES +
+    estimateStringBytes(record.uuid) +
+    estimateStringBytes(record.parentUuid) +
+    estimateStringBytes(record.type) +
+    estimateStringBytes(record.subtype)
+  );
+}
+
+function estimateUuidIndexEntryBytes(
+  uuid: string,
+  entry: UuidIndexEntry,
+): number {
+  return (
+    INDEX_ENTRY_BASE_BYTES +
+    INDEX_HINT_BASE_BYTES * 2 +
+    INDEX_MAP_ENTRY_BYTES +
+    INDEX_CONTAINER_BASE_BYTES +
+    entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
+    estimateStringBytes(uuid) +
+    estimateStringBytes(entry.parentUuid) +
+    estimateStringBytes(entry.lastUserPromptAt) +
+    estimateStringBytes(entry.type) +
+    estimateStringBytes(entry.subtype) +
+    estimateStringBytes(entry.navigationKind) +
+    estimateStringBytes(entry.turnResultPromptId) +
+    estimateStringBytes(entry.daemonPromptId) +
+    estimateStringBytes(entry.turnHint.turnParentUuid) +
+    estimateStringBytes(entry.turnHint.turnPromptId) +
+    estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
+    estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
+    estimateStringBytes(entry.turnHint.hookTurn?.promptId) +
+    estimateStringBytes(entry.turnHint.hookTurn?.parentUuid) +
+    entry.segments.length * INDEX_SEGMENT_BYTES
+  );
 }
 
 function estimateIndexCacheBytes(index: TranscriptIndex): number {
@@ -1881,12 +1982,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
     estimateStringBytes(index.lastUpdated);
 
   for (const record of index.physicalRecords) {
-    total +=
-      INDEX_HINT_BASE_BYTES +
-      estimateStringBytes(record.uuid) +
-      estimateStringBytes(record.parentUuid) +
-      estimateStringBytes(record.type) +
-      estimateStringBytes(record.subtype);
+    total += estimatePhysicalRecordHintBytes(record);
   }
 
   for (const uuid of index.runtimeUuids) {
@@ -1903,27 +1999,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(gap.missingParentUuid);
   }
   for (const [uuid, entry] of index.byUuid) {
-    total +=
-      INDEX_ENTRY_BASE_BYTES +
-      INDEX_HINT_BASE_BYTES * 2 +
-      INDEX_MAP_ENTRY_BYTES +
-      INDEX_CONTAINER_BASE_BYTES +
-      entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
-      estimateStringBytes(uuid) +
-      estimateStringBytes(entry.parentUuid) +
-      estimateStringBytes(entry.lastUserPromptAt) +
-      estimateStringBytes(entry.type) +
-      estimateStringBytes(entry.subtype) +
-      estimateStringBytes(entry.navigationKind) +
-      estimateStringBytes(entry.turnResultPromptId) +
-      estimateStringBytes(entry.daemonPromptId) +
-      estimateStringBytes(entry.turnHint.turnParentUuid) +
-      estimateStringBytes(entry.turnHint.turnPromptId) +
-      estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
-      estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
-      estimateStringBytes(entry.turnHint.hookTurn?.promptId) +
-      estimateStringBytes(entry.turnHint.hookTurn?.parentUuid) +
-      entry.segments.length * INDEX_SEGMENT_BYTES;
+    total += estimateUuidIndexEntryBytes(uuid, entry);
   }
   for (const turn of index.navigationTurns) {
     total +=
@@ -2229,6 +2305,7 @@ function evictSupersededSnapshots(
 async function forEachLineInSnapshot(
   filePath: string,
   snapshotSize: number,
+  sessionId: string,
   onLine: (
     line: Buffer,
     offset: number,
@@ -2236,6 +2313,7 @@ async function forEachLineInSnapshot(
   ) => void | Promise<void>,
 ): Promise<void> {
   if (snapshotSize === 0) return;
+  const maxLineBytes = getSessionTranscriptMaxLineBytes();
   const scheduler = new CooperativeReadScheduler();
   let pending: Buffer[] = [];
   let pendingLength = 0;
@@ -2250,52 +2328,69 @@ async function forEachLineInSnapshot(
   const makePendingLine = (): Buffer =>
     pending.length === 1 ? pending[0]! : Buffer.concat(pending, pendingLength);
 
-  for await (const chunk of stream) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    let lineStart = 0;
-    while (lineStart < buffer.length) {
-      const lineEnd = buffer.indexOf(0x0a, lineStart);
-      if (lineEnd === -1) break;
-      const lineOffset =
-        pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
-      const currentLine = buffer.subarray(lineStart, lineEnd);
-      const rawLine =
-        pendingLength > 0
-          ? Buffer.concat(
-              [...pending, currentLine],
-              pendingLength + currentLine.length,
-            )
-          : currentLine;
+  try {
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      let lineStart = 0;
+      while (lineStart < buffer.length) {
+        const lineEnd = buffer.indexOf(0x0a, lineStart);
+        if (lineEnd === -1) break;
+        const lineOffset =
+          pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
+        const currentLine = buffer.subarray(lineStart, lineEnd);
+        const totalLineLength = pendingLength + currentLine.length;
+        if (totalLineLength > maxLineBytes) {
+          throw new SessionTranscriptPageTooLargeError(
+            sessionId,
+            totalLineLength,
+            maxLineBytes,
+          );
+        }
+        const rawLine =
+          pendingLength > 0
+            ? Buffer.concat([...pending, currentLine], totalLineLength)
+            : currentLine;
+        const line =
+          rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+            ? rawLine.subarray(0, rawLine.length - 1)
+            : rawLine;
+        await onLine(line, lineOffset, line.length);
+        await scheduler.afterUnit(line.length);
+        pending = [];
+        pendingLength = 0;
+        lineStart = lineEnd + 1;
+      }
+
+      if (lineStart < buffer.length) {
+        if (pendingLength === 0) {
+          pendingOffset = streamOffset + lineStart;
+        }
+        const tail = buffer.subarray(lineStart);
+        const nextPendingLength = pendingLength + tail.length;
+        if (nextPendingLength > maxLineBytes) {
+          throw new SessionTranscriptPageTooLargeError(
+            sessionId,
+            nextPendingLength,
+            maxLineBytes,
+          );
+        }
+        pending.push(tail);
+        pendingLength = nextPendingLength;
+      }
+      streamOffset += buffer.length;
+    }
+
+    if (pendingLength > 0) {
+      const rawLine = makePendingLine();
       const line =
-        rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+        rawLine[rawLine.length - 1] === 0x0d
           ? rawLine.subarray(0, rawLine.length - 1)
           : rawLine;
-      await onLine(line, lineOffset, line.length);
+      await onLine(line, pendingOffset, line.length);
       await scheduler.afterUnit(line.length);
-      pending = [];
-      pendingLength = 0;
-      lineStart = lineEnd + 1;
     }
-
-    if (lineStart < buffer.length) {
-      if (pendingLength === 0) {
-        pendingOffset = streamOffset + lineStart;
-      }
-      const tail = buffer.subarray(lineStart);
-      pending.push(tail);
-      pendingLength += tail.length;
-    }
-    streamOffset += buffer.length;
-  }
-
-  if (pendingLength > 0) {
-    const rawLine = makePendingLine();
-    const line =
-      rawLine[rawLine.length - 1] === 0x0d
-        ? rawLine.subarray(0, rawLine.length - 1)
-        : rawLine;
-    await onLine(line, pendingOffset, line.length);
-    await scheduler.afterUnit(line.length);
+  } finally {
+    stream.destroy();
   }
 }
 
@@ -2504,6 +2599,7 @@ function newIndexEntry(
     apiHistoryCompressionCandidate: isApiHistoryCompressionCandidate(record),
     resumeTokenCountsCandidate: isResumeTokenCountsCandidate(record),
     attributionSnapshotCandidate: isAttributionSnapshotCandidate(record),
+    uiTelemetryCandidate: isRestoreUiTelemetryCandidate(record),
     goalRecoveryCandidate: isGoalRecoveryCandidate(record),
     turnHint: getSessionTurnRecordHint(record, sessionId),
     ...(navigationKind ? { navigationKind } : {}),
@@ -2556,11 +2652,55 @@ async function buildIndex(params: {
   let firstRecordUuid: string | undefined;
   let firstRecordTimestamp: string | undefined;
   let startTime: string | undefined;
+  const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
+  const buildHeapUsedStart = process.memoryUsage().heapUsed;
+  const heapSizeLimit = getHeapStatistics().heap_size_limit;
+  const availableHeapBytes = Math.max(0, heapSizeLimit - buildHeapUsedStart);
+  const remainingHeapBudget =
+    availableHeapBudgetForTest ??
+    Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
+  // V8's heap_size_limit exceeds --max-old-space-size by a platform-dependent
+  // margin (~96 MiB on x86_64 Node 26; larger on aarch64/Node 24, where a
+  // 192 MiB old space can report roughly 2x that in heap_size_limit). Deducting
+  // 96 MiB keeps 256+ MiB heaps below Mark-Compact OOM while giving ~512+ MiB
+  // heaps 5/8 headroom above GC noise; smaller heaps on such platforms remain
+  // subject to V8's pre-existing OOM limitation, matching base.
+  const estimatedOldSpaceAvailableBytes = Math.max(
+    0,
+    availableHeapBytes - 96 * 1024 * 1024,
+  );
+  const maxHeapGrowthBytes =
+    availableHeapBudgetForTest ??
+    Math.max(
+      64 * 1024,
+      Math.min(
+        Math.floor((availableHeapBytes * 5) / 8),
+        Math.floor((estimatedOldSpaceAvailableBytes * 3) / 4),
+      ),
+    );
+  const maxIndexBuildBytes = Math.min(
+    maxIndexEstimateBytes,
+    remainingHeapBudget,
+  );
+  // Only mark a heap-limited estimate rejection retryable when live heap
+  // occupancy is elevated (or a test injects a constrained headroom). An idle
+  // process with a small fixed --max-old-space-size will reject the same file
+  // on every retry.
+  const transientHeapPressure =
+    availableHeapBudgetForTest !== undefined
+      ? remainingHeapBudget < maxIndexEstimateBytes
+      : remainingHeapBudget < maxIndexEstimateBytes &&
+        buildHeapUsedStart >= Math.floor(heapSizeLimit / 4);
+  let estimatedIndexBytes =
+    INDEX_ENTRY_BASE_BYTES +
+    INDEX_CONTAINER_BASE_BYTES * 7 +
+    estimateStringBytes(filePath);
 
   try {
     await forEachLineInSnapshot(
       filePath,
       snapshotSize,
+      sessionId,
       (line, offset, length) => {
         const text = line.toString('utf8').trim();
         if (text.length === 0) return;
@@ -2583,14 +2723,18 @@ async function buildIndex(params: {
             leafUuid = record.uuid;
           }
           const existing = byUuid.get(record.uuid);
-          physicalRecords.push({
+          const physicalHint: PhysicalRecordHint = {
             uuid: record.uuid,
             parentUuid: record.parentUuid,
             type: record.type,
             ...(record.subtype !== undefined
               ? { subtype: record.subtype }
               : {}),
-          });
+          };
+          physicalRecords.push(physicalHint);
+          estimatedIndexBytes +=
+            INDEX_CONTAINER_SLOT_BYTES +
+            estimatePhysicalRecordHintBytes(physicalHint);
           const segment = {
             offset,
             length,
@@ -2608,10 +2752,17 @@ async function buildIndex(params: {
                 : undefined,
             } as ChatRecord;
             existing.segments.push(segment);
+            estimatedIndexBytes +=
+              INDEX_CONTAINER_SLOT_BYTES + INDEX_SEGMENT_BYTES;
             existing.sessionIdMatchesFile &&= record.sessionId === sessionId;
             existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
             existing.assistantPreviewCandidate ||=
               isAssistantPreviewCandidate(fragmentRecord);
+            existing.uiTelemetryCandidate ||= isRestoreUiTelemetryCandidate({
+              ...(record as unknown as ChatRecord),
+              type: existing.type,
+              subtype: existing.subtype,
+            } as ChatRecord);
             if (existing.type === 'assistant' && record.usageMetadata) {
               existing.resumeTokenCountsCandidate =
                 isResumeTokenCountsCandidate({
@@ -2628,6 +2779,47 @@ async function buildIndex(params: {
             const chatRecord = record as unknown as ChatRecord;
             const entry = newIndexEntry(chatRecord, sessionId, [segment]);
             byUuid.set(record.uuid, entry);
+            estimatedIndexBytes += estimateUuidIndexEntryBytes(
+              record.uuid,
+              entry,
+            );
+          }
+          if (estimatedIndexBytes > maxIndexBuildBytes) {
+            const retryable =
+              transientHeapPressure &&
+              estimatedIndexBytes <= maxIndexEstimateBytes;
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              snapshotSize,
+              maxIndexBuildBytes,
+              {
+                dimension: 'index',
+                measuredBytes: estimatedIndexBytes,
+                ...(retryable ? { retryable: true } : {}),
+              },
+            );
+          }
+          // The cache estimate intentionally stays unchanged. For the hard
+          // build ceiling, periodically sample real heap growth as well —
+          // short-record retention can cost materially more than the estimate
+          // on some runtimes, and estimation alone must not free a 1 GiB heap.
+          // Always sample the first record so a depleted process cannot admit
+          // a build even if there are fewer than 1024 records.
+          if ((sequence & 1023) === 1) {
+            const heapGrowth =
+              process.memoryUsage().heapUsed - buildHeapUsedStart;
+            if (heapGrowth > maxHeapGrowthBytes) {
+              throw new SessionTranscriptTooLargeError(
+                sessionId,
+                snapshotSize,
+                maxHeapGrowthBytes,
+                {
+                  dimension: 'index',
+                  measuredBytes: heapGrowth,
+                  retryable: true,
+                },
+              );
+            }
           }
         }
       },
@@ -2744,9 +2936,7 @@ async function buildIndex(params: {
       `branchPoints=${branchPointsByAssistantUuid.size}`,
   );
 
-  await indexBuildCompleteHookForTest?.(filePath);
-
-  return {
+  const builtIndex: TranscriptIndex = {
     executionEngine: executionEngine.finish({
       filePath,
       ...fileIdentity,
@@ -2771,6 +2961,38 @@ async function buildIndex(params: {
     byUuid,
     branchPointsByAssistantUuid,
   };
+  const finalEstimatedBytes = estimateIndexCacheBytes(builtIndex);
+  if (finalEstimatedBytes > maxIndexBuildBytes) {
+    const retryable =
+      transientHeapPressure && finalEstimatedBytes <= maxIndexEstimateBytes;
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      snapshotSize,
+      maxIndexBuildBytes,
+      {
+        dimension: 'index',
+        measuredBytes: finalEstimatedBytes,
+        ...(retryable ? { retryable: true } : {}),
+      },
+    );
+  }
+  const finalHeapGrowth = process.memoryUsage().heapUsed - buildHeapUsedStart;
+  if (finalHeapGrowth > maxHeapGrowthBytes) {
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      snapshotSize,
+      maxHeapGrowthBytes,
+      {
+        dimension: 'index',
+        measuredBytes: finalHeapGrowth,
+        retryable: true,
+      },
+    );
+  }
+
+  await indexBuildCompleteHookForTest?.(filePath);
+
+  return builtIndex;
 }
 
 async function getCachedIndex(params: {
@@ -2984,6 +3206,23 @@ function selectRestoreReplayUuids(
   if (replay.kind === 'none') return undefined;
   const replayIndex = makeReplayIndex(index, replay.hideInheritedHistory);
   if (replay.kind === 'all') {
+    const maxAllReplayBytes = getMaxAllReplayBytes();
+    let totalReplayBytes = 0;
+    for (const uuid of replayIndex.replayUuids) {
+      const entry = replayIndex.byUuid.get(uuid);
+      if (!entry) continue;
+      for (const segment of entry.segments) {
+        totalReplayBytes += segment.length;
+      }
+      if (totalReplayBytes > maxAllReplayBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          index.snapshotSize,
+          maxAllReplayBytes,
+          { dimension: 'replay', measuredBytes: totalReplayBytes },
+        );
+      }
+    }
     return {
       index: replayIndex,
       uuids: replayIndex.replayUuids,
@@ -3107,7 +3346,7 @@ export async function readSessionTranscriptSnapshot(
   const owner = new SessionExecutionEngineAccumulator(sessionId);
   const records: ChatRecord[] = [];
   let firstRecord: ChatRecord | undefined;
-  await forEachLineInSnapshot(filePath, stats.size, (line) => {
+  await forEachLineInSnapshot(filePath, stats.size, sessionId, (line) => {
     for (const { value } of owner.parseLine(
       line.toString('utf8').trim(),
       filePath,
@@ -3303,6 +3542,28 @@ function indexHasManagedHeader(index: TranscriptIndex): boolean {
   return index.physicalRecords.some(
     (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
   );
+}
+
+function assertManagedAllReplayBudget(
+  records: readonly ChatRecord[],
+  sessionId: string,
+  snapshotSize: number,
+  replay: SessionRestoreReplaySelection,
+): void {
+  if (replay.kind !== 'all') return;
+  const maxBytes = getMaxAllReplayBytes();
+  let total = 0;
+  for (const record of records) {
+    total += Buffer.byteLength(JSON.stringify(record), 'utf8');
+    if (total > maxBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        snapshotSize,
+        maxBytes,
+        { dimension: 'replay', measuredBytes: total },
+      );
+    }
+  }
 }
 
 /**
@@ -3603,7 +3864,10 @@ export class SessionTranscriptReader {
         ? undefined
         : snapshot.lastUserPromptAt;
     }
-    if (stats.size > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) return undefined;
+    // Preserve the base O(1) behavior of session-list enrichment on very
+    // large transcripts. Restore/paging reads use the expanded limit below;
+    // prompt timestamps are optional metadata, not worth an entire index scan.
+    if (stats.size > SESSION_TRANSCRIPT_MAX_PROMPT_TIME_BYTES) return undefined;
     const pending = (async (): Promise<LastUserPromptSnapshot> => {
       let index: TranscriptIndex;
       try {
@@ -3615,7 +3879,17 @@ export class SessionTranscriptReader {
         });
       } catch (error) {
         if (
-          error instanceof EmptySessionTranscriptError &&
+          error instanceof SessionTranscriptTooLargeError &&
+          error.retryable === true
+        ) {
+          // Memory available to this process may change. Do not retain a
+          // missing prompt timestamp until the session file is rewritten.
+          throw error;
+        }
+        if (
+          (error instanceof EmptySessionTranscriptError ||
+            error instanceof SessionTranscriptTooLargeError ||
+            error instanceof SessionTranscriptPageTooLargeError) &&
           (await hasSnapshotSignature(
             filePath,
             fileIdentity,
@@ -4207,10 +4481,9 @@ export class SessionTranscriptReader {
       (entry) => entry.type === 'assistant',
     );
     const uiTelemetrySet = new Set(
-      index.runtimeUuids.filter((uuid) => {
-        const entry = index.byUuid.get(uuid);
-        return entry?.type === 'system' && entry.subtype === 'ui_telemetry';
-      }),
+      index.runtimeUuids.filter(
+        (uuid) => index.byUuid.get(uuid)?.uiTelemetryCandidate === true,
+      ),
     );
     const fileHistorySet = new Set(
       index.runtimeUuids.filter((uuid) => {
@@ -4283,12 +4556,7 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (
-          uiEvent &&
-          uiEvent['event.name'] !== 'request_lifecycle' &&
-          uiEvent['event.name'] !== 'tool_lifecycle' &&
-          uiEvent['event.name'] !== 'hook_lifecycle'
-        ) {
+        if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
           uiTelemetryEvents.push(uiEvent as UiEvent);
         }
       }
@@ -4611,6 +4879,13 @@ export class SessionTranscriptReader {
       sessionId,
       index,
       readOptions,
+      options.replay.kind === 'all' ? getMaxAllReplayBytes() : undefined,
+    );
+    assertManagedAllReplayBudget(
+      records,
+      sessionId,
+      index.snapshotSize,
+      options.replay,
     );
     // Read from the whole log: a session whose title the session list no
     // longer finds in its windows must not restore, and then re-anchor, an
@@ -4653,6 +4928,13 @@ export class SessionTranscriptReader {
       sessionId,
       index,
       readOptions,
+      options.replay.kind === 'all' ? getMaxAllReplayBytes() : undefined,
+    );
+    assertManagedAllReplayBudget(
+      records,
+      sessionId,
+      index.snapshotSize,
+      options.replay,
     );
     const replay = managedReplayPage(records, options.replay);
     await assertIndexSnapshotUnchanged(index, sessionId);
@@ -4669,6 +4951,7 @@ export class SessionTranscriptReader {
     sessionId: string,
     index: TranscriptIndex,
     readOptions: RestoreProjectionReadOptions,
+    maxBodyBytes?: number,
   ): Promise<ChatRecord[]> {
     // Timed as the same stage the index-based path uses for its record reads:
     // for a Managed log the projection is that read, and leaving it untimed
@@ -4712,8 +4995,20 @@ export class SessionTranscriptReader {
             // The index froze a byte length, so the projection answers from
             // the same prefix rather than from records appended since.
             maxBytes: index.snapshotSize,
+            ...(maxBodyBytes !== undefined ? { maxBodyBytes } : {}),
           });
         } catch (error) {
+          if (error instanceof ManagedSessionProjectionLimitError) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              index.snapshotSize,
+              error.maxBytes,
+              {
+                dimension: 'replay',
+                measuredBytes: error.measuredBytes,
+              },
+            );
+          }
           // A missing or corrupt body is the same class of failure as a
           // snapshot that can no longer be served: the page contract maps
           // that to 409, not an untyped 500 from JSON.parse(null).
@@ -5220,6 +5515,10 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;
   indexCacheOversizedMaxBytesForTest = undefined;
+  maxIndexEstimateBytesForTest = undefined;
+  availableHeapBudgetForTest = undefined;
+  maxLineBytesForTest = undefined;
+  maxAllReplayBytesForTest = undefined;
   expandedPageBytesForTest = undefined;
   cooperativeReadByteBudgetForTest = undefined;
   cooperativeReadTimeBudgetMsForTest = undefined;
@@ -5266,6 +5565,30 @@ export function setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
 ): void {
   indexCacheOversizedMaxBytesForTest = maxBytes;
   pruneCache();
+}
+
+export function setSessionTranscriptAvailableHeapBudgetForTest(
+  maxBytes: number | undefined,
+): void {
+  availableHeapBudgetForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxIndexEstimateBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxIndexEstimateBytesForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxLineBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxLineBytesForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxAllReplayBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxAllReplayBytesForTest = maxBytes;
 }
 
 export function setSessionTranscriptExpandedPageBytesForTest(

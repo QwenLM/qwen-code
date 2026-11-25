@@ -84,9 +84,14 @@ vi.mock('./acp-output.js', () => ({
   }),
 }));
 
-vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
-  ndJsonStream: vi.fn().mockReturnValue({}),
-}));
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/acp-bridge/ndJsonStream')>();
+  return {
+    ...actual,
+    ndJsonStream: vi.fn().mockReturnValue({}),
+  };
+});
 
 vi.mock('node:stream', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:stream')>();
