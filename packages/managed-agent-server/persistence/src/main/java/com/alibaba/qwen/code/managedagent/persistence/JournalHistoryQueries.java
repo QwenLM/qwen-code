@@ -14,6 +14,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -198,7 +199,7 @@ final class JournalHistoryQueries {
         }
         boolean more = candidates.size() > selected;
         Long next = more ? transactions.getLast().journalRevision() : null;
-        java.util.Collections.reverse(transactions);
+        Collections.reverse(transactions);
         restore(tenantId, workspaceId, sessionId, writerToken);
         return new ManagedSessionStoreModels.RecentTransactionPage(List.copyOf(transactions), through, next, more);
     }
