@@ -52,4 +52,4 @@ Design: [docs/design/2026-11-26-mod-claude-code-2-1-332-shapes.md](../../docs/de
 - All groups 1–6 pass as described.
 - In both Ink and OpenTUI, typing `/pa2 there` shows `pa ran as pa`, and `/pt` runs (`pt ran`).
 - The same probe with `blur: 1` on its scroller draws no band: `blur` is refused until its placement rules are checked.
-- `integration-tests/cli/mods-claude-332.test.ts` covers 1–3 on the bundled CLI.
+- `integration-tests/cli/mods-claude-332.test.ts` covers 1–3 on the bundled CLI; `integration-tests/interactive/mods-band-claude-332.test.ts` covers 4–5 and the alias in a real terminal, passing with `QWEN_E2E_RENDERER=ink` and `=opentui`.

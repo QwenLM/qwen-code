@@ -98,7 +98,8 @@ Observed on `main` at `a37a7612c9` with the bundled CLI, an isolated `HOME` and 
   - `mono` blocks an engine node;
   - Ink and OpenTUI draw `Progress`, `maxLines`, `clip` and `overflowX` as described.
 - Integration tests (`integration-tests/cli/mods-claude-332.test.ts`) use a Mod fixture written for this change. It hooks `session.stop` and `vcs.*`, registers a command with an alias and one with `isTerminalOnly`, and returns `by`. The tests check that the plugin loads and its note shows, that the alias runs with the canonical name, and that a headless terminal-only command is refused with no model request.
-- Interactive check: Claude Code's token-weather sample, run unchanged, draws its band in Ink and OpenTUI. A probe Mod draws `Progress`, `maxLines` and `clip` in both terminals.
+- An interactive integration test (`integration-tests/interactive/mods-band-claude-332.test.ts`, run once per renderer) checks in a real terminal that the band draws `maxLines`, `clip`, a sideways scroller and `Progress`, and that a command runs by its alias.
+- Interactive check: Claude Code's token-weather sample, run unchanged, draws its band in Ink and OpenTUI.
 
 ## Left for later slices
 

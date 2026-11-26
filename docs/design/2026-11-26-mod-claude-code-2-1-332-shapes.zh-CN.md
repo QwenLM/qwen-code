@@ -98,7 +98,8 @@ Mod 运行时认得的是 Claude Code 2.1.318 的事件和数据形状。从 2.1
   - `mono` 会挡住引擎节点；
   - Ink 和 OpenTUI 按上文所述绘制 `Progress`、`maxLines`、`clip` 和 `overflowX`。
 - 集成测试（`integration-tests/cli/mods-claude-332.test.ts`）使用为本改动编写的 Mod fixture。它挂 `session.stop` 和 `vcs.*`，注册一个带别名的命令和一个 `isTerminalOnly` 命令，并返回 `by`。测试检查：插件能加载且它的 note 能显示；别名能运行，且 `command.run` 收到的是规范名字；headless 下的终端专用命令被拒绝，且没有发出模型请求。
-- 交互检查：原样运行 Claude Code 的 token-weather 示例，它在 Ink 和 OpenTUI 中都能画出 band。另用一个探针 Mod，在两个终端里分别绘制 `Progress`、`maxLines` 和 `clip`。
+- 交互式集成测试（`integration-tests/interactive/mods-band-claude-332.test.ts`，每个渲染器各跑一次）在真实终端里检查：band 能绘制 `maxLines`、`clip`、横向滚动容器和 `Progress`，命令能通过别名运行。
+- 交互检查：原样运行 Claude Code 的 token-weather 示例，它在 Ink 和 OpenTUI 中都能画出 band。
 
 ## 留给后续切片
 

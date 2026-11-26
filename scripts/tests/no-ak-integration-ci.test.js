@@ -258,6 +258,7 @@ describe('no-AK integration CI wiring', () => {
       './interactive/mods-tool-middleware.test.ts',
       './interactive/mods-prompt-submit.test.ts',
       './interactive/mods-assistant-message.test.ts',
+      './interactive/mods-band-claude-332.test.ts',
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
       './interactive/tui-input-ownership.test.ts',
