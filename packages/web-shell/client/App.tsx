@@ -19234,7 +19234,10 @@ export function App({
         (boundRun.sessionId !== sessionId ||
           boundRun.workspaceCwd !== workspaceCwd)
       ) {
-        clearPendingBoundRun(boundRun.sessionId);
+        if (boundRun.timer !== undefined) clearTimeout(boundRun.timer);
+        if (boundRun.owner?.isCurrent() !== false) {
+          pendingBoundRunRef.current = null;
+        }
         boundRun.reject(
           createScheduledTaskCancellation('Bound run target was replaced'),
         );
@@ -19296,7 +19299,6 @@ export function App({
       }
     },
     [
-      clearPendingBoundRun,
       closeMobileDrawer,
       closePanel,
       isKnownLiveWorkspaceCwd,
