@@ -783,18 +783,11 @@ final class JournalStoreRows {
         return new ManagedAgentException(409, code, message);
     }
 
-    record HeadRow(String tenantId, String workspaceId,
-            String sessionId, String state, boolean activityDiagnostics,
-            long writerGeneration, String writerId,
-            Timestamp writerLeaseUntil, String leaseTokenHash,
-            long journalRevision, long committedSequence,
-            String lastCommitDigest, long activationEpoch,
-            String latestCheckpointResourceId,
-            long compactedThroughRevision, long packedThroughRevision, String recoveryStatus,
-            String recoveryDetailCode, String activationId,
-            String activationPhase, Long activationEventEpoch,
-            Long activationExpiresAt, Long activationHeadRevision,
-            Long wakeSealRevision) {
+    record HeadRow(String tenantId, String workspaceId, String sessionId, String state, boolean activityDiagnostics, long writerGeneration,
+            String writerId, Timestamp writerLeaseUntil, String leaseTokenHash, long journalRevision, long committedSequence,
+            String lastCommitDigest, long activationEpoch, String latestCheckpointResourceId, long compactedThroughRevision,
+            long packedThroughRevision, String recoveryStatus, String recoveryDetailCode, String activationId, String activationPhase,
+            Long activationEventEpoch, Long activationExpiresAt, Long activationHeadRevision, Long wakeSealRevision) {
     }
 
     record TransactionRow(String workspaceId, long journalRevision,
