@@ -19,7 +19,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
-final class JdbcRepositorySupport {
+public final class JdbcRepositorySupport {
     private JdbcRepositorySupport() {
     }
 
@@ -38,7 +38,7 @@ final class JdbcRepositorySupport {
         return RuntimeRequestKeys.scopeKey(scope);
     }
 
-    static String valueKey(String value) {
+    public static String valueKey(String value) {
         return RuntimeRequestKeys.valueKey(value);
     }
 

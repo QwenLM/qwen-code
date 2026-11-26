@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.api.ManagedSessionStoreController;
 import com.alibaba.qwen.code.managedagent.api.ManagedSideQueryStoreController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,7 +20,7 @@ import org.springframework.context.annotation.Import;
 /** Opt-in native journal callbacks; each operation retains its writer-credential check. */
 @Configuration(proxyBeanMethods = false)
 @Import({ManagedSessionStoreController.class, ManagedMemorySessionController.class, ManagedSideQueryStoreController.class,
-        ManagedAutomationSessionController.class, TenantContextArgumentResolver.class,
+        ManagedAutomationSessionController.class, ToolPublicationController.class, TenantContextArgumentResolver.class,
         WebConfiguration.class, ManagedSessionJsonConfiguration.class, ApiExceptionHandler.class})
 public class ManagedAgentInternalConfiguration {
     @Bean

@@ -22,6 +22,20 @@ public interface ManagedWorkspaceRegistry {
         }
     }
 
+    /**
+     * The principal twin, so a caller holding the trusted principal cannot
+     * lose the fence its raw-actor counterpart enforces. The owner comparison
+     * keys on the user id, which is the granularity
+     * {@link #isSessionOwner(String, String, String)} reads.
+     */
+    public static void requireSessionVisibility(
+            com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord session,
+            com.alibaba.qwen.code.managedagent.model.SessionPrincipal principal,
+            ManagedWorkspaceRegistry workspaces) {
+        requireSessionVisibility(session,
+                principal == null ? null : principal.userId(), workspaces);
+    }
+
     public boolean createdSession(String tenantId, String actorId, String sessionId);
 
     public boolean isSessionOwner(String tenantId, String actorId, String sessionId);
@@ -52,6 +66,14 @@ public interface ManagedWorkspaceRegistry {
     public boolean externalFilesAvailable();
 
     public boolean externalFilesAllowed(ContextBinding binding);
+
+    /** Whether the external foreground-Shell profile is negotiated and current. */
+    public boolean externalShellAllowed(ContextBinding binding);
+
+    /** Whether the external foreground-Shell profile is negotiated at all. */
+    public default boolean externalShellAvailable() {
+        return false;
+    }
 
     public record WorkspaceSummary(String workspaceId, String displayName,
             String state, boolean canCreateSession, String defaultCwdRelative, boolean canSelectDirectory) {

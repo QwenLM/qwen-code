@@ -13,6 +13,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
@@ -29,13 +30,20 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         validate(settings);
         var broker = settings.getRuntimeBroker();
         boolean workspace = ExternalRuntimeKinds.isWorkspace(broker.getProvisioner());
+        if (settings.isExternalWorkspaceExecutionConfigured()) {
+            if (!(transport instanceof com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport http)) {
+                throw new IllegalStateException("External extension execution requires HTTP Runtime transport");
+            }
+            http.withManagedExtensionCacheDirectory(settings.getManagedExtensions().getCacheDirectory(), null);
+        }
         ExternalStorageRegistry storage = workspace ? dependencies.externalStorage() : null;
         ExternalHttpRuntimeClient client = new ExternalHttpRuntimeClient(
                 URI.create(broker.getExternalProviderUrl()), broker.getExternalProviderToken(),
                 broker.getExternalRequestTimeout());
         return workspace
                 ? new ExternalWorkspaceProvisioner(client, storage, broker.getExternalProviderId(),
-                        broker.getExternalStartupTimeout())
+                        broker.getExternalStartupTimeout(), settings.isExternalWorkspaceExecutionConfigured()
+                                ? settings.getManagedExtensions().getCacheDirectory() : null)
                 : new ExternalRuntimeProvisioner(client, broker.getExternalProviderId(),
                         broker.getExternalStartupTimeout());
     }
@@ -46,7 +54,9 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
                 settings.getRuntimeBroker().getProvisioner() + " configuration accepted; provider reachability,"
                         + " worker attestation and storage registration are checked on first use", null);
         if (ExternalRuntimeKinds.isWorkspace(settings.getRuntimeBroker().getProvisioner())) {
-            return List.of(accepted, new Check("external-prerequisite", Status.WARN,
+            List<Check> checks = new ArrayList<>();
+            checks.add(accepted);
+            checks.add(new Check("external-prerequisite", Status.WARN,
                     settings.isExternalWorkspaceFilesConfigured()
                             ? "External files require exact Harness negotiation and current registration;"
                                     + " original-worker close proof is checked at drain"
@@ -54,6 +64,18 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
                                     + " new Hosted files Sessions fail closed",
                     "keep this profile out of production until files execution and"
                             + " Session close are verified (step 3b/3c)"));
+            if (settings.getHarness().isExternalWorkspaceShellEnabled()) {
+                checks.add(new Check("external-shell-prerequisite", Status.WARN,
+                        settings.isExternalWorkspaceShellConfigured()
+                                ? "External foreground Shell is enabled: every command reaches approval,"
+                                        + " captured bytes travel through the publication service, and"
+                                        + " Session close waits for a drained-stop proof"
+                                : "external-workspace Shell is enabled but incompletely configured;"
+                                        + " new Hosted Shell Sessions fail closed",
+                        "keep this profile out of production until foreground Shell execution,"
+                                + " publication drain and in-flight Session close are verified (#15512 slice C)"));
+            }
+            return checks;
         }
         return List.of(accepted);
     }
@@ -67,9 +89,26 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
             return;
         }
         boolean workspace = ExternalRuntimeKinds.isWorkspace(provisioner);
+        // The external foreground-Shell profile (#15512 slice C) is admitted
+        // only behind its own switch and on top of eligible external files.
+        // General Shell execution requires the complete extension configuration;
+        // the legacy external foreground-Shell lane keeps its own eligibility gate.
+        boolean externalShell = workspace && harness.isExternalWorkspaceShellEnabled();
+        boolean execution = settings.isExternalWorkspaceExecutionConfigured();
+        // Only the Shell lane's own extras are checked here. Calling
+        // settings.isExternalWorkspaceFilesConfigured() would re-enter this
+        // method through its own factory.validate() and recurse forever; the
+        // rest of this method already is the external-files eligibility rule.
         if (harness.isWorkspaceFilesEnabled() && !workspace
-                || harness.isWorkspaceShellEnabled()
-                || workspace && (settings.getManagedExtensions().isEnabled() || settings.getExtensions().isEnabled())
+                || harness.isWorkspaceShellEnabled() && !execution
+                || externalShell && (!settings.getToolPublication().isEnabled()
+                        || harness.getApprovalMode() == null
+                        || !Set.of("default", "auto-edit")
+                                .contains(harness.getApprovalMode().toLowerCase(java.util.Locale.ROOT)))
+                // Control-plane package management and source import do not execute on the
+                // external Worker, so only worker-side execution is restricted.
+                || workspace && (settings.getManagedExtensions().isEnabled()
+                        && !"content-only".equals(settings.getManagedExtensions().getMode()) && !execution)
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())
                 || runtimeBroker.isLocalDirectoryImportEnabled()
@@ -78,13 +117,18 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
                 || runtimeBroker.isChildWorkspacesEnabled() || runtimeBroker.isChildSnapshotsEnabled()
                 || runtimeBroker.getSsh().isEnabled() || !runtimeBroker.getSsh().getNodes().isEmpty()) {
             throw new IllegalStateException(workspace
-                    ? "External Workspace Runtime supports registered files-only Sessions;"
-                            + " local mounts, Shell, extensions, children and recovery features must stay disabled"
+                    ? "External Workspace Runtime supports registered files Sessions, plus foreground Shell"
+                            + " behind qwen.managed-agent.harness.external-workspace-shell-enabled with tool"
+                            + " publication and default or auto-edit approval; local mounts, local Shell,"
+                            + " managed extension execution, children and recovery features must stay disabled"
                     : "External Runtime supports scratch Sessions only;"
                             + " managed Workspace features must be disabled");
         }
         if (!"session".equals(runtimeBroker.getIsolationClass())
-                || !"session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                || externalShell && !"session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                || !("session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                        || workspace
+                                && "workspace".equals(runtimeBroker.getBoundSessionIsolationClass()))
                 || runtimeBroker.isSessionCreateWarm()) {
             throw new IllegalStateException("External Runtime requires session isolation without Session-create warm");
         }

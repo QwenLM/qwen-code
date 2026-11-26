@@ -34,7 +34,8 @@ public record SessionCreationCommand(
         List<ManagedExtensionPackages.Pin> extensionPins,
         ExtensionPackages.Selection extensionSelection,
         Set<String> extensionLifecycleProfiles,
-        SessionWorktreeStore.Plan worktree, SessionModelConfig modelConfig, String memoryStoreId) {
+        SessionWorktreeStore.Plan worktree, SessionModelConfig modelConfig, String memoryStoreId,
+        String requestedToolProfile) {
     public static Builder builder() {
         return new Builder();
     }
@@ -65,6 +66,7 @@ public record SessionCreationCommand(
         private SessionWorktreeStore.Plan worktree;
         private SessionModelConfig modelConfig;
         private String memoryStoreId;
+        private String requestedToolProfile;
 
         public Builder tenantId(String value) {
             this.tenantId = value;
@@ -186,13 +188,24 @@ public record SessionCreationCommand(
             return this;
         }
 
+        /**
+         * The Hosted tool profile the caller asks for. Unset means the
+         * placement's default profile; the admission decides whether the
+         * requested profile is negotiated, so this is a request, never a grant.
+         */
+        public Builder requestedToolProfile(String value) {
+            this.requestedToolProfile = value;
+            return this;
+        }
+
         public SessionCreationCommand build() {
             return new SessionCreationCommand(tenantId, actorId, idempotencyKey,
                     requestDigest, agentId, requestedRevision, title, input,
                     payloadDigest, selection, requestedApprovalMode,
                     approvalSelectionSupported, requestedPlanMode, planModeSupported,
                     skills, publicChildrenSupported, sessionSkillsSupported, modelId, extensionPins, extensionSelection,
-                    extensionLifecycleProfiles, worktree, modelConfig, memoryStoreId);
+                    extensionLifecycleProfiles, worktree, modelConfig, memoryStoreId,
+                    requestedToolProfile);
         }
     }
 }

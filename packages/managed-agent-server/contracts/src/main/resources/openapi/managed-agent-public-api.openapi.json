@@ -11039,6 +11039,16 @@
             "minLength": 1,
             "maxLength": 128,
             "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
+          },
+          "tool_profile": {
+            "type": "string",
+            "maxLength": 128,
+            "enum": [
+              "hosted-workspace-external-files/1",
+              "hosted-workspace-external-shell/1",
+              "hosted-workspace-shell/1"
+            ],
+            "description": "Optional explicit Hosted Workspace profile for the built-in qwen-code Agent on external registered storage. hosted-workspace-shell/1 requires the complete external extension execution configuration. Omission keeps the profile the deployment already selects. Only a profile this control plane has negotiated is admitted, and the chosen profile is pinned with the Session so later Turns cannot re-derive it; creation idempotency includes this field."
           }
         }
       },
@@ -12130,6 +12140,16 @@
             "minLength": 1,
             "maxLength": 128,
             "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
+          },
+          "toolProfile": {
+            "type": "string",
+            "maxLength": 128,
+            "enum": [
+              "hosted-workspace-external-files/1",
+              "hosted-workspace-external-shell/1",
+              "hosted-workspace-shell/1"
+            ],
+            "description": "Optional explicit Hosted Workspace profile for the built-in qwen-code Agent on external registered storage. hosted-workspace-shell/1 requires the complete external extension execution configuration. Omission keeps the profile the deployment already selects. Only a profile this control plane has negotiated is admitted, and the chosen profile is pinned with the Session so later Turns cannot re-derive it; creation idempotency includes this field."
           }
         }
       },
@@ -19727,11 +19747,11 @@
             "maxProperties": 32,
             "additionalProperties": {
               "type": "array",
-              "maxItems": 2,
+              "maxItems": 3,
               "uniqueItems": true,
               "items": {
                 "type": "string",
-                "enum": ["mcp", "hooks"]
+                "enum": ["agents", "mcp", "hooks"]
               }
             }
           },

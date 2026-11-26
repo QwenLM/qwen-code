@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecoveryActions;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
@@ -48,24 +49,57 @@ public class SessionRecoveryService {
 
     public SessionRecovery query(String tenantId, String actorId, String sessionId) {
         SessionRecord session = sessions.requireReadableSession(tenantId, actorId, sessionId);
-        return inspect(session, actorId, true);
+        return inspect(session, null, actorId, true);
     }
 
     SessionRecovery projection(SessionRecord session, String actorId) {
-        SessionRecovery recovery = inspect(session, actorId, true);
+        SessionRecovery recovery = inspect(session, null, actorId, true);
         return "turn_active".equals(recovery.reasonCode()) ? null : recovery;
+    }
+
+    SessionRecovery projection(SessionRecord session, SessionPrincipal principal) {
+        SessionRecovery recovery = inspect(session, principal,
+                principal == null ? null : principal.userId(), true);
+        return "turn_active".equals(recovery.reasonCode()) ? null : recovery;
+    }
+
+    private SessionRecovery query(String tenantId, SessionPrincipal principal,
+            String rawActorId, String sessionId) {
+        SessionRecord current = principal == null
+                ? sessions.requireReadableSession(tenantId, rawActorId, sessionId)
+                : sessions.requireReadableSession(tenantId, principal, sessionId);
+        return inspect(current, principal, rawActorId, false);
     }
 
     public SessionRecovery recheck(String tenantId, String actorId,
             String sessionId, String turnId) {
-        SessionRecord session = sessions.requireReadableSession(tenantId, actorId, sessionId);
-        sessions.requireRecoveryOperator(session, actorId);
+        return recheck(tenantId, null, actorId, sessionId, turnId);
+    }
+
+    public SessionRecovery recheck(SessionPrincipal principal,
+            String sessionId, String turnId) {
+        return recheck(principal == null ? null : principal.tenantId(),
+                principal, principal == null ? null : principal.userId(),
+                sessionId, turnId);
+    }
+
+    private SessionRecovery recheck(String tenantId, SessionPrincipal principal,
+            String rawActorId, String sessionId, String turnId) {
+        SessionRecord session = principal == null
+                ? sessions.requireReadableSession(tenantId, rawActorId, sessionId)
+                : sessions.requireReadableSession(tenantId, principal, sessionId);
+        tenantId = session.tenantId();
+        if (principal == null) {
+            sessions.requireRecoveryOperator(session, rawActorId);
+        } else {
+            sessions.requireRecoveryOperator(session, principal);
+        }
         TurnRecord turn = latest(session);
         if (turn == null || !turn.turnId().equals(turnId)) {
             throw new ManagedAgentException(409,
                     "recovery_target_changed", "The Session's recovery Turn has changed.");
         }
-        SessionRecovery recovery = targetRecovery(session, actorId, turnId);
+        SessionRecovery recovery = targetRecovery(session, principal, rawActorId, turnId);
         if ("ready".equals(recovery.state())) {
             return recovery;
         }
@@ -85,7 +119,7 @@ public class SessionRecoveryService {
         } else {
             rechecked = coordinator.recheckRecovery(tenantId, sessionId, turnId);
             if (!rechecked) {
-                recovery = targetRecovery(session, actorId, turnId);
+                recovery = targetRecovery(session, principal, rawActorId, turnId);
                 if ("ready".equals(recovery.state())) {
                     return recovery;
                 }
@@ -95,7 +129,7 @@ public class SessionRecoveryService {
                         && recheckCleanup(tenantId, sessionId, turn.promptId());
             }
         }
-        recovery = targetRecovery(session, actorId, turnId);
+        recovery = targetRecovery(session, principal, rawActorId, turnId);
         if (!rechecked && !"ready".equals(recovery.state())) {
             throw new ManagedAgentException(409,
                     "recovery_recheck_unavailable", "The original recovery work is not available.");
@@ -126,9 +160,13 @@ public class SessionRecoveryService {
         }
     }
 
-    private SessionRecovery targetRecovery(SessionRecord session, String actorId, String turnId) {
-        SessionRecord current = sessions.requireReadableSession(session.tenantId(), actorId, session.sessionId());
-        SessionRecovery recovery = inspect(current, actorId, false);
+    private SessionRecovery targetRecovery(SessionRecord session,
+            SessionPrincipal principal, String rawActorId, String turnId) {
+        // Keep the tenant explicit: an anonymous caller has a null principal,
+        // and re-deriving the tenant from it would collapse this re-read to a
+        // null-tenant 404 on a legacy Session the caller already reads.
+        SessionRecovery recovery = query(session.tenantId(), principal, rawActorId,
+                session.sessionId());
         if (!turnId.equals(recovery.turnId())) {
             throw new ManagedAgentException(409,
                     "recovery_target_changed", "The Session's recovery Turn has changed.");
@@ -136,9 +174,10 @@ public class SessionRecoveryService {
         return recovery;
     }
 
-    private SessionRecovery inspect(SessionRecord session, String actorId, boolean publicView) {
+    private SessionRecovery inspect(SessionRecord session, SessionPrincipal principal,
+            String rawActorId, boolean publicView) {
         TurnRecord turn = latest(session);
-        boolean operator = operator(session, actorId);
+        boolean operator = operator(session, principal, rawActorId);
         boolean active = turn != null && ACTIVE.contains(turn.status());
         boolean cancel = operator && active && !"CANCELLING".equals(turn.status());
         List<HeadRecovery> heads = recovery.heads(session.tenantId(), session.sessionId());
@@ -306,9 +345,14 @@ public class SessionRecoveryService {
                                 "recovery_evidence_unavailable", "The recovery evidence is unavailable."));
     }
 
-    private boolean operator(SessionRecord session, String actorId) {
+    private boolean operator(SessionRecord session,
+            SessionPrincipal principal, String rawActorId) {
         try {
-            sessions.requireRecoveryOperator(session, actorId);
+            if (principal == null) {
+                sessions.requireRecoveryOperator(session, rawActorId);
+            } else {
+                sessions.requireRecoveryOperator(session, principal);
+            }
             return "ACTIVE".equals(session.status());
         } catch (ManagedAgentException forbidden) {
             return false;

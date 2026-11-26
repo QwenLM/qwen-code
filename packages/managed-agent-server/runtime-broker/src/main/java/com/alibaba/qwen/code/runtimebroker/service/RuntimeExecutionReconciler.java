@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 
 import java.time.Clock;
@@ -34,6 +35,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.n
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.externalShellNoStartAnswer;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
 
 final class RuntimeExecutionReconciler {
@@ -279,16 +281,31 @@ final class RuntimeExecutionReconciler {
             bindingRegistry.invalidateBinding(context.binding());
             throw evidenceUnavailable();
         }
+        if (isPublicationV3(unknown.getReference())
+                && WorkspaceExecutionProfile.isExternalShellRequest(
+                        context.binding().getRequest())) {
+            Map<String, Object> durable = publicationVerifier == null
+                    ? null : publicationVerifier.finished(unknown);
+            if (durable != null) {
+                // The drain already finished but its settle did not land. That
+                // envelope is the outcome, and it needs no worker: this arm
+                // runs precisely when the original worker may be gone.
+                return CompletableFuture.completedFuture(absorbRuntimeStatus(unknown,
+                        requireRuntimeStatus(Map.of("state", "settled", "result", durable)), takeover, false));
+            }
+            bindingRegistry.requireLiveBinding(context.binding());
+            return lookupOnce(context, unknown, takeover, cooled, true);
+        }
         // Adoption can re-register the binding at a different endpoint than
         // the one this Session was acquired with; that stale route must not be
         // used, so the lookup fails as runtime_reconciliation_required.
         bindingRegistry.requireLiveBinding(context.binding());
-        return lookupOnce(context, unknown, takeover, cooled);
+        return lookupOnce(context, unknown, takeover, cooled, false);
     }
 
     private CompletionStage<ExecutionReconciliation> lookupOnce(
             SessionContext context, ToolExecutionRecord unknown,
-            boolean takeover, boolean cooled) {
+            boolean takeover, boolean cooled, boolean drainProofLane) {
         String executionId = unknown.getExecutionCallId();
         if (cooled) {
             ExecutionReconciliation cached =
@@ -402,6 +419,11 @@ final class RuntimeExecutionReconciler {
 
     ExecutionReconciliation absorbRuntimeStatus(ToolExecutionRecord unknown,
             RuntimeExecutionStatus status, boolean takeover) {
+        return absorbRuntimeStatus(unknown, status, takeover, false);
+    }
+
+    private ExecutionReconciliation absorbRuntimeStatus(ToolExecutionRecord unknown,
+            RuntimeExecutionStatus status, boolean takeover, boolean drainProofLane) {
         String runtimeState = status.state().wireName();
         if (status.state() != RuntimeExecutionStatus.State.SETTLED) {
             ToolExecutionRecord latest = executionRepository
@@ -415,12 +437,25 @@ final class RuntimeExecutionReconciler {
         }
         Map<String, Object> result = status.result();
         try {
+            if (drainProofLane && !externalShellNoStartAnswer(result)) {
+                if (takeover) {
+                    return new ExecutionReconciliation(unknown,
+                            ExecutionReconciliation.Outcome.UNRESOLVED, null);
+                }
+                throw conflict("workspace_close_identity_unverified",
+                        "External Shell capture has not been drained into its publication");
+            }
             // Validate before writing, so an invalid result is reported as
             // the Runtime's fault rather than as a repository failure. A
             // not_started status is accepted only as the Runtime's own
             // terminal answer; the Broker never derives it.
             unknown.resolveUnsettled(result, clock.instant());
-        } catch (IllegalArgumentException | RuntimeBrokerException exception) {
+        } catch (IllegalArgumentException exception) {
+            throw invalidStatus(exception);
+        } catch (RuntimeBrokerException exception) {
+            if ("workspace_close_identity_unverified".equals(exception.getCode())) {
+                throw exception;
+            }
             throw invalidStatus(exception);
         }
         ToolExecutionRecord current = unknown;

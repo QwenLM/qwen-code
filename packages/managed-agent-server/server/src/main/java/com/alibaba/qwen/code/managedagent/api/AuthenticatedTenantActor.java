@@ -7,4 +7,12 @@ public interface AuthenticatedTenantActor extends Principal {
     String tenantId();
 
     String actorId();
+
+    /**
+     * Optional verified business subject supplied by the trusted adapter.
+     * It must never be populated from an HTTP header or request body.
+     */
+    default String actorSubjectId() {
+        return null;
+    }
 }

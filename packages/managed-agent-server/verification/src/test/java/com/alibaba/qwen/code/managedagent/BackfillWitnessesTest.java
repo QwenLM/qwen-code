@@ -23,6 +23,11 @@ class BackfillWitnessesTest {
         activate(source);
         activate(source);
         ManagedSchema.validate(source);
+        // 48 = the 47 baseline tables plus flyway_schema_history. Three entries
+        // were added to V1__managed_schema.sql on the two sides of this merge:
+        // the PR's ma_session_principal ownership row table, and the base's
+        // ma_client_files_binding and ma_client_files_request. Replaying the
+        // activation above must not add any table beyond this pinned catalog.
         assertThat(
                         new JdbcTemplate(source)
                                 .queryForObject(

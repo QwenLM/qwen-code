@@ -28,5 +28,8 @@ export function managedExtensionEnvironment(
     HOME: directory,
     USERPROFILE: directory,
     ...extension,
+    // Package assets are immutable. Python imports must not add __pycache__
+    // entries that invalidate the package before the next tool invocation.
+    PYTHONDONTWRITEBYTECODE: '1',
   };
 }

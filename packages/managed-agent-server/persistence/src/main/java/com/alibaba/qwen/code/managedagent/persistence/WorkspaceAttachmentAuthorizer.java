@@ -39,7 +39,7 @@ final class WorkspaceAttachmentAuthorizer {
     void authorizeAttachment(SessionRecord session, boolean cancellation,
             boolean actionResponse, RuntimeLifecycleAuthority authority,
             boolean legacyClose, boolean committedStop) {
-        boolean external = WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && store.isExternal(session.workspace());
+        boolean external = store.externalSession(session);
         if (external && (!"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null)) {
             throw unavailable();
         }
@@ -63,7 +63,7 @@ final class WorkspaceAttachmentAuthorizer {
             requireWorktreeAncestorsReady(jdbc, session.tenantId(), session.sessionId());
         }
         if (external) {
-            if (!store.isExternal(binding) || !"hosted-workspace-external-files/1".equals(session.toolProfile())) {
+            if (!store.externalSession(session)) {
                 throw unavailable();
             }
         } else {

@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionSkills;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSkill;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ExtensionPackageRepository;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -38,6 +40,16 @@ public class ManagedSkillCatalogService {
     @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public WebShellSessionSkills get(String tenantId, String actorId, String sessionId) {
         var session = sessions.requireReadableSession(tenantId, actorId, sessionId);
+        return view(session);
+    }
+
+    @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public WebShellSessionSkills get(SessionPrincipal principal, String sessionId) {
+        var session = sessions.requireReadableSession(principal, sessionId);
+        return view(session);
+    }
+
+    private WebShellSessionSkills view(SessionRecord session) {
         if (session.workspace() == null
                 || WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
             return new WebShellSessionSkills(List.of());
@@ -50,11 +62,11 @@ public class ManagedSkillCatalogService {
         if (installed.isPresent()) {
             visible.addAll(installed.get());
         } else {
-            var initial = skills.initialSelection(tenantId, sessionId);
+            var initial = skills.initialSelection(session.tenantId(), session.sessionId());
             if (initial != null) {
                 List<Pin> pins = json.convertValue(initial.get("extensions"), new TypeReference<List<Pin>>() { });
                 for (Pin pin : pins) {
-                    var skill = packages.standaloneSkill(tenantId, session.workspace().getWorkspaceId(), pin);
+                    var skill = packages.standaloneSkill(session.tenantId(), session.workspace().getWorkspaceId(), pin);
                     if (skill != null && skill.userInvocable()) {
                         visible.add(new WebShellSkill(skill.name(), skill.description()));
                     }

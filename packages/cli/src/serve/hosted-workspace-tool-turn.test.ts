@@ -10361,7 +10361,7 @@ const hookInputs = (
       : input['tool_input'],
   ]);
 
-it('completes and replays durable Hook results after a live pending approval change', async () => {
+it('persists live Hook approval as v3 without a continuation and replays completed results', async () => {
   let mode: HostedApprovalMode = 'default';
   const { create, seen } = durableHooks({
     [HookEventName.PreToolUse]: replaceWith(editB),
@@ -10380,6 +10380,16 @@ it('completes and replays durable Hook results after a live pending approval cha
   const settled = running.catch(() => undefined);
   try {
     const requestId = await requested();
+    const options = await readHostedActionOptions(
+      session,
+      session.authority.action(requestId)!,
+    );
+    expect(options).toMatchObject({
+      v: 3,
+      toolName: calls[1].name,
+      inputRef: { kind: 'managed-tool-input' },
+    });
+    expect(options).not.toHaveProperty('continuationRef');
     mode = 'yolo';
     const responses = await running;
     expect(session.authority.action(requestId)?.state).toBe('decided');

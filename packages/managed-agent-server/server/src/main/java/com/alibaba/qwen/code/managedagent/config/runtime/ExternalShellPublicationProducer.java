@@ -572,7 +572,7 @@ public final class ExternalShellPublicationProducer
         }
         var registered = registrations.find(binding.getRequest().getScope().getTenantId(),
                 binding.getRequest().getStorageId());
-        if (registered.isEmpty()) {
+        if (registered.isEmpty() || registered.get().ephemeral()) {
             throw new RuntimeBrokerException(409, "external_shell_publication_unavailable",
                     "External Shell capture requires durable registered storage.", false);
         }

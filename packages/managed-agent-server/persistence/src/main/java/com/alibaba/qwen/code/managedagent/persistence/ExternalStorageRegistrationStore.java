@@ -116,6 +116,63 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         });
     }
 
+    public void registerEphemeralWorkspace(String tenant, String idempotencyKey,
+            EphemeralWorkspaceRegistration registration) {
+        if (tenant == null || !tenant.matches("[A-Za-z0-9._:-]{1,128}") || registration == null
+                || idempotencyKey == null || !idempotencyKey.matches("[A-Za-z0-9._:-]{1,128}")) {
+            throw new IllegalArgumentException("Invalid ephemeral Workspace registration.");
+        }
+        WorkspaceStorageKindGuard.requireFreshTransaction();
+        var registered = registration.registered(tenant);
+        String workspace = registration.workspaceId();
+        String ownerKey = registered.ownerKey();
+        String encoded = encode(Map.of("kind", "ephemeral", "tenantId", tenant,
+                "providerId", registration.providerId(), "workspaceId", workspace,
+                "mountRoot", registration.mountRoot(),
+                "registrationRevision", registration.registrationRevision()));
+        String digest = ManagedSchemaKeys.key("ephemeral-workspace-registration/1", tenant,
+                registration.providerId(), workspace, registration.mountRoot(),
+                Long.toString(registration.registrationRevision()));
+        transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenant, 10);
+            var prior = ManagedReceipts.find(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT,
+                    tenant, idempotencyKey, true);
+            if (prior != null) {
+                if (!digest.equals(prior.requestDigest())) {
+                    throw conflict("idempotency_conflict");
+                }
+                return;
+            }
+            if (!jdbc.queryForList("SELECT 1 FROM ma_storage WHERE tenant_id = ? AND storage_id = ?",
+                            tenant, workspace).isEmpty()
+                    || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ?"
+                            + " AND (storage_id = ? OR workspace_id = ?)",
+                            tenant, workspace, workspace).isEmpty()
+                    || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ? AND storage_id = ?",
+                            tenant, workspace).isEmpty()
+                    || !jdbc.queryForList("SELECT physical_id FROM ma_storage_owner WHERE physical_id = ?",
+                            ManagedSchemaKeys.identity(ownerKey)).isEmpty()) {
+                throw conflict("alias_conflict");
+            }
+            jdbc.update("INSERT INTO ma_storage_owner (physical_id, tenant_id, storage_id,"
+                            + " storage_kind, mount_root, mount_revision)"
+                            + " VALUES (?, ?, ?, 'EPHEMERAL', ?, ?)",
+                    ManagedSchemaKeys.identity(ownerKey), tenant, workspace, registration.mountRoot(),
+                    registration.registrationRevision());
+            jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, physical_id,"
+                            + " storage_kind, registration_state, registration_revision, registration_json,"
+                            + " gmt_create, gmt_modified)"
+                            + " VALUES (?, ?, ?, 'EPHEMERAL', 'REGISTERED', ?, ?, "
+                            + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
+                    tenant, workspace, ManagedSchemaKeys.identity(ownerKey),
+                    registration.registrationRevision(), encoded);
+            long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
+            ManagedReceipts.insert(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant,
+                    idempotencyKey, digest, "REGISTER_EPHEMERAL_WORKSPACE", null, null,
+                    null, "COMPLETED", null, null, now);
+        });
+    }
+
     /**
      * Reads one tenant-bound registration for the external Workspace profile.
      *
@@ -149,7 +206,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         try {
             rows = jdbc.queryForList(
                     "SELECT s.registration_json, s.registration_revision,"
-                            + " s.physical_id, o.mount_root"
+                            + " s.physical_id, o.mount_root, s.storage_kind"
                             + " FROM ma_storage s JOIN ma_storage_owner o"
                             + " ON o.physical_id = s.physical_id"
                             + " WHERE s.tenant_id = ? AND s.storage_id = ?"
@@ -180,6 +237,8 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         // The primary-key lookup already bound the tenant and alias; these checks
         // catch a row that drifted away from its own persisted record.
         if (registration == null || !(revision instanceof Number number)
+                || !registration.storageKind().equals(row.get("storage_kind"))
+                || registration.ephemeral() && !tenant.equals(registration.ephemeralTenantId())
                 || !tenantWorkspaceId.equals(
                         registration.tenantWorkspaceId())
                 || !registration.ownerKey().equals(text(row.get("physical_id")))
@@ -221,7 +280,8 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                         return new StoredRegistration(row.getString("storage_id"),
                                 row.getString("registration_json"),
                                 revision instanceof Number number ? number : null,
-                                row.getString("physical_id"), row.getString("mount_root"));
+                                row.getString("physical_id"), row.getString("mount_root"),
+                                row.getString("storage_kind"));
                     },
                     arguments.toArray());
         } catch (RuntimeException failure) {
@@ -250,6 +310,8 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
             }
             if (result.containsKey(storage)
                     || registered == null || row.registrationRevision() == null
+                    || !registered.storageKind().equals(row.storageKind())
+                    || registered.ephemeral() && !tenant.equals(registered.ephemeralTenantId())
                     || !storage.equals(registered.tenantWorkspaceId())
                     || !registered.ownerKey().equals(row.physicalKey())
                     || registered.registrationRevision() != row.registrationRevision().longValue()
@@ -268,7 +330,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
     }
 
     private record StoredRegistration(String storageId, String encodedRegistration,
-            Number registrationRevision, String physicalKey, String mountRoot) {
+            Number registrationRevision, String physicalKey, String mountRoot, String storageKind) {
     }
 
     record RegistrationState(boolean current, String providerId, String tenantWorkspaceId) {

@@ -94,7 +94,7 @@ final class WorkspaceMigrationAdmission {
         if (!tenant.equals(alias.get("tenant_id")) || !storage.equals(alias.get("storage_id"))) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        if ("EXTERNAL".equals(alias.get("storage_kind"))) {
+        if (java.util.Set.of("EXTERNAL", "EPHEMERAL").contains(alias.get("storage_kind"))) {
             requireExternalPhysicalOpen(jdbc, tenant, storage, lock);
             return;
         }

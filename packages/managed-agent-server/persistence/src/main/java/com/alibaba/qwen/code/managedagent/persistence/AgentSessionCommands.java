@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
@@ -68,10 +69,27 @@ final class AgentSessionCommands {
     // Input admission records the supplied caller on the command
     // receipt, so the receipt's replay answers the actor who recorded it —
     // an OPERATOR's own retry of his own key — and not only the creator.
+    // The raw-actor entries defer principal construction to the unbound
+    // arm (R7-1); principal entries pass their verified owner through.
     Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
+        return insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest, null, actorId);
+    }
+
+    // Principal-carrying Turn admission: unbound requires the exact row.
+    Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionPrincipal principal) {
+        return insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest, principal, principal == null ? null : principal.userId());
+    }
+
+    private Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionPrincipal principal, String actorId) {
         // A per-turn admission takes no tenant guard. The Session row orders it
         // against lifecycle begin, requireOpen's locking reads of this storage's
         // alias (fence) and directory rows order it against migration fence
@@ -80,6 +98,9 @@ final class AgentSessionCommands {
         // transaction's snapshot is taken after it.
         SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
+        if (session.workspace() == null) {
+            requireWriteAuthority(tenantId, sessionId, principal, actorId);
+        }
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
         // on the bound Workspace while the Session's creator-keyed
@@ -96,6 +117,8 @@ final class AgentSessionCommands {
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
                 idempotencyKey);
         if (existing.isPresent()) {
+            requireMutationReceiptGrant(tenantId, session, existing.get(),
+                    actorId, principal);
             return replayCommand(tenantId, operation, idempotencyKey,
                     requestDigest);
         }
@@ -103,7 +126,7 @@ final class AgentSessionCommands {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
-            if (workspaces.isExternal(session.workspace()) || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())) {
+            if (workspaces.isExternal(session.workspace()) || WorkspaceToolProfiles.isExternal(session.toolProfile())) {
                 sessionPolicies.requireExternalTurnAllowed(tenantId, actorId, sessionId, session, input);
             }
             if (sessionPolicies.isSshWorkspace(session.workspace())) {
@@ -158,7 +181,9 @@ final class AgentSessionCommands {
         if (queuedInputs.isEmpty()) {
             SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
         }
-        byte[] actorKey = commandActorKey(tenantId, actorId);
+        byte[] actorKey = principal != null
+                ? ManagedSessionPrincipal.actorKey(principal)
+                : commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, turnId, "COMPLETED", null, actorKey, now);
         String operationId = insertTurnCommandOperation(tenantId, sessionId,
@@ -173,13 +198,30 @@ final class AgentSessionCommands {
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
+        return insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, turnId, null, actorId);
+    }
+
+    Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, SessionPrincipal principal) {
+        return insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, turnId, principal, principal == null ? null : principal.userId());
+    }
+
+    private Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, SessionPrincipal principal, String actorId) {
         SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null) {
+            requireWriteAuthority(tenantId, sessionId, principal, actorId);
+        }
         if (session.workspace() != null && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         TurnRecord turn = storeRows.requireTurn(tenantId, sessionId, turnId);
         long now = clock.millis();
-        byte[] actorKey = commandActorKey(tenantId, actorId);
+        byte[] actorKey = principal != null
+                ? ManagedSessionPrincipal.actorKey(principal)
+                : commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, turnId, "COMPLETED", null, actorKey, now);
         String operationId = insertTurnCommandOperation(tenantId, sessionId,
@@ -237,9 +279,23 @@ final class AgentSessionCommands {
     // probe. A tombstoned Session answers the reads' 404 instead of the
     // live-Session refusal.
     void requireRenameReplayOwner(SessionRecord session, CommandRecord previous, String actorId) {
-        if (!previous.admitsReplayBy(actorId) && session.workspace() != null
-                && !workspaces.createdSession(session.tenantId(), actorId,
-                        session.sessionId())) {
+        requireRenameReplayOwner(session, previous, actorId, null);
+    }
+
+    void requireRenameReplayOwner(SessionRecord session, CommandRecord previous,
+            String actorId, SessionPrincipal principal) {
+        if (session.workspace() == null) {
+            // The raw twin defers principal construction to the row match,
+            // so a filter-admitted byte-long actor keeps replaying (R11-3).
+            requireWriteAuthority(session.tenantId(), session.sessionId(), principal, actorId);
+            return;
+        }
+        // A rolling deploy replays through either twin: the recorder match
+        // accepts the raw workspace key and the principal encoding alike, so
+        // the caller's encoding never refuses what the other twin recorded.
+        boolean recorder = previous.admitsReplayBy(actorId, principal);
+        if (!recorder && !workspaces.createdSession(session.tenantId(), actorId,
+                session.sessionId())) {
             if ("DELETED".equals(session.status())) {
                 throw new ManagedAgentException(404, "session_not_found",
                         "The Session was not found.");
@@ -258,16 +314,22 @@ final class AgentSessionCommands {
      */
     SyncRename settleRenameSync(String tenantId, String key, String digest,
             String sessionId, String title, String actorId) {
+        return settleRenameSync(tenantId, key, digest, sessionId, title, actorId, null);
+    }
+
+    SyncRename settleRenameSync(String tenantId, String key, String digest,
+            String sessionId, String title, String actorId, SessionPrincipal principal) {
         // No tenant guard, as in changeSessionModel: settlement writes no delivery row, so no
         // operation range is locked. The Session lock comes first, so the replay probe's snapshot
         // follows it; a racing Session reusing the key loses on the receipt's unique key.
         SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
-            requireRenameReplayOwner(session, previous.get(), actorId);
+            requireMutationReceiptGrant(tenantId, session, previous.get(), actorId, principal);
+            requireRenameReplayOwner(session, previous.get(), actorId, principal);
         }
         SessionMutationCommand command = beginSessionMutation(tenantId, "RENAME_SESSION",
-                key, digest, sessionId, SessionMutationKind.RENAME, actorId);
+                key, digest, sessionId, SessionMutationKind.RENAME, actorId, principal);
         if ("COMPLETED".equals(command.status())) {
             // A replay sends no journal notification, so its revision is unused.
             return new SyncRename(storeRows.requireSessionForUpdate(tenantId, sessionId),
@@ -290,12 +352,26 @@ final class AgentSessionCommands {
     SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
+        return beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId, kind, actorId, null);
+    }
+
+    SessionMutationCommand beginSessionMutation(String tenantId,
+            String operation, String idempotencyKey, String requestDigest,
+            String sessionId, SessionMutationKind kind, String actorId,
+            SessionPrincipal principal) {
         // No tenant guard. The Session lock comes first, so this transaction's snapshot follows
         // it and serializes this Session's commands. The replay probe does not lock: a locking
         // read that misses gap-locks the tenant-shared receipt index, and concurrent admissions
         // of different keys would deadlock inserting into that gap. A racing Session reusing the
         // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
         SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null) {
+            if (principal != null) {
+                ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, principal);
+            } else {
+                ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, actorId);
+            }
+        }
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -303,6 +379,8 @@ final class AgentSessionCommands {
                 idempotencyKey, false);
         if (existing.isPresent()) {
             CommandRecord command = existing.get();
+            requireMutationReceiptGrant(tenantId, session, command, actorId,
+                    principal);
             requireSameMutation(command, requestDigest, sessionId);
             if ("FAILED".equals(command.status())) {
                 if (session.workspace() != null) {
@@ -331,7 +409,9 @@ final class AgentSessionCommands {
         try {
             insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                     sessionId, null, "PENDING", session.status(),
-                    commandActorKey(tenantId, actorId), now);
+                    principal != null
+                            ? ManagedSessionPrincipal.actorKey(principal)
+                            : commandActorKey(tenantId, actorId), now);
         } catch (DuplicateKeyException race) {
             // Every receipt unique key derives from this command key, so another request
             // committed it first. A locking read normally sees it past this transaction's
@@ -342,6 +422,11 @@ final class AgentSessionCommands {
                 throw new ManagedAgentException(409, "idempotency_conflict",
                         "The idempotency key was reused with different content.");
             }
+            // The pre-read arm answers a foreign live key with 404; the race
+            // winner must reach the same gate, or the answer would depend on
+            // whether the receipt was visible before this snapshot (R9-2).
+            requireMutationReceiptGrant(tenantId, session, winner, actorId,
+                    principal);
             requireSameMutation(winner, requestDigest, sessionId);
             return new SessionMutationCommand(sessionId, winner.status(), true);
         }
@@ -358,6 +443,46 @@ final class AgentSessionCommands {
                     requestedSource, now);
         }
         return new SessionMutationCommand(sessionId, "PENDING", false);
+    }
+
+    // A supplied principal keeps the exact-match gate; a raw actor is
+    // authorised by the raw twin, which defers construction (R11-3, R13-2).
+    private void requireWriteAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal, String actorId) {
+        if (principal == null) {
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, actorId);
+        } else {
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, principal);
+        }
+    }
+
+    private void requireMutationReceiptGrant(String tenantId, SessionRecord requested,
+            CommandRecord command, String actorId, SessionPrincipal principal) {
+        if (command.sessionId().equals(requested.sessionId())) {
+            if (requested.workspace() == null) {
+                requireWriteAuthority(tenantId, requested.sessionId(), principal, actorId);
+            }
+            return;
+        }
+        // Cross-Session reuse of a tenant-global key, matching the service
+        // pre-read so the answer never depends on receipt visibility.
+        if (requested.workspace() == null) {
+            // Unbound Sessions are private: the recorded Session's authority
+            // hides a foreign key (404); the owner's collision falls through.
+            // R3-7: a bound recorded Session must 404, not leak the key.
+            if (storeRows.findSession(tenantId, command.sessionId()).map(recorded -> recorded.workspace() != null).orElse(false)) {
+                throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
+            }
+            requireWriteAuthority(tenantId, command.sessionId(), principal, actorId);
+        } else if (!workspaces.createdSession(tenantId, actorId,
+                requested.sessionId())) {
+            // Bound Workspace Sessions gate on the caller's own requested
+            // Session, never the recorded Session's grant.
+            throw new ManagedAgentException(409, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+        throw new ManagedAgentException(409, "idempotency_conflict",
+                "The idempotency key was reused with different content.");
     }
 
     private static void requireSameMutation(CommandRecord command, String requestDigest, String sessionId) {
@@ -412,7 +537,8 @@ final class AgentSessionCommands {
         Map<String, Object> data = Map.of("sessionId", sessionId);
         switch (kind) {
             case RENAME -> {
-                jdbc.update("UPDATE ma_session SET title = ?," + " harness_boot_id ="
+                jdbc.update("UPDATE ma_session SET title = ?,"
+                                + " harness_boot_id ="
                                 + " COALESCE(harness_boot_id, ?),"
                                 + " gmt_modified = ?, version = version + 1"
                                 + " WHERE tenant_id = ? AND session_id = ?",
@@ -517,7 +643,8 @@ final class AgentSessionCommands {
      * is itself unknown. A Turn that has not ended leaves its cancels
      * pending, so cancels of one Turn coalesce.
      */
-    void settleTurnCommands(String tenantId, String sessionId, String turnId, long now) {
+    void settleTurnCommands(String tenantId, String sessionId,
+            String turnId, long now) {
         // Current reads only: every caller holds the Session row, but its
         // snapshot may predate that lock and miss a cancel committed since.
         TurnRecord turn = storeRows.requireTurnForUpdate(tenantId, sessionId, turnId);
@@ -624,7 +751,8 @@ final class AgentSessionCommands {
                 false, operationId);
     }
 
-    Optional<CommandRecord> findCommand(String tenantId, String operation, String idempotencyKey) {
+    Optional<CommandRecord> findCommand(String tenantId,
+            String operation, String idempotencyKey) {
         return findCommand(tenantId, operation, idempotencyKey, false);
     }
 
@@ -658,13 +786,13 @@ final class AgentSessionCommands {
                         + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision, is_plan_enabled, permission_rules_json) SELECT"
                         + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
                         + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
-                        + TURN_SESSION_PROJECTION_GUARD
+                        + AgentTurnProjectionGuard.SESSION_GUARD
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
-                        + TURN_SESSION_PROJECTION_GUARD
+                        + AgentTurnProjectionGuard.SESSION_GUARD
                         + " THEN approval_revision ELSE NULL END,"
-                        + TURN_SESSION_PROJECTION_GUARD
-                        + " THEN CASE WHEN tool_profile = 'hosted-workspace-external-files/1' THEN FALSE ELSE is_plan_enabled END ELSE NULL END,"
-                        + TURN_SESSION_PROJECTION_GUARD
+                        + AgentTurnProjectionGuard.SESSION_GUARD
+                        + " THEN" + AgentTurnProjectionGuard.PLAN_ENABLED + " ELSE NULL END,"
+                        + AgentTurnProjectionGuard.SESSION_GUARD
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, storeRows.writeJson(input),
@@ -712,7 +840,8 @@ final class AgentSessionCommands {
     }
 
     // A mutation leaves the status unchanged until it completes.
-    static void validateMutationStatus(SessionRecord session, SessionMutationKind kind) {
+    static void validateMutationStatus(SessionRecord session,
+            SessionMutationKind kind) {
         AgentSessionPolicies.requireSessionStatus(session.status(),
                 kind == SessionMutationKind.RENAME ? "ACTIVE" : "ARCHIVED");
     }

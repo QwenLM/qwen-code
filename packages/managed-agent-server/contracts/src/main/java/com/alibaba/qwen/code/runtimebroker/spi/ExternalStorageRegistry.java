@@ -52,7 +52,7 @@ public interface ExternalStorageRegistry {
     /** One persisted registration, in the shape the boot document needs. */
     public record RegisteredExternalStorage(String providerId, String physicalKey,
             long registrationRevision, String tenantWorkspaceId,
-            String aliasPath, String mountRoot) {
+            String aliasPath, String mountRoot, String ephemeralTenantId) {
         /**
          * Largest integer both sides of the wire represent exactly (2^53-1),
          * mirrored from the persisted registration record; the two must agree
@@ -60,15 +60,43 @@ public interface ExternalStorageRegistry {
          */
         public static final long MAX_REGISTRATION_REVISION = 9_007_199_254_740_991L;
 
+        public RegisteredExternalStorage(String providerId, String physicalKey, long registrationRevision,
+                String tenantWorkspaceId, String aliasPath, String mountRoot) {
+            this(providerId, physicalKey, registrationRevision, tenantWorkspaceId, aliasPath, mountRoot, null);
+        }
+
         public RegisteredExternalStorage {
             if (providerId == null || !providerId.matches("[A-Za-z0-9._-]{1,128}")
-                    || physicalKey == null || !physicalKey.matches("[A-Za-z0-9._-]{1,128}")
+                    || (ephemeralTenantId == null
+                            ? physicalKey == null || !physicalKey.matches("[A-Za-z0-9._-]{1,128}")
+                            : physicalKey != null || !ephemeralTenantId.matches("[A-Za-z0-9._:-]{1,128}"))
                     || tenantWorkspaceId == null || !tenantWorkspaceId.matches("[A-Za-z0-9._-]{1,128}")
                     || !registeredPath(aliasPath) || !registeredPath(mountRoot) || registrationRevision < 1
                     || registrationRevision > MAX_REGISTRATION_REVISION) {
                 throw new IllegalArgumentException(
                         "Invalid external storage registration record.");
             }
+        }
+
+        public boolean ephemeral() {
+            return ephemeralTenantId != null;
+        }
+
+        public String storageKind() {
+            return ephemeral() ? "EPHEMERAL" : "EXTERNAL";
+        }
+
+        public java.util.Map<String, Object> bootStorage(
+                com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed seed) {
+            if (ephemeral()) {
+                return java.util.Map.of("kind", "ephemeral", "workspaceId", tenantWorkspaceId,
+                        "mountRoot", mountRoot, "registrationRevision", registrationRevision,
+                        "provisionRequestId", seed.getProvisionRequestId(),
+                        "runtimeIncarnation", seed.getGatewayIncarnation());
+            }
+            return java.util.Map.of("kind", "external", "physicalKey", physicalKey,
+                    "aliasPath", aliasPath, "mountRoot", mountRoot,
+                    "registrationRevision", registrationRevision);
         }
 
         public String ownerKey() {

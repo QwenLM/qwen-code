@@ -8,6 +8,8 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOpera
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -222,13 +224,97 @@ final class AgentSessionQueries {
 
     SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
-        if (actorId != null) {
-            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        // The raw-actor page keeps the filter's code-point-bounded actor
+        // verbatim: a principal's byte bound would 400 a long non-ASCII
+        // actor whose Workspace Sessions this page listed before (R7-1).
+        // A String actor never carries a business-actor subject, so the
+        // ownership clause matches the absent-subject row exactly as a
+        // subjectless principal would.
+        return listSessionPage(tenantId, actorId, false, null,
+                beforeCreatedAt, beforeSessionId, limit, archiveState,
+                titleQuery);
+    }
+
+    /**
+     * Bound Sessions keep Workspace read grants. Unbound Sessions require
+     * the immutable ownership row to match tenant, user and actor presence
+     * plus subject exactly. A genuine legacy unbound Session that never
+     * wrote an ownership row (and carries no principal-created creation
+     * receipt) lists tenant-wide, anonymous callers included; only
+     * row-bearing Sessions are owner-scoped.
+     */
+    SessionPage listSessions(String tenantId,
+            SessionPrincipal principal, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery) {
+        if (principal != null) {
+            ManagedSessionPrincipal.requireTenant(tenantId, principal);
         }
+        return listSessionPage(tenantId,
+                principal == null ? null : principal.userId(),
+                principal != null && principal.actorPresent(),
+                principal == null ? null : principal.actorSubjectId(),
+                beforeCreatedAt, beforeSessionId, limit, archiveState,
+                titleQuery);
+    }
+
+    private SessionPage listSessionPage(String tenantId,
+            String actorId, boolean actorPresent, String actorSubjectId,
+            Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
-        arguments.add(actorId);
-        arguments.add(actorId);
+        arguments.add(actorId == null ? null
+                : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
+                        tenantId, actorId));
+        // A legacy unbound Session — one that never wrote an ownership row —
+        // lists tenant-wide. The CREATE_SESSION receipt is an exclusion mark,
+        // not a required one: a principal-created Session stamps the non-empty
+        // structured principal key, which never equals the raw creator key, so
+        // a deleted row cannot resurrect the Session into the page. A legacy
+        // create (raw creator key or empty UNATTRIBUTED key) and the oldest
+        // rows that predate the receipt altogether carry no such mark and stay
+        // visible.
+        String legacyUnbound = " (ma_session.workspace_id IS NULL AND NOT"
+                + " EXISTS (SELECT 1 FROM ma_session_principal sp WHERE"
+                + " sp.tenant_id = ma_session.tenant_id AND"
+                + " sp.session_id = ma_session.session_id) AND NOT EXISTS"
+                + " (SELECT 1 FROM ma_request_receipt r WHERE"
+                + " r.tenant_id = ma_session.tenant_id AND"
+                + " r.session_id = ma_session.session_id AND"
+                + " r.namespace = 'SESSION_COMMAND' AND"
+                + " r.operation = 'CREATE_SESSION' AND"
+                + " r.actor_id IS NOT NULL AND LENGTH(r.actor_id) > 0 AND"
+                + " r.actor_id <> ma_session.creator_actor_key))";
+        String ownershipClause;
+        if (actorId != null) {
+            // A present ownership row is the sole authority over an unbound
+            // Session; the legacy arm below adds the tenant-wide no-row rows.
+            ownershipClause = " OR EXISTS (SELECT 1 FROM"
+                    + " ma_session_principal sp WHERE"
+                    + " ma_session.workspace_id IS NULL AND sp.tenant_id ="
+                    + " ma_session.tenant_id AND sp.session_id ="
+                    + " ma_session.session_id AND sp.version = "
+                    + ManagedSessionPrincipal.VERSION
+                    + " AND sp.user_id = ? AND sp.actor_present = ? AND"
+                    + " (sp.actor_subject_id = ? OR"
+                    + " (sp.actor_subject_id IS NULL AND ? IS NULL)))"
+                    + " OR" + legacyUnbound;
+            arguments.add(actorId);
+            arguments.add(actorPresent);
+            arguments.add(actorSubjectId);
+            arguments.add(actorSubjectId);
+        } else {
+            // The anonymous arm sees only the tenant-wide legacy rows; a
+            // row-present Session is its owner's alone.
+            ownershipClause = " OR" + legacyUnbound;
+        }
+        // The owner-only privacy fence is unconditional on the completion base:
+        // a memory-bound Session lists only for the actor that owns it.
+        arguments.add(actorId == null ? null
+                : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
+                        tenantId, actorId));
         String archiveClause = switch (archiveState) {
             case "archived" -> " AND ma_session.status = 'ARCHIVED'";
             case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
@@ -275,18 +361,21 @@ final class AgentSessionQueries {
                             + " o.phase AS worktree_phase, o.attempt_count AS worktree_attempt_count FROM"
                             + " ma_session LEFT JOIN ma_event_stream es ON es.tenant_id ="
                             + " ma_session.tenant_id AND es.session_id = ma_session.session_id AND"
-                            + " es.stream_kind = 'SESSION' AND es.stream_id = ''"
+                            + " es.stream_kind = 'SESSION' AND es.stream_id = X''"
                             + " LEFT JOIN ma_session_worktree w ON w.tenant_id = ma_session.tenant_id"
                             + " AND w.session_id = ma_session.session_id LEFT JOIN ma_operation o"
                             + " ON o.operation_kind = 'SESSION_WORKTREE' AND o.tenant_id = w.tenant_id"
                             + " AND o.operation_id = w.operation_id WHERE"
                             + " ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id = ? AND"
-                            + " ma_session.status <> 'DELETED' AND (ma_session.workspace_id IS NULL OR EXISTS (SELECT 1"
+                            + " ma_session.status <> 'DELETED' AND (EXISTS (SELECT 1"
                             + " FROM ma_workspace_access wa WHERE wa.tenant_id ="
                             + " ma_session.tenant_id AND wa.workspace_id = ma_session.workspace_id"
                             + " AND wa.actor_id = ? AND wa.role IN ('READER', 'OPERATOR',"
-                            + " 'OWNER'))) AND (ma_session.owner_only = 0 OR"
-                            + " COALESCE(ma_session.owner_actor_key, ma_session.creator_actor_key) = ?)"
+                            + " 'OWNER'))"
+                                + ownershipClause + ")"
+                                + " AND (ma_session.owner_only = 0 OR"
+                                + " COALESCE(ma_session.owner_actor_key,"
+                                + " ma_session.creator_actor_key) = ?)"
                                 + archiveClause + titleClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
@@ -303,7 +392,7 @@ final class AgentSessionQueries {
             rows = new ArrayList<>(rows.subList(0, limit));
         }
         var selectedWorktrees = rows.stream().map(row -> worktrees.get(row.sessionId()))
-                .filter(Objects::nonNull).toList();
+                .filter(java.util.Objects::nonNull).toList();
         return new SessionPage(List.copyOf(rows), hasMore, JdbcSessionWorktreeStore.descriptors(worktreeFiles, jdbc, selectedWorktrees));
     }
 
@@ -476,7 +565,7 @@ final class AgentSessionQueries {
                     if (("qwen-code".equals(row.getString("agent_id"))
                             ? row.getString("agent_definition_digest") != null
                             : row.getString("agent_definition_digest") == null) || row.getString("workspace_id") == null
-                            || !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(row.getString("tool_profile"))
+                            || !(WorkspaceToolProfiles.isExternal(row.getString("tool_profile"))
                                     ? "qwen-code".equals(row.getString("agent_id")) && row.getString("agent_definition_digest") == null
                                             && row.getString("parent_session_id") == null && row.getInt("public_child_agents_version") == 0
                                     : WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))

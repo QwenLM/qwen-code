@@ -553,7 +553,12 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
         if (lease == null || seed == null || !seed.matches(lease) || request == null
                 || !"external-workspace".equals(request.getProvisionerKind()) || !request.isManagedContext()
-                || !"session".equals(request.getScope().getIsolationClass())
+                || !("session".equals(request.getScope().getIsolationClass())
+                        || WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
+                                && "workspace".equals(request.getScope().getIsolationClass())
+                                && ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                                        .equals(request.getScope().getCapabilityDigest())
+                                && managedExtensionCacheDirectory != null)
                 || !WorkspaceExecutionProfile.admitsExternalWorkspaceDigest(request.getScope().getCapabilityDigest())
                 || registrationRevision <= 0 || registrationRevision > 9_007_199_254_740_991L
                 || client.followRedirects() != HttpClient.Redirect.NEVER
@@ -600,7 +605,11 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, HttpRequest exchangeRequest,
             int responseLimit, Function<byte[], T> parse) {
         // Pin the attestation too: a resolver must not switch origins between the two requests.
-        var attestation = new HttpRuntimeTransport(client, requestTimeout).attest(lease, request, seed, true)
+        var pinned = new HttpRuntimeTransport(client, requestTimeout);
+        if (managedExtensionCacheDirectory != null) {
+            pinned.withManagedExtensionCacheDirectory(managedExtensionCacheDirectory, managedExtensionCgroupRoot);
+        }
+        var attestation = pinned.attest(lease, request, seed, true)
                 .toCompletableFuture();
         var active = new AtomicReference<CompletableFuture<?>>(attestation);
         CompletableFuture<T> result = new CompletableFuture<>();
@@ -2127,6 +2136,13 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             try {
                 Map<String, Object> fields = ManagedContextProtocol.parse(body.bytes());
                 Object code = fields.get("code");
+                if (ManagedExtensionProtocol.PATH.equals(path)
+                        && fields.keySet().equals(Set.of("code"))
+                        && "managed_extension_configuration_unavailable".equals(code)
+                        && response.headers().firstValue("Content-Encoding").isEmpty()) {
+                    return error(409, (String) code,
+                            "Managed Runtime extension configuration failed.", false);
+                }
                 if (ManagedExtensionProtocol.PATH.equals(path) && fields.keySet().equals(Set.of("code"))
                         && code instanceof String skillCode
                         && Set.of("source_changed", "skill_source_unavailable", "skill_source_busy",

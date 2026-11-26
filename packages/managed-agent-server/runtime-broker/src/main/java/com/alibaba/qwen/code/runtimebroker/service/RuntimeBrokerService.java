@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.ExecutionReconciliation;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
-import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -16,6 +15,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -28,6 +28,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
@@ -38,9 +39,7 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
-import org.apache.commons.codec.digest.DigestUtils;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
@@ -118,6 +117,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     private final RuntimeBindingProvisioning bindingProvisioning;
     private final TerminalHolds terminalHolds;
     private final BackgroundProcessAdmission backgroundProcessAdmission;
+    private final RuntimeDispatchPayloadAdmission payloadAdmission;
     private final RuntimeExecutionState executionState;
     private final RuntimeExecutionDispatcher executionDispatcher;
     private final RuntimeExecutionReconciler executionReconciler;
@@ -280,6 +280,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 sessionRepository, executionRepository, clock, closed);
         this.backgroundProcessAdmission = new BackgroundProcessAdmission(bindingRepository,
                 sessionRepository, executionRepository);
+        this.payloadAdmission = new RuntimeDispatchPayloadAdmission(publicationVerifier,
+                executionRepository, clock);
         this.executionState = new RuntimeExecutionState(bindingRepository, sessionRepository, executionRepository,
                 this.brokerOwnerId, this.dispatchLeaseDuration, clock);
         this.executionDispatcher = new RuntimeExecutionDispatcher(bindingRegistry, executionState,
@@ -292,7 +294,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         this.executionRecovery = new RuntimeExecutionRecovery(bindingRegistry, executionState, executionRepository,
                 sessionRepository, transport, executionReconciler, closed);
         this.executionCancellation = new RuntimeExecutionCancellation(bindingRegistry, executionState, executionRepository,
-                transport, executionDispatcher, scheduler, this.operationLeaseDuration, closed);
+                transport, publicationVerifier, executionDispatcher, scheduler, this.operationLeaseDuration, closed);
         this.sessionRelease = new RuntimeSessionRelease(bindingRepository, sessionRepository, executionRepository,
                 provisioner, transport, bindingRegistry, executionRecovery);
         this.drainCoordinator = new RuntimeDrainCoordinator(bindingRegistry, bindingRepository, sessionRepository,
@@ -364,6 +366,22 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     public CompletionStage<RuntimeBindingRecord> warm(
             String harnessSessionId) {
         return warm(harnessSessionId, null);
+    }
+
+    /** 只读查询可信会话对应的当前 Workspace 绑定，不分配也不预热运行时。 */
+    public CompletionStage<RuntimeBindingRecord> findBindingForHarnessSession(
+            String tenantId, String harnessSessionId) {
+        requireOpen(closed);
+        String harnessId = BrokerValues.requireId(
+                harnessSessionId, "harnessSessionId");
+        return resolveScope(harnessId, false, null).thenApply(scope -> {
+            if (!scope.getTenantId().equals(tenantId)) {
+                throw conflict("runtime_session_conflict",
+                        "Harness Session belongs to another tenant");
+            }
+            return bindingRepository.findLatestForRequest(
+                    provisionRequest(scope, harnessId));
+        });
     }
 
     public CompletionStage<RuntimeScope> capabilities(
@@ -1035,39 +1053,15 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         if (!v3 && (publicationId != null || publicationToken != null)) {
                             throw invalid("runtime_reference_invalid", "Tool v2 has no publication grant");
                         }
-                        // The UTF-8 encoder would turn an unpaired surrogate into '?'.
-                        if (payloadJson == null || !BrokerValues.isWellFormedJson(payloadJson)) {
-                            throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+                        RuntimeDispatchPayloadAdmission.Admitted admitted =
+                                payloadAdmission.admit(context, record, v3, payloadJson);
+                        if (admitted.refused()) {
+                            return CompletableFuture.completedFuture(admitted.settled() == null
+                                    ? executionState.requireExecution(context, executionId) : admitted.settled());
                         }
-                        byte[] bytes = payloadJson.getBytes(StandardCharsets.UTF_8);
-                        if (bytes.length > 256 * 1024) {
-                            throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
-                        }
-                        String digest = "sha256:" + DigestUtils.sha256Hex(bytes);
-                        if (!digest.equals(record.getRequestDigest())) {
-                            throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
-                        }
-                        Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
-                        // An escaped unpaired surrogate passes the text check above but
-                        // would still reach the Worker, and run, as '?'.
-                        if (!payload.keySet().equals(Set.of("toolName", "input"))
-                                || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
-                                || !(payload.get("input") instanceof Map)
-                                || !BrokerValues.isWellFormedJson(payload)
-                                || isProtocolV3(record.getReference())
-                                    && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
-                            throw invalid("runtime_payload_invalid", "Tool payload is invalid");
-                        }
-                        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
-                                && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
-                                && (v3 || record.getReference().containsKey("runtimeProtocol")
-                                        || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
-                            executionRepository.settlePrepared(record, Map.of(
-                                    "executionStatus", "not_started", "responseParts", List.of(),
-                                    "error", Map.of("type", "workspace_tool_unsupported",
-                                            "message", "External Workspace requires a file Tool v2 payload")), clock.instant());
-                            throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
-                        }
+                        Map<String, Object> payload = admitted.payload();
+                        String toolName = (String) payload.get("toolName");
+                        VerifiedDispatchPayload verifiedPayload = admitted.verified();
                         if (v3) {
                             if (!"run_shell_command".equals(payload.get("toolName"))
                                     && !"monitor".equals(payload.get("toolName"))) {
@@ -1109,7 +1103,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                             if (family != null) {
                                                 admitBackgroundProcess(context, current, family);
                                             }
-                                            executionDispatcher.beginDispatch(context, current, payload, grant);
+                                            executionDispatcher.beginDispatch(context, current, payload,
+                                                    grant, verifiedPayload);
                                             ToolExecutionRecord latest = executionRepository
                                                     .findByExecutionCallId(executionId);
                                             return latest == null ? current : latest;
@@ -1119,7 +1114,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                     });
                         }
                         if (shouldDriveDispatch(record)) {
-                            executionDispatcher.beginDispatch(context, record, payload);
+                            executionDispatcher.beginDispatch(context, record, payload,
+                                    null, verifiedPayload);
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(latest == null ? record : latest);
@@ -1825,6 +1821,99 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     /** Trusted maintenance of the saved generation; never resolves current authorization or provisions a replacement. */
     public CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration) {
         return bindingProvisioning.recoverBinding(bindingId, expectedGeneration, false);
+    }
+
+    /** 已核原 endpoint 的宿主专用入口；快照版本过期或工具未决时不得进入恢复。 */
+    public CompletionStage<RuntimeBindingRecord> recoverExternalWorkspaceBinding(
+            String bindingId, long expectedGeneration, long expectedVersion) {
+        if (expectedVersion < 0) {
+            return failed(conflict("runtime_broker_recovery_blocked",
+                    "Invalid recovery snapshot"));
+        }
+        return bindingProvisioning.recoverBinding(
+                bindingId, expectedGeneration, false, expectedVersion);
+    }
+
+    private boolean blockRecovery(RuntimeBindingRecord claimed) {
+        return bindingRepository.compareAndSet(claimed, claimed.withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                claimed.getLease(), clock.instant())) != null;
+    }
+
+    /**
+     * Blocks recovery and answers whether the binding is now blocked. The
+     * deadline and the failure handler hold the same claim, so the one that
+     * writes second finds the block already there. A write or read that
+     * fails answers false, and the failure is kept on {@code cause}.
+     */
+    private boolean blockRecoveryQuietly(RuntimeBindingRecord claimed,
+            Throwable cause) {
+        try {
+            if (blockRecovery(claimed)) {
+                return true;
+            }
+            RuntimeBindingRecord latest = bindingRepository.findById(
+                    claimed.getBindingId());
+            return latest != null && latest.getState()
+                    == RuntimeBindingRecord.State.RECOVERY_BLOCKED;
+        } catch (RuntimeException failure) {
+            cause.addSuppressed(failure);
+            return false;
+        }
+    }
+
+    private void blockRecovery(String bindingId, long operationGeneration) {
+        RuntimeBindingRecord latest = bindingRepository.findById(bindingId);
+        if (latest != null && ownsOperation(latest, operationGeneration)
+                && latest.getState() == RuntimeBindingRecord.State.READY) {
+            blockRecovery(latest);
+        }
+    }
+
+    private boolean ownsOperation(RuntimeBindingRecord record,
+            long operationGeneration) {
+        return brokerOwnerId.equals(record.getOperationOwner())
+                && record.getOperationGeneration() == operationGeneration;
+    }
+
+    private long operationDeadlineNanos() {
+        long leaseNanos = operationLeaseDuration.toNanos();
+        return leaseNanos > Long.MAX_VALUE / 4
+                ? Long.MAX_VALUE : leaseNanos * 4;
+    }
+
+    private long operationDeadlineMillis() {
+        return Math.max(1, operationDeadlineNanos() / 1_000_000);
+    }
+
+    private record DurableProvision(RuntimeLease lease,
+            RuntimeResourceHandle handle) {
+    }
+
+    private record ReconcileStep(Kind kind, RuntimeObservation observation,
+            RuntimeBrokerException error) {
+        private enum Kind {
+            RETRY,
+            LOST,
+            BLOCKED,
+            READY
+        }
+
+        static ReconcileStep retry() {
+            return new ReconcileStep(Kind.RETRY, null, null);
+        }
+
+        static ReconcileStep lost(RuntimeObservation observation) {
+            return new ReconcileStep(Kind.LOST, observation, null);
+        }
+
+        static ReconcileStep blocked(RuntimeBrokerException error) {
+            return new ReconcileStep(Kind.BLOCKED, null, error);
+        }
+
+        static ReconcileStep ready(RuntimeObservation observation) {
+            return new ReconcileStep(Kind.READY, observation, null);
+        }
     }
 
     private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {

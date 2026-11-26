@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.catalog;
 
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -20,6 +21,15 @@ public class ManagedHookCatalogService {
 
     public JsonNode get(String tenantId, String actorId, String sessionId) {
         sessions.requireReadableSession(tenantId, actorId, sessionId);
+        return catalog(tenantId, sessionId);
+    }
+
+    public JsonNode get(SessionPrincipal principal, String sessionId) {
+        sessions.requireReadableSession(principal, sessionId);
+        return catalog(principal.tenantId(), sessionId);
+    }
+
+    private JsonNode catalog(String tenantId, String sessionId) {
         ObjectNode result = JsonNodeFactory.instance.objectNode()
                 .put("object", "agent.hook_catalog").put("session_id", sessionId);
         ArrayNode catalogs = result.putArray("catalogs");

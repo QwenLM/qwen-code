@@ -19,12 +19,15 @@ final class ExternalWorkspaceSessionPolicies {
     }
 
     /**
-     * Admission-side eligibility read. The registry predicate throws so execution
+     * Admission-side eligibility read, per profile. Shell answers on its own
+     * flag and its own negotiation, so an operator that qualified files never
+     * gains Shell through this path. The registry predicate throws so execution
      * paths fail closed; on admission an unreadable or drifted registration is a
      * permanent record defect, so the caller answers its own 409 instead of the
      * registry's retryable 503.
      */
-    static boolean externalFilesAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces, ContextBinding binding) {
+    static boolean externalProfileAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces,
+            ContextBinding binding, String profile) {
         try {
             return workspaces.externalFilesAllowed(binding);
         } catch (RuntimeBrokerException unreadable) {
@@ -42,8 +45,19 @@ final class ExternalWorkspaceSessionPolicies {
     static AgentSessionPolicies.AgentPin creationPin(boolean external, JdbcManagedWorkspaceRegistry workspaces, ContextBinding binding,
             AgentSessionPolicies.AgentPin resolvedPin, SessionCreationCommand command) {
         AgentSessionPolicies.AgentPin effective = resolvedPin;
+        if (external && (WorkspaceToolProfiles.SHELL.equals(command.requestedToolProfile())
+                || command.requestedToolProfile() == null && workspaces.externalExtensionsAvailable())) {
+            if (!workspaces.externalExtensionsAllowed(binding) || !"qwen-code".equals(command.agentId())
+                    || resolvedPin.digest() != null || !WorkspaceToolProfiles.isPublicShell(resolvedPin.toolProfile())) {
+                throw AgentSessionPolicies.workspaceExecutionUnavailable();
+            }
+            return selectApprovalMode(resolvedPin, command.requestedApprovalMode(), command.approvalSelectionSupported());
+        }
         if (external) {
-            if (!externalFilesAllowedOrRefuse(workspaces, binding)
+            String profile = command.requestedToolProfile() == null
+                    ? WorkspaceToolProfiles.EXTERNAL_FILES : command.requestedToolProfile();
+            if (!WorkspaceToolProfiles.isExternal(profile)
+                    || !externalProfileAllowedOrRefuse(workspaces, binding, profile)
                     || !"qwen-code".equals(command.agentId())
                     || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
                     || Boolean.TRUE.equals(command.requestedPlanMode()) || command.extensionPins() != null
@@ -80,6 +94,22 @@ final class ExternalWorkspaceSessionPolicies {
 
     /** The legacy v1 close refusal exempts an external-files Session on its registered EXTERNAL Workspace. */
     static boolean admitsLegacyClose(SessionRecord session, JdbcManagedWorkspaceRegistry workspaces) {
-        return WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && workspaces.isExternal(session.workspace());
+        return WorkspaceToolProfiles.isExternal(session.toolProfile()) && workspaces.isExternal(session.workspace());
+    }
+
+    /**
+     * Whether an external Session's own approval selection is refused: its
+     * registered profile stopped allowing it, or the Session became a child
+     * lineage whose policy belongs to its parent. A non-external Session is
+     * never refused here.
+     */
+    static boolean refusesApprovalSelection(SessionRecord session,
+            JdbcManagedWorkspaceRegistry workspaces, AgentSessionQueries sessionQueries) {
+        if (workspaces.isExternal(session.workspace()) && WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
+            return !workspaces.externalExtensionsAllowed(session.workspace());
+        }
+        return WorkspaceToolProfiles.isExternal(session.toolProfile())
+                && (!externalProfileAllowedOrRefuse(workspaces, session.workspace(), session.toolProfile())
+                        || sessionQueries.findChildLineage(session.tenantId(), session.sessionId()) != null);
     }
 }

@@ -165,6 +165,8 @@ function nativeContinuationFixture(
   return {
     plan,
     runtime,
+    session,
+    publish,
     read: () =>
       readHostedApprovalContinuation(
         session,
@@ -173,6 +175,85 @@ function nativeContinuationFixture(
       ),
   };
 }
+
+it('does not borrow another approval continuation when a batch approval has none', async () => {
+  const fixture = nativeContinuationFixture(['read_file', 'read_file']);
+  const continuationRef = fixture.publish(
+    'hosted-approval-continuation',
+    fixture.plan,
+  );
+  const actions = [0, 1].map((index) => {
+    const requestId = `approval-${index}`;
+    return {
+      requestId,
+      kind: 'permission',
+      inputRevision: 1,
+      state: 'requested',
+      optionsRef: fixture.publish('managed-action-options', {
+        v: 3,
+        requestId,
+        turnId: 'prompt',
+        functionCallId: `call-${index}`,
+        toolName: 'read_file',
+        policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        inputRevision: 1,
+        createdAt: 1,
+        expiresAt: 1000,
+        options: [
+          { id: 'allow', label: 'Allow' },
+          { id: 'deny', label: 'Deny' },
+        ],
+        ...(index === 1 ? { continuationRef } : {}),
+      }),
+    };
+  });
+  const session = {
+    ...fixture.session,
+    authority: {
+      ...fixture.session.authority,
+      committedSequence: 3,
+      harnessRunAuthorization: async () => ({
+        status: 'runnable',
+        checkpoint: { continuation: { phase: 'await_action' } },
+      }),
+      action: (id: string) => actions.find((action) => action.requestId === id),
+      eventsInSequenceRange: () => [
+        {
+          sequence: 1,
+          kind: 'message.committed',
+          payload: { messageId: 'batch', role: 'assistant' },
+        },
+        ...actions.map((action, index) => ({
+          sequence: index + 2,
+          kind: 'action.changed',
+          payload: {
+            requestId: action.requestId,
+            source: 'tool_call',
+            state: 'requested',
+          },
+        })),
+      ],
+    },
+    sink: {
+      project: async () => [
+        {
+          type: 'assistant',
+          uuid: 'batch',
+          daemonPromptId: 'prompt',
+          message: {
+            parts: actions.map((_, index) => ({
+              functionCall: { id: `call-${index}`, name: 'read_file' },
+            })),
+          },
+        },
+      ],
+    },
+  } as unknown as Awaited<ReturnType<typeof openManagedSession>>;
+
+  await expect(
+    findHostedApprovalContinuation(session, 'prompt'),
+  ).resolves.toBeUndefined();
+});
 
 it('accepts legacy native owners and the local question provider pin', async () => {
   const fixture = nativeContinuationFixture();

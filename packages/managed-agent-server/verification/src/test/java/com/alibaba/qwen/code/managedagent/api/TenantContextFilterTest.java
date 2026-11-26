@@ -21,12 +21,15 @@ class TenantContextFilterTest {
     @Test
     void acceptsOnlyMatchingTrustedPrincipal() throws Exception {
         MockHttpServletRequest request = request("tenant-a");
-        request.setUserPrincipal(actor("tenant-a", "actor-a"));
+        request.setUserPrincipal(actor("tenant-a", "actor-a",
+                "subject-a"));
         MockFilterChain chain = new MockFilterChain();
         filter.doFilter(request, new MockHttpServletResponse(), chain);
         TenantContext context = (TenantContext) request.getAttribute(
                 TenantContextFilter.ATTRIBUTE);
         assertThat(context.requireActorId()).isEqualTo("actor-a");
+        assertThat(context.actorSubjectId()).isEqualTo("subject-a");
+        assertThat(context.principal().actorSubjectId()).isEqualTo("subject-a");
         assertThat(context.tenantId()).isEqualTo("tenant-a");
         assertThat(chain.getRequest()).isSameAs(request);
     }
@@ -161,6 +164,11 @@ class TenantContextFilterTest {
 
     private static AuthenticatedTenantActor actor(String tenant,
             String actorId) {
+        return actor(tenant, actorId, null);
+    }
+
+    private static AuthenticatedTenantActor actor(String tenant,
+            String actorId, String actorSubjectId) {
         return new AuthenticatedTenantActor() {
             @Override
             public String getName() {
@@ -175,6 +183,11 @@ class TenantContextFilterTest {
             @Override
             public String actorId() {
                 return actorId;
+            }
+
+            @Override
+            public String actorSubjectId() {
+                return actorSubjectId;
             }
         };
     }

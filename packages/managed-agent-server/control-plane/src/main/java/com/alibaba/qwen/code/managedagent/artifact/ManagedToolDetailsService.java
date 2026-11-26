@@ -29,7 +29,10 @@ public class ManagedToolDetailsService {
 
     private SessionRecord authorize(TenantContext tenant, String sessionId) {
         tenant.requireActorId();
-        SessionRecord session = sessions.requireReadableSession(tenant.tenantId(), tenant.actorId(), sessionId);
+        // Raw actor, as in the artifact read gate: requirePrincipal() would
+        // 400 a long non-ASCII actor the tenant filter admits (R7-1).
+        SessionRecord session = sessions.requireReadableSession(
+                tenant.tenantId(), tenant.actorId(), sessionId);
         if (session.workspace() == null || "DELETING".equals(session.status())) {
             throw new ManagedAgentException(404, "tool_details_not_found", "Tool details are unavailable.");
         }

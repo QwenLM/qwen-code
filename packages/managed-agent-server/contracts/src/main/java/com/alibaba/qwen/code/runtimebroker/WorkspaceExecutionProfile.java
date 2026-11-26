@@ -38,10 +38,9 @@ public final class WorkspaceExecutionProfile {
     public static final String EXTERNAL_SHELL_CAPABILITY_DIGEST =
             "sha256:3c5d6034815a24441f8ba119e7f6f81baa09686d4bbfd7bbf3ce75837be2f840";
     /**
-     * The external Shell resource-handle version, reserved for the follow-up
-     * Broker half (#17474). Nothing mints or accepts it yet: both external
-     * placements currently write version 1 and are distinguished by their
-     * capability digests, which every binding and attestation compares.
+     * The external Shell resource-handle version. Separate from the files
+     * handle version (1) so a handle minted for one profile cannot be adopted
+     * as the other, even though both name the same provider and storage.
      */
     public static final int EXTERNAL_SHELL_HANDLE_VERSION = 2;
 
@@ -61,7 +60,8 @@ public final class WorkspaceExecutionProfile {
 
     /** The capability digests a registered external Workspace placement admits. */
     public static boolean admitsExternalWorkspaceDigest(String digest) {
-        return CAPABILITY_DIGEST.equals(digest) || isExternalShell(digest);
+        return CAPABILITY_DIGEST.equals(digest) || isExternalShell(digest)
+                || ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST.equals(digest);
     }
 
     /** Whether Workspace execution may run under this Runtime isolation class. */
@@ -95,9 +95,30 @@ public final class WorkspaceExecutionProfile {
                         .equals(request.getProvisionerKind())
                 && request.isManagedContext()
                 && admitsExternalWorkspaceDigest(request.getScope().getCapabilityDigest())
-                && admitsIsolationClass(request.getScope().getIsolationClass())
-                && request.getIsolationKey() != null && !request.getIsolationKey().trim().isEmpty()
+                && (admitsIsolationClass(request.getScope().getIsolationClass())
+                        && request.getIsolationKey() != null
+                        && !request.getIsolationKey().trim().isEmpty()
+                        || "workspace".equals(request.getScope().getIsolationClass())
+                                && request.getIsolationKey() == null)
                 && request.getScope().getWorkspaceId().equals(request.getStorageId());
+    }
+
+    /** Full extension execution on registered external storage; not execution authority. */
+    public static boolean isExternalWorkspaceExecutionRequest(RuntimeProvisionRequest request) {
+        return isExternalWorkspaceRequest(request)
+                && ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                        .equals(request.getScope().getCapabilityDigest());
+    }
+
+    /** Saved identity only; this predicate never admits execution or replacement provisioning. */
+    public static boolean isExternalWorkspaceRetirementRequest(RuntimeProvisionRequest request) {
+        return request != null
+                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(request.getProvisionerKind())
+                && request.isManagedContext()
+                && "workspace".equals(request.getScope().getIsolationClass())
+                && request.getIsolationKey() == null
+                && request.getScope().getWorkspaceId().equals(request.getStorageId())
+                && request.getScope().getCapabilityDigest().matches("sha256:[0-9a-f]{64}");
     }
 
     /**

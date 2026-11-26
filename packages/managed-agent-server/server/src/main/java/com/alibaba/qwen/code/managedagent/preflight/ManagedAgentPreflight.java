@@ -1692,16 +1692,32 @@ public final class ManagedAgentPreflight {
                 properties.getRuntimeBroker();
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
-        if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && (files || shell)) {
+        boolean externalShell = harness.isExternalWorkspaceShellEnabled();
+        if (externalShell && !ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())) {
+            return new Check("tool-path", Status.FAIL,
+                    "External Workspace Shell requires the external-workspace Runtime provisioner",
+                    "set qwen.managed-agent.runtime-broker.provisioner=external-workspace,"
+                            + " or disable external-workspace-shell-enabled");
+        }
+        if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && (files || shell || externalShell)) {
             if (properties.isExternalWorkspaceFilesConfigured()) {
+                if (externalShell && !properties.isExternalWorkspaceShellConfigured()) {
+                    return new Check("tool-path", Status.FAIL,
+                            "External Workspace Shell requires tool publication, session-isolated bound"
+                                    + " Sessions and approval mode default or auto-edit",
+                            "enable qwen.managed-agent.tool-publication.enabled and use default or auto-edit");
+                }
                 return new Check("tool-path", Status.PASS,
-                        "External Workspace files configuration is supported; negotiated readiness and original-worker close proof remain required", null);
+                        externalShell
+                                ? "External Workspace files and foreground Shell configuration is supported;"
+                                        + " negotiated readiness, publication drain and original-worker close proof remain required"
+                                : "External Workspace files configuration is supported; negotiated readiness and original-worker close proof remain required", null);
             }
             return new Check("tool-path", Status.FAIL,
                     ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())
                                     ? "External Workspace Runtime is a storage provisioning prerequisite"
                                     : "External Runtime supports scratch Sessions only",
-                    "disable managed Workspace files and Shell");
+                    "disable managed Workspace files, Shell and external Workspace Shell");
         }
         if (broker.getSsh().isEnabled()
                 && (!files || broker.getSsh().getNodes().isEmpty())) {

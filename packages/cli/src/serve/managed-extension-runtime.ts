@@ -77,6 +77,8 @@ interface Prepared {
 }
 
 export interface ManagedExtensionRuntimeDependencies {
+  /** External execution can serve Skills/MCP/hooks before public child Sessions. */
+  readonly agentsEnabled?: boolean;
   readonly ownerJournalId?: string;
   readonly executionMode: 'linux-cgroup' | 'developer-process-group';
   readonly directory: string;
@@ -708,8 +710,12 @@ export class ManagedExtensionRuntime {
   private admissionContributions(
     contributions: ManagedPackageContributions,
   ): ManagedPackageContributions {
-    if (this.dependencies.stage) return contributions;
-    return { ...contributions, mcpServers: {}, hooks: {} };
+    const admitted =
+      this.dependencies.agentsEnabled === false
+        ? { ...contributions, agents: [] }
+        : contributions;
+    if (this.dependencies.stage) return admitted;
+    return { ...admitted, mcpServers: {}, hooks: {} };
   }
 
   private preparedView(value: Prepared): ManagedExtensionPrepareResult {
@@ -720,16 +726,31 @@ export class ManagedExtensionRuntime {
       revision: value.command.expectedRevision + 1,
       executionMode: this.dependencies.executionMode,
       packages: value.packages.map((pkg) => {
-        if (this.dependencies.stage) return pkg;
-        const degradedComponents = (['mcp', 'hooks'] as const).filter(
-          (component) =>
-            Object.keys(
-              component === 'mcp'
-                ? pkg.contributions.mcpServers
-                : pkg.contributions.hooks,
-            ).length > 0,
-        );
-        return degradedComponents.length ? { ...pkg, degradedComponents } : pkg;
+        const degradedComponents: Array<'agents' | 'mcp' | 'hooks'> = [];
+        const agentsUnavailable =
+          this.dependencies.agentsEnabled === false &&
+          pkg.contributions.agents.length > 0;
+        if (agentsUnavailable) degradedComponents.push('agents');
+        if (!this.dependencies.stage)
+          degradedComponents.push(
+            ...(['mcp', 'hooks'] as const).filter(
+              (component) =>
+                Object.keys(
+                  component === 'mcp'
+                    ? pkg.contributions.mcpServers
+                    : pkg.contributions.hooks,
+                ).length > 0,
+            ),
+          );
+        return degradedComponents.length
+          ? {
+              ...pkg,
+              ...(agentsUnavailable
+                ? { contributions: { ...pkg.contributions, agents: [] } }
+                : {}),
+              degradedComponents,
+            }
+          : pkg;
       }),
       mcpServers: value.mcpServers,
       hookCatalog: value.hookCatalog,

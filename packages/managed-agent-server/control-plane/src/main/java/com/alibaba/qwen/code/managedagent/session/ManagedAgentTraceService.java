@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtension
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionAdmissionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskTarget;
@@ -42,7 +43,24 @@ public class ManagedAgentTraceService {
 
     @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public JsonNode list(String tenant, String actor, String sessionId, String cursor, int limit) {
-        sessions.requireReadableSession(tenant, actor, sessionId);
+        return list(tenant, actor, null, sessionId, cursor, limit);
+    }
+
+    @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public JsonNode list(SessionPrincipal principal, String sessionId,
+            String cursor, int limit) {
+        return list(principal.tenantId(), principal.userId(), principal,
+                sessionId, cursor, limit);
+    }
+
+    private JsonNode list(String tenant, String actor,
+            SessionPrincipal principal, String sessionId, String cursor,
+            int limit) {
+        if (principal == null) {
+            sessions.requireReadableSession(tenant, actor, sessionId);
+        } else {
+            sessions.requireReadableSession(principal, sessionId);
+        }
         if (limit < 1 || limit > 100) {
             throw new ManagedAgentException(400, "invalid_limit", "Limit must be between 1 and 100.");
         }
@@ -104,7 +122,11 @@ public class ManagedAgentTraceService {
                 continue;
             }
             try {
-                sessions.requireReadableSession(tenant, actor, child);
+                if (principal == null) {
+                    sessions.requireReadableSession(tenant, actor, child);
+                } else {
+                    sessions.requireReadableSession(principal, child);
+                }
                 var relation = lineage.findChildLineage(tenant, child);
                 if (relation != null && sessionId.equals(relation.parentSessionId())
                         && target.get().recordId().equals(relation.parentChildRunId())

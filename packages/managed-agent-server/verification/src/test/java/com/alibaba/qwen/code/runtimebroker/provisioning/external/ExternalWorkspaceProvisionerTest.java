@@ -36,8 +36,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -111,6 +113,18 @@ class ExternalWorkspaceProvisionerTest {
     /** Places the worker for one test and returns its handle and lease. */
     private Placement place(ExternalWorkspaceProvisioner subject, String name) throws Exception {
         RuntimeProvisionRequest request = request();
+        return place(subject, name, request);
+    }
+
+    /** The resident (workspace-isolated) request shape reattachment serves. */
+    private static RuntimeProvisionRequest residentRequest() {
+        return new RuntimeProvisionRequest(new RuntimeScope(TENANT, ALIAS, "1", MOUNT,
+                CAPABILITY, "workspace"), null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE, ALIAS);
+    }
+
+    private Placement place(ExternalWorkspaceProvisioner subject, String name,
+            RuntimeProvisionRequest request) throws Exception {
         RuntimeProvisionSeed seed = seed(name);
         RuntimeResourceHandle handle = join(subject.ensureResource(request, seed, null));
         client.provisionResponse = Map.of("protocolVersion", 1,
@@ -319,6 +333,20 @@ class ExternalWorkspaceProvisionerTest {
     }
 
     @Test
+    void aSessionIsolatedUnknownNeverAttemptsReattach() throws Exception {
+        // The design keeps reattachment on the resident (workspace-isolated)
+        // profile only: a session-isolated provider without a reattach
+        // endpoint must keep its placement and answer UNKNOWN, not conflict.
+        ExternalWorkspaceProvisioner subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        Placement placement = place(subject, "session-unknown");
+        client.observeState = "UNKNOWN";
+        assertEquals(RuntimeObservation.Outcome.UNKNOWN, join(subject.reconcile(placement.request(),
+                placement.seed(), placement.handle(), placement.lease())).getOutcome());
+        assertTrue(subject.isUsable(placement.lease()));
+        assertEquals(0, client.reattaches.size());
+    }
+
+    @Test
     void unknownStorageContinuityCannotOverrideAGoneWorker() throws Exception {
         ExternalWorkspaceProvisioner subject = provisioner(registration(PROVIDER, 1, MOUNT));
         Placement placement = place(subject, "gone-storage");
@@ -445,6 +473,106 @@ class ExternalWorkspaceProvisionerTest {
                 placement.handle().getValue());
         assertTrue(subject.supportsStartupRecovery(placement.handle()));
         assertFalse(subject.supportsStartupRecovery(scratchShaped));
+    }
+
+    @Test
+    void historicalWorkspaceTerminalIdentityNeedsNoCurrentBootOrProviderTraffic() {
+        provisioner = new ExternalWorkspaceProvisioner(client, (tenant, alias) -> {
+            throw new AssertionError("Terminal validation must not reconstruct the historical boot");
+        }, PROVIDER, Duration.ofSeconds(5));
+        var original = historicalTerminalOriginal();
+
+        assertTrue(WorkspaceExecutionProfile.isExternalWorkspaceRetirementRequest(original.getRequest()));
+        assertFalse(ExternalWorkspaceProvisioner.isWorkspaceRequest(original.getRequest()));
+        assertDoesNotThrow(() -> provisioner.validateTerminalOriginal(original));
+        assertDoesNotThrow(() -> provisioner.validateTerminalOriginal(original.withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, null, Instant.now())));
+        assertTrue(client.provisions.isEmpty());
+        assertTrue(client.observes.isEmpty());
+        assertTrue(client.reattaches.isEmpty());
+    }
+
+    @Test
+    void admittedWorkspaceTerminalValidationStillRecomputesIdentity() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var request = residentRequest();
+        var seed = seed("admitted-terminal");
+        var handle = join(subject.ensureResource(request, seed, null));
+        var original = draining(request, seed, handle, null, false).withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, null, Instant.now());
+        assertDoesNotThrow(() -> subject.validateTerminalOriginal(original));
+
+        var values = new LinkedHashMap<>(handle.getValue());
+        values.put("identity", "a".repeat(64));
+        var changed = new RuntimeResourceHandle(handle.getKind(), handle.getVersion(), values);
+        assertThrows(RuntimeBrokerException.class, () -> subject.validateTerminalOriginal(
+                original.withResourceHandle(changed, Instant.now())));
+        assertTrue(client.provisions.isEmpty());
+        assertTrue(client.observes.isEmpty());
+    }
+
+    @Test
+    void historicalTerminalValidationDoesNotAdmitProvisionReconcileOrAcquisition() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = historicalTerminalOriginal();
+        subject.validateTerminalOriginal(original);
+
+        failure(subject.ensureResource(original.getRequest(), original.getProvisionSeed(), original.getResourceHandle()));
+        failure(subject.provision(original.getRequest(), original.getProvisionSeed()));
+        assertEquals(RuntimeObservation.Outcome.CONFLICT, join(subject.reconcile(original.getRequest(),
+                original.getProvisionSeed(), original.getResourceHandle(), original.getLease())).getOutcome());
+        failure(subject.verifyAcquisition(original.withState(
+                RuntimeBindingRecord.State.READY, original.getLease(), Instant.now())));
+        assertThrows(RuntimeBrokerException.class, () -> subject.recoveryProviderRequest(original));
+        assertTrue(client.provisions.isEmpty());
+        assertTrue(client.observes.isEmpty());
+        assertTrue(client.reattaches.isEmpty());
+    }
+
+    @Test
+    void historicalTerminalValidationRejectsForeignMalformedAndMismatchedOriginals() {
+        var subject = provisioner(null);
+        var original = historicalTerminalOriginal();
+        var handle = original.getResourceHandle();
+        for (var change : List.<Map<String, Object>>of(
+                Map.of("providerId", "other-provider"),
+                Map.of("provisionRequestId", "other-request"),
+                Map.of("provider", Map.of("requestId", "other-request")),
+                Map.of("identity", "not-a-digest"),
+                Map.of("unexpected", "field"))) {
+            var values = new LinkedHashMap<>(handle.getValue());
+            values.putAll(change);
+            var changed = new RuntimeResourceHandle(handle.getKind(), handle.getVersion(), values);
+            assertThrows(RuntimeBrokerException.class, () -> subject.validateTerminalOriginal(
+                    original.withResourceHandle(changed, Instant.now())));
+        }
+        var wrongVersion = new RuntimeResourceHandle(handle.getKind(), 2, handle.getValue());
+        assertThrows(RuntimeBrokerException.class, () -> subject.validateTerminalOriginal(
+                original.withResourceHandle(wrongVersion, Instant.now())));
+        var wrongKind = new RuntimeResourceHandle("external-scratch", 1, handle.getValue());
+        assertThrows(IllegalArgumentException.class, () -> original.withResourceHandle(wrongKind, Instant.now()));
+        var seed = original.getProvisionSeed();
+        var wrongLease = new RuntimeLease(seed.getProvisionalRuntimeId(), original.getLease().getEndpoint(),
+                "other-token", seed.getLeaseId(), seed.getEpoch());
+        assertThrows(IllegalArgumentException.class, () -> original.withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, wrongLease, Instant.now()));
+        assertThrows(RuntimeBrokerException.class, () -> subject.validateTerminalOriginal(
+                original.withResourceHandle(null, Instant.now())));
+    }
+
+    private static RuntimeBindingRecord historicalTerminalOriginal() {
+        var request = new RuntimeProvisionRequest(new RuntimeScope(TENANT, ALIAS, "1", MOUNT,
+                "sha256:" + "c".repeat(64), "workspace"), null, ExternalWorkspaceProvisioner.KIND, ALIAS);
+        var seed = RuntimeProvisionSeed.create("binding-a", 1);
+        // The original digest is opaque here; the retirement service must demand
+        // an independent match against the trusted host's persisted launch.
+        var handle = new RuntimeResourceHandle(ExternalWorkspaceProvisioner.KIND, 1, Map.of(
+                "providerId", PROVIDER, "provisionRequestId", seed.getProvisionRequestId(),
+                "identity", "a".repeat(64), "provider", Map.of("requestId", seed.getProvisionRequestId())));
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create(RecordingClient.ENDPOINT),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        return draining(request, seed, handle, lease, false).withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, lease, Instant.now());
     }
 
     private static RuntimeBindingRecord draining(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
@@ -619,6 +747,93 @@ class ExternalWorkspaceProvisionerTest {
     }
 
     @Test
+    void freshProvisionerReattachesAnUnknownOldBindingWithoutProvisioning() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-ready", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachState = "RUNNING";
+        client.reattachStorage = evidence("confirms", 1);
+        int observations = client.observes.size();
+        int provisions = client.provisions.size();
+
+        RuntimeObservation observed = join(subject.reconcile(original.request(), original.seed(),
+                original.handle(), original.lease()));
+
+        assertEquals(RuntimeObservation.Outcome.READY, observed.getOutcome());
+        assertEquals(observations + 1, client.observes.size());
+        assertEquals(provisions, client.provisions.size(), "reattach must not provision a replacement");
+        assertEquals(1, client.reattaches.size());
+        Map<String, Object> body = client.reattaches.get(0);
+        assertEquals(1, ((Number) body.get("protocolVersion")).intValue());
+        assertEquals(original.seed().getProvisionRequestId(), body.get("provisionRequestId"));
+        assertEquals(original.handle().getValue().get("identity"), body.get("identity"));
+        assertEquals(original.handle().getValue().get("provider"), body.get("handle"));
+        assertEquals(original.lease().getEndpoint().toString(), body.get("endpoint"));
+        assertTrue(body.get("scope") instanceof Map<?, ?>);
+        assertTrue(body.get("boot") instanceof Map<?, ?>);
+        assertTrue(subject.isUsable(original.lease()));
+    }
+
+    @Test
+    void reattachEndpointDriftFailsClosedWithoutProvisioning() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-drift", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachState = "RUNNING";
+        client.reattachEndpoint = "http://127.0.0.1:43191";
+        client.reattachStorage = evidence("confirms", 1);
+        int provisions = client.provisions.size();
+
+        assertEquals(RuntimeObservation.Outcome.CONFLICT, join(subject.reconcile(original.request(),
+                original.seed(), original.handle(), original.lease())).getOutcome());
+        assertEquals(1, client.reattaches.size());
+        assertEquals(provisions, client.provisions.size());
+        assertFalse(subject.isUsable(original.lease()));
+    }
+
+    @Test
+    void reattachUnknownRemainsUnknownAndRetryable() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-unknown", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachState = "UNKNOWN";
+        int provisions = client.provisions.size();
+
+        assertEquals(RuntimeObservation.Outcome.UNKNOWN, join(subject.reconcile(original.request(),
+                original.seed(), original.handle(), original.lease())).getOutcome());
+        assertEquals(1, client.reattaches.size());
+        assertEquals(provisions, client.provisions.size());
+        assertTrue(subject.isUsable(original.lease()));
+    }
+
+    @Test
+    void reattachGoneIsPermanentAndCreatesNothing() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-gone", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachState = "GONE";
+        int provisions = client.provisions.size();
+
+        assertEquals(RuntimeObservation.Outcome.CONFLICT, join(subject.reconcile(original.request(),
+                original.seed(), original.handle(), original.lease())).getOutcome());
+        assertEquals(1, client.reattaches.size());
+        assertEquals(provisions, client.provisions.size());
+        assertFalse(subject.isUsable(original.lease()));
+    }
+
+    @Test
     void acquisitionRequiresPositiveContinuityButProvisionOnlyParityDoesNot() throws Exception {
         var subject = provisioner(registration(PROVIDER, 1, MOUNT));
         var original = place(subject, "acquire-missing");
@@ -697,11 +912,15 @@ class ExternalWorkspaceProvisionerTest {
         private static final String ENDPOINT = "http://127.0.0.1:43190";
         private final List<Map<String, Object>> provisions = new ArrayList<>();
         private final List<Map<String, Object>> observes = new ArrayList<>();
+        private final List<Map<String, Object>> reattaches = new ArrayList<>();
         private Map<String, Object> provisionResponse = Map.of("protocolVersion", 1,
                 "handle", Map.of("requestId", "request-a"), "endpoint", ENDPOINT);
         private String observeState = "STARTING";
+        private String reattachState = "UNKNOWN";
         private String endpoint = ENDPOINT;
+        private String reattachEndpoint = ENDPOINT;
         private Map<String, Object> storage;
+        private Map<String, Object> reattachStorage;
 
         @Override
         public CompletionStage<Map<String, Object>> provision(Map<String, Object> request) {
@@ -720,6 +939,21 @@ class ExternalWorkspaceProvisionerTest {
             }
             if (storage != null) {
                 response.put("storage", storage);
+            }
+            return CompletableFuture.completedFuture(Map.copyOf(response));
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request) {
+            reattaches.add(request);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("protocolVersion", 1);
+            response.put("state", reattachState);
+            if ("RUNNING".equals(reattachState)) {
+                response.put("endpoint", reattachEndpoint);
+            }
+            if (reattachStorage != null) {
+                response.put("storage", reattachStorage);
             }
             return CompletableFuture.completedFuture(Map.copyOf(response));
         }

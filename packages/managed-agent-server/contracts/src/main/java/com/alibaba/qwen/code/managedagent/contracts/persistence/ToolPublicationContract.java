@@ -169,7 +169,7 @@ public final class ToolPublicationContract {
         require(PUBLISHABLE_TOOL_NAMES.contains(toolName),
                 "Only Shell and Monitor payloads can publish");
         if ("run_shell_command".equals(toolName)) {
-            requireShellInput(input);
+            requireShellInput(input, binding.path("sessionKey").path("sessionId"));
         } else if ("monitor".equals(toolName)) {
             requireMonitorInput(input);
         } else {
@@ -182,12 +182,31 @@ public final class ToolPublicationContract {
                 "Canonical Shell input digest conflicts");
     }
 
-    private static void requireShellInput(JsonNode input) {
+    private static void requireShellInput(JsonNode input, JsonNode sessionId) {
         require(input.has("command") && input.get("command").isTextual()
                 && !input.get("command").textValue().isEmpty(), "Shell command is invalid");
         input.fieldNames().forEachRemaining(name -> require(
-                Set.of("command", "timeout", "description", "is_background", "directory")
+                Set.of("command", "timeout", "description", "is_background", "directory", "managedExtension")
                         .contains(name), "Shell input field is invalid"));
+        if (input.has("managedExtension")) {
+            JsonNode context = input.get("managedExtension");
+            closed(context, Set.of("harnessSessionId", "configRevision", "pin"));
+            require(sessionId.equals(context.get("harnessSessionId")),
+                    "Extension Shell belongs to another Session");
+            count(context.get("configRevision"), MAX_COUNT);
+            JsonNode pin = context.get("pin");
+            require(pin != null && pin.isObject(), "Extension Shell pin is invalid");
+            closed(pin, pin.has("settingsRevision")
+                    ? Set.of("extensionId", "packageRevision", "packageDigest", "settingsRevision")
+                    : Set.of("extensionId", "packageRevision", "packageDigest"));
+            require(id(pin.get("extensionId")).matches("[A-Za-z0-9._:-]{1,128}"),
+                    "Extension Shell pin ID is invalid");
+            count(pin.get("packageRevision"), MAX_COUNT);
+            digest(pin.get("packageDigest"));
+            if (pin.has("settingsRevision")) {
+                count(pin.get("settingsRevision"), MAX_COUNT);
+            }
+        }
         boundedIntField(input, "timeout", 600_000, "Shell timeout is invalid");
         require(!input.has("description") || input.get("description").isTextual(),
                 "Shell description is invalid");

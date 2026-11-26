@@ -621,7 +621,8 @@ public class ManagedSchemaSessionStoreTest {
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload"))
+                                                "payload",
+                                                "actor"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));
@@ -731,7 +732,8 @@ public class ManagedSchemaSessionStoreTest {
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload"))
+                                                "payload",
+                                                "actor"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));

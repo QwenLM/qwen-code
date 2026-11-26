@@ -83,7 +83,8 @@ export function resolveManagedRuntimeWorkerRoutePlan(
   const mode = resolveManagedShellPublisherMode({
     capabilityDigest: input.capabilityDigest,
     managedExtensions: input.managedExtensions,
-    capturePublisher: input.capturePublisher || input.publication,
+    capturePublisher:
+      input.capturePublisher || (input.publication && !input.managedExtensions),
     remotePublishers: input.remotePublishers,
   });
   const toolV4 = isMeasuredWorkspaceCapability(input.capabilityDigest);

@@ -269,7 +269,10 @@ export async function startManagedRuntimeAttestationWorker(
       : resolved;
   if (
     externalBoot &&
-    (!containerMode || capturePublisher || remotePublishers || sshRuntime)
+    (!containerMode ||
+      capturePublisher ||
+      (remotePublishers && !externalBoot.managedExtensions) ||
+      sshRuntime)
   )
     throw new Error(INVALID_BOOT_MESSAGE);
   if (
@@ -278,7 +281,13 @@ export async function startManagedRuntimeAttestationWorker(
     (containerMode &&
       csiBoot === undefined &&
       ((boot.version !== 1 && !externalBoot) ||
-        boot.isolationClass !== 'session'))
+        // A shared resident external Workspace boots workspace-isolated; admit
+        // that on the external boot path only. Plain v1 boots keep the session
+        // requirement.
+        (externalBoot
+          ? boot.isolationClass !== 'session' &&
+            boot.isolationClass !== 'workspace'
+          : boot.isolationClass !== 'session')))
   ) {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
@@ -309,24 +318,27 @@ export async function startManagedRuntimeAttestationWorker(
       registerManagedCsiAttestationRoute(app, csiBoot, csiMount);
     }
     if (boot.version === 2) {
-      const ledger = publication
-        ? ManagedRuntimeLedger.create({
-            workFile: path.join(publication.directory, 'worker-ledger.json'),
-            worker: {
-              pid: process.pid,
-              pgid: process.pid,
-              hostPid: process.ppid,
-              incarnation: boot.runtimeIncarnation,
-              startedAt: Date.now(),
-            },
-          })
-        : (sshRuntime?.ledger ??
-          managedRuntimeLedgerFromEnvironment(boot.runtimeIncarnation));
+      const ledger =
+        publication && !boot.managedExtensions
+          ? ManagedRuntimeLedger.create({
+              workFile: path.join(publication.directory, 'worker-ledger.json'),
+              worker: {
+                pid: process.pid,
+                pgid: process.pid,
+                hostPid: process.ppid,
+                incarnation: boot.runtimeIncarnation,
+                startedAt: Date.now(),
+              },
+            })
+          : (sshRuntime?.ledger ??
+            managedRuntimeLedgerFromEnvironment(boot.runtimeIncarnation));
       ledger?.watch();
       executor = registerManagedContextRoutes(
         app,
         boot,
-        publication ?? capturePublisher,
+        boot.managedExtensions
+          ? capturePublisher
+          : (publication ?? capturePublisher),
         remotePublishers,
         sshRuntime
           ? new ManagedContextMount(boot.mountRoot, () =>
@@ -335,6 +347,10 @@ export async function startManagedRuntimeAttestationWorker(
           : (externalMount ?? csiMount),
         ledger,
         sshRuntime !== undefined || externalBoot !== undefined,
+        !(
+          externalBoot &&
+          boot.managedExtensions?.mode === 'developer-process-group'
+        ),
       );
       sshRuntime?.register(app, boot, executor);
       // The main listener mounts the same publication channels as the
@@ -652,7 +668,8 @@ export async function runManagedRuntimeAttestationWorker(
     boot,
     undefined,
     contextBoot.version === 2 &&
-      !('storage' in contextBoot) &&
+      (!('storage' in contextBoot) ||
+        contextBoot.managedExtensions !== undefined) &&
       (isWorkspaceToolCapability(contextBoot.capabilityDigest) ||
         contextBoot.managedExtensions !== undefined)
       ? new ManagedShellPublisherRegistry({

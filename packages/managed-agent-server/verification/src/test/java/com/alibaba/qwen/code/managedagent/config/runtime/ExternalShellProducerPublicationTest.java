@@ -212,7 +212,10 @@ class ExternalShellProducerPublicationTest {
             assertNull(lane.finishedOrNull(), "A refused drain must not finish the publication");
             // The envelope alone decides the refusal, so it lands before any
             // block is moved: no read reaches the worker and no segment row is
-            // written for a capture that can never finish.
+            // written for a capture that can never finish. Neither EOF is
+            // acknowledged either — that is the worker's only drain proof, and
+            // without it the close keeps refusing rather than releasing storage
+            // whose capture was never accepted as complete.
             assertTrue(lane.worker.routes("read").isEmpty(),
                     "A refused drain must not move any block off the worker");
             assertEquals("undrained", lane.stopDrained());

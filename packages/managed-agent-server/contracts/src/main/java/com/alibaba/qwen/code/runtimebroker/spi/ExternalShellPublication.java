@@ -19,9 +19,8 @@ import java.util.concurrent.CompletionStage;
  * sequence, including each stream's empty EOF sequence, before the guarded
  * drained stop may run.
  *
- * <p>A Runtime that cannot prove the lane answers no producer at all. The
- * dispatch-side refusal on a missing producer is wired by the follow-up
- * Broker half (#17474); until it lands, no dispatch reaches this interface.
+ * <p>A Runtime that cannot prove the lane answers no producer at all, so the
+ * dispatch refuses before any Shell runs.
  */
 public interface ExternalShellPublication {
     /**

@@ -87,7 +87,9 @@ public final class WorkspaceRuntimeResolver {
                 || WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST.equals(
                         properties.getHarness().getCapabilityDigest())
                 || WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
-                properties.getHarness().getCapabilityDigest())) {
+                properties.getHarness().getCapabilityDigest())
+                || WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST.equals(
+                        properties.getHarness().getCapabilityDigest())) {
             throw new IllegalStateException("Workspace execution profile is reserved");
         }
         if (!broker.getWorkspaceMounts().isEmpty()
@@ -137,8 +139,12 @@ public final class WorkspaceRuntimeResolver {
         SessionRecord session = sessions.findSessionById(sessionId)
                 .orElseThrow(WorkspaceExecutionStore::unavailable);
         if (authority.isExternal(session.workspace())) {
-            if (hook || managedExtensions.isEnabled() || externalRegistrations == null
-                    || !"session".equals(boundSessionIsolationClass)) {
+            boolean executable = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles
+                    .isPublicShell(session.toolProfile()) && managedExtensions.isEnabled()
+                    && "developer-process-group".equals(managedExtensions.getMode());
+            if (hook && !executable || externalRegistrations == null
+                    || !java.util.Set.of("session", "workspace")
+                            .contains(boundSessionIsolationClass)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             authority.authorizeExternal(session, lifecycle);
@@ -150,7 +156,10 @@ public final class WorkspaceRuntimeResolver {
             }
             return new Resolved(saved, new RuntimeScope(session.tenantId(), saved.getWorkspaceId(),
                     Long.toString(saved.getWorkspaceGeneration()), registered.mountRoot(),
-                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+                    executable ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                            : externalDigest(session.toolProfile()),
+                    boundSessionIsolationClass)
+                    .withLifecycleAuthority(lifecycle));
         }
         if (lifecycle == null && hook && "CLOSING".equals(session.status())) {
             authority.authorizeLegacyClose(session);
@@ -251,6 +260,19 @@ public final class WorkspaceRuntimeResolver {
         } catch (RuntimeException error) {
             return false;
         }
+    }
+
+    /**
+     * The capability digest of a registered external placement, chosen from
+     * the Session's pinned tool profile. A Session pinned to files keeps the
+     * files digest for its whole life even after Shell is enabled, so its
+     * saved binding, handle and admission never change shape.
+     */
+    private static String externalDigest(String toolProfile) {
+        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles
+                .isExternalShell(toolProfile)
+                ? WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST
+                : WorkspaceExecutionProfile.CAPABILITY_DIGEST;
     }
 
     private String extensionDigest(String platform) {
@@ -364,6 +386,30 @@ public final class WorkspaceRuntimeResolver {
             throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
+    }
+
+    /** 共享 external Workspace 没有 owning Session，只校验原注册和 scope 连续性。 */
+    public void requireExternalWorkspaceCurrent(
+            RuntimeScope scope, String storageId) {
+        if (externalRegistrations == null
+                || !scope.getWorkspaceId().equals(storageId)
+                // The shared worker retains its registered scope; each logical
+                // Session is independently authorized before acquiring a member.
+                || !(WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())
+                        || managedExtensions.isEnabled()
+                                && "developer-process-group".equals(managedExtensions.getMode())
+                                && com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                                        .equals(scope.getCapabilityDigest()))
+                || !"workspace".equals(scope.getIsolationClass())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        var registered = externalRegistrations.find(
+                        scope.getTenantId(), storageId)
+                .orElseThrow(WorkspaceExecutionStore::unavailable);
+        if (!storageId.equals(registered.tenantWorkspaceId())
+                || !scope.getCanonicalCwd().equals(registered.mountRoot())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
     }
 
     private Mount mount(ContextBinding binding) {

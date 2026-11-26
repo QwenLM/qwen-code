@@ -151,9 +151,7 @@ final class AgentSessionPolicies {
 
     static List<String> availableApprovalModes(AgentPin pin) {
         return pin.digest() != null ? List.of(pin.approvalMode())
-                : WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
-                        ? List.of("default", "auto-edit")
-                        : List.of("default", "auto-edit", "yolo");
+                : WorkspaceToolProfiles.approvalModes(pin.toolProfile());
     }
 
     boolean supportsPlanMode(SessionRecord session) {
@@ -314,9 +312,9 @@ final class AgentSessionPolicies {
         Map<String, Object> initial = creationSkills.initialSelection(tenantId, sessionId);
         if (initial != null) {
             if (initial.get("operationId").equals(body.path("command").path("operationId").asText())) {
-                boolean beforeModel = jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=?", Integer.class,
-                        tenantId, sessionId) <= 1
-                        && jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND is_submission_attempted=TRUE LIMIT 1 FOR UPDATE",
+                // Failed pre-admission Turns do not consume initial configuration.
+                // The locked Session and actual model-submission fence remain authoritative.
+                boolean beforeModel = jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND is_submission_attempted=TRUE LIMIT 1 FOR UPDATE",
                                 tenantId, sessionId).isEmpty();
                 if (!beforeModel || !isBootstrapRevision(body)
                         || !objectMapper.valueToTree(initial).equals(body.path("command"))) {
@@ -631,13 +629,14 @@ final class AgentSessionPolicies {
         }
         if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
                 || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
-                || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
-                        && (!ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(workspaces, session.workspace())
-                                || sessionQueries.findChildLineage(tenantId, sessionId) != null)
+                || ExternalWorkspaceSessionPolicies.refusesApprovalSelection(session, workspaces, sessionQueries)
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
             throw new ManagedAgentException(409, "unsupported_feature", "Approval selection is unavailable");
         }
         if (!WorkspaceToolProfiles.supportsApprovalMode(mode) || "auto".equals(mode) && !autoSupported) {
+            throw new ManagedAgentException(400, "unsupported_approval_mode", "The approval mode is unavailable");
+        }
+        if (!WorkspaceToolProfiles.admitsExternalApprovalMode(session.toolProfile(), mode)) {
             throw new ManagedAgentException(400, "unsupported_approval_mode", "The approval mode is unavailable");
         }
         var currentPolicy = jdbc.queryForMap("SELECT approval_revision, permission_rules_json, is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
@@ -698,13 +697,22 @@ final class AgentSessionPolicies {
 
     void requireExternalTurnAllowed(String tenantId, String actorId, String sessionId,
             SessionRecord session, List<Map<String, Object>> input) {
-        if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
-                || !ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(workspaces, session.workspace())
+        if (WorkspaceToolProfiles.isPublicShell(session.toolProfile())
+                && workspaces.externalExtensionsAllowed(session.workspace())
+                && "qwen-code".equals(session.agentId()) && session.agentDefinitionDigest() == null
+                && sessionQueries.findChildLineage(tenantId, sessionId) == null
+                && workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()) {
+            return;
+        }
+        if (!WorkspaceToolProfiles.isExternal(session.toolProfile())
+                || !ExternalWorkspaceSessionPolicies.externalProfileAllowedOrRefuse(workspaces,
+                        session.workspace(), session.toolProfile())
                 || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0
                 || hasMcpServers(session)
                 || creationSkills.initialSelection(tenantId, sessionId) != null
+                || !WorkspaceToolProfiles.admitsExternalApprovalMode(session.toolProfile(), session.approvalMode())
                 || Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                         Boolean.class, tenantId, sessionId))
                 || input.stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
