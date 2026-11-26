@@ -146,7 +146,7 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 ## 已验证结果（2026-11-26）
 
-- 单元与 workflow 套件：181 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
+- 单元与 workflow 套件：191 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
 - #18362：`protected_path:authority_surface`、`ambient_credential:cloud_metadata`、`ambient_credential:env_dump`。
 - #18364：`ambient_credential:cloud_metadata`、`ambient_credential:proc_environ`。
 - 变异见证：56 个臂，全部击杀，无跳过，另加一条**未变异对照**要求保持全绿。装置的临时目录**镜像仓库真实布局**——workflow 契约用例经相对 URL 读取 workflow；若不镜像，该用例在每个臂都会因文件缺失而红，而「文件缺失」会被误当成「变异击杀」。正是这条对照让整轮结果值得读。

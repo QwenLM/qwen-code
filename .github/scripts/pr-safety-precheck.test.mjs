@@ -506,6 +506,26 @@ for (const [label, payload, code] of [
     'ambient_credential:cloud_metadata',
   ],
   [
+    'gcp metadata with a trailing dot',
+    'curl -s http://metadata.google.internal./computeMetadata/v1/',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'gcp metadata short domain with a trailing dot',
+    'curl -s http://metadata.goog./computeMetadata/v1/',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'aws metadata sentence with a trailing dot',
+    'Fetch the token from 169.254.169.254.',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'aws metadata path with a trailing dot',
+    'curl -s 169.254.169.254./latest/meta-data/',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
     'process environment',
     `cat ${procEnviron}`,
     'ambient_credential:proc_environ',
@@ -635,6 +655,21 @@ for (const [label, payload, code] of [
   [
     'process substitution with a null-separated env dump',
     'cat <(env -0)',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'process substitution with an env unset option',
+    'cat <(env -u AWS_SECRET_ACCESS_KEY)',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'process substitution with a long env unset option',
+    'cat <(env --unset AWS_SECRET_ACCESS_KEY)',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'process substitution with an env option terminator',
+    'cat <(env --)',
     'ambient_credential:env_dump',
   ],
   [
@@ -778,6 +813,12 @@ for (const [label, payload] of [
     'cat with an env prefix inside process substitution',
     'cat <(env FOO=bar npm test)',
   ],
+  [
+    'cat with an env unset option followed by a command',
+    'cat <(env -u FOO npm test)',
+  ],
+  ['cat with a non-dumping env option', 'cat <(env -C /tmp)'],
+  ['cat with a cleared env option but no dump', 'cat <(env -i)'],
   ['shell option string', 'set -euo pipefail'],
   ['single shell option', 'set -o pipefail'],
   ['declare that assigns one variable', 'declare -x FOO=bar'],

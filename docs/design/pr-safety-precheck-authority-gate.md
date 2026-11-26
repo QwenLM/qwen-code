@@ -342,7 +342,7 @@ admitted. These are coverage gaps, not safety claims.
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 181 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 191 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout

@@ -82,7 +82,7 @@ const PROTECTED_FILE_PATHS = new Set([
 const AMBIENT_CREDENTIAL_PATTERNS = [
   [
     'ambient_credential:cloud_metadata',
-    /(?<![\w.])(?:100\.100\.100\.200|169\.254\.169\.254|169\.254\.170\.2|fd00:ec2::254|metadata\.google\.internal|metadata\.goog)(?![\w.-])/i,
+    /(?<![\w.])(?:100\.100\.100\.200|169\.254\.169\.254|169\.254\.170\.2|fd00:ec2::254|metadata\.google\.internal|metadata\.goog)(?![\w-]|\.\w)/i,
   ],
   [
     'ambient_credential:proc_environ',
@@ -113,7 +113,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
 // Restores the historical process-substitution regression without restoring a
 // bare-parenthesis anchor that would hold ordinary function calls.
 const CAT_ENV_SUBSTITUTION =
-  /\bcat[ \t]{1,64}[<>]\([ \t]{0,64}env(?:[ \t]{1,64}(?:-0|--null))?(?=[ \t]{0,64}(?:[|;&<>)]|$))/;
+  /\bcat[ \t]{1,64}[<>]\([ \t]{0,64}env(?:[ \t]{1,64}(?:-0|--null|-u[ \t]{1,64}\S+|--unset[ \t]{1,64}\S+|--))?(?=[ \t]{0,64}(?:[|;&<>)]|$))/;
 
 const METADATA_HOSTNAMES = new Set([
   '100.100.100.200',
