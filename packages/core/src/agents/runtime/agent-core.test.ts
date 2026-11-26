@@ -2278,6 +2278,7 @@ describe('AgentCore truncation output budget', () => {
         isUnifiedAgentLoopEnabled: () => shared,
         getSkipLoopDetection: () => false,
         isEventBusAgentLoopEnabled: () => kernel,
+        getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
         getToolRegistry: vi.fn().mockReturnValue({ getTool: vi.fn() }),
         getDebugLogger: vi
           .fn()
@@ -2349,29 +2350,13 @@ describe('AgentCore truncation output budget', () => {
           ...(batch.flatMap(({ responseParts }) => responseParts) as Part[]),
         );
       });
-    // The loop detector is not under test here.
-    const detector = [
-      vi
-        .spyOn(LoopDetectionService.prototype, 'checkAlwaysOnSafeties')
-        .mockReturnValue(false),
-      vi
-        .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
-        .mockReturnValue(false),
-      vi
-        .spyOn(LoopDetectionService.prototype, 'recordToolResult')
-        .mockReturnValue(false),
-    ];
     const controller = new AbortController();
-    const run = core
-      .runReasoningLoop(
-        chat,
-        [{ role: 'user', parts: [{ text: 'Go.' }] }],
-        TOOLS_LIST,
-        controller,
-      )
-      .finally(() => {
-        for (const spy of detector) spy.mockRestore();
-      });
+    const run = core.runReasoningLoop(
+      chat,
+      [{ role: 'user', parts: [{ text: 'Go.' }] }],
+      TOOLS_LIST,
+      controller,
+    );
     return { run, controller, responses };
   }
 
