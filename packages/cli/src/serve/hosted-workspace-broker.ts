@@ -70,6 +70,7 @@ import type { ManagedSessionLifecycleAuthority } from '@qwen-code/qwen-code-core
 export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
   token: string;
+  requireTls?: boolean;
   lifecycleAuthority?: () => ManagedSessionLifecycleAuthority | undefined;
   /** Stops for the daemon's owed mount handbacks (#13800). */
   mountHandbacks?: Set<() => void>;
@@ -251,7 +252,10 @@ export class HostedWorkspaceBroker {
     private readonly key: ManagedSessionKey,
     runtimeSessionId: string,
   ) {
-    this.baseUrl = resolveManagedRuntimeBrokerBaseUrl(options.baseUrl);
+    this.baseUrl = resolveManagedRuntimeBrokerBaseUrl(
+      options.baseUrl,
+      options.requireTls,
+    );
     this.identity = { harnessSessionId: key.sessionId, runtimeSessionId };
   }
 

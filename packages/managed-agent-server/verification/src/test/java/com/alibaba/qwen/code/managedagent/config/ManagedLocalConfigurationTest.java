@@ -149,6 +149,32 @@ class ManagedLocalConfigurationTest {
     }
 
     @Test
+    void localProfileRequiresEveryEnabledHarnessPoolMemberToUseLoopback() throws Exception {
+        Path directory = temporary.toRealPath();
+        var settings = managed(directory);
+        var harness = settings.getHarness();
+        harness.setRequireRemoteTls(false);
+        var member = new ManagedAgentProperties.HarnessInstance();
+        member.setBaseUrl("http://harness.internal:4170");
+        harness.getPool().setInstances(java.util.List.of(member));
+        harness.getPool().setEnabled(true);
+        assertThatThrownBy(() -> configure(directory, properties(directory), server(), settings))
+                .hasMessage("Managed local service URLs must use loopback HTTP endpoints");
+        member.setBaseUrl("http://private-test-token@bad host:4170");
+        assertThatThrownBy(() -> configure(directory, properties(directory), server(), settings))
+                .hasMessage("Managed local service URLs must use loopback HTTP endpoints");
+        harness.getPool().setEnabled(false);
+        try (var source = configure(directory, properties(directory), server(), settings)) {
+            assertThat(source.getUrl()).isEqualTo(ManagedLocalConfiguration.jdbcUrl(directory));
+        }
+        harness.getPool().setEnabled(true);
+        member.setBaseUrl("http://[::1]:4170");
+        try (var source = configure(directory, properties(directory), server(), settings)) {
+            assertThat(source.getUrl()).isEqualTo(ManagedLocalConfiguration.jdbcUrl(directory));
+        }
+    }
+
+    @Test
     void refusesPublicPermissionsAndSymlinkedPrivateState() throws Exception {
         Path directory = temporary.toRealPath();
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwxr-xr-x"));

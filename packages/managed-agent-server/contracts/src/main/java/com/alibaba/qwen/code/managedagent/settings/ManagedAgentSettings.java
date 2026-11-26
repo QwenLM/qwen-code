@@ -47,6 +47,9 @@ public interface ManagedAgentSettings {
         public HarnessPool getPool();
         public Duration getApprovalTimeout();
         public boolean isEnabled();
+        public default boolean isRequireRemoteTls() {
+            return true;
+        }
         public boolean isWorkspaceFilesEnabled();
         public boolean isWorkspaceChildAgentsEnabled();
         public boolean isWorkspaceShellEnabled();

@@ -742,6 +742,7 @@ public class ManagedAgentProperties
         private boolean externalWorkspaceShellEnabled;
         private boolean workspaceChildAgentsEnabled = true;
         private String baseUrl = "http://127.0.0.1:4170";
+        private boolean requireRemoteTls = true;
         private String token = "";
         private String capabilityDigest = "";
         private String credentialsFile = "";

@@ -45,8 +45,8 @@
       "zh": "与运行 Session 的 Hosted Harness（`qwen serve --profile hosted-harness`）之间的连接：地址与共享凭据、调用超时、审批策略，以及 Session 创建时可获得哪些 Workspace 工具。"
     },
     "qwen.managed-agent.harness.pool": {
-      "en": "Placing Sessions on several Hosted Harness instances instead of the single `qwen.managed-agent.harness.base-url`, with static discovery and mutual TLS to the members.",
-      "zh": "将 Session 分配到多个 Hosted Harness 实例上（而不是单一的 `qwen.managed-agent.harness.base-url`），支持静态发现，并与成员之间使用双向 TLS。"
+      "en": "Places Sessions on statically discovered Hosted Harness instances. Remote HTTPS members use mutual TLS.",
+      "zh": "将 Session 分配给静态发现的 Hosted Harness 实例，远程 HTTPS 成员使用双向 TLS。"
     },
     "qwen.managed-agent.internal-server": {
       "en": "An optional separate listener for the internal routes (`/internal/**`), such as the Session Store the Harness calls, so they do not share the public listener.",
@@ -452,8 +452,8 @@
       "zh": "工具权限请求在过期、该工具调用被拒绝之前等待答复的时长。创建 Session 时发送给 Harness。取值不在 `1s` 到 `24h` 之间时启动时拒绝；不带单位的数字按秒解析。"
     },
     "qwen.managed-agent.harness.base-url": {
-      "en": "The URL of the single Hosted Harness the control plane calls. Must be an absolute `http` or `https` URL without credentials, query or fragment while `qwen.managed-agent.harness.enabled` is true: a single Harness is refused at startup, and under `qwen.managed-agent.harness.pool.enabled` every pool member fails to join instead, so keep a valid value there even though the pool does not route by it. Startup refuses plaintext `http` to a non-loopback host unless `qwen.managed-agent.auth.allow-insecure-bind` is true. The `managed-local` profile requires a loopback `http` URL.",
-      "zh": "控制面调用的单个 Hosted Harness 的 URL。`qwen.managed-agent.harness.enabled` 为 true 时必须是不含凭据、查询串和片段的绝对 `http` 或 `https` URL：单个 Harness 时启动时拒绝；开启 `qwen.managed-agent.harness.pool.enabled` 时则改为所有池成员都无法加入，因此即使池不按它路由，也要保留有效值。指向非回环主机的明文 `http` 启动时拒绝，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。`managed-local` profile 要求回环 `http` URL。"
+      "en": "The URL of the single Hosted Harness the control plane calls. Must be an absolute `http` or `https` URL without credentials, query or fragment while `qwen.managed-agent.harness.enabled` is true: a single Harness is refused at startup, and under `qwen.managed-agent.harness.pool.enabled` every pool member fails to join instead, so keep a valid value there even though the pool does not route by it. Startup refuses plaintext `http` to a non-loopback host unless `qwen.managed-agent.harness.require-remote-tls` is false or `qwen.managed-agent.auth.allow-insecure-bind` is true. The `managed-local` profile requires a loopback `http` URL.",
+      "zh": "控制面调用的单个 Hosted Harness 的 URL。`qwen.managed-agent.harness.enabled` 为 true 时必须是不含凭据、查询串和片段的绝对 `http` 或 `https` URL：单个 Harness 时启动时拒绝；开启 `qwen.managed-agent.harness.pool.enabled` 时则改为所有池成员都无法加入，因此即使池不按它路由，也要保留有效值。指向非回环主机的明文 `http` 启动时拒绝，除非 `qwen.managed-agent.harness.require-remote-tls` 为 false 或 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。`managed-local` profile 要求回环 `http` URL。"
     },
     "qwen.managed-agent.harness.capability-digest": {
       "en": "The capability digest the Harness must advertise, written `sha256:` plus 64 lowercase hex characters and equal to the Harness's `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST`; a mismatch fails negotiation. Required while `qwen.managed-agent.harness.enabled` is true unless `qwen.managed-agent.harness.credentials-file` supplies it; setting both is refused at startup.",
@@ -488,13 +488,13 @@
       "zh": "是否将 Session 分配到由多个 Hosted Harness 实例组成的池中（每个 Session 固定在其所在成员上），而不是调用单一的 `qwen.managed-agent.harness.base-url`。仅在 `qwen.managed-agent.harness.enabled` 为 true 时读取。启动要求 `qwen.managed-agent.session-store.enabled`、`qwen.managed-agent.session-store.binding-key`、Harness token 以及 `sha256:` 格式的能力摘要。成员必须声明 `harness-pool-owner/1` 与 `harness-instance-lifecycle/1`，且各成员能力完全一致。"
     },
     "qwen.managed-agent.harness.pool.instances": {
-      "en": "The static pool members, used when `qwen.managed-agent.harness.pool.discovery` is `static`; set in a configuration file (YAML). Each entry has `instance-id` (1 to 128 letters, digits, `.`, `_`, `:` or `-`, unique, equal to the instance ID that Harness reports) and `base-url` (an `http` or `https` origin without path, credentials, query or fragment). Startup refuses an empty list, more than 256 entries, and a non-loopback member without `https` and the pool's mTLS stores.",
-      "zh": "静态池成员列表，在 `qwen.managed-agent.harness.pool.discovery` 为 `static` 时使用；需在配置文件（YAML）中设置。每项包含 `instance-id`（1 到 128 个字母、数字、`.`、`_`、`:` 或 `-`，不可重复，且须等于该 Harness 报告的实例 ID）和 `base-url`（不含路径、凭据、查询串和片段的 `http` 或 `https` 源地址）。列表为空、超过 256 项，或非回环成员未使用 `https` 和池的 mTLS 证书库时，均启动时拒绝。",
+      "en": "The static pool members, used when `qwen.managed-agent.harness.pool.discovery` is `static`; set in a configuration file (YAML). Each entry has `instance-id` (1 to 128 letters, digits, `.`, `_`, `:` or `-`, unique, equal to the instance ID that Harness reports) and `base-url` (an `http` or `https` origin without path, credentials, query or fragment). Configure 1 to 256 entries. Remote HTTPS members require the pool's mTLS stores. Remote HTTP members require `qwen.managed-agent.harness.require-remote-tls=false`.",
+      "zh": "静态池成员列表，在 `qwen.managed-agent.harness.pool.discovery` 为 `static` 时使用；需在配置文件（YAML）中设置。每项包含 `instance-id`（1 到 128 个字母、数字、`.`、`_`、`:` 或 `-`，不可重复，且须等于该 Harness 报告的实例 ID）和 `base-url`（不含路径、凭据、查询串和片段的 `http` 或 `https` 源地址）。须配置 1 到 256 项。远程 HTTPS 成员需要池的 mTLS 证书库，远程 HTTP 成员需要设置 `qwen.managed-agent.harness.require-remote-tls=false`。",
       "default": ""
     },
     "qwen.managed-agent.harness.pool.key-store-file": {
-      "en": "Path to the PKCS12 key store with the client certificate and key the control plane presents to Harness pool members (mutual TLS). Must be set together with `qwen.managed-agent.harness.pool.trust-store-file`, or startup is refused. Required for any non-loopback member; with both stores empty, no client certificate is sent.",
-      "zh": "PKCS12 密钥库路径，包含控制面向 Harness 池成员出示的客户端证书和私钥（双向 TLS）。必须与 `qwen.managed-agent.harness.pool.trust-store-file` 同时设置，否则启动时拒绝。任何非回环成员都需要它；两个证书库都为空时不发送客户端证书。"
+      "en": "Path to the PKCS12 key store with the client certificate and key the control plane presents to Harness pool members (mutual TLS). Must be set together with `qwen.managed-agent.harness.pool.trust-store-file`, or startup is refused. Required for every remote HTTPS member; with both stores empty, no client certificate is sent.",
+      "zh": "PKCS12 密钥库路径，包含控制面向 Harness 池成员出示的客户端证书和私钥（双向 TLS）。必须与 `qwen.managed-agent.harness.pool.trust-store-file` 同时设置，否则启动时拒绝。所有远程 HTTPS 成员都需要它；两个证书库都为空时不发送客户端证书。"
     },
     "qwen.managed-agent.harness.pool.key-store-password-file": {
       "en": "Path to a file holding the password of `qwen.managed-agent.harness.pool.key-store-file`, also used as the key password. The file holds a secret. At most 4096 bytes; trailing whitespace is removed; empty means an empty password. Startup refuses a file that cannot be read or is too large.",
@@ -511,6 +511,10 @@
     "qwen.managed-agent.harness.request-timeout": {
       "en": "How long a single ordinary call to the Hosted Harness may take, including attach loads that are not takeovers. Task cancellation attempts get at least four times this value, and never less than 5 minutes. Must be positive; a number without a unit is read as seconds.",
       "zh": "对 Hosted Harness 的单次普通调用（包括非接管的挂接加载）允许的最长时长。任务取消尝试的时限至少为该值的四倍，且不少于 5 分钟。必须为正值；不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.harness.require-remote-tls": {
+      "en": "Requires HTTPS for remote connections from the control plane to a single Hosted Harness or static pool members. Set false to permit explicitly configured HTTP endpoints on a trusted private network. Remote HTTPS pool members still require mutual TLS. The Harness bearer token and capability digest are required in both modes.",
+      "zh": "控制面连接远程单个 Hosted Harness 或静态池成员时要求 HTTPS。设为 false 允许在受信私网使用显式配置的 HTTP 地址。远程 HTTPS 池成员仍要求双向 TLS。两种模式均要求 Harness bearer token 和能力摘要。"
     },
     "qwen.managed-agent.harness.token": {
       "en": "The bearer token the control plane sends to the Hosted Harness, equal to the Harness's `QWEN_SERVER_TOKEN`; a secret. Required while `qwen.managed-agent.harness.enabled` is true unless `qwen.managed-agent.harness.credentials-file` supplies it; setting both is refused at startup. The preflight check fails a value still starting with the template placeholder `replace-`.",
@@ -589,8 +593,8 @@
       "default": ""
     },
     "qwen.managed-agent.runtime-broker.allow-non-loopback": {
-      "en": "Whether the embedded Runtime Broker may bind a non-loopback address in `qwen.managed-agent.runtime-broker.host`, such as `0.0.0.0`; without it, startup refuses such an address. The listener serves one global bearer token over plaintext HTTP, with no per-tenant authorization, so enable it only behind a layer that terminates TLS and authorizes callers: restricting the network alone still sends the token in clear text, and whoever reads it can drive every execution the Broker admits. The `managed-local` profile refuses a non-loopback host regardless.",
-      "zh": "是否允许内嵌 Runtime Broker 绑定 `qwen.managed-agent.runtime-broker.host` 中的非回环地址（例如 `0.0.0.0`）；未开启时，此类地址启动时拒绝。该监听器通过明文 HTTP 使用同一个全局 bearer token，且没有按租户的鉴权，因此只应在终止 TLS 并对调用方鉴权的前置层之后开启：仅限制网络仍会以明文传输该 token，读到它的人可以操控 Broker 接纳的所有执行。`managed-local` profile 无论此项如何都拒绝非回环 host。"
+      "en": "Allows the embedded Runtime Broker to bind a non-loopback `qwen.managed-agent.runtime-broker.host`, such as `0.0.0.0`. The listener serves plaintext HTTP and accepts one global bearer token covering all admitted executions across tenants. Prefer a TLS-terminating layer that authorizes callers. Direct HTTP requires a private network restricted to trusted workloads and explicit acceptance that the token travels in cleartext. The `managed-local` profile requires a loopback host.",
+      "zh": "允许内嵌 Runtime Broker 绑定非回环的 `qwen.managed-agent.runtime-broker.host`，例如 `0.0.0.0`。监听器提供明文 HTTP，一个全局 bearer token 可访问所有租户已受理的执行。建议通过 TLS 终止层校验调用方。若直接使用 HTTP，私网应仅允许受信工作负载访问，且部署方须明确接受 token 明文传输。`managed-local` profile 要求回环地址。"
     },
     "qwen.managed-agent.runtime-broker.bound-session-isolation-class": {
       "en": "How Runtime workers are shared among Sessions bound to a mounted local Workspace: `session` gives each Session its own worker, `workspace` lets the Sessions of one Workspace share one. Startup refuses other values. `workspace` requires the `local-process` provisioner with `qwen.managed-agent.runtime-broker.durable-local-process` and cannot combine with `qwen.managed-agent.runtime-broker.child-workspaces-enabled`; Session worktrees and public child agents need `session`. SSH-bound Sessions always use `session`.",
@@ -674,8 +678,8 @@
       "zh": "是否允许离线的运维恢复命令（`bin/qwen-managed-agent-admin operator-recovery`）对仍占用 Workspace 租约的 Hosted Shell 捕获执行 `inspect`、`prepare` 与 `complete` 步骤。请在该维护进程中设置：除非此项开启，且同时开启 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner 并配置 `qwen.managed-agent.runtime-broker.state-directory`，否则该命令拒绝运行。使用外部 provisioner 时，服务端启动时拒绝此项。"
     },
     "qwen.managed-agent.runtime-broker.port": {
-      "en": "The TCP port of the embedded Runtime Broker's HTTP listener; the Hosted Harness's `QWEN_MANAGED_RUNTIME_BROKER_URL` must reach it, directly on a loopback address or through the TLS-terminating proxy in front of a non-loopback bind. Startup fails when the listener cannot bind it. Preflight checks that the port is free, or listening with `--online`, and compares it with the Broker URL in the Harness credentials file.",
-      "zh": "内嵌 Runtime Broker HTTP 监听器的 TCP 端口；Hosted Harness 的 `QWEN_MANAGED_RUNTIME_BROKER_URL` 必须能到达它：回环地址时直接指向它，非回环绑定时经由前置的 TLS 终止代理。监听器无法绑定该端口时启动失败。预检会检查端口是否空闲（使用 `--online` 时检查是否在监听），并与 Harness 凭据文件中的 Broker URL 比对。"
+      "en": "TCP port of the embedded Runtime Broker HTTP listener. The Hosted Harness must reach it through its configured Broker URL. Remote access normally uses a TLS-terminating proxy. A trusted private network can use direct HTTP when the Harness starts with `--managed-runtime-broker-require-tls=false` and the Broker permits a non-loopback bind. Startup fails if the port cannot be bound. Preflight checks that the port is free, or listening with `--online`, and compares it with the Broker URL in the Harness credentials file.",
+      "zh": "内嵌 Runtime Broker HTTP 监听器的 TCP 端口。Hosted Harness 必须能通过其配置的 Broker URL 到达此端口。远程连接通常经过 TLS 终止代理。在受信私网中，为 Harness 传入启动参数 `--managed-runtime-broker-require-tls=false` 并允许 Broker 绑定非回环地址后，可使用 HTTP 直连。绑定端口失败时启动失败。预检检查端口是否空闲（使用 `--online` 时检查是否在监听），并与 Harness 凭据文件中的 Broker URL 比对。"
     },
     "qwen.managed-agent.runtime-broker.previous-credential-keys": {
       "en": "Earlier Runtime credential keys kept after a rotation, as a map from key ID to base64-encoded 32-byte key, so rows encrypted under them stay readable; writes use only the active key. Secrets. Set it in a configuration file (YAML), each ID in brackets, such as `'[old-v1]': <key>`; environment variables cannot supply it. Startup refuses a key that is not 32 bytes or an ID equal to `qwen.managed-agent.runtime-broker.credential-key-id`.",

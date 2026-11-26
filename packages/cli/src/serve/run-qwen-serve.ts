@@ -3543,7 +3543,7 @@ async function runQwenServeImpl(
 
   const { token, generated: generatedToken } = resolveRemoteServeToken(
     optsIn.token,
-    isLoopbackBind(optsIn.hostname),
+    optsIn.profile === 'hosted-harness' || isLoopbackBind(optsIn.hostname),
   );
   const hostedHarnessCapabilityDigest =
     optsIn.hostedHarnessCapabilityDigest ??
@@ -3680,7 +3680,11 @@ async function runQwenServeImpl(
     optsIn.hostname.toLowerCase() === 'localhost'
       ? (await (deps.bindHostnameLookup ?? lookup)(optsIn.hostname)).address
       : optsIn.hostname;
-  if (optsIn.profile === 'hosted-harness' && !isLoopbackAddress(bindHostname)) {
+  if (
+    optsIn.profile === 'hosted-harness' &&
+    isLoopbackBind(optsIn.hostname) &&
+    !isLoopbackAddress(bindHostname)
+  ) {
     throw new Error(
       '--profile hosted-harness resolved outside the loopback interface.',
     );

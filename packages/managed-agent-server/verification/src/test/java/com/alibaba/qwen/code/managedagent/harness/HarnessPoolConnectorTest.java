@@ -685,11 +685,29 @@ class HarnessPoolConnectorTest {
                 () -> new HarnessDiscovery.Snapshot(List.of(), true), ignored -> leaf(), null, null, ignored -> client("a")))
                 .hasMessageContaining("enabled Session Store");
         assertThatThrownBy(() -> HarnessPoolConnector.validateEndpoint(
-                new HarnessDiscovery.Endpoint("remote", URI.create("http://10.0.0.2:4170"), true), null))
+                new HarnessDiscovery.Endpoint("remote", URI.create("http://10.0.0.2:4170"), true), true, false))
                 .hasMessageContaining("mTLS");
+    }
+
+    @Test
+    void remoteHttpOptInStillRequiresMutualTlsForHttpsAndValidatesPoolOrigins() {
+        var settings = settings();
+        settings.getHarness().setRequireRemoteTls(false);
+        var remote = new HarnessDiscovery.Endpoint("remote", URI.create("http://harness.example:4170"), true);
+        var member = client("remote");
+        try (var pool = new HarnessPoolConnector(settings, mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(remote), true), ignored -> leaf(), null, null, ignored -> member)) {
+            pool.refresh();
+            verify(member).readInstance();
+        }
         assertThatThrownBy(() -> HarnessPoolConnector.validateEndpoint(
-                new HarnessDiscovery.Endpoint("remote", URI.create("https://10.0.0.2:4170"), true), null))
+                new HarnessDiscovery.Endpoint("remote", URI.create("https://harness.example:4170"), true), false, false))
                 .hasMessageContaining("mTLS");
+        for (String url : List.of("ftp://harness.example", "http://harness.example/path", "http://user@harness.example")) {
+            assertThatThrownBy(() -> HarnessPoolConnector.validateEndpoint(
+                    new HarnessDiscovery.Endpoint("remote", URI.create(url), true), false, false))
+                    .hasMessageContaining("Invalid Harness pool endpoint");
+        }
     }
 
     private static QwenHostedHarnessConnector leaf() {

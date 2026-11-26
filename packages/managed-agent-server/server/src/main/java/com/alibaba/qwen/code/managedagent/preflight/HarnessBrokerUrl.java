@@ -112,9 +112,7 @@ final class HarnessBrokerUrl {
                 if (hasNonRootPath) {
                     return new Result(Verdict.NOT_ORIGIN);
                 }
-                return new Result(protocol.equals("http")
-                        ? Verdict.PLAIN_OUTSIDE_LOOPBACK
-                        : Verdict.UNCLASSIFIED);
+                return new Result(Verdict.UNCLASSIFIED);
             }
         }
         boolean loopback;

@@ -48,6 +48,32 @@ describe('Hosted Harness profile', () => {
     expect(() => validateHostedHarnessProfile(privateOptions)).not.toThrow();
   });
 
+  it('requires separate opt-ins for a private listener and HTTP Broker', () => {
+    const optionsForPrivateNetwork = {
+      ...options,
+      profile: 'hosted-harness' as const,
+      hostname: '0.0.0.0',
+      token: 'harness-secret',
+      serveWebShell: false,
+      hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      managedRuntimeBrokerUrl: 'http://runtime-broker:4182',
+      managedRuntimeBrokerToken: 'broker-secret',
+    };
+    const validate = (
+      hostedHarnessRequireLoopback: boolean,
+      managedRuntimeBrokerRequireTls: boolean,
+    ) =>
+      validateHostedHarnessProfile({
+        ...optionsForPrivateNetwork,
+        hostedHarnessRequireLoopback,
+        managedRuntimeBrokerRequireTls,
+      });
+
+    expect(() => validate(true, false)).toThrow('loopback --hostname');
+    expect(() => validate(false, true)).toThrow('must use HTTPS');
+    expect(() => validate(false, false)).not.toThrow();
+  });
+
   it.each([
     { hostname: '0.0.0.0', error: 'loopback' },
     { mode: 'native' as const, error: '--http-bridge' },
@@ -91,11 +117,15 @@ describe('Hosted Harness profile', () => {
     ).toThrow('not implemented');
   });
 
-  it('rejects broker options outside hosted mode', () => {
+  it.each([
+    { managedRuntimeBrokerToken: 'secret' },
+    { managedRuntimeBrokerRequireTls: false },
+    { hostedHarnessRequireLoopback: false },
+  ])('rejects hosted options outside hosted mode: %j', (option) => {
     expect(() =>
       validateHostedHarnessProfile({
         ...options,
-        managedRuntimeBrokerToken: 'secret',
+        ...option,
       }),
     ).toThrow('require --profile hosted-harness');
   });

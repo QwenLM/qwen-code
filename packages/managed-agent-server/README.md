@@ -402,6 +402,53 @@ The returned `id` is an RFC UUID and is the canonical identity used by
 the public API, Hosted Harness transcript, and Runtime Broker. The server does
 not maintain a separate public-to-Harness Session mapping.
 
+### Private service connections
+
+A Hosted Harness running in its own Pod can listen directly on a Service's
+target port. For a private network where the operator accepts plaintext HTTP
+between workloads, the following container arguments allow the Harness to
+receive requests on port 4170 and call the Runtime Broker over HTTP:
+
+```yaml
+command: ["qwen"]
+args:
+  - serve
+  - --profile=hosted-harness
+  - --no-web
+  - --hostname=0.0.0.0
+  - --port=4170
+  - --hosted-harness-require-loopback=false
+  - --managed-runtime-broker-url=http://runtime-broker:4182
+  - --managed-runtime-broker-require-tls=false
+```
+
+Supply `QWEN_SERVER_TOKEN`, `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` and
+`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` through the deployment's usual secret
+configuration. Both transport arguments default to `true`. The first permits
+the chosen listen address, which can also be a Pod IP. The second permits
+HTTP only for the configured Broker origin.
+
+The embedded Runtime Broker has its own listen address. For a Broker reached
+directly through a Service, set `qwen.managed-agent.runtime-broker.host` to
+its Pod IP or wildcard and `qwen.managed-agent.runtime-broker.allow-non-loopback=true`.
+Restrict access to the intended workloads. Callers with its bearer can use
+the Broker across tenants.
+
+If the Service exposes port 4171 and targets port 4170, pass these application
+arguments to the Managed Agent JVM:
+
+```text
+--qwen.managed-agent.harness.base-url=http://harness:4171
+--qwen.managed-agent.harness.require-remote-tls=false
+```
+
+The Java setting defaults to `true` and applies to both single and pooled
+Harness endpoints. HTTPS endpoints still verify certificates. Remote HTTPS
+pool members require mutual TLS. With a single Harness, a Session Store
+reached via remote HTTP needs its own `session-store.base-url` and
+`session-store.allow-insecure-http=true`. Pool mode requires a Session Store
+with secure writer transport. [Configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentsession-store)
+
 ## Personal memory (opt-in)
 
 Personal memory is disabled by default. Enable it only after qualifying a

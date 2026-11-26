@@ -240,6 +240,13 @@ describe('serve command args', () => {
     expect(parsed['open-with-auth']).toBe(false);
   });
 
+  it.each([
+    '--hosted-harness-require-loopback=',
+    '--managed-runtime-broker-require-tls=flase',
+  ])('rejects an invalid transport setting %s', (flag) => {
+    expect(() => buildParser().parseSync([flag])).toThrow();
+  });
+
   it('parses standalone --open-with-auth', () => {
     const parsed = buildParser().parseSync('--open-with-auth');
     expect(parsed['open']).toBe(false);
@@ -1434,6 +1441,27 @@ describe('serve rate limit env parsing', () => {
     ).rejects.toThrow('process.exit(1) called');
     expect(mockRunQwenServe).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['', true, true],
+    ['--hosted-harness-require-loopback=false', false, true],
+    ['--managed-runtime-broker-require-tls=false', true, false],
+  ])(
+    'passes independent Hosted Harness policies for "%s"',
+    async (args, loopback, tls) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
+      await startServeHandlerWithArgs(
+        `--profile hosted-harness --no-web ${args}`,
+      );
+      expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+        hostedHarnessRequireLoopback: loopback,
+        managedRuntimeBrokerRequireTls: tls,
+      });
+    },
+  );
 
   it('takes the Broker pair from the environment and removes it', async () => {
     process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'] = 'http://127.0.0.1:4182';

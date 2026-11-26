@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import org.apache.commons.lang3.StringUtils;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -17,12 +18,18 @@ public final class HarnessTls {
     private HarnessTls() {
     }
 
-    public static SSLContext poolContext(ManagedAgentSettings.HarnessPool properties) {
-        if (properties.getKeyStoreFile().isBlank() && properties.getTrustStoreFile().isBlank()) {
-            return null;
-        }
-        if (properties.getKeyStoreFile().isBlank() || properties.getTrustStoreFile().isBlank()) {
+    public static boolean hasPoolStores(ManagedAgentSettings.HarnessPool properties) {
+        boolean key = StringUtils.isNotBlank(properties.getKeyStoreFile());
+        boolean trust = StringUtils.isNotBlank(properties.getTrustStoreFile());
+        if (key != trust) {
             throw new IllegalArgumentException("Harness mTLS requires both PKCS12 key and trust stores");
+        }
+        return key;
+    }
+
+    public static SSLContext poolContext(ManagedAgentSettings.HarnessPool properties) {
+        if (!hasPoolStores(properties)) {
+            return null;
         }
         char[] keyPassword = password(properties.getKeyStorePasswordFile());
         char[] trustPassword = password(properties.getTrustStorePasswordFile());

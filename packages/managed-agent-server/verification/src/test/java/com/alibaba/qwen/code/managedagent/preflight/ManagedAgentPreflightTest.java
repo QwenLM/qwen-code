@@ -107,6 +107,76 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
+    void honorsTheHarnessTransportArgumentBeforeSendingCredentials() {
+        var arguments = new ArrayList<>(List.of(
+                "--server.address=127.0.0.1",
+                "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.base-url=http://192.0.2.7:4170"));
+        var checks = new ArrayList<ManagedAgentPreflight.Check>();
+        for (boolean requireTls : List.of(true, false)) {
+            if (!requireTls) {
+                arguments.add("--qwen.managed-agent.harness.require-remote-tls=false");
+            }
+            var environment = ManagedAgentPreflight.prepare(arguments.toArray(String[]::new),
+                    new StandardEnvironment(), checks).environment();
+            var properties = ManagedAgentPreflight.bind(environment, checks);
+            assertEquals(requireTls, properties.getHarness().isRequireRemoteTls());
+            assertFalse(properties.getAuth().isAllowInsecureBind());
+            assertEquals(requireTls ? ManagedAgentPreflight.Status.FAIL : ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.authCheck(environment, properties).status());
+            if (requireTls) {
+                properties.getHarness().setToken("test-harness-token");
+                properties.getHarness().setCapabilityDigest(DIGEST);
+                var probe = ManagedAgentPreflight.harnessCheck(properties, null);
+                assertEquals(ManagedAgentPreflight.Status.FAIL, probe.status());
+                assertTrue(probe.detail().contains("harness.require-remote-tls=false"), probe.detail());
+            }
+        }
+    }
+
+    @Test
+    void managedLocalRequiresALoopbackHarnessEvenWithRemoteHttpEnabled(@TempDir Path directory) {
+        var checks = ManagedAgentPreflight.checks(new String[] {
+                "--spring.profiles.active=managed-local",
+                "--QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY=" + directory,
+                "--QWEN_MANAGED_AGENT_WORKSPACE_ID=workspace",
+                "--spring.datasource.url=",
+                "--qwen.managed-agent.harness.base-url=http://192.0.2.1:4170",
+                "--qwen.managed-agent.harness.token=test-token",
+                "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
+                "--qwen.managed-agent.harness.require-remote-tls=false",
+        });
+        var harness = checks.stream().filter(check -> check.name().equals("harness")).findFirst().orElseThrow();
+        assertEquals(ManagedAgentPreflight.Status.FAIL, harness.status());
+        assertTrue(harness.detail().contains("Managed local service URLs must use loopback HTTP endpoints"), harness.detail());
+    }
+
+    @Test
+    void managedLocalPreflightChecksPoolMembersWithALoopbackBaseUrl(@TempDir Path directory) {
+        for (String url : List.of("http://192.0.2.1:4170", "http://private-test-token@bad host:4170", "http://localhost:4170")) {
+            var checks = ManagedAgentPreflight.checks(new String[] {
+                    "--spring.profiles.active=managed-local",
+                    "--QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY=" + directory,
+                    "--QWEN_MANAGED_AGENT_WORKSPACE_ID=workspace",
+                    "--spring.datasource.url=",
+                    "--qwen.managed-agent.auth.signing-key=" + "k".repeat(32),
+                    "--qwen.managed-agent.session-store.binding-key=" + "b".repeat(32),
+                    "--qwen.managed-agent.harness.base-url=http://127.0.0.1:4170",
+                    "--qwen.managed-agent.harness.pool.enabled=true",
+                    "--qwen.managed-agent.harness.pool.instances[0].instance-id=member",
+                    "--qwen.managed-agent.harness.pool.instances[0].base-url=" + url,
+                    "--qwen.managed-agent.harness.token=test-token",
+                    "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
+                    "--qwen.managed-agent.harness.require-remote-tls=false",
+            });
+            var harness = checks.stream().filter(check -> check.name().equals("harness")).findFirst().orElseThrow();
+            assertEquals(url.equals("http://localhost:4170") ? ManagedAgentPreflight.Status.SKIP
+                    : ManagedAgentPreflight.Status.FAIL, harness.status(), harness.detail());
+            assertTrue(checks.stream().noneMatch(check -> String.valueOf(check.detail()).contains("private-test-token")));
+        }
+    }
+
+    @Test
     void probesTheHarnessCapabilitiesEndpoint() throws IOException {
         HttpServer server = capabilitiesServer(capabilities(DIGEST, ""));
         try {
@@ -1584,13 +1654,8 @@ class ManagedAgentPreflightTest {
                 + " to 192.0.2.7:4182", proxied.fix());
         ManagedAgentPreflight.Check plain =
                 urlCheck("http://192.0.2.7:4182", broker);
-        assertEquals(ManagedAgentPreflight.Status.FAIL, plain.status());
-        assertEquals("the Hosted Harness refuses http://192.0.2.7:4182,"
-                + " because it uses plain http outside the loopback interface",
-                plain.detail());
-        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at the https"
-                + " URL of the TLS-terminating proxy in front of"
-                + " 192.0.2.7:4182", plain.fix());
+        assertEquals(ManagedAgentPreflight.Status.WARN, plain.status());
+        assertTrue(plain.fix().contains("--managed-runtime-broker-require-tls=false"));
         // A wildcard bind serves this machine's addresses, not any address,
         // and the Harness dials it over loopback.
         broker.setHost("0.0.0.0");
@@ -1600,9 +1665,8 @@ class ManagedAgentPreflightTest {
                 urlCheck("http://127.0.0.2:4183", broker).status());
         ManagedAgentPreflight.Check outside =
                 urlCheck("http://192.0.2.7:4182", broker);
-        assertEquals(ManagedAgentPreflight.Status.FAIL, outside.status());
-        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
-                + " http://127.0.0.1:4182", outside.fix());
+        assertEquals(ManagedAgentPreflight.Status.WARN, outside.status());
+        assertEquals(plain.fix(), outside.fix());
         // The IPv4 wildcard takes IPv6 only from a dual-stack JVM, which
         // preflight cannot confirm; the IPv4 URL reaches it either way.
         ManagedAgentPreflight.Check ipv6 = urlCheck("http://[::1]:4182", broker);
@@ -1669,9 +1733,8 @@ class ManagedAgentPreflightTest {
                 urlCheck("http://127.0.0.1:4182/broker", broker).status());
         // A host name the URI parser takes only as a registry authority is
         // still read as a host.
-        assertEquals("the Hosted Harness refuses http://qwen_broker:4182,"
-                + " because it uses plain http outside the loopback interface",
-                urlCheck("http://qwen_broker:4182", broker).detail());
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                urlCheck("http://qwen_broker:4182", broker).status());
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 urlCheck("https://qwen_broker:port", broker).status());
         // IPv6 loopback is one socket family; the IPv4 URL does not reach it.
@@ -1724,11 +1787,10 @@ class ManagedAgentPreflightTest {
             assertEquals("the Hosted Harness refuses " + url
                     + ", which is not an http or https origin", check.detail());
         }
-        // Only whether the Harness accepts an https host with an xn-- label
-        // depends on IDNA; plain http to one is refused either way.
+        // Whether the Harness accepts an xn-- host depends on its URL parser.
         assertEquals(ManagedAgentPreflight.Status.WARN,
                 urlCheck("https://xn--bcher-kva.example:4182", broker).status());
-        assertEquals(ManagedAgentPreflight.Status.FAIL,
+        assertEquals(ManagedAgentPreflight.Status.WARN,
                 urlCheck("http://xn--bcher-kva.example:4182", broker).status());
         broker.setHost("::1");
         assertEquals(ManagedAgentPreflight.Status.FAIL,

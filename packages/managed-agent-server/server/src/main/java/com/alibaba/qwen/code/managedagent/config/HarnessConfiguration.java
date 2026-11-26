@@ -22,7 +22,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.HashSet;
+import java.util.Objects;
 
 @Configuration
 public class HarnessConfiguration {
@@ -44,7 +46,7 @@ public class HarnessConfiguration {
             JdbcManagedSessionStore resources, JdbcSshWorkspaceStore ssh, JdbcHarnessPlacementStore placements,
             JdbcManagedSessionSkills skills, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
             JdbcManagedExtensionRecordStore extensionRecords) {
-        BrokerSecurity.checkHarnessTransport(properties, new java.util.ArrayList<>());
+        BrokerSecurity.checkHarnessTransport(properties);
         var pool = properties.getHarness().getPool();
         if (pool.isEnabled()) {
             HarnessDiscovery discovery;
@@ -57,7 +59,7 @@ public class HarnessConfiguration {
                     if (!identities.add(instance.getInstanceId())) {
                         throw new IllegalStateException("Duplicate Harness instance identity");
                     }
-                    return new HarnessDiscovery.Endpoint(instance.getInstanceId(), URI.create(instance.getBaseUrl()), true);
+                    return poolEndpoint(instance);
                 }).toList();
                 discovery = () -> new HarnessDiscovery.Snapshot(endpoints, true);
             } else {
@@ -80,6 +82,14 @@ public class HarnessConfiguration {
         connector.configureSessionSkills(skills);
         connector.configureExtensionResources(extensionRecords, json);
         return new com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary(connector);
+    }
+
+    static HarnessDiscovery.Endpoint poolEndpoint(ManagedAgentProperties.HarnessInstance instance) {
+        try {
+            return new HarnessDiscovery.Endpoint(instance.getInstanceId(), new URI(Objects.toString(instance.getBaseUrl(), "")), true);
+        } catch (URISyntaxException malformed) {
+            throw new IllegalStateException("Invalid Harness pool endpoint URL");
+        }
     }
 
     @Bean

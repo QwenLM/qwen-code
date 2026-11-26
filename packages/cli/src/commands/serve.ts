@@ -278,6 +278,7 @@ interface ServeArgs {
   'managed-data-dir'?: string;
   'managed-web-config'?: string;
   'hosted-harness-capability-digest'?: string;
+  'hosted-harness-require-loopback': 'true' | 'false';
   token?: string;
   'max-sessions'?: number;
   'max-total-sessions'?: number;
@@ -327,6 +328,7 @@ interface ServeArgs {
   'experimental-managed-runtime-url'?: string;
   'experimental-managed-runtime-token'?: string;
   'managed-runtime-broker-url'?: string;
+  'managed-runtime-broker-require-tls': 'true' | 'false';
   'managed-runtime-broker-token'?: string;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
@@ -369,13 +371,21 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: DEFAULT_SERVE_HOSTNAME,
         description:
-          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one). A localhost bind that resolves off-loopback never generates, and still refuses when no token source resolved; an empty value is rejected as operator error.',
+          'Interface to bind. The default profile allows tokenless loopback (127.0.0.0/8, localhost, ::1, [::1]) and generates a token for other addresses when none is configured. A localhost bind resolving off-loopback requires a configured token. Hosted Harness always requires a configured token. An empty hostname is rejected.',
       })
       .option('profile', {
         choices: ['default', 'hosted-harness'] as const,
         default: 'default' as const,
         description:
-          'Deployment profile. hosted-harness enables the private no-tool Managed Session API on loopback.',
+          'Deployment profile. hosted-harness serves the private Managed Session API and binds to loopback by default.',
+      })
+      .option('hosted-harness-require-loopback', {
+        type: 'string',
+        choices: ['true', 'false'] as const,
+        default: 'true' as const,
+        requiresArg: true,
+        description:
+          'Require a loopback --hostname for Hosted Harness. Set to false to bind an explicitly selected private interface or wildcard.',
       })
       .option('hosted-harness-capability-digest', {
         type: 'string',
@@ -403,7 +413,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('token', {
         type: 'string',
         description:
-          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var; a non-loopback bind with neither generates an ephemeral token at startup, while loopback keeps the trusted tokenless mode unless --require-auth is set.',
+          'Bearer token for every request. Falls back to QWEN_SERVER_TOKEN. The default profile generates an ephemeral token for a non-loopback bind when neither is supplied. Hosted Harness requires one of these token sources.',
       })
       .option('max-sessions', {
         type: 'number',
@@ -487,9 +497,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Hardens the loopback developer default for shared dev hosts / CI ' +
           'runners / multi-tenant workstations where any local user can hit ' +
           '127.0.0.1. Requires --token, QWEN_SERVER_TOKEN, or --open-with-auth ' +
-          '(which installs its own generated loopback token); on non-loopback ' +
-          'binds the generated ephemeral token also satisfies it, so the ' +
-          'no-configured-secret fail-fast is loopback-only. /health also ' +
+          '(which installs its own generated loopback token). In the default ' +
+          'profile a non-loopback bind can generate an ephemeral token. /health also ' +
           'requires Authorization when enabled (no loopback exemption — ' +
           'k8s/Compose probes must pass the bearer too).',
       })
@@ -849,6 +858,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requiresArg: true,
         description:
           'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list.',
+      })
+      .option('managed-runtime-broker-require-tls', {
+        type: 'string',
+        choices: ['true', 'false'] as const,
+        default: 'true' as const,
+        requiresArg: true,
+        description:
+          'Require HTTPS for a non-loopback Hosted Harness Broker URL. Set to false to allow HTTP on a trusted network.',
       })
       .option('writer-idle-timeout-ms', {
         type: 'number',
@@ -1246,6 +1263,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         port: argv.port,
         hostname: argv.hostname,
         profile: argv.profile,
+        hostedHarnessRequireLoopback:
+          argv['hosted-harness-require-loopback'] !== 'false',
+        managedRuntimeBrokerRequireTls:
+          argv['managed-runtime-broker-require-tls'] !== 'false',
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],

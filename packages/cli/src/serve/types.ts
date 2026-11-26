@@ -396,10 +396,14 @@ export interface ServeOptions {
   experimentalManagedRuntimeToken?: string;
   /** Java Runtime Broker origin used only by the Hosted Harness profile. */
   managedRuntimeBrokerUrl?: string;
+  /** Require HTTPS for a non-loopback Broker origin. Defaults to true. */
+  managedRuntimeBrokerRequireTls?: boolean;
   /** Service credential used only for Harness-to-Broker calls. */
   managedRuntimeBrokerToken?: string;
   /** Deployment-generated digest for the Hosted Harness private contract. */
   hostedHarnessCapabilityDigest?: string;
+  /** Require a loopback Hosted Harness listen address. Defaults to true. */
+  hostedHarnessRequireLoopback?: boolean;
   /**
    * Per-SSE-connection writer stall budget (ms). A stream whose write is
    * stuck waiting for `drain` (the consumer stopped reading) for longer
