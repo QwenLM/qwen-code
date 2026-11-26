@@ -1789,8 +1789,12 @@ function submit(
   if (aoneWrite || commentOnly) {
     if (fixedFindings.length > 0) {
       writeStderrLine(
-        `${commentOnly ? 'COMMENT-only publication' : 'Aone Code'} leaves ` +
-          `${fixedFindings.length} historical thread(s) unchanged; resolve them separately.`,
+        aoneWrite
+          ? `Note: ${fixedFindings.length} fixed ruling(s) name threads to ` +
+              `resolve, but the thread lifecycle is GitHub-only — Aone's MR ` +
+              `discussions stay as posted.`
+          : `COMMENT-only publication leaves ${fixedFindings.length} ` +
+              `historical thread(s) unchanged; resolve them separately.`,
       );
     }
   } else {

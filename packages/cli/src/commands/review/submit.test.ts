@@ -3461,6 +3461,35 @@ describe('trusted CI COMMENT-only publication', () => {
     expect(process.exitCode).toBe(3);
     expect(ghMock).not.toHaveBeenCalled();
   });
+
+  it('discloses fixed rulings left unapplied under COMMENT-only publication', () => {
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    vi.stubEnv(
+      'QWEN_CI_REVIEW_PUBLISHER',
+      'qwen-code-pr-review/publish-comment',
+    );
+    runSubmit(
+      args({
+        userAuthorized: true,
+        commentOnly: true,
+        review: file(
+          `review-${seq++}.json`,
+          JSON.stringify({
+            ...REVIEW,
+            state: {
+              ...REVIEW.state,
+              fixedFindings: [{ id: 'R1-1', by: 'the reworked guard' }],
+            },
+          }),
+        ),
+      }),
+    );
+    expect(process.exitCode).toBeUndefined();
+    const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain(
+      'COMMENT-only publication leaves 1 historical thread(s) unchanged; resolve them separately.',
+    );
+  });
 });
 
 // The failure this whole change exists for.
