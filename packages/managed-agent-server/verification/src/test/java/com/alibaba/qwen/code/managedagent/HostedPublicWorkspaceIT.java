@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepo
 import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
+import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -102,6 +103,9 @@ class HostedPublicWorkspaceIT {
     private ServletWebServerApplicationContext spring;
     private HttpServer model;
     private Process harness;
+    private Process poolSuccessor;
+    private int poolSuccessorPort;
+    private IsolatedManagedSchemaMySqlTestDatabase poolDatabase;
     private JdbcTemplate jdbc;
     private int port;
     private Path decoy;
@@ -953,7 +957,7 @@ class HostedPublicWorkspaceIT {
     @ValueSource(strings = {"allow", "deny", "cancel", "mode-change", "expiry"})
     @Timeout(150)
     void publicChildrenShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql(String outcome) throws Exception {
-        shellApprovalSettlesAfterParkingAndHarnessReplacement(outcome, true, true);
+        shellApprovalSettlesAfterParking(outcome, true, true);
     }
 
     @ParameterizedTest(name = "publication={0}, outcome={1}")
@@ -961,7 +965,7 @@ class HostedPublicWorkspaceIT {
     @Timeout(150)
     void versionZeroShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql(boolean publication, String outcome)
             throws Exception {
-        shellApprovalSettlesAfterParkingAndHarnessReplacement(outcome, false, publication);
+        shellApprovalSettlesAfterParking(outcome, false, publication);
     }
 
     @Test
@@ -1388,8 +1392,16 @@ class HostedPublicWorkspaceIT {
                 tenant, "mail-1", 1, "1700:90", 1);
     }
 
-    private void shellApprovalSettlesAfterParkingAndHarnessReplacement(
-            String outcome, boolean children, boolean publication) throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"allow", "deny"})
+    @Timeout(120)
+    void healthyPoolHandsParkedShellActionToSuccessorBeforeLeaseExpiryOnMySql(String outcome) throws Exception {
+        poolDatabase = new IsolatedManagedSchemaMySqlTestDatabase();
+        poolSuccessorPort = reservePort();
+        shellApprovalSettlesAfterParking(outcome, true, true);
+    }
+
+    private void shellApprovalSettlesAfterParking(String outcome, boolean children, boolean publication) throws Exception {
         assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
         parkedShellOutcome = outcome;
         shell = true;
@@ -1428,18 +1440,34 @@ class HostedPublicWorkspaceIT {
         var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
         int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
         int brokerPort = properties.getRuntimeBroker().getPort();
-        long oldPid = harness.pid();
-        harness.destroyForcibly();
-        assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
-        Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
-        if (children && "allow".equals(outcome)) {
-            spring.close();
-            restarted = true;
-            startSpring(cli, roots, harnessPort, brokerPort);
-            assertThat(HostedParkedAction.read(jdbc, tenant, session, turn)).isEqualTo(parked);
+        HarnessPlacementStore placements = poolDatabase == null ? null : spring.getBean(HarnessPlacementStore.class);
+        HarnessPlacementStore.Placement original = placements == null ? null : placements.get(tenant, session);
+        long oldLease = 0;
+        if (placements != null) {
+            assertThat(original).isNotNull();
+            assertThat(original.instanceId()).isEqualTo("pool-a");
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertThat(placements.get(tenant, session).state()).isEqualTo("RELEASED"));
+            oldLease = jdbc.queryForObject("""
+                    SELECT writer_lease_until FROM ma_session_head
+                    WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'
+                    """, Long.class, tenant, session);
+            assertThat(oldLease).isGreaterThan(System.currentTimeMillis());
+            assertPoolMembersAccepting(harnessPort);
+        } else {
+            long oldPid = harness.pid();
+            harness.destroyForcibly();
+            assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
+            Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
+            if (children && "allow".equals(outcome)) {
+                spring.close();
+                restarted = true;
+                startSpring(cli, roots, harnessPort, brokerPort);
+                assertThat(HostedParkedAction.read(jdbc, tenant, session, turn)).isEqualTo(parked);
+            }
+            startHarness(cli, harnessPort, brokerPort);
+            assertThat(harness.pid()).isNotEqualTo(oldPid);
         }
-        startHarness(cli, harnessPort, brokerPort);
-        assertThat(harness.pid()).isNotEqualTo(oldPid);
 
         String actionRoute = route + "/actions/" + parked.actionId();
         switch (outcome) {
@@ -1449,6 +1477,14 @@ class HostedPublicWorkspaceIT {
                 var decision = parked.response(action, outcome);
                 String operation = request("POST", actionRoute + "/responses", decision, "decision", "actor", 202)
                         .path("id").asText();
+                if (placements != null) {
+                    await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+                        var successor = placements.get(tenant, session);
+                        assertThat(successor.instanceId()).isEqualTo("pool-b");
+                        assertThat(successor.epoch()).isEqualTo(original.epoch() + 1);
+                    });
+                    assertThat(oldLease).isGreaterThan(System.currentTimeMillis());
+                }
                 assertThat(request("POST", actionRoute + "/responses", decision, "decision", "actor", 202)
                         .path("id").asText()).isEqualTo(operation);
                 await().atMost(Duration.ofSeconds(40)).untilAsserted(() ->
@@ -1490,6 +1526,25 @@ class HostedPublicWorkspaceIT {
         }
         assertThat(modelFailure.get()).isNull();
         assertThat(modelRequests).hasSize(cancelled ? 1 : 2);
+        if (placements != null) {
+            assertPoolMembersAccepting(harnessPort);
+        }
+    }
+
+    private void assertPoolMembersAccepting(int harnessPort) {
+        assertThat(harness.isAlive()).isTrue();
+        assertThat(poolSuccessor.isAlive()).isTrue();
+        assertThat(harness.pid()).isNotEqualTo(poolSuccessor.pid());
+        assertPoolMemberAccepting(harnessPort, "pool-a");
+        assertPoolMemberAccepting(poolSuccessorPort, "pool-b");
+    }
+
+    private void assertPoolMemberAccepting(int memberPort, String instanceId) {
+        try (var client = HostedHarnessClient.builder().baseUri(URI.create("http://127.0.0.1:" + memberPort))
+                .bearerToken(TOKEN).capabilityDigest(DIGEST).heartbeatInterval(Duration.ZERO).build()) {
+            assertThat(client.capabilities().getInstanceId()).isEqualTo(instanceId);
+            assertThat(client.readInstance().get("state")).isEqualTo("ACCEPTING");
+        }
     }
 
     private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
@@ -1889,6 +1944,11 @@ class HostedPublicWorkspaceIT {
         }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
+        if (poolDatabase != null) {
+            startHarness(cli, poolSuccessorPort, brokerPort, "pool-b");
+            assertPoolMembersAccepting(harnessPort);
+            ReflectionTestUtils.invokeMethod(connectorOwning(spring.getBean(HarnessConnector.class)), "refresh");
+        }
         return roots;
     }
 
@@ -2219,7 +2279,8 @@ class HostedPublicWorkspaceIT {
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) throws IOException {
         boolean mysql = System.getProperty("mysql.url") != null;
-        String databaseUrl = parkingDatabase != null ? parkingDatabase.url() : System.getProperty("mysql.url",
+        var isolatedDatabase = parkingDatabase == null ? poolDatabase : parkingDatabase;
+        String databaseUrl = isolatedDatabase != null ? isolatedDatabase.url() : System.getProperty("mysql.url",
                 "jdbc:h2:mem:" + tenant + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         boolean detachedParking = "background".equals(parkingSlice) || "monitor".equals(parkingSlice);
         Path worker = cli;
@@ -2255,6 +2316,16 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.node-executable="
                         + (holdRuntimeStartup ? temporary.resolve("worker-barrier-node") : node),
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + worker));
+        if (poolDatabase != null) {
+            arguments.addAll(List.of(
+                    "--qwen.managed-agent.session-store.binding-key=pool-binding-key-0123456789abcdef0123456789abcdef",
+                    "--qwen.managed-agent.harness.heartbeat-interval=PT0S",
+                    "--qwen.managed-agent.harness.pool.enabled=true",
+                    "--qwen.managed-agent.harness.pool.instances[0].instance-id=pool-a",
+                    "--qwen.managed-agent.harness.pool.instances[0].base-url=http://127.0.0.1:" + harnessPort,
+                    "--qwen.managed-agent.harness.pool.instances[1].instance-id=pool-b",
+                    "--qwen.managed-agent.harness.pool.instances[1].base-url=http://127.0.0.1:" + poolSuccessorPort));
+        }
         if (holdRuntimeStartup) {
             arguments.addAll(List.of("--qwen.managed-agent.dispatch.scan-delay=10ms",
                     "--qwen.managed-agent.dispatch.retry-initial-delay=10ms",
@@ -2429,7 +2500,12 @@ class HostedPublicWorkspaceIT {
     }
 
     private void startHarness(Path cli, int harnessPort, int brokerPort) throws Exception {
-        Path home = Files.createDirectories(temporary.resolve("home"));
+        startHarness(cli, harnessPort, brokerPort, poolDatabase == null ? null : "pool-a");
+    }
+
+    private void startHarness(Path cli, int harnessPort, int brokerPort, String instanceId) throws Exception {
+        boolean successor = "pool-b".equals(instanceId);
+        Path home = Files.createDirectories(temporary.resolve(successor ? "pool-b-home" : "home"));
         Path config = Files.createDirectories(home.resolve(".qwen"));
         String modelUrl = "http://127.0.0.1:" + model.getAddress().getPort() + "/v1";
         List<Map<String, Object>> models = new ArrayList<>(List.of(Map.of(
@@ -2448,7 +2524,7 @@ class HostedPublicWorkspaceIT {
                             "maxRetries", 0, "retryInitialDelayMs", 1, "retryMaxDelayMs", 1)));
         }
         Files.writeString(config.resolve("settings.json"), json.writeValueAsString(settings));
-        Path log = temporary.resolve("harness.log");
+        Path log = temporary.resolve(successor ? "pool-b.log" : "harness.log");
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(),
                 "serve", "--profile", "hosted-harness", "--http-bridge", "--hostname", "127.0.0.1", "--port",
                 Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
@@ -2463,10 +2539,14 @@ class HostedPublicWorkspaceIT {
             }
         }
         environment.putAll(Map.of("HOME", home.toString(), "USERPROFILE", home.toString(), "QWEN_HOME", config.toString(),
-                "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
+                "QWEN_RUNTIME_DIR", temporary.resolve(successor ? "pool-b-runtime" : "runtime").toString(),
+                "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
+        if (instanceId != null) {
+            environment.put("QWEN_HOSTED_HARNESS_INSTANCE_ID", instanceId);
+        }
         if (parkedShellOutcome != null) {
-            environment.put("QWEN_E2E_IDLE_SUSPEND_MS", "3000");
+            environment.put("QWEN_E2E_IDLE_SUSPEND_MS", successor ? "60000" : "3000");
         }
         if (shellLifecycleV2) {
             environment.remove("QWEN_HOSTED_LIFECYCLE_V2_PROFILES");
@@ -2480,9 +2560,14 @@ class HostedPublicWorkspaceIT {
                 "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
             environment.put(name, temporary.resolve(name + ".json").toString());
         }
-        harness = builder.start();
+        Process process = builder.start();
+        if (successor) {
+            poolSuccessor = process;
+        } else {
+            harness = process;
+        }
         await().atMost(Duration.ofSeconds(30)).ignoreExceptions().untilAsserted(() -> {
-            if (!harness.isAlive()) {
+            if (!process.isAlive()) {
                 throw new AssertionError("Hosted Harness exited: " + Files.readString(log));
             }
             assertThat(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
@@ -2931,6 +3016,13 @@ class HostedPublicWorkspaceIT {
                         harness.waitFor(10, TimeUnit.SECONDS);
                     }
                 },
+                () -> {
+                    if (poolSuccessor != null) {
+                        poolSuccessor.descendants().forEach(ProcessHandle::destroyForcibly);
+                        poolSuccessor.destroyForcibly();
+                        assertThat(poolSuccessor.waitFor(10, TimeUnit.SECONDS)).isTrue();
+                    }
+                },
                 () -> { if (shellProbe != null) {
                     shellProbe.close();
                 } },
@@ -2959,6 +3051,9 @@ class HostedPublicWorkspaceIT {
                 } },
                 () -> { if (parkingDatabase != null) {
                     parkingDatabase.close();
+                } },
+                () -> { if (poolDatabase != null) {
+                    poolDatabase.close();
                 } });
         for (var step : cleanup) {
             try {
