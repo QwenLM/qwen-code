@@ -17,10 +17,7 @@ describe('describeAgentTerminateReason', () => {
     [AgentTerminateMode.MAX_TURNS, 'Agent stopped: maximum turns reached.'],
     [AgentTerminateMode.TIMEOUT, 'Agent stopped: time limit reached.'],
     [AgentTerminateMode.ERROR, 'Agent stopped due to an error.'],
-    [
-      AgentTerminateMode.LOOP_DETECTED,
-      'Agent stopped: duplicate tool-call loop detected.',
-    ],
+    [AgentTerminateMode.LOOP_DETECTED, 'Agent stopped: loop detected.'],
   ])('words %s', (mode, expected) => {
     expect(describeAgentTerminateReason(mode)).toBe(expected);
   });
@@ -29,11 +26,9 @@ describe('describeAgentTerminateReason', () => {
     expect(
       describeAgentTerminateReason(
         AgentTerminateMode.LOOP_DETECTED,
-        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        LoopType.TURN_TOOL_CALL_CAP,
       ),
-    ).toBe(
-      'Agent stopped: duplicate tool-call loop detected (consecutive_identical_tool_calls).',
-    );
+    ).toBe('Agent stopped: loop detected (turn_tool_call_cap).');
   });
 
   it.each([
@@ -62,11 +57,9 @@ describe('terminateReasonMessage', () => {
       terminateReasonMessage(
         AgentTerminateMode.LOOP_DETECTED,
         'Dream agent failed',
-        LoopType.ACTION_STAGNATION,
+        LoopType.TURN_TOOL_CALL_CAP,
       ),
-    ).toBe(
-      'Agent stopped: duplicate tool-call loop detected (action_stagnation).',
-    );
+    ).toBe('Agent stopped: loop detected (turn_tool_call_cap).');
   });
 
   it('falls back to the generic wording when no detector is known', () => {
@@ -76,7 +69,7 @@ describe('terminateReasonMessage', () => {
         'Dream agent failed',
         null,
       ),
-    ).toBe('Agent stopped: duplicate tool-call loop detected.');
+    ).toBe('Agent stopped: loop detected.');
   });
 
   it('passes an unrecognized reason through unchanged', () => {

@@ -43,6 +43,7 @@ import type {
   ContextUsageControls,
   RegisterContextUsageControls,
 } from './hooks/useContextUsageControls';
+import type { DaemonProductSessionContext } from './daemon/session/types';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import * as browserNotifications from './browser-turn-notifications';
 import {
@@ -53,12 +54,14 @@ import {
   type DaemonSessionAgentTaskStatus,
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
+  type DaemonSessionClient,
   type DaemonSessionSummary,
   type DaemonSessionContextStatus,
   type DaemonSessionContextUsageStatus,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionShellTaskStatus,
   type DaemonBrand,
+  type DaemonCapabilities,
   type DaemonSessionStatsStatus,
   type DaemonSessionTaskStatus,
   type DaemonSessionTaskWithWorkflowStatus,
@@ -93,6 +96,7 @@ import type {
 } from './voice/voice-workspace-target';
 import type {
   ChatHeaderRenderInfo,
+  WebShellAssistantFeedbackOptions,
   WebShellComposerToolbarRenderInfo,
 } from './customization';
 import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
@@ -101,6 +105,7 @@ import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
 import { DaemonAvailabilityContext } from './daemon/availability-context.js';
+import type { DaemonProductSessionContext } from './daemon/session/types';
 import { offlineDaemon } from './daemon/availability.test-fixtures.js';
 import { WebShellNavigationBoundary } from './navigation';
 import { HotkeySetter } from './live/HotkeySetter';
@@ -284,7 +289,6 @@ type StreamingState = 'idle' | 'responding';
 type MockConnection = {
   status: 'connected' | 'connecting' | 'disconnected' | 'error';
   sessionId: string | undefined;
-  sessionContext?: { kind: 'standalone' };
   context?: DaemonSessionContextStatus;
   clientId: string;
   displayName: string | undefined;
@@ -767,6 +771,7 @@ const {
       sessionId: 'session-1',
       recap: null,
     }),
+    rateAssistantTurn: vi.fn().mockResolvedValue(undefined),
     refreshCommands: vi.fn().mockResolvedValue(undefined),
     setModel: vi.fn().mockResolvedValue(undefined),
     setReasoningEffort: vi.fn().mockResolvedValue(undefined),
@@ -851,6 +856,7 @@ const {
       capabilities: {
         workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
       },
+      workspaceCwd: undefined as string | undefined,
       brand: undefined as DaemonBrand | undefined,
       brandSettled: false,
       status: 'connected' as 'connected' | 'error',
@@ -892,6 +898,7 @@ const {
       updateScheduledTask: vi.fn(),
       deleteScheduledTask: vi.fn(),
       deleteModel: vi.fn().mockResolvedValue(undefined),
+      unarchiveSession: vi.fn().mockResolvedValue(undefined),
       controlGoal: vi.fn().mockResolvedValue({
         snapshot: { v: 2, activity: 'idle', goal: null },
       }),
@@ -988,7 +995,13 @@ const {
         | null,
       latestTaskChipsIncludeAgents: null as boolean | null,
       latestTaskChipsOnSelectTask: null as
-        | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
+        | ((
+            task: DaemonSessionTaskWithWorkflowStatus,
+            toggle?: boolean,
+          ) => void)
+        | null,
+      latestTaskChipsIsTaskOpen: null as
+        | ((task: DaemonSessionTaskWithWorkflowStatus) => boolean)
         | null,
       latestTaskChipsOnExplainTask: null as
         | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
@@ -1005,6 +1018,9 @@ const {
         | ((turn: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn) => void)
         | undefined,
       capturedHostOwnsArtifactPreview: undefined as boolean | undefined,
+      capturedAssistantFeedback: undefined as
+        | WebShellAssistantFeedbackOptions
+        | undefined,
       latestMessageListProps: null as {
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
         turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
@@ -1017,6 +1033,7 @@ const {
         showRetryHint?: boolean;
         onRetryClick?: () => void;
         failedPromptMessageId?: string;
+        failedPromptStatus?: 'failed' | 'uncertain';
         onRetryFailedPrompt?: () => void;
         onEditUserMessage?: (
           turnIndex: number,
@@ -1045,7 +1062,12 @@ const {
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestSessionOverviewProps: null as {
-        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+        onOpenSession?: (
+          sessionId: string,
+          workspaceCwd?: string,
+          sessionContext?: DaemonProductSessionContext,
+          restoredSession?: DaemonSessionClient,
+        ) => void;
         onOpenSplit?: (sessionIds: string[]) => void;
         onCurrentSessionRemoved?: (session: {
           sessionId: string;
@@ -1054,10 +1076,28 @@ const {
         manageLiveState?: boolean;
         onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
       } | null,
+      latestPluginManagerProps: null as React.ComponentProps<
+        typeof import('./components/plugins/PluginManagerPage').PluginManagerPage
+      > | null,
       latestChannelsManagerProps: null as {
         clientId?: string;
         sessionWorkspaceCwd?: string;
+        initialWorkspaceCwd?: string;
+        navigationRequest?: number;
       } | null,
+      onOpenWorkspaceManagement: undefined as
+        | ((
+            target:
+              | 'mcp'
+              | 'skills'
+              | 'extensions'
+              | 'channels'
+              | 'settings'
+              | 'context'
+              | 'hooks',
+            workspaceCwd: string,
+          ) => void)
+        | undefined,
       latestToolApprovalDisabled: false,
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
@@ -1100,7 +1140,11 @@ const {
       settingsReloading: false,
       settingsError: undefined as Error | undefined,
       latestSettingsHookOptions: undefined as
-        | { autoLoad?: boolean; enabled?: boolean }
+        | {
+            workspaceCwd?: string;
+            autoLoad?: boolean;
+            enabled?: boolean;
+          }
         | undefined,
       latestProvidersHookOptions: undefined as
         | { autoLoad?: boolean; enabled?: boolean }
@@ -1123,6 +1167,8 @@ const {
           value: unknown,
         ) => Promise<unknown>;
       } | null,
+      latestSettingsWorkspaceControl: null as ReactNode,
+      latestSettingsWorkspaceDirectoriesSection: null as ReactNode,
       artifactPanelExtra: null as ReactNode,
       captureArtifactPanelOnly: false,
       latestArtifactPanelProps: null as React.ComponentProps<
@@ -1188,6 +1234,18 @@ const {
           workspaceCwd?: string,
         ) => boolean | void | Promise<boolean | void>;
         onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+      } | null,
+      latestArtifactLibraryProps: null as {
+        workspaceCwd?: string;
+        onOpenSession?: (
+          sessionId: string,
+          archiveState: 'active' | 'archived',
+        ) => void;
+        onJumpToSessionArtifact?: (
+          sessionId: string,
+          artifactId: string,
+          archiveState: 'active' | 'archived',
+        ) => void;
       } | null,
       latestWorkflowRunsProps: null as {
         onCreateViaChat?: () => void;
@@ -1300,7 +1358,11 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
       refreshHead: vi.fn(),
       loadOrdinal: vi.fn(),
     }),
-    useSettings: (options?: { autoLoad?: boolean; enabled?: boolean }) => {
+    useSettings: (options?: {
+      workspaceCwd?: string;
+      autoLoad?: boolean;
+      enabled?: boolean;
+    }) => {
       testState.latestSettingsHookOptions = options;
       return {
         settings: testState.settings,
@@ -1706,6 +1768,7 @@ vi.mock('./components/TranscriptViewport', async () => {
         showRetryHint?: boolean;
         onRetryClick?: () => void;
         failedPromptMessageId?: string;
+        failedPromptStatus?: 'failed' | 'uncertain';
         onRetryFailedPrompt?: () => void;
         onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         onAttachmentPreview?: (file: {
@@ -1727,6 +1790,8 @@ vi.mock('./components/TranscriptViewport', async () => {
       // the hostOwnsArtifactPreview value App derives from onRightPanelOpen.
       testState.capturedHostOwnsArtifactPreview =
         useWebShellCustomization().hostOwnsArtifactPreview;
+      testState.capturedAssistantFeedback =
+        useWebShellCustomization().assistantFeedback;
       React.useImperativeHandle(ref, () => ({
         scrollToBottom: notificationScrollToBottom,
         scrollToMessage: messageListScrollToMessage,
@@ -1752,6 +1817,7 @@ vi.mock('./components/TranscriptViewport', async () => {
               'button',
               {
                 'data-testid': 'failed-prompt-retry',
+                'data-failed-status': props.failedPromptStatus,
                 onClick: props.onRetryFailedPrompt,
                 type: 'button',
               },
@@ -1773,6 +1839,8 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       settingsState: NonNullable<typeof testState.latestSettingsState>;
       initialCategory?: string;
       presentation?: WebShellSettingsOptions;
+      workspaceControl?: ReactNode;
+      workspaceDirectoriesSection?: ReactNode;
       onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
       onLanguageChange?: (
         language: string,
@@ -1794,6 +1862,9 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       testState.latestSettingsState = props.settingsState;
       testState.latestSettingsInitialCategory = props.initialCategory;
       testState.latestSettingsPresentation = props.presentation;
+      testState.latestSettingsWorkspaceControl = props.workspaceControl ?? null;
+      testState.latestSettingsWorkspaceDirectoriesSection =
+        props.workspaceDirectoriesSection ?? null;
       testState.latestModelManagement =
         props.modelManagementSectionProps ?? null;
       return React.createElement(
@@ -2013,6 +2084,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onOpenLive?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenPrWatches?: () => void;
+      onOpenArtifacts?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
       onAddSessionToSplitView?: (sessionId: string) => void;
@@ -2024,6 +2096,17 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
+      onOpenWorkspaceManagement?: (
+        target:
+          | 'mcp'
+          | 'skills'
+          | 'extensions'
+          | 'channels'
+          | 'settings'
+          | 'context'
+          | 'hooks',
+        workspaceCwd: string,
+      ) => void;
       onLoadSession?: (
         sessionId: string,
         workspaceCwd?: string,
@@ -2053,6 +2136,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onSearchQueryChange?: (query: string) => void;
       currentSessionActive?: boolean;
     }) => {
+      testState.onOpenWorkspaceManagement = props.onOpenWorkspaceManagement;
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
       return React.createElement(
@@ -2170,6 +2254,18 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: () => props.onOpenPrWatches?.(),
           },
           'open pr watches',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-artifacts-library',
+            'data-has-artifacts-library': String(
+              Boolean(props.onOpenArtifacts),
+            ),
+            type: 'button',
+            onClick: () => props.onOpenArtifacts?.(),
+          },
+          'open artifacts library',
         ),
         React.createElement(
           'button',
@@ -2449,12 +2545,17 @@ vi.doMock('./components/ComposerTaskChips', async () => {
     ComposerTaskChips: React.forwardRef(function ComposerTaskChips(props: {
       tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
       includeAgents: boolean;
-      onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+      onSelectTask: (
+        task: DaemonSessionTaskWithWorkflowStatus,
+        toggle?: boolean,
+      ) => void;
+      isTaskOpen?: (task: DaemonSessionTaskWithWorkflowStatus) => boolean;
       onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
     }) {
       testState.latestTaskChipsTasks = props.tasks;
       testState.latestTaskChipsIncludeAgents = props.includeAgents;
       testState.latestTaskChipsOnSelectTask = props.onSelectTask;
+      testState.latestTaskChipsIsTaskOpen = props.isTaskOpen ?? null;
       testState.latestTaskChipsOnExplainTask = props.onExplainTask ?? null;
       return React.createElement('div', {
         'data-testid': 'composer-task-chips',
@@ -2555,7 +2656,12 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
   const React = await import('react');
   return {
     SessionOverviewPanel: (props: {
-      onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+      onOpenSession?: (
+        sessionId: string,
+        workspaceCwd?: string,
+        sessionContext?: DaemonProductSessionContext,
+        restoredSession?: DaemonSessionClient,
+      ) => void;
       onOpenSplit?: (sessionIds: string[]) => void;
       onCurrentSessionRemoved?: (session: {
         sessionId: string;
@@ -2571,12 +2677,30 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
     },
   };
 });
+vi.doMock('./components/plugins/PluginManagerPage', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./components/plugins/PluginManagerPage')
+    >();
+  const React = await import('react');
+  return {
+    ...actual,
+    PluginManagerPage: (
+      props: React.ComponentProps<typeof actual.PluginManagerPage>,
+    ) => {
+      testState.latestPluginManagerProps = props;
+      return React.createElement(actual.PluginManagerPage, props);
+    },
+  };
+});
 vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   const React = await import('react');
   return {
     ChannelsManagerPage: (props: {
       clientId?: string;
       sessionWorkspaceCwd?: string;
+      initialWorkspaceCwd?: string;
+      navigationRequest?: number;
     }) => {
       testState.latestChannelsManagerProps = props;
       return React.createElement('div', {
@@ -2963,6 +3087,28 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
     }) => {
       testState.latestGoalsProps = props;
       return React.createElement('div');
+    },
+  };
+});
+vi.doMock('./components/artifacts/WorkspaceArtifactLibraryPage', async () => {
+  const React = await import('react');
+  return {
+    WorkspaceArtifactLibraryPage: (props: {
+      workspaceCwd?: string;
+      onOpenSession?: (
+        sessionId: string,
+        archiveState: 'active' | 'archived',
+      ) => void;
+      onJumpToSessionArtifact?: (
+        sessionId: string,
+        artifactId: string,
+        archiveState: 'active' | 'archived',
+      ) => void;
+    }) => {
+      testState.latestArtifactLibraryProps = props;
+      return React.createElement('div', {
+        'data-testid': 'workspace-artifact-library-mock',
+      });
     },
   };
 });
@@ -13565,6 +13711,7 @@ beforeEach(() => {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
   mockWorkspace.baseUrl = '';
+  mockWorkspace.workspaceCwd = undefined;
   mockUseWorkspaceSessionLiveState.mockClear();
   mockUseDaemonSessionActivityBridge.mockReset();
   mockUseDaemonSessionActivityBridge.mockImplementation(() => ({
@@ -13756,15 +13903,19 @@ beforeEach(() => {
   testState.latestTaskChipsTasks = null;
   testState.latestTaskChipsIncludeAgents = null;
   testState.latestTaskChipsOnSelectTask = null;
+  testState.latestTaskChipsIsTaskOpen = null;
   testState.latestTaskChipsOnExplainTask = null;
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
   testState.capturedHostOwnsArtifactPreview = undefined;
+  testState.capturedAssistantFeedback = undefined;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
+  testState.latestPluginManagerProps = null;
   testState.latestChannelsManagerProps = null;
+  testState.onOpenWorkspaceManagement = undefined;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
@@ -13787,12 +13938,15 @@ beforeEach(() => {
   testState.latestSettingsHookOptions = undefined;
   testState.latestProvidersHookOptions = undefined;
   testState.latestSettingsState = null;
+  testState.latestSettingsWorkspaceControl = null;
+  testState.latestSettingsWorkspaceDirectoriesSection = null;
   testState.latestSettingsInitialCategory = undefined;
   testState.latestSettingsPresentation = undefined;
   testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
   testState.latestPrWatchesProps = null;
   testState.latestGoalsProps = null;
+  testState.latestArtifactLibraryProps = null;
   testState.latestWorkflowRunsProps = null;
   testState.latestSplitViewProps = null;
   testState.latestArtifactPanelProps = null;
@@ -14969,7 +15123,7 @@ describe('App plan todos', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
 
@@ -15803,7 +15957,7 @@ describe('App session workflow', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
     await flush();
@@ -19807,6 +19961,7 @@ describe('App session callbacks', () => {
     });
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledExactlyOnceWith(
       '/compress',
+      { suppressInputHistory: true },
     );
     expect(testState.latestChatEditorProps!.contextUsageControls).toMatchObject(
       { canCompress: false, compressing: true },
@@ -21904,13 +22059,957 @@ describe('App session callbacks', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
     await flush();
 
     expect(testState.latestTasksStatusProps).not.toBeNull();
   });
+
+  it('collapses a shell or monitor right-panel tab when its chip is clicked again, and switches when another chip is clicked', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-toggle',
+      label: 'npm run dev',
+      description: 'npm run dev',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'npm run dev',
+      cwd: '/tmp/project',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-toggle',
+      label: 'Watch server log',
+      description: 'Watch server log',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    const { container } = renderApp();
+    await flush();
+
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+
+    // First direct activation opens the shell tab.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="npm"]')).not.toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(false);
+
+    // Clicking a different chip switches to its tab without closing the panel.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelectorAll('button[title="Close"]')).toHaveLength(2);
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(true);
+
+    // Clicking the currently active monitor chip collapses the right panel.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(false);
+
+    // Direct activation reopens the shell and a repeat activation closes it.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="npm"]')).not.toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+  });
+
+  it('closes whichever alias is active when standard and background tabs share one task', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-two-alias-tabs',
+      command: 'sleep 900',
+      label: 'Keep validation shell alive',
+      description: 'Keep validation shell alive',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+    };
+    mockWorkspace.client.sessionTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      tasks: [shell],
+    });
+    const transcript =
+      deferred<
+        Awaited<
+          ReturnType<typeof mockWorkspace.client.getSessionTranscriptPage>
+        >
+      >();
+    mockWorkspace.client.getSessionTranscriptPage.mockReturnValueOnce(
+      transcript.promise,
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.backgroundDetails?.({
+        id: 'background-two-alias-tabs',
+        turnId: 'background-two-alias-tabs',
+        taskId: shell.id,
+        kind: 'shell',
+        label: shell.label,
+        startedAt: 1,
+      });
+    });
+    await flush();
+    const backgroundId = `background:session-1:${shell.id}`;
+    expect(
+      testState.latestArtifactPanelProps?.tabs.map((tab) => tab.id),
+    ).toEqual([`shell:${shell.id}`, backgroundId]);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(backgroundId);
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    await act(async () => {
+      transcript.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        events: [],
+        hasMore: false,
+      });
+      await Promise.resolve();
+    });
+  });
+
+  it('toggles an unlinked workflow tasks dialog closed on repeat chip click and drops stale in-flight responses', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    type WorkflowTasksSnapshot = Awaited<
+      ReturnType<typeof mockSessionActions.getWorkflowTasks>
+    >;
+    const first = deferred<WorkflowTasksSnapshot>();
+    const second = deferred<WorkflowTasksSnapshot>();
+    mockSessionActions.getWorkflowTasks
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+
+    // A fresh activation after cancelling the first fetch can still open it.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    await act(async () => {
+      second.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 2,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      true,
+    );
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+
+    // Clicking the workflow chip again closes the tasks dialog without refetching.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(2);
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      false,
+    );
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+
+    // Resolving the earlier in-flight request must not re-open the closed dialog.
+    await act(async () => {
+      first.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      false,
+    );
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it('closes a transcript-background shell tab on its chip instead of duplicating it', async () => {
+    mockWorkspace.client.sessionTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      tasks: [
+        {
+          kind: 'shell',
+          id: 'cli-bg-shell-success',
+          command: 'echo ok',
+          label: 'echo ok',
+          description: 'echo ok',
+          status: 'completed',
+          startTime: 1,
+          runtimeMs: 10,
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      await testState.backgroundDetails?.({
+        id: 'background-shell',
+        turnId: 'successful-shell',
+        taskId: 'cli-bg-shell-success',
+        kind: 'shell',
+        name: 'background_task',
+        status: 'completed',
+        message: 'Command completed.',
+        timestamp: '2026-10-25T08:00:00.000Z',
+        rawOutput: {
+          task: {
+            id: 'cli-bg-shell-success',
+            kind: 'shell',
+            command: 'echo ok',
+            label: 'echo ok',
+            description: 'echo ok',
+          },
+        },
+      });
+    });
+    await flush();
+    expect(container.querySelector('button[title="echo"]')).not.toBeNull();
+
+    const task = (await mockWorkspace.client.sessionTasks()).tasks[0]!;
+    expect(task.kind).toBe('shell');
+    expect(testState.latestTaskChipsIsTaskOpen?.(task)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(task, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+  });
+
+  it('does not let a pending tasks dialog cover a newer agent detail selection', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.({
+        kind: 'agent',
+        id: 'agent-new-detail',
+        toolUseId: 'agent-call',
+        label: 'Research the API',
+        description: 'Research the API',
+        status: 'running',
+        startTime: 3,
+        runtimeMs: 30,
+        isBackgrounded: true,
+        subagentType: 'general-purpose',
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(container.textContent).toContain('Agent: Research the API');
+  });
+
+  it('cancels an old tasks request when closing the already-open chip panel', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-close-cancel',
+      label: 'npm run test',
+      description: 'npm run test',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'npm run test',
+    };
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+  });
+
+  it('closes a background agent tab on its chip while hydration is still pending', async () => {
+    const transcript =
+      deferred<
+        Awaited<
+          ReturnType<typeof mockWorkspace.client.getSessionTranscriptPage>
+        >
+      >();
+    mockWorkspace.client.getSessionTranscriptPage.mockReturnValueOnce(
+      transcript.promise,
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      await testState.backgroundDetails?.({
+        id: 'background-agent',
+        turnId: 'background-agent-call',
+        taskId: 'agent-call',
+        kind: 'agent',
+        name: 'background_task',
+        status: 'running',
+        message: 'Agent is working.',
+        timestamp: '2026-10-25T08:00:00.000Z',
+        rawOutput: {
+          task: {
+            id: 'agent-call',
+            kind: 'agent',
+            label: 'Research the API',
+            description: 'Research the API',
+          },
+        },
+      });
+    });
+    await flush();
+    expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalled();
+
+    expect(
+      testState.latestTaskChipsIsTaskOpen?.({
+        kind: 'agent',
+        id: 'agent-call',
+        toolUseId: 'agent-call',
+        label: 'Research the API',
+        description: 'Research the API',
+        status: 'running',
+        startTime: 3,
+        runtimeMs: 30,
+        isBackgrounded: true,
+        subagentType: 'general-purpose',
+      }),
+    ).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(
+        {
+          kind: 'agent',
+          id: 'agent-call',
+          toolUseId: 'agent-call',
+          label: 'Research the API',
+          description: 'Research the API',
+          status: 'running',
+          startTime: 3,
+          runtimeMs: 30,
+          isBackgrounded: true,
+          subagentType: 'general-purpose',
+        },
+        true,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+
+    await act(async () => {
+      transcript.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        events: [],
+        hasMore: false,
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+  });
+
+  it('does not let a pending tasks dialog cover a newly located workflow row', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    testState.messages = [
+      {
+        id: 'workflow-message',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'Workflow',
+            status: 'completed',
+            args: {},
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+    messageListScrollToMessage.mockClear();
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(
+        {
+          ...unlinkedWorkflowTask,
+          toolUseId: 'workflow-call',
+        },
+        true,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(messageListScrollToMessage).toHaveBeenCalledWith(
+      'workflow-message',
+      'workflow-call',
+    );
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it.each([false, true])(
+    'uses a newly available Workflow transcript instead of cancelling its fallback (available=%s)',
+    async (transcriptAvailable) => {
+      mockConnection.supportedCommands = { workflowsEnabled: true };
+      testState.messages = [];
+      const { container, rerender } = renderApp();
+      await flush();
+      const task: DaemonSessionWorkflowTaskStatus = {
+        ...unlinkedWorkflowTask,
+        toolUseId: 'workflow-call',
+      };
+      const pending =
+        deferred<
+          Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+        >();
+      mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+      messageListScrollToMessage.mockClear();
+
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(task, true);
+      });
+      expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+      if (transcriptAvailable) {
+        testState.messages = [
+          {
+            id: 'workflow-message',
+            role: 'tool_group',
+            tools: [
+              {
+                callId: 'workflow-call',
+                toolName: 'Workflow',
+                status: 'completed',
+                args: {},
+              },
+            ],
+          },
+        ];
+        rerender();
+      }
+
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(task, true);
+        await Promise.resolve();
+      });
+      if (transcriptAvailable) {
+        expect(messageListScrollToMessage).toHaveBeenCalledWith(
+          'workflow-message',
+          'workflow-call',
+        );
+      } else {
+        expect(messageListScrollToMessage).not.toHaveBeenCalled();
+      }
+      expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        pending.resolve({
+          v: 1,
+          sessionId: 'session-1',
+          now: 1,
+          tasks: [],
+        });
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="dialog-shell"]'),
+      ).toBeNull();
+    },
+  );
+
+  it('cancels a pending Workflow fallback when its transcript row is unchanged', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    testState.messages = [
+      {
+        id: 'workflow-message',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'Workflow',
+            status: 'completed',
+            args: {},
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+    messageListScrollToMessage.mockClear();
+    messageListScrollToMessage.mockReturnValue(false);
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+    const task: DaemonSessionWorkflowTaskStatus = {
+      ...unlinkedWorkflowTask,
+      toolUseId: 'workflow-call',
+    };
+
+    for (let index = 0; index < 2; index += 1) {
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(task, true);
+        await Promise.resolve();
+      });
+    }
+    expect(messageListScrollToMessage).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it('cancels an unopened Workflow dialog when clicking its chip again', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    for (let index = 0; index < 2; index += 1) {
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+        await Promise.resolve();
+      });
+    }
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      false,
+    );
+  });
+
+  it('does not cancel a pending Workflow dialog through a repeated row selection', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    for (let index = 0; index < 2; index += 1) {
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, false);
+        await Promise.resolve();
+      });
+    }
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      true,
+    );
+  });
+
+  it('only toggles direct chip activation and preserves row selection or switching', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-row-intent',
+      label: 'npm run dev',
+      description: 'npm run dev',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'npm run dev',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-row-intent',
+      label: 'Watch server log',
+      description: 'Watch server log',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, false);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, false);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, false);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+  });
+
+  it('reuses an existing background tab after it is hidden instead of multiplying tabs', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'cli-bg-shell-success',
+      command: 'echo ok',
+      label: 'echo ok',
+      description: 'echo ok',
+      status: 'completed',
+      startTime: 1,
+      runtimeMs: 10,
+    };
+    mockWorkspace.client.sessionTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      tasks: [shell],
+    });
+    renderApp();
+    await flush();
+    await act(async () => {
+      await testState.backgroundDetails?.({
+        id: 'background-shell-reopen',
+        turnId: 'successful-shell',
+        taskId: shell.id,
+        kind: 'shell',
+        name: 'background_task',
+        status: 'completed',
+        message: 'Command completed.',
+        timestamp: '2026-10-25T08:00:00.000Z',
+        rawOutput: { task: shell },
+      });
+    });
+    await flush();
+    const originalId = testState.latestArtifactPanelProps?.tabs[0]?.id;
+    expect(originalId).toBe(`background:session-1:${shell.id}`);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(1);
+    expect(testState.latestArtifactPanelProps?.tabs[0]?.id).toBe(originalId);
+
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-background-reopen',
+      label: 'Watch another task',
+      description: 'Watch another task',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      testState.latestArtifactPanelProps?.tabs.map((tab) => tab.id),
+    ).toEqual([originalId, 'monitor:monitor-background-reopen']);
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(false);
+
+    act(() => testState.latestArtifactPanelProps?.onSelectTab(originalId!));
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+  });
+
+  it.each([false, true])(
+    'retries a failed background tab on reactivation (chip=%s)',
+    async (fromChip) => {
+      mockWorkspace.client.getSessionTranscriptPage
+        .mockRejectedValueOnce(new Error('temporary transcript failure'))
+        .mockResolvedValue({
+          v: 1,
+          sessionId: 'session-1',
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'retry-agent-call',
+                title: 'Recovered agent',
+                status: 'completed',
+                rawInput: {
+                  description: 'Recovered agent details',
+                  subagent_type: 'Explore',
+                },
+                rawOutput: { result: 'Recovered agent details' },
+                _meta: { toolName: 'Task' },
+              },
+            },
+          ],
+          hasMore: false,
+        });
+      renderApp();
+      await flush();
+      await flush();
+      const task: DaemonSessionAgentTaskStatus = {
+        kind: 'agent',
+        id: 'retry-agent-task',
+        toolUseId: 'retry-agent-call',
+        label: 'Retry background agent',
+        description: 'Retry background agent',
+        status: 'running',
+        startTime: 1,
+        runtimeMs: 10,
+        isBackgrounded: true,
+        subagentType: 'Explore',
+      };
+      await act(async () => {
+        testState.backgroundDetails?.({
+          turnId: 'retry-agent-turn',
+          taskId: task.id,
+          kind: 'agent',
+          toolUseId: task.toolUseId,
+          label: task.label,
+          startedAt: 1,
+        });
+      });
+      await vi.waitFor(async () => {
+        await flush();
+        const tab = testState.latestArtifactPanelProps?.tabs[0];
+        expect(tab?.kind).toBe('pending');
+        expect(tab?.kind === 'pending' && tab.loadError).toContain(
+          'temporary transcript failure',
+        );
+      });
+      const originalId = testState.latestArtifactPanelProps!.tabs[0]!.id;
+      expect(testState.latestTaskChipsIsTaskOpen?.(task)).toBe(true);
+      expect(
+        mockWorkspace.client.getSessionTranscriptPage,
+      ).toHaveBeenCalledTimes(1);
+
+      if (fromChip) {
+        await act(async () => {
+          testState.latestTaskChipsOnSelectTask?.(task, true);
+          await Promise.resolve();
+        });
+        await flush();
+        expect(testState.latestTaskChipsIsTaskOpen?.(task)).toBe(false);
+        expect(
+          mockWorkspace.client.getSessionTranscriptPage,
+        ).toHaveBeenCalledTimes(1);
+        await act(async () => {
+          testState.latestTaskChipsOnSelectTask?.(task, true);
+          await Promise.resolve();
+        });
+      } else {
+        act(() => testState.latestArtifactPanelProps?.onSelectTab(originalId));
+      }
+      await vi.waitFor(async () => {
+        await flush();
+        expect(
+          mockWorkspace.client.getSessionTranscriptPage,
+        ).toHaveBeenCalledTimes(2);
+        expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(1);
+        expect(testState.latestArtifactPanelProps?.tabs[0]?.id).toBe(
+          originalId,
+        );
+        expect(testState.latestArtifactPanelProps?.tabs[0]?.kind).toBe(
+          'subagent',
+        );
+      });
+    },
+  );
 
   it('passes agent tasks to a host-provided footer', () => {
     const agent: DaemonSessionAgentTaskStatus = {
@@ -24109,6 +25208,132 @@ describe('App session callbacks', () => {
     );
   });
 
+  describe('standalone assistant feedback telemetry wiring', () => {
+    beforeEach(() => {
+      mockConnection.capabilities.features = ['session_turn_feedback'];
+    });
+
+    // MessageList is mocked in this harness, so the wiring is asserted on
+    // the customization it receives; the rendered marks and the click →
+    // onRate leg live in the MessageList/AssistantMessage tests and the
+    // assistant-feedback Playwright spec.
+    function rate(rating: 'up' | 'down' | null): void {
+      const onRate = testState.capturedAssistantFeedback?.onRate;
+      expect(onRate).toBeDefined();
+      onRate!({
+        rating,
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        userMessage: { text: 'hello' },
+      });
+    }
+
+    it('offers the marks and reports a satisfied mark', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback).toBeDefined();
+      rate('up');
+
+      expect(mockSessionActions.rateAssistantTurn).toHaveBeenCalledWith(
+        'prompt-1',
+        'up',
+      );
+    });
+
+    it('reports a dissatisfied mark', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      rate('down');
+
+      expect(mockSessionActions.rateAssistantTurn).toHaveBeenCalledWith(
+        'prompt-1',
+        'down',
+      );
+    });
+
+    it('does not report clearing a lit mark', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      rate(null);
+
+      expect(mockSessionActions.rateAssistantTurn).not.toHaveBeenCalled();
+    });
+
+    it('does not record a mark owned by another session (split pane)', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      const onRate = testState.capturedAssistantFeedback?.onRate;
+      expect(onRate).toBeDefined();
+      onRate!({
+        rating: 'up',
+        sessionId: 'other-session',
+        promptId: 'prompt-1',
+        userMessage: { text: 'hello' },
+      });
+
+      expect(mockSessionActions.rateAssistantTurn).not.toHaveBeenCalled();
+    });
+
+    it('still dispatches when the payload carries no session id', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      const onRate = testState.capturedAssistantFeedback?.onRate;
+      expect(onRate).toBeDefined();
+      onRate!({
+        rating: 'down',
+        promptId: 'prompt-1',
+        userMessage: { text: 'hello' },
+      });
+
+      expect(mockSessionActions.rateAssistantTurn).toHaveBeenCalledWith(
+        'prompt-1',
+        'down',
+      );
+    });
+
+    it('keeps the marks hidden without the capability', async () => {
+      mockConnection.capabilities.features = [];
+      renderApp({}, undefined, true);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback).toBeUndefined();
+    });
+
+    it('does not wire telemetry for embedded hosts', async () => {
+      renderApp({}, undefined, false);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback).toBeUndefined();
+    });
+
+    it('lets a host-provided option win over the standalone wiring', async () => {
+      const onRate = vi.fn();
+      renderApp({ assistantFeedback: { onRate } }, undefined, true);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback?.onRate).toBe(onRate);
+      rate('up');
+
+      expect(onRate).toHaveBeenCalledWith(
+        expect.objectContaining({ promptId: 'prompt-1', rating: 'up' }),
+      );
+      expect(mockSessionActions.rateAssistantTurn).not.toHaveBeenCalled();
+    });
+
+    it('honors a host disabling the marks even standalone', async () => {
+      renderApp({ assistantFeedback: { enabled: false } }, undefined, true);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback?.enabled).toBe(false);
+      expect(testState.capturedAssistantFeedback?.onRate).toBeUndefined();
+    });
+  });
+
   describe('cancelling a prompt before it produced anything', () => {
     const snapshot = (turnIndex: number) => ({
       promptId: `prompt-${turnIndex}`,
@@ -25366,7 +26591,8 @@ describe('App session callbacks', () => {
       expect(testState.prompt).toBe('hello');
     });
 
-    it('keeps an unknown admission recoverable and blocks another inline edit', async () => {
+    it('recovers an unknown edit admission onto the edited message with the same idempotencyKey', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const prepareSubmit = vi
         .fn()
         .mockResolvedValue({ prompt: 'prepared edit', inputAnnotations: [] });
@@ -25384,21 +26610,37 @@ describe('App session callbacks', () => {
       await act(async () => {
         expect(await submit()).toBe(false);
       });
-      expect(testState.prompt).toBe('hello');
-      await act(async () => {
-        expect(await submit('second edit')).toBe(false);
-      });
       expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
       expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
-      const restore = container.querySelector<HTMLButtonElement>(
-        '[data-testid="prompt-admission-unknown"] button',
+      expect(testState.prompt).toBe('hello');
+      expect(testState.latestChatEditorProps?.disabled).toBe(false);
+      expect(
+        container.querySelector('[data-testid="prompt-admission-unknown"]'),
+      ).toBeNull();
+      const firstIdempotencyKey =
+        mockSessionActions.sendPrompt.mock.calls[0]?.[1]?.idempotencyKey;
+      expect(typeof firstIdempotencyKey).toBe('string');
+
+      const retryButton = container.querySelector<HTMLButtonElement>(
+        '[data-testid="failed-prompt-retry"]',
       );
-      expect(restore).not.toBeNull();
-      act(() => {
-        restore!.click();
+      expect(retryButton?.textContent).toBe('optimistic-new');
+      expect(retryButton?.getAttribute('data-failed-status')).toBe('uncertain');
+
+      await act(async () => {
+        retryButton!.click();
       });
-      expect(testState.prompt).toBe('prepared edit\nhello');
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+        'prepared edit',
+        expect.objectContaining({
+          optimisticUserMessage: false,
+          bindBlockId: 'optimistic-new',
+          idempotencyKey: firstIdempotencyKey,
+        }),
+      );
+      expect(testState.prompt).toBe('hello');
+      warn.mockRestore();
     });
 
     it('preserves inline and referenced attachments when resending', async () => {
@@ -31429,6 +32671,63 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
 
+  it('forwards a host command opt-out through detached session creation', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const create = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await create.promise;
+        if (options?.navigationOutcome) options.navigationOutcome.bound = false;
+        return { ...result, ...detachedClient };
+      },
+    );
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-output-language"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      create.resolve({ sessionId: 'session-1' });
+      await create.promise;
+    });
+
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'session-1' }),
+        '/language output English',
+        expect.objectContaining({ suppressInputHistory: true }),
+      );
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('releases the detached client when a goal is created after navigation', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.displayName = undefined;
@@ -35844,6 +37143,67 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it.each(['none', 'low', undefined] as const)(
+    'uses startup configuration for standalone welcome reasoning %s',
+    async (selection) => {
+      const modelId = 'qwen3.8-max';
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = undefined;
+      mockConnection.sessionContext = { kind: 'standalone' };
+      mockConnection.capabilities = {
+        qwenCodeVersion: 'test',
+        features: ['standalone_sessions_v1', 'session_startup_config'],
+      };
+      mockConnection.currentModel = modelId;
+      mockConnection.models = [
+        {
+          id: modelId,
+          label: 'Qwen',
+          reasoningPreview: {
+            enabled: true,
+            effort: 'high',
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+            canDisable: true,
+          },
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+
+      renderApp();
+      await flush();
+      if (selection !== undefined) {
+        act(() => {
+          testState.latestChatEditorProps?.onSelectReasoningEffort?.(selection);
+        });
+      }
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+
+      const createOptions = mockSessionActions.createSession.mock.calls[0][0];
+      expect(createOptions).toMatchObject({
+        sessionContext: { kind: 'standalone' },
+      });
+      if (selection === undefined) {
+        expect(createOptions).not.toHaveProperty('startupConfig');
+      } else {
+        expect(createOptions).toHaveProperty('startupConfig', {
+          modelServiceId: modelId,
+          reasoningEffort: selection,
+        });
+        expect(createOptions).not.toHaveProperty('modelServiceId');
+      }
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+    },
+  );
+
   it('clears a stale welcome disable after reasoning becomes mandatory', async () => {
     const reasoningPreview = (canDisable: boolean) => ({
       enabled: true,
@@ -37899,9 +39259,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(
-      container.querySelector('[data-testid="prompt-admission-unknown"]'),
-    ).toBeNull();
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
     expect(warn).not.toHaveBeenCalledWith(
       '[WebShell] post-turn retry admission outcome is unknown',
       expect.anything(),
@@ -37909,8 +39267,9 @@ describe('App session callbacks', () => {
     warn.mockRestore();
   });
 
-  it('locks an image retry when its admission response is lost', async () => {
+  it('keeps an image retry armed with the same idempotencyKey when its admission response is lost', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const onToast = vi.fn();
     const retrySend = deferred<void>();
     const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
     const inputAnnotations: DaemonInputAnnotation[] = [
@@ -37922,7 +39281,7 @@ describe('App session callbacks', () => {
         reference: { id: 'file:hello', kind: 'file', value: 'hello' },
       },
     ];
-    const { container, rerender } = renderApp();
+    const { container, rerender } = renderApp({ onToast });
     await flush();
 
     act(() => {
@@ -37937,6 +39296,9 @@ describe('App session callbacks', () => {
       );
     });
     await flush();
+    const initialKey =
+      mockSessionActions.sendPrompt.mock.calls[0]?.[1]?.idempotencyKey;
+    expect(typeof initialKey).toBe('string');
     mockSessionActions.sendPrompt.mockClear();
     act(() => {
       testState.blocks = [
@@ -37969,20 +39331,43 @@ describe('App session callbacks', () => {
       optimisticUserMessage: false,
       retry: true,
     });
+    expect(typeof retryOptions?.idempotencyKey).toBe('string');
+    expect(retryOptions?.idempotencyKey).not.toBe(initialKey);
     act(() => retryOptions?.onAdmissionStarted?.());
     await act(async () => {
       retrySend.reject(new Error('response lost'));
       await Promise.resolve();
     });
+    await flush();
 
     expect(
       container.querySelector('[data-testid="prompt-admission-unknown"]'),
-    ).not.toBeNull();
-    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    ).toBeNull();
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+    expect(onToast).toHaveBeenCalledWith(
+      'warning',
+      expect.stringContaining('Message may not have sent'),
+    );
     expect(
       sessionCatalogController.promptAdmissionUncertain,
     ).toHaveBeenCalledWith('/tmp/project');
     expect(sessionCatalogController.promptAdmitted).not.toHaveBeenCalled();
+
+    const secondRetry = deferred<void>();
+    mockSessionActions.sendPrompt.mockReturnValueOnce(secondRetry.promise);
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+    });
+    expect(
+      mockSessionActions.sendPrompt.mock.calls[1]?.[1]?.idempotencyKey,
+    ).toBe(retryOptions?.idempotencyKey);
     warn.mockRestore();
   });
 
@@ -41543,9 +42928,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(
-      container.querySelector('[data-testid="prompt-admission-unknown"]'),
-    ).toBeNull();
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
     expect(warn).not.toHaveBeenCalledWith(
       '[WebShell] post-turn retry admission outcome is unknown',
       expect.anything(),
@@ -44476,7 +45859,7 @@ describe('App session callbacks', () => {
                 'session-1',
               );
               await mockSessionActions
-                .sendPrompt('/compress')
+                .sendPrompt('/compress', { suppressInputHistory: true })
                 .catch(() => undefined);
             },
           });
@@ -44489,6 +45872,7 @@ describe('App session callbacks', () => {
       await act(async () => compress.click());
       expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
         '/compress',
+        { suppressInputHistory: true },
       );
       if (owner === 'pane') {
         await act(async () => {
@@ -44561,6 +45945,7 @@ describe('App session callbacks', () => {
     await act(async () => compress.click());
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledExactlyOnceWith(
       '/compress',
+      { suppressInputHistory: true },
     );
     expect(mockSessionActions.getContextUsage).toHaveBeenLastCalledWith({
       detail: true,
@@ -47957,6 +49342,45 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('hands a restored worktree client to the existing session load', async () => {
+    const restoredSession = {
+      sessionId: 'removed-session',
+      workspaceCwd: '/work/secondary',
+      clientId: 'restore-client',
+    } as unknown as DaemonSessionClient;
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    mockSessionActions.loadSession.mockClear();
+
+    await act(async () => {
+      testState.latestSessionOverviewProps?.onOpenSession?.(
+        'removed-session',
+        '/work/secondary',
+        undefined,
+        restoredSession,
+      );
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'removed-session',
+      {
+        workspaceCwd: '/work/secondary',
+        sessionContext: { kind: 'workspace', cwd: '/work/secondary' },
+        artifactCountHint: undefined,
+        restoredSession,
+      },
+    );
+  });
+
   it('does not restore a folded split when opening a session from the Session Overview', async () => {
     let large = true;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;
@@ -50462,6 +51886,10 @@ describe('App session callbacks', () => {
         (c) => c[0] === '/model --fast fast-model-x --project',
       ),
     ).toBe(true);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/model --fast fast-model-x --project',
+      expect.objectContaining({ suppressInputHistory: true }),
+    );
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
     expect(settingsReload).toHaveBeenCalled();
   });
@@ -51018,6 +52446,182 @@ describe('App session callbacks', () => {
     expect(onLanguageChange).not.toHaveBeenCalled();
   });
 
+  it('aligns the Settings workspace switcher with a secondary session and an explicit primary selection', async () => {
+    mockWorkspace.workspaceCwd = '/work/primary';
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/secondary',
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/work/primary',
+      features: ['workspace_settings', 'workspace_directories'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(mockConnection.sessionId).toBe('session-1');
+
+    const workspaceSelect = () =>
+      testState.latestSettingsWorkspaceControl as React.ReactElement<{
+        value: string;
+        onValueChange: (cwd: string) => void;
+      }>;
+    const directories = () =>
+      testState.latestSettingsWorkspaceDirectoriesSection as React.ReactElement<{
+        workspaceCwd?: string;
+      }>;
+
+    // The default Settings surface reads the session workspace, not primary.
+    expect(workspaceSelect().props.value).toBe('/work/secondary');
+    expect(directories().props.workspaceCwd).toBe('/work/secondary');
+
+    act(() => workspaceSelect().props.onValueChange('/work/primary'));
+    await flush();
+    expect(workspaceSelect().props.value).toBe('/work/primary');
+    expect(directories().props.workspaceCwd).toBe('/work/primary');
+    expect(testState.latestSettingsHookOptions).toEqual({
+      workspaceCwd: '/work/primary',
+      autoLoad: true,
+      enabled: true,
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenLastCalledWith(
+      'en',
+      'workspace',
+      '/work/primary',
+    );
+
+    act(() => workspaceSelect().props.onValueChange('/work/secondary'));
+    await flush();
+    expect(workspaceSelect().props.value).toBe('/work/secondary');
+    expect(directories().props.workspaceCwd).toBe('/work/secondary');
+    // Selecting the session workspace again unmounts the secondary bridge.
+    expect(testState.latestSettingsHookOptions).toEqual({
+      autoLoad: true,
+      enabled: true,
+    });
+  });
+
+  it('routes every workspace management selection to its clicked workspace', async () => {
+    mockWorkspace.workspaceCwd = '/work/primary';
+    mockConnection.workspaceCwd = '/work/primary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/primary',
+    } as DaemonProductSessionContext;
+    Object.assign(mockWorkspace.capabilities, {
+      v: 1,
+      mode: 'native',
+      workspaceCwd: '/work/primary',
+      modelServices: [],
+      features: [
+        'workspace_settings',
+        'workspace_skills_config_runtime',
+        'channel_management',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as DaemonCapabilities);
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(mockConnection.sessionId).toBe('session-1');
+    expect(testState.onOpenWorkspaceManagement).toBeTypeOf('function');
+
+    for (const [index, target] of (
+      ['mcp', 'skills', 'extensions'] as const
+    ).entries()) {
+      await act(async () => {
+        testState.onOpenWorkspaceManagement?.(target, '/work/secondary');
+      });
+      await flush();
+      expect(testState.latestPluginManagerProps).toMatchObject({
+        initialTab: target,
+        initialWorkspaceCwd: '/work/secondary',
+        navigationRequest: index + 1,
+      });
+    }
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('channels', '/work/secondary');
+    });
+    await flush();
+    expect(testState.latestChannelsManagerProps).toMatchObject({
+      initialWorkspaceCwd: '/work/secondary',
+      navigationRequest: 1,
+      sessionWorkspaceCwd: '/work/primary',
+    });
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('settings', '/work/secondary');
+    });
+    await flush();
+    expect(
+      (
+        testState.latestSettingsWorkspaceControl as React.ReactElement<{
+          value: string;
+        }>
+      ).props.value,
+    ).toBe('/work/secondary');
+
+    const dialogTitles = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>('[data-dialog-title]'),
+      ).map((node) => node.getAttribute('data-dialog-title'));
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('context', '/work/secondary');
+    });
+    await flush();
+    expect(dialogTitles()).toContain('Memory · secondary');
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('hooks', '/work/secondary');
+    });
+    await flush();
+    expect(dialogTitles()).toContain('Hooks · secondary');
+  });
+
   it('maps a Chinese UI language choice to the daemon language code', async () => {
     renderApp();
     await flush();
@@ -51314,6 +52918,10 @@ describe('App session callbacks', () => {
         (c) => c[0] === '/language output English',
       ),
     ).toBe(true);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/language output English',
+      expect.objectContaining({ suppressInputHistory: true }),
+    );
     expect(mockSessionActions.createSession).toHaveBeenCalled();
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
@@ -52335,7 +53943,13 @@ describe('App prompt send failure retry', () => {
       return { sessionId: 'session-created' };
     });
     const firstSend = deferred<void>();
-    mockSessionActions.sendPrompt.mockReturnValueOnce(firstSend.promise);
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u-created', kind: 'user', text: 'hello' }];
+      testState.messages = [
+        { id: 'u-created', role: 'user', content: 'hello' },
+      ];
+      return firstSend.promise;
+    });
     const { rerender } = renderApp();
     await flush();
 
@@ -52364,16 +53978,29 @@ describe('App prompt send failure retry', () => {
     expect(editorCommit).toHaveBeenCalledOnce();
     expect(
       document.querySelector('[data-testid="prompt-admission-unknown"]'),
-    ).not.toBeNull();
+    ).toBeNull();
+    const retry = document.querySelector('[data-testid="failed-prompt-retry"]');
+    expect(retry?.textContent).toBe('u-created');
+    expect(retry?.getAttribute('data-failed-status')).toBe('uncertain');
     expect(
       sessionCatalogController.promptAdmissionUncertain,
     ).toHaveBeenCalledWith('/workspace');
+
+    act(() => {
+      mockConnection.sessionId = 'session-other';
+      rerender();
+    });
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
   });
 
-  it('locks duplicate submission when prompt admission is unknown', async () => {
+  it('shows uncertain resend indicator without locking composer, reuses idempotencyKey, and auto-clears on reply or promptId', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const firstSend = deferred<void>();
     mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+      testState.blocks = [{ id: 'u1', kind: 'user', text: 'hello' }];
+      testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
       options?.onAdmissionStarted?.();
       return firstSend.promise;
     });
@@ -52408,153 +54035,232 @@ describe('App prompt send failure retry', () => {
       await Promise.resolve();
     });
 
-    const notice = document.querySelector(
-      '[data-testid="prompt-admission-unknown"]',
-    );
-    expect(notice).not.toBeNull();
-    expect(compressButton.disabled).toBe(true);
     expect(
-      document.querySelector('[data-testid="failed-prompt-retry"]'),
+      document.querySelector('[data-testid="prompt-admission-unknown"]'),
     ).toBeNull();
-    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(compressButton.disabled).toBe(false);
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    const retry = document.querySelector<HTMLButtonElement>(
+      '[data-testid="failed-prompt-retry"]',
+    );
+    expect(retry?.textContent).toBe('u1');
+    expect(retry?.getAttribute('data-failed-status')).toBe('uncertain');
+    const firstKey =
+      mockSessionActions.sendPrompt.mock.calls[0]?.[1]?.idempotencyKey;
+    expect(typeof firstKey).toBe('string');
 
     act(() => {
       testState.streamingState = 'responding';
       rerender();
     });
     expect(
-      document.querySelector('[data-testid="prompt-admission-unknown"]'),
-    ).not.toBeNull();
-    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
 
     act(() => {
-      notice?.querySelectorAll('button').item(1).click();
+      testState.streamingState = 'idle';
+      rerender();
     });
-
-    expect(testState.latestChatEditorProps?.disabled).toBe(false);
-    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
     expect(
-      document.querySelector('[data-testid="prompt-admission-unknown"]'),
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
     ).not.toBeNull();
+
+    // Auto-clears once an assistant reply lands.
+    act(() => {
+      testState.blocks = [
+        { id: 'u1', kind: 'user', text: 'hello' },
+        { id: 'a1', kind: 'assistant', text: 'done' },
+      ];
+      testState.messages = [
+        { id: 'u1', role: 'user', content: 'hello' },
+        { id: 'a1', role: 'assistant', content: 'done' },
+      ];
+      rerender();
+    });
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+
+    // Resend path also reuses the same idempotencyKey when clicked directly.
+    const secondSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+      testState.blocks = [{ id: 'u2', kind: 'user', text: 'second' }];
+      testState.messages = [{ id: 'u2', role: 'user', content: 'second' }];
+      options?.onAdmissionStarted?.();
+      return secondSend.promise;
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('second');
+    });
+    await act(async () => {
+      secondSend.reject(new Error('connection closed before response'));
+      await Promise.resolve();
+    });
+    const secondKey =
+      mockSessionActions.sendPrompt.mock.calls[1]?.[1]?.idempotencyKey;
+    const retrySecond = document.querySelector<HTMLButtonElement>(
+      '[data-testid="failed-prompt-retry"]',
+    );
+    expect(retrySecond?.textContent).toBe('u2');
+    act(() => {
+      retrySecond?.click();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(3);
+    });
+    expect(
+      mockSessionActions.sendPrompt.mock.calls[2]?.[1]?.idempotencyKey,
+    ).toBe(secondKey);
+
+    // Auto-clears if daemon binds promptId on the user block.
+    const thirdSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+      testState.blocks = [{ id: 'u3', kind: 'user', text: 'third' }];
+      testState.messages = [{ id: 'u3', role: 'user', content: 'third' }];
+      options?.onAdmissionStarted?.();
+      return thirdSend.promise;
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('third');
+    });
+    await act(async () => {
+      thirdSend.reject(new Error('connection closed before response'));
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).not.toBeNull();
+    act(() => {
+      testState.blocks = [
+        { id: 'u3', kind: 'user', text: 'third', promptId: 'daemon-u3' },
+      ];
+      rerender();
+    });
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
   });
 
-  it.each(['discard', 'restore'] as const)(
-    'exposes recovery after %s unlocks an unknown admission and a later turn is interrupted',
-    async (unlock) => {
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
-      const firstSend = deferred<void>();
-      const secondSend = deferred<void>();
-      mockSessionActions.sendPrompt
-        .mockImplementationOnce((_text, options) => {
-          options?.onAdmissionStarted?.();
-          return firstSend.promise;
-        })
-        .mockImplementationOnce((_text, options) => {
-          options?.onAdmissionStarted?.();
-          options?.onAdmitted?.();
-          return secondSend.promise;
-        });
-      mockSessionActions.continueSession.mockResolvedValue(undefined);
-      const recoveryContext = {
-        v: 1 as const,
-        sessionId: 'session-1',
-        workspaceCwd: '/tmp/project',
-        state: {},
-        recovery: { kind: 'interrupted_prompt' as const, canContinue: true },
-      };
-      mockConnection.context = recoveryContext;
-      const { container, rerender } = renderApp();
-      await flush();
-      const banner = () =>
-        container.querySelector('[data-testid="session-recovery-banner"]');
-      const notice = () =>
-        container.querySelector('[data-testid="prompt-admission-unknown"]');
-      expect(banner()).not.toBeNull();
-
-      await act(async () => {
-        testState.latestChatEditorProps?.onSubmit('request A');
-        await Promise.resolve();
-      });
-      await vi.waitFor(() =>
-        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1),
-      );
-      await act(async () => {
-        firstSend.reject(new Error('admission response lost'));
-        await Promise.resolve();
-      });
-      expect(testState.latestChatEditorProps?.disabled).toBe(true);
-      expect(notice()?.querySelectorAll('button')).toHaveLength(2);
-      expect(banner()).toBeNull();
-
-      act(() => {
-        const activeContext = {
-          ...recoveryContext,
-          recovery: { ...recoveryContext.recovery, canContinue: false },
-        };
-        mockConnection.context = activeContext;
-        rerender();
-        notice()
-          ?.querySelectorAll('button')
-          .item(unlock === 'discard' ? 1 : 0)
-          .click();
-      });
-      expect(testState.latestChatEditorProps?.disabled).toBe(false);
-      expect(notice()).not.toBeNull();
-      expect(notice()?.querySelectorAll('button')).toHaveLength(0);
-      if (unlock === 'restore') expect(window.confirm).toHaveBeenCalledOnce();
-
-      await act(async () => {
-        testState.latestChatEditorProps?.onSubmit('request B');
-        await Promise.resolve();
-      });
-      await vi.waitFor(() =>
-        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2),
-      );
-      expect(sessionCatalogController.promptAdmitted).toHaveBeenCalledWith(
-        '/tmp/project',
-        'session-1',
-      );
-      act(() => {
-        testState.streamingState = 'responding';
-        testState.sessionHasActivePrompt = true;
-        rerender();
-      });
-      expect(banner()).toBeNull();
-      await act(async () => {
-        secondSend.reject(
-          Object.assign(new Error('interrupted'), { _daemonTurnError: true }),
-        );
-        await Promise.resolve();
-        testState.streamingState = 'idle';
-        testState.sessionHasActivePrompt = false;
-        testState.blocks = [
-          {
-            kind: 'error',
-            source: 'turn_error',
-            id: 'request-b-error',
-            text: 'interrupted',
-          },
+  it('allows submitting a new turn and exposes recovery after an interrupted turn following uncertain admission', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    const secondSend = deferred<void>();
+    mockSessionActions.sendPrompt
+      .mockImplementationOnce((_text, options) => {
+        testState.blocks = [{ id: 'u-a', kind: 'user', text: 'request A' }];
+        testState.messages = [
+          { id: 'u-a', role: 'user', content: 'request A' },
         ];
-        mockConnection.context = { ...recoveryContext };
-        rerender();
+        options?.onAdmissionStarted?.();
+        return firstSend.promise;
+      })
+      .mockImplementationOnce((_text, options) => {
+        testState.blocks = [
+          { id: 'u-a', kind: 'user', text: 'request A' },
+          { id: 'u-b', kind: 'user', text: 'request B' },
+        ];
+        testState.messages = [
+          { id: 'u-a', role: 'user', content: 'request A' },
+          { id: 'u-b', role: 'user', content: 'request B' },
+        ];
+        options?.onAdmissionStarted?.();
+        options?.onAdmitted?.();
+        return secondSend.promise;
       });
-      await flush();
-      expect(testState.latestChatEditorProps?.disabled).toBe(false);
-      expect(notice()).not.toBeNull();
-      expect(notice()?.querySelectorAll('button')).toHaveLength(0);
-      const continueButton = banner()?.querySelector('button');
-      expect(continueButton).toBeTruthy();
-      await act(async () => continueButton?.click());
-      expect(mockSessionActions.continueSession).toHaveBeenCalledOnce();
-      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
-    },
-  );
+    mockSessionActions.continueSession.mockResolvedValue(undefined);
+    const recoveryContext = {
+      v: 1 as const,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      state: {},
+      recovery: { kind: 'interrupted_prompt' as const, canContinue: true },
+    };
+    mockConnection.context = recoveryContext;
+    const { container, rerender } = renderApp();
+    await flush();
+    const banner = () =>
+      container.querySelector('[data-testid="session-recovery-banner"]');
+    expect(banner()).not.toBeNull();
 
-  it('restores direct prompt annotations after uncertain admission', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('request A');
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1),
+    );
+    await act(async () => {
+      firstSend.reject(new Error('admission response lost'));
+      await Promise.resolve();
+    });
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    expect(
+      container.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      mockConnection.context = {
+        ...recoveryContext,
+        recovery: { ...recoveryContext.recovery, canContinue: false },
+      };
+      rerender();
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('request B');
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2),
+    );
+    expect(sessionCatalogController.promptAdmitted).toHaveBeenCalledWith(
+      '/tmp/project',
+      'session-1',
+    );
+    act(() => {
+      testState.streamingState = 'responding';
+      testState.sessionHasActivePrompt = true;
+      rerender();
+    });
+    expect(banner()).toBeNull();
+    await act(async () => {
+      secondSend.reject(
+        Object.assign(new Error('interrupted'), { _daemonTurnError: true }),
+      );
+      await Promise.resolve();
+      testState.streamingState = 'idle';
+      testState.sessionHasActivePrompt = false;
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'request-b-error',
+          text: 'interrupted',
+        },
+      ];
+      mockConnection.context = { ...recoveryContext };
+      rerender();
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    expect(
+      container.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+    const continueButton = banner()?.querySelector('button');
+    expect(continueButton).toBeTruthy();
+    await act(async () => continueButton?.click());
+    expect(mockSessionActions.continueSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('resends direct prompt annotations with the same idempotencyKey after uncertain admission', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const firstSend = deferred<void>();
     mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+      testState.blocks = [{ id: 'u-ann', kind: 'user', text: '@file.ts fix' }];
+      testState.messages = [
+        { id: 'u-ann', role: 'user', content: '@file.ts fix' },
+      ];
       options?.onAdmissionStarted?.();
       return firstSend.promise;
     });
@@ -52586,18 +54292,27 @@ describe('App prompt send failure retry', () => {
       firstSend.reject(new Error('response lost'));
       await Promise.resolve();
     });
-    act(() => {
-      document
-        .querySelector('[data-testid="prompt-admission-unknown"]')
-        ?.querySelectorAll('button')
-        .item(0)
-        .click();
-    });
-
-    expect(editorRestoreInputAnnotations).toHaveBeenCalledWith(
-      inputAnnotations,
+    const firstKey =
+      mockSessionActions.sendPrompt.mock.calls[0]?.[1]?.idempotencyKey;
+    const retry = document.querySelector<HTMLButtonElement>(
+      '[data-testid="failed-prompt-retry"]',
     );
-    confirm.mockRestore();
+    expect(retry?.getAttribute('data-failed-status')).toBe('uncertain');
+    act(() => {
+      retry?.click();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      '@file.ts fix',
+      expect.objectContaining({
+        inputAnnotations,
+        optimisticUserMessage: false,
+        bindBlockId: 'u-ann',
+        idempotencyKey: firstKey,
+      }),
+    );
     warn.mockRestore();
   });
 
@@ -52929,7 +54644,7 @@ describe('App prompt send failure retry', () => {
         { id: 'u1', kind: 'user', text: 'hello' },
         {
           id: 'background-1',
-          kind: 'user',
+          kind: 'assistant',
           text: 'Background task completed',
           meta: { source: 'background_notification' },
         },
@@ -53299,7 +55014,7 @@ describe('App prompt send failure retry', () => {
     });
 
     expect(
-      container.querySelector('[data-testid="prompt-admission-unknown"]'),
+      container.querySelector('[data-testid="failed-prompt-retry"]'),
     ).toBeNull();
     expect(warn).not.toHaveBeenCalledWith(
       '[WebShell] prompt retry admission outcome is unknown',
@@ -54667,7 +56382,7 @@ describe('App /goal command', () => {
       if (unknownOutcome)
         expect(onToast).toHaveBeenCalledWith(
           'warning',
-          expect.stringContaining('Delivery is uncertain'),
+          expect.stringContaining('Message may not have sent'),
         );
     },
   );
@@ -55897,7 +57612,7 @@ describe('App workflow history entry', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
     await flush();
@@ -55911,7 +57626,7 @@ describe('App workflow history entry', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
     await flush();
@@ -56132,6 +57847,255 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
       'do the thing',
       expect.not.objectContaining({ submittedPrompt: expect.anything() }),
+    );
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'do the thing',
+      expect.objectContaining({ suppressInputHistory: true }),
+    );
+  });
+
+  it('preserves the host history opt-out through a manual-run retry', async () => {
+    admitOnSend();
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await expect(run('do the thing', null)).resolves.toBeUndefined();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenNthCalledWith(
+      1,
+      'do the thing',
+      expect.objectContaining({ suppressInputHistory: true }),
+    );
+
+    await act(async () => {
+      testState.blocks = [
+        { kind: 'error', source: 'turn_error', id: 'scheduled-retry' },
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+    mockSessionActions.sendPrompt.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenNthCalledWith(
+      1,
+      'do the thing',
+      expect.objectContaining({
+        retry: true,
+        suppressInputHistory: true,
+      }),
+    );
+  });
+
+  it('preserves the history opt-out after a rejected retry admission', async () => {
+    admitOnSend();
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await run('do the thing', null);
+    });
+    await act(async () => {
+      testState.blocks = [
+        { kind: 'error', source: 'turn_error', id: 'scheduled-retry' },
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    mockSessionActions.sendPrompt.mockClear();
+    mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+      options?.onAdmissionStarted?.();
+      return Promise.reject(
+        new DaemonHttpError(413, {}, 'Retry rejected before admission'),
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(container.querySelector('[data-testid="retry"]')).not.toBeNull(),
+    );
+
+    mockSessionActions.sendPrompt.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledExactlyOnceWith(
+      'do the thing',
+      expect.objectContaining({
+        retry: true,
+        suppressInputHistory: true,
+      }),
+    );
+  });
+
+  // Admission becomes uncertain after the daemon started handling a retry.
+  it('preserves history opt-out on uncertain manual-run admission', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    admitOnSend();
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await run('do the thing', null);
+    });
+    await act(async () => {
+      testState.blocks = [
+        { kind: 'error', source: 'turn_error', id: 'scheduled-retry' },
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    mockSessionActions.sendPrompt.mockClear();
+    const firstAdmission = deferred<void>();
+    mockSessionActions.sendPrompt.mockReturnValueOnce(firstAdmission.promise);
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+    const firstRetry = mockSessionActions.sendPrompt.mock.calls[0]?.[1];
+    expect(firstRetry).toMatchObject({
+      retry: true,
+      suppressInputHistory: true,
+    });
+    act(() => firstRetry?.onAdmissionStarted?.());
+    await act(async () => {
+      firstAdmission.reject(new Error('response lost'));
+      await Promise.resolve();
+    });
+    await flush();
+    await vi.waitFor(() =>
+      expect(container.querySelector('[data-testid="retry"]')).not.toBeNull(),
+    );
+
+    mockSessionActions.sendPrompt.mockClear();
+    const restoredAdmission = deferred<void>();
+    mockSessionActions.sendPrompt.mockReturnValueOnce(
+      restoredAdmission.promise,
+    );
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+    const restoredOptions = mockSessionActions.sendPrompt.mock.calls[0]?.[1];
+    expect(restoredOptions?.suppressInputHistory).toBe(true);
+    expect(restoredOptions?.idempotencyKey).toEqual(expect.any(String));
+    expect(restoredOptions?.idempotencyKey).toBe(firstRetry?.idempotencyKey);
+    warn.mockRestore();
+  });
+
+  it('restores a cancelled manual-run retry with its history opt-out', async () => {
+    admitOnSend();
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/tmp/project';
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await run('do the thing', null);
+    });
+    await act(async () => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'scheduled-retry',
+          promptId: 'scheduled-prompt',
+        },
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    let approveRetry!: () => void;
+    const onSubmitBefore = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          approveRetry = resolve;
+        }),
+    );
+    mockSessionActions.sendPrompt.mockClear();
+    rerender({ onSubmitBefore });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(onSubmitBefore).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    act(() => {
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
+    });
+    act(() => {
+      mockConnection.workspaceCwd = '/tmp/project-2';
+      testState.blocks = [];
+      testState.ownerVersion += 1;
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
+    });
+    await act(async () => {
+      approveRetry();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    act(() => {
+      mockConnection.workspaceCwd = '/tmp/project';
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'scheduled-retry',
+          promptId: 'scheduled-prompt',
+        },
+      ];
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+    rerender({ onSubmitBefore: vi.fn().mockResolvedValue(undefined) });
+    mockSessionActions.sendPrompt.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledExactlyOnceWith(
+      'do the thing',
+      expect.objectContaining({
+        retry: true,
+        suppressInputHistory: true,
+      }),
     );
   });
 
@@ -60187,5 +62151,284 @@ describe('upstream embedded transport reproduction', () => {
     await flush();
     expect(testState.latestMessageListProps?.activeTurnStartedAt).toBe(1000);
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+});
+
+describe('App workspace artifact library wiring (R2-1 & R2-4)', () => {
+  it('gates the sidebar Artifacts entry on workspace_artifact_library, mounts the full page, and reconciles /artifacts when capability is absent (R2-4)', async () => {
+    const { container, rerender, unmount } = renderApp();
+    await flush();
+    const openBtn = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="open-artifacts-library"]',
+      )!;
+    expect(openBtn().dataset.hasArtifactsLibrary).toBe('false');
+    expect(
+      container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).toBeNull();
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['workspace_artifact_library'],
+    };
+    rerender();
+    await flush();
+    expect(openBtn().dataset.hasArtifactsLibrary).toBe('true');
+
+    await act(async () => {
+      openBtn().click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page'),
+    ).toBe('artifacts');
+
+    // Dropping the capability returns the shell to chat
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: [],
+    };
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).toBeNull();
+    unmount();
+
+    // URL navigation: initial /artifacts without capability reconciles back to chat
+    window.history.replaceState(null, '', '/artifacts');
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: [],
+    };
+    const navOff = renderApp({}, undefined, false, true);
+    await flush();
+    expect(
+      navOff.container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).toBeNull();
+    expect(window.location.pathname).not.toBe('/artifacts');
+    navOff.unmount();
+
+    // URL navigation: initial /artifacts WITH capability mounts the page and preserves /artifacts
+    window.history.replaceState(null, '', '/artifacts');
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['workspace_artifact_library'],
+    };
+    const navOn = renderApp({}, undefined, false, true);
+    await flush();
+    expect(
+      navOn.container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).not.toBeNull();
+    expect(window.location.pathname).toBe('/artifacts');
+    navOn.unmount();
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('opens the jumped artifact tab after archived unarchive and right-panel restore settle, and cancels if user switches sessions mid-load (R2-1)', async () => {
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['session_artifacts', 'workspace_artifact_library'],
+    };
+    let resolveUnarchive!: () => void;
+    mockWorkspaceActions.unarchiveSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUnarchive = resolve;
+        }),
+    );
+    const targetArtifact = {
+      id: 'art-snap-1',
+      title: 'Archived Snapshot',
+      kind: 'web_page' as const,
+      storage: 'published' as const,
+      managedId: 'preview-1',
+      metadata: { artifactType: 'web_preview_snapshot' },
+      status: 'available' as const,
+      source: 'tool' as const,
+      retention: 'restorable' as const,
+      clientRetained: false,
+      createdAt: '2026-11-21T08:00:00.000Z',
+      updatedAt: '2026-11-21T09:00:00.000Z',
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [targetArtifact],
+    });
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'sess-arch-target';
+      mockConnection.status = 'connected';
+      mockConnection.loadingTranscript = false;
+    });
+
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ onToast });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    // Trigger jump to archived session's snapshot artifact
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-arch-target',
+        'art-snap-1',
+        'archived',
+      );
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.unarchiveSession).toHaveBeenCalledWith(
+      'sess-arch-target',
+    );
+    // Unarchive resolves -> loadSession switches to sess-arch-target -> panel restore commits -> artifact tab opens
+    await act(async () => {
+      resolveUnarchive();
+      await Promise.resolve();
+    });
+    rerender();
+    await flush();
+    rerender();
+    await flush();
+
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.artifactId === 'art-snap-1',
+      ),
+    ).toBe(true);
+
+    // Cancel arm: start a second archived jump, switch sessions mid-unarchive -> never loads or opens its tab
+    let resolveUnarchive2!: () => void;
+    mockWorkspaceActions.unarchiveSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUnarchive2 = resolve;
+        }),
+    );
+    mockSessionActions.loadSession.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-arch-canceled',
+        'art-snap-canceled',
+        'archived',
+      );
+      await Promise.resolve();
+    });
+    // User loads another session ('session-2') while unarchive is still in flight
+    await act(async () => {
+      mockSessionActions.loadSession.mockResolvedValueOnce(undefined);
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveUnarchive2();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.loadSession).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'session-2',
+      expect.any(Object),
+    );
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.artifactId === 'art-snap-canceled',
+      ),
+    ).toBe(false);
+
+    // R1-1: clicking New chat while unarchive is in flight also cancels the
+    // archived-session jump (createNewSession bumps artifactLibraryJumpGenRef).
+    let resolveUnarchiveNewChat!: () => void;
+    mockWorkspaceActions.unarchiveSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUnarchiveNewChat = resolve;
+        }),
+    );
+    mockSessionActions.loadSession.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-arch-newchat',
+        'art-snap-newchat',
+        'archived',
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveUnarchiveNewChat();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalledWith(
+      'sess-arch-newchat',
+      expect.anything(),
+    );
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.artifactId === 'art-snap-newchat',
+      ),
+    ).toBe(false);
+
+    // R1-2 (App-level): when the jump's own loadSession rejects, the dispatch
+    // suppression keeps isCurrent() true so the error alert is surfaced rather
+    // than silently swallowed.
+    mockSessionActions.loadSession.mockRejectedValueOnce(
+      new Error('session deleted mid-jump'),
+    );
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-load-reject',
+        'art-snap-reject',
+        'active',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(onToast).toHaveBeenCalledWith('error', 'session deleted mid-jump');
   });
 });

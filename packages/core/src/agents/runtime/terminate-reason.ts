@@ -7,8 +7,7 @@
 import { AgentTerminateMode } from './agent-types.js';
 import type { LoopType } from '../../telemetry/types.js';
 
-const LOOP_DETECTED_WORDING =
-  'Agent stopped: duplicate tool-call loop detected';
+const LOOP_DETECTED_WORDING = 'Agent stopped: loop detected';
 
 // Total on purpose, like the severity table in agent-interactive.ts: a new
 // AgentTerminateMode has to choose its wording here or `tsc` fails. `null`
@@ -22,6 +21,7 @@ const TERMINATE_MODE_WORDING: Record<AgentTerminateMode, string | null> = {
   [AgentTerminateMode.GOAL]: null,
   [AgentTerminateMode.CANCELLED]: null,
   [AgentTerminateMode.SHUTDOWN]: null,
+  [AgentTerminateMode.HOOK_STOPPED]: 'Agent stopped by a hook.',
 };
 
 /**
@@ -38,8 +38,7 @@ export function describeAgentTerminateReason(
     return undefined;
   }
   if (reason === AgentTerminateMode.LOOP_DETECTED && loopType) {
-    // Name the exact detector so a stop is attributable (issue #9450)
-    // instead of collapsing every loop type into one generic label.
+    // Name the stop so it is attributable (issue #9450).
     return `${LOOP_DETECTED_WORDING} (${loopType}).`;
   }
   return TERMINATE_MODE_WORDING[reason as AgentTerminateMode] ?? undefined;

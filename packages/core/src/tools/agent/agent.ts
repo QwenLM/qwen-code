@@ -2303,8 +2303,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const typedStopOutput = stopHookOutput as StopHookOutput | undefined;
 
         if (
-          !typedStopOutput?.isBlockingDecision() &&
-          !typedStopOutput?.shouldStopExecution()
+          !typedStopOutput?.isBlockingDecision() ||
+          subagent.getTerminateMode() === AgentTerminateMode.HOOK_STOPPED
         ) {
           return undefined;
         }

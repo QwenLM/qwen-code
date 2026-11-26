@@ -1,9 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.OccurrenceRow;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleRow;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -155,11 +153,9 @@ class AutomationLedgerStoreTest {
 
     private void seedRunState(String tenantId, String sessionId, String runId, String state) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, tenant_id, workspace_id, session_id, domain, record_id,"
-                        + " record_key, revision, task_kind, task_state, record_resource_id, gmt_create)"
-                        + " VALUES (?, ?, 'w', ?, 'automation_run', ?, ?, 1, 'automation_run', ?, 'res', 42)",
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, runId,
-                ManagedExtensionProjection.recordKey(sessionId, "automation_run", runId), state);
+                        + " (tenant_id, workspace_id, session_id, domain, record_id,"
+                        + " revision, task_kind, task_state, record_resource_id, gmt_create)"
+                        + " VALUES (?, 'w', ?, 'automation_run', ?, 1, 'automation_run', ?, 'res', 42)", tenantId, sessionId, runId, state);
         // Direct fixtures must carry the same derived flag as a journal projection.
         jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = ?"
                         + " WHERE tenant_id = ? AND session_id = ? AND run_id = ?",
@@ -170,9 +166,9 @@ class AutomationLedgerStoreTest {
     private void seedForeignRecords(int count) {
         for (int index = 0; index < count; index += 1) {
             jdbc.update("INSERT INTO ma_session_record"
-                            + " (session_scope_key, tenant_id, workspace_id, session_id, domain, record_id, record_key, revision, task_state, record_resource_id, gmt_create) VALUES ('scope-" + index + "', 't', 'w',"
+                            + " (tenant_id, workspace_id, session_id, domain, record_id, revision, task_state, record_resource_id, gmt_create) VALUES ('t', 'w',"
                             + " 's', 'schedule', 'asch_" + index + "',"
-                            + " 'rk-" + index + "', 1, 'completed', 'res', ?)",
+                            + " 1, 'completed', 'res', ?)",
                     System.nanoTime() + index);
         }
     }
@@ -293,7 +289,7 @@ class AutomationLedgerStoreTest {
                 .doesNotContain("OFFSET"));
         assertThat(queries.stream().filter(sql -> sql.contains("FROM ma_session_record"))
                 .map(sql -> sql.chars().filter(value -> value == '?').count()))
-                .containsExactly(512L, 512L, 6L);
+                .containsExactly(768L, 768L, 9L);
         queries.clear();
         extensionRecordRows.clear();
 
@@ -311,7 +307,7 @@ class AutomationLedgerStoreTest {
         assertThat(extensionRecordReads()).isEqualTo(519);
         assertThat(queries.stream().filter(sql -> sql.contains("FROM ma_session_record"))
                 .map(sql -> sql.chars().filter(value -> value == '?').count()))
-                .containsExactly(512L, 512L, 18L);
+                .containsExactly(768L, 768L, 27L);
     }
 
     private ScheduleRow heldSchedule(JdbcAutomationLedgerStore store) {

@@ -92,6 +92,7 @@ function SettingsHarness() {
       theme={theme}
       sidebar={params.get('sidebar') === 'false' ? false : undefined}
       settings={{ includeItems, excludeItems }}
+      disableArrowKeyHistory={params.get('disableArrowKeyHistory') === 'true'}
       loadingPhrases={
         params.has('loadingPhrase')
           ? () => [params.get('loadingPhrase')!]

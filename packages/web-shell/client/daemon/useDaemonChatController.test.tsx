@@ -30,6 +30,14 @@ const harness = vi.hoisted(() => ({
   blocks: [] as readonly DaemonTranscriptBlock[],
   pendingPermissions: [] as readonly DaemonTranscriptBlock[],
   promptSettledListener: undefined as ((event: unknown) => void) | undefined,
+  history: {
+    loadMore: vi.fn(async () => {}),
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    paginationError: false,
+  },
+  surfaceEditor: null as Record<string, unknown> | null,
 }));
 
 vi.mock('./session/DaemonSessionProvider.js', () => ({
@@ -42,6 +50,7 @@ vi.mock('./session/DaemonSessionProvider.js', () => ({
   }),
   useDaemonTranscriptBlocks: () => harness.blocks,
   useDaemonPendingPermissions: () => harness.pendingPermissions,
+  useDaemonTranscriptHistory: () => harness.history,
   useDaemonPromptSettled: (listener: unknown) => {
     harness.promptSettledListener = listener as (event: unknown) => void;
   },
@@ -53,7 +62,23 @@ vi.mock('../hooks/useMessages.js', () => ({
 vi.mock('../hooks/useComposerCore.js', () => ({
   getComposerDraftStorageKey: (sessionId: string) => `draft:${sessionId}`,
 }));
+vi.mock('../components/TranscriptViewport.js', () => ({
+  TranscriptViewport: () => null,
+}));
+vi.mock('../components/messages/ToolApproval.js', () => ({
+  ToolApproval: () => null,
+}));
+vi.mock('../components/messages/AskUserQuestion.js', () => ({
+  AskUserQuestion: () => null,
+}));
+vi.mock('../components/ChatEditor.js', () => ({
+  ChatEditor: (props: Record<string, unknown>) => {
+    harness.surfaceEditor = props;
+    return null;
+  },
+}));
 
+import { ChatSurface } from '../chat-core/ChatSurface.js';
 import { useDaemonChatController } from './useDaemonChatController.js';
 import { cleanupReact, mountReact } from '../test/reactHarness.js';
 
@@ -120,6 +145,7 @@ beforeEach(() => {
   harness.blocks = [];
   harness.pendingPermissions = [];
   harness.promptSettledListener = undefined;
+  harness.history.loadMore.mockClear();
   controller = undefined;
   forceRerender = undefined;
 });
@@ -150,6 +176,73 @@ describe('useDaemonChatController', () => {
     );
   });
 
+  it('binds loadOlder to the transcript history loader and forwards retry options', async () => {
+    mountReact(<Probe />);
+    // Dropping the loadOlder binding leaves the capability undefined, so the
+    // surface would silently lose older-history pagination; dropping the
+    // options parameter loses { force: true } on pagination-error retries;
+    // dropping the per-render ref update pins the mount-time history handle.
+    expect(controller!.loadOlder).toBeDefined();
+    await controller!.loadOlder!();
+    expect(harness.history.loadMore).toHaveBeenCalledTimes(1);
+    expect(harness.history.loadMore).toHaveBeenLastCalledWith(undefined);
+    const originalHistory = harness.history;
+    const nextLoadMore = vi.fn(async () => {});
+    harness.history = { ...originalHistory, loadMore: nextLoadMore };
+    try {
+      forceRerender!();
+      await controller!.loadOlder!({ force: true });
+      expect(originalHistory.loadMore).toHaveBeenCalledTimes(1);
+      expect(nextLoadMore).toHaveBeenCalledTimes(1);
+      expect(nextLoadMore).toHaveBeenLastCalledWith({ force: true });
+    } finally {
+      harness.history = originalHistory;
+    }
+  });
+
+  it('projects reactive transcript history pagination facts through the session-stable controller', () => {
+    mountReact(<Probe />);
+    const initialController = controller!;
+    expect([
+      initialController.hasOlderHistory,
+      initialController.loadingOlderHistory,
+      initialController.historyCapacityReached,
+      initialController.historyPaginationError,
+    ]).toEqual([false, false, false, false]);
+    const originalHistory = harness.history;
+    const cases: Array<{
+      wire: 'hasMore' | 'loading' | 'capacityReached' | 'paginationError';
+      expected: [boolean, boolean, boolean, boolean];
+    }> = [
+      { wire: 'hasMore', expected: [true, false, false, false] },
+      { wire: 'loading', expected: [false, true, false, false] },
+      { wire: 'capacityReached', expected: [false, false, true, false] },
+      { wire: 'paginationError', expected: [false, false, false, true] },
+    ];
+    try {
+      for (const { wire, expected } of cases) {
+        harness.history = {
+          ...originalHistory,
+          hasMore: false,
+          loading: false,
+          capacityReached: false,
+          paginationError: false,
+          [wire]: true,
+        };
+        forceRerender!();
+        expect(controller).toBe(initialController);
+        expect([
+          controller!.hasOlderHistory,
+          controller!.loadingOlderHistory,
+          controller!.historyCapacityReached,
+          controller!.historyPaginationError,
+        ]).toEqual(expected);
+      }
+    } finally {
+      harness.history = originalHistory;
+    }
+  });
+
   it('splits question permissions from tool approvals', () => {
     harness.pendingPermissions = [
       permissionBlock('q1', { questions: true }),
@@ -158,6 +251,97 @@ describe('useDaemonChatController', () => {
     mountReact(<Probe />);
     expect(controller!.pendingQuestions.map((q) => q.id)).toEqual(['q1']);
     expect(controller!.pendingApprovals.map((a) => a.id)).toEqual(['a1']);
+    // The render-ready request payload is pinned, not just the ids: emptying
+    // request.options at the binding must turn this red.
+    expect(
+      controller!.pendingApprovals[0].request.options.map((o) => o.id),
+    ).toEqual(['submit', 'cancel']);
+    expect(
+      (
+        controller!.pendingQuestions[0].request.rawInput as {
+          questions?: unknown;
+        }
+      ).questions,
+    ).toEqual([{ question: 'Q0?' }, { question: 'Q1?' }]);
+  });
+
+  it('refreshes the cached request when a re-emitted payload changes under the same id', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    const before = controller!.pendingApprovals[0].request;
+    expect(before.title).toBe('permission');
+    // The daemon re-emits permission.request for the same requestId with a
+    // changed title and a bumped revision; id and classification are unchanged.
+    harness.pendingPermissions = [
+      {
+        ...permissionBlock('a1'),
+        title: 'Run ls',
+        updatedAt: 2,
+      } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    const after = controller!.pendingApprovals[0].request;
+    expect(after.title).toBe('Run ls');
+    expect(after).not.toBe(before);
+  });
+
+  it('refreshes the cached request on a rawInput-only re-emit via the updatedAt term', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    expect(
+      (controller!.pendingApprovals[0].request.rawInput as { command?: string })
+        .command,
+    ).toBeUndefined();
+    // Same id, title and option ids; only toolCall.rawInput changes and the
+    // revision bumps. Only the updatedAt term can catch this shape, so dropping
+    // it from the revision must turn this red.
+    harness.pendingPermissions = [
+      {
+        ...permissionBlock('a1'),
+        toolCall: { rawInput: { command: 'pwd' } },
+        updatedAt: 2,
+      } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    expect(
+      (controller!.pendingApprovals[0].request.rawInput as { command?: string })
+        .command,
+    ).toBe('pwd');
+  });
+
+  it('refreshes the cached request on a title-only re-emit at the same revision', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    // Same updatedAt and option ids; only the title changes. Only the title term
+    // can catch this shape, so dropping it from the revision must turn this red.
+    harness.pendingPermissions = [
+      { ...permissionBlock('a1'), title: 'Run pwd' } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    expect(controller!.pendingApprovals[0].request.title).toBe('Run pwd');
+  });
+
+  it('refreshes the cached request on an option-id-only re-emit at the same revision', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    expect(
+      controller!.pendingApprovals[0].request.options.map((o) => o.id),
+    ).toEqual(['submit', 'cancel']);
+    // Same updatedAt and title; only the option ids change. Only the option-id
+    // term can catch this shape, so dropping it must turn this red.
+    harness.pendingPermissions = [
+      {
+        ...permissionBlock('a1'),
+        options: [
+          { optionId: 'allow', label: 'Allow', raw: { kind: 'allow_once' } },
+          { optionId: 'deny', label: 'Deny', raw: { kind: 'reject_once' } },
+        ],
+      } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    expect(
+      controller!.pendingApprovals[0].request.options.map((o) => o.id),
+    ).toEqual(['allow', 'deny']);
   });
 
   it('answers a question by voting its allow_once option with indexed answers', async () => {
@@ -494,5 +678,128 @@ describe('useDaemonChatController', () => {
     expect(
       controller!.operations.find((op) => op.kind === 'question')?.state,
     ).toBe('established');
+  });
+
+  it('tracks activeTurnId across admitted prompts and prompt settlements', async () => {
+    mountReact(<Probe />);
+    expect(controller!.activeTurnId).toBeUndefined();
+    harness.submitPrompt.mockResolvedValueOnce({ promptId: 'p1' });
+    await controller!.submit({ text: 'turn 1' });
+    expect(controller!.activeTurnId).toBe('p1');
+    harness.submitPrompt.mockResolvedValueOnce({ promptId: 'p2' });
+    await controller!.submit({ text: 'turn 2' });
+    expect(controller!.activeTurnId).toBe('p1');
+    harness.cancel.mockRejectedValueOnce(new Error('cancel timeout'));
+    const cancelRes = await controller!.cancel();
+    expect(cancelRes.admission).toBe('unknown');
+    expect(cancelRes.target.turnId).toBe('p1');
+    harness.promptSettledListener?.({ promptId: 'p1', outcome: 'completed' });
+    expect(controller!.activeTurnId).toBe('p2');
+    harness.promptSettledListener?.({ promptId: 'p2', outcome: 'completed' });
+    expect(controller!.activeTurnId).toBeUndefined();
+  });
+
+  it('preserves activeTurnId across a session switch round-trip and clears it when settled away (R2-1)', async () => {
+    mountReact(<Probe />);
+    const first = controller!;
+    harness.submitPrompt.mockResolvedValueOnce({ promptId: 'p1' });
+    await first.submit({ text: 'turn 1' });
+    expect(first.activeTurnId).toBe('p1');
+    // Switch s1 -> s2 -> s1: each switch rebuilds the controller, yet the
+    // returned s1 controller must still report p1 as its active turn.
+    harness.connection.sessionId = 's2';
+    forceRerender!();
+    const second = controller!;
+    expect(second).not.toBe(first);
+    expect(second.activeTurnId).toBeUndefined();
+    harness.connection.sessionId = 's1';
+    forceRerender!();
+    const third = controller!;
+    expect(third).not.toBe(first);
+    expect(third.activeTurnId).toBe('p1');
+    // If p1 settles while viewing s2, returning to s1 must report undefined.
+    harness.connection.sessionId = 's2';
+    forceRerender!();
+    harness.promptSettledListener?.({
+      sessionId: 's1',
+      promptId: 'p1',
+      outcome: 'completed',
+    });
+    harness.connection.sessionId = 's1';
+    forceRerender!();
+    expect(controller!.activeTurnId).toBeUndefined();
+  });
+
+  it('reports a delayed stop failure after a real s1 -> s2 -> s1 controller rebuild round-trip (R2-1 / F1)', async () => {
+    const onError = vi.fn();
+    let rerenderSurface: (() => void) | undefined;
+    function ComposedSurface() {
+      const [, bump] = useReducer((x: number) => x + 1, 0);
+      rerenderSurface = () => act(() => bump());
+      const bound = useDaemonChatController();
+      return <ChatSurface controller={bound} onError={onError} />;
+    }
+    harness.surfaceEditor = null;
+    mountReact(<ComposedSurface />);
+    harness.submitPrompt.mockResolvedValueOnce({ promptId: 'p1' });
+    await act(async () => {
+      (
+        harness.surfaceEditor?.onSubmit as (
+          text: string,
+          images?: unknown,
+          files?: unknown,
+          commitAccepted?: () => void,
+        ) => unknown
+      )('turn 1', undefined, undefined, vi.fn());
+    });
+    let rejectCancel!: (err: unknown) => void;
+    harness.cancel.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectCancel = reject;
+        }),
+    );
+    await act(async () => {
+      (harness.surfaceEditor?.onCancel as () => void)();
+    });
+    // Switch s1 -> s2 -> s1 while p1 is still running on the daemon:
+    // useDaemonChatController builds a brand-new controller for s1 on return.
+    harness.connection.sessionId = 's2';
+    rerenderSurface!();
+    harness.connection.sessionId = 's1';
+    rerenderSurface!();
+    await act(async () => {
+      rejectCancel(new Error('stop transport timeout'));
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('chat.stopNotConfirmed');
+  });
+
+  it('does not seed a prompt that already settled before submitPrompt resolved', async () => {
+    mountReact(<Probe />);
+    let resolveSubmit!: (value: { promptId: string }) => void;
+    harness.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise<{ promptId: string }>((resolve) => {
+          resolveSubmit = resolve;
+        }),
+    );
+    const pending = controller!.submit({ text: 'fast turn' });
+    // Terminal settlement arrives while the submit POST is still in flight.
+    harness.promptSettledListener?.({
+      sessionId: 's1',
+      promptId: 'p-fast',
+      outcome: 'completed',
+    });
+    resolveSubmit({ promptId: 'p-fast' });
+    await pending;
+    // Round-trip s1 -> s2 -> s1: p-fast must NOT be seeded into the rebuilt
+    // controller (dropping !settledDuringSubmit.has(accepted.promptId) latches
+    // p-fast permanently as activeTurnId).
+    harness.connection.sessionId = 's2';
+    forceRerender!();
+    harness.connection.sessionId = 's1';
+    forceRerender!();
+    expect(controller!.activeTurnId).toBeUndefined();
   });
 });

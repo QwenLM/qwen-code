@@ -9,43 +9,53 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11.5px;
-  font-weight: 500;
-  padding: 3px 9px;
-  border-radius: 20px;
+  min-width: 0;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
   cursor: pointer;
-  border: 1px solid var(--border);
-  background: var(--subtle-bg-strong);
-  color: var(--chat-editor-text-primary);
-  transition:
-    border-color 0.2s,
-    background 0.2s,
-    color 0.2s;
-  white-space: nowrap;
+  border: none;
+  background: transparent;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  font-weight: 400;
   line-height: 1.4;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+  white-space: nowrap;
 }
 .chip:hover,
 .chip:focus-visible {
-  border-color: color-mix(
-    in srgb,
-    var(--chat-editor-text-primary) 35%,
-    transparent
-  );
-  background: color-mix(
-    in srgb,
-    var(--chat-editor-text-primary) 12%,
-    transparent
-  );
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+  --git-branch-badge-ring: var(--chat-editor-bg-tertiary);
 }
-.chipBranch .chipIcon {
+.chip:focus-visible {
+  outline: 2px solid var(--chat-editor-accent-color);
+  outline-offset: -2px;
+}
+.chipBranch .chipIcon,
+.chipBranch [data-web-shell-git-branch-icon] {
   color: var(--git-mode-branch);
 }
-.chipWorktree .chipIcon {
+.chipWorktree .chipIcon,
+.chipWorktree [data-web-shell-git-branch-icon] {
   color: var(--git-mode-worktree);
 }
 .chipCompact {
-  padding: 3px 7px;
+  width: 28px;
+  max-width: 28px;
+  flex: 0 0 28px;
+  gap: 0;
+  padding: 0 6px;
+  justify-content: center;
+  box-sizing: border-box;
+}
+.chipCompact .chevron {
+  display: none;
 }
 .chipIcon {
   display: inline-flex;
@@ -58,6 +68,8 @@
   height: 14px;
 }
 .chipText {
+  min-width: 0;
+  flex: 0 1 auto;
   max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -77,21 +89,35 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   border: none;
-  background: var(--subtle-bg-strong);
-  color: inherit;
   border-radius: 50%;
-  font-size: 9px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 10px;
   cursor: pointer;
-  transition: background 0.15s;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
   flex-shrink: 0;
   line-height: 1;
 }
 .clearBtn:hover,
 .clearBtn:focus-visible {
-  background: color-mix(in srgb, var(--foreground) 18%, transparent);
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+}
+.clearBtn:focus-visible {
+  outline: 2px solid var(--chat-editor-accent-color);
+  outline-offset: -2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chip,
+  .chevron,
+  .clearBtn {
+    transition: none;
+  }
 }
 
 /* ── popover ──────────────────────────────── */

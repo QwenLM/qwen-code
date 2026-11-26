@@ -14,7 +14,7 @@
       "artifacts": [
         {
           "object": "agent.artifact",
-          "id": "artifact_e692910a7d0f5938791386f65dc0bc2fa58a8e6de3fff18de6131a820c678c83",
+          "id": "artifact_77d7265fcd950d72105f79c955528a441d52cd031d774e3a4c8880a7a21c8fa7",
           "session_id": "session-1",
           "result_id": "result_2cfafc7d888110d51e955a9816b826fe3fd617141bbf38748bf6116b0efc5d69",
           "revision": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
@@ -27,7 +27,7 @@
         },
         {
           "object": "agent.artifact",
-          "id": "artifact_9a29a5f8b2c056e92424cc5849064fde997bbdd08b48d1eac67ebe6825971fc8",
+          "id": "artifact_1f7b1f3f892d3727cd9c5d7a73ce841a85f0a41751eeaea4f758a4eca46ba9fd",
           "session_id": "session-1",
           "result_id": "result_2cfafc7d888110d51e955a9816b826fe3fd617141bbf38748bf6116b0efc5d69",
           "revision": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -57,7 +57,7 @@
       {
         "artifact": {
           "object": "agent.artifact",
-          "id": "artifact_e692910a7d0f5938791386f65dc0bc2fa58a8e6de3fff18de6131a820c678c83",
+          "id": "artifact_77d7265fcd950d72105f79c955528a441d52cd031d774e3a4c8880a7a21c8fa7",
           "session_id": "session-1",
           "result_id": "result_2cfafc7d888110d51e955a9816b826fe3fd617141bbf38748bf6116b0efc5d69",
           "revision": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
@@ -75,7 +75,7 @@
       {
         "artifact": {
           "object": "agent.artifact",
-          "id": "artifact_9a29a5f8b2c056e92424cc5849064fde997bbdd08b48d1eac67ebe6825971fc8",
+          "id": "artifact_1f7b1f3f892d3727cd9c5d7a73ce841a85f0a41751eeaea4f758a4eca46ba9fd",
           "session_id": "session-1",
           "result_id": "result_2cfafc7d888110d51e955a9816b826fe3fd617141bbf38748bf6116b0efc5d69",
           "revision": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -119,7 +119,7 @@
             "artifacts": [
               {
                 "object": "agent.artifact",
-                "id": "artifact_e692910a7d0f5938791386f65dc0bc2fa58a8e6de3fff18de6131a820c678c83",
+                "id": "artifact_77d7265fcd950d72105f79c955528a441d52cd031d774e3a4c8880a7a21c8fa7",
                 "session_id": "session-1",
                 "result_id": "result_2cfafc7d888110d51e955a9816b826fe3fd617141bbf38748bf6116b0efc5d69",
                 "revision": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
@@ -132,7 +132,7 @@
               },
               {
                 "object": "agent.artifact",
-                "id": "artifact_9a29a5f8b2c056e92424cc5849064fde997bbdd08b48d1eac67ebe6825971fc8",
+                "id": "artifact_1f7b1f3f892d3727cd9c5d7a73ce841a85f0a41751eeaea4f758a4eca46ba9fd",
                 "session_id": "session-1",
                 "result_id": "result_2cfafc7d888110d51e955a9816b826fe3fd617141bbf38748bf6116b0efc5d69",
                 "revision": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -195,7 +195,7 @@
           "artifacts": [
             {
               "object": "agent.artifact",
-              "id": "artifact_e692910a7d0f5938791386f65dc0bc2fa58a8e6de3fff18de6131a820c678c83",
+              "id": "artifact_77d7265fcd950d72105f79c955528a441d52cd031d774e3a4c8880a7a21c8fa7",
               "session_id": "session-1",
               "result_id": "result_2cfafc7d888110d51e955a9816b826fe3fd617141bbf38748bf6116b0efc5d69",
               "revision": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
@@ -208,7 +208,7 @@
             },
             {
               "object": "agent.artifact",
-              "id": "artifact_9a29a5f8b2c056e92424cc5849064fde997bbdd08b48d1eac67ebe6825971fc8",
+              "id": "artifact_1f7b1f3f892d3727cd9c5d7a73ce841a85f0a41751eeaea4f758a4eca46ba9fd",
               "session_id": "session-1",
               "result_id": "result_2cfafc7d888110d51e955a9816b826fe3fd617141bbf38748bf6116b0efc5d69",
               "revision": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",

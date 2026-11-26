@@ -363,7 +363,7 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
         AgentTerminateMode.LOOP_DETECTED,
         'stopped',
         vi.fn().mockResolvedValue(undefined),
-        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        LoopType.TURN_TOOL_CALL_CAP,
       ),
     );
     const result = await fork(restore, parent);
@@ -371,7 +371,7 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     // The memory callers build their failure message from these two fields;
     // without the detector here every background stop reads the same (#9450).
     expect(result.status).toBe('failed');
-    expect(result.loopType).toBe(LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS);
+    expect(result.loopType).toBe(LoopType.TURN_TOOL_CALL_CAP);
   });
 
   it('reports successful reads and writes separately from attempted calls', async () => {

@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionRecoveryRepository;
 import com.alibaba.qwen.code.managedagent.repository.SessionRecoveryRepository.HeadRecovery;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -47,11 +48,11 @@ public class SessionRecoveryService {
 
     public SessionRecovery query(String tenantId, String actorId, String sessionId) {
         SessionRecord session = sessions.requireReadableSession(tenantId, actorId, sessionId);
-        return inspect(session, actorId);
+        return inspect(session, actorId, true);
     }
 
     SessionRecovery projection(SessionRecord session, String actorId) {
-        SessionRecovery recovery = inspect(session, actorId);
+        SessionRecovery recovery = inspect(session, actorId, true);
         return "turn_active".equals(recovery.reasonCode()) ? null : recovery;
     }
 
@@ -74,7 +75,13 @@ public class SessionRecoveryService {
         }
         boolean rechecked;
         if (TERMINAL.contains(turn.status())) {
-            rechecked = recheckCleanup(tenantId, sessionId, turn.promptId());
+            if (cancelledBeforeAdmission(turn)) {
+                RecoveryStatus evidence = evidence(session, turn);
+                rechecked = hasCleanupTarget(evidence)
+                        && recheckCleanup(tenantId, sessionId, evidence.promptId());
+            } else {
+                rechecked = recheckCleanup(tenantId, sessionId, turn.promptId());
+            }
         } else {
             rechecked = coordinator.recheckRecovery(tenantId, sessionId, turnId);
             if (!rechecked) {
@@ -120,7 +127,8 @@ public class SessionRecoveryService {
     }
 
     private SessionRecovery targetRecovery(SessionRecord session, String actorId, String turnId) {
-        SessionRecovery recovery = query(session.tenantId(), actorId, session.sessionId());
+        SessionRecord current = sessions.requireReadableSession(session.tenantId(), actorId, session.sessionId());
+        SessionRecovery recovery = inspect(current, actorId, false);
         if (!turnId.equals(recovery.turnId())) {
             throw new ManagedAgentException(409,
                     "recovery_target_changed", "The Session's recovery Turn has changed.");
@@ -128,7 +136,7 @@ public class SessionRecoveryService {
         return recovery;
     }
 
-    private SessionRecovery inspect(SessionRecord session, String actorId) {
+    private SessionRecovery inspect(SessionRecord session, String actorId, boolean publicView) {
         TurnRecord turn = latest(session);
         boolean operator = operator(session, actorId);
         boolean active = turn != null && ACTIVE.contains(turn.status());
@@ -145,14 +153,22 @@ public class SessionRecoveryService {
             return view("operator_required", reason == null ? "recovery_blocked" : reason,
                     turn, false, false, cancel);
         }
-        boolean initial = turn == null || "CANCELLED".equals(turn.status()) && !turn.submissionAttempted()
-                && turn.harnessEventEpoch() == null && recovery.nonInitialTurns(session.tenantId(), session.sessionId()) == 0;
+        boolean localCancellation = cancelledBeforeAdmission(turn);
+        boolean initial = turn == null || localCancellation
+                && recovery.nonInitialTurns(session.tenantId(), session.sessionId()) == 0;
         if (initial && (heads.isEmpty() || journals.hasPristineInitialJournal(session.tenantId(),
                 session.sessionId(), session.workspace() == null ? null : session.workspace().getWorkspaceId()))) {
             return view("ready", "ready", turn, true, false, false);
         }
         if (active && !recoveryIntent(turn)) {
             return view("recovering", "turn_active", turn, false, false, cancel);
+        }
+        if (active && publicView) {
+            boolean recheck = operator && recheckIntent(turn);
+            if (recovery.hasNativeTerminal(session.tenantId(), session.sessionId(), turn.turnId())) {
+                return view("recovering", "turn_settlement_pending", turn, false, recheck, cancel);
+            }
+            return view("awaiting_evidence", "recovery_evidence_unavailable", turn, false, recheck, cancel);
         }
         // The persistent suspension proof (docs/design/2026-11-18-managed-
         // suspension-recovery-view.md): the view follows durable state, never
@@ -180,19 +196,30 @@ public class SessionRecoveryService {
             // the stamp, so a refused load's seal never inherits it.
             boolean sealStamped = head.journalRevision() != null
                     && head.journalRevision().equals(head.wakeSealRevision());
+            // A suspension that certified its background holds may leave a
+            // live projected run and an owed cleanup behind: those ARE the
+            // certified work, and the pull plus the next drain-only load
+            // converge them. A parked wake-started Turn's own owed cleanup is
+            // certified the same way: it has no Turn row, and the wake scan
+            // resumes it at its due time. Only the seal at this exact revision
+            // proves either.
+            boolean holdsCertified = sealStamped
+                    && (head.wakeSealBackground() || head.wakeSealParkedWake());
             if ("released".equals(head.activationPhase()) && (wakeProven || sealStamped)
-                    && !recovery.hasUnsettledWork(session.tenantId(), session.sessionId())) {
+                    && !recovery.hasUnsettledWork(session.tenantId(), session.sessionId(),
+                            holdsCertified)) {
                 return view("ready", "ready", turn, true, false, false);
             }
         }
         RecoveryStatus evidence = evidence(session, turn);
-        // #17538: the Harness answers status only to the client that loaded
-        // the Session, so a replica without that attachment reads nothing,
-        // and that absence proves nothing. A live head whose latest Turn
-        // carries the Harness's own journaled terminal and owes no durable
-        // work is ready from every replica. The cached-attachment guard keeps
-        // a failed or foreign-prompt status read on the owning replica from
-        // masquerading as that absence: unreadable evidence is not no evidence.
+        boolean unattached = evidence == null && publicView
+                && harness.cachedRecoveryAttachment(session.tenantId(), session.sessionId()) == null;
+        if (unattached) {
+            evidence = unattachedEvidence(session, turn);
+        }
+        // #17538: without live evidence, only the exact native terminal and a
+        // live head with no outstanding work can prove readiness. An unreadable
+        // attachment or an invalid observer response cannot use this fallback.
         if (evidence == null && !active && turn != null && head != null
                 && "ACTIVE".equals(head.journalState())
                 && harness.cachedRecoveryAttachment(session.tenantId(), session.sessionId()) == null
@@ -204,7 +231,7 @@ public class SessionRecoveryService {
             return view(active ? "awaiting_evidence" : "operator_required",
                     "recovery_evidence_unavailable", turn, false,
                     operator && (recheckIntent(turn)
-                            || turn != null && TERMINAL.contains(turn.status())), cancel);
+                            || turn != null && TERMINAL.contains(turn.status()) && !localCancellation), cancel);
         }
         if ("ready".equals(evidence.state()) && evidence.nextTurnAllowed() && evidence.inputSettled()
                 && evidence.continuationReady() && !active) {
@@ -218,7 +245,7 @@ public class SessionRecoveryService {
         }
         boolean cleanup = evidence.inputSettled() && "cleanup_pending".equals(state);
         boolean recheck = operator && !"operator_required".equals(state)
-                && (recheckIntent(turn) || cleanup);
+                && (recheckIntent(turn) || cleanup && (!localCancellation || !unattached && hasCleanupTarget(evidence)));
         if (!active && !evidence.inputSettled() && !cleanup) {
             state = "operator_required";
             recheck = false;
@@ -230,14 +257,44 @@ public class SessionRecoveryService {
     }
 
     private RecoveryStatus evidence(SessionRecord session, TurnRecord turn) {
+        String target = recoveryPrompt(turn);
         try {
-            RecoveryStatus status = harness.inspectRecovery(session.tenantId(),
-                    session.sessionId(), turn == null ? null : turn.promptId());
-            return status != null && (turn == null
-                    || turn.promptId().equals(status.promptId())) ? status : null;
+            RecoveryStatus status = harness.inspectRecovery(session.tenantId(), session.sessionId(), target);
+            return status == null || target == null || target.equals(status.promptId()) ? status : null;
         } catch (RuntimeException unavailable) {
             return null;
         }
+    }
+
+    private RecoveryStatus unattachedEvidence(SessionRecord session, TurnRecord turn) {
+        String target = recoveryPrompt(turn);
+        try {
+            RecoveryStatus status = harness.inspectUnattachedRecovery(session, target);
+            if (status == null || target == null || target.equals(status.promptId())) {
+                return status;
+            }
+        } catch (RuntimeException unavailable) {
+            // An unreadable response is not proof that the Session is absent.
+        }
+        return new RecoveryStatus("awaiting_evidence", "recovery_evidence_unavailable", target, false, false, false);
+    }
+
+    private static String recoveryPrompt(TurnRecord turn) {
+        // A null target lets the Harness name its last accepted input, even
+        // when it is this Turn's own prompt: a withdrawn submission mark
+        // does not prove non-admission (R10-4).
+        return turn == null || cancelledBeforeAdmission(turn) ? null : turn.promptId();
+    }
+
+    private static boolean hasCleanupTarget(RecoveryStatus evidence) {
+        return evidence != null && "cleanup_pending".equals(evidence.state())
+                && evidence.inputSettled() && evidence.continuationReady()
+                && StringUtils.isNotBlank(evidence.promptId());
+    }
+
+    private static boolean cancelledBeforeAdmission(TurnRecord turn) {
+        return turn != null && "CANCELLED".equals(turn.status())
+                && !turn.submissionAttempted() && turn.harnessEventEpoch() == null;
     }
 
     private TurnRecord latest(SessionRecord session) {

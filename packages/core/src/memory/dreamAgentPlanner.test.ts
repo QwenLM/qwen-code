@@ -394,23 +394,20 @@ describe('dreamAgentPlanner', () => {
   });
 
   it('names the loop detector when the dream agent stops on a loop', async () => {
-    // ACTION_STAGNATION only stops the turn under `model.loopProtection:
-    // 'stop'`; the default `warn` merely reminds. This pins what an operator
-    // reads when it does stop: the detector's name rather than the generic
-    // loop wording. Reverting the `result.loopType` argument at the call site
-    // leaves the sentence generic and turns this case red.
+    // This pins what an operator reads when the dream agent stops: the
+    // detector's name rather than the generic loop wording. Reverting the
+    // `result.loopType` argument at the call site leaves the sentence generic
+    // and turns this case red.
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'failed',
       terminateReason: 'LOOP_DETECTED',
-      loopType: LoopType.ACTION_STAGNATION,
+      loopType: LoopType.TURN_TOOL_CALL_CAP,
       filesTouched: [],
     } satisfies ForkedAgentResult);
 
     await expect(
       planManagedAutoMemoryDreamByAgent(config, projectRoot),
-    ).rejects.toThrow(
-      'Agent stopped: duplicate tool-call loop detected (action_stagnation).',
-    );
+    ).rejects.toThrow('Agent stopped: loop detected (turn_tool_call_cap).');
   });
 
   it('throws when the agent terminates as cancelled', async () => {

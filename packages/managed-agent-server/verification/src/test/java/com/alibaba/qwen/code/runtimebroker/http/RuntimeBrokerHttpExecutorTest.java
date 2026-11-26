@@ -36,7 +36,14 @@ class RuntimeBrokerHttpExecutorTest {
                 fixture.connect();
             }
             await().atMost(5, TimeUnit.SECONDS).until(() -> fixture.executor.getQueue().size() == 64);
-            try (Socket rejected = fixture.open()) {
+            try (Socket rejected = new Socket()) {
+                fixture.connectSocket(rejected);
+                try {
+                    // The HTTP dispatcher submits a connection once it is readable.
+                    rejected.getOutputStream().write('P');
+                } catch (SocketException reset) {
+                    // The rejection can race with the write. Verify the disconnect below.
+                }
                 assertDisconnected(rejected);
             }
             assertEquals(32, fixture.executor.getLargestPoolSize());
@@ -124,8 +131,7 @@ class RuntimeBrokerHttpExecutorTest {
         private Socket open() throws Exception {
             Socket socket = new Socket();
             try {
-                socket.connect(new InetSocketAddress("127.0.0.1", server.getBaseUri().getPort()), 5000);
-                socket.setSoTimeout(5000);
+                connectSocket(socket);
                 byte[] payload = BODY.getBytes(StandardCharsets.UTF_8);
                 String request = "POST " + PATH + " HTTP/1.1\r\nHost: localhost\r\n"
                         + "Authorization: Bearer secret\r\n"
@@ -138,6 +144,11 @@ class RuntimeBrokerHttpExecutorTest {
                 socket.close();
                 throw failure;
             }
+        }
+
+        private void connectSocket(Socket socket) throws Exception {
+            socket.connect(new InetSocketAddress("127.0.0.1", server.getBaseUri().getPort()), 5000);
+            socket.setSoTimeout(5000);
         }
 
         @Override

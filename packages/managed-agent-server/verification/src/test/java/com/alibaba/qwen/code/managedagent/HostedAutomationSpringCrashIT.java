@@ -119,7 +119,7 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenant = "hosted-automation-spring-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
         brokerPort = reservePort();
@@ -412,7 +412,7 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenantName = "hosted-automation-fire-" + UUID.randomUUID();
+        String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
         brokerPort = reservePort();
@@ -484,8 +484,7 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenantName = "hosted-automation-kill-watermark-"
-                + UUID.randomUUID();
+        String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
         brokerPort = reservePort();
@@ -560,7 +559,7 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenantName = "hosted-automation-kill-answer-" + UUID.randomUUID();
+        String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
         brokerPort = reservePort();
@@ -686,7 +685,7 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenantName = "hosted-automation-race-" + UUID.randomUUID();
+        String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
         brokerPort = reservePort();

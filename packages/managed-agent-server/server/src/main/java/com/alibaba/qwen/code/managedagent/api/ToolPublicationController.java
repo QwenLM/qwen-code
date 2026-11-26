@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
@@ -27,6 +28,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
@@ -199,8 +201,8 @@ public class ToolPublicationController {
             try {
                 CommitTransactionRequest commit = JSON.treeToValue(body, CommitTransactionRequest.class);
                 HttpHeaders headers = new HttpHeaders();
-                for (String header : java.util.List.of(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.OPERATION_HEADER,
-                        com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.GENERATION_HEADER)) {
+                for (String header : List.of(RuntimeLifecycleAuthority.OPERATION_HEADER,
+                        RuntimeLifecycleAuthority.GENERATION_HEADER)) {
                     if (request.getHeader(header) != null) {
                         headers.set(header, request.getHeader(header));
                     }

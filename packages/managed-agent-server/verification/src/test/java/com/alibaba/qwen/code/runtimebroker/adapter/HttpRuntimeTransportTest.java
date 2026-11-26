@@ -146,7 +146,8 @@ class HttpRuntimeTransportTest {
     private void externalAttestation(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         server.createContext(ManagedContextProtocol.ATTEST_PATH, exchange -> {
             captured.set(exchange.getRequestBody().readAllBytes());
-            byte[] body = JsonCodec.encode(ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed)));
+            byte[] body = JsonCodec.encode(ManagedContextProtocol.attestationResponse(
+                    ManagedContextProtocol.boot(request, seed).toWire()));
             exchange.getResponseHeaders().set("Cache-Control", "no-store");
             exchange.getResponseHeaders().set("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, body.length);
@@ -465,7 +466,7 @@ class HttpRuntimeTransportTest {
         var remoteLease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:2"),
                 seed.getToken(), seed.getLeaseId(), seed.getEpoch());
         reply.set(json(200, JsonCodec.encode(ManagedContextProtocol.attestationResponse(
-                ManagedContextProtocol.boot(request, seed)))));
+                ManagedContextProtocol.boot(request, seed).toWire()))));
         routed.attest(remoteLease, request, seed).toCompletableFuture().get(2, TimeUnit.SECONDS);
         assertEquals(ManagedContextProtocol.ATTEST_PATH, capturedPath.get());
         assertEquals(URI.create("http://127.0.0.1:2/"), remoteLease.getEndpoint());
@@ -476,12 +477,12 @@ class HttpRuntimeTransportTest {
         var request = ManagedContextProtocolTest.request();
         var seed = ManagedContextProtocolTest.seed();
         var boot = ManagedContextProtocol.boot(request, seed);
-        reply.set(json(200, JsonCodec.encode(ManagedContextProtocol.attestationResponse(boot))));
+        reply.set(json(200, JsonCodec.encode(ManagedContextProtocol.attestationResponse(boot.toWire()))));
         droppedResponses.set(1);
         assertEquals(request.getStorageId(), transport.attest(contextLease(seed), request, seed)
                 .toCompletableFuture().get(2, TimeUnit.SECONDS).getStorageId());
         assertEquals(2, requestCount.get());
-        assertEquals(JSON.valueToTree(ManagedContextProtocol.attestationRequest(boot)),
+        assertEquals(JSON.valueToTree(ManagedContextProtocol.attestationRequest(boot.toWire())),
                 JSON.readTree(captured.get()));
         assertEquals("Bearer " + seed.getToken(), capturedAuthorization.get());
         assertEquals(seed.getLeaseId(), capturedHeaders.get().getFirst("X-Qwen-Managed-Lease-Id"));
@@ -556,7 +557,7 @@ class HttpRuntimeTransportTest {
         RuntimeProvisionRequest request = ManagedContextProtocolTest.request();
         RuntimeProvisionSeed seed = ManagedContextProtocolTest.seed();
         RuntimeLease lease = contextLease(seed);
-        Map<String, Object> boot = ManagedContextProtocol.boot(request, seed);
+        Map<String, Object> boot = ManagedContextProtocol.boot(request, seed).toWire();
         Map<String, Object> proof = ManagedContextProtocol.attestationResponse(boot);
         reply.set(json(200, JsonCodec.encode(proof)));
         assertEquals(request.getStorageId(), transport.attest(lease, request, seed)
@@ -1132,20 +1133,39 @@ class HttpRuntimeTransportTest {
         Map<String, Object> receipt = Map.of("protocolVersion", 3, "toolResult", "managed-tool-result/1",
                 "sessionId", session.getRuntimeSessionId(), "installed", true);
         reply.set(json(200, JsonCodec.encode(receipt)));
-        transport.installPublisherV3(lease, session, publisher).toCompletableFuture().get(2, TimeUnit.SECONDS);
+        transport.installPublisherV3(lease, session, publisher, null).toCompletableFuture().get(2, TimeUnit.SECONDS);
         assertEquals("/internal/managed-runtime/v3/publisher", capturedPath.get());
         assertEquals(JSON.valueToTree(publisher), JSON.readTree(captured.get()).required("publisher"));
         for (String url : List.of("http://localhost:1234/internal/hosted-shell-publisher/v1",
                 "http://127.0.0.1:65536/internal/hosted-shell-publisher/v1",
                 "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1?redirect=evil")) {
             assertThrows(IllegalArgumentException.class, () -> transport.installPublisherV3(lease, session,
-                    Map.of("url", url, "token", "a".repeat(43))));
+                    Map.of("url", url, "token", "a".repeat(43)), null));
         }
         Map<String, Object> foreign = new LinkedHashMap<>(receipt);
         foreign.put("sessionId", "another-session");
         reply.set(json(200, JsonCodec.encode(foreign)));
         assertThrows(ExecutionException.class,
-                () -> transport.installPublisherV3(lease, session, publisher).toCompletableFuture().get(2, TimeUnit.SECONDS));
+                () -> transport.installPublisherV3(lease, session, publisher, null).toCompletableFuture().get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void forwardsWriterGenerationAndReturnsObservationOwnership() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> publisher = Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
+                "token", "a".repeat(43));
+        Map<String, Object> receipt = new LinkedHashMap<>();
+        receipt.put("protocolVersion", 3);
+        receipt.put("toolResult", "managed-tool-result/1");
+        receipt.put("sessionId", session.getRuntimeSessionId());
+        receipt.put("installed", true);
+        receipt.put("observation", true);
+        reply.set(json(200, JsonCodec.encode(receipt)));
+        Map<String, Object> result = transport.installPublisherV3(lease, session, publisher, 7L)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertEquals(7, JSON.readTree(captured.get()).required("writerGeneration").asInt());
+        assertEquals(Boolean.TRUE, result.get("observation"));
     }
 
     @Test

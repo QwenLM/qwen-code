@@ -1861,6 +1861,7 @@ export class BridgeClient implements Client {
       messageId: string;
       displayText: string;
       content: ContentBlock[];
+      queueOnly?: true;
       _meta?: Record<string, unknown>;
       attachmentReferences?: SessionAttachmentReference[];
     }> = [];
@@ -1912,6 +1913,7 @@ export class BridgeClient implements Client {
           messageId: item.messageId,
           displayText: item.text,
           content,
+          ...(item.queueOnly ? { queueOnly: true } : {}),
           ...(attachmentReferences.length > 0 ? { attachmentReferences } : {}),
         });
       }
@@ -2449,6 +2451,7 @@ export class BridgeClient implements Client {
     const workspace = params['workspace'];
     const workspaceGeneration = params['workspaceGeneration'];
     const requiresYolo = params['requiresYolo'];
+    const requiresAutoMode = params['requiresAutoMode'];
     if (
       workspace !== undefined &&
       (!isSubSessionWorkspaceSelector(workspace) ||
@@ -2477,6 +2480,15 @@ export class BridgeClient implements Client {
       throw RequestError.invalidParams(
         undefined,
         '`requiresYolo` is only supported for named workspaces and must be true',
+      );
+    }
+    if (
+      requiresAutoMode !== undefined &&
+      (requiresAutoMode !== true || workspace === undefined)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`requiresAutoMode` is only supported for named workspaces and must be true',
       );
     }
     const sessionId = params['sessionId'];
@@ -2521,6 +2533,7 @@ export class BridgeClient implements Client {
             workspace,
             workspaceGeneration,
             ...(requiresYolo === true ? { requiresYolo } : {}),
+            ...(requiresAutoMode === true ? { requiresAutoMode } : {}),
           }
         : {}),
       ...(typeof sessionId === 'string' ? { sessionId } : {}),

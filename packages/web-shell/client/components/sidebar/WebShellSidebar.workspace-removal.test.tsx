@@ -3405,7 +3405,7 @@ describe('WebShellSidebar workspace removal', () => {
         : [],
     );
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -3416,7 +3416,10 @@ describe('WebShellSidebar workspace removal', () => {
     const items = await openSessionMenuItems('Pinned secondary');
     expect(items).toEqual(expect.arrayContaining(['Rename', 'Delete']));
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -4387,26 +4390,86 @@ describe('WebShellSidebar workspace removal', () => {
     expect(menuItemLabels()).toContain('Reload runtime');
   });
 
-  it('opens management pages for the primary workspace only', () => {
+  it('opens capability-gated management pages for trusted primary and secondary workspaces and offers Trust for untrusted workspaces', async () => {
     const onOpenWorkspaceManagement = vi.fn();
+    const grantWorkspaceTrust = vi.fn().mockResolvedValue({ ok: true });
+    const baseWorkspaceByCwd = workspace.client.workspaceByCwd;
+    workspace.client.workspaceByCwd = vi.fn((cwd: string) => ({
+      ...baseWorkspaceByCwd(cwd),
+      grantWorkspaceTrust,
+    }));
+    connection.capabilities = {
+      ...connection.capabilities,
+      features: [
+        ...(connection.capabilities.features ?? []),
+        'workspace_trust_grant',
+      ],
+    };
     renderSidebar({ onOpenWorkspaceManagement });
 
+    // Without workspace_skills_config_runtime or channel_management, a
+    // secondary trusted workspace exposes MCP, Extensions and Settings only.
     act(() => click(workspaceAction('/tmp/other')!));
-    expect(menuItemLabels()).not.toContain('MCP');
-    act(() => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-    });
-
-    act(() => click(workspaceAction('/tmp/project')!));
-    const mcp = Array.from(
+    expect(menuItemLabels()).toContain('MCP');
+    expect(menuItemLabels()).toContain('Extensions');
+    expect(menuItemLabels()).toContain('Settings');
+    expect(menuItemLabels()).not.toContain('Skills');
+    expect(menuItemLabels()).not.toContain('Channels');
+    const secondaryMcp = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
     ).find((element) => element.textContent?.startsWith('MCP'));
-    expect(mcp).toBeDefined();
-    act(() => click(mcp!));
+    expect(secondaryMcp).toBeDefined();
+    act(() => click(secondaryMcp!));
+    expect(onOpenWorkspaceManagement).toHaveBeenCalledWith('mcp', '/tmp/other');
+
+    // Primary still exposes its full management list.
+    act(() => click(workspaceAction('/tmp/project')!));
+    const primaryMcp = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent?.startsWith('MCP'));
+    expect(primaryMcp).toBeDefined();
+    act(() => click(primaryMcp!));
     expect(onOpenWorkspaceManagement).toHaveBeenCalledWith(
       'mcp',
       '/tmp/project',
     );
+
+    // Untrusted workspace exposes Trust instead of management entries.
+    act(() => click(workspaceAction('/tmp/danger')!));
+    expect(menuItemLabels()).not.toContain('MCP');
+    expect(menuItemLabels()).toContain('Trust workspace');
+    const trustItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent?.trim() === 'Trust workspace');
+    expect(trustItem).toBeDefined();
+    await act(async () => {
+      click(trustItem!);
+      await Promise.resolve();
+    });
+    expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/tmp/danger');
+    expect(grantWorkspaceTrust).toHaveBeenCalledTimes(1);
+
+    // Enabling split skills and channels surfaces both on secondary rows.
+    connection.capabilities = {
+      ...connection.capabilities,
+      features: [
+        ...(connection.capabilities.features ?? []),
+        'workspace_skills_config_runtime',
+        'channel_management',
+      ],
+    };
+    workspace.capabilities = {
+      ...workspace.capabilities,
+      features: [
+        ...(workspace.capabilities.features ?? []),
+        'workspace_skills_config_runtime',
+        'channel_management',
+      ],
+    };
+    renderSidebar({ onOpenWorkspaceManagement });
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).toContain('Skills');
+    expect(menuItemLabels()).toContain('Channels');
   });
 
   it('removes the selected workspace and falls back to primary', async () => {
@@ -4778,7 +4841,10 @@ describe('WebShellSidebar non-primary archive', () => {
         : [],
     );
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/danger' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/danger',
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await ensureWorkspaceExpanded('danger');
     expect(container.textContent).toContain('Untrusted active');
     expect(sessionAction('Untrusted active')).toBeUndefined();
@@ -5376,6 +5442,13 @@ describe('WebShellSidebar session source switch', () => {
     expect(Boolean(row?.querySelector(scenario.selector))).toBe(
       scenario.activeWorkState === 'active',
     );
+    if (scenario.activeWorkState === 'active') {
+      expect(
+        row
+          ?.querySelector(scenario.selector)
+          ?.classList.contains(sidebarStyles.sessionStatusDotRunning),
+      ).toBe(true);
+    }
   });
 
   it('keeps the scheduled-task marker when a run is grouped by color', async () => {
@@ -6900,6 +6973,175 @@ describe('WebShellSidebar Live group', () => {
       container.querySelector('[data-live-starting-session]'),
     ).not.toBeNull();
   });
+  it('shows the starting cue in the hover details until presence clears', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [
+            {
+              sessionId: 'voice-session',
+              workspaceCwd: liveWorkspace.cwd,
+              displayName: 'Voice chat',
+              sourceType: 'qwen-live',
+              sourceId: 'realtime_voice:voice-call',
+            },
+          ]
+        : [],
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'starting',
+        callId: 'voice-call',
+        coordinator: {
+          workspaceCwd: liveWorkspace.cwd,
+          sessionId: 'voice-session',
+        },
+      });
+    });
+    renderSidebar({
+      showLive: true,
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const voiceRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes('Voice chat'));
+    expect(voiceRow).toBeDefined();
+    await act(async () => {
+      voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Preparing voice chat',
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, undefined);
+    });
+    const settled = document.querySelector('[role="dialog"]')?.textContent;
+    expect(settled).toContain('Idle');
+    expect(settled).not.toContain('Preparing voice chat');
+  });
+  it('names hidden background work while the voice row is starting', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [
+            {
+              sessionId: 'voice-session',
+              workspaceCwd: liveWorkspace.cwd,
+              displayName: 'Voice chat',
+              sourceType: 'qwen-live',
+              sourceId: 'realtime_voice:voice-call',
+              hasRunningBackgroundTasks: true,
+            },
+          ]
+        : [],
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'starting',
+        callId: 'voice-call',
+        coordinator: {
+          workspaceCwd: liveWorkspace.cwd,
+          sessionId: 'voice-session',
+        },
+      });
+    });
+    renderSidebar({
+      showLive: true,
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const voiceRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes('Voice chat'));
+    expect(voiceRow).toBeDefined();
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+    await act(async () => {
+      voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    const details = document.querySelector('[role="dialog"]')?.textContent;
+    expect(details).toContain('Preparing voice chat');
+    expect(details).toContain('Background tasks running');
+  });
+  it.each([
+    ['isWaitingForPermission', 'Needs approval'],
+    ['isWaitingForUserQuestion', 'User input needed'],
+  ] as const)(
+    'keeps %s ahead of the starting cue in the hover details',
+    async (flag, expected) => {
+      const liveWorkspace: DaemonWorkspaceCapability = {
+        id: 'live',
+        cwd: '/tmp/live',
+        primary: false,
+        trusted: true,
+        kind: 'live',
+      };
+      const voiceSession: DaemonSessionSummary = {
+        sessionId: 'voice-session',
+        workspaceCwd: liveWorkspace.cwd,
+        displayName: 'Voice chat',
+        sourceType: 'qwen-live',
+        sourceId: 'realtime_voice:voice-call',
+        ...(flag === 'isWaitingForPermission'
+          ? { isWaitingForPermission: true }
+          : { isWaitingForUserQuestion: true }),
+      };
+      useWorkspaceSessionCatalog(async (cwd) =>
+        cwd === liveWorkspace.cwd ? [voiceSession] : [],
+      );
+      act(() => {
+        setLivePresence(workspace.client as unknown as DaemonClient, {
+          state: 'starting',
+          callId: 'voice-call',
+          coordinator: {
+            workspaceCwd: liveWorkspace.cwd,
+            sessionId: 'voice-session',
+          },
+        });
+      });
+      renderSidebar({
+        showLive: true,
+        workspaces: [...capabilities.workspaces, liveWorkspace],
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const voiceRow = Array.from(
+        container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+      ).find((row) => row.textContent?.includes('Voice chat'));
+      expect(voiceRow).toBeDefined();
+      await act(async () => {
+        voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      });
+      const details = document.querySelector('[role="dialog"]')?.textContent;
+      expect(details).toContain(expected);
+      expect(details).not.toContain('Preparing voice chat');
+    },
+  );
   it('hides Live sessions by default', async () => {
     const liveWorkspace: DaemonWorkspaceCapability = {
       id: 'live',
@@ -7387,7 +7629,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
     enableOrganization();
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
     await settle();
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
     expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(0);
@@ -8380,5 +8622,146 @@ describe('WebShellSidebar goal markers', () => {
     expect(marker!.querySelector('svg')!.getAttribute('data-status')).toBe(
       'attention',
     );
+  });
+});
+
+describe('WebShellSidebar status dot precedence', () => {
+  const findRow = (name: string) =>
+    Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((r) => r.textContent?.includes(name));
+
+  it('lets the background dot own the slot over the unread dot', async () => {
+    const session = {
+      sessionId: 'bg-unread',
+      workspaceCwd: '/tmp/project',
+      displayName: 'BG unread',
+      hasRunningBackgroundTasks: true,
+    };
+    active.sessions = [{ ...session, hasActivePrompt: true }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('BG unread')?.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    // Control phase: prove the running→idle promotion actually marked the
+    // row unread — with no background work the unread dot owns the slot.
+    active.sessions = [
+      { ...session, hasActivePrompt: false, hasRunningBackgroundTasks: false },
+    ];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('BG unread')?.querySelector(
+        '[data-web-shell-session-completed-unread]',
+      ),
+    ).not.toBeNull();
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    const bgRow = findRow('BG unread');
+    expect(bgRow).toBeDefined();
+    expect(
+      bgRow!.querySelector('[data-web-shell-session-background-running]'),
+    ).not.toBeNull();
+    expect(
+      bgRow!.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    // The running dot's !completedUnread guard is defensive for the
+    // render-before-effect transient; the unread-over-running leg is pinned
+    // at hover level by the tooltip unread matrix, and the resume cleanup is
+    // pinned directly below.
+  });
+
+  it('lets the unread dot own the slot over the active-work dot', async () => {
+    const unreadSession = {
+      sessionId: 'unread-active',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Unread active',
+    };
+    const controlSession = {
+      sessionId: 'active-only',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Active control',
+      hasActivePrompt: false,
+      activeWorkState: 'active' as const,
+    };
+    active.sessions = [
+      { ...unreadSession, hasActivePrompt: true },
+      controlSession,
+    ];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('Unread active')?.querySelector(
+        '[data-web-shell-session-running]',
+      ),
+    ).not.toBeNull();
+    active.sessions = [
+      {
+        ...unreadSession,
+        hasActivePrompt: false,
+        activeWorkState: 'active' as const,
+      },
+      controlSession,
+    ];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    const unreadRow = findRow('Unread active');
+    const controlRow = findRow('Active control');
+    expect(unreadRow).toBeDefined();
+    expect(controlRow).toBeDefined();
+    // Control row proves activeWorkState='active' actually drives the
+    // active-work dot in this render, so the null check below is non-vacuous.
+    expect(
+      controlRow!.querySelector('[data-web-shell-session-active-work]'),
+    ).not.toBeNull();
+    expect(
+      unreadRow!.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+    expect(
+      unreadRow!.querySelector('[data-web-shell-session-active-work]'),
+    ).toBeNull();
+  });
+
+  it('clears the unread dot when a completed session starts running again', async () => {
+    const session = {
+      sessionId: 'unread-resume',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Unread resume',
+    };
+    active.sessions = [{ ...session, hasActivePrompt: true }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('Unread resume')?.querySelector(
+        '[data-web-shell-session-running]',
+      ),
+    ).not.toBeNull();
+    // Control phase: prove the running→idle promotion marked the row unread.
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('Unread resume')?.querySelector(
+        '[data-web-shell-session-completed-unread]',
+      ),
+    ).not.toBeNull();
+    // Resume phase: once the session runs again, the tracker clears unread
+    // and the running dot reclaims the slot.
+    active.sessions = [{ ...session, hasActivePrompt: true }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    const resumedRow = findRow('Unread resume');
+    expect(resumedRow).toBeDefined();
+    expect(
+      resumedRow!.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(
+      resumedRow!.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
   });
 });

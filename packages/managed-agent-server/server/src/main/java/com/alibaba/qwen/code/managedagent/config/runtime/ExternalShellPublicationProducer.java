@@ -21,6 +21,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,6 +30,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 
 /**
  * The Broker as the control plane's producer for an external worker's
@@ -82,8 +86,8 @@ public final class ExternalShellPublicationProducer
     private final ExternalStorageRegistrationStore registrations;
     // Same virtual-thread rule as the other guarded repository lanes: a JDBC
     // call must not pin the carrier of the stage that scheduled it.
-    private final java.util.concurrent.ExecutorService worker =
-            java.util.concurrent.Executors.newThreadPerTaskExecutor(
+    private final ExecutorService worker =
+            Executors.newThreadPerTaskExecutor(
                     Thread.ofVirtual().name("external-shell-publication-", 0).factory());
 
     public ExternalShellPublicationProducer(HttpRuntimeTransport transport,
@@ -442,8 +446,8 @@ public final class ExternalShellPublicationProducer
      * slot, so a resubmission after a lost answer meets the same row.
      */
     private JsonNode operation(JsonNode key, String publicationId, String token,
-            String operationId, java.util.function.Supplier<JsonNode> submit) {
-        long deadline = System.nanoTime() + java.time.Duration.ofMinutes(30).toNanos();
+            String operationId, Supplier<JsonNode> submit) {
+        long deadline = System.nanoTime() + Duration.ofMinutes(30).toNanos();
         int recoveries = 0;
         JsonNode status;
         while (System.nanoTime() < deadline) {

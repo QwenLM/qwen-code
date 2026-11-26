@@ -146,12 +146,13 @@ export function startSharedLoopRound(
             inTurn(() => batch.executor.run(requests, signal, hooks)),
         },
       });
-      return run.then(({ reason, parts, responses }) => ({
+      return run.then(({ reason, parts, responses, hookStopReason }) => ({
         parts: parts ?? [],
         ...(responses ? { responses } : {}),
         ...(reason === 'next_round' || reason === 'completed'
           ? {}
           : { stop: reason }),
+        ...(hookStopReason !== undefined ? { hookStopReason } : {}),
       }));
     },
     close: async () => {

@@ -131,6 +131,8 @@ export enum AgentTerminateMode {
   CANCELLED = 'CANCELLED',
   /** The agent was gracefully shut down (e.g., arena/team session ended). */
   SHUTDOWN = 'SHUTDOWN',
+  /** A tool hook returned `continue: false`. */
+  HOOK_STOPPED = 'HOOK_STOPPED',
 }
 
 // ─── Agent Status ────────────────────────────────────────────
