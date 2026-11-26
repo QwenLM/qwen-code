@@ -1388,4 +1388,60 @@ describe('ChannelsManagerPage', () => {
         ?.disabled,
     ).toBe(true);
   });
+
+  it('selects initialWorkspaceCwd and switches when navigationRequest advances', async () => {
+    workspaceState.current = {
+      ...workspaceState.current,
+      capabilities: {
+        features: ['channel_management'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/workspace/demo',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary',
+            cwd: '/workspace/other',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      },
+    };
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ChannelsManagerPage
+            onClose={vi.fn()}
+            initialWorkspaceCwd="/workspace/other"
+            navigationRequest={1}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/other',
+    });
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ChannelsManagerPage
+            onClose={vi.fn()}
+            initialWorkspaceCwd="/workspace/demo"
+            navigationRequest={2}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/demo',
+    });
+  });
 });

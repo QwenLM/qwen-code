@@ -41,6 +41,7 @@ import {
 import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
+  deleteNestedPropertySafe,
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
   WORKSPACE_RESTRICTED_ROOT_SETTINGS,
@@ -843,7 +844,7 @@ export class LoadedSettings {
 
   setValue(
     scope: SettingScope,
-    key: string,
+    key: string | readonly string[],
     value: unknown,
     assertCanCommit?: () => void,
     opts: { throwOnWriteFailure?: boolean } = {},
@@ -865,8 +866,13 @@ export class LoadedSettings {
         },
       );
     }
-    setNestedPropertySafe(settingsFile.settings, key, value);
-    setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    if (typeof key !== 'string' && value === undefined) {
+      deleteNestedPropertySafe(settingsFile.settings, key);
+      deleteNestedPropertySafe(settingsFile.originalSettings, key);
+    } else {
+      setNestedPropertySafe(settingsFile.settings, key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    }
     this._merged = this.computeMergedSettings();
     if (!opts.throwOnWriteFailure) {
       saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
@@ -1701,7 +1707,7 @@ function readSettingsLayers(
 }
 
 function createSettingsUpdate(
-  key: string,
+  key: string | readonly string[],
   value: unknown,
 ): Record<string, unknown> {
   const root: Record<string, unknown> = {};

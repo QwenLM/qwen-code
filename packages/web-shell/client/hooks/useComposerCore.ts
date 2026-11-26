@@ -1,5 +1,6 @@
 import {
   createElement,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -80,6 +81,7 @@ import {
   type AtMentionWorkspaceActions,
 } from './useAtMentionMenu';
 import { useI18n } from '../i18n';
+import { ArrowKeyHistoryContext } from '../WebShellContexts';
 import {
   inputHighlight,
   inputHighlightTheme,
@@ -1760,6 +1762,10 @@ export function useComposerCore(
   persistFileReferencesRef.current = persistFileReferences;
   const workspace = useOptionalComposerWorkspace();
   const { language, t } = useI18n();
+  const arrowKeyHistoryEnabled =
+    useContext(ArrowKeyHistoryContext)?.enabled ?? true;
+  const arrowKeyHistoryEnabledRef = useRef(arrowKeyHistoryEnabled);
+  arrowKeyHistoryEnabledRef.current = arrowKeyHistoryEnabled;
   const portalRoot = useWebShellPortalRoot();
   const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
   const storageScopeRef = useRef(storageScopeKey);
@@ -3455,6 +3461,7 @@ export function useComposerCore(
     getMutationVersion,
     navigateUp,
     navigateDown,
+    endNavigation,
     isNavigating,
     reset,
     getReverseMatches,
@@ -3779,6 +3786,15 @@ export function useComposerCore(
     }
   }, [isTouchComposer, mobileText]);
 
+  const getFollowupCompletionForSubmit = (text: string) => {
+    const followup = followupStateRef.current;
+    return followup?.isVisible &&
+      pastedImagesRef.current.length === 0 &&
+      pastedFilesRef.current.length === 0
+      ? getFollowupCompletion(text, followup.suggestion)
+      : null;
+  };
+
   // Lives in the render scope (not the editor-creation effect) so the mobile
   // textarea backend, which never instantiates an EditorView, can reuse the
   // exact same submit pipeline with `view === null`.
@@ -3802,20 +3818,11 @@ export function useComposerCore(
         ? getInlineComposerTagPlacements(view)
         : [];
     const editorText = view ? view.state.doc.toString() : mobileTextRef.current;
-    const followup = followupStateRef.current;
-    // A folded paste leaves the draft empty, which is the state the follow-up
-    // completion submits from, so the suggestion would become the message with
-    // the paste along as an attachment. The paste wins while a card waits.
-    const foldedPastePending = pastedFilesRef.current.some(
-      (file) => file.text !== undefined,
-    );
     const followupCompletion =
       textOverride === undefined &&
       !suppressFollowupCompletion &&
-      inlineTags.length === 0 &&
-      !foldedPastePending &&
-      followup?.isVisible
-        ? getFollowupCompletion(editorText, followup.suggestion)
+      inlineTags.length === 0
+        ? getFollowupCompletionForSubmit(editorText)
         : null;
     const sourceText = textOverride ?? followupCompletion ?? editorText;
     // Slash-command completions stay editable on touch before a deliberate submit.
@@ -4302,26 +4309,21 @@ export function useComposerCore(
             return true;
           }
           const submitDraft = (target: EditorView) => {
-            const followup = followupStateRef.current;
-            const hasInlineTags = hasInlineComposerTags(target);
-            const followupCompletion = hasInlineTags
+            if (submitPreparingRef.current || submitGuardsBlock()) return true;
+            const followupCompletion = hasInlineComposerTags(target)
               ? null
-              : getFollowupCompletion(
-                  target.state.doc.toString(),
-                  followup?.suggestion,
-                );
-            if (followup?.isVisible && followupCompletion) {
+              : getFollowupCompletionForSubmit(target.state.doc.toString());
+            if (followupCompletion) {
               onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
               return submitText(target, followupCompletion);
             }
             return submitText(target);
           };
+          if (!prepareSubmitRef.current) return submitDraft(view);
           // Refuse before arming the finalizer: a submit the guards would
           // reject must leave a live capture recording, as it did before
           // finalization existed.
-          if (!prepareSubmitRef.current || submitGuardsBlock()) {
-            return submitDraft(view);
-          }
+          if (submitGuardsBlock()) return true;
           const identity = composerIdentityRef.current;
           // CodeMirror commands are synchronous; the finalization runs in the
           // background and the key is consumed so no newline is inserted.
@@ -4393,10 +4395,13 @@ export function useComposerCore(
       {
         key: 'ArrowUp',
         run: (view) => {
+          const canRecallHistory =
+            shellModeRef.current || arrowKeyHistoryEnabledRef.current;
           const history = shellModeRef.current
             ? shellHistoryActionsRef.current
             : historyActionsRef.current;
-          const isBrowsingHistory = historyBrowseActiveRef.current;
+          const isBrowsingHistory =
+            canRecallHistory && historyBrowseActiveRef.current;
           // Not browsing history → arrows drive the slash menu / native
           // completion. While browsing → arrows keep walking history and any
           // auto-opened menu is closed. (Gate uses historyBrowseActiveRef, not
@@ -4438,6 +4443,7 @@ export function useComposerCore(
               return true;
             }
           }
+          if (!canRecallHistory) return false;
           const current = view.state.doc.toString();
           if (!isBrowsingHistory) {
             saveCurrentDraftRef.current();
@@ -4456,10 +4462,13 @@ export function useComposerCore(
       {
         key: 'ArrowDown',
         run: (view) => {
+          const canRecallHistory =
+            shellModeRef.current || arrowKeyHistoryEnabledRef.current;
           const history = shellModeRef.current
             ? shellHistoryActionsRef.current
             : historyActionsRef.current;
-          const isBrowsingHistory = historyBrowseActiveRef.current;
+          const isBrowsingHistory =
+            canRecallHistory && historyBrowseActiveRef.current;
           // Symmetric with ArrowUp: history navigation wins while browsing;
           // the slash menu and native completion only capture arrows once the
           // user is no longer paging through history.
@@ -4493,7 +4502,7 @@ export function useComposerCore(
             restoreHistoryEntry(view, next);
             return true;
           }
-          const next = history.navigateDown();
+          const next = canRecallHistory ? history.navigateDown() : null;
           if (next === null) {
             if (isBrowsingHistory) return true;
             return onFocusFooterRef.current?.() ?? false;
@@ -5079,6 +5088,31 @@ export function useComposerCore(
   }, [portalRoot]);
 
   // ---- Reactions to prop changes ----
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (
+      arrowKeyHistoryEnabled ||
+      shellMode ||
+      searchMode ||
+      !historyBrowseActiveRef.current ||
+      !view
+    ) {
+      return;
+    }
+    const draft = endNavigation();
+    if (draft === null) return;
+    historyBrowseActiveRef.current = false;
+    restorePromptHistoryEntry(view, draft);
+    restorePromptHistoryDraftTags();
+  }, [
+    arrowKeyHistoryEnabled,
+    endNavigation,
+    restorePromptHistoryDraftTags,
+    restorePromptHistoryEntry,
+    searchMode,
+    shellMode,
+  ]);
 
   useEffect(() => {
     const view = viewRef.current;
