@@ -125,6 +125,32 @@ class StarterHostTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
+    @Test
+    void earlyInvocationDoesNotInitializeManagedAgentTooEarly() {
+        var application = new SpringApplication(EarlyInvocationHost.class);
+        application.setWebApplicationType(WebApplicationType.NONE);
+        try (var context = application.run("--qwen.managed-agent.enabled=true",
+                "--qwen.managed-agent.datasource.url=" + url())) {
+            assertThat(context.getBean("earlyFailure", IllegalStateException.class))
+                    .hasMessage("Embedded Managed Agent is unavailable")
+                    .matches(failure -> failure.getCause() == null);
+            assertNormalSessionRead(context);
+        }
+    }
+
+    @SpringBootConfiguration
+    @EnableAutoConfiguration
+    static class EarlyInvocationHost extends Host {
+        @Bean
+        IllegalStateException earlyFailure(@Qualifier("managedAgentService") ManagedAgentService service) {
+            return assertThatThrownBy(() -> service.getPublicSession(
+                    new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "owner", null), "missing"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("Embedded Managed Agent is unavailable")
+                    .actual();
+        }
+    }
+
     private static String url() {
         return "jdbc:h2:mem:starter-" + UUID.randomUUID() + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
     }

@@ -73,8 +73,7 @@ public final class EmbeddedManagedAgentBootstrap implements AutoCloseable, Smart
     }
 
     private synchronized Object resolve(Class<?> service) {
-        initialize();
-        if (initializationFailure != null || !context.isActive()) {
+        if (!initialized || initializationFailure != null || context == null || !context.isActive()) {
             throw new IllegalStateException("Embedded Managed Agent is unavailable", initializationFailure);
         }
         return context.getBean(service);

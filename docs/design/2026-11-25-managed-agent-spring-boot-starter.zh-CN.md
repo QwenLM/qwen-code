@@ -66,7 +66,7 @@ Managed catalog 与宿主业务 catalog 不同。其表结构和应用账号由�
 
 - 上下文测试：默认依赖无效果、显式启用、独立或宿主提供的 Managed 数据源，以及没有公共/内部 Controller Bean。
 - Schema 测试：默认仍初始化；仅校验接受已建基线，空库或不匹配结构被拒绝，错误保留在 Managed 调用中，宿主无关路径仍可启动。不能因请求校验就补建缺失结构；可用时用真实 MySQL 验证该边界。
-- 架构测试：Starter 类型只属于本模块。允许的依赖是 server 装配以及三个公开 Java 服务所需的 control-plane 和 contracts 类型；宿主类型、内部 JDBC、调度器和执行器仍不向宿主透出。
+- 架构测试：Starter 类型只属于本模块。允许的依赖是 server 装配以及三个公开 Java 服务所需的 control-plane 和 contracts 类型，并在 starter POM 中直接声明；宿主类型、内部 JDBC、调度器和执行器仍不向宿主透出。子上下文推迟到 `afterSingletonsInstantiated` 启动：更早的 Managed 调用以 `IllegalStateException` 拒绝，不基于构造未完整的宿主 Bean 提前初始化 MA，也不将过早失败固化下来。
 - 独立夹具：使用 Spring Boot 3.5.3 消费新制品，无 `@Import`，覆盖独立连接池和宿主提供的连接池。验证宿主声明的 `@Transactional` Bean 是 AOP 代理。覆盖数据源配置缺失及部分结构：宿主仍须启动，Managed 服务调用须保留原始根因，宿主业务 Bean 仍可使用。原显式导入测试继续执行。
 - 配置参考与 README 同步新属性和制品契约。
 - 聚焦 Maven/Checkstyle 检查及独立夹具提供本地证据；完整 Java、MySQL 和打包测试集保留为 CI 门禁。

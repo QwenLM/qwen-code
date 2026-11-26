@@ -14,6 +14,7 @@ import javax.sql.DataSource;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedAgentStarterTest {
     private ApplicationContextRunner runner() {
