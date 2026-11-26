@@ -72,12 +72,17 @@ class EmbeddedRuntimeBrokerTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"static", "local-process"})
-    void externalTransportDoesNotReplaceNonExternalProviderTransport(String provisioner)
+    void externalTransportDoesNotReplaceNonExternalProviderTransport(String provisioner,
+            @org.junit.jupiter.api.io.TempDir Path tempDir)
             throws Exception {
         var properties = properties();
         properties.getRuntimeBroker().setProvisioner(provisioner);
         if ("local-process".equals(provisioner)) {
             properties.getRuntimeBroker().setWorkspaceId("");
+            properties.getRuntimeBroker().setStateDirectory(tempDir.resolve("runtime-state").toString());
+            properties.getRuntimeBroker().setNodeExecutable("node");
+            properties.getRuntimeBroker().setWorkerEntry("worker.js");
+            properties.getRuntimeBroker().setDurableLocalProcess(false);
         }
         var transport = mock(com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport.class);
         try (EmbeddedRuntimeBroker broker = transportBroker(properties, transport)) {
