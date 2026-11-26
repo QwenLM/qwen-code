@@ -73,6 +73,11 @@
   margin-left: auto;
 }
 
+/* A copy or download outcome sits right after the save status. */
+.saveStatus + .saveStatus {
+  margin-left: 0;
+}
+
 .loading {
   padding: 16px 12px;
   color: var(--muted-foreground);

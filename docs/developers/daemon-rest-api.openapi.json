@@ -3670,6 +3670,10 @@
           "sessionId": {
             "type": "string"
           },
+          "eventEpoch": {
+            "type": "string",
+            "description": "Epoch of the live native session's event stream."
+          },
           "workspaceCwd": {
             "type": "string"
           },
@@ -3716,6 +3720,10 @@
           },
           "hasTurnError": {
             "type": "boolean"
+          },
+          "needsContinuation": {
+            "type": "boolean",
+            "description": "Persisted prompt-ledger evidence that the session's latest prompt was cut off mid-flight (dangling admission, reconciled interruption, or a teardown flush), so opening the session can offer Continue execution. A list-surface hint only; the loaded session's recovery status stays authoritative. Absent when there is no ledger evidence; never false."
           },
           "turnError": {
             "type": "object",
@@ -3813,6 +3821,37 @@
               "$ref": "#/components/schemas/PromptContentBlock"
             }
           },
+          "pinSkills": {
+            "type": "boolean",
+            "x-qwen-capability": "turn_skill_file_snapshot",
+            "description": "Retain the admitted turn's managed Skill files."
+          },
+          "requireSessionSkillEffects": {
+            "type": "boolean",
+            "x-qwen-capability": "turn_skill_session_effects_check",
+            "description": "With pinSkills, reject before admission if a captured managed Skill requires unsupported session-scoped effects."
+          },
+          "pinExtensions": {
+            "type": "boolean",
+            "x-qwen-capability": "turn_extension_store_lease",
+            "description": "With pinSkills and expectedExtensionGeneration, hold the managed extension store during this turn."
+          },
+          "expectedExtensionGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The verified workspace extension generation to reserve. Requires pinExtensions."
+          },
+          "expectedSkillDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Expected admitted Skill file digest. Requires pinSkills."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Bounded, process-local prompt admission retry identity."
+          },
           "deadlineMs": {
             "type": "integer",
             "minimum": 1,
@@ -3878,6 +3917,24 @@
           },
           "eventEpoch": {
             "type": "string"
+          },
+          "sessionSkillEffectsChecked": {
+            "const": true,
+            "description": "The runtime checked the admitted Skill snapshot for unsupported session-scoped effects."
+          },
+          "extensionGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The extension store generation reserved before admission."
+          },
+          "skillDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "The admitted skill-file snapshot digest."
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "description": "An existing admission receipt was returned for this key."
           }
         },
         "additionalProperties": false

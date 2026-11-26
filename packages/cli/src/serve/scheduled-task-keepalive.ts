@@ -41,6 +41,7 @@ import {
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import { SystemOverloadedError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
@@ -400,23 +401,40 @@ export function startScheduledTaskKeepalive(
           log.debug('keepalive: revived non-resident session', sessionId);
           reviveState.delete(sessionId);
         } catch (loadErr) {
-          // Back off exponentially so a permanently-gone transcript isn't
-          // retried every interval for the daemon's lifetime.
-          const failures = (state?.failures ?? 0) + 1;
-          const backoff = Math.min(
-            intervalMs * 2 ** Math.min(failures - 1, 6),
-            MAX_REVIVE_BACKOFF_MS,
-          );
-          reviveState.set(sessionId, {
-            failures,
-            nextAttemptAt: Date.now() + backoff,
-          });
-          log.debug(
-            'keepalive: failed to revive session',
-            sessionId,
-            `(failure ${failures}, next retry in ${backoff}ms)`,
-            loadErr,
-          );
+          if (loadErr instanceof SystemOverloadedError) {
+            // Load backpressure drains on its own; exponential backoff would
+            // park bound cron tasks for up to 30 min after the host recovers.
+            // Keep the failure count and retry at the next interval.
+            reviveState.set(sessionId, {
+              failures: state?.failures ?? 0,
+              // Arm for the NEXT tick, not one interval after the refusal
+              // settles: the tick already spent awaited work before the
+              // admission threw, so +intervalMs would skip a whole cadence.
+              nextAttemptAt: Date.now(),
+            });
+            log.debug(
+              'keepalive: revive refused by load admission, retry next interval',
+              sessionId,
+            );
+          } else {
+            // Back off exponentially so a permanently-gone transcript isn't
+            // retried every interval for the daemon's lifetime.
+            const failures = (state?.failures ?? 0) + 1;
+            const backoff = Math.min(
+              intervalMs * 2 ** Math.min(failures - 1, 6),
+              MAX_REVIVE_BACKOFF_MS,
+            );
+            reviveState.set(sessionId, {
+              failures,
+              nextAttemptAt: Date.now() + backoff,
+            });
+            log.debug(
+              'keepalive: failed to revive session',
+              sessionId,
+              `(failure ${failures}, next retry in ${backoff}ms)`,
+              loadErr,
+            );
+          }
         }
       }
     }
@@ -608,6 +626,13 @@ export async function rehydrateScheduledTaskSessions(deps: {
       await withTimeout(resume, timeoutMs, `resumeSession(${sessionId})`);
       loaded.push(sessionId);
     } catch (err) {
+      if (err instanceof SystemOverloadedError) {
+        // Load backpressure, not a restore defect: leave this session
+        // non-resident for the keepalive revive loop instead of reporting a
+        // failure and alarming on a saturated boot.
+        log.debug('rehydrate: load admission refused', sessionId);
+        return;
+      }
       // Timed out (or the load rejected). Do NOT await the raw `load` here: a
       // genuinely hung, non-abortable load would pin this worker forever and, if
       // enough loads hang, the whole boot sweep never completes (`Promise.all`

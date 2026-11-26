@@ -6,6 +6,7 @@
 
 import { CLAUDE_CODE_EVENTS } from './claude-events.js';
 import {
+  DESKTOP_ELEMENTS,
   INVALIDATABLE_EVENTS,
   MOD_RENDER_SITES,
   TERMINAL_ELEMENTS,
@@ -14,7 +15,7 @@ import { MOD_MAX_DEPTH } from './types.js';
 
 // Executed only inside QuickJS. The factory's handles stay private to the host.
 export const MOD_GUEST_FACTORY = String.raw`
-((bridge, status, identity) => {
+((bridge, status, identity, drawnOn) => {
   const parse = JSON.parse.bind(JSON);
   const stringify = JSON.stringify.bind(JSON);
   const Depths = Map;
@@ -108,7 +109,6 @@ export const MOD_GUEST_FACTORY = String.raw`
       ...(kids.length ? { children: kids } : {})
     });
   };
-  const elementTags = ${JSON.stringify(TERMINAL_ELEMENTS)};
   const h = (tag, props, ...children) => {
     // A component, as in Claude Code, gets its children flattened, always an array.
     if (typeof tag === 'function') return tag({ ...(object(props) ? props : {}), children: flatten(children) });
@@ -118,14 +118,22 @@ export const MOD_GUEST_FACTORY = String.raw`
   const Fragment = props => build('Box', { flexDirection: 'column' }, [object(props) ? props.children : undefined]);
   for (const [name, value] of [['h', h], ['Fragment', Fragment]])
     Object.defineProperty(globalThis, name, { value: freeze(value), writable: false, configurable: false });
-  const terminal = Object.create(null);
-  for (const tag of elementTags) terminal[tag] = freeze(props => {
-    const { children, ...rest } = object(props) ? props : {};
-    const element = build(tag, rest, Array.isArray(children) ? children : [children]);
-    if (!object(element)) throw new TypeError('the element constructor did not build an element');
-    return element;
-  });
-  freeze(terminal);
+  // The element tables, read by the event's surface: the terminal's, and the
+  // desktop's on a host that draws there.
+  const table = tags => {
+    const elements = Object.create(null);
+    for (const tag of tags) elements[tag] = freeze(props => {
+      const { children, ...rest } = object(props) ? props : {};
+      const element = build(tag, rest, Array.isArray(children) ? children : [children]);
+      if (!object(element)) throw new TypeError('the element constructor did not build an element');
+      return element;
+    });
+    return freeze(elements);
+  };
+  const tables = Object.create(null);
+  tables.terminal = table(${JSON.stringify(TERMINAL_ELEMENTS)});
+  if (drawnOn === 'desktop') tables.desktop = table(${JSON.stringify(DESKTOP_ELEMENTS)});
+  freeze(tables);
   const invalidatable = new Set(${JSON.stringify(INVALIDATABLE_EVENTS)});
   const matches = (m, e) => {
     if (Array.isArray(m)) return m.some(v => matches(v, e));
@@ -240,8 +248,9 @@ export const MOD_GUEST_FACTORY = String.raw`
         },
         // A read of the table, not a dispatch.
         resolve: e => {
-          if (!object(e) || e.surface !== 'terminal') throw new TypeError('$.ui.resolve takes a ui.render event drawn on a surface this host draws');
-          return terminal;
+          const elements = object(e) && typeof e.surface === 'string' ? tables[e.surface] : undefined;
+          if (!elements) throw new TypeError('$.ui.resolve takes a ui.render event drawn on a surface this host draws');
+          return elements;
         },
         invalidate: event => {
           if (!invalidatable.has(event)) throw new TypeError('$.ui.invalidate takes ui.render or a cached-answer event, not ' + String(event));

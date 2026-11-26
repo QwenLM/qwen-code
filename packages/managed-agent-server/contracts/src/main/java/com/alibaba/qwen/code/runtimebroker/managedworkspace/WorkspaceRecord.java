@@ -24,7 +24,7 @@ public final class WorkspaceRecord {
     public WorkspaceRecord(String tenantId, String workspaceId,
             long workspaceGeneration, String storageId, String displayName,
             WorkspaceState state, String policyRef, String configRef) {
-        this.tenantId = WorkspaceValues.requireIdentifier(tenantId,
+        this.tenantId = WorkspaceValues.requireTenantIdentifier(tenantId,
                 "tenantId");
         this.workspaceId = WorkspaceValues.requireIdentifier(workspaceId,
                 "workspaceId");

@@ -114,6 +114,10 @@ import {
   effectiveHistoryEnd,
 } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
@@ -126,6 +130,7 @@ import {
   type ChatRecordingService,
   type ChatCompressionRecordPayload,
 } from '../services/chatRecordingService.js';
+import { withoutCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
 import {
   ChatCompressionService,
   computeThresholds,
@@ -198,6 +203,7 @@ import {
   isRetryableStatuslessUpstreamError,
   isRetryableStreamTransportError,
 } from './stream-transport-retry.js';
+import { StreamInactivityTimeoutError } from './stream-guards.js';
 import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
@@ -275,6 +281,25 @@ function hasNonThoughtCandidateParts(
   return Boolean(
     response.candidates?.some((candidate) =>
       candidate.content?.parts?.some((part) => !part.thought),
+    ),
+  );
+}
+
+function hasVisibleNonToolCandidateParts(
+  response: GenerateContentResponse,
+): boolean {
+  return Boolean(
+    response.candidates?.some((candidate) =>
+      candidate.content?.parts?.some((part) => {
+        if (part.thought || part.functionCall) return false;
+        return Boolean(
+          (typeof part.text === 'string' && part.text.length > 0) ||
+            part.inlineData ||
+            part.fileData ||
+            part.executableCode ||
+            part.codeExecutionResult,
+        );
+      }),
     ),
   );
 }
@@ -775,6 +800,12 @@ export interface LlmChatSendOptions {
    */
   retractDeliveredOutputOnRetry?: boolean;
   /**
+   * The consumer buffers streamed `functionCall` parts until end-of-stream and
+   * discards them on `StreamEventType.RETRY`, so a cut that yielded only
+   * thinking and unexecuted tool calls (no visible output) can replay cleanly.
+   */
+  retractToolCallsOnRetry?: boolean;
+  /**
    * A `UserPromptSubmit` block suppressed as already delivered. Compression
    * can drop the history entry holding its only copy inside this same send,
    * so it is re-appended when the send compacts.
@@ -919,7 +950,24 @@ const STREAM_RETRY_CONFIG = {
    * the replay budget.
    */
   maxContinuationRetries: 3,
+  /**
+   * Shared budget for replays and continuations after an inactivity timeout
+   * that hit while a tool call's arguments were still open. Providers that
+   * withhold arguments until they are complete go silent for exactly that
+   * stretch, so the same request tends to stall the same way again; one retry
+   * covers a transient cut without spending every budget on a repeat.
+   */
+  maxToolArgumentStallRetries: 1,
 };
+
+function getToolArgumentStallRetryError(error: unknown) {
+  // Classify the local timeout code so the diagnostic tool name cannot be
+  // mistaken for a provider error.
+  return error instanceof StreamInactivityTimeoutError &&
+    error.openToolCallName !== undefined
+    ? { code: error.code }
+    : undefined;
+}
 
 /**
  * Pad added when sizing the output clamp from an estimate-derived prompt
@@ -1956,14 +2004,20 @@ function copyContentContainer(content: Content): Content {
 
 function copyPartContainer(part: Part): Part {
   const nested = getFunctionResponseParts(part);
-  if (!nested) return { ...part };
-  return {
-    ...part,
-    functionResponse: {
-      ...part.functionResponse,
-      parts: nested.map((inner) => ({ ...inner })),
-    },
-  };
+  const copy = nested
+    ? {
+        ...part,
+        functionResponse: {
+          ...part.functionResponse,
+          parts: nested.map((inner) => ({ ...inner })),
+        },
+      }
+    : { ...part };
+  const recovery = getToolOutputRecovery(part);
+  if (recovery) {
+    setToolOutputRecovery(copy, recovery);
+  }
+  return copy;
 }
 
 function stripThoughtPartsFromContent(content: Content): Content | null {
@@ -2514,6 +2568,19 @@ export class LlmChat {
     return this.historyReplacementRevision;
   }
 
+  /**
+   * The per-response output-token limit the send layer last used — clamp,
+   * escalation, or user override. `Turn` reads it when a `MAX_TOKENS` cut
+   * truncates a tool call so the scheduler's rejection can name the budget
+   * (#16417). One send stale is fine: the value is refreshed at every clamp
+   * and every escalation before the retry goes out.
+   */
+  private lastRequestMaxOutputTokens: number | undefined;
+
+  getLastRequestMaxOutputTokens(): number | undefined {
+    return this.lastRequestMaxOutputTokens;
+  }
+
   // A promise to represent the current state of the message being sent to the
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
@@ -2679,7 +2746,9 @@ export class LlmChat {
     payload: ChatCompressionRecordPayload,
   ): Promise<void> {
     if (this.compressionObserver) {
-      const compressedHistory = [...payload.compressedHistory];
+      const compressedHistory = [
+        ...withoutCompactionTranscriptHint(payload.compressedHistory),
+      ];
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
@@ -2776,8 +2845,11 @@ export class LlmChat {
     private readonly chatRecordingService?: ChatRecordingService,
     private readonly telemetryService?: UiTelemetryService,
   ) {
-    validateHistory(history);
-    markCompressedHistory(history);
+    if (!chatRecordingService) {
+      this.history = withoutCompactionTranscriptHint(history);
+    }
+    validateHistory(this.history);
+    markCompressedHistory(this.history);
     this.redactApprovedPlansFromLoadedHistory();
     this.markToolResultsInjected(this.history);
   }
@@ -3246,6 +3318,10 @@ export class LlmChat {
       requestPayloadTooLarge: options?.requestPayloadTooLarge,
       signal,
       restoreRecentFiles: this.compressionObserverOptions?.restoreRecentFiles,
+      getExistingTranscriptPath:
+        this.chatRecordingService && !this.isForkedChat
+          ? async () => this.chatRecordingService?.getExistingTranscriptPath?.()
+          : undefined,
     });
     // The service owns the compression outcome; LlmChat owns the input
     // provenance. Expose it so UIs can mark estimated banner numbers
@@ -4386,6 +4462,7 @@ export class LlmChat {
           contextWindowForClamp,
           promptTokensForClamp,
         );
+        this.lastRequestMaxOutputTokens = clampedMaxOutputTokens;
         params = {
           ...params,
           config: {
@@ -4468,6 +4545,7 @@ export class LlmChat {
           }
         };
         let streamReplayRetryCount = 0;
+        let toolArgumentStallRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
         // send has already handed to callers across all continuation attempts,
@@ -4616,6 +4694,7 @@ export class LlmChat {
           let streamEstablished = false;
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
+          let streamYieldedVisibleContent = false;
           // A cut that already delivered a `functionCall` cannot be continued
           // from — see the continuation gate below.
           let streamYieldedFunctionCall = false;
@@ -4702,6 +4781,9 @@ export class LlmChat {
               if (hasNonThoughtCandidateParts(chunk)) {
                 streamYieldedContentChunk = true;
               }
+              if (hasVisibleNonToolCandidateParts(chunk)) {
+                streamYieldedVisibleContent = true;
+              }
               // Mirror the visible text into the continuation buffer as it is
               // yielded. Reading it back off history is not an option on the
               // transport path: processStreamResponse deliberately does NOT
@@ -4743,13 +4825,16 @@ export class LlmChat {
             // boundary, which is the only place a replay can occur.
             foldTransportAttemptText();
 
+            const toolArgumentStall = getToolArgumentStallRetryError(error);
+            const retryError = toolArgumentStall ?? error;
+
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
             // Classify once per failed attempt; reused by the rate-limit
             // diagnostics below and the transport-retry decision further down.
-            const classification = classifyRetryError(error, {
+            const classification = classifyRetryError(retryError, {
               authType: cgConfig?.authType,
               extraRetryErrorCodes,
             });
@@ -4762,7 +4847,7 @@ export class LlmChat {
             // minute delay on an error that cannot succeed until the reset
             // time. Throws a plain Error (no .status) and skips model
             // fallback, matching the retryWithBackoff fast-fail.
-            if (isQuotaExhaustedError(error)) {
+            if (isQuotaExhaustedError(retryError)) {
               debugLogger.warn('Quota exhausted mid-stream, fast-failing', {
                 retryPath: 'stream',
                 retryDecision: 'fail-fast',
@@ -4780,7 +4865,10 @@ export class LlmChat {
             ) {
               throw error;
             }
-            const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
+            const isRateLimit = isRateLimitError(
+              retryError,
+              extraRetryErrorCodes,
+            );
             if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
               // The classifier is observation-only here; stream retry control
@@ -4852,8 +4940,9 @@ export class LlmChat {
             // endpoint can reject the serialized request with a bare HTTP 413
             // (no token wording) even below the token-based compaction
             // threshold; it recovers through the same one-shot path (#10380).
-            const contextOverflow = getContextLengthExceededInfo(error);
-            const requestPayloadOverflow = getRequestPayloadTooLargeInfo(error);
+            const contextOverflow = getContextLengthExceededInfo(retryError);
+            const requestPayloadOverflow =
+              getRequestPayloadTooLargeInfo(retryError);
 
             // HTTP establishment failures already exhausted retryWithBackoff;
             // only server errors raised while reading the stream join replay.
@@ -4885,6 +4974,10 @@ export class LlmChat {
             // ask the model to resume from.
             const isReplayableStreamError =
               isContinuableStreamCut || isServerStreamError;
+            const toolArgumentStallBudgetLeft =
+              !toolArgumentStall ||
+              toolArgumentStallRetryCount <
+                STREAM_RETRY_CONFIG.maxToolArgumentStallRetries;
 
             // Replay transient server errors and curated socket-level failures
             // before any content (non-thought output) has reached callers.
@@ -4904,23 +4997,30 @@ export class LlmChat {
             // (#13319). Such sends never take the continuation arm below.
             const replayAdmitsDeliveredContent =
               options?.retractDeliveredOutputOnRetry === true;
+            const replayAdmitsCutFunctionCalls =
+              options?.retractToolCallsOnRetry === true &&
+              !streamYieldedVisibleContent;
+            const canReplayAttempt =
+              replayAdmitsDeliveredContent ||
+              ((!streamYieldedContentChunk || replayAdmitsCutFunctionCalls) &&
+                // `streamYieldedContentChunk` is per-attempt, so on its own it
+                // cannot tell "nothing has been delivered" from "this attempt
+                // was cut while thinking, after earlier attempts already put
+                // text on screen". Only the first is replayable; replaying the
+                // second discards output the caller is watching. The
+                // accumulated buffer is what distinguishes them, and it must be
+                // consulted here because this branch is checked before the
+                // continuation one below.
+                transportContinuationText.trim().length === 0);
             if (
               isReplayableStreamError &&
-              (replayAdmitsDeliveredContent ||
-                (!streamYieldedContentChunk &&
-                  // `streamYieldedContentChunk` is per-attempt, so on its own it
-                  // cannot tell "nothing has been delivered" from "this attempt
-                  // was cut while thinking, after earlier attempts already put
-                  // text on screen". Only the first is replayable; replaying the
-                  // second discards output the caller is watching. The
-                  // accumulated buffer is what distinguishes them, and it must be
-                  // consulted here because this branch is checked before the
-                  // continuation one below.
-                  transportContinuationText.trim().length === 0)) &&
-              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
+              canReplayAttempt &&
+              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries &&
+              toolArgumentStallBudgetLeft
             ) {
               self.popPendingPartialAssistantTurn();
               streamReplayRetryCount++;
+              if (toolArgumentStall) toolArgumentStallRetryCount++;
               const delayMs =
                 STREAM_RETRY_CONFIG.initialDelayMs * streamReplayRetryCount;
               debugLogger.warn(
@@ -5015,10 +5115,12 @@ export class LlmChat {
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
-                STREAM_RETRY_CONFIG.maxContinuationRetries;
+                STREAM_RETRY_CONFIG.maxContinuationRetries &&
+              toolArgumentStallBudgetLeft;
             if (canContinueAfterTransportCut) {
               self.popPendingPartialAssistantTurn();
               transportContinuationCount++;
+              if (toolArgumentStall) toolArgumentStallRetryCount++;
               // Everything delivered so far — across earlier continuation
               // attempts too, since `transportContinuationText` accumulates
               // and is never reset while continuing. Each attempt's own text
@@ -5068,12 +5170,13 @@ export class LlmChat {
                   : 'Transport stream retry not taken',
                 {
                   retryPath: 'stream',
-                  retryDecision: attemptClosedWithOwnOutput
-                    ? 'skipped_terminal_finish_reason'
-                    : streamYieldedContentChunk ||
-                        transportContinuationText.trim().length > 0
-                      ? 'skipped_after_content'
-                      : 'exhausted',
+                  retryDecision: !toolArgumentStallBudgetLeft
+                    ? 'tool_argument_stall_exhausted'
+                    : canReplayAttempt
+                      ? 'exhausted'
+                      : attemptClosedWithOwnOutput
+                        ? 'skipped_terminal_finish_reason'
+                        : 'skipped_after_content',
                   attempts: streamReplayRetryCount,
                   maxRetries: STREAM_RETRY_CONFIG.maxRetries,
                   continuationAttempts: transportContinuationCount,
@@ -5646,6 +5749,7 @@ export class LlmChat {
           let recoveryParams: SendMessageParameters = params;
 
           if (shouldEscalateMaxOutputTokens) {
+            self.lastRequestMaxOutputTokens = escalatedLimit;
             debugLogger.info(
               `Output truncated at ${effectiveInitialMaxOutputTokens} tokens. ` +
                 `Escalating to ${escalatedLimit} tokens.`,
@@ -5789,15 +5893,21 @@ export class LlmChat {
             // defensive fallback that never fires in practice.
             const recoveryCeiling =
               recoveryParams.config?.maxOutputTokens ?? outputCeiling;
+            const iterationClampedMaxOutputTokens = clampOutputTokensToWindow(
+              recoveryCeiling,
+              contextWindowForClamp,
+              recoveryPromptEstimate,
+            );
+            // Refresh the per-response limit the Turn reads (#16417): a
+            // recovery iteration can end at MAX_TOKENS, and the rejection
+            // must name the limit *this* iteration used, not the one from
+            // before the recovery loop started.
+            self.lastRequestMaxOutputTokens = iterationClampedMaxOutputTokens;
             const iterationParams: SendMessageParameters = {
               ...recoveryParams,
               config: {
                 ...recoveryParams.config,
-                maxOutputTokens: clampOutputTokensToWindow(
-                  recoveryCeiling,
-                  contextWindowForClamp,
-                  recoveryPromptEstimate,
-                ),
+                maxOutputTokens: iterationClampedMaxOutputTokens,
               },
             };
 
@@ -5895,10 +6005,10 @@ export class LlmChat {
             !isUnattendedMode() &&
             !streamYieldedAnyChunk
           ) {
-            let currentErrorClassification = classifyRetryError(lastError, {
-              authType: cgConfig?.authType,
-              extraRetryErrorCodes,
-            });
+            let currentErrorClassification = classifyRetryError(
+              getToolArgumentStallRetryError(lastError) ?? lastError,
+              { authType: cgConfig?.authType, extraRetryErrorCodes },
+            );
 
             if (isFallbackEligible(currentErrorClassification)) {
               let fallbackSucceeded = false;
@@ -6084,7 +6194,8 @@ export class LlmChat {
                   // Classify the fallback error to decide whether to continue
                   // to the next fallback or give up
                   const fallbackClassification = classifyRetryError(
-                    fallbackError,
+                    getToolArgumentStallRetryError(fallbackError) ??
+                      fallbackError,
                     {
                       authType: fallbackRetryAuthType,
                       extraRetryErrorCodes: fallbackRetryErrorCodes,
@@ -7080,6 +7191,9 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    if (!this.chatRecordingService || this.isForkedChat) {
+      history = withoutCompactionTranscriptHint(history);
+    }
     this.toolBudgetUsageAnchor = undefined;
     this.toolBudgetFixedInputVersion++;
     this.historyReplacementRevision++;
@@ -7814,7 +7928,7 @@ export class LlmChat {
       // status, so without that context it reads as a status-less upstream
       // frame — the one class this gate accepts.
       const trailingErrorClassification = classifyRetryError(
-        streamError,
+        getToolArgumentStallRetryError(streamError) ?? streamError,
         retryClassificationContext,
       );
       if (

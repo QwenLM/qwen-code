@@ -30,15 +30,15 @@
 
 增加只读公开恢复查询和 WebShell adapter。查询不得加载 Session、获取 Runtime、调用模型、停止执行或解锁。既有资源读取可能维护已持有的 writer 租约和读取校验元数据，但不会获取新的 writer 或执行 owner。扩展私有 Harness 状态响应及 SDK reader，提供明确的结算和准入证据；旧 Harness 缺字段不能证明已就绪。Session 响应增加可选恢复描述，保留现有生命周期状态。
 
-增加针对原 Turn 的公开 recheck POST 及 WebShell adapter。重复请求合并，只唤醒已有对账、取消与清理；202 仅表示已安排，不表示停止或 ready。保持现有 claim、generation、重试预算及租户/Session 身份；旧请求不得操作后续 Turn。原 Turn 若在复查请求途中安全结清，则返回重新核验后的 ready 视图；目标已变或结果仍未证明时继续拒绝。查询沿用 Session 读授权，变更沿用取消/清理授权，同步 OpenAPI、SurfaceRegistry、SDK 和生成的 WebShell 类型。
+增加针对原 Turn 的公开 recheck POST 及 WebShell adapter。重复请求合并，只唤醒已有对账、取消与清理；202 仅表示已安排，不表示停止或 ready。保持现有 claim、generation、重试预算及租户/Session 身份；旧请求不得操作后续 Turn。最新 Turn 在 Harness 接收前被取消时，公开 Turn id 保持不变，清理复查改为面向 Harness 为该 Session 指认的已结清 prompt；证据若指认被取消 Turn 自己的 prompt 同样被接受，因为撤回提交标记并不能证明未被接收。原 Turn 若在复查请求途中安全结清，则返回重新核验后的 ready 视图；目标已变或结果仍未证明时继续拒绝。查询沿用 Session 读授权，变更沿用取消/清理授权，同步 OpenAPI、SurfaceRegistry、SDK 和生成的 WebShell 类型。
 
-| 接口                                                    | 作用域                                                                                       |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `GET /v1/agents/sessions/{sessionId}/recovery`          | 只读所选 Session 的事实，不触发加载。                                                        |
-| `POST /v1/agents/sessions/{sessionId}/recovery/recheck` | 请求体 `{turnId}`，只检查原最近 Turn。                                                       |
-| `POST /session-recovery/query`                          | WebShell adapter，请求体 `{sessionId}`。                                                     |
-| `POST /session-recovery/recheck`                        | WebShell adapter，请求体 `{sessionId,turnId}`。                                              |
-| 私有 Hosted status                                      | 可选 `promptId` 将原生证据绑定原输入；定向读取不得清除 SDK 中更新一轮的 active-prompt 登记。 |
+| 接口                                                    | 作用域                                                                                                                     |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `GET /v1/agents/sessions/{sessionId}/recovery`          | 只读所选 Session 的事实，不触发加载。                                                                                      |
+| `POST /v1/agents/sessions/{sessionId}/recovery/recheck` | 请求体 `{turnId}`，只检查原最近 Turn。                                                                                     |
+| `POST /session-recovery/query`                          | WebShell adapter，请求体 `{sessionId}`。                                                                                   |
+| `POST /session-recovery/recheck`                        | WebShell adapter，请求体 `{sessionId,turnId}`。                                                                            |
+| 私有 Hosted status                                      | 可选 `promptId` 将原生证据绑定原输入；省略时评估最后一个已接收输入。定向读取不得清除 SDK 中更新一轮的 active-prompt 登记。 |
 
 可选 Session 投影仅用于单 Session 读取；列表不逐个调用 Harness RPC。只有普通健康 Java 执行使用不显示面板的 `turn_active` 原因；恢复期间的原生忙碌转为 `harness_work_active`，避免隐藏准入限制。私有证据包含 `inputSettled`、`continuationReady` 与 `nextTurnAllowed`。检查点覆盖范围必须包含原终态前缀，且没有未结束的模型 attempt、工具、审批、子任务等待或其他待结算输入。工具调用与结果配对继续由既有 journal/checkpoint 权威机制保证。
 

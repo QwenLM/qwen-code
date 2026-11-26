@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -10,7 +11,7 @@ final class ChildSessionCreation {
     private ChildSessionCreation() {}
 
     static String childActorOf(String parentSessionId) {
-        return "child:" + parentSessionId;
+        return ChildActorId.of(parentSessionId);
     }
 
     static Object[] childInsertArgs(String sessionId, String title,

@@ -135,7 +135,7 @@ public class HostedBackgroundPublicationGate {
         temporary = temporary.toRealPath();
         Files.createDirectory(temporary.resolve("runtime"));
 
-        String tenant = "publication-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         record SessionSpec(String name, String role, String shellCommand) {}
         List<SessionSpec> specs = List.of(
                 new SessionSpec("alpha", "background",

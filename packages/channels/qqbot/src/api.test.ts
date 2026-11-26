@@ -18,11 +18,15 @@ vi.stubGlobal(
 );
 
 const {
+  QQ_FILE_TYPE,
+  QQRichMediaError,
   fetchAccessToken,
   fetchGatewayUrl,
   getApiBase,
+  parseQQErrorCode,
   requestQQApi,
   sendQQMessage,
+  uploadQQRichMedia,
   validateGatewayUrl,
 } = await import('./api.js');
 
@@ -369,5 +373,441 @@ describe('fetchGatewayUrl + validateGatewayUrl integration', () => {
     await expect(fetchGatewayUrl('tok', false)).resolves.toBe(
       'wss://api.sgroup.qq.com/ws',
     );
+  });
+});
+
+describe('uploadQQRichMedia', () => {
+  const bytes = Buffer.from('file body');
+  const base = 'https://api.sgroup.qq.com';
+
+  function upload(
+    overrides: Partial<Parameters<typeof uploadQQRichMedia>[0]> = {},
+  ) {
+    return uploadQQRichMedia({
+      base,
+      accessToken: 'tok',
+      scope: 'users',
+      chatId: 'CHAT',
+      fileName: 'report.txt',
+      bytes,
+      fileType: QQ_FILE_TYPE.file,
+      ...overrides,
+    });
+  }
+
+  function prepareBody(
+    parts: Array<{ index: number; url: string; size: number }>,
+  ) {
+    return {
+      upload_id: 'upload-1',
+      block_size: 10485760,
+      parts: parts.map((part) => ({
+        index: part.index,
+        presigned_url: part.url,
+        block_size: part.size,
+      })),
+      upload_config: { concurrency: 1, retry_timeout: 300, retry_delay: 1 },
+    };
+  }
+
+  beforeEach(() => {
+    // clearAllMocks keeps queued mockResolvedValueOnce responses, so one failing
+    // case would leak its queue into the next one; reset drops the queue.
+    mockFetch.mockReset();
+  });
+
+  it.each([
+    [QQ_FILE_TYPE.image, 1],
+    [QQ_FILE_TYPE.video, 2],
+    [QQ_FILE_TYPE.voice, 3],
+    [QQ_FILE_TYPE.file, 4],
+  ])(
+    'sends file_type %i in both the prepare and the merge body',
+    async (fileType, expected) => {
+      mockFetch
+        .mockResolvedValueOnce(
+          mockResponse(
+            true,
+            200,
+            prepareBody([
+              { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+            ]),
+          ),
+        )
+        .mockResolvedValueOnce(mockResponse(true, 200, ''))
+        .mockResolvedValueOnce(mockResponse(true, 200, {}))
+        .mockResolvedValueOnce(
+          mockResponse(true, 200, { file_info: 'FILE-INFO', ttl: 0 }),
+        );
+
+      await upload({ fileType });
+
+      expect(
+        JSON.parse(String(mockFetch.mock.calls[0]![1]?.body)),
+      ).toMatchObject({ file_type: expected });
+      expect(
+        JSON.parse(String(mockFetch.mock.calls[3]![1]?.body)),
+      ).toMatchObject({ file_type: expected });
+    },
+  );
+
+  it('walks prepare → PUT → part_finish → merge and returns the handle', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(true, 200, { file_info: 'FILE-INFO', ttl: 86400 }),
+      );
+
+    await expect(upload()).resolves.toEqual({
+      fileInfo: 'FILE-INFO',
+      ttl: 86400,
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+    const [prepareUrl, prepareInit] = mockFetch.mock.calls[0]!;
+    expect(prepareUrl).toBe(`${base}/v2/users/CHAT/upload_prepare`);
+    expect(JSON.parse(String(prepareInit?.body))).toEqual({
+      file_type: 4,
+      file_size: String(bytes.length),
+      file_name: 'report.txt',
+      md5: expect.any(String),
+      sha1: expect.any(String),
+      md5_10m: expect.any(String),
+    });
+
+    const [partUrl, partInit] = mockFetch.mock.calls[1]!;
+    expect(partUrl).toBe('https://cos.test/p1');
+    expect(partInit?.method).toBe('PUT');
+    // The presigned URL carries its own signature; the bot token must not leak
+    // onto the COS request.
+    expect(partInit?.headers).toBeUndefined();
+
+    const [finishUrl, finishInit] = mockFetch.mock.calls[2]!;
+    expect(finishUrl).toBe(`${base}/v2/users/CHAT/upload_part_finish`);
+    expect(JSON.parse(String(finishInit?.body))).toEqual({
+      upload_id: 'upload-1',
+      part_index: 1,
+      block_size: bytes.length,
+      md5: expect.any(String),
+    });
+
+    const [mergeUrl, mergeInit] = mockFetch.mock.calls[3]!;
+    expect(mergeUrl).toBe(`${base}/v2/users/CHAT/files`);
+    expect(JSON.parse(String(mergeInit?.body))).toEqual({
+      upload_id: 'upload-1',
+      file_type: 4,
+      file_name: 'report.txt',
+      srv_send_msg: false,
+    });
+  });
+
+  it('computes md5_10m over the first 10002432 bytes only', async () => {
+    const big = Buffer.alloc(10002432 + 10, 7);
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: big.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(true, 200, { file_info: 'FI', ttl: 0 }),
+      );
+
+    await upload({ bytes: big });
+
+    const body = JSON.parse(String(mockFetch.mock.calls[0]![1]?.body)) as {
+      md5: string;
+      md5_10m: string;
+    };
+    expect(body.md5_10m).not.toBe(body.md5);
+    expect(body.md5_10m).toHaveLength(32);
+  });
+
+  it('retries the retryable 40093001 part_finish failure', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(
+        mockResponse(false, 400, { code: 40093001, message: 'retry' }),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(true, 200, { file_info: 'FI', ttl: 0 }),
+      );
+
+    await expect(upload()).resolves.toEqual({ fileInfo: 'FI', ttl: 0 });
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+  });
+
+  it('splits parts by cumulative offsets and hashes each slice', async () => {
+    const first = bytes.subarray(0, 4);
+    const second = bytes.subarray(4);
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: first.length },
+            { index: 2, url: 'https://cos.test/p2', size: second.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(true, 200, { file_info: 'FI', ttl: 0 }),
+      );
+
+    await upload();
+
+    const secondPut = mockFetch.mock.calls[3]!;
+    expect(secondPut[0]).toBe('https://cos.test/p2');
+    expect(Buffer.from(secondPut[1]?.body as Uint8Array).toString()).toBe(
+      second.toString(),
+    );
+    const firstFinish = JSON.parse(
+      String(mockFetch.mock.calls[2]![1]?.body),
+    ) as { md5: string; part_index: number };
+    const secondFinish = JSON.parse(
+      String(mockFetch.mock.calls[4]![1]?.body),
+    ) as { md5: string; part_index: number };
+    expect(firstFinish.part_index).toBe(1);
+    expect(secondFinish.part_index).toBe(2);
+    expect(firstFinish.md5).not.toBe(secondFinish.md5);
+  });
+
+  it('rejects when prepare returns no parts', async () => {
+    mockFetch.mockResolvedValueOnce(
+      mockResponse(true, 200, {
+        upload_id: 'u',
+        block_size: 10485760,
+        parts: [],
+      }),
+    );
+
+    await expect(upload()).rejects.toBeInstanceOf(QQRichMediaError);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects when the parts do not cover the file', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([{ index: 1, url: 'https://cos.test/p1', size: 2 }]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}));
+
+    await expect(upload()).rejects.toThrow(/cover 2 of 9 bytes/);
+    // Nothing is merged when the split does not add up.
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects when the merge returns no file_info', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(mockResponse(true, 200, { ttl: 10 }));
+
+    await expect(upload()).rejects.toThrow(/no file_info/);
+  });
+
+  it('carries the platform error code on a non-retryable failure', async () => {
+    mockFetch.mockResolvedValueOnce(
+      mockResponse(false, 400, { code: 850031, message: 'too large' }),
+    );
+
+    await expect(upload()).rejects.toMatchObject({
+      stage: 'prepare',
+      status: 400,
+      code: 850031,
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a non-retryable merge failure', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(false, 400, { code: 40093002, message: 'quota' }),
+      );
+
+    await expect(upload()).rejects.toMatchObject({ code: 40093002 });
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('retries upload_prepare on the retryable 40093001', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(false, 400, { code: 40093001, message: 'retry' }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(true, 200, { file_info: 'FI', ttl: 0 }),
+      );
+
+    await expect(upload()).resolves.toEqual({ fileInfo: 'FI', ttl: 0 });
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+  });
+
+  it('retries upload_prepare on 850027', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(false, 400, { code: 850027, message: 'later' }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(true, 200, { file_info: 'FI', ttl: 0 }),
+      );
+
+    await expect(upload()).resolves.toEqual({ fileInfo: 'FI', ttl: 0 });
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+  });
+
+  it('retries a part PUT rejected with 429', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(false, 429, 'slow down'))
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(true, 200, { file_info: 'FI', ttl: 0 }),
+      );
+
+    await expect(upload()).resolves.toEqual({ fileInfo: 'FI', ttl: 0 });
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+  });
+
+  it('retries a part PUT that fails at the transport', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+          ]),
+        ),
+      )
+      .mockRejectedValueOnce(new Error('socket hang up'))
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(true, 200, { file_info: 'FI', ttl: 0 }),
+      );
+
+    await expect(upload()).resolves.toEqual({ fileInfo: 'FI', ttl: 0 });
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+  });
+
+  it('retries a part_finish rejected with 500', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse(
+          true,
+          200,
+          prepareBody([
+            { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(mockResponse(true, 200, ''))
+      .mockResolvedValueOnce(mockResponse(false, 500, 'boom'))
+      .mockResolvedValueOnce(mockResponse(true, 200, {}))
+      .mockResolvedValueOnce(
+        mockResponse(true, 200, { file_info: 'FI', ttl: 0 }),
+      );
+
+    await expect(upload()).resolves.toEqual({ fileInfo: 'FI', ttl: 0 });
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+  });
+});
+
+describe('parseQQErrorCode', () => {
+  it('reads code and err_code', () => {
+    expect(parseQQErrorCode('{"code":850031}')).toBe(850031);
+    expect(parseQQErrorCode('{"err_code":40093001}')).toBe(40093001);
+  });
+
+  it('returns undefined for non-JSON and code-less bodies', () => {
+    expect(parseQQErrorCode('boom')).toBeUndefined();
+    expect(parseQQErrorCode('{"message":"x"}')).toBeUndefined();
   });
 });

@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="275" viewBox="0 0 920 275">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="920" height="275" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="0" y="2" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">ScrollableList                                                                                      </text>
+    <text x="0" y="19" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">AppHeader(full)                                                                                     </text>
+    <rect x="0" y="34" width="900" height="17" fill="#141414" />
+    <text x="0" y="36" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</text>
+    <rect x="0" y="51" width="9" height="17" fill="#141414" />
+    <rect x="9" y="51" width="18" height="17" fill="#141414" />
+    <text x="9" y="53" fill="#d7afff" textLength="18" lengthAdjust="spacingAndGlyphs">&gt; </text>
+    <rect x="27" y="51" width="135" height="17" fill="#141414" />
+    <text x="27" y="53" fill="#ffffff" textLength="135" lengthAdjust="spacingAndGlyphs">Plan a solution</text>
+    <rect x="162" y="51" width="738" height="17" fill="#141414" />
+    <rect x="0" y="68" width="900" height="17" fill="#141414" />
+    <text x="0" y="70" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</text>
+    <text x="0" y="87" fill="#ffffff" textLength="108" lengthAdjust="spacingAndGlyphs" font-style="italic"> Thinking...</text>
+    <text x="9" y="104" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="104" fill="#ffffff" textLength="63" lengthAdjust="spacingAndGlyphs" font-weight="bold" font-style="italic">Initial</text>
+    <text x="99" y="104" fill="#ffffff" textLength="72" lengthAdjust="spacingAndGlyphs" font-weight="bold" font-style="italic">analysis</text>
+    <text x="9" y="121" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="121" fill="#afafaf" textLength="36" lengthAdjust="spacingAndGlyphs" font-style="italic">This</text>
+    <text x="72" y="121" fill="#afafaf" textLength="18" lengthAdjust="spacingAndGlyphs" font-style="italic">is</text>
+    <text x="99" y="121" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs" font-style="italic">a</text>
+    <text x="117" y="121" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">multiple</text>
+    <text x="198" y="121" fill="#afafaf" textLength="36" lengthAdjust="spacingAndGlyphs" font-style="italic">line</text>
+    <text x="243" y="121" fill="#afafaf" textLength="81" lengthAdjust="spacingAndGlyphs" font-style="italic">paragraph</text>
+    <text x="333" y="121" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">for</text>
+    <text x="369" y="121" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">the</text>
+    <text x="405" y="121" fill="#afafaf" textLength="45" lengthAdjust="spacingAndGlyphs" font-style="italic">first</text>
+    <text x="459" y="121" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">thinking</text>
+    <text x="540" y="121" fill="#afafaf" textLength="63" lengthAdjust="spacingAndGlyphs" font-style="italic">message</text>
+    <text x="612" y="121" fill="#afafaf" textLength="18" lengthAdjust="spacingAndGlyphs" font-style="italic">of</text>
+    <text x="639" y="121" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">how</text>
+    <text x="675" y="121" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">the</text>
+    <text x="9" y="138" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="138" fill="#afafaf" textLength="45" lengthAdjust="spacingAndGlyphs" font-style="italic">model</text>
+    <text x="81" y="138" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">analyzes</text>
+    <text x="162" y="138" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">the</text>
+    <text x="198" y="138" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">problem.</text>
+    <text x="9" y="155" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="155" fill="#ffffff" textLength="72" lengthAdjust="spacingAndGlyphs" font-weight="bold" font-style="italic">Planning</text>
+    <text x="108" y="155" fill="#ffffff" textLength="81" lengthAdjust="spacingAndGlyphs" font-weight="bold" font-style="italic">execution</text>
+    <text x="9" y="172" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="172" fill="#afafaf" textLength="36" lengthAdjust="spacingAndGlyphs" font-style="italic">This</text>
+    <text x="72" y="172" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs" font-style="italic">a</text>
+    <text x="90" y="172" fill="#afafaf" textLength="54" lengthAdjust="spacingAndGlyphs" font-style="italic">second</text>
+    <text x="153" y="172" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">multiple</text>
+    <text x="234" y="172" fill="#afafaf" textLength="36" lengthAdjust="spacingAndGlyphs" font-style="italic">line</text>
+    <text x="279" y="172" fill="#afafaf" textLength="81" lengthAdjust="spacingAndGlyphs" font-style="italic">paragraph</text>
+    <text x="369" y="172" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">for</text>
+    <text x="405" y="172" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">the</text>
+    <text x="441" y="172" fill="#afafaf" textLength="54" lengthAdjust="spacingAndGlyphs" font-style="italic">second</text>
+    <text x="504" y="172" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">thinking</text>
+    <text x="585" y="172" fill="#afafaf" textLength="63" lengthAdjust="spacingAndGlyphs" font-style="italic">message</text>
+    <text x="9" y="189" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="189" fill="#afafaf" textLength="90" lengthAdjust="spacingAndGlyphs" font-style="italic">explaining</text>
+    <text x="126" y="189" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">the</text>
+    <text x="162" y="189" fill="#afafaf" textLength="36" lengthAdjust="spacingAndGlyphs" font-style="italic">plan</text>
+    <text x="207" y="189" fill="#afafaf" textLength="18" lengthAdjust="spacingAndGlyphs" font-style="italic">in</text>
+    <text x="234" y="189" fill="#afafaf" textLength="54" lengthAdjust="spacingAndGlyphs" font-style="italic">detail</text>
+    <text x="297" y="189" fill="#afafaf" textLength="18" lengthAdjust="spacingAndGlyphs" font-style="italic">so</text>
+    <text x="324" y="189" fill="#afafaf" textLength="36" lengthAdjust="spacingAndGlyphs" font-style="italic">that</text>
+    <text x="369" y="189" fill="#afafaf" textLength="18" lengthAdjust="spacingAndGlyphs" font-style="italic">it</text>
+    <text x="396" y="189" fill="#afafaf" textLength="45" lengthAdjust="spacingAndGlyphs" font-style="italic">wraps</text>
+    <text x="450" y="189" fill="#afafaf" textLength="54" lengthAdjust="spacingAndGlyphs" font-style="italic">around</text>
+    <text x="513" y="189" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">the</text>
+    <text x="549" y="189" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">terminal</text>
+    <text x="630" y="189" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">display.</text>
+    <text x="9" y="206" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="206" fill="#ffffff" textLength="72" lengthAdjust="spacingAndGlyphs" font-weight="bold" font-style="italic">Refining</text>
+    <text x="108" y="206" fill="#ffffff" textLength="72" lengthAdjust="spacingAndGlyphs" font-weight="bold" font-style="italic">approach</text>
+    <text x="9" y="223" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="223" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">And</text>
+    <text x="63" y="223" fill="#afafaf" textLength="63" lengthAdjust="spacingAndGlyphs" font-style="italic">finally</text>
+    <text x="135" y="223" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs" font-style="italic">a</text>
+    <text x="153" y="223" fill="#afafaf" textLength="45" lengthAdjust="spacingAndGlyphs" font-style="italic">third</text>
+    <text x="207" y="223" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">multiple</text>
+    <text x="288" y="223" fill="#afafaf" textLength="36" lengthAdjust="spacingAndGlyphs" font-style="italic">line</text>
+    <text x="333" y="223" fill="#afafaf" textLength="81" lengthAdjust="spacingAndGlyphs" font-style="italic">paragraph</text>
+    <text x="423" y="223" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">for</text>
+    <text x="459" y="223" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">the</text>
+    <text x="495" y="223" fill="#afafaf" textLength="45" lengthAdjust="spacingAndGlyphs" font-style="italic">third</text>
+    <text x="549" y="223" fill="#afafaf" textLength="72" lengthAdjust="spacingAndGlyphs" font-style="italic">thinking</text>
+    <text x="630" y="223" fill="#afafaf" textLength="63" lengthAdjust="spacingAndGlyphs" font-style="italic">message</text>
+    <text x="702" y="223" fill="#afafaf" textLength="18" lengthAdjust="spacingAndGlyphs" font-style="italic">to</text>
+    <text x="9" y="240" fill="#afafaf" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="240" fill="#afafaf" textLength="63" lengthAdjust="spacingAndGlyphs" font-style="italic"> refine</text>
+    <text x="99" y="240" fill="#afafaf" textLength="27" lengthAdjust="spacingAndGlyphs" font-style="italic">the</text>
+    <text x="135" y="240" fill="#afafaf" textLength="81" lengthAdjust="spacingAndGlyphs" font-style="italic">solution.</text>
+  </g>
+</svg>

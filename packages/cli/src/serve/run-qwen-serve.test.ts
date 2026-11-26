@@ -7,6 +7,8 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import type { CliArgs } from '../config/config.js';
+import { QWEN_CODE_MANAGED_RUNTIME_ENV } from '../config/acp-channel-fallback.js';
 import { createHash, X509Certificate } from 'node:crypto';
 import {
   createServer,
@@ -85,6 +87,7 @@ import type {
 } from '@qwen-code/acp-bridge/status';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as sharedEnvKeysModule from '../config/shared-env-keys.js';
 import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import * as pemCertificateBlocks from './pem-certificate-blocks.js';
@@ -7316,6 +7319,10 @@ describe('runQwenServe paired execution engines', () => {
 });
 
 describe('runQwenServe deployment profiles', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('rejects paired engines with the Hosted Harness profile before listening', async () => {
     const listen = vi.spyOn(net.Server.prototype, 'listen');
     try {
@@ -7553,6 +7560,7 @@ describe('runQwenServe deployment profiles', () => {
 
   it('rejects a hosted localhost name that resolves outside loopback before listening', async () => {
     const listen = vi.spyOn(net.Server.prototype, 'listen');
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
     try {
       await expect(
         runQwenServe(
@@ -7575,8 +7583,535 @@ describe('runQwenServe deployment profiles', () => {
         ),
       ).rejects.toThrow(/outside the loopback interface/);
       expect(listen).not.toHaveBeenCalled();
+      // The refusal lands after the marker stamp; an embedded caller must
+      // not keep it.
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
     } finally {
       listen.mockRestore();
+    }
+  });
+
+  it('stamps the managed attribution marker while the Hosted Harness runs and restores it on close', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-marker-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        },
+      );
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('1');
+      // The frozen session-child base env carries the marker, so a legacy
+      // engine `qwen --acp` child inherits it and reports managed too.
+      const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+        'sourceEnv'
+      ] as NodeJS.ProcessEnv | undefined;
+      expect(sourceEnv?.['QWEN_CODE_MANAGED_RUNTIME']).toBe('1');
+      await handle.close();
+      handle = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
+    } finally {
+      await handle?.close();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('restores a pre-existing managed marker value when the Hosted Harness closes', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-marker-prev-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, 'operator-value');
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        },
+      );
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('1');
+      await handle.close();
+      handle = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('operator-value');
+    } finally {
+      await handle?.close();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('does not stamp the managed marker for the default profile', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-default-marker-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        },
+      );
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
+    } finally {
+      await handle?.close();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('drops an inherited managed marker from an independent daemon children env, keeping the ambient slot', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-default-inherit-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, '1');
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        },
+      );
+      // A daemon launched inside a Managed session is independent: its
+      // session children must not keep the attribution, but the shared
+      // process.env slot belongs to co-resident daemons and stays untouched.
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('1');
+      const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+        'sourceEnv'
+      ] as NodeJS.ProcessEnv | undefined;
+      expect(sourceEnv?.['QWEN_CODE_MANAGED_RUNTIME']).toBeUndefined();
+      await handle.close();
+      handle = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('1');
+    } finally {
+      await handle?.close();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('restores the marker when startup fails between the stamp and the loader-scrub registration', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-early-restore-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
+    const scrubSpy = vi
+      .spyOn(sharedEnvKeysModule, 'acquireInheritedLoaderEnvScrub')
+      .mockImplementationOnce(() => {
+        throw new Error('loader scrub acquire failed');
+      });
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+            managedRuntimeBrokerUrl: 'https://broker.internal',
+            managedRuntimeBrokerToken: 'broker-secret',
+          },
+          {
+            bridge: makeRuntimeBridge(),
+            daemonLogBaseDir: path.join(workspace, 'debug'),
+          },
+        ),
+      ).rejects.toThrow('loader scrub acquire failed');
+      // Only the early marker-only restore is registered in this window;
+      // it must still run so an embedded caller keeps no stamped marker.
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
+    } finally {
+      scrubSpy.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the managed marker while a default-profile daemon is co-resident', async () => {
+    const workspaceA = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost-a-')),
+    );
+    const workspaceB = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost-b-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
+    let a: RunHandle | undefined;
+    let b: RunHandle | undefined;
+    try {
+      a = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: workspaceA,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspaceA, 'debug'),
+        },
+      );
+      b = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: workspaceB,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspaceB, 'debug'),
+        },
+      );
+      // The hosted harness's in-process turns and export label read the
+      // live marker; a co-resident independent daemon must not clear it.
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('1');
+      const { loadCliConfig } = await import('../config/config.js');
+      const turnConfig = await loadCliConfig({}, {
+        acp: true,
+        sessionId: 'co-resident-turn',
+        sessionIdGenerated: true,
+      } as CliArgs);
+      expect(turnConfig.getChannel()).toBe('managed');
+      await b.close();
+      b = undefined;
+      await a.close();
+      a = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
+    } finally {
+      await b?.close();
+      await a?.close();
+      fs.rmSync(workspaceA, { recursive: true, force: true });
+      fs.rmSync(workspaceB, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the managed marker until the last co-resident hosted harness closes', async () => {
+    const workspaceA = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost2-a-')),
+    );
+    const workspaceB = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost2-b-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
+    let a: RunHandle | undefined;
+    let b: RunHandle | undefined;
+    const hostedOpts = (workspace: string) => ({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge' as const,
+      workspace,
+      profile: 'hosted-harness' as const,
+      token: 'hosted-secret',
+      serveWebShell: false,
+      hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      managedRuntimeBrokerUrl: 'https://broker.internal',
+      managedRuntimeBrokerToken: 'broker-secret',
+    });
+    try {
+      a = await runQwenServe(hostedOpts(workspaceA), {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(workspaceA, 'debug'),
+      });
+      b = await runQwenServe(hostedOpts(workspaceB), {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(workspaceB, 'debug'),
+      });
+      // Non-LIFO close: the later-booted handle closes first; the marker
+      // must survive until the last handle releases it.
+      await b.close();
+      b = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('1');
+      await a.close();
+      a = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
+    } finally {
+      await a?.close();
+      await b?.close();
+      fs.rmSync(workspaceA, { recursive: true, force: true });
+      fs.rmSync(workspaceB, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves an ambient managed marker across co-resident default and hosted daemons', async () => {
+    const workspaceA = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost3-a-')),
+    );
+    const workspaceB = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost3-b-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, '1');
+    let a: RunHandle | undefined;
+    let b: RunHandle | undefined;
+    try {
+      a = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: workspaceA,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspaceA, 'debug'),
+        },
+      );
+      b = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: workspaceB,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspaceB, 'debug'),
+        },
+      );
+      await a.close();
+      a = undefined;
+      await b.close();
+      b = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('1');
+    } finally {
+      await a?.close();
+      await b?.close();
+      fs.rmSync(workspaceA, { recursive: true, force: true });
+      fs.rmSync(workspaceB, { recursive: true, force: true });
+    }
+  });
+
+  it('releases the stamp when a hosted startup fails after the combined registration', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-late-window-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
+    try {
+      // The loopback DNS lookup lands after the combined scrubApplied
+      // registration; the startup-failure catch runs only that stored
+      // callback, so its marker half must release the stamp. (A default
+      // profile never touches the shared slot, so only a hosted boot can
+      // leave a residue in this window.)
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: 'localhost',
+            mode: 'http-bridge',
+            workspace,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+            managedRuntimeBrokerUrl: 'https://broker.internal',
+            managedRuntimeBrokerToken: 'broker-secret',
+          },
+          {
+            bridge: makeRuntimeBridge(),
+            daemonLogBaseDir: path.join(workspace, 'debug'),
+            bindHostnameLookup: async () => {
+              throw new Error('dns lookup failed');
+            },
+          },
+        ),
+      ).rejects.toThrow('dns lookup failed');
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('restores the ambient marker value when a hosted startup fails inside the stamp window', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-early-ambient-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, 'operator-value');
+    const scrubSpy = vi
+      .spyOn(sharedEnvKeysModule, 'acquireInheritedLoaderEnvScrub')
+      .mockImplementationOnce(() => {
+        throw new Error('loader scrub acquire failed');
+      });
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+            managedRuntimeBrokerUrl: 'https://broker.internal',
+            managedRuntimeBrokerToken: 'broker-secret',
+          },
+          {
+            bridge: makeRuntimeBridge(),
+            daemonLogBaseDir: path.join(workspace, 'debug'),
+          },
+        ),
+      ).rejects.toThrow('loader scrub acquire failed');
+      // The stamp overwrote a distinct ambient value; only the early
+      // marker-only restore (registered before the loader scrub) can bring
+      // it back in this window. A default-profile boot never touches the
+      // shared slot, so it cannot exercise this restore.
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('operator-value');
+    } finally {
+      scrubSpy.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('a failed hosted boot must not clear a live co-resident harness marker', async () => {
+    const workspaceA = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-failboot-a-')),
+    );
+    const workspaceB = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-failboot-b-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
+    let a: RunHandle | undefined;
+    const hostedOpts = (workspace: string) => ({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge' as const,
+      workspace,
+      profile: 'hosted-harness' as const,
+      token: 'hosted-secret',
+      serveWebShell: false,
+      hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      managedRuntimeBrokerUrl: 'https://broker.internal',
+      managedRuntimeBrokerToken: 'broker-secret',
+    });
+    try {
+      a = await runQwenServe(hostedOpts(workspaceA), {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(workspaceA, 'debug'),
+      });
+      // The second boot's runtime startup times out after the handle exists:
+      // the rejection path closes the handle (releasing once) and then
+      // rejects into the startup catch (which must not release again).
+      await expect(
+        runQwenServe(hostedOpts(workspaceB), {
+          daemonLogBaseDir: path.join(workspaceB, 'debug'),
+          runtimeStartupTimeoutMs: 1,
+        }),
+      ).rejects.toThrow('timed out');
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('1');
+      await a.close();
+      a = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
+    } finally {
+      await a?.close();
+      fs.rmSync(workspaceA, { recursive: true, force: true });
+      fs.rmSync(workspaceB, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the managed marker until the last co-resident hosted harness closes in LIFO order', async () => {
+    const workspaceA = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost-lifo-a-')),
+    );
+    const workspaceB = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost-lifo-b-')),
+    );
+    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
+    let a: RunHandle | undefined;
+    let b: RunHandle | undefined;
+    const hostedOpts = (workspace: string) => ({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge' as const,
+      workspace,
+      profile: 'hosted-harness' as const,
+      token: 'hosted-secret',
+      serveWebShell: false,
+      hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      managedRuntimeBrokerUrl: 'https://broker.internal',
+      managedRuntimeBrokerToken: 'broker-secret',
+    });
+    try {
+      a = await runQwenServe(hostedOpts(workspaceA), {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(workspaceA, 'debug'),
+      });
+      b = await runQwenServe(hostedOpts(workspaceB), {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(workspaceB, 'debug'),
+      });
+      // LIFO: the first-booted handle closes first. A per-handle restore
+      // would clear the slot under the still-live second harness here.
+      await a.close();
+      a = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBe('1');
+      await b.close();
+      b = undefined;
+      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
+    } finally {
+      await a?.close();
+      await b?.close();
+      fs.rmSync(workspaceA, { recursive: true, force: true });
+      fs.rmSync(workspaceB, { recursive: true, force: true });
     }
   });
 });
@@ -21459,6 +21994,250 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('relays a Managed terminal upgrade through the real local front door without leaking browser credentials', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-managed-terminal-')),
+    );
+    const java = createServer();
+    let peerWire = '';
+    const clientHead = new Promise<void>((resolve) => {
+      java.on('connection', (socket) => {
+        socket.on('data', (chunk) => {
+          peerWire += chunk.toString();
+          if (peerWire.endsWith('client-head')) resolve();
+        });
+      });
+    });
+    await new Promise<void>((resolve) => java.listen(0, '127.0.0.1', resolve));
+    const javaAddress = java.address();
+    if (!javaAddress || typeof javaAddress === 'string')
+      throw new Error('missing Java port');
+    let handle: RunHandle | undefined;
+    let clientSocket: import('node:stream').Duplex | undefined;
+    let peerSocket: import('node:stream').Duplex | undefined;
+    const terminalUrl = () =>
+      `${handle!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`;
+    const upgradeHeaders = () => ({
+      Connection: 'Upgrade',
+      Upgrade: 'websocket',
+      'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+      'Sec-WebSocket-Version': '13',
+      'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+      'Sec-WebSocket-Extensions': 'permessage-deflate',
+      Authorization: 'Bearer deliberately-invalid-daemon-token',
+      Cookie: 'browser-secret=must-not-reach-java',
+      'X-Qwen-Tenant-Id': 'forged-tenant',
+      'X-Qwen-Actor-Id': 'forged-actor',
+      'X-Qwen-Signature': 'forged-signature',
+      'X-Qwen-Signature-Timestamp': '1',
+      Origin: handle!.url,
+    });
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: tmpDir,
+          token: 'unified-token',
+          mode: 'http-bridge',
+          requireAuth: true,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          installSignalHandlers: false,
+          managedLocalWeb: {
+            javaUrl: `http://127.0.0.1:${javaAddress.port}`,
+            signingKey: 'private-signing-key',
+            tenantId: 'local',
+            actorId: 'owner',
+            agentId: 'qwen-code',
+            productScope: 'local:installation',
+          },
+        },
+      );
+      for (const headers of [
+        { ...upgradeHeaders(), Host: 'attacker.invalid' },
+        { ...upgradeHeaders(), Origin: 'https://attacker.example' },
+      ]) {
+        const target = new URL(terminalUrl());
+        const host =
+          Object.entries(headers).find(
+            ([name]) => name.toLowerCase() === 'host',
+          )?.[1] ?? target.host;
+        const response = await new Promise<string>((resolve, reject) => {
+          const socket = net.connect(
+            Number(target.port),
+            target.hostname,
+            () => {
+              const lines = [
+                `GET ${target.pathname}${target.search} HTTP/1.1`,
+                `Host: ${host}`,
+                ...Object.entries(headers)
+                  .filter(([name]) => name.toLowerCase() !== 'host')
+                  .map(([name, value]) => `${name}: ${value}`),
+                '',
+                '',
+              ];
+              socket.write(lines.join('\r\n'));
+            },
+          );
+          let raw = '';
+          socket.on('data', (chunk) => {
+            raw += chunk.toString();
+            if (raw.includes('\r\n\r\n')) {
+              socket.destroy();
+              resolve(raw);
+            }
+          });
+          socket.on('error', reject);
+        });
+        expect(response.startsWith('HTTP/1.1 403 ')).toBe(true);
+      }
+      expect(peerWire).toBe('');
+
+      let peerHeaders: IncomingMessage['headers'] | undefined;
+      let peerPath: string | undefined;
+      let forwardedUpgrades = 0;
+      java.on('upgrade', (request, socket) => {
+        forwardedUpgrades++;
+        peerSocket = socket;
+        peerHeaders = request.headers;
+        peerPath = request.url;
+        socket.resume();
+        socket.write(
+          'HTTP/1.1 101 Switching Protocols\r\n' +
+            'Upgrade: websocket\r\n' +
+            'Connection: Upgrade\r\n' +
+            'Sec-WebSocket-Accept: test-accept\r\n' +
+            'Sec-WebSocket-Protocol: qwen-ws\r\n' +
+            'Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n' +
+            'java-head',
+        );
+      });
+      const result = await new Promise<{
+        status: number;
+        protocol: string | undefined;
+        accept: string | undefined;
+        extensions: string | undefined;
+        echo: string;
+      }>((resolve, reject) => {
+        const target = new URL(terminalUrl());
+        const socket = net.connect(Number(target.port), target.hostname, () => {
+          const lines = [
+            `GET ${target.pathname}${target.search} HTTP/1.1`,
+            `Host: ${target.host}`,
+            ...Object.entries(upgradeHeaders()).map(
+              ([name, value]) => `${name}: ${value}`,
+            ),
+            '',
+            '',
+          ];
+          // One write makes client-head part of the server's upgrade head,
+          // rather than a later WebSocket data frame.
+          socket.write(lines.join('\r\n') + 'client-head');
+        });
+        clientSocket = socket;
+        let buffer = '';
+        let upgraded = false;
+        let status = 0;
+        let protocol: string | undefined;
+        let accept: string | undefined;
+        let extensions: string | undefined;
+        socket.on('data', (chunk) => {
+          buffer += chunk.toString();
+          let echo = '';
+          if (!upgraded) {
+            const boundary = buffer.indexOf('\r\n\r\n');
+            if (boundary < 0) return;
+            upgraded = true;
+            const header = buffer.slice(0, boundary);
+            status = Number(header.split('\r\n')[0]!.split(' ')[1]);
+            protocol = /^Sec-WebSocket-Protocol:\s*(.+)$/im
+              .exec(header)?.[1]
+              ?.trim();
+            accept = /^Sec-WebSocket-Accept:\s*(.+)$/im
+              .exec(header)?.[1]
+              ?.trim();
+            extensions = /^Sec-WebSocket-Extensions:\s*(.+)$/im
+              .exec(header)?.[1]
+              ?.trim();
+            echo = buffer.slice(boundary + 4);
+            if (!echo.includes('java-head')) return;
+            resolve({
+              status,
+              protocol,
+              accept,
+              extensions,
+              echo: 'java-head',
+            });
+            return;
+          }
+          if (buffer.includes('java-head'))
+            resolve({
+              status,
+              protocol,
+              accept,
+              extensions,
+              echo: 'java-head',
+            });
+        });
+        socket.on('error', reject);
+      });
+      expect(result).toEqual({
+        status: 101,
+        protocol: 'qwen-ws',
+        accept: 'test-accept',
+        extensions: 'permessage-deflate',
+        echo: 'java-head',
+      });
+      expect(peerPath).toBe(
+        '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+      );
+      await clientHead;
+      expect(peerWire.endsWith('client-head')).toBe(true);
+      expect(peerHeaders).toBeDefined();
+      expect(peerHeaders!['sec-websocket-key']).toBe(
+        'dGhlIHNhbXBsZSBub25jZQ==',
+      );
+      expect(peerHeaders!['sec-websocket-version']).toBe('13');
+      expect(peerHeaders!['sec-websocket-protocol']).toBe(
+        'qwen-ws, qwen-bearer.ticket-abc',
+      );
+      expect(peerHeaders!['sec-websocket-extensions']).toBe(
+        'permessage-deflate',
+      );
+      expect(peerHeaders!['authorization']).toBeUndefined();
+      expect(peerHeaders!['cookie']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-tenant-id']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-actor-id']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-signature']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-signature-timestamp']).toBeUndefined();
+      expect(peerHeaders!['origin']).toBeUndefined();
+
+      expect(forwardedUpgrades).toBe(1);
+
+      const browserClosed = new Promise<void>((resolve) =>
+        clientSocket!.once('close', resolve),
+      );
+      const upstreamClosed = new Promise<void>((resolve) => {
+        // The peer reads EOF as 'end'; a full 'close' also requires its
+        // writable side to close, so either proves the tunnel was torn down.
+        peerSocket!.once('close', resolve);
+        peerSocket!.once('end', resolve);
+      });
+      await handle.close();
+      handle = undefined;
+      await Promise.all([browserClosed, upstreamClosed]);
+    } finally {
+      clientSocket?.destroy();
+      peerSocket?.destroy();
+      if (handle) await handle.close();
+      java.closeAllConnections();
+      await new Promise<void>((resolve) => java.close(() => resolve()));
+    }
+  });
+
   it('force-kills channel worker, bridge, and pidfile on a second shutdown signal', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-force-')),
@@ -22327,7 +23106,7 @@ describe('runQwenServe channel worker supervisor', () => {
         'channel worker stderr: adapter failed with <redacted>',
       );
       expect(logContent).toContain(
-        'channel worker exited (state=exited, pid=1234, code=1, signal=null, error=ipc failed, restartCount=2, nextRestartAt=2026-07-01T01:00:05.000Z, staleHeartbeatAt=2026-07-01T01:00:00.000Z)',
+        'channel worker exited (state=exited, childPid=1234, code=1, signal=null, error=ipc failed, restartCount=2, nextRestartAt=2026-07-01T01:00:05.000Z, staleHeartbeatAt=2026-07-01T01:00:00.000Z)',
       );
       expect(logContent).not.toContain('secret-token');
     } finally {

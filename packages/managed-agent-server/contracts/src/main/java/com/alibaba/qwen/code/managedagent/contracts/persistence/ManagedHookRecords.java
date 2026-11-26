@@ -3,9 +3,7 @@ package com.alibaba.qwen.code.managedagent.contracts.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.apache.commons.codec.digest.DigestUtils;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
@@ -17,53 +15,28 @@ public final class ManagedHookRecords {
     private static final Set<String> EXECUTION_KEYS = Set.of("hookExecutionId",
             "occurrenceId", "runtimeSessionId", "registrationId", "eventName", "ordinal", "hookId",
             "planRef", "inputRef", "resultRef", "onceKey", "cancelRequested", "run");
+    /** The raw Hook identities project into VARCHAR(128) columns. */
+    private static final int MAXIMUM_HOOK_ID_LENGTH = 128;
 
     private ManagedHookRecords() {
     }
 
     /**
-     * The identities Hook admission keeps unique, projected into indexed
-     * columns. They never change across a record's revisions, so the first
-     * revision's projection holds for every later one. Fields that do not
-     * apply to the record's domain are null.
+     * A Hook identity projected into an indexed VARCHAR(128) column: the
+     * shared id rules plus the column's length bound. MySQL counts code
+     * points and H2 counts UTF-16 units, so the UTF-16 length bounds both.
      */
-    public record AdmissionKeys(String onceKeyHash, String occurrenceHash,
-            Long ordinal, String definitionHash) {
-    }
-
-    /** The admission keys of a body that its domain's validator accepted. */
-    public static AdmissionKeys admissionKeys(String domain, JsonNode record) {
-        return switch (domain) {
-            case "hook_registration" -> new AdmissionKeys(null, null, null,
-                    definitionHash(record.get("run").get("definition")));
-            case "hook_execution" -> new AdmissionKeys(
-                    record.get("onceKey").isNull() ? null
-                            : sha256(record.get("onceKey").textValue()),
-                    sha256(record.get("occurrenceId").textValue()),
-                    record.get("ordinal").longValue(), null);
-            default -> new AdmissionKeys(null, null, null, null);
-        };
-    }
-
-    /**
-     * Two pins share this key exactly when their definition ID and revision
-     * are the same, which is when their digests must agree. Identifiers
-     * carry no control character, so the separator is unambiguous, and a
-     * validated revision is an exact integer.
-     */
-    private static String definitionHash(JsonNode definition) {
-        return sha256(definition.get("definitionId").textValue() + "\u0000"
-                + definition.get("definitionRevision").longValue());
-    }
-
-    private static String sha256(String value) {
-        return DigestUtils.sha256Hex(value.getBytes(StandardCharsets.UTF_8));
+    private static String hookId(JsonNode node, String label) {
+        String value = ManagedExtensionRecords.id(node, label);
+        require(value.length() <= MAXIMUM_HOOK_ID_LENGTH,
+                label + " exceeds " + MAXIMUM_HOOK_ID_LENGTH + " characters");
+        return value;
     }
 
     public static void requireRegistration(JsonNode record) {
         ManagedExtensionRecords.closed(record, REGISTRATION_KEYS, "hookRegistration");
         pinnedRun(record, "registrationId");
-        String catalogId = ManagedExtensionRecords.id(record.get("catalogId"), "catalogId");
+        String catalogId = hookId(record.get("catalogId"), "catalogId");
         long catalogRevision = ManagedExtensionRecords.count(record.get("catalogRevision"),
                 1, Long.MAX_VALUE, "catalogRevision");
         ManagedExtensionRecords.durableRef(record.get("catalogRef"), "catalogRef");
@@ -78,7 +51,8 @@ public final class ManagedHookRecords {
     public static void requireExecution(JsonNode record) {
         ManagedExtensionRecords.closed(record, EXECUTION_KEYS, "hookExecution");
         pinnedRun(record, "hookExecutionId");
-        for (String key : List.of("occurrenceId", "runtimeSessionId", "registrationId", "eventName", "hookId")) {
+        hookId(record.get("occurrenceId"), "occurrenceId");
+        for (String key : List.of("runtimeSessionId", "registrationId", "eventName", "hookId")) {
             ManagedExtensionRecords.id(record.get(key), key);
         }
         ManagedExtensionRecords.count(record.get("ordinal"), 0, Long.MAX_VALUE, "ordinal");
@@ -86,7 +60,7 @@ public final class ManagedHookRecords {
             ManagedExtensionRecords.durableRef(record.get(key), key);
         }
         if (!record.get("onceKey").isNull()) {
-            ManagedExtensionRecords.id(record.get("onceKey"), "onceKey");
+            hookId(record.get("onceKey"), "onceKey");
         }
         require(record.get("cancelRequested").isBoolean(), "Hook cancelRequested must be boolean");
         JsonNode run = record.get("run");

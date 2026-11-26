@@ -123,6 +123,78 @@ clicked, using the list data the sidebar already holds.
   best-effort zero write must not leave a phantom count forever) but never
   creates one for an artifact-free session; an equal count skips the write so
   a warm load adds no disk write; a partial transcript read never seeds. The
+  seed runs before the empty-conversation early return, so metadata-bearing
+  side-records sessions (artifacts registered before the first prompt — the
+  production shape, since every daemon session carries a `session_source`
+  record) gain a count on their first open even though they have no
+  conversation to load. The seed only fires for a transcript that
+  reconstructs at least one message: a pure artifact-only transcript
+  reconstructs nothing, no restore path can open it (`loadSession` returns
+  undefined, the projection is undefined), and a count there would advertise
+  a set no cold open can deliver — the honest state is no sidecar. The
+  shape gate states the property the helper needs — no conversation turns
+  at all, every record is system metadata — instead of enumerating subtypes,
+  so every creation-time record the product writes before the first prompt
+  (`session_source`, `session_model`, titles, …) keeps it true; it is
+  deliberately not `!records.some(isTranscriptConversationRecord)`, which
+  counts creation-time metadata as conversation records. The load funnel
+  dispatches on a real conversation turn
+  (`messages.some((m) => m.type !== 'system')`): metadata reconstructs
+  messages too, and the raw records are unvalidated, so neither
+  `messages.length` nor the raw-array shape decides "has a conversation".
+  Only a transcript with a user/assistant/tool_result turn takes the
+  uncapped seed — its read is the load itself, and the restore payload's
+  embedded snapshot must not depend on the sidecar cap. Everything else
+  goes through the shared helper, whose shape gate refuses a mixed raw
+  array (a validator-dropped record alongside metadata) and whose
+  empty-message refusal covers the artifact-only shape — seeding either
+  from an empty active set would heal a correct count to zero. The
+  daemon/ACP restore funnel reads selectively via `readRestoreProjection`
+  and never calls `loadSession`. For a defined projection with an empty
+  apiHistory it counts exactly the set that projection delivers —
+  `runtime.artifactSnapshot.artifacts` filtered by the shared restorable
+  predicate — and heals an existing sidecar to that count, subject to the
+  same authority gates as the load seed: an incomplete read
+  (`sourceReadComplete` — the same signal the load seed gates on;
+  `sourcesUnavailable` is broader and also flags a damaged sources
+  snapshot, which does not narrow artifact delivery), a broken history
+  chain (`historyGaps`), or a
+  damaged artifact journal (`artifactJournalWarnings`, which the reader
+  threads out of the rebuild even when no snapshot survives) must not
+  overwrite a correct count. One delivered-set definition spans all three
+  writers: the side-record selector includes every artifact record when
+  the transcript never held a conversation turn (every record is system
+  metadata), so the projection delivery, the load funnel's whole-
+  transcript rebuild and the recorder's registration stamp agree — a
+  non-tail-parented event (the recorder writes titles and re-anchored
+  sources with `updateActiveTail: false`) is delivered by every path, not
+  counted by one and delivered by nobody. A file holding conversation
+  records anywhere — even rewound off the active chain — keeps the
+  active-segment selection, which excludes the abandoned branch. A missing projection is not a restore
+  candidate (nothing downstream carries an artifactSnapshot for it). The
+  projection funnel pays no auxiliary read at all — the reader already
+  indexed the transcript. The load funnel's conversation-less seed goes
+  through the shared helper that owns the size probe, the auxiliary read,
+  ownership, the shape gate and the seed: the read is capped at the same
+  64 MiB as the library mutation read with the same inclusive boundary
+  (exactly 64 MiB seeds, above skips, a failed size probe skips). The size
+  and shape gates are sidecar-COUNT policies only: when the helper declines
+  (an oversized journal, or rewound-away conversation records beside a
+  metadata-only active chain) the load funnel falls back to a payload-only
+  rebuild, so the restore payload still carries the active-branch artifacts
+  while the sidecar stays untouched; the empty-message refusal is the
+  artifact-only shape no restore path can open. Sessions with a
+  conversation keep the selective read's zero-extra-I/O contract (pinned
+  by a read spy) and are not seeded on the daemon funnel: their count
+  arrives via the recorder stamp and the CLI load funnel, so a daemon-only
+  first open of a legacy conversation session without a sidecar shows no
+  count until the next artifact event — a pre-existing #17518 limitation
+  tracked as a follow-up, not a shape this seed covers. The load funnel
+  seeds through one seed method; the library guard shares the shape
+  predicate and the record-composition helper, not the seed method; the
+  projection funnel shares the delivered-set definition (the side-record
+  selector and the restorable predicate) and counts its own delivery rather
+  than calling the seed method. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no
   record-level damage warnings — the same predicate the library mutation
@@ -256,6 +328,8 @@ clicked, using the list data the sidebar already holds.
 - `packages/acp-bridge/src/bridgeTypes.ts` (`BridgeSessionSummary`).
 - `packages/sdk-typescript/src/daemon/types.ts` (`DaemonSessionSummary`).
 - `packages/cli/src/serve/server/session-list.ts` (enrichment, merge rule).
+- `packages/cli/src/serve/acp-http/dispatch.ts` (ACP session/list projection
+  of the count and the pending marker).
 - `packages/web-shell/client/daemon/session/types.ts` (connection fields,
   action options).
 - `packages/web-shell/client/daemon/session/actions.ts` (optimistic hint,
@@ -298,17 +372,47 @@ clicked, using the list data the sidebar already holds.
   an existing sidecar); load seed and its authority gate (history gap,
   record-level damage warnings including change-level drops, tolerated
   per-artifact skips, all-refused journals refused by the seed and the
-  library guard alike), in both active and archived states, from event and
-  snapshot (fork) records, counting the cold-restorable set (non-snapshot
-  published file locators excluded via the shared bridge/core predicate,
-  real preview snapshots kept); library
+  library guard alike, side-records-only sessions seeded before the
+  empty-conversation early return and through the daemon restore projection
+  funnel, creation-time `session_model` metadata admitted by the shape gate
+  on both funnels, the shared cap pinned on the load funnel — above-cap
+  skips the seed, exactly-at-cap seeds, a failed size probe skips — and the
+  conversation load seed staying uncapped (the projection funnel pays no
+  stat, read or cap; it counts its own delivery), a conversation-less
+  transcript carrying an unvalidatable record (unknown type, invalid
+  identity) refused by both funnels instead of healing a correct count to
+  zero — including the variant where creation-time metadata reconstructs a
+  message beside the dropped record (dispatch keys on a real conversation
+  turn) — an artifact-only transcript that no restore path can open left
+  without a sidecar by both funnels, a missing projection paying no
+  auxiliary read, the helper's empty-records and foreign-project guards, a
+  partial read through the projection funnel refused via the threaded
+  incomplete-read flag (both funnels), the projection funnel counting its
+  own delivery under the same authority gates (a damaged or refused
+  journal keeps the correct count; a partial read keeps it; a stale
+  sidecar heals to the delivery; the restorable subset is counted; an
+  equal count skips the write), one delivered-set definition across the
+  projection, the load rebuild and the removal recount for a non-tail-
+  parented journal (both funnels yield the same sidecar value; the
+  removal survivor count equals the projection delivery), the projection
+  funnel paying no auxiliary read on either branch, a
+  generated_ui_state-only journal accepted as a legal library removal
+  target, conversation sessions untouched by the projection read), in both
+  active and archived states, from
+  event and snapshot (fork) records, counting the cold-restorable set
+  (non-snapshot published file locators excluded via the shared bridge/core
+  predicate, real preview snapshots kept); library
   removal update (restorable-survivor arithmetic, single and batch, stale
-  ids in the requested batch);
-  archive/delete/conflict handling; working-directory relocation; store
+  ids in the requested batch, non-snapshot published file locators
+  excluded, a `session_model`-bearing conversation-less transcript as a
+  legal removal target);
+  archive/delete/conflict handling (including the kept-side-absent shape);
+  working-directory relocation; store
   `count()` including the decrement after a removal; `toSessionSummary`
   include/omit and the pending-restore marker (`artifactCountPending` keeps
-  the row visible and the merge keeps the sidecar count, and a rejecting
-  rewind restore clears it); the ACP boundary
+  the row visible and the merge keeps the sidecar count, a rejecting
+  rewind restore clears it, and it is keyed per session on a shared
+  channel); the ACP boundary
   carries the stamped count to the recorder and the ACP session/list
   projection carries the count and the marker; enrichment on all list paths,
   including a mid-scan abort (per-iteration checks, interrupted scan not

@@ -9,13 +9,13 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskService;
@@ -24,11 +24,15 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -307,6 +311,77 @@ class ManagedExtensionRecordStoreTest {
                         .recordKey(sessionId, "automation_run",
                                 run.get("automationRunId").asText())))
                 .orElseThrow().kind()).isEqualTo("automation_run");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true,settled", "false,true,failed", "true,true,cancelled",
+            "true,false,settled", "false,false,cancelled"})
+    void automationTerminalFlagCommitsWithTheValidatedProjection(
+            boolean occurrenceFirst, boolean taskKind, String terminalState) throws Exception {
+        JsonNode templates = ManagedAutomationRecordContractTest.fixtures().get("templates");
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        var ledger = new JdbcAutomationLedgerStore(jdbc);
+        var tx = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+        CommitResource prompt = hookResource("prompt-flag", "managed-automation-prompt",
+                "Run it.".getBytes(StandardCharsets.UTF_8));
+        ObjectNode schedule = templates.get("schedule").deepCopy();
+        String scheduleId = "schedule-" + sessionId;
+        schedule.put("scheduleId", scheduleId).put("targetSessionId", sessionId);
+        schedule.set("promptRef", hookRef(prompt));
+        commitDomain(journal, "schedule-1", "schedule", schedule, List.of(prompt));
+        ObjectNode run = templates.get("automation_run").deepCopy();
+        run.put("scheduleId", scheduleId).put("definitionRevision", 1).put("targetSessionId", sessionId);
+        String key = run.get("occurrenceKey").asText();
+        run.put("automationRunId", AutomationLedgerStore.automationRunId(scheduleId, key));
+        long fence = ledger.claim(TENANT, scheduleId, "owner", Long.MAX_VALUE, 1);
+        var decision = AutomationLedgerStore.OccurrenceRow.decision(
+                ledger.findSchedule(TENANT, scheduleId).orElseThrow(), key, null,
+                "manual", "fired", "original", fence, 100);
+        if (occurrenceFirst) {
+            ledger.recordOccurrence(decision, "owner");
+            assertThat(ledger.countActive(TENANT, scheduleId)).isEqualTo(1);
+        }
+        commitDomain(journal, "run-1", "automation_run", run, List.of());
+        if (!taskKind) {
+            jdbc.update("UPDATE ma_session_record SET task_kind = NULL, task_state = NULL"
+                            + " WHERE tenant_id = ? AND session_id = ? AND domain = 'automation_run' AND record_id = ?",
+                    TENANT, sessionId, decision.runId());
+        }
+        run.withObject("/run").put("state", "running");
+        commitDomain(journal, "run-2", "automation_run", run, List.of());
+        run.withObject("/run").put("state", terminalState);
+        var terminal = journal.requestDomain("run-3", "automation_run", run, List.of(), 2_000);
+        tx.executeWithoutResult(status -> {
+            journal.commit(terminal);
+            if (occurrenceFirst) {
+                assertThat(ledger.countActive(TENANT, scheduleId)).isEqualTo(taskKind ? 0 : 1);
+            }
+            status.setRollbackOnly();
+        });
+        assertThat(jdbc.queryForObject("SELECT task_state FROM ma_session_record"
+                        + " WHERE tenant_id = ? AND session_id = ? AND domain = 'automation_run' AND record_id = ?", String.class,
+                TENANT, sessionId, decision.runId()))
+                .isEqualTo(taskKind ? "running" : null);
+        if (occurrenceFirst) {
+            assertThat(ledger.countActive(TENANT, scheduleId)).isEqualTo(1);
+        }
+        journal.commit(terminal);
+        journal.committed(terminal);
+        if (!occurrenceFirst) {
+            tx.executeWithoutResult(status -> {
+                ledger.recordOccurrence(decision, "owner");
+                assertThat(ledger.countActive(TENANT, scheduleId)).isEqualTo(taskKind ? 0 : 1);
+                status.setRollbackOnly();
+            });
+            assertThat(ledger.findOccurrence(TENANT, scheduleId, key)).isEmpty();
+            ledger.recordOccurrence(decision, "owner");
+        }
+        assertThat(ledger.countActive(TENANT, scheduleId)).isEqualTo(taskKind ? 0 : 1);
+        assertThat(ledger.findOccurrence(TENANT, scheduleId, key).orElseThrow()).isEqualTo(decision);
+        assertThat(jdbc.queryForObject("SELECT is_run_terminal FROM ma_schedule_occurrence"
+                        + " WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                Integer.class, TENANT, scheduleId, key)).isEqualTo(taskKind ? 1 : 0);
     }
 
     @Test
@@ -730,21 +805,17 @@ class ManagedExtensionRecordStoreTest {
         accepted.withObject("/run").withObject("/delivery").put("state",
                 "accepted");
         commitDomain(journal, "agent-5", "child_run", accepted, List.of());
-        String scope = com.alibaba.qwen.code.managedagent.repository
-                .ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         for (String run : List.of("run-x", "run-other")) {
-            jdbc.update("INSERT INTO ma_delivery (delivery_key,"
-                            + " delivery_kind, tenant_id, source_scope_key,"
+            jdbc.update("INSERT INTO ma_delivery ("
+                            + " delivery_kind, tenant_id, source_scope_id,"
                             + " source_session_id, target_session_id,"
                             + " delivery_id, creation_key, payload_json,"
                             + " transport_state, reception_state,"
                             + " consumption_state, gmt_create, gmt_modified)"
-                            + " VALUES (?, 'CHILD_RESULT', ?, ?, 'session-child',"
+                            + " VALUES ('CHILD_RESULT', ?, ?, 'session-child',"
                             + " ?, ?, 'creation', '{}', 'delivered', 'accepted',"
                             + " 'pending', 1, 1)",
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
-                            .key("delivery", "CHILD_RESULT", scope, run),
-                    TENANT, scope, sessionId, run);
+                    TENANT, sessionId, sessionId, run);
         }
         ObjectNode consumed = accepted.deepCopy();
         consumed.withObject("/run").withObject("/delivery").put("state",
@@ -760,10 +831,9 @@ class ManagedExtensionRecordStoreTest {
         return jdbc.queryForObject("SELECT CONCAT(transport_state, '/',"
                         + " reception_state, '/', consumption_state) FROM"
                         + " ma_delivery WHERE tenant_id = ? AND delivery_kind ="
-                        + " 'CHILD_RESULT' AND source_scope_key = ? AND"
+                        + " 'CHILD_RESULT' AND source_scope_id = ? AND"
                         + " delivery_id = ?", String.class, TENANT,
-                ManagedSessionStore
-                        .sessionScopeKey(TENANT, sessionId), run);
+                sessionId, run);
     }
 
     /** Commits a child agent through its settled result. */
@@ -1209,7 +1279,9 @@ class ManagedExtensionRecordStoreTest {
                 "channel_delivery", delivery.path("deliveryId").asText());
         // The row as a server before the projection wrote it.
         jdbc.update("UPDATE ma_session_record SET task_kind = NULL,"
-                + " task_state = NULL WHERE record_key = ?", recordKey);
+                + " task_state = NULL WHERE tenant_id = ? AND session_id = ?"
+                + " AND domain = 'channel_delivery' AND record_id = ?",
+                TENANT, sessionId, delivery.path("deliveryId").asText());
         jdbc.update("DELETE FROM ma_public_event WHERE tenant_id = ? AND"
                 + " session_id = ? AND stream_kind = 'TASK'", TENANT,
                 sessionId);
@@ -1221,7 +1293,8 @@ class ManagedExtensionRecordStoreTest {
                 List.of());
         Map<String, Object> row = jdbc.queryForMap("SELECT task_kind,"
                 + " task_state, delivery_state FROM ma_session_record WHERE"
-                + " record_key = ?", recordKey);
+                + " tenant_id = ? AND session_id = ? AND domain = 'channel_delivery' AND record_id = ?",
+                TENANT, sessionId, delivery.path("deliveryId").asText());
         assertThat(row.get("delivery_state")).isEqualTo("sending");
         assertThat(row.get("task_kind")).isNull();
         assertThat(row.get("task_state")).isNull();

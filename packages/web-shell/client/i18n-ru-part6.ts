@@ -30,6 +30,7 @@ export const RU_PART6: Record<
   'workflow.graph.omitted': (v) =>
     `Граф ограничен ради производительности: пропущены ${v?.lanes ?? 0} ${ruPlural(v?.lanes, 'фаза', 'фазы', 'фаз')}, ${v?.nodes ?? 0} ${ruPlural(v?.nodes, 'агент', 'агента', 'агентов')} и ${v?.edges ?? 0} ${ruPlural(v?.edges, 'связь', 'связи', 'связей')}.`,
   'workflow.noPhase': 'Без фазы',
+  'workflow.phase.notStarted': 'Не начата',
   'workflow.dispatchCount': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'запуск', 'запуска', 'запусков')}`,
   'workflow.selectedDispatch': 'Выбранный запуск',

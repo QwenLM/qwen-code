@@ -3490,6 +3490,46 @@ describe('OpenAIContentConverter', () => {
       expect(params['required']).toEqual(['description', 'prompt']);
     });
 
+    it('makes omitted additionalProperties explicit when asked to open undeclared objects', async () => {
+      const [mcp, gemini] = await converter.convertLlmToolsToOpenAI(
+        toolsOf(
+          schemaTool('structured_output', {
+            type: 'object',
+            properties: {
+              docs: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: { category_id: { type: 'string' } },
+                },
+              },
+            },
+          }),
+          {
+            name: 'gemini_shaped',
+            parameters: {
+              type: Type.OBJECT,
+              properties: { path: { type: Type.STRING } },
+            },
+          },
+        ),
+        'auto',
+        true,
+      );
+      const mcpParams = mcp!.function.parameters as {
+        additionalProperties?: unknown;
+        properties: { docs: { items: { additionalProperties?: unknown } } };
+      };
+
+      expect(mcpParams.additionalProperties).toBe(true);
+      expect(mcpParams.properties.docs.items.additionalProperties).toBe(true);
+      expect(
+        (gemini!.function.parameters as Record<string, unknown>)[
+          'additionalProperties'
+        ],
+      ).toBe(true);
+    });
+
     it('keeps additionalProperties:false when every property is required', async () => {
       const params = await paramsOf({
         name: 'strict_tool',

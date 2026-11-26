@@ -24,7 +24,7 @@ Non-goals:
 - Render sites (`ui.render`). Nothing in an ACP client draws a Mod rewrite yet. The Web Shell projection, with its client capability check, is the next step.
 - Tool and command middleware (`tool.call`, `tool.check`, Mod commands) and prompts (`prompt.submit`, `$.prompt.submit`). They are a later ACP step.
 - Showing Mod logs in the Web Shell, which comes with the projection.
-- Removing `MessageRewriteMiddleware`. It can go once the Web Shell draws Mod rewrites.
+- Removing `MessageRewriteMiddleware`. It went once the Web Shell drew Mod rewrites: [Removing MessageRewriteMiddleware](2026-11-23-remove-message-rewrite-middleware.md).
 
 ## Contract
 
@@ -95,5 +95,5 @@ Acceptance: in an ACP session with Mods enabled, a Mod's session and turn hooks 
 - Each ACP session with Mods runs its own Mod worker thread, whose guest memory is capped at 64 MiB, so a daemon pays a worker for each open session that loads Mods.
 - The legacy-loop mapping is a second reading of the model stream. It goes away with the legacy loop once ACP runs the shared loop by default.
 - `session.end` on daemon shutdown has the same end budget as the terminal. A shutdown that kills the process sooner cuts it short. Closing a session was checked by hand against a real `qwen serve` daemon (its `session.end` hook wrote to `$.store` before the close returned); the integration test covers neither closing nor shutdown.
-- The `mod_log` frame is not yet a known event in the TypeScript SDK; the Web Shell projection adds it with its display. Until then the SDK turns each frame into an unrecognized debug block, which the Web Shell does not show, and a chatty Mod's frames take slots in the session's event ring. `experimental.mods` stays out of the Web Shell settings page until then.
+- A chatty Mod's `mod_log` frames take slots in the session's event ring. (The SDK event, its Web Shell display and the setting on the Web Shell settings page followed in [Mod reply rows in the Web Shell](2026-11-18-mod-rows-in-web-shell.md).)
 - The two sessions in the integration test run one after the other. Turn isolation under concurrent prompts rests on the prompt-id filter and each session's own Config, not on a concurrency test.
