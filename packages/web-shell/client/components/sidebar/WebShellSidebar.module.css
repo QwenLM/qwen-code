@@ -2217,6 +2217,12 @@ button.livePendingSession:hover {
   padding: 0;
 }
 
+.collapsed .overloadStrip {
+  width: 32px;
+  justify-content: center;
+  padding: 6px 0;
+}
+
 .collapsed .body {
   align-items: center;
   width: 100%;
@@ -2533,6 +2539,14 @@ button.livePendingSession:hover {
     var(--sidebar-foreground) 50%,
     var(--sidebar-background)
   );
+}
+
+.railLayout .rail .overloadStrip {
+  width: 40px;
+  height: 32px;
+  justify-content: center;
+  padding: 0;
+  border-radius: 10px;
 }
 
 .railLayout
