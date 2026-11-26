@@ -71,6 +71,10 @@ If the session supports settings-based servers and an eligible server still
 does not appear in `/mcp` after a settings change, restart Qwen Code in the
 same project.
 
+In OpenTUI, **Reconnect** reports whether discovery reached a connected server.
+If it did not, the result includes the current connection status and the most
+recently recorded connection error, when available.
+
 ## Where configuration is stored (scopes)
 
 Most users only need these two scopes:

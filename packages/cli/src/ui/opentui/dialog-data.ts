@@ -74,6 +74,8 @@ import {
   sortModelEntriesForDisplay,
 } from '../../utils/model-display-order.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { sanitizeTerminalLine } from '../utils/textUtils.js';
+import { getMCPServerLastError } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
 import { applyOpenTuiTheme } from './theme.js';
@@ -1044,7 +1046,18 @@ export async function applyMcpServerAction(
         if (toolRegistry) {
           await toolRegistry.discoverToolsForServer(server.name);
         }
-        return { message: `Reconnecting '${server.name}'…`, changed: true };
+        const status = getMCPServerStatus(server.name);
+        if (status === MCPServerStatus.CONNECTED) {
+          return { message: `Reconnected '${server.name}'.`, changed: true };
+        }
+        const rawError = getMCPServerLastError(server.name);
+        const lastError = rawError ? sanitizeTerminalLine(rawError) : undefined;
+        return {
+          message:
+            `Reconnect to '${server.name}' finished without a live connection (status: ${status})` +
+            (lastError ? `: ${lastError}` : '.'),
+          changed: true,
+        };
       }
       case 'clear-auth': {
         const tokenStorage = new MCPOAuthTokenStorage();
