@@ -19727,10 +19727,21 @@ export function App({
       new Promise<void>((resolve, reject) => {
         const taskRuntimeClient =
           scheduledScope?.runtimeClient ?? workspace.client;
+        const scheduledScopeIsCurrent = () =>
+          taskRuntimeClient === boundRunRuntimeClientRef.current &&
+          (!scheduledScope ||
+            (scheduledScope.logicalSessionKey !== undefined &&
+              scheduledScope.targetGeneration !== undefined &&
+              getLogicalSessionKey(
+                connectionRef.current.sessionId,
+                connectionRef.current.workspaceCwd,
+              ) === scheduledScope.logicalSessionKey &&
+              boundRunTargetRef.current.generation ===
+                scheduledScope.targetGeneration));
         const assertRunnable = () => {
-          if (taskRuntimeClient !== boundRunRuntimeClientRef.current) {
+          if (!scheduledScopeIsCurrent()) {
             throw createScheduledTaskCancellation(
-              'Bound run runtime was replaced',
+              'Bound run target or runtime was replaced',
             );
           }
           if (taskIsStale?.()) {
@@ -19777,15 +19788,7 @@ export function App({
               }
             : {}),
           canRebindOwner: () =>
-            scheduledScope?.logicalSessionKey !== undefined &&
-            scheduledScope.targetGeneration !== undefined &&
-            getLogicalSessionKey(
-              connectionRef.current.sessionId,
-              connectionRef.current.workspaceCwd,
-            ) === scheduledScope.logicalSessionKey &&
-            boundRunTargetRef.current.generation ===
-              scheduledScope.targetGeneration &&
-            scheduledScope.runtimeClient === boundRunRuntimeClientRef.current,
+            scheduledScope !== undefined && scheduledScopeIsCurrent(),
           onAdmitted: admit,
           onCancelledBeforeAdmission: () => {
             if (!admitted) {
@@ -19835,14 +19838,19 @@ export function App({
       return;
     }
     if (
-      conn.sessionId === pending.sessionId &&
-      getLogicalSessionKey(conn.sessionId, conn.workspaceCwd) ===
-        pending.logicalSessionKey &&
-      boundRunTargetRef.current.generation === pending.targetGeneration &&
-      pending.runtimeClient === boundRunRuntimeClientRef.current
+      conn.sessionId !== pending.sessionId ||
+      getLogicalSessionKey(conn.sessionId, conn.workspaceCwd) !==
+        pending.logicalSessionKey ||
+      boundRunTargetRef.current.generation !== pending.targetGeneration
     ) {
-      pending.owner = sessionOwnerGuard.capture();
-    } else if (pending.owner && !pending.owner.isCurrent()) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        createScheduledTaskCancellation('Bound run session was replaced'),
+      );
+      return;
+    }
+    pending.owner = sessionOwnerGuard.capture();
+    if (!pending.owner.isCurrent()) {
       clearPendingBoundRun(pending.sessionId);
       pending.reject(
         createScheduledTaskCancellation('Bound run session was replaced'),

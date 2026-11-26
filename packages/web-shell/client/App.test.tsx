@@ -59215,6 +59215,7 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       sessionId: string | null,
       workspaceCwd?: string,
       isStale?: () => boolean,
+      beforeTaskDispatch?: () => void | Promise<void>,
     ) => Promise<void>
   > {
     mockConnection.goalState ??= {
@@ -59975,6 +59976,57 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       }
     },
   );
+
+  it('rejects a stale revalidation after its original scope is cleared', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    interface InterceptedOptions {
+      beforeAdmission?: () => void | Promise<void>;
+      beforeDispatch?: () => void | Promise<void>;
+      onAdmitted?: () => void;
+    }
+    const rawCallbacks: InterceptedOptions[] = [];
+    let admitted = 0;
+    mockSessionActions.sendPrompt.mockImplementation(
+      async (_prompt: string, options: unknown) => {
+        const opts = options as InterceptedOptions;
+        rawCallbacks.push(opts);
+        await opts.beforeAdmission?.();
+        await opts.beforeDispatch?.();
+        admitted += 1;
+        opts.onAdmitted?.();
+      },
+    );
+    const revalidation = deferred<void>();
+    const remoteRevalidation = vi.fn(async () => revalidation.promise);
+    let deleted = false;
+    let settlement!: Promise<unknown>;
+    await act(async () => {
+      settlement = run(
+        'do the thing',
+        'session-1',
+        '/tmp/project',
+        () => deleted,
+        remoteRevalidation,
+      ).catch((error) => error);
+      await vi.waitFor(() => expect(remoteRevalidation).toHaveBeenCalledOnce());
+    });
+
+    await act(async () => {
+      deleted = true;
+      mockConnection.workspaceCwd = '/repo/other';
+      deleted = false;
+      rerender({});
+      await Promise.resolve();
+    });
+    expect(rawCallbacks).toHaveLength(1);
+    revalidation.resolve();
+
+    const result = await settlement;
+    expect(isScheduledTaskCancellation(result)).toBe(true);
+    expect(admitted).toBe(0);
+  });
 
   it('R21 binds a live stale guard to the raw dispatch hooks', async () => {
     const { container } = renderApp();
