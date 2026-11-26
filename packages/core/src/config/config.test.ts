@@ -230,6 +230,18 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+// This Config suite uses a synthetic filesystem. Archive exclusion and
+// generation checks are covered on disk by session-archive-write-fence.test.ts.
+vi.mock('../services/session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  assertSessionArchiveGeneration: vi.fn(),
+  readSessionArchiveGeneration: vi.fn(),
+  withSessionArchiveWriteLockSync: vi.fn((_path, run) => run()),
+}));
+
 vi.mock('../memory/metadata-migration.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../memory/metadata-migration.js')>()),
   scanMemoryMetadataCorpusStatus: vi.fn().mockResolvedValue({
@@ -350,6 +362,7 @@ vi.mock('../hooks/index.js', () => {
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
+  HookSystemMock.prototype.getConfigWarnings = vi.fn().mockReturnValue([]);
   return {
     HookSystem: HookSystemMock,
     createHookOutput: vi.fn(),

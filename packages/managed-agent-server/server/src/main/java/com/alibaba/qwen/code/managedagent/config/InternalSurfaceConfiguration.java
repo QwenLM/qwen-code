@@ -19,6 +19,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 
 /**
  * Binds the internal surface (/internal/**) to its own connector when
@@ -63,14 +65,14 @@ public class InternalSurfaceConfiguration
         String address = properties.getInternalServer().getAddress();
         String hostAddress;
         try {
-            hostAddress = java.net.InetAddress.getByName(address)
+            hostAddress = InetAddress.getByName(address)
                     .getHostAddress();
             if (!connector.setProperty("address", hostAddress)) {
                 throw new IllegalStateException(
                         "qwen.managed-agent.internal-server.address was"
                                 + " rejected by the connector: " + address);
             }
-        } catch (java.net.UnknownHostException error) {
+        } catch (UnknownHostException error) {
             throw new IllegalStateException(
                     "qwen.managed-agent.internal-server.address is invalid: "
                             + address, error);

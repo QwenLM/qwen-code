@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHostedRecoveryRecords;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
@@ -11,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -26,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 final class JournalCommit {
     private final JournalFencing fencing;
@@ -61,7 +64,7 @@ final class JournalCommit {
     }
 
     CommitReceipt commit(String tenantId, String sessionId, String writerToken,
-            CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            CommitTransactionRequest request, RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -124,7 +127,7 @@ final class JournalCommit {
         }
         var resourceCache = new HashMap<String, StoredResource>();
         var hostedReferences = new HashMap<String, JsonNode>();
-        java.util.function.Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
+        Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
                 id -> storeRows.storedResource(tenantId, request.workspaceId(), sessionId, id));
         ManagedHostedRecoveryRecords.HistoricalResources closureReader = new ManagedHostedRecoveryRecords.HistoricalResources() {
             @Override
@@ -153,14 +156,14 @@ final class JournalCommit {
                 ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
-            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
+            if (ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
                 ManagedModelDiagnosticProjection.validateResource(closureReader.apply(resource.resourceId()));
             }
-            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.kind())) {
+            if (ManagedActivityDiagnostics.KIND.equals(resource.kind())) {
                 StoredResource evidence = closureReader.apply(resource.resourceId());
                 JdbcManagedExtensionRecordStore.require(evidence.schemaVersion() == 1 && evidence.byteLength() <= 65_536,
                         "Invalid execution diagnostic resource.");
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.requireEvidence(
+                ManagedActivityDiagnostics.requireEvidence(
                         JdbcManagedExtensionRecordStore.readBody(evidence));
             }
         }

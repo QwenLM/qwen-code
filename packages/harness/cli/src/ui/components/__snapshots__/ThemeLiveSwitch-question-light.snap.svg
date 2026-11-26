@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="740" height="224" viewBox="0 0 740 224">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="740" height="224" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="0" y="19" fill="#1a1917" textLength="108" lengthAdjust="spacingAndGlyphs" font-weight="bold"> Asking User</text>
+    <text x="0" y="36" fill="#b8b7b3" textLength="720" lengthAdjust="spacingAndGlyphs">────────────────────────────────────────────────────────────────────────────────</text>
+    <text x="9" y="53" fill="#1a1917" textLength="153" lengthAdjust="spacingAndGlyphs" font-weight="bold">Choose a language</text>
+    <text x="27" y="87" fill="#ffffff" textLength="27" lengthAdjust="spacingAndGlyphs">1. </text>
+    <text x="54" y="87" fill="#1a1917" textLength="90" lengthAdjust="spacingAndGlyphs">TypeScript</text>
+    <text x="9" y="104" fill="#14802e" textLength="18" lengthAdjust="spacingAndGlyphs">❯ </text>
+    <text x="27" y="104" fill="#ffffff" textLength="162" lengthAdjust="spacingAndGlyphs">2. retained answer</text>
+    <rect x="189" y="102" width="9" height="17" fill="#ffffff" />
+    <text x="9" y="138" fill="#b8b7b3" textLength="702" lengthAdjust="spacingAndGlyphs">──────────────────────────────────────────────────────────────────────────────</text>
+    <text x="9" y="155" fill="#1a1917" textLength="180" lengthAdjust="spacingAndGlyphs">  3. Chat about this</text>
+    <text x="9" y="189" fill="#6b6a65" textLength="432" lengthAdjust="spacingAndGlyphs" font-style="italic">Enter submit · Ctrl+X edit response · Esc cancel</text>
+  </g>
+</svg>

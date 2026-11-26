@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="740" height="54" viewBox="0 0 740 54">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="740" height="54" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="0" y="19" fill="#ffffff" textLength="27" lengthAdjust="spacingAndGlyphs">⎿  </text>
+    <text x="27" y="19" fill="#9f6500" textLength="567" lengthAdjust="spacingAndGlyphs">PreToolUse:Bash hook stopped continuation: Retained stop reason</text>
+  </g>
+</svg>

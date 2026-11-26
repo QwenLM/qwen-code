@@ -23,6 +23,9 @@ packages:
   - 'integrations/external-context-mem0'
   - 'integrations/test-failure-explorer'
   - 'integrations/generated-ui'
+  - 'packages/harness/cli'
+  - 'packages/harness/core'
+  - 'packages/harness/resource'
   - '!packages/desktop'
   - '!packages/live-host'
   - '!packages/mobile-shell'
@@ -131,6 +134,15 @@ allowBuilds:
   keytar: true
   msw: true
   protobufjs: true
+  # packages/harness/core's sharp 0.34 install script only checks for the
+  # prebuilt @img/sharp-* binary, which arrives as an optional dependency, and
+  # falls back to a source build when it is missing. The root's sharp 0.35
+  # has no install script.
+  sharp: false
+  # packages/harness/core loads only tree-sitter-bash.wasm through
+  # web-tree-sitter; the install script builds the native binding it never
+  # loads.
+  tree-sitter-bash: false
 
 minimumReleaseAgeExclude:
   - '@qwen-code/channel-base'

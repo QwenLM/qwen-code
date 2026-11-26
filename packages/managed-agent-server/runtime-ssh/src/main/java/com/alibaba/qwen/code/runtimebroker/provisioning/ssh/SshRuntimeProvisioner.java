@@ -276,7 +276,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
         }
     }
 
-    private Map<String, Object> contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+    private ManagedContextProtocol.Boot contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         String digest = request.getScope().getCapabilityDigest();
         return ManagedContextProtocol.boot(request, seed,
                 ManagedExtensionExecutionProfile.admits(digest)
@@ -289,7 +289,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
         if (!(result.get("ready") instanceof Map<?, ?> raw)) {
             throw conflict();
         }
-        URI endpoint = ManagedContextProtocol.ready(object(raw), contextBoot(request, seed));
+        URI endpoint = ManagedContextProtocol.ready(object(raw), contextBoot(request, seed)).url();
         RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(), endpoint, seed.getToken(),
                 seed.getLeaseId(), seed.getEpoch());
         if (lastLease != null && (!seed.matches(lastLease) || !lastLease.getEndpoint().equals(lease.getEndpoint()))) {
@@ -363,7 +363,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
         Map<String, Object> registration = object((Map<?, ?>) handle.getValue().get("registration"));
         command.put("bindingId", seed.getProvisionalRuntimeId());
         command.put("bindingGeneration", seed.getEpoch());
-        command.put("boot", contextBoot(request, seed));
+        command.put("boot", contextBoot(request, seed).toWire());
         command.put("identity", registration.get("identity"));
         command.put("marker", registration.get("marker"));
         command.put("expectedQwenVersion", registration.get("qwenVersion"));

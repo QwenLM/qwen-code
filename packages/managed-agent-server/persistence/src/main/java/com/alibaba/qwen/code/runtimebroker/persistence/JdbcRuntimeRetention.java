@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRetention;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 
 import javax.sql.DataSource;
@@ -17,7 +18,7 @@ import java.util.List;
 import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
 
 /** Bounded cleanup of unreferenced retired Runtime generations. */
-public final class JdbcRuntimeRetention implements com.alibaba.qwen.code.runtimebroker.RuntimeRetention {
+public final class JdbcRuntimeRetention implements RuntimeRetention {
     public interface ReferenceGuard {
         boolean bindingReferenced(Connection connection, RuntimeBindingRecord binding) throws SQLException;
 

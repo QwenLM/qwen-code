@@ -9,6 +9,8 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -21,6 +23,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -58,9 +61,9 @@ public class JournalPackTransactions {
         this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public JournalPackTransactions(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            org.springframework.beans.factory.ObjectProvider<ToolPublicationObjectStore> objects) {
+            ObjectProvider<ToolPublicationObjectStore> objects) {
         this(jdbc, objects.getIfAvailable());
     }
 
@@ -336,7 +339,7 @@ public class JournalPackTransactions {
             throw new IllegalStateException("Pack reconciliation read failed", error);
         }
         return length == expectedLength
-                && java.util.HexFormat.of().formatHex(digest.digest()).equals(pack.get("sha256"));
+                && HexFormat.of().formatHex(digest.digest()).equals(pack.get("sha256"));
     }
 
     private ToolPublicationObjectStore store() {

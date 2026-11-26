@@ -12,6 +12,7 @@ import {
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
@@ -175,6 +176,7 @@ export function classifyPromptRequest(
   delete forwardedBody['deadlineMs'];
   delete forwardedBody['delivery'];
   delete forwardedBody['idempotencyKey'];
+  delete forwardedBody['suppressInputHistory'];
   const forwardedMeta =
     typeof forwardedBody['_meta'] === 'object' &&
     forwardedBody['_meta'] !== null &&
@@ -194,6 +196,7 @@ export function classifyPromptRequest(
     delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete forwardedMeta[SUBMITTED_PROMPT_META_KEY];
     delete forwardedMeta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+    delete forwardedMeta[DAEMON_USER_PROMPT_META_KEY];
     delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
     delete forwardedMeta[CHANNEL_WORKFLOW_ORIGIN_META_KEY];
     delete forwardedMeta[CHANNEL_BOUND_RELAY_META_KEY];
@@ -415,6 +418,7 @@ export function admitSessionPrompt(
       {
         ...(clientId !== undefined ? { clientId } : {}),
         promptId,
+        userPrompt: true,
         ...(input.turnSkillLease
           ? { turnSkillLease: input.turnSkillLease }
           : {}),
