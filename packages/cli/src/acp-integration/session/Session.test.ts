@@ -6459,7 +6459,10 @@ describe('Session', () => {
 
       const result = await prompt();
 
-      expect(result.stopReason).toBe('end_turn');
+      expect(result).toEqual({
+        stopReason: 'end_turn',
+        _meta: { 'qwen.promptBlocked': true },
+      });
       expect(send).toHaveBeenCalledOnce();
       expect(send.mock.calls[0][3]).toMatchObject({
         promptAdmission: { blocked: true },
@@ -6468,6 +6471,30 @@ describe('Session', () => {
         '✗ **UserPromptSubmit blocked**: not today',
       );
       expect(mockConfig.getFileHistoryService).not.toHaveBeenCalled();
+    });
+
+    it('admits a prompt with the sending session it came from', async () => {
+      useSharedRounds([]);
+      const admitUserPrompt = vi.fn().mockResolvedValue({ blocked: false });
+      Object.assign(mockLlmClient, { admitUserPrompt });
+
+      await prompt({
+        _meta: {
+          'qwen.daemon.promptSource': {
+            sessionId: 'sender-session',
+            workspaceCwd: '/workspace/a',
+          },
+        },
+      });
+
+      expect(admitUserPrompt).toHaveBeenCalledWith(
+        'hello',
+        expect.any(String),
+        expect.objectContaining({
+          submittedPrompt: undefined,
+          source: { session_id: 'sender-session', cwd: '/workspace/a' },
+        }),
+      );
     });
 
     it('checks each steering message and sends the tool result with the allowed input', async () => {
@@ -51059,6 +51086,40 @@ describe('Session', () => {
           },
         );
 
+        it('passes the sending session to UserPromptSubmit', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'delegated task' }],
+            _meta: {
+              'qwen.daemon.promptSource': {
+                sessionId: 'sender-session',
+                workspaceCwd: '/workspace/a',
+              },
+            },
+          });
+
+          expect(messageBus.request).toHaveBeenCalledWith(
+            expect.objectContaining({
+              eventName: 'UserPromptSubmit',
+              input: {
+                prompt: 'delegated task',
+                source: { session_id: 'sender-session', cwd: '/workspace/a' },
+              },
+            }),
+            expect.anything(),
+          );
+        });
+
         it('blocks prompt when UserPromptSubmit hook returns blocking decision', async () => {
           const messageBus = {
             request: vi.fn().mockResolvedValue({
@@ -51078,7 +51139,10 @@ describe('Session', () => {
           });
 
           expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-          expect(result.stopReason).toBe('end_turn');
+          expect(result).toEqual({
+            stopReason: 'end_turn',
+            _meta: { 'qwen.promptBlocked': true },
+          });
           expect(
             mockLlmClient.beginManagedAutoMemoryRecall,
           ).not.toHaveBeenCalled();

@@ -259,7 +259,7 @@ import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
-import type { StopHookOutput } from '../hooks/types.js';
+import type { StopHookOutput, UserPromptSource } from '../hooks/types.js';
 import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 
 const MAX_TURNS = 100;
@@ -4016,6 +4016,8 @@ export class LlmClient {
     options: {
       /** The hook's `submitted_prompt`; `prompt` when it has text by default. */
       submittedPrompt?: string;
+      /** The hook's `source`: the session that sent this prompt. */
+      source?: UserPromptSource;
       signal?: AbortSignal;
     } = {},
   ): Promise<UserPromptAdmission> {
@@ -4030,6 +4032,7 @@ export class LlmClient {
           : undefined,
       options.signal,
       owner,
+      options.source,
     );
     const admission: UserPromptAdmission = Object.freeze({
       blocked: decision?.blockReason !== undefined,

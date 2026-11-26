@@ -13843,8 +13843,27 @@ describe('Model Switching and Config Updates', () => {
         'model prompt',
         undefined,
         expected,
+        undefined,
       );
       expect(response.success).toBe(true);
+    });
+
+    it('passes the sending session through', async () => {
+      const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
+      const config = await withHookSystem({ fireUserPromptSubmitEvent });
+      const source = { session_id: 'sender', cwd: '/workspace/a' };
+
+      await hookRequest(config, 'UserPromptSubmit', {
+        prompt: 'model prompt',
+        source,
+      });
+
+      expect(fireUserPromptSubmitEvent).toHaveBeenCalledWith(
+        'model prompt',
+        undefined,
+        undefined,
+        source,
+      );
     });
   });
 
