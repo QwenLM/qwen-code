@@ -356,7 +356,11 @@ describe('OpenTuiModBand', () => {
     const text = (props: Record<string, string | number | boolean>) =>
       drawn({ type: 'Text', props, children: ['x'] });
     expect(text({ wrap: 'clip' }).props).toMatchObject({ wrapMode: 'none' });
-    expect(text({ maxLines: 1 }).props).toMatchObject({ wrapMode: 'none' });
+    const oneLine = text({ maxLines: 1 });
+    expect(oneLine.props).toMatchObject({ maxHeight: 1, overflow: 'hidden' });
+    expect((children(oneLine)[0] as Drawn).props).toMatchObject({
+      wrapMode: 'none',
+    });
     const clipped = text({ maxLines: 3 });
     expect(clipped.props).toMatchObject({
       tag: 'box',

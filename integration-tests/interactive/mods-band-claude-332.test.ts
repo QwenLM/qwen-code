@@ -42,6 +42,7 @@ const MOD = `export function register(on) {
     const { Box, Text, Progress } = $.ui.resolve(e);
     return Box({ flexDirection: 'column', children: [
       Text({ maxLines: 2, children: 'Band row one\\nBand row two\\nBand row three' }),
+      Text({ maxLines: 1, children: 'One visible row\\nHidden extra row' }),
       Text({ wrap: 'clip', children: 'Clipped ' + 'x'.repeat(300) }),
       Box({ overflowX: 'scroll', mono: true, children: [Text({ children: 'Scrolled ' + 'y'.repeat(300) })] }),
       Progress({ label: 'Indexing', value: 3, max: 10, color: 'success' }),
@@ -146,6 +147,8 @@ describe(`A Claude Code 2.1.332 Mod in the ${renderer} terminal`, () => {
     expect(line('Band row one')).toBeDefined();
     expect(line('Band row two')).toBeDefined();
     expect(line('Band row three')).toBeUndefined();
+    expect(line('One visible row')).toBeDefined();
+    expect(lines.some((row) => row.includes('Hidden extra row'))).toBe(false);
     // Each cut Text keeps to one row within the band's columns.
     for (const start of ['Clipped', 'Scrolled']) {
       expect(line(start)).toBeDefined();

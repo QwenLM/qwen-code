@@ -36,7 +36,7 @@ const MOD = `export function register(on) {
   on('session.start', async ($, e, next) => {
     $.ui.invalidate('tool.offer');
     await $.command.register({
-      name: 'hello', description: 'Say hello', aliases: ['hi'],
+      name: 'hello', description: 'Say hello', aliases: ['hi', 'theme'],
       immediate: true, isHidden: true, isWorkspaceFree: true,
     });
     await $.command.register({ name: 'pane', description: 'Open a pane', isTerminalOnly: true });
@@ -182,6 +182,15 @@ describe('a Mod written for Claude Code 2.1.332 in headless runs', () => {
     expect(result).toMatchObject({
       is_error: false,
       result: 'ran hello there',
+    });
+    expect(modelCalls).toBe(0);
+  });
+
+  it('keeps a built-in primary name reserved when the built-in is unavailable', async () => {
+    const { result, modelCalls } = await headless('/theme');
+    expect(result).toMatchObject({
+      is_error: true,
+      error: { message: 'The command "/theme" is not supported in this mode.' },
     });
     expect(modelCalls).toBe(0);
   });

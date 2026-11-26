@@ -510,7 +510,15 @@ export function adjustRenderTree(
   };
   const walk = (node: ModRenderNode): ModRenderNode => {
     if (typeof node === 'string') return text(node);
-    if (node.type === 'engine' || node.type === 'Progress') return node;
+    if (node.type === 'engine') return node;
+    if (node.type === 'Progress') {
+      const props = { ...node.props };
+      for (const key of ['label', 'valueText']) {
+        const value = props[key];
+        if (typeof value === 'string') props[key] = text(value);
+      }
+      return { ...node, props };
+    }
     let props = node.props;
     let hover = node.hover;
     if (node.type === 'Box' && props) {

@@ -254,7 +254,7 @@ export function modBandMaxLines(
   inScroller: boolean,
 ): number | undefined {
   const lines = props['maxLines'];
-  return !inScroller && typeof lines === 'number' && lines > 1
+  return !inScroller && typeof lines === 'number' && lines >= 1
     ? lines
     : undefined;
 }

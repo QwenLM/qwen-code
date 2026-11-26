@@ -275,6 +275,42 @@ describe('adjustRenderTree', () => {
     ]);
   });
 
+  it('counts Progress strings in the same text budget as its siblings', () => {
+    const prefix = 'a'.repeat(MOD_RENDER_TEXT_CAP - 10);
+    const label = 'Working';
+    const { tree, notes } = adjustRenderTree(
+      {
+        type: 'Box',
+        children: [
+          prefix,
+          { type: 'Progress', props: { label, valueText: 'almost done' } },
+          'tail',
+        ],
+      },
+      'AbovePrompt',
+    );
+    expect(tree).toEqual({
+      type: 'Box',
+      children: [
+        prefix,
+        {
+          type: 'Progress',
+          props: {
+            label,
+            valueText: 'alm\n… 8 more characters, not drawn',
+          },
+        },
+        '',
+      ],
+    });
+    expect(notes).toEqual([
+      {
+        key: 'text cut',
+        text: `ui.render (AbovePrompt): ${MOD_RENDER_TEXT_CAP + 12} characters of text are drawn up to the first ${MOD_RENDER_TEXT_CAP}`,
+      },
+    ]);
+  });
+
   it('never cuts between the halves of a surrogate pair', () => {
     const { tree, notes } = adjustRenderTree(
       text(['a'.repeat(MOD_RENDER_TEXT_CAP - 1) + '😀😀']) as ModRenderElement,
