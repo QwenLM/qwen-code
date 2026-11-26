@@ -20,6 +20,7 @@ export type ChatCompletionContentPartWithCache =
   | OpenAI.Chat.ChatCompletionContentPartRefusal;
 
 export interface OpenAICompatibleProvider {
+  replaysReasoningContent?(model: string): boolean;
   buildHeaders(): Record<string, string | undefined>;
   buildClient(): OpenAI;
   buildRequest(

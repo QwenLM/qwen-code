@@ -38,6 +38,9 @@ import type { ReasoningEffort } from './reasoning-effort.js';
  * Interface abstracting the core content generation functionality.
  */
 export interface ContentGenerator {
+  /** Whether assistant reasoning text is sent again on the next request. */
+  replaysReasoningContent?(model: string): boolean;
+
   generateContent(
     request: GenerateContentParameters,
     userPromptId: string,
@@ -448,11 +451,22 @@ function wrapProviderLoadError(error: unknown, authType: AuthType): unknown {
 class LazyContentGenerator implements ContentGenerator {
   private generatorPromise?: Promise<ContentGenerator>;
   private preloadedOnly = false;
+  private resolved?: ContentGenerator;
+
+  replaysReasoningContent(model: string): boolean {
+    return this.resolved?.replaysReasoningContent?.(model) ?? true;
+  }
 
   constructor(private readonly loader: () => Promise<ContentGenerator>) {}
 
   private getGenerator(): Promise<ContentGenerator> {
-    this.generatorPromise ??= this.loader();
+    if (!this.generatorPromise) {
+      const loading = this.loader().then((generator) => {
+        if (this.generatorPromise === loading) this.resolved = generator;
+        return generator;
+      });
+      this.generatorPromise = loading;
+    }
     return this.generatorPromise;
   }
 
@@ -472,6 +486,7 @@ class LazyContentGenerator implements ContentGenerator {
     if (!this.preloadedOnly) return;
     this.preloadedOnly = false;
     this.generatorPromise = undefined;
+    this.resolved = undefined;
   }
 
   async generateContent(

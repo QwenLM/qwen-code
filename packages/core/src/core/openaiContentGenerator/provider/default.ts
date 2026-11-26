@@ -230,6 +230,13 @@ export class DefaultOpenAICompatibleProvider
     } as unknown as T;
   }
 
+  protected mirrorsReasoningContent(model: string): boolean {
+    const profile = this.getReasoningCapabilities(model)?.profile;
+    return (
+      (!profile && isQwen3Model(model)) || profile === 'qwen-chat-template'
+    );
+  }
+
   buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     _userPromptId: string,
@@ -243,12 +250,9 @@ export class DefaultOpenAICompatibleProvider
     const requestWithTokenLimits = this.clampConfiguredReasoningEffort(
       this.applyOutputTokenLimit(request),
     );
-    const profile = this.getReasoningCapabilities(request.model)?.profile;
-    const messages =
-      (!profile && isQwen3Model(request.model)) ||
-      profile === 'qwen-chat-template'
-        ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
-        : requestWithTokenLimits.messages;
+    const messages = this.mirrorsReasoningContent(request.model)
+      ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
+      : requestWithTokenLimits.messages;
 
     const result = {
       ...requestWithTokenLimits,

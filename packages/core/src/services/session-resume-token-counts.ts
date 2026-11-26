@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Content } from '@google/genai';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
@@ -24,6 +25,7 @@ export interface PricedCatalogEntry {
 }
 
 export interface ResumeHistoryBoundary {
+  restoredHistory?: Content[];
   mediaTokenCosts?: number[][];
   trailingEntries: number;
   partCount?: number;
@@ -49,6 +51,28 @@ export interface ResumeTokenCounts {
   catalogSwitchTokens?: number;
   /** Saved per-entry adjustments when only part of the history was priced locally. */
   pricedCatalogEntries?: PricedCatalogEntry[];
+}
+
+export function captureResumeHistoryBoundary(
+  history: Content[],
+  checkpoint: ResumeTokenCounts['historyCheckpoint'],
+): ResumeHistoryBoundary | undefined {
+  if (!checkpoint || checkpoint.entries > history.length) return undefined;
+  // Startup can insert tool results, move existing parts and remove duplicate
+  // entries. Snapshot the replayed containers before those repairs. Keep leaf
+  // payloads shared so their stored per-image prices still identify them.
+  return {
+    restoredHistory: history.map((entry) => ({
+      ...entry,
+      ...(entry.parts && { parts: [...entry.parts] }),
+    })),
+    trailingEntries: history.length - checkpoint.entries,
+    partCount: checkpoint.lastEntryParts,
+    ...(checkpoint.mediaTokenCosts && {
+      mediaTokenCosts: checkpoint.mediaTokenCosts,
+    }),
+    ...(checkpoint.endsWithHookContext && { endsWithHookContext: true }),
+  };
 }
 
 function assistantPromptTokenCount(record: ChatRecord): number | undefined {

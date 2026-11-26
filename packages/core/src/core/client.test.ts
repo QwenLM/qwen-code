@@ -49,6 +49,7 @@ import {
 import {
   AuthType,
   createContentGenerator,
+  preloadContentGenerator,
   type ContentGenerator,
   type ContentGeneratorConfig,
 } from './contentGenerator.js';
@@ -56,7 +57,12 @@ import { BaseLlmClient } from './baseLlmClient.js';
 import { MemoryManager } from '../memory/manager.js';
 import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
+import { estimateContentTokens } from '../services/tokenEstimation.js';
+import {
+  LlmChat,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
+  userContentPushSnapshotKey,
+} from './llm-chat.js';
 import { WorkflowModeContext } from './workflow-mode.js';
 import { getPermissionContextSnapshot } from './permission-context.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
@@ -263,6 +269,7 @@ vi.mock('./contentGenerator.js', async (importOriginal) => {
   return {
     ...actual,
     createContentGenerator: vi.fn(),
+    preloadContentGenerator: vi.fn(actual.preloadContentGenerator),
   };
 });
 vi.mock('../utils/getFolderStructure', () => ({
@@ -1481,14 +1488,72 @@ describe('Gemini Client (client.ts)', () => {
         undefined,
         512,
         undefined,
-        { trailingEntries: 0, partCount: undefined },
+        { restoredHistory: [], trailingEntries: 0, partCount: undefined },
       );
       expect(resumedClient.getChat().isLastPromptTokenCountEstimated()).toBe(
         true,
       );
     });
 
+    it.each([
+      [AuthType.USE_OPENAI, true, true, true],
+      [AuthType.QWEN_SUBSCRIPTION, true, true, true],
+      [AuthType.USE_OPENAI_RESPONSES, true, true, false],
+      [AuthType.USE_OPENAI, false, true, false],
+      [AuthType.USE_OPENAI, true, false, false],
+    ] as const)(
+      'loads the %s reasoning adapter before seeding (local %s, thought %s)',
+      async (authType, local, thought, shouldLoad) => {
+        let resolved = false;
+        mockContentGenerator.replaysReasoningContent = () => !resolved;
+        if (shouldLoad) {
+          vi.mocked(preloadContentGenerator).mockImplementationOnce(
+            async () => {
+              await Promise.resolve();
+              resolved = true;
+            },
+          );
+        }
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          model: 'test-model',
+          authType,
+        });
+        restoreFromRuntime({
+          apiHistory: [
+            userText('saved'),
+            content(
+              'model',
+              { text: 'abcd'.repeat(30), thought },
+              { text: 'answer' },
+            ),
+          ],
+          completedToolCallIds: [],
+          uiTelemetryEvents: [],
+          resumeTokenCounts: {
+            promptTokenCount: 250,
+            outputTokenCount: 0,
+            isEstimated: local,
+            ...(local && { historyImageTokenEstimate: 100 }),
+          },
+        });
+        const client = await initializedClient();
+        expect(client.getChat().getLastPromptTokenCount()).toBe(
+          shouldLoad ? 220 : 250,
+        );
+        if (shouldLoad) {
+          expect(preloadContentGenerator).toHaveBeenCalledWith(
+            mockContentGenerator,
+          );
+        } else {
+          expect(preloadContentGenerator).not.toHaveBeenCalled();
+        }
+      },
+    );
+
     it('prices a later image merged into the last user entry of a checkpoint', async () => {
+      vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+        image: true,
+      });
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         imageTokenEstimate: 3200,
       });
@@ -1517,12 +1582,63 @@ describe('Gemini Client (client.ts)', () => {
         undefined,
         100,
         undefined,
-        { trailingEntries: 1, partCount: 1 },
+        expect.objectContaining({ trailingEntries: 1, partCount: 1 }),
       );
       expect(client.getChat().getLastPromptTokenCount()).toBeGreaterThanOrEqual(
         3400,
       );
     });
+
+    it.each([false, true])(
+      'counts post-checkpoint images across startup tool repair (result already saved: %s)',
+      async (hasResult) => {
+        vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+          image: true,
+        });
+        vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+          imageTokenEstimate: 3200,
+        });
+        const saved = userText('checkpointed text');
+        const image = content('user', {
+          inlineData: { mimeType: 'image/png', data: 'AA==' },
+        });
+        const call = content(
+          'model',
+          fnCall('read_file', { file_path: 'x' }, 'interrupted'),
+        );
+        const result = content('user', {
+          functionResponse: {
+            id: 'interrupted',
+            name: 'read_file',
+            response: { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+          },
+        });
+        const seed = 876;
+        const client = await resumeWith(
+          transcriptRecord('checkpoint', 'system', {
+            subtype: 'chat_compression',
+            systemPayload: {
+              info: compressionInfo(CompressionStatus.COMPRESSED, 1000, seed),
+              historyImageTokenEstimate: 3200,
+              compressedHistory: [saved],
+            },
+          }),
+          transcriptRecord('image', 'user', { message: image }),
+          transcriptRecord('call', 'assistant', { message: call }),
+          ...(hasResult
+            ? [transcriptRecord('result', 'tool_result', { message: result })]
+            : []),
+        );
+        const history = client.getChat().getHistory();
+        expect(history.slice(-3)).toMatchObject([image, call, result]);
+        const expected =
+          seed +
+          estimateContentTokens(history, 3200) -
+          estimateContentTokens(history.slice(0, -3), 3200);
+        expect(expected).toBeGreaterThan(4000);
+        expect(client.getChat().getLastPromptTokenCount()).toBe(expected);
+      },
+    );
 
     it.each(['hook', 'permission'])(
       'charges only new parts when permissions and hooks extend a saved %s',

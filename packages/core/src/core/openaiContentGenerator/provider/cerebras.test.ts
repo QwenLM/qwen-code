@@ -24,6 +24,14 @@ const stripped = {
 const preserved = { ...stripped, reasoning_content: 'The user said test.' };
 
 describe('Cerebras provider outbound compatibility filtering', () => {
+  it('counts reasoning replayed through the Qwen chat template field', () => {
+    const model = 'qwen3-32b';
+    expectOutboundRequest({ ...config, model }, createReasoningRequest(model), {
+      ...stripped,
+      reasoning: preserved.reasoning_content,
+    });
+  });
+
   it.each([
     [
       'strips reasoning_content from outgoing requests for api.cerebras.ai without mutating the source history',

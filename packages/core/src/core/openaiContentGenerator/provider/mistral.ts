@@ -49,17 +49,25 @@ export function isMistralProvider(config: ContentGeneratorConfig): boolean {
 export class MistralOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   static isMistralProvider = isMistralProvider;
 
+  private acceptsReasoningContent(model: string): boolean {
+    return (
+      !isMistralHostname(this.contentGeneratorConfig) &&
+      this.getReasoningCapabilities(model)?.profile === 'deepseek-openai'
+    );
+  }
+
+  replaysReasoningContent(model: string): boolean {
+    return (
+      this.acceptsReasoningContent(model) || this.mirrorsReasoningContent(model)
+    );
+  }
+
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
-    if (
-      !isMistralHostname(this.contentGeneratorConfig) &&
-      this.getReasoningCapabilities(request.model)?.profile ===
-        'deepseek-openai'
-    )
-      return baseRequest;
+    if (this.acceptsReasoningContent(request.model)) return baseRequest;
 
     return {
       ...baseRequest,

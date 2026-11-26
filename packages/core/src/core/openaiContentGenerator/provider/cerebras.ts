@@ -42,6 +42,10 @@ export function isCerebrasProvider(config: ContentGeneratorConfig): boolean {
 export class CerebrasOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   static isCerebrasProvider = isCerebrasProvider;
 
+  replaysReasoningContent(model: string): boolean {
+    return this.mirrorsReasoningContent(model);
+  }
+
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,

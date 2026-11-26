@@ -28,6 +28,13 @@ export interface StoredImagePayload {
   displayName?: string;
 }
 
+export interface ImageReferenceChange {
+  content: Content;
+  media: NonNullable<Part['inlineData']>;
+  id: string;
+  chars: number;
+}
+
 export interface ImagePayloadStore {
   put(part: Part): StoredImagePayload;
   get(id: string): StoredImagePayload | undefined;
@@ -57,7 +64,9 @@ export class InMemoryImagePayloadStore implements ImagePayloadStore {
 
 export function countAllInlineImages(contents: Content[]): number {
   let count = 0;
-  for (const _part of inlineImageParts(contents)) count++;
+  for (const content of contents) {
+    for (const _part of inlineImageParts(content)) count++;
+  }
   return count;
 }
 
@@ -77,13 +86,24 @@ export function replaceImagePayloadsInPlace(
   contents: Content[],
   store: ImagePayloadStore,
   skipContent?: Content,
+  changes?: ImageReferenceChange[],
 ): StoredImagePayload[] {
   const replaced: StoredImagePayload[] = [];
-  for (const part of inlineImageParts(contents, skipContent)) {
-    const stored = store.put(part);
-    replaced.push(stored);
-    part.text = imageReferenceText(stored);
-    delete part.inlineData;
+  for (const content of contents) {
+    if (content === skipContent) continue;
+    for (const part of inlineImageParts(content)) {
+      const stored = store.put(part);
+      replaced.push(stored);
+      const text = imageReferenceText(stored);
+      changes?.push({
+        content,
+        media: part.inlineData!,
+        id: stored.id,
+        chars: text.length,
+      });
+      part.text = text;
+      delete part.inlineData;
+    }
   }
   return replaced;
 }
@@ -99,6 +119,22 @@ export function buildReattachParts(
   referencedContents: Content[] = [],
   store?: ImagePayloadStore,
 ): Part[] {
+  return imageReattachParts(
+    selectReattachedImages(
+      replaced,
+      maxRecentImages,
+      referencedContents,
+      store,
+    ),
+  );
+}
+
+export function selectReattachedImages(
+  replaced: StoredImagePayload[],
+  maxRecentImages: number,
+  referencedContents: Content[],
+  store?: ImagePayloadStore,
+): StoredImagePayload[] {
   const referencedIds = collectReferencedImageIds(referencedContents);
   if (replaced.length === 0 && (!store || referencedIds.size === 0)) return [];
   const inlineIds = collectInlineImageIds(referencedContents);
@@ -135,6 +171,10 @@ export function buildReattachParts(
       }
     }
   }
+  return recent;
+}
+
+export function imageReattachParts(recent: StoredImagePayload[]): Part[] {
   if (recent.length === 0) return [];
   return [
     {
@@ -292,32 +332,27 @@ function transformPart(
 
 function collectInlineImageIds(contents: Content[]): Set<string> {
   const ids = new Set<string>();
-  for (const part of inlineImageParts(contents)) {
-    ids.add(imagePartToStoredPayload(part).id);
+  for (const content of contents) {
+    for (const part of inlineImageParts(content))
+      ids.add(imagePartToStoredPayload(part).id);
   }
   return ids;
 }
 
-function* inlineImageParts(
-  contents: Content[],
-  skipContent?: Content,
-): Generator<Part> {
-  for (const content of contents) {
-    if (content === skipContent) continue;
-    for (const part of content.parts ?? []) {
+function* inlineImageParts(content: Content): Generator<Part> {
+  for (const part of content.parts ?? []) {
+    if (
+      part.inlineData?.mimeType?.startsWith('image/') &&
+      part.inlineData.data
+    ) {
+      yield part;
+    }
+    for (const inner of getFunctionResponseParts(part) ?? []) {
       if (
-        part.inlineData?.mimeType?.startsWith('image/') &&
-        part.inlineData.data
+        inner.inlineData?.mimeType?.startsWith('image/') &&
+        inner.inlineData.data
       ) {
-        yield part;
-      }
-      for (const inner of getFunctionResponseParts(part) ?? []) {
-        if (
-          inner.inlineData?.mimeType?.startsWith('image/') &&
-          inner.inlineData.data
-        ) {
-          yield inner;
-        }
+        yield inner;
       }
     }
   }

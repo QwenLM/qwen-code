@@ -4319,6 +4319,89 @@ describe('LlmChat', async () => {
       );
     });
 
+    it.each([0, 1])(
+      'drops the pending image charge when a provider checkpoint stores its reference (retain %s)',
+      async (retain) => {
+        vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+          imageTokenEstimate: 3200,
+          imagePayloadThreshold: 1,
+          maxRecentImagesToRetain: retain,
+        });
+        const owner = userText('Retry saved request');
+        owner.parts!.push(...png('AA==').parts!);
+        const thought = 'thought '.repeat(100);
+        const history = [
+          owner,
+          content('model', { text: thought, thought: true }, { text: 'seen' }),
+        ];
+        const recorder = {
+          recordChatCompression: vi.fn(),
+          recordAssistantTurn: vi.fn(),
+        };
+        const target = newChat({ history, recorder });
+        const providerCount = 30000;
+        const savedPrice = 4200;
+        target.seedResumeTokenCounts(
+          providerCount + estimateContentTokens([owner], savedPrice),
+          0,
+          true,
+          false,
+          undefined,
+          undefined,
+          {
+            trailingEntries: 0,
+            partCount: 2,
+            mediaTokenCosts: [[savedPrice], []],
+          },
+        );
+        streamEach(() => textStream('answer'));
+        await sendDrain('continue', 'convert', target);
+        await sendDrain('more', 'repeat', target);
+        const sent = requestAt(1).contents as Content[];
+        expect(
+          sent
+            .flatMap((entry) => entry.parts ?? [])
+            .filter((p) => p.inlineData),
+        ).toHaveLength(retain);
+
+        const { info } = target.compressFast();
+        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        expect(target.compressFast().info.newTokenCount).toBe(
+          info.newTokenCount,
+        );
+        const [saved] = recorder.recordChatCompression.mock.lastCall!;
+        const storedOwner = saved.compressedHistory[0];
+        expect(storedOwner.parts[1].text).toMatch(/^\[Image #/);
+        const coldCount =
+          providerCount +
+          estimateContentTokens([storedOwner]) -
+          thought.length / 4;
+        const record = {
+          type: 'system',
+          subtype: 'chat_compression',
+          systemPayload: saved,
+        } as ChatRecord;
+        expect(
+          getResumeTokenCounts({ messages: [record] })?.promptTokenCount,
+        ).toBe(coldCount);
+        expect(info.newTokenCount - coldCount).toBe(
+          estimateContentTokens(
+            [content('user', ...(sent.at(-1)?.parts?.slice(1) ?? []))],
+            3200,
+          ),
+        );
+        const restored = newChat({
+          history: structuredClone(saved.compressedHistory),
+        });
+        restored.seedResumeTokenCounts(coldCount, 0, true);
+        await sendDrain('continue', 'cold', restored);
+        expect(JSON.stringify(requestAt(2).contents)).not.toContain(
+          '"data":"AA=="',
+        );
+        expect(restored.getLastPromptTokenCount()).toBe(coldCount);
+      },
+    );
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       const reminder = '<system-reminder>\nstartup context\n</system-reminder>';
       chat.setHistory([userText(reminder)]);
@@ -17340,6 +17423,69 @@ describe('LlmChat', async () => {
     });
 
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'AA==' } };
+
+    it('charges the same budget for an unsupported PDF and its dispatched placeholder', async () => {
+      vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+        image: true,
+      });
+      const prices = vi.mocked(mockConfig.getChatCompression);
+      const history = [content('user', imagePart), modelText('ready')];
+      const counts = [];
+      for (const part of [
+        { inlineData: { mimeType: 'application/pdf', data: 'JVBERg==' } },
+        { text: '[document: application/pdf]' },
+      ]) {
+        prices.mockReturnValue({ imageTokenEstimate: 100 });
+        const target = newChat({ history: structuredClone(history) });
+        target.seedResumeTokenCounts(
+          estimateContentTokens(history, 100),
+          0,
+          true,
+          false,
+          100,
+        );
+        prices.mockReturnValue({ imageTokenEstimate: 3200 });
+        mockStream(textStream('answer'));
+        await sendDrain([part], 'document', target);
+        counts.push(target.getLastPromptTokenCount());
+      }
+      expect(requestAt(0).contents).toEqual(requestAt(1).contents);
+      expect(counts[0]).toBe(counts[1]);
+      expect(counts[0]).toBeLessThan(3200);
+    });
+
+    it.each([true, false])(
+      'budgets assistant thoughts according to transport replay (%s)',
+      async (replay) => {
+        mockContentGenerator.replaysReasoningContent = () => replay;
+        const history = [userText('question'), modelText('ack')];
+        const target = newChat({ history: structuredClone(history) });
+        target.seedResumeTokenCounts(
+          estimateContentTokens(history) + 50,
+          0,
+          true,
+          false,
+          100,
+        );
+        const thought = {
+          thought: true,
+          text: 'private reasoning '.repeat(500),
+        };
+        mockStream(streamOf(modelChunk([thought, { text: 'answer' }], 'STOP')));
+        await sendDrain('continue', 'reason', target);
+        const expected = [
+          ...history,
+          userText('continue'),
+          content('model', ...(replay ? [thought] : []), { text: 'answer' }),
+        ];
+        expect(target.getLastPromptTokenCount()).toBe(
+          50 + estimateContentTokens(expected),
+        );
+        expect(target.getHistory().at(-1)?.parts).toContainEqual(
+          expect.objectContaining(thought),
+        );
+      },
+    );
 
     it.each(['live', 'resume', 'zero-seed'])(
       'retains local image and catalog pricing across two fast compressions (%s)',

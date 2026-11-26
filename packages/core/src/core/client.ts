@@ -39,6 +39,7 @@ import process from 'node:process';
 // Config
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
+import { AuthType } from '../utils/auth-type.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
@@ -205,6 +206,10 @@ import {
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
+import {
+  captureResumeHistoryBoundary,
+  type ResumeHistoryBoundary,
+} from '../services/session-resume-token-counts.js';
 import { replayUiTelemetryFromConversation } from '../services/sessionService.js';
 import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
 import { markApiHistoryDirectoryContext } from '../utils/api-history-metadata.js';
@@ -951,8 +956,12 @@ export class LlmClient {
     const resumedSessionData = this.config.getResumedSessionData();
     const restoreRuntime = this.config.getSessionRestoreRuntime?.();
     let resumeTokenCounts = restoreRuntime?.resumeTokenCounts;
-    let restoredHistoryLength = restoreRuntime?.apiHistory.length ?? 0;
+    let resumeBoundary: ResumeHistoryBoundary | undefined;
     if (restoreRuntime) {
+      resumeBoundary = captureResumeHistoryBoundary(
+        restoreRuntime.apiHistory,
+        resumeTokenCounts?.historyCheckpoint,
+      );
       this.armTelemetrySwapUndo(sessionId);
       uiTelemetryService.resetSession(sessionId);
       for (const event of restoreRuntime.uiTelemetryEvents) {
@@ -984,7 +993,10 @@ export class LlmClient {
         resumedSessionData.conversation,
       );
       const resumedHistory = restored.apiHistory;
-      restoredHistoryLength = resumedHistory.length;
+      resumeBoundary = captureResumeHistoryBoundary(
+        resumedHistory,
+        resumeTokenCounts?.historyCheckpoint,
+      );
       this.seedRecentCompletedToolNamesFromHistory(resumedHistory);
       await this.startChat(
         resumedHistory,
@@ -1015,8 +1027,35 @@ export class LlmClient {
         promptTokenCount = Math.max(0, promptTokenCount + adjustment);
         uiTelemetryService.setLastPromptTokenCount(promptTokenCount);
       }
-      const checkpoint = resumeTokenCounts.historyCheckpoint;
-      this.getChat().seedResumeTokenCounts(
+      const chat = this.getChat();
+      const authType = this.config.getContentGeneratorConfig()?.authType;
+      if (
+        resumeTokenCounts.isEstimated &&
+        !resumeTokenCounts.isProviderAdjusted &&
+        (resumeTokenCounts.historyImageTokenEstimate !== undefined ||
+          promptTokenCount === 0) &&
+        (authType === AuthType.USE_OPENAI ||
+          authType === AuthType.QWEN_OAUTH ||
+          authType === AuthType.QWEN_SUBSCRIPTION) &&
+        (resumeBoundary?.restoredHistory ?? chat.getHistoryShallow()).some(
+          (entry) =>
+            entry.role === 'model' &&
+            entry.parts?.some((part) => part.thought && part.text),
+        )
+      ) {
+        // The adapter decides whether assistant reasoning is replayed. Resolve
+        // it before the synchronous session-limit check uses the restored count.
+        const generator = this.config.getContentGenerator({
+          allowUninitialized: true,
+        });
+        if (generator) {
+          const { preloadContentGenerator } = await import(
+            './contentGenerator.js'
+          );
+          await preloadContentGenerator(generator);
+        }
+      }
+      chat.seedResumeTokenCounts(
         promptTokenCount,
         resumeTokenCounts.outputTokenCount,
         resumeTokenCounts.isEstimated ||
@@ -1024,18 +1063,7 @@ export class LlmClient {
         resumeTokenCounts.isProviderAdjusted,
         resumeTokenCounts.historyImageTokenEstimate,
         resumeTokenCounts.pricedCatalogEntries,
-        checkpoint && checkpoint.entries <= restoredHistoryLength
-          ? {
-              trailingEntries: restoredHistoryLength - checkpoint.entries,
-              partCount: checkpoint.lastEntryParts,
-              ...(checkpoint.mediaTokenCosts && {
-                mediaTokenCosts: checkpoint.mediaTokenCosts,
-              }),
-              ...(checkpoint.endsWithHookContext && {
-                endsWithHookContext: true,
-              }),
-            }
-          : undefined,
+        resumeBoundary,
       );
     }
     signal?.throwIfAborted();

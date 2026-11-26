@@ -56,9 +56,10 @@ export function expectOutboundRequest(
   userPromptId = 'prompt-123',
 ) {
   const original = structuredClone(request);
-  const result = determineProvider(config, cliConfig).buildRequest(
-    request,
-    userPromptId,
+  const provider = determineProvider(config, cliConfig);
+  const result = provider.buildRequest(request, userPromptId);
+  expect(provider.replaysReasoningContent?.(request.model) ?? true).toBe(
+    Boolean(expectedAssistant.reasoning_content || expectedAssistant.reasoning),
   );
   expect(result.messages).toEqual([
     original.messages[0],

@@ -1,4 +1,5 @@
 import type { ContentGenerator } from '../contentGenerator.js';
+import { getRequestModel } from '../request-model.js';
 import type { Config } from '../../config/config.js';
 import { type OpenAICompatibleProvider } from './provider/index.js';
 import type {
@@ -22,9 +23,9 @@ export class OpenAIContentGenerator implements ContentGenerator {
   protected pipeline: ContentGenerationPipeline;
 
   constructor(
-    contentGeneratorConfig: ContentGeneratorConfig,
+    private readonly contentGeneratorConfig: ContentGeneratorConfig,
     cliConfig: Config,
-    provider: OpenAICompatibleProvider,
+    private readonly provider: OpenAICompatibleProvider,
   ) {
     // Create pipeline configuration
     const pipelineConfig: PipelineConfig = {
@@ -63,6 +64,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
     }
 
     return false;
+  }
+
+  replaysReasoningContent(model: string): boolean {
+    const requestModel = getRequestModel(this.contentGeneratorConfig, model);
+    return this.provider.replaysReasoningContent?.(requestModel) ?? true;
   }
 
   async generateContent(
