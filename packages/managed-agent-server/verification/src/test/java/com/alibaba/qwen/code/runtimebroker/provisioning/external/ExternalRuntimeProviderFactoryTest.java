@@ -37,6 +37,8 @@ class ExternalRuntimeProviderFactoryTest {
             }
         };
         var factory = new ExternalRuntimeProviderFactory();
+        settings.getRuntimeBroker().setExternalProviderUrl(null);
+        settings.getRuntimeBroker().setExternalProviderToken(null);
         assertDoesNotThrow(() -> factory.validate(settings, dependencies));
         assertDoesNotThrow(() -> new ManagedAgentConfiguration(settings, external));
         try (var provisioner = factory.create(settings, null, dependencies)) {
@@ -44,8 +46,6 @@ class ExternalRuntimeProviderFactoryTest {
             assertSame(external, ReflectionTestUtils.getField(provisioner, "client"));
         }
         verifyNoInteractions(external, registry);
-        settings.getRuntimeBroker().setExternalProviderUrl(null);
-        settings.getRuntimeBroker().setExternalProviderToken(null);
         assertThrows(IllegalStateException.class, () -> factory.validate(settings));
     }
 

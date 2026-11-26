@@ -18415,6 +18415,62 @@
         },
         "x-qwen-implementation-status": "implemented"
       },
+      "PublicSessionCloseProof": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation", "drain_receipts"],
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/PublicCommandOperation"
+          },
+          "drain_receipts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuntimeDrainReceipt"
+            }
+          }
+        }
+      },
+      "RuntimeDrainReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["bindingId", "generation", "provisionRequestId", "resourceHandle", "stoppedAt"],
+        "properties": {
+          "bindingId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "generation": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "provisionRequestId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "resourceHandle": {
+            "$ref": "#/components/schemas/RuntimeResourceHandle"
+          },
+          "stoppedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "executionMode": {
+            "enum": ["linux-cgroup", "developer-process-group"],
+            "nullable": true
+          },
+          "stopScope": {
+            "enum": ["process_tree", "process_group"],
+            "nullable": true
+          }
+        }
+      },
+      "RuntimeResourceHandle": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Provider-specific immutable execution-resource handle proving retirement of the original binding. It is opaque outside the originating runtime and does not issue new credentials."
+      },
       "PublicContextCompressionOperation": {
         "type": "object",
         "additionalProperties": false,
