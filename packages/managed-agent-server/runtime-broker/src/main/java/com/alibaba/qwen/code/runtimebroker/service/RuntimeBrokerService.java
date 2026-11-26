@@ -217,8 +217,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         this(sessionResolver, provisioner, transport, bindingRepository,
                 sessionRepository, executionRepository, brokerOwnerId,
                 operationLeaseDuration, dispatchLeaseDuration, null,
-                DEFAULT_V3_RESULT_WINDOW, clock, executionIdSupplier,
-                newScheduler(), newRenewalScheduler());
+                DEFAULT_V3_RESULT_WINDOW, clock, executionIdSupplier, newScheduler(), newRenewalScheduler());
     }
 
     private RuntimeBrokerService(HarnessSessionResolver sessionResolver,
@@ -361,8 +360,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return drainCoordinator.retireStorageBinding(tenantId, storageId, operationId, bindingId, generation);
     }
 
-    public CompletionStage<RuntimeBindingRecord> warm(
-            String harnessSessionId) {
+    public CompletionStage<RuntimeBindingRecord> warm(String harnessSessionId) {
         return warm(harnessSessionId, null);
     }
 

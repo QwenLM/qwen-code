@@ -917,8 +917,7 @@ public final class JdbcToolExecutionRepository
     static boolean hasActiveByRuntimeSession(Connection connection,
             String bindingId, long runtimeGeneration, String runtimeSessionId)
             throws SQLException {
-        return hasActiveByRuntimeSession(connection, bindingId,
-                runtimeGeneration, runtimeSessionId, Set.of());
+        return hasActiveByRuntimeSession(connection, bindingId, runtimeGeneration, runtimeSessionId, Set.of());
     }
 
     static boolean hasActiveByRuntimeSession(Connection connection,
