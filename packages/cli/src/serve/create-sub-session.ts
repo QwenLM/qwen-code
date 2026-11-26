@@ -52,14 +52,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import {
-  closeSync,
-  lstatSync,
-  openSync,
-  readSync,
-  realpathSync,
-  statSync,
-} from 'node:fs';
+import fs, { lstatSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import {
   createDebugLogger,
@@ -235,14 +228,14 @@ async function lastPersistedTurnOutcome(
   }
   let size: number;
   try {
-    size = statSync(filePath).size;
+    size = fs.statSync(filePath).size;
   } catch {
     return undefined;
   }
   const start = Math.max(0, size - TTL_DISCOVERY_TAIL_BYTES);
   let fd: number;
   try {
-    fd = openSync(filePath, 'r');
+    fd = fs.openSync(filePath, 'r');
   } catch {
     // EACCES after an ownership change, or the ENOENT in the stat/open
     // race: the tail cannot be read, so the row is unclassifiable — a
@@ -252,11 +245,11 @@ async function lastPersistedTurnOutcome(
   let buffer: Buffer;
   try {
     buffer = Buffer.alloc(size - start);
-    readSync(fd, buffer, 0, buffer.length, start);
+    fs.readSync(fd, buffer, 0, buffer.length, start);
   } catch {
     return undefined;
   } finally {
-    closeSync(fd);
+    fs.closeSync(fd);
   }
   const lines = buffer.toString('utf8').split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -1412,7 +1405,7 @@ export function createSubSessionLauncher(
       }
       let lastActivity: number | undefined;
       try {
-        lastActivity = statSync(
+        lastActivity = fs.statSync(
           service.getSessionTranscriptPath(sessionId),
         ).mtimeMs;
       } catch {
@@ -1441,7 +1434,7 @@ export function createSubSessionLauncher(
       const service = new SessionService(boundWorkspace);
       let exists = false;
       try {
-        statSync(service.getSessionTranscriptPath(sessionId));
+        fs.statSync(service.getSessionTranscriptPath(sessionId));
         exists = true;
       } catch {
         return 'missing';
