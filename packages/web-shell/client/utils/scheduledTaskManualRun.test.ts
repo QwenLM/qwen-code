@@ -377,6 +377,48 @@ describe('runScheduledTaskManually owner matching', () => {
     },
   );
 
+  it('allows bound one-shot admission across a same-session SDK reload while still rejecting scope changes', async () => {
+    const task = makeTask({ recurring: false });
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([task]),
+      runScheduledTask: vi.fn().mockResolvedValue(task),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    let ownerCurrent = true;
+    let scopeCurrent = true;
+    const onError = vi.fn();
+    const onOneShotError = vi.fn();
+    const onRunPrompt = vi.fn(
+      async (
+        _prompt: string,
+        _sessionId: string | null,
+        _workspaceCwd?: string,
+        taskIsStale?: () => boolean,
+      ) => {
+        // Simulates App.runTaskManually -> loadSidebarSession replacing the
+        // SDK DaemonSessionClient instance for the same session/workspace.
+        ownerCurrent = false;
+        expect(taskIsStale?.()).toBe(false);
+        scopeCurrent = false;
+        expect(taskIsStale?.()).toBe(true);
+      },
+    );
+
+    await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+      reload: vi.fn(),
+      onError,
+      onOneShotError,
+      isCurrent: () => scopeCurrent,
+      isOwnerCurrent: () => ownerCurrent,
+      isStale: () => false,
+    });
+
+    expect(actions.runScheduledTask).toHaveBeenCalledOnce();
+    expect(onRunPrompt).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+    expect(onOneShotError).not.toHaveBeenCalled();
+  });
+
   it('surfaces recurring recording failure when the scope remains current', async () => {
     const task = makeTask();
     const recordError = new Error('record failed');

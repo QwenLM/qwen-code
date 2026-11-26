@@ -211,6 +211,8 @@ export function useSessionScheduledTasks(options: {
   const workspace = useWorkspace();
   const workspaceClientRef = useRef(workspace.client);
   workspaceClientRef.current = workspace.client;
+  const scopeRef = useRef({ sessionId, workspaceId });
+  scopeRef.current = { sessionId, workspaceId };
   const ownerGuard = useDaemonSessionOwnerGuard();
   const ownerRef = useRef(ownerGuard.capture());
   if (!ownerRef.current?.isCurrent()) ownerRef.current = ownerGuard.capture();
@@ -373,13 +375,20 @@ export function useSessionScheduledTasks(options: {
     [owner],
   );
 
+  const refreshClient = workspace.client;
   const refresh = useCallback(() => {
-    if (!owner.isCurrent()) return;
+    if (
+      scopeRef.current.sessionId !== sessionId ||
+      scopeRef.current.workspaceId !== workspaceId ||
+      workspaceClientRef.current !== refreshClient
+    ) {
+      return;
+    }
     // Revoke older reads before React starts the replacement request.
     durableReqRef.current += 1;
     manualRefreshSessionRef.current = sessionId;
     setManualRefreshTick((n) => n + 1);
-  }, [owner, sessionId]);
+  }, [refreshClient, sessionId, workspaceId]);
 
   const markBusy = useCallback(
     (task: Parameters<typeof scheduledTaskRuntimeKey>[0], busy: boolean) => {

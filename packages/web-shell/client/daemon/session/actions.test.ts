@@ -424,6 +424,35 @@ describe('sendPrompt admission notices', () => {
     },
   );
 
+  it('does not append an optimistic user bubble or emit a duplicate notice when beforeDispatch throws a non-AbortError', async () => {
+    const session = createMockSession('session-a');
+    const guardError = new Error('GET /scheduled-tasks failed: 503');
+    session.submitPrompt.mockImplementation(
+      async (_req, _signal, beforeDispatch) => {
+        await beforeDispatch?.('client-1');
+        return { promptId: 'unexpected', lastEventId: 1 };
+      },
+    );
+    const addNotice = vi.fn();
+    const onAdmitted = vi.fn();
+    const h = createActionsHarness({ session, addNotice });
+
+    await expect(
+      h.actions.sendPrompt('Scheduled prompt', {
+        idempotencyKey: 'idem-1',
+        beforeDispatch: async () => {
+          throw guardError;
+        },
+        onAdmitted,
+      }),
+    ).rejects.toBe(guardError);
+
+    expect(session.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(onAdmitted).not.toHaveBeenCalled();
+  });
+
   it('keeps notices for MCP App errors before admission starts', async () => {
     const session = createMockSession('session-a');
     const error = new Error('Admission preparation failed');

@@ -1851,6 +1851,27 @@ describe('ScheduledTasksDialog run now', () => {
     },
   );
 
+  it('notifies onTaskMutated after a manual run updates the task', async () => {
+    const task = baseTask({
+      recurring: true,
+      sessionId: 'sess-notify',
+      sessionMode: 'persistent',
+    });
+    const onRunPrompt = vi.fn(async () => {
+      act(() => {
+        root!.unmount();
+        root = null;
+      });
+    });
+    const onTaskMutated = vi.fn();
+    await mount([task], { onRunPrompt, onTaskMutated });
+    actions.listScheduledTasks.mockResolvedValue([task]);
+    actions.runScheduledTask.mockResolvedValue(task);
+
+    click(document.querySelector('[aria-label="Run now"]'));
+    await vi.waitFor(() => expect(onTaskMutated).toHaveBeenCalledOnce());
+  });
+
   it.each([
     ['persistent', 'per_run', 0],
     ['per_run', 'persistent', 1],

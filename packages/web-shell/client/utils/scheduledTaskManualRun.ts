@@ -125,7 +125,7 @@ export async function runScheduledTaskManually(
         task.workspaceId,
         fresh.sessionId,
       );
-      if (current()) await reload();
+      if (current(fresh.recurring)) await reload();
       return;
     }
     if (fresh.recurring) {
@@ -138,7 +138,7 @@ export async function runScheduledTaskManually(
         task.workspaceCwd,
         isStale ?? (() => false),
         async () => {
-          if (!current()) {
+          if (!current(true)) {
             throw new DOMException(
               t('scheduledTasks.error.runFailed'),
               'AbortError',
@@ -152,7 +152,7 @@ export async function runScheduledTaskManually(
               (candidate.sessionId ?? null) === (fresh.sessionId ?? null),
           );
           if (
-            !current() ||
+            !current(true) ||
             candidates.length !== 1 ||
             !candidates[0].enabled ||
             candidates[0].recurring !== fresh.recurring ||
@@ -175,7 +175,7 @@ export async function runScheduledTaskManually(
           task.workspaceId,
           fresh.sessionId,
         );
-        if (current()) await reload();
+        if (current(true)) await reload();
       } catch (err) {
         onError(err, t('scheduledTasks.error.runFailed'));
       }
@@ -188,7 +188,7 @@ export async function runScheduledTaskManually(
         task.workspaceId,
         fresh.sessionId,
       );
-      if (current()) await reload();
+      if (current(false)) await reload();
       if (!current(false)) {
         // The server has already consumed the one-shot. Do not resume an old
         // owner's prompt and supersede a newer run, but never hide the loss.
@@ -199,11 +199,14 @@ export async function runScheduledTaskManually(
         return;
       }
       try {
+        // Bound-session admission reloads the session into a fresh SDK client
+        // instance; keep logical scope/runtime and confirmed deletion guards
+        // active without rejecting that expected same-session reload.
         await onRunPrompt(
           manualRunPrompt(fresh),
           fresh.sessionId ?? null,
           task.workspaceCwd,
-          () => !current(false),
+          () => !current(true),
         );
       } catch (err) {
         (onOneShotError ?? onError)(

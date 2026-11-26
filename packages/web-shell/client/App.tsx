@@ -14221,6 +14221,7 @@ export function App({
         onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: (admission: { promptId: string }) => void;
         onCancelledBeforeAdmission?: () => void;
+        rethrowDetachedError?: boolean;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
         onSessionAllocated?: (sessionId: string) => void;
@@ -14488,7 +14489,7 @@ export function App({
               detachedWorkspaceCwd,
             );
           }
-          if (opts?.onCancelledBeforeAdmission) {
+          if (opts?.rethrowDetachedError) {
             throw error;
           }
           if (appMountedRef.current) {
@@ -14598,6 +14599,18 @@ export function App({
         };
         inFlightPromptRef.current = inFlightPrompt;
       };
+      let beforeDispatchRejected = false;
+      const wrappedBeforeDispatch = opts?.beforeDispatch
+        ? async (clientId: string | undefined) => {
+            beforeDispatchRejected = false;
+            try {
+              await opts.beforeDispatch!(clientId);
+            } catch (error) {
+              beforeDispatchRejected = true;
+              throw error;
+            }
+          }
+        : undefined;
       const promptOptions: SendPromptOptionsWithRetry = {
         ...(opts?.submittedPrompt !== undefined
           ? { submittedPrompt: opts.submittedPrompt }
@@ -14616,8 +14629,8 @@ export function App({
         ...(opts?.idempotencyKey
           ? { idempotencyKey: opts.idempotencyKey }
           : {}),
-        ...(opts?.beforeDispatch
-          ? { beforeDispatch: opts.beforeDispatch }
+        ...(wrappedBeforeDispatch
+          ? { beforeDispatch: wrappedBeforeDispatch }
           : {}),
         onAdmissionStarted: () => {
           opts?.onAdmissionStarted?.(
@@ -14696,6 +14709,7 @@ export function App({
         if (
           admissionStarted &&
           !admitted &&
+          !beforeDispatchRejected &&
           !(preserveComposer
             ? isMcpAppPromptAdmissionRejected(error)
             : isDefinitelyRejectedPromptAdmission(error)) &&
@@ -18103,6 +18117,11 @@ export function App({
         }
         if (nextContext?.kind === 'live') {
           pendingManualTitleRef.current = undefined;
+          if (pendingBoundRunRef.current) {
+            pendingBoundRunRef.current.reject(
+              createScheduledTaskCancellation('Bound run target was replaced'),
+            );
+          }
           gitModeIntentRef.current = { mode: 'current' };
           setGitModeIntent({ mode: 'current' });
           try {
@@ -19994,6 +20013,7 @@ export function App({
             scheduledScope !== undefined &&
             scheduledScopeIsCurrent(),
           onAdmitted: admit,
+          rethrowDetachedError: true,
           onCancelledBeforeAdmission: () => {
             if (!admitted) {
               reject(

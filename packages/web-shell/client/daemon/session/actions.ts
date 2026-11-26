@@ -1476,6 +1476,7 @@ export function createDaemonSessionActions({
         replayedTurnEvents: new Map(),
       });
       let admissionError = false;
+      let beforeDispatchFailed = false;
       try {
         // Normalize images once and pass the same array to both calls
         const normalizedImages: Array<{ data: string; mimeType: string }> = (
@@ -1582,23 +1583,36 @@ export function createDaemonSessionActions({
           promptRequest['suppressInputHistory'] = true;
         }
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        const guardedBeforeDispatch = options?.beforeDispatch
+          ? async (clientId: string | undefined) => {
+              beforeDispatchFailed = false;
+              try {
+                await options.beforeDispatch!(clientId);
+              } catch (error) {
+                beforeDispatchFailed = true;
+                throw error;
+              }
+            }
+          : undefined;
         try {
           const request = promptRequest as Parameters<
             typeof session.submitPrompt
           >[0];
           for (let attempt = 0; ; attempt += 1) {
+            beforeDispatchFailed = false;
             try {
-              accepted = options?.beforeDispatch
+              accepted = guardedBeforeDispatch
                 ? await session.submitPrompt(
                     request,
                     ctrl.signal,
-                    options.beforeDispatch,
+                    guardedBeforeDispatch,
                   )
                 : await session.submitPrompt(request, ctrl.signal);
               break;
             } catch (error) {
               const retryDelayMs = PROMPT_ADMISSION_RETRY_DELAYS_MS[attempt];
               if (
+                beforeDispatchFailed ||
                 !options?.idempotencyKey ||
                 retryDelayMs === undefined ||
                 ctrl.signal.aborted ||
@@ -1628,6 +1642,7 @@ export function createDaemonSessionActions({
             sessionRef.current === session &&
             shouldAppendOptimisticMessage &&
             !optimisticMessageAppended &&
+            !beforeDispatchFailed &&
             !(options?.beforeDispatch && isAbortError(error))
           ) {
             store.appendLocalUserMessage(
@@ -1700,6 +1715,12 @@ export function createDaemonSessionActions({
           }
           if (options?.source === 'mcp-app' && admissionError) throw error;
           return { stopReason: 'cancelled' };
+        }
+        if (beforeDispatchFailed) {
+          if (sessionRef.current?.sessionId === sessionId) {
+            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
+          }
+          throw error;
         }
         if (isDaemonTurnError(error)) {
           throw error;

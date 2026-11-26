@@ -1548,7 +1548,10 @@ export function ScheduledTasksDialog({
       setRunningTaskId(task.id);
       try {
         await runScheduledTaskManually(task, actions, onRunPrompt, t, {
-          reload,
+          reload: async () => {
+            onTaskMutated?.();
+            await reload();
+          },
           onError,
           isCurrent: () =>
             workspaceClientRef.current === originalClient &&
@@ -1570,6 +1573,7 @@ export function ScheduledTasksDialog({
       isTaskDeleted,
       onError,
       onRunPrompt,
+      onTaskMutated,
       reload,
       runningTaskId,
       t,

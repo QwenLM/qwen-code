@@ -1644,4 +1644,68 @@ describe('useSessionScheduledTasks', () => {
 
     expect(latest?.tasks.map((item) => item.id)).toEqual(['task-b']);
   });
+
+  it('completes bound one-shot admission and recurring post-run refresh across same-session SDK reload', async () => {
+    const oneShot = durableTask({
+      id: 'oneshot-reload',
+      recurring: false,
+      sessionId: 'session-1',
+    });
+    const recurring = durableTask({
+      id: 'recurring-reload',
+      recurring: true,
+      sessionId: 'session-1',
+    });
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([
+      oneShot,
+      recurring,
+    ]);
+    sdkMock.workspaceActions.runScheduledTask.mockResolvedValue(recurring);
+    onRunPrompt.mockImplementation(
+      async (
+        _prompt: string,
+        _sessionId: string | null,
+        _workspaceCwd?: string,
+        taskIsStale?: () => boolean,
+        beforeDispatch?: () => void | Promise<void>,
+      ) => {
+        // Real App.runTaskManually reloads the session into a new SDK client.
+        sdkMock.ownerVersion += 1;
+        expect(taskIsStale?.()).toBe(false);
+        await beforeDispatch?.();
+      },
+    );
+
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+
+    const oneShotEntry = latest!.tasks.find(
+      (item) => item.id === oneShot.id,
+    ) as SessionDurableScheduledTask;
+    await act(async () => {
+      await latest!.runDurableTask(oneShotEntry);
+    });
+    expect(onRunPrompt).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+
+    const readsBeforeRecurring =
+      sdkMock.workspaceActions.listScheduledTasks.mock.calls.length;
+    const recurringEntry = latest!.tasks.find(
+      (item) => item.id === recurring.id,
+    ) as SessionDurableScheduledTask;
+    await act(async () => {
+      await latest!.runDurableTask(recurringEntry);
+    });
+    await vi.waitFor(() => {
+      // Fresh read + beforeDispatch revalidation + post-run refresh.
+      expect(
+        sdkMock.workspaceActions.listScheduledTasks.mock.calls.length,
+      ).toBeGreaterThanOrEqual(readsBeforeRecurring + 3);
+    });
+    expect(onError).not.toHaveBeenCalled();
+  });
 });
