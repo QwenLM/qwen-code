@@ -55,7 +55,7 @@ describe('ManagedExtensionProcessOwners', () => {
     ).toThrow('unavailable');
   });
 
-  it.skipIf(process.platform !== 'darwin')(
+  it.skipIf(!['darwin', 'linux'].includes(process.platform))(
     'stops changed Session owners while preserving retained MCP owners and sibling Sessions',
     async () => {
       const directory = await fs.mkdtemp(
