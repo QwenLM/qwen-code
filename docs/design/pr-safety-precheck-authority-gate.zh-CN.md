@@ -75,9 +75,11 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 这些规则作用于 PR 标题、正文与新增行，因此即使 diff 只是一个无害的 docs 文件，仅由正文承载的指令也会被抓到。
 
-两条边界防止规则误拦正常工作。每种导出形态在**两个分支里都**保留终止符前瞻——裸的命令位置分支，以及 shell `-c` 包装分支（它把闭合引号也算作终止符）——因此带选项的前缀两种写法都不被扣住：`set -euo pipefail`、`env FOO=bar cmd`、`env -i FOO=bar node x.mjs`、`declare -x FOO=bar`，以及被包成 `sh -c "set -euo pipefail; make"` 的同样形态。早期版本没给包装分支终止符判据，导致上述每一种被包装后都被扣住；该问题已关闭。
+两条边界防止规则误拦正常工作。所有导出命令**共享同一个**终止符前瞻，且在裸的命令位置分支与 shell `-c` 包装分支中都提到**候选之外**统一施加：操作符、右括号（因此 `$(env)` 与 `(env)` 也成立）、行尾，或者「闭合引号且其后是操作符或行尾」——最后这一种正是能覆盖 `-c` 串里第一条命令之后的导出（如 `bash -c "cd repo && env"`）的原因。因此带选项的前缀两种写法都不被扣住：`set -euo pipefail`、`env FOO=bar cmd`、`env -i FOO=bar node x.mjs`、`declare -x FOO=bar`，以及被包成 `sh -c "set -euo pipefail; make"` 的同样形态。早期有两个版本的问题均记录为已关闭：包装分支曾经完全没有终止符判据。
 
-而 `.credentials` 要求前面是路径分隔符、空白、引号或行首。允许集合是**显式枚举而非取反**：像 `[^.\w]` 这样的否定类还会放进 `?` 与 `)`，从而扣住 `a?.credentials`、`(await client).credentials` 这类普通 TypeScript。完全没有边界时，它也会命中对象展开 `{ ...credentials }`，那只是复制内存对象、且出现在普通产品代码里（`packages/channels/msteams/src/ingress.ts`）。以上每一处在修复前都实测为真实误报。
+没有 utility 的 `env FOO=bar` **本身就是导出**，因此前瞻之前允许赋值前缀，而 `env FOO=bar cmd` 仍在 utility 处停下——此前那次让包装误报放行的精确化，曾把这一导出写法也一并放行了。
+
+而 `.credentials` 要求前面是路径分隔符、空白、引号（含 markdown 行内代码的反引号）或行首。允许集合是**显式枚举而非取反**：像 `[^.\w]` 这样的否定类还会放进 `?` 与 `)`，从而扣住 `a?.credentials`、`(await client).credentials` 这类普通 TypeScript。完全没有边界时，它也会命中对象展开 `{ ...credentials }`，那只是复制内存对象、且出现在普通产品代码里（`packages/channels/msteams/src/ingress.ts`）。以上每一处在修复前都实测为真实误报。
 
 ### 3. 截断即 fail closed
 
@@ -135,10 +137,10 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 ## 已验证结果（2026-11-26）
 
-- 单元套件：107 通过、0 失败。其中四条驱动**真实 CLI**，使旗标拼写进入被测契约；另有一条从 CLI 源码推导旗标名，并要求 workflow 逐个从 collect 步骤的对应 output 传入。现在任一侧改名都会让套件转红；在加这些用例之前，改名后套件仍全绿而一条 fail-closed 臂已失效。
+- 单元套件：116 通过、0 失败。其中四条驱动**真实 CLI**，使旗标拼写进入被测契约；另有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
 - #18362：`protected_path:authority_surface`、`ambient_credential:cloud_metadata`、`ambient_credential:env_dump`。
 - #18364：`ambient_credential:cloud_metadata`、`ambient_credential:proc_environ`。
-- 变异见证：28 个臂，全部击杀，无跳过。其中九个臂是把规则**放宽或收窄**而非移除，因此误报与漏报两个方向都被钉住；两个臂改 CLI 旗标拼写；另有两个臂做整文件回退，分别回到第一轮加固与 PR 前的模块。
+- 变异见证：30 个臂，全部击杀，无跳过，另加一条**未变异对照**要求保持全绿。装置的临时目录**镜像仓库真实布局**——workflow 契约用例经相对 URL 读取 workflow；若不镜像，该用例在每个臂都会因文件缺失而红，而「文件缺失」会被误当成「变异击杀」。正是这条对照让整轮结果值得读。
 - workflow 端到端决策表：9 个用例通过。它用打桩 `gh`、在步骤自身的 bash 契约下执行**真实的** collect 与 assess `run:` 块，断言最终决策而非中间旗标。覆盖恰好等于上限、上限加一、diff 调用失败、可信作者，以及「敌意正文 + 元数据调用成功／失败」两臂。
 - `prettier --check`、`eslint`、`actionlint`：干净。`eslint` 与 `actionlint` 均先用一个故意非法的输入证明过是活的。
 - `classify-profile.test.mjs`：27 通过、0 失败。
@@ -151,6 +153,8 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 第二个提交经评审后进行了第三轮，又关闭五项：第二轮边界丢掉的**带引号相对路径** `.credentials` 读取；shell `-c` 包装分支缺终止符判据（它扣住了普通的 `sh -c "set -euo pipefail; make"`）；位于 `-c` 之前的旗标如 `--norc`；`/proc/self/task/<tid>/environ`；以及未被钉住的 CLI 旗标——现由已提交的 CLI 用例加一条双向 workflow 契约用例覆盖。对该轮的对抗审计又在**其自身修复里**发现一个问题：把 `.credentials` 边界写成否定类 `[^.\w]` 会放进 `?` 与 `)`，从而扣住普通 TypeScript 的可选链与带括号属性访问。允许集合现已改为显式枚举，两种误报形态都被钉住。
 
 有一处枚举清单的缺口选择披露而非关闭：带独立参数的 shell 旗标，如 `bash -o posix -c printenv`，仍被放行。
+
+第四轮又关闭六项：`.credentials` 的**反引号行内代码**写法；`-c` 串里第一条命令之后的导出（裸分支也需要把「其后跟操作符或行尾的闭合引号」算作终止符）；没有 utility 的 `env FOO=bar`；此前空转的 `$(…)` 与 `(…)` 锚点（终止符需要补 `)`）；`-c` 之前的 `--flag=value`；以及旗标钉子的盲区——trusted 分支那行同名 `echo` 曾把「untrusted 那行被删」掩盖掉。以下几项选择披露而非追逐，因为它们属于选项与前缀文法、而非本规则枚举的形态：`env -u NAME`、带引号的赋值写法 `env "FOO=bar"`，以及锚点集合之外的命令前缀 `time env`、`command env`、`{ env; }`、`! env`、`sudo -E env`。
 
 ## 未决问题
 

@@ -64,26 +64,30 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
     'ambient_credential:proc_environ',
     /\/proc\/(?:self|thread-self|\d+|\$\$|\$\{?\w+\}?)(?:\/task\/(?:\d+|\$\$|\$\{?\w+\}?))?\/environ/,
   ],
-  // Every shape that prints the whole environment, not just `env`. `set`,
-  // `declare -x` and `env -0` dump the same variables, and a shell `-c` wrapper
-  // hides the command from the command-position anchor. BOTH branches carry the
-  // same terminator lookahead — the wrapper counts its closing quote as a
-  // terminator — so an option-taking prefix (`set -euo pipefail`,
-  // `env FOO=bar cmd`, `declare -x FOO=bar`) stays ungated either way, including
-  // inside `sh -c "set -euo pipefail; make"`. Flags may precede `-c`.
+  // Every shape that prints the whole environment. The dump commands share one
+  // terminator lookahead, applied once outside their alternation: an operator, a
+  // closing paren (so `$(env)` works), end of line, or a quote that closes the
+  // wrapper and is followed by the same — that last case is what reaches a dump
+  // placed after the first command of a `-c` string (`bash -c "cd repo; env"`).
+  // `printenv` needs no terminator since it has no option grammar. An assignment
+  // prefix is allowed because `env FOO=bar` with no utility is itself a dump,
+  // while `env FOO=bar cmd` still stops at the utility. Flags may precede `-c`.
+  // Remaining disclosed gaps: option grammar such as `env -u NAME`, and command
+  // prefixes outside the anchor set such as `time env` or `command env`.
   [
     'ambient_credential:env_dump',
-    /(?:^|[;&|(`]|\$\()\s*(?:env(?:\s+(?:-0|--null))?(?=\s*(?:\||;|&|>|$))|printenv\b|export(?:\s+-p)?(?=\s*(?:\||;|&|>|$))|set(?=\s*(?:\||;|&|>|$))|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?(?=\s*(?:\||;|&|>|$)))|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*\s+)*-[a-z]*c[a-z]*\s*["']\s*(?:env(?:\s+(?:-0|--null))?|printenv\b|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$))/m,
+    /(?:^|[;&|(`]|\$\()\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>)]|$)|["'](?=\s*(?:[|;&>)]|$)))|(?:^|[;&|(`]|\$\()\s*printenv\b|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*(?:=\S+)?\s+)*-[a-z]*c[a-z]*\s*["']\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|printenv\b|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$))/m,
   ],
   // `.credentials` needs a boundary that admits every spelling of a file read
-  // — bare, quoted, or after a separator — while refusing property access. The
-  // allowed set is enumerated rather than negated: a negated class also admits
-  // `?` and `)`, which gated ordinary TypeScript such as `a?.credentials` and
-  // `(await client).credentials`. A dot is excluded so `{ ...credentials }`
-  // stays ungated.
+  // — bare, quoted (including a markdown code span's backtick), or after a
+  // separator — while refusing property access. The allowed set is enumerated
+  // rather than negated: a negated class also admits `?` and `)`, which gated
+  // ordinary TypeScript such as `a?.credentials` and `(await
+  // client).credentials`. A dot is excluded so `{ ...credentials }` stays
+  // ungated.
   [
     'ambient_credential:credential_file',
-    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'])\.credentials\b/,
+    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'`])\.credentials\b/,
   ],
 ];
 

@@ -530,6 +530,39 @@ for (const [label, payload, code] of [
     'ambient_credential:proc_environ',
   ],
   [
+    'backtick code-span credential file',
+    'cat `.credentials`',
+    'ambient_credential:credential_file',
+  ],
+  [
+    'dump after the first command of a -c string',
+    'bash -c "cd repo; env"',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'dump after && inside a -c string',
+    'bash -c "cd repo && env"',
+    'ambient_credential:env_dump',
+  ],
+  ['env with only an assignment', 'env FOO=bar', 'ambient_credential:env_dump'],
+  [
+    'env with only an assignment inside -c',
+    'bash -c "env FOO=bar"',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'env in a command substitution',
+    'echo "$(env)"',
+    'ambient_credential:env_dump',
+  ],
+  ['set in a command substitution', 'x=$(set)', 'ambient_credential:env_dump'],
+  ['env in a subshell', '(env)', 'ambient_credential:env_dump'],
+  [
+    'env behind a flag carrying an inline value',
+    'bash --rcfile=/dev/null -c "env"',
+    'ambient_credential:env_dump',
+  ],
+  [
     'aws credential file',
     'cat ~/.aws/credentials',
     'ambient_credential:credential_file',
@@ -793,9 +826,12 @@ test('workflow passes every fail-closed flag the CLI reads', () => {
       workflow.includes(`steps.collect.outputs.${output}`),
       `workflow must read --${flag} from steps.collect.outputs.${output}`,
     );
+    // Pin the untrusted path specifically: asserting `echo "<name>=` alone is
+    // satisfied by the trusted branch's `=false` line, so deleting this one went
+    // unnoticed while the real step stopped emitting the flag's value.
     assert.ok(
-      workflow.includes(`echo "${output}=`),
-      `collect step must write the ${output} output`,
+      workflow.includes(`echo "${output}=$${output}"`),
+      `collect step must write ${output} from its own variable on the untrusted path`,
     );
   }
 });

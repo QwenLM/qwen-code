@@ -127,17 +127,26 @@ The source itself is the signal; no sink pairing is required.
 These run over the PR title, body and added lines, so an instruction carried
 only by the body is caught even when the diff is a single harmless docs file.
 
-Two boundaries keep the rules from gating ordinary work. Every dump form keeps
-the terminator lookahead **in both branches** — the bare command-position branch
-and the shell `-c` wrapper, which counts its closing quote as a terminator — so
-an option-taking prefix stays ungated either way: `set -euo pipefail`,
-`env FOO=bar cmd`, `env -i FOO=bar node x.mjs`, `declare -x FOO=bar`, and the same
-forms wrapped as `sh -c "set -euo pipefail; make"`. An earlier revision gave the
-wrapper no terminator test, which gated every one of those wrapped forms; that
-is closed.
+Two boundaries keep the rules from gating ordinary work. The dump commands share
+one terminator lookahead, applied once **outside** their alternation in both the
+bare command-position branch and the shell `-c` wrapper: an operator, a closing
+paren (so `$(env)` and `(env)` work), end of line, or a quote that closes the
+wrapper and is followed by an operator or end of line — which is what reaches a
+dump placed after the first command of a `-c` string, such as
+`bash -c "cd repo && env"`. An option-taking prefix therefore stays ungated
+either way: `set -euo pipefail`, `env FOO=bar cmd`, `env -i FOO=bar node x.mjs`,
+`declare -x FOO=bar`, and the same forms wrapped as
+`sh -c "set -euo pipefail; make"`. Two earlier revisions are recorded as closed:
+the wrapper once had no terminator test at all, which gated each of those wrapped
+forms.
 
-And `.credentials` requires a preceding path separator, whitespace, quote, or
-line start. The allowed set is **enumerated, not negated**: a negated class such
+`env FOO=bar` with **no utility** is a dump, so an assignment prefix is allowed
+before the lookahead while `env FOO=bar cmd` still stops at the utility — the
+precision fix that released wrapper false positives had also released that dump
+spelling.
+
+And `.credentials` requires a preceding path separator, whitespace, quote
+(including a markdown code span's backtick), or line start. The allowed set is **enumerated, not negated**: a negated class such
 as `[^.\w]` also admits `?` and `)`, which gated ordinary TypeScript like
 `a?.credentials` and `(await client).credentials`. Without any boundary the
 pattern also matched the object spread `{ ...credentials }`, which copies an
@@ -269,19 +278,23 @@ content rules, as before. Only a missing head SHA still fails closed for them.
 
 ## Verified results (2026-11-26)
 
-- Unit suite: 107 passed, 0 failed. Four cases drive the real CLI so the flag
+- Unit suite: 116 passed, 0 failed. Four cases drive the real CLI so the flag
   spellings are under test, and one derives the flag names from the CLI source
   and requires the workflow to pass each one from the collect step's matching
-  output. Renaming a flag on either side now reds the suite; before these cases
-  it stayed green while a fail-closed arm went dark.
+  output, including the untrusted path's own echo line — asserting only
+  `echo "<name>=` had been satisfied by the trusted branch's `=false`, so deleting
+  the untrusted write went unseen. Renaming a flag on either side, or deleting
+  that echo, now reds the suite.
 - #18362: `protected_path:authority_surface`,
   `ambient_credential:cloud_metadata`, `ambient_credential:env_dump`.
 - #18364: `ambient_credential:cloud_metadata`,
   `ambient_credential:proc_environ`.
-- Mutation witness: 28 arms, all killed, none skipped. Nine arms widen or
-  narrow a rule instead of removing it, so both the false-positive and the
-  false-negative direction are pinned; two arms rename a CLI flag; two arms
-  revert the whole file, to the first hardening round and to the pre-PR module.
+- Mutation witness: 30 arms, all killed, none skipped, plus an unmutated control
+  that must stay green. The harness mirrors the repository layout in its temp
+  dir, because the workflow-contract test reads the workflow through a relative
+  URL — without the mirror that case reds in every arm for a missing file, and a
+  missing file would have passed for a kill. The control is what makes the rest
+  of the run worth reading.
 - Workflow end-to-end table: 9 cases passed. It executes the real collect and
   assess `run:` blocks under their own bash contract with a stubbed `gh`, and
   asserts the final decision rather than an intermediate flag. Covers
@@ -327,6 +340,17 @@ allowed set is now enumerated, and both false-positive shapes are pinned.
 
 One enumerated-list gap is disclosed rather than closed: a shell flag that takes
 a separate argument, as in `bash -o posix -c printenv`, is still admitted.
+
+A fourth round closed six more: the backtick code-span spelling of
+`.credentials`; a dump placed after the first command of a `-c` string, which
+needed the closing quote to count as a terminator in the bare branch too;
+`env FOO=bar` with no utility; the inert `$(…)` and `(…)` anchors, which needed
+`)` as a terminator; `--flag=value` before `-c`; and the flag pin's blind spot
+where a matching `echo` in the trusted branch hid a deleted untrusted one.
+Disclosed rather than chased, since they are option and prefix grammar rather
+than the forms this rule enumerates: `env -u NAME`, the quoted-assignment spelling
+`env "FOO=bar"`, and command prefixes outside the anchor set — `time env`,
+`command env`, `{ env; }`, `! env`, `sudo -E env`.
 
 ## Open questions
 
