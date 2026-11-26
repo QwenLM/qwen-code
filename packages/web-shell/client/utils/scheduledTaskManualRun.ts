@@ -18,10 +18,30 @@ export type ScheduledTaskRunPrompt = (
   beforeDispatch?: () => void | Promise<void>,
 ) => void | Promise<void>;
 
+const cancellationReason = 'scheduled_task_target_replacement';
+
+export function createScheduledTaskCancellation(message: string): DOMException {
+  return Object.assign(new DOMException(message, 'AbortError'), {
+    reason: cancellationReason,
+  });
+}
+
+export function isScheduledTaskCancellation(error: unknown): boolean {
+  return (
+    error instanceof DOMException &&
+    'reason' in error &&
+    error.reason === cancellationReason
+  );
+}
+
 export interface ScheduledTaskManualRunErrorHandlers {
   reload: () => void | Promise<void>;
   onError: (err: unknown, fallback: string) => void;
   isCurrent?: () => boolean;
+  /** Optional stronger guard for the original SDK owner of a one-shot. */
+  isOwnerCurrent?: () => boolean;
+  /** Reports a consumed one-shot even when its original UI scope is gone. */
+  onOneShotError?: (error: unknown, fallback: string) => void;
   /** True once this owner/task deletion has been confirmed. */
   isStale?: () => boolean;
 }
@@ -55,9 +75,19 @@ export async function runScheduledTaskManually(
   >,
   onRunPrompt: ScheduledTaskRunPrompt,
   t: TranslateFn,
-  { reload, onError, isCurrent, isStale }: ScheduledTaskManualRunErrorHandlers,
+  {
+    reload,
+    onError,
+    isCurrent,
+    isStale,
+    isOwnerCurrent,
+    onOneShotError,
+  }: ScheduledTaskManualRunErrorHandlers,
 ): Promise<void> {
-  const current = () => isCurrent?.() !== false && !isStale?.();
+  const current = (recurring = task.recurring) =>
+    isCurrent?.() !== false &&
+    !isStale?.() &&
+    (recurring || isOwnerCurrent?.() !== false);
   try {
     // A bound-session /run only records the fire. Re-read before enqueueing:
     // a stale snapshot could otherwise execute a disabled or deleted task's
@@ -71,7 +101,7 @@ export async function runScheduledTaskManually(
         (candidate.sessionId ?? null) === (task.sessionId ?? null),
     );
     const fresh = candidates.length === 1 ? candidates[0] : undefined;
-    if (!current()) return;
+    if (!current(fresh?.recurring)) return;
     if (!fresh || !fresh.enabled) {
       await Promise.resolve(reload()).catch(() => {});
       if (!current()) return;
@@ -82,7 +112,7 @@ export async function runScheduledTaskManually(
       return;
     }
     await actions.assertScheduledTaskOwnerSelection(fresh.sessionId);
-    if (!current()) return;
+    if (!current(fresh.recurring)) return;
     if (fresh.sessionMode === 'per_run') {
       // The daemon dispatches a fresh child session and records it on this
       // run. Never also enqueue the prompt into the controller session.
@@ -102,7 +132,7 @@ export async function runScheduledTaskManually(
         manualRunPrompt(fresh),
         fresh.sessionId ?? null,
         task.workspaceCwd,
-        () => !current(),
+        isStale ?? (() => false),
         async () => {
           const candidates = (
             await actions.listScheduledTasks(task.workspaceId)
@@ -136,7 +166,7 @@ export async function runScheduledTaskManually(
         );
         if (current()) await reload();
       } catch (err) {
-        if (current()) onError(err, t('scheduledTasks.error.runFailed'));
+        onError(err, t('scheduledTasks.error.runFailed'));
       }
     } else {
       // A bound-session one-shot is consumed by /run, preventing a second
@@ -148,10 +178,10 @@ export async function runScheduledTaskManually(
         fresh.sessionId,
       );
       if (current()) await reload();
-      if (!current()) {
+      if (!current(false)) {
         // The server has already consumed the one-shot. Do not resume an old
         // owner's prompt and supersede a newer run, but never hide the loss.
-        onError(
+        (onOneShotError ?? onError)(
           new Error(t('scheduledTasks.error.oneShotConsumedButFailed')),
           t('scheduledTasks.error.oneShotConsumedButFailed'),
         );
@@ -162,14 +192,19 @@ export async function runScheduledTaskManually(
           manualRunPrompt(fresh),
           fresh.sessionId ?? null,
           task.workspaceCwd,
-          () => !current(),
+          () => !current(false),
         );
       } catch (err) {
-        onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
+        (onOneShotError ?? onError)(
+          err,
+          t('scheduledTasks.error.oneShotConsumedButFailed'),
+        );
         return;
       }
     }
   } catch (err) {
-    if (current()) onError(err, t('scheduledTasks.error.runFailed'));
+    if (current() && !isScheduledTaskCancellation(err)) {
+      onError(err, t('scheduledTasks.error.runFailed'));
+    }
   }
 }

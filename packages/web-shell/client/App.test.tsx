@@ -11,6 +11,7 @@ import {
 import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { DAEMON_APPROVAL_MODES } from './test/sidebarHarness';
+import { isScheduledTaskCancellation } from './utils/scheduledTaskManualRun';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
 const messageListScrollToMessage = vi.hoisted(() =>
   vi.fn((_messageId: string, _callId?: string) => true),
@@ -953,6 +954,7 @@ const {
       notices: [] as import('./daemon/session/types').DaemonSessionNotice[],
       dismissNotice: vi.fn(),
       ownerVersion: 0,
+      workspaceRuntime: undefined as typeof mockWorkspace | undefined,
       recoveryVersion: 0,
       prompt: 'hello',
       inputAnnotations: undefined as DaemonInputAnnotation[] | undefined,
@@ -1378,7 +1380,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
       release: vi.fn(),
     }),
     useTranscriptStore: () => mockStore,
-    useWorkspace: () => mockWorkspace,
+    useWorkspace: () => testState.workspaceRuntime ?? mockWorkspace,
     useWorkspaceActions: () => mockWorkspaceActions,
     useMcp: () => mockMcp,
     useWorkspaceEventSignals: () => testState.workspaceEventSignals,
@@ -15130,6 +15132,7 @@ beforeEach(() => {
   mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
   mockConnection.standaloneSession = undefined;
   testState.ownerVersion = 0;
+  testState.workspaceRuntime = undefined;
   testState.recoveryVersion = 0;
   testState.workspaceEventSignals = {
     artifactsVersion: 0,
@@ -59601,6 +59604,236 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     },
   );
 
+  it.each([
+    {
+      title: 'A-B-A navigation',
+      steps: [
+        {
+          sessionId: 'other-session',
+          workspaceCwd: '/repo/owner',
+          catchingUp: true,
+        },
+        {
+          sessionId: 'bound-session',
+          workspaceCwd: '/repo/owner',
+          catchingUp: false,
+        },
+      ],
+    },
+    {
+      title: 'a workspace change',
+      steps: [
+        {
+          sessionId: 'bound-session',
+          workspaceCwd: '/repo/other',
+          catchingUp: false,
+        },
+      ],
+    },
+  ])(
+    'cancels a first binding during $title before restore',
+    async ({ steps }) => {
+      const restore = deferred<void>();
+      const { container, rerender } = renderApp();
+      await flush();
+      const run = await openRunHandler(container);
+      mockSessionActions.loadSession.mockImplementationOnce(
+        async () => restore.promise,
+      );
+      let runError: unknown;
+      act(() => {
+        void run('do the thing', 'bound-session', '/repo/owner').catch(
+          (error) => {
+            runError = error;
+          },
+        );
+      });
+      await flush();
+
+      for (const step of steps) {
+        testState.ownerVersion += 1;
+        await act(async () => {
+          mockConnection.sessionId = step.sessionId;
+          mockConnection.workspaceCwd = step.workspaceCwd;
+          mockConnection.catchingUp = step.catchingUp;
+          rerender({});
+          await Promise.resolve();
+        });
+      }
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        restore.resolve();
+        await Promise.resolve();
+      });
+
+      await vi.waitFor(() => {
+        expect((runError as Error | undefined)?.name).toBe('AbortError');
+      });
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reads the latest runtime during an incomplete first restore', async () => {
+    const restore = deferred<void>();
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(
+      async () => restore.promise,
+    );
+    let runError: unknown;
+    let records = 0;
+    act(() => {
+      void run('do the thing', 'bound-session', '/repo/owner').then(
+        () => {
+          records += 1;
+        },
+        (error) => {
+          runError = error;
+        },
+      );
+    });
+    await flush();
+
+    await act(async () => {
+      testState.workspaceRuntime = {
+        ...mockWorkspace,
+        client: Object.create(mockWorkspace.client) as never,
+      };
+      mockConnection.sessionId = 'bound-session';
+      mockConnection.workspaceCwd = '/repo/owner';
+      mockConnection.catchingUp = false;
+      rerender({});
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect((runError as Error | undefined)?.name).toBe('AbortError');
+    });
+    expect(isScheduledTaskCancellation(runError)).toBe(true);
+    expect(records).toBe(0);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      restore.resolve();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/owner',
+      admitted: true,
+    },
+    {
+      nextSessionId: 'other-session',
+      nextWorkspaceCwd: '/repo/owner',
+      admitted: false,
+    },
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/other',
+      admitted: false,
+    },
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/owner',
+      viaOtherSession: true,
+      admitted: false,
+    },
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/owner',
+      runtimeChanged: true,
+      admitted: false,
+    },
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/owner',
+      runtimeChanged: true,
+      replaceOwner: false,
+      admitted: false,
+    },
+  ])(
+    'follows a re-attached SDK owner only within the original session/workspace ($admitted)',
+    async ({
+      nextSessionId,
+      nextWorkspaceCwd,
+      viaOtherSession,
+      runtimeChanged,
+      replaceOwner,
+      admitted,
+    }) => {
+      admitOnSend();
+      const restore = deferred<void>();
+      const { container, rerender } = renderApp();
+      await flush();
+      const run = await openRunHandler(container);
+      mockSessionActions.loadSession.mockImplementationOnce(async () => {
+        mockConnection.sessionId = 'bound-session';
+        mockConnection.workspaceCwd = '/repo/owner';
+        mockConnection.catchingUp = true;
+        await restore.promise;
+      });
+      let runError: unknown;
+      let runRecordings = 0;
+
+      act(() => {
+        void run(
+          'do the thing',
+          'bound-session',
+          '/repo/owner',
+          () => false,
+        ).then(
+          () => {
+            runRecordings += 1;
+          },
+          (error) => {
+            runError = error;
+          },
+        );
+      });
+      await flush();
+      await act(async () => {
+        restore.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      if (viaOtherSession) {
+        await act(async () => {
+          mockConnection.sessionId = 'other-session';
+          mockConnection.workspaceCwd = '/repo/owner';
+          mockConnection.catchingUp = true;
+          rerender({});
+          await Promise.resolve();
+        });
+      }
+      if (runtimeChanged) {
+        mockWorkspace.client = Object.create(mockWorkspace.client) as never;
+      }
+      if (replaceOwner !== false) testState.ownerVersion += 1;
+      await act(async () => {
+        mockConnection.sessionId = nextSessionId;
+        mockConnection.workspaceCwd = nextWorkspaceCwd;
+        mockConnection.catchingUp = false;
+        rerender({});
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      if (admitted) {
+        expect(runError).toBeUndefined();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+        expect(runRecordings).toBe(1);
+      } else {
+        await vi.waitFor(() => {
+          expect((runError as Error | undefined)?.name).toBe('AbortError');
+        });
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(runRecordings).toBe(0);
+      }
+    },
+  );
+
   it.each([{ deleted: true }, { deleted: false }])(
     'R21 checks deletion during unbound admission preflight ($deleted)',
     async ({ deleted }) => {
@@ -59627,6 +59860,57 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       } else {
         expect(outcome).toBeNull();
         expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
+  it.each([
+    { nextWorkspaceCwd: '/tmp/project', admitted: true },
+    { nextWorkspaceCwd: '/repo/other', admitted: false },
+  ])(
+    'rebinds a scheduled admission owner only inside the same scope ($admitted)',
+    async ({ nextWorkspaceCwd, admitted }) => {
+      const preflight = deferred<void>();
+      const onSubmitBefore = vi.fn(async () => preflight.promise);
+      const { container, rerender } = renderApp({ onSubmitBefore });
+      admitOnSend();
+      await flush();
+      const run = await openRunHandler(container);
+      let runError: unknown;
+      let records = 0;
+      await act(async () => {
+        void run('do the thing', 'session-1', undefined, () => false).then(
+          () => {
+            records += 1;
+          },
+          (error) => {
+            runError = error;
+          },
+        );
+        await vi.waitFor(() => expect(onSubmitBefore).toHaveBeenCalledOnce());
+      });
+
+      testState.ownerVersion += 1;
+      await act(async () => {
+        mockConnection.workspaceCwd = nextWorkspaceCwd;
+        rerender({});
+        await Promise.resolve();
+      });
+      await act(async () => {
+        preflight.resolve();
+        await Promise.resolve();
+      });
+
+      if (admitted) {
+        expect(runError).toBeUndefined();
+        expect(records).toBe(1);
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      } else {
+        await vi.waitFor(() =>
+          expect((runError as Error | undefined)?.name).toBe('AbortError'),
+        );
+        expect(records).toBe(0);
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
       }
     },
   );

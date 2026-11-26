@@ -502,6 +502,7 @@ import {
 } from './hooks/useSessionScheduledTasks';
 import { useSubSessionTasks } from './hooks/useSubSessionTasks';
 import { extractErrorDetail } from './utils/errorDetail';
+import { createScheduledTaskCancellation } from './utils/scheduledTaskManualRun';
 import {
   getSendWorkspace,
   parseSendCommand,
@@ -14109,6 +14110,7 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
         source?: 'mcp-app';
         isCurrent?: () => boolean;
+        canRebindOwner?: () => boolean;
         beforeDispatch?: (clientId: string | undefined) => void | Promise<void>;
         beforeDetachedDispatch?: (
           clientId: string | undefined,
@@ -14182,6 +14184,18 @@ export function App({
           allocatedSessionId !== undefined &&
           (currentSessionId === undefined ||
             currentSessionId === allocatedSessionId);
+        if (
+          !admissionSource.owner.isCurrent() &&
+          opts?.canRebindOwner?.() === true
+        ) {
+          const owner = sessionOwnerGuard.capture();
+          if (owner.isCurrent()) {
+            admissionSource.owner = owner;
+            admissionSource.sourceVersion = composerSourceVersionRef.current;
+            admissionSource.writeBlockGeneration =
+              sessionWriteBlockGenerationRef.current;
+          }
+        }
         return (
           (admissionSource.owner.isCurrent() || ownAllocationSucceeded) &&
           sessionMatches &&
@@ -19635,8 +19649,27 @@ export function App({
   // rejects if the bound session can't be opened (archived/deleted), supersedes,
   // or times out — so the caller only records the run after it truly happened,
   // never on a failed session switch. Only one bound run waits at a time.
+  const boundRunTargetKey = getLogicalSessionKey(
+    connection.sessionId,
+    connection.workspaceCwd,
+  );
+  const boundRunTargetRef = useRef({
+    key: boundRunTargetKey,
+    generation: 0,
+  });
+  if (boundRunTargetRef.current.key !== boundRunTargetKey) {
+    boundRunTargetRef.current = {
+      key: boundRunTargetKey,
+      generation: boundRunTargetRef.current.generation + 1,
+    };
+  }
+  const boundRunRuntimeClientRef = useRef(workspace.client);
+  boundRunRuntimeClientRef.current = workspace.client;
   const pendingBoundRunRef = useRef<{
     sessionId: string;
+    logicalSessionKey?: string;
+    targetGeneration?: number;
+    runtimeClient: typeof workspace.client;
     prompt: string;
     resolve: () => void;
     reject: (err: unknown) => void;
@@ -19674,9 +19707,21 @@ export function App({
       prompt: string,
       taskIsStale?: () => boolean,
       beforeTaskDispatch?: () => void | Promise<void>,
+      scheduledScope?: {
+        runtimeClient: typeof workspace.client;
+        logicalSessionKey?: string;
+        targetGeneration?: number;
+      },
     ): Promise<void> =>
       new Promise<void>((resolve, reject) => {
+        const taskRuntimeClient =
+          scheduledScope?.runtimeClient ?? workspace.client;
         const assertRunnable = () => {
+          if (taskRuntimeClient !== boundRunRuntimeClientRef.current) {
+            throw createScheduledTaskCancellation(
+              'Bound run runtime was replaced',
+            );
+          }
           if (taskIsStale?.()) {
             throw new DOMException(
               'Scheduled task was deleted before prompt admission',
@@ -19720,7 +19765,26 @@ export function App({
                 onAdmissionStarted: assertRunnable,
               }
             : {}),
+          canRebindOwner: () =>
+            scheduledScope?.logicalSessionKey !== undefined &&
+            scheduledScope.targetGeneration !== undefined &&
+            getLogicalSessionKey(
+              connectionRef.current.sessionId,
+              connectionRef.current.workspaceCwd,
+            ) === scheduledScope.logicalSessionKey &&
+            boundRunTargetRef.current.generation ===
+              scheduledScope.targetGeneration &&
+            scheduledScope.runtimeClient === boundRunRuntimeClientRef.current,
           onAdmitted: admit,
+          onCancelledBeforeAdmission: () => {
+            if (!admitted) {
+              reject(
+                createScheduledTaskCancellation(
+                  'Run was cancelled before it started',
+                ),
+              );
+            }
+          },
           suppressInputHistory: true,
         }).then(
           () => {
@@ -19733,7 +19797,7 @@ export function App({
           },
         );
       }),
-    [isGoalGateBlocked, sendPrompt, t],
+    [isGoalGateBlocked, sendPrompt, t, workspace],
   );
   // Enqueue the pending bound run once its session is the current, fully-loaded
   // one — driven both by the effect below (when the session switch changes a
@@ -19745,10 +19809,32 @@ export function App({
     const pending = pendingBoundRunRef.current;
     const conn = connectionRef.current;
     if (!pending) return;
-    if (pending.owner && !pending.owner.isCurrent()) {
+    if (pending.runtimeClient !== boundRunRuntimeClientRef.current) {
       clearPendingBoundRun(pending.sessionId);
       pending.reject(
-        new DOMException('Bound run session was replaced', 'AbortError'),
+        createScheduledTaskCancellation('Bound run runtime was replaced'),
+      );
+      return;
+    }
+    if (
+      pending.owner === undefined ||
+      pending.logicalSessionKey === undefined ||
+      pending.targetGeneration === undefined
+    ) {
+      return;
+    }
+    if (
+      conn.sessionId === pending.sessionId &&
+      getLogicalSessionKey(conn.sessionId, conn.workspaceCwd) ===
+        pending.logicalSessionKey &&
+      boundRunTargetRef.current.generation === pending.targetGeneration &&
+      pending.runtimeClient === boundRunRuntimeClientRef.current
+    ) {
+      pending.owner = sessionOwnerGuard.capture();
+    } else if (pending.owner && !pending.owner.isCurrent()) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        createScheduledTaskCancellation('Bound run session was replaced'),
       );
       return;
     }
@@ -19787,11 +19873,16 @@ export function App({
       pending.prompt,
       pending.taskIsStale,
       pending.beforeTaskDispatch,
+      {
+        runtimeClient: pending.runtimeClient,
+        logicalSessionKey: pending.logicalSessionKey,
+        targetGeneration: pending.targetGeneration,
+      },
     ).then(
       () => pending.resolve(),
       (error: unknown) => pending.reject(error),
     );
-  }, [clearPendingBoundRun, enqueueManualRun]);
+  }, [clearPendingBoundRun, enqueueManualRun, sessionOwnerGuard]);
   const runTaskManually = useCallback(
     (
       prompt: string,
@@ -19816,8 +19907,10 @@ export function App({
         prev.reject(new Error('superseded by another run'));
       }
       return new Promise<void>((resolve, reject) => {
+        const requestedTargetGeneration = boundRunTargetRef.current.generation;
         const pending: NonNullable<typeof pendingBoundRunRef.current> = {
           sessionId,
+          runtimeClient: workspace.client,
           prompt,
           resolve,
           reject,
@@ -19831,7 +19924,40 @@ export function App({
           // which case the effect picks it up.
           .then(() => {
             if (pendingBoundRunRef.current !== pending) return;
+            if (
+              boundRunTargetRef.current.generation >
+              requestedTargetGeneration + 1
+            ) {
+              clearPendingBoundRun(sessionId);
+              reject(
+                createScheduledTaskCancellation(
+                  'Bound run session was replaced',
+                ),
+              );
+              return;
+            }
+            if (
+              connectionRef.current.sessionId !== sessionId ||
+              (workspaceCwd !== undefined &&
+                getLogicalSessionKey(
+                  sessionId,
+                  connectionRef.current.workspaceCwd,
+                ) !== getLogicalSessionKey(sessionId, workspaceCwd))
+            ) {
+              clearPendingBoundRun(sessionId);
+              reject(
+                createScheduledTaskCancellation(
+                  'Bound run target was replaced',
+                ),
+              );
+              return;
+            }
             pending.owner = sessionOwnerGuard.capture();
+            pending.logicalSessionKey = getLogicalSessionKey(
+              sessionId,
+              connectionRef.current.workspaceCwd,
+            );
+            pending.targetGeneration = boundRunTargetRef.current.generation;
             pending.timer = setTimeout(() => {
               if (pendingBoundRunRef.current !== pending) return;
               pendingBoundRunRef.current = null;
@@ -19853,16 +19979,27 @@ export function App({
       showChat,
       sessionOwnerGuard,
       tryFireBoundRun,
+      workspace.client,
     ],
   );
   useEffect(() => {
+    const pending = pendingBoundRunRef.current;
+    if (pending && pending.runtimeClient !== workspace.client) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        createScheduledTaskCancellation('Bound run runtime was replaced'),
+      );
+      return;
+    }
     tryFireBoundRun();
   }, [
+    clearPendingBoundRun,
     connection.sessionId,
     connection.loadingTranscript,
     connection.catchingUp,
     connection.goalState,
     tryFireBoundRun,
+    workspace.client,
   ]);
   useEffect(
     () => () => {
@@ -19871,7 +20008,7 @@ export function App({
       if (pending.timer !== undefined) clearTimeout(pending.timer);
       pendingBoundRunRef.current = null;
       pending.reject(
-        new DOMException('Bound run owner was unmounted', 'AbortError'),
+        createScheduledTaskCancellation('Bound run owner was unmounted'),
       );
     },
     [],

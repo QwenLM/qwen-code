@@ -17,6 +17,7 @@ import {
   createWebShellDaemonScenario,
   installMockDaemon,
   promptIdFor,
+  replayCompleteEvent,
   toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
@@ -255,6 +256,12 @@ test('@smoke surfaces durable and session-scoped scheduled tasks in header, comp
   });
   await page.setViewportSize({ width: 430, height: 780 });
   await page.goto(`${baseURL}/session/${SESSION_ID}?theme=dark`);
+  // The daemon ends its initial snapshot replay with this sentinel. Without
+  // it, a bound manual run correctly remains latched until replay completes.
+  await daemon.sse.waitForConnection(SESSION_ID);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: SESSION_ID, replayedCount: 0 }),
+  );
 
   const headerEntry = page.locator('[data-web-shell-scheduled-tasks-entry]');
   await expect(headerEntry).toBeVisible();
@@ -301,6 +308,10 @@ test('@smoke surfaces durable and session-scoped scheduled tasks in header, comp
       window.localStorage.setItem('qwen-code-web-shell-theme', 'light');
     });
     await page.goto(`${baseURL}/session/${SESSION_ID}?theme=light`);
+    await daemon.sse.waitForConnection(SESSION_ID);
+    await daemon.sendEvent(
+      replayCompleteEvent({ sessionId: SESSION_ID, replayedCount: 0 }),
+    );
     await expect(headerEntry).toBeVisible();
     await expect(section).toBeVisible();
     await page.evaluate(() => {

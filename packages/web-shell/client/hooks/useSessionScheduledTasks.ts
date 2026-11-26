@@ -10,6 +10,7 @@ import type { DaemonSessionScheduledTaskStatus } from '@qwen-code/sdk/daemon';
 import {
   useActions,
   useDaemonSessionOwnerGuard,
+  useWorkspace,
   useWorkspaceActions,
   type DaemonScheduledTask,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -205,6 +206,9 @@ export function useSessionScheduledTasks(options: {
   const { t } = useI18n();
   const sessionActions = useActions();
   const workspaceActions = useWorkspaceActions();
+  const workspace = useWorkspace();
+  const workspaceClientRef = useRef(workspace.client);
+  workspaceClientRef.current = workspace.client;
   const ownerGuard = useDaemonSessionOwnerGuard();
   const ownerRef = useRef(ownerGuard.capture());
   if (!ownerRef.current?.isCurrent()) ownerRef.current = ownerGuard.capture();
@@ -253,10 +257,11 @@ export function useSessionScheduledTasks(options: {
     manualRunActiveRef.current = false;
     setManualRunActive(false);
     setBusyIds(new Set());
-    // The counter is a baseline only at owner/session transitions. Later
+    // The counter is a baseline only at session/workspace transitions. Later
     // increments are handled as explicit intent by the request effect below.
+    // refreshTrigger is only a baseline here, not a scope change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [owner, sessionId, workspaceId]);
+  }, [sessionId, workspaceId]);
 
   useLayoutEffect(() => {
     if (durableEnabled) return;
@@ -391,10 +396,10 @@ export function useSessionScheduledTasks(options: {
       if (!workspaceActions?.updateScheduledTask) return;
       const generation = scopeGenerationRef.current;
       const durableRevision = durableRevisionRef.current;
-      const isCurrent = () =>
+      const sameScope = () =>
         durableRevisionRef.current === durableRevision &&
-        scopeGenerationRef.current === generation &&
-        owner.isCurrent();
+        scopeGenerationRef.current === generation;
+      const isCurrent = () => sameScope() && owner.isCurrent();
       durableReqRef.current += 1;
       markBusy(entry, true);
       try {
@@ -416,9 +421,9 @@ export function useSessionScheduledTasks(options: {
           prev.map((item) => (item.id === updated.id ? updated : item)),
         );
       } catch (error) {
-        if (isCurrent()) onError(error, t('scheduledTasks.error.toggleFailed'));
+        if (sameScope()) onError(error, t('scheduledTasks.error.toggleFailed'));
       } finally {
-        if (isCurrent()) markBusy(entry, false);
+        if (sameScope()) markBusy(entry, false);
       }
     },
     [markBusy, onError, owner, t, workspaceActions, workspaceId],
@@ -426,15 +431,22 @@ export function useSessionScheduledTasks(options: {
 
   const runDurableTask = useCallback(
     async (entry: SessionDurableScheduledTask) => {
-      if (!workspaceActions?.runScheduledTask || manualRunActiveRef.current) {
+      if (
+        !workspaceActions?.runScheduledTask ||
+        manualRunActiveRef.current ||
+        !owner.isCurrent()
+      ) {
         return;
       }
       const generation = scopeGenerationRef.current;
       const durableRevision = durableRevisionRef.current;
-      const isCurrent = () =>
+      const originalOwner = owner;
+      const originalClient = workspaceClientRef.current;
+      const sameScope = () =>
         durableRevisionRef.current === durableRevision &&
-        scopeGenerationRef.current === generation &&
-        owner.isCurrent();
+        scopeGenerationRef.current === generation;
+      const isCurrent = () =>
+        sameScope() && workspaceClientRef.current === originalClient;
       const deletedTaskKey = JSON.stringify([
         entry.workspaceId ?? workspaceId ?? null,
         entry.id,
@@ -452,14 +464,23 @@ export function useSessionScheduledTasks(options: {
           t,
           {
             reload: refresh,
-            onError,
+            onError: (error, fallback) => {
+              if (
+                sameScope() &&
+                !confirmedDeletedDurableTaskKeysRef.current.has(deletedTaskKey)
+              ) {
+                onError(error, fallback);
+              }
+            },
             isCurrent,
+            isOwnerCurrent: () => originalOwner.isCurrent(),
+            onOneShotError: onError,
             isStale: () =>
               confirmedDeletedDurableTaskKeysRef.current.has(deletedTaskKey),
           },
         );
       } finally {
-        if (isCurrent()) {
+        if (sameScope()) {
           manualRunActiveRef.current = false;
           setManualRunActive(false);
           markBusy(entry, false);
@@ -503,10 +524,10 @@ export function useSessionScheduledTasks(options: {
       if (!workspaceActions?.deleteScheduledTask) return false;
       const generation = scopeGenerationRef.current;
       const durableRevision = durableRevisionRef.current;
-      const isCurrent = () =>
+      const sameScope = () =>
         durableRevisionRef.current === durableRevision &&
-        scopeGenerationRef.current === generation &&
-        owner.isCurrent();
+        scopeGenerationRef.current === generation;
+      const isCurrent = () => sameScope() && owner.isCurrent();
       durableReqRef.current += 1;
       markBusy(entry, true);
       try {
@@ -522,10 +543,10 @@ export function useSessionScheduledTasks(options: {
         });
         return true;
       } catch (error) {
-        if (isCurrent()) onError(error, t('scheduledTasks.error.deleteFailed'));
+        if (sameScope()) onError(error, t('scheduledTasks.error.deleteFailed'));
         return false;
       } finally {
-        if (isCurrent()) markBusy(entry, false);
+        if (sameScope()) markBusy(entry, false);
       }
     },
     [
@@ -573,6 +594,7 @@ export function useSessionScheduledTasks(options: {
       const generation = scopeGenerationRef.current;
       const isCurrent = () =>
         scopeGenerationRef.current === generation && owner.isCurrent();
+      const sameScope = () => scopeGenerationRef.current === generation;
       markBusy({ id: taskId, scope: 'session', source }, true);
       try {
         const result = await sessionActions.cancelTask(taskId, 'cron', source);
@@ -587,10 +609,10 @@ export function useSessionScheduledTasks(options: {
         }
         return result.cancelled;
       } catch (error) {
-        if (isCurrent()) onError(error, t('scheduledTasks.error.cancelFailed'));
+        if (sameScope()) onError(error, t('scheduledTasks.error.cancelFailed'));
         return false;
       } finally {
-        if (isCurrent()) {
+        if (sameScope()) {
           markBusy({ id: taskId, scope: 'session', source }, false);
         }
       }

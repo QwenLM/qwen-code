@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DaemonScheduledTask } from '@qwen-code/web-shell/daemon-react-sdk';
-import { runScheduledTaskManually } from './scheduledTaskManualRun';
+import {
+  createScheduledTaskCancellation,
+  runScheduledTaskManually,
+} from './scheduledTaskManualRun';
 
 function makeTask(
   overrides: Partial<DaemonScheduledTask> = {},
@@ -180,6 +183,71 @@ describe('runScheduledTaskManually owner matching', () => {
     },
   );
 
+  it('passes only confirmed deletion as the replay admission guard', async () => {
+    const task = makeTask();
+    let current = true;
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([task]),
+      runScheduledTask: vi.fn().mockResolvedValue(task),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    const isStale = vi.fn().mockReturnValue(false);
+    const onRunPrompt = vi.fn(async () => {
+      current = false;
+    });
+
+    await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+      reload: vi.fn(),
+      onError: vi.fn(),
+      isCurrent: () => current,
+      isStale,
+    });
+
+    expect(onRunPrompt.mock.calls[0]?.[3]).toBe(isStale);
+    expect(isStale()).toBe(false);
+    expect(actions.runScheduledTask).toHaveBeenCalledExactlyOnceWith(
+      'shared-id',
+      'ws-a',
+      'session-a',
+    );
+  });
+
+  it('retains HTTP revalidation when confirmed deletion is omitted', async () => {
+    const task = makeTask();
+    let remoteTask: DaemonScheduledTask | undefined = task;
+    const actions = {
+      listScheduledTasks: vi.fn(async () => (remoteTask ? [remoteTask] : [])),
+      runScheduledTask: vi.fn(),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    const onError = vi.fn();
+    const onRunPrompt = vi.fn(
+      async (
+        _prompt: string,
+        _sessionId: string | null,
+        _workspaceCwd?: string,
+        taskIsStale?: () => boolean,
+        beforeDispatch?: () => void | Promise<void>,
+      ) => {
+        expect(taskIsStale?.()).toBe(false);
+        remoteTask = undefined;
+        await beforeDispatch?.();
+      },
+    );
+
+    await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+      reload: vi.fn(),
+      onError,
+    });
+
+    expect(actions.listScheduledTasks).toHaveBeenCalledTimes(2);
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'AbortError' }),
+      'scheduledTasks.error.runFailed',
+    );
+  });
+
   it('R22 records an admitted recurring run after an owner change', async () => {
     const task = makeTask();
     let current = true;
@@ -206,6 +274,77 @@ describe('runScheduledTaskManually owner matching', () => {
     );
   });
 
+  it.each([
+    { error: new Error('admission failed'), current: true, reported: true },
+    {
+      error: new DOMException('target changed', 'AbortError'),
+      current: false,
+      reported: false,
+    },
+    {
+      error: createScheduledTaskCancellation('runtime replaced'),
+      current: true,
+      reported: false,
+    },
+  ])(
+    'reports recurring admission failure with cancellation isolation ($reported)',
+    async ({ error, current, reported }) => {
+      const task = makeTask();
+      const actions = {
+        listScheduledTasks: vi.fn().mockResolvedValue([task]),
+        runScheduledTask: vi.fn(),
+        assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+      };
+      const onError = vi.fn();
+      let scopeCurrent = true;
+      const onRunPrompt = vi.fn(async () => {
+        scopeCurrent = current;
+        throw error;
+      });
+
+      await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+        reload: vi.fn(),
+        onError,
+        isCurrent: () => scopeCurrent,
+        isStale: () => false,
+      });
+
+      expect(actions.runScheduledTask).not.toHaveBeenCalled();
+      if (reported) {
+        expect(onError).toHaveBeenCalledExactlyOnceWith(
+          error,
+          'scheduledTasks.error.runFailed',
+        );
+      } else {
+        expect(onError).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('surfaces recurring recording failure when the scope remains current', async () => {
+    const task = makeTask();
+    const recordError = new Error('record failed');
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([task]),
+      runScheduledTask: vi.fn().mockRejectedValue(recordError),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    const onRunPrompt = vi.fn(async () => {});
+    const onError = vi.fn();
+
+    await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+      reload: vi.fn(),
+      onError,
+      isCurrent: () => true,
+      isStale: () => false,
+    });
+
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      recordError,
+      'scheduledTasks.error.runFailed',
+    );
+  });
+
   it('runs the unique task from the expected session', async () => {
     const task = makeTask();
     const actions = {
@@ -228,6 +367,7 @@ describe('runScheduledTaskManually owner matching', () => {
       expect.any(Function),
       expect.any(Function),
     );
+    expect(onRunPrompt.mock.calls[0]?.[3]?.()).toBe(false);
     expect(actions.runScheduledTask).toHaveBeenCalledWith(
       'shared-id',
       'ws-a',
@@ -339,5 +479,35 @@ describe('runScheduledTaskManually owner matching', () => {
     expect(actions.runScheduledTask).toHaveBeenCalledOnce();
     expect(onRunPrompt).toHaveBeenCalledOnce();
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('preserves one-shot owner cancellation separately from deletion', async () => {
+    const task = makeTask({ recurring: false });
+    let current = true;
+    let deleted = false;
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([task]),
+      runScheduledTask: vi.fn().mockResolvedValue(task),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    const onRunPrompt = vi.fn(async () => {
+      current = false;
+    });
+
+    await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+      reload: vi.fn(),
+      onError: vi.fn(),
+      isCurrent: () => current,
+      isStale: () => deleted,
+    });
+
+    const replayGuard = onRunPrompt.mock.calls[0]?.[3] as
+      | (() => boolean)
+      | undefined;
+    expect(replayGuard?.()).toBe(true);
+    deleted = true;
+    current = true;
+    expect(replayGuard?.()).toBe(true);
+    expect(actions.runScheduledTask).toHaveBeenCalledOnce();
   });
 });
