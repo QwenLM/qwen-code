@@ -27,6 +27,7 @@ import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
 import { useOptionalDaemonHistoryNavigationStore } from '../daemon/session/DaemonSessionProvider';
 import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
+import { isProgrammaticScrollTarget } from '../utils/programmaticScroll';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
 import { ModRowsProvider } from './messages/ModAssistantMessage';
@@ -581,6 +582,9 @@ const DaemonTranscriptViewport = forwardRef<
         }}
         onScrollCapture={(event) => {
           if (event.target !== scroller() || restoring.current) return;
+          // Strip-compensated offset writes are not user scrolling; feeding
+          // them to loadAtEdge would fetch an older page near the top.
+          if (isProgrammaticScrollTarget(event.target as HTMLElement)) return;
           const current = capture();
           if (loading) anchor.current = current;
           loadAtEdge();

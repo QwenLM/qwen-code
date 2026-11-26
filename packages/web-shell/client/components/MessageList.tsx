@@ -56,6 +56,7 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import { isProgrammaticScrollTarget } from '../utils/programmaticScroll';
 import { isAutomaticTriggerSource } from '../utils/automatic-trigger';
 import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
@@ -5486,6 +5487,13 @@ export const MessageList = memo(
       const el = getScrollElement();
       if (!el) return;
       const curr = el.scrollTop;
+      // Layout compensations (e.g. the pinned plan strip) write the offset
+      // directly; treat them as no-op scrolls, not user scrolling — a shift
+      // near the top would otherwise fetch an older history page.
+      if (isProgrammaticScrollTarget(el)) {
+        lastScrollTop.current = curr;
+        return;
+      }
       if (hasOlderHistory && curr <= LOAD_OLDER_HISTORY_THRESHOLD_PX) {
         void loadOlderHistory(true);
       }

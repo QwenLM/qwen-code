@@ -9,7 +9,9 @@ import {
   getAgentToolsForPlan,
   getFloatingTodos,
   getLatestSuccessfulTodos,
+  getOrderedStickyTodos,
   getSessionWorkflowTodos,
+  STICKY_TODO_MAX_VISIBLE_ITEMS,
   getActiveTodosForPlanRevision,
   getTodoStatusIcon,
   getTodoWindow,
@@ -1532,4 +1534,28 @@ it('uses committed Managed Todo output, ignoring requested, failed and cancelled
   ).toEqual([expect.objectContaining({ id: 'a', status: 'pending' })]);
   expect(getLatestSuccessfulTodos([first, committed('clear', [])])).toEqual([]);
   expect(getLatestSuccessfulTodos([requested])).toBeUndefined();
+});
+
+describe('getOrderedStickyTodos', () => {
+  it('puts in-progress before pending before completed, keeping order within a status', () => {
+    const ordered = getOrderedStickyTodos([
+      todo('1', 'completed'),
+      todo('2', 'pending'),
+      todo('3', 'in_progress'),
+      todo('4', 'pending'),
+      todo('5', 'in_progress'),
+    ]);
+
+    expect(ordered.map((entry) => entry.id)).toEqual(['3', '5', '2', '4', '1']);
+  });
+
+  it('leaves the input untouched', () => {
+    const todos = [todo('1', 'completed'), todo('2', 'in_progress')];
+    getOrderedStickyTodos(todos);
+    expect(todos.map((entry) => entry.id)).toEqual(['1', '2']);
+  });
+
+  it('caps the strip the same way the terminal panel does', () => {
+    expect(STICKY_TODO_MAX_VISIBLE_ITEMS).toBe(5);
+  });
 });
