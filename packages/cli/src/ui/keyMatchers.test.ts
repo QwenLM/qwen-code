@@ -98,6 +98,13 @@ describe('keyMatchers', () => {
     [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
     [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
+    [Command.PREV_TURN]: (key: Key) => key.meta && key.name === 'pageup',
+    [Command.NEXT_TURN]: (key: Key) => key.meta && key.name === 'pagedown',
+    [Command.PREV_TOOL_OUTPUT]: (key: Key) =>
+      key.ctrl && key.meta && key.name === 'up',
+    [Command.NEXT_TOOL_OUTPUT]: (key: Key) =>
+      key.ctrl && key.meta && key.name === 'down',
+    [Command.TRANSCRIPT_SEARCH]: (key: Key) => key.meta && key.name === 's',
     [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
       (key.ctrl && key.name === 'o') || (key.meta && key.name === 't'),
   };
@@ -462,6 +469,53 @@ describe('keyMatchers', () => {
       command: Command.SCROLL_END,
       positive: [createKey('end', { ctrl: true })],
       negative: [createKey('end'), createKey('end', { shift: true })],
+    },
+    {
+      command: Command.PREV_TURN,
+      positive: [createKey('pageup', { meta: true })],
+      negative: [
+        createKey('pageup'),
+        createKey('pagedown', { meta: true }),
+        createKey('s', { meta: true }),
+      ],
+    },
+    {
+      command: Command.NEXT_TURN,
+      positive: [createKey('pagedown', { meta: true })],
+      negative: [
+        createKey('pagedown'),
+        createKey('pageup', { meta: true }),
+        createKey('up', { meta: true }),
+      ],
+    },
+    {
+      command: Command.PREV_TOOL_OUTPUT,
+      positive: [createKey('up', { ctrl: true, meta: true })],
+      negative: [
+        createKey('up', { ctrl: true }),
+        createKey('up', { meta: true }),
+        createKey('up'),
+        createKey('down', { ctrl: true, meta: true }),
+      ],
+    },
+    {
+      command: Command.NEXT_TOOL_OUTPUT,
+      positive: [createKey('down', { ctrl: true, meta: true })],
+      negative: [
+        createKey('down', { ctrl: true }),
+        createKey('down', { meta: true }),
+        createKey('down'),
+        createKey('up', { ctrl: true, meta: true }),
+      ],
+    },
+    {
+      command: Command.TRANSCRIPT_SEARCH,
+      positive: [createKey('s', { meta: true })],
+      negative: [
+        createKey('s'),
+        createKey('s', { ctrl: true }),
+        createKey('r', { ctrl: true }),
+      ],
     },
     {
       command: Command.TOGGLE_THINKING_EXPANDED,

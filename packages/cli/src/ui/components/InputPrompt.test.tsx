@@ -37,6 +37,7 @@ import type { UseInputHistoryReturn } from '../hooks/useInputHistory.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
+import { useTranscriptSearch } from '../hooks/use-transcript-search.js';
 import { useVoiceInput } from '../hooks/use-voice-input.js';
 import type { MicrophonePermission } from '../hooks/use-voice-input.js';
 import { createVoiceRecorder } from '../voice/voice-recorder.js';
@@ -117,6 +118,13 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     popAllQueuedMessages: vi.fn(() => null),
     invalidateSubmittedPromptProvenance: vi.fn(),
   })),
+}));
+// Transcript search is mocked at the hook boundary: its match/jump logic is
+// covered by use-transcript-search.test.tsx, while the tests below assert the
+// composer's mode wiring (prefix, draft buffer, Enter/Esc scroll behavior).
+vi.mock('../hooks/use-transcript-search.js', () => ({
+  useTranscriptSearch: vi.fn(),
+  pickInitialMatchPosition: vi.fn(),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({
   useAgentViewState: vi.fn(() => ({
@@ -1703,6 +1711,33 @@ describe('InputPrompt', () => {
       displayText: 'some text',
       humanInput: { text: 'some text' },
     });
+    unmount();
+  });
+
+  it('does not run prompt history on Ctrl+Alt+arrows (transcript tool-output keys)', async () => {
+    props.buffer.setText('some text');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    mockBuffer.visualCursor = [0, 0];
+    stdin.write('\x1b[1;7A'); // Ctrl+Alt+Up
+    await wait();
+    stdin.write('\x1b[1;7B'); // Ctrl+Alt+Down
+    await wait();
+
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+
+    // The unmodified arrows must keep doing prompt history, proving only the
+    // transcript chords are swallowed.
+    mockBuffer.visualCursor = [0, 0];
+    stdin.write('[A');
+    await wait();
+    mockBuffer.visualCursor = [0, 'some text'.length];
+    stdin.write('[B');
+    await wait();
+    expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+    expect(mockInputHistory.navigateDown).toHaveBeenCalled();
     unmount();
   });
 
@@ -5368,6 +5403,265 @@ describe('InputPrompt', () => {
       await wait();
 
       expect(props.buffer.move).toHaveBeenCalledWith('home');
+      unmount();
+    });
+  });
+
+  describe('transcript search (Alt+S)', () => {
+    let nextMatch: Mock;
+    let previousMatch: Mock;
+    let scrollToIndex: Mock;
+    let scrollToEnd: Mock;
+    let getScrollIndex: Mock;
+    const match = { index: 3, itemType: 'user', snippet: 'deploy to prod' };
+
+    beforeEach(() => {
+      nextMatch = vi.fn();
+      previousMatch = vi.fn();
+      scrollToIndex = vi.fn(() => true);
+      scrollToEnd = vi.fn();
+      getScrollIndex = vi.fn(() => 7);
+      vi.mocked(useTranscriptSearch).mockReturnValue({
+        matches: [match],
+        truncated: false,
+        activeMatchPosition: 0,
+        activeMatch: match,
+        nextMatch,
+        previousMatch,
+        jumpUnsupported: false,
+      });
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        pendingHistoryItems: [],
+        history: [
+          { id: 1, type: 'user', text: 'deploy to prod' },
+          { id: 2, type: 'gemini', text: 'done' },
+        ],
+      } as unknown as ReturnType<typeof useUIState>);
+      mockBuffer.text = 'draft text';
+    });
+
+    const searchTree = () => (
+      <ScrollContext.Provider
+        value={{
+          scrollBy: vi.fn(),
+          hasScrollableTranscript: () => true,
+          scrollToIndex,
+          scrollToEnd,
+          getScrollIndex,
+        }}
+      >
+        <InputPrompt {...props} />
+      </ScrollContext.Provider>
+    );
+
+    const renderSearch = () => renderWithProviders(searchTree());
+
+    const openSearch = async (stdin: { write: (data: string) => void }) => {
+      await wait();
+      // Kitty CSI-u for Alt+S (the default transcript-search binding).
+      act(() => {
+        stdin.write('\x1b[115;3u');
+      });
+      await wait();
+    };
+
+    it('opens with Alt+S, clears the buffer, and counts matches once a query is typed', async () => {
+      const { stdin, stdout, unmount, rerender } = renderSearch();
+      await openSearch(stdin);
+
+      // Freshly opened: the buffer was cleared for the query, so the hint
+      // explains what to type rather than showing a counter.
+      expect(stdout.lastFrame()).toContain('(find:)');
+      expect(stdout.lastFrame()).toContain('Type to search this session');
+      expect(mockBuffer.setText).toHaveBeenCalledWith('');
+      expect(getScrollIndex).toHaveBeenCalled();
+
+      // Simulate typing a query (BaseTextInput writes into this same buffer).
+      mockBuffer.text = 'prod';
+      rerender(withProviders(searchTree()));
+
+      const frame = stdout.lastFrame();
+      expect(frame).toContain('1/1 matches');
+      expect(frame).toContain('deploy to prod');
+      unmount();
+    });
+
+    it('moves between matches with the arrow keys', async () => {
+      const { stdin, unmount } = renderSearch();
+      await openSearch(stdin);
+
+      act(() => {
+        stdin.write('\x1b[B');
+      });
+      await wait();
+      expect(nextMatch).toHaveBeenCalled();
+
+      act(() => {
+        stdin.write('\x1b[A');
+      });
+      await wait();
+      expect(previousMatch).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('keeps the match on Enter and hands the pre-search draft back', async () => {
+      const { stdin, stdout, unmount } = renderSearch();
+      await openSearch(stdin);
+
+      act(() => {
+        stdin.write('\r');
+      });
+      await wait();
+
+      expect(stdout.lastFrame()).not.toContain('(find:)');
+      expect(mockBuffer.setText).toHaveBeenLastCalledWith('draft text');
+      expect(scrollToEnd).not.toHaveBeenCalled();
+      expect(scrollToIndex).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('restores the draft and the original viewport position on Esc', async () => {
+      const { stdin, stdout, unmount } = renderSearch();
+      await openSearch(stdin);
+
+      act(() => {
+        stdin.write('\x1b');
+      });
+      await wait();
+
+      expect(stdout.lastFrame()).not.toContain('(find:)');
+      expect(mockBuffer.setText).toHaveBeenLastCalledWith('draft text');
+      expect(scrollToIndex).toHaveBeenCalledWith(7);
+      expect(scrollToEnd).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('restores live-tail following with scrollToEnd instead of top-aligning the last item', async () => {
+      const pendingHistoryItems = [
+        { type: 'gemini' as const, text: 'current answer' },
+      ];
+      // Banner + user + gemini + this pending row = four items, anchor 3.
+      // Although the anchor is the last OUTPUT row, it is also the LAST ITEM,
+      // so Escape must not top-align a tall final output and lose follow.
+      getScrollIndex.mockReturnValue(3);
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        pendingHistoryItems,
+        history: [
+          { id: 1, type: 'user', text: 'deploy to prod' },
+          { id: 2, type: 'gemini', text: 'done' },
+        ],
+      } as unknown as ReturnType<typeof useUIState>);
+      const { stdin, stdout, unmount } = renderSearch();
+      await openSearch(stdin);
+
+      expect(stdout.lastFrame()).toContain('(find:)');
+      expect(mockBuffer.setText).toHaveBeenLastCalledWith('');
+      act(() => {
+        stdin.write('\x1b');
+      });
+      await wait();
+
+      expect(stdout.lastFrame()).not.toContain('(find:)');
+      expect(scrollToEnd).toHaveBeenCalledOnce();
+      expect(scrollToIndex).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('keeps Ctrl+R inert so find owns the draft slot', async () => {
+      const { stdin, stdout, unmount } = renderSearch();
+      await openSearch(stdin);
+
+      act(() => {
+        mockBuffer.text = 'querytext';
+        stdin.write('\x12');
+      });
+      await wait();
+
+      expect(stdout.lastFrame()).toContain('(find:)');
+      expect(stdout.lastFrame()).not.toContain('(r:)');
+      act(() => {
+        stdin.write('\x1b');
+      });
+      await wait();
+
+      expect(stdout.lastFrame()).not.toContain('(r:)');
+      expect(mockBuffer.setText).toHaveBeenLastCalledWith('draft text');
+      unmount();
+    });
+
+    it('keeps shell toggle, shortcuts and suggestion acceptance out of the query', async () => {
+      const onToggleShortcuts = vi.fn();
+      const onPromptSuggestionDismiss = vi.fn();
+      const setShellModeActive = vi.fn();
+      const { stdin, stdout, unmount } = renderWithProviders(
+        <ScrollContext.Provider
+          value={{
+            scrollBy: vi.fn(),
+            hasScrollableTranscript: () => true,
+            scrollToIndex,
+            scrollToEnd,
+            getScrollIndex,
+          }}
+        >
+          <InputPrompt
+            {...props}
+            onToggleShortcuts={onToggleShortcuts}
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+            promptSuggestion="an unrelated suggestion"
+            setShellModeActive={setShellModeActive}
+          />
+        </ScrollContext.Provider>,
+      );
+      await openSearch(stdin);
+      for (const sequence of ['!', '?', '\t', '\x1b[C']) {
+        act(() => {
+          stdin.write(sequence);
+        });
+        await wait();
+      }
+
+      expect(stdout.lastFrame()).toContain('(find:)');
+      expect(stdout.lastFrame()).not.toContain('(r:)');
+      expect(mockBuffer.setText).toHaveBeenLastCalledWith('');
+      expect(onToggleShortcuts).not.toHaveBeenCalled();
+      expect(setShellModeActive).not.toHaveBeenCalled();
+      expect(onPromptSuggestionDismiss).not.toHaveBeenCalled();
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('does not start voice input for a space in the query', async () => {
+      const { stdin, unmount } = renderSearch();
+      await openSearch(stdin);
+      act(() => {
+        stdin.write(' ');
+      });
+      await wait();
+
+      expect(
+        mockedUseVoiceInput.mock.results[0].value.handleKeypress,
+      ).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('renders normally when restored history arrays are absent', async () => {
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+      } as unknown as ReturnType<typeof useUIState>);
+      const { stdin, stdout, unmount } = renderSearch();
+
+      // This is also how many pre-existing tests provide a partial UIState:
+      // absent arrays must not crash the component or block opening search.
+      await openSearch(stdin);
+      expect(stdout.lastFrame()).toContain('(find:)');
       unmount();
     });
   });

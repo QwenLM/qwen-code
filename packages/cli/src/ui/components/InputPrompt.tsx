@@ -47,7 +47,9 @@ import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { parseSlashCommand } from '../commands/commands.js';
 import { isSlashCommand } from '../utils/commandUtils.js';
-import { StreamingState } from '../types.js';
+import { isHistoryItemVisibleAfterRestore, StreamingState } from '../types.js';
+import { buildVirtualItems } from '../utils/virtual-items.js';
+import { useTranscriptSearch } from '../hooks/use-transcript-search.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
@@ -357,6 +359,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const [reverseSearchActive, setReverseSearchActive] = useState(false);
   const [commandSearchActive, setCommandSearchActive] = useState(false);
+  const [transcriptSearchActive, setTranscriptSearchActive] = useState(false);
+  // Viewport position to return to when transcript search is cancelled.
+  const transcriptSearchReturnIndexRef = useRef<number | null>(null);
+  // A following viewport's anchor is its last item, never null. Restore that
+  // state with scrollToEnd; top-aligning the last item disables auto-follow.
+  const transcriptSearchReturnFollowRef = useRef(false);
   const [textBeforeReverseSearch, setTextBeforeReverseSearch] = useState('');
   const [cursorPosition, setCursorPosition] = useState<[number, number]>([
     0, 0,
@@ -378,7 +386,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     config.getTargetDir(),
     slashCommands,
     commandContext,
-    reverseSearchActive,
+    // Transcript search reuses this buffer as its query, so ordinary command
+    // completion must stay off for the same reason as reverse search.
+    reverseSearchActive || transcriptSearchActive,
     config,
     // Suppress completion for history-restored text until the user edits it.
     !isHistoryRestoredText,
@@ -390,6 +400,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     !exportCompletion.suggestionDisplayProps &&
     !commandSearchActive &&
     !reverseSearchActive &&
+    !transcriptSearchActive &&
     !isAttachmentMode &&
     (completion.availableCategories?.length ?? 0) > 2;
 
@@ -418,6 +429,70 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     commandSearchHistory,
     commandSearchActive,
   );
+
+  // Alt+S in-session transcript search. It reuses this buffer as the query
+  // (exactly like Ctrl+R reuses it for prompt history), but the corpus is the
+  // rendered transcript and accepting a match scrolls the viewport instead of
+  // replacing the buffer. Indexes come from the same builder MainContent uses
+  // so a match always addresses the row the viewport actually renders.
+  const transcriptSearchItems = useMemo(
+    () =>
+      buildVirtualItems(
+        // The real store always supplies these arrays, but restored/partial
+        // presenter states (including unit harnesses) may omit them. Absent
+        // history means an empty transcript, not a render-time crash.
+        (uiState.history ?? []).filter(isHistoryItemVisibleAfterRestore),
+        uiState.pendingHistoryItems ?? [],
+      ),
+    // Keep this independent of whether the mode is active: opening uses this
+    // same list to remember whether it began following the last output item.
+    // If an empty list were supplied while closed, a tail-starting search
+    // could never remember to resume following on cancel.
+    [uiState.history, uiState.pendingHistoryItems],
+  );
+  const transcriptSearch = useTranscriptSearch({
+    isActive: transcriptSearchActive,
+    query: buffer.text,
+    items: transcriptSearchItems,
+    scrollActions,
+  });
+
+  const closeTranscriptSearch = (restoreScroll: boolean) => {
+    setTranscriptSearchActive(false);
+    // Supersede any in-flight clipboard read: the buffer is about to be
+    // replaced with the pre-search draft (same reason as reverse search).
+    submitEpochRef.current += 1;
+    buffer.setText(textBeforeReverseSearch);
+    const offset = logicalPosToOffset(
+      buffer.lines,
+      cursorPosition[0],
+      cursorPosition[1],
+    );
+    buffer.moveToOffset(offset);
+    setExpandedSuggestionIndex(-1);
+    if (restoreScroll) {
+      if (transcriptSearchReturnFollowRef.current) {
+        scrollActions?.scrollToEnd?.();
+      } else {
+        const returnIndex = transcriptSearchReturnIndexRef.current;
+        if (returnIndex === null) {
+          scrollActions?.scrollToEnd?.();
+        } else {
+          scrollActions?.scrollToIndex?.(returnIndex);
+        }
+      }
+    }
+    transcriptSearchReturnIndexRef.current = null;
+    transcriptSearchReturnFollowRef.current = false;
+  };
+
+  // handleInput is memoized with an explicit dependency list. Route the
+  // per-render search controller through refs so key handling sees fresh
+  // matches without having to resubscribe on every keystroke.
+  const transcriptSearchRef = useRef(transcriptSearch);
+  transcriptSearchRef.current = transcriptSearch;
+  const closeTranscriptSearchRef = useRef(closeTranscriptSearch);
+  closeTranscriptSearchRef.current = closeTranscriptSearch;
 
   // Prompt suggestion hook
   const followup = useFollowupSuggestionsCLI({
@@ -1091,8 +1166,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (key.paste) {
-        // Dismiss follow-up suggestion when user starts typing/pasting
-        if (buffer.text.length === 0 && availableSuggestion) {
+        // Do not paste prompt suggestions into a transcript query. Typed text
+        // belongs to the search, not to the blank-prompt follow-up feature.
+        if (
+          !transcriptSearchActive &&
+          buffer.text.length === 0 &&
+          availableSuggestion
+        ) {
           followup.dismiss();
           onPromptSuggestionDismiss?.();
         }
@@ -1176,6 +1256,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !shellModeActive &&
         !reverseSearchActive &&
         !commandSearchActive &&
+        !transcriptSearchActive &&
         !showCompletionSuggestions &&
         !isAttachmentMode &&
         buffer.text.length === 0 &&
@@ -1207,6 +1288,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       };
 
+      // Ctrl+Alt+Arrow is the transcript's tool-output jump. The arrow
+      // matchers below ignore modifiers, and KeypressContext fans every key
+      // out to all subscribers, so without this guard one keypress would both
+      // jump the transcript AND recall an older prompt into the composer.
+      if (
+        keyMatchers[Command.PREV_TOOL_OUTPUT](key) ||
+        keyMatchers[Command.NEXT_TOOL_OUTPUT](key)
+      ) {
+        return true;
+      }
+
       // Reset ESC count and hide prompt on any non-ESC key
       if (key.name !== 'escape') {
         if (escPressCount > 0 || showEscapePrompt) {
@@ -1217,6 +1309,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (
         key.sequence === '!' &&
         buffer.text === '' &&
+        !transcriptSearchActive &&
         !showCompletionSuggestions
       ) {
         // Hide shortcuts when toggling shell mode
@@ -1232,10 +1325,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      // Toggle keyboard shortcuts display with "?" when buffer is empty
+      // Toggle keyboard shortcuts display with "?" when buffer is empty and
+      // the composer is not being used as a query field. By this point the
+      // field may be a transcript query rather than a fresh blank prompt.
       if (
         key.sequence === '?' &&
         buffer.text === '' &&
+        !transcriptSearchActive &&
         !showCompletionSuggestions &&
         onToggleShortcuts
       ) {
@@ -1266,6 +1362,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           buffer.moveToOffset(offset);
           setExpandedSuggestionIndex(-1);
         };
+
+        if (transcriptSearchActive) {
+          // Esc cancels: restore the pre-search draft AND the viewport
+          // position that Alt+S started from.
+          closeTranscriptSearchRef.current(true);
+          return true;
+        }
 
         if (reverseSearchActive) {
           cancelSearch(
@@ -1384,6 +1487,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
+      if (transcriptSearchActive) {
+        const search = transcriptSearchRef.current;
+        if (keyMatchers[Command.NAVIGATION_UP](key)) {
+          search.previousMatch();
+          return true;
+        }
+        if (keyMatchers[Command.NAVIGATION_DOWN](key)) {
+          search.nextMatch();
+          return true;
+        }
+        if (keyMatchers[Command.SUBMIT_REVERSE_SEARCH](key)) {
+          // Enter accepts the current match: keep the viewport where the
+          // search left it and hand the pre-search draft back.
+          closeTranscriptSearchRef.current(false);
+          return true;
+        }
+        // Keep prompt-history bindings from recalling a prompt over the
+        // query. Every other key falls through to BaseTextInput, which keeps
+        // editing the query (and the search re-runs incrementally).
+        if (
+          keyMatchers[Command.HISTORY_UP](key) ||
+          keyMatchers[Command.HISTORY_DOWN](key)
+        ) {
+          return true;
+        }
+      }
+
       if (reverseSearchActive || commandSearchActive) {
         const isCommandSearch = commandSearchActive;
 
@@ -1463,6 +1593,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       // Export-specific arrow/Tab/Enter handling (Phase 1 + Phase 2).
       if (
+        !transcriptSearchActive &&
         !isHistoryRestoredText &&
         exportCompletion.handleExportInput(key, completion)
       ) {
@@ -1535,9 +1666,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.paste &&
         !key.shift &&
         buffer.text.length === 0 &&
-        !showCompletionSuggestions &&
         !reverseSearchActive &&
         !commandSearchActive &&
+        !transcriptSearchActive &&
+        !showCompletionSuggestions &&
         availableSuggestion
       ) {
         // Use the normal accept path. When the followup controller has no live
@@ -1557,6 +1689,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.ctrl &&
         !key.meta &&
         buffer.text.length === 0 &&
+        !transcriptSearchActive &&
         availableSuggestion
       ) {
         followup.accept('right', {
@@ -1700,10 +1833,35 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (!shellModeActive) {
-        if (keyMatchers[Command.REVERSE_SEARCH](key)) {
+        // Transcript search owns the buffer and the draft slot while open, so
+        // the two search modes must not be stacked.
+        if (
+          keyMatchers[Command.REVERSE_SEARCH](key) &&
+          !transcriptSearchActive
+        ) {
           setCommandSearchActive(true);
           setTextBeforeReverseSearch(buffer.text);
           setCursorPosition(buffer.cursor);
+          return true;
+        }
+
+        if (
+          keyMatchers[Command.TRANSCRIPT_SEARCH](key) &&
+          !reverseSearchActive &&
+          !commandSearchActive &&
+          !transcriptSearchActive
+        ) {
+          setTranscriptSearchActive(true);
+          // Same draft-preservation contract as reverse search: the buffer
+          // becomes the query, and closing restores what was being typed.
+          setTextBeforeReverseSearch(buffer.text);
+          setCursorPosition(buffer.cursor);
+          transcriptSearchReturnIndexRef.current =
+            scrollActions?.getScrollIndex?.() ?? null;
+          transcriptSearchReturnFollowRef.current =
+            transcriptSearchReturnIndexRef.current ===
+            transcriptSearchItems.length - 1;
+          buffer.setText('');
           return true;
         }
 
@@ -1868,7 +2026,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // This prevents accidental execution of destructive slash commands
         // (/clear, /quit) and aligns with Claude Code's design: suggestion
         // acceptance requires explicit Tab or arrow-key action.
-        if (buffer.text.length === 0 && availableSuggestion) {
+        if (
+          !transcriptSearchActive &&
+          buffer.text.length === 0 &&
+          availableSuggestion
+        ) {
           followup.accept('enter', {
             fallbackText: promptSuggestion ?? undefined,
           });
@@ -1977,8 +2139,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       // All remaining keys (readline shortcuts, text input) handled by BaseTextInput
-      // Dismiss follow-up suggestion only on printable character input
+      // Dismiss follow-up suggestion only on printable character input when
+      // this really is a prompt, not a transcript query.
       if (
+        !transcriptSearchActive &&
         buffer.text.length === 0 &&
         availableSuggestion &&
         key.sequence &&
@@ -2033,6 +2197,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       resetEscapeState,
       vimHandleInput,
       reverseSearchActive,
+      transcriptSearchActive,
+      transcriptSearchItems.length,
       textBeforeReverseSearch,
       cursorPosition,
       recentPasteTime,
@@ -2204,7 +2370,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const activeCompletion = getActiveCompletion();
   const shouldUseExportSuggestions =
-    !commandSearchActive && !reverseSearchActive && !isHistoryRestoredText;
+    !commandSearchActive &&
+    !reverseSearchActive &&
+    !transcriptSearchActive &&
+    !isHistoryRestoredText;
   const suggestionDisplayProps =
     shouldUseExportSuggestions && exportCompletion.suggestionDisplayProps
       ? exportCompletion.suggestionDisplayProps
@@ -2215,10 +2384,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           scrollOffset: activeCompletion.visibleStartIndex,
         };
   const shouldShowSuggestions =
-    (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
-    (!isHistoryRestoredText || commandSearchActive || reverseSearchActive
-      ? activeCompletion.showSuggestions
-      : false);
+    !transcriptSearchActive &&
+    ((shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
+      (!isHistoryRestoredText || commandSearchActive || reverseSearchActive
+        ? activeCompletion.showSuggestions
+        : false));
 
   // Mouse hover/select must target the SAME completion source that builds
   // suggestionDisplayProps. For reverse/command search, selecting also resets
@@ -2409,6 +2579,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         )
       ) : commandSearchActive ? (
         <Text color={theme.text.accent}>(r:) </Text>
+      ) : transcriptSearchActive ? (
+        <Text color={theme.text.accent}>(find:) </Text>
       ) : approvalModePromptStyle ? (
         approvalModePromptStyle.prefix
       ) : (
@@ -2424,9 +2596,29 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       : 2 // "! " = 2 chars
     : commandSearchActive
       ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
-      : approvalMode === ApprovalMode.YOLO
-        ? 2 // "* " = 2 chars
-        : 2; // "> " = 2 chars
+      : transcriptSearchActive
+        ? 9 // "(find:) " (inner) + " " (outer) = 9 cols
+        : approvalMode === ApprovalMode.YOLO
+          ? 2 // "* " = 2 chars
+          : 2; // "> " = 2 chars
+
+  const transcriptQuery = transcriptSearchActive ? buffer.text.trim() : '';
+  let transcriptSearchHint = '';
+  if (transcriptSearchActive) {
+    if (transcriptSearch.jumpUnsupported) {
+      transcriptSearchHint =
+        'Search needs the virtual viewport (ui.useTerminalBuffer) · Esc to close';
+    } else if (transcriptQuery.length === 0) {
+      transcriptSearchHint =
+        'Type to search this session · ↑/↓ matches · Enter keep position · Esc cancel';
+    } else if (transcriptSearch.matches.length === 0) {
+      transcriptSearchHint = `No matches for "${transcriptQuery}" · Esc cancel`;
+    } else {
+      const position = transcriptSearch.activeMatchPosition + 1;
+      const total = `${transcriptSearch.matches.length}${transcriptSearch.truncated ? '+' : ''}`;
+      transcriptSearchHint = `${position}/${total} matches · ↑/↓ to move · Enter keep position · Esc cancel`;
+    }
+  }
 
   return (
     <>
@@ -2466,6 +2658,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         renderLine={renderLineWithHighlighting}
         mouseEnabled={mouseInteractionsEnabled}
       />
+      {transcriptSearchActive && (
+        <Box marginLeft={2} marginRight={2} flexDirection="column">
+          <Text color={theme.text.secondary} wrap="truncate">
+            {transcriptSearchHint}
+          </Text>
+          {transcriptSearch.activeMatch && (
+            <Text color={theme.text.secondary} wrap="truncate">
+              {transcriptSearch.activeMatch.snippet}
+            </Text>
+          )}
+        </Box>
+      )}
       {shouldShowSuggestions && (
         <Box marginLeft={2} marginRight={2}>
           <SuggestionsDisplay

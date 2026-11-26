@@ -2,7 +2,8 @@
 
 Status: **implemented**, PR #4146 ships:
 core viewport, ASCII scrollbar with auto-hide animation, SGR mouse-wheel, `ui.useTerminalBuffer` gate, keyboard scroll keys.
-Scrollbar drag / in-app search / alt-buffer mode / dual-write to host scrollback are scoped out to V.3+ (see §7).
+The viewport also supports turn/tool-output structure navigation and in-session transcript search (PR #17024). The shared item builder keeps their indexes aligned with rendered rows; a navigation cursor survives clamped jumps, and cancelling search restores the draft and follow state.
+Alt-buffer mode / dual-write to host scrollback are scoped out to V.3+ (see §7).
 Author: 秦奇
 Tracking branch: `feat/virtual-viewport-on-ink7` (base: `main`)
 
