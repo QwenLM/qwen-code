@@ -4262,6 +4262,55 @@ describe('retained snapshot archive lifecycle', () => {
     }
   });
 
+  it.each(['active', 'archived'] as const)(
+    'fails closed on a dangling sidecar symlink instead of running the %s fast path lock-free',
+    async (sourceState) => {
+      const workspace = path.join(root, `dangling-${sourceState}`);
+      const service = new SessionService(workspace);
+      const sessionId = `550e8400-e29b-41d4-a716-44665544${sourceState === 'active' ? '0092' : '0093'}`;
+      writeSessionFile(workspace, sessionId, sourceState);
+      const sidecarPath = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        sourceState,
+      );
+      fs.symlinkSync(path.join(root, 'missing-sidecar-target'), sidecarPath);
+      const localCoordinator = new SessionArchiveCoordinator();
+
+      const result =
+        sourceState === 'active'
+          ? await archiveDaemonSessions({
+              sessionIds: [sessionId],
+              service,
+              bridge: { closeSession: async () => {} },
+              coordinator: localCoordinator,
+            })
+          : await unarchiveDaemonSessions({
+              sessionIds: [sessionId],
+              service,
+              coordinator: localCoordinator,
+            });
+      const moved = 'archived' in result ? result.archived : result.unarchived;
+
+      expect(moved).toEqual([]);
+      expect(result.errors).toHaveLength(1);
+      expect(String(result.errors[0]?.error)).toContain(
+        'Could not read worktree sidecar for archive lock: unsafe sidecar file type',
+      );
+      expect(
+        fs.existsSync(sessionPath(workspace, sessionId, sourceState)),
+      ).toBe(true);
+      expect(
+        fs.existsSync(
+          sessionPath(
+            workspace,
+            sessionId,
+            sourceState === 'active' ? 'archived' : 'active',
+          ),
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('does not fail archive for an unbound missing checkout with no snapshot pair', async () => {
     const target = makeRetentionRepo(root, 'primary');
     const session = await makeRetainedSession(target, {

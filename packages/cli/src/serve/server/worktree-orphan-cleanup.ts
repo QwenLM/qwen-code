@@ -244,13 +244,24 @@ export async function withWorktreeArchiveMove<T>(
   sourceState: 'active' | 'archived',
   move: () => Promise<T>,
 ): Promise<T> {
-  // With no sidecar to inspect, enter the archive-exclusive coordinator before
-  // the next session in the same batch maps to its own asynchronous work.
+  // Keep no-sidecar work on the caller's synchronous prefix so the next batch
+  // item cannot acquire its coordinator first.
+  const sidecarAbsent = (sidecarPath: string): boolean => {
+    try {
+      fs.lstatSync(sidecarPath);
+      return false;
+    } catch (error) {
+      // Only a genuinely missing entry skips the strict sidecar read. A
+      // dangling symlink, unreadable parent or other stat error stays on the
+      // fail-closed path below.
+      return (error as NodeJS.ErrnoException).code === 'ENOENT';
+    }
+  };
   if (
-    !fs.existsSync(
+    sidecarAbsent(
       service.getWorktreeSessionPathForArchiveState(sessionId, 'active'),
     ) &&
-    !fs.existsSync(
+    sidecarAbsent(
       service.getWorktreeSessionPathForArchiveState(sessionId, 'archived'),
     )
   ) {
