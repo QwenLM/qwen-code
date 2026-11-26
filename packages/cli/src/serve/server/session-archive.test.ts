@@ -65,6 +65,7 @@ import {
   executeWorktreeCleanup,
   preclassifyWorktreeCleanup,
   verifyWorktreeCleanupOwnership,
+  withWorktreeArchiveMove,
 } from './worktree-orphan-cleanup.js';
 import * as worktreeOwnership from './worktree-ownership-op.js';
 import { restoreWorktreeFromSessionSnapshot } from './session-worktree-restore.js';
@@ -2383,6 +2384,35 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     await expect(pending).resolves.toMatchObject({ unarchived: [sessionId] });
   });
 
+  it('holds every no-sidecar batch coordinator before returning and preserves close order', async () => {
+    const firstId = '550e8400-e29b-41d4-a716-446655440094';
+    const secondId = '550e8400-e29b-41d4-a716-446655440095';
+    writeSessionFile(workspaceDir, firstId, 'active');
+    writeSessionFile(workspaceDir, secondId, 'active');
+    const coordinator = new SessionArchiveCoordinator();
+    const closeSession = vi.fn(async (_sessionId: string) => {});
+
+    const pending = archiveDaemonSessions({
+      sessionIds: [firstId, secondId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession },
+      coordinator,
+    });
+
+    for (const sessionId of [firstId, secondId]) {
+      expect(() => coordinator.assertNotTransitioning(sessionId)).toThrow(
+        SessionArchivingError,
+      );
+    }
+    await expect(pending).resolves.toMatchObject({
+      archived: [firstId, secondId],
+    });
+    expect(closeSession.mock.calls.map(([sessionId]) => sessionId)).toEqual([
+      firstId,
+      secondId,
+    ]);
+  });
+
   it('keeps worktree content and binding across archive and unarchive', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440089';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
@@ -4266,12 +4296,39 @@ describe('retained snapshot archive lifecycle', () => {
     'fails closed on a dangling sidecar symlink instead of running the %s fast path lock-free',
     async (sourceState) => {
       const workspace = path.join(root, `dangling-${sourceState}`);
-      const service = new SessionService(workspace);
+      const runtimeBaseDir = path.join(root, `storage-dangling-${sourceState}`);
+      const service = new SessionService(workspace, { runtimeBaseDir });
       const sessionId = `550e8400-e29b-41d4-a716-44665544${sourceState === 'active' ? '0092' : '0093'}`;
-      writeSessionFile(workspace, sessionId, sourceState);
       const sidecarPath = service.getWorktreeSessionPathForArchiveState(
         sessionId,
         sourceState,
+      );
+      const oppositeState = sourceState === 'active' ? 'archived' : 'active';
+      const oppositeSidecarPath = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        oppositeState,
+      );
+      const transcriptPath = path.join(
+        path.dirname(sidecarPath),
+        `${sessionId}.jsonl`,
+      );
+      const oppositeTranscriptPath = path.join(
+        path.dirname(oppositeSidecarPath),
+        `${sessionId}.jsonl`,
+      );
+      fs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
+      fs.writeFileSync(
+        transcriptPath,
+        `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2024-01-01T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: workspace,
+          version: '1.0.0',
+        })}\n`,
       );
       fs.symlinkSync(path.join(root, 'missing-sidecar-target'), sidecarPath);
       const localCoordinator = new SessionArchiveCoordinator();
@@ -4296,18 +4353,43 @@ describe('retained snapshot archive lifecycle', () => {
       expect(String(result.errors[0]?.error)).toContain(
         'Could not read worktree sidecar for archive lock: unsafe sidecar file type',
       );
-      expect(
-        fs.existsSync(sessionPath(workspace, sessionId, sourceState)),
-      ).toBe(true);
-      expect(
-        fs.existsSync(
-          sessionPath(
-            workspace,
-            sessionId,
-            sourceState === 'active' ? 'archived' : 'active',
-          ),
-        ),
-      ).toBe(false);
+      expect(fs.existsSync(transcriptPath)).toBe(true);
+      expect(fs.existsSync(oppositeTranscriptPath)).toBe(false);
+    },
+  );
+
+  it.runIf(
+    process.platform !== 'win32' &&
+      typeof process.getuid === 'function' &&
+      process.getuid() !== 0,
+  )(
+    'does not treat an unreadable sidecar parent as a missing sidecar',
+    async () => {
+      const workspace = path.join(root, 'unreadable-parent');
+      const service = new SessionService(workspace, {
+        runtimeBaseDir: path.join(root, 'storage-unreadable-parent'),
+      });
+      const sessionId = '550e8400-e29b-41d4-a716-446655440096';
+      const sidecarPath = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      const sidecarParent = path.dirname(sidecarPath);
+      fs.mkdirSync(sidecarParent, { recursive: true });
+      fs.chmodSync(sidecarParent, 0o000);
+      let moved = false;
+
+      try {
+        await expect(
+          withWorktreeArchiveMove(service, sessionId, 'active', async () => {
+            moved = true;
+            return 'moved';
+          }),
+        ).rejects.toThrow(/EACCES/);
+        expect(moved).toBe(false);
+      } finally {
+        fs.chmodSync(sidecarParent, 0o700);
+      }
     },
   );
 
