@@ -34,6 +34,7 @@ import {
 import { OmniTransportGuardError } from './guard.js';
 import { OmniObjectStore, prepareOmniDownloadsDir } from './storage.js';
 import { sniffMediaType } from './recognition.js';
+import { captureFixedPolicyHookStopReporter } from './policy/fixed-policy-hook-stop.js';
 
 const debugLogger = createDebugLogger('omni:tool-result');
 
@@ -193,6 +194,7 @@ export async function processToolResultOmniMedia(
         signal,
         displayName,
         origin: 'tool',
+        onHookStop: captureFixedPolicyHookStopReporter(),
       });
       // §6.2/D8 ordering contract documented on buildTranscriptParts.
       const transcriptParts: Part[] = buildTranscriptParts(

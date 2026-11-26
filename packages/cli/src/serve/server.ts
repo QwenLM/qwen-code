@@ -17,6 +17,7 @@ import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
   hashDaemonWorkspace,
+  supportsLocalExtensionTurnStore,
   readCronTasks,
   Storage,
   WebTerminalRegistry,
@@ -206,6 +207,10 @@ import {
   type KeepaliveSessionResumeRequest,
 } from './scheduled-task-keepalive.js';
 import {
+  startWorktreeRetention,
+  type WorktreeRetentionController,
+} from './server/worktree-retention.js';
+import {
   registerWorkspaceDiagnosticStatusRoutes,
   registerWorkspaceQualifiedDiagnosticStatusRoutes,
   registerWorkspaceQualifiedStatusRoutes,
@@ -237,6 +242,7 @@ import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
 } from './routes/workspace-permissions.js';
+import { registerWorkspaceInputHistoryRoutes } from './routes/workspace-input-history.js';
 import {
   readEffectiveSessionWorkflow,
   registerWorkspaceQualifiedSettingsRoutes,
@@ -986,6 +992,8 @@ export function createServeApp(
   let runtimeStopReady = false;
   let runtimeStopsClosing = false;
   const scheduledActivity = new WeakMap<WorkspaceRuntime, () => boolean>();
+  const retentionStops = new Set<Promise<void>>();
+  const retentionStopFailures = new Set<unknown>();
   const rehydratingWorkspaces = new Set<WorkspaceRuntime>();
   const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
   // The scheduled-task helpers retain an outer watchdog for injected bridges.
@@ -1238,6 +1246,37 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      sessionRetireIfIdleAvailable: () =>
+        workspaceRegistry
+          .listAll()
+          .some(
+            (runtime) =>
+              runtime.trusted &&
+              runtime.provenance !== 'live-conversation' &&
+              !runtime.routeFileSystemFactory.sshWorkspace &&
+              runtime.bridge.retireSessionIfIdle !== undefined,
+          ),
+      turnSkillFileSnapshotAvailable: () =>
+        workspaceRegistry
+          .listAll()
+          .some(
+            (runtime) =>
+              runtime.trusted &&
+              !runtime.routeFileSystemFactory.sshWorkspace &&
+              typeof runtime.bridge.updateTurnSkillLease === 'function',
+          ),
+      turnExtensionStoreLeaseAvailable: () =>
+        supportsLocalExtensionTurnStore(
+          path.join(Storage.getGlobalQwenDir(), 'extension-store'),
+        ) &&
+        workspaceRegistry
+          .listAll()
+          .some(
+            (runtime) =>
+              runtime.trusted &&
+              !runtime.routeFileSystemFactory.sshWorkspace &&
+              runtime.bridge.supportsTurnExtensionStoreLease === true,
+          ),
       userSkillActivationAvailable:
         deps.persistUserSkillsActivation !== undefined,
       sessionArtifactsPersistenceAvailable:
@@ -3578,6 +3617,13 @@ export function createServeApp(
     mutate,
     safeBody,
   });
+  registerWorkspaceInputHistoryRoutes(app, {
+    mutate,
+    safeBody,
+    boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
   registerWorkspaceVoiceRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     mutate,
@@ -4112,7 +4158,17 @@ export function createServeApp(
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
   // usage only; open GET like /daemon/status, with its own short TTL cache.
-  registerUsageStatsRoutes(app);
+  registerUsageStatsRoutes(app, {
+    getLedgerRuntimeBaseDirs: () => [
+      ...workspaceRegistry
+        .listManaged()
+        .filter((runtime) => runtime.trusted)
+        .map((runtime) => runtime.sessionRuntimeBaseDir),
+      // This is the default CLI's shared ledger, not whichever runtime root
+      // happens to be ambient in this daemon process.
+      Storage.getGlobalQwenDir(),
+    ],
+  });
 
   // Resident management of scheduled-task-owned sessions — opt-in, so tests and
   // embeds that call createServeApp neither spawn sessions on boot nor hold a
@@ -4229,7 +4285,29 @@ export function createServeApp(
     // Every trusted workspace gets its own keepalive + rehydration against its
     // own cron file + bridge.
     const keepaliveStops = new Map<string, () => void>();
+    const retentions = new Map<string, WorktreeRetentionController>();
+    const stopRetentionForWorkspace = (
+      workspaceCwd: string,
+    ): Promise<void> | undefined => {
+      const controller = retentions.get(workspaceCwd);
+      if (!controller) return undefined;
+      const stopped = controller.stop();
+      retentionStops.add(stopped);
+      void stopped
+        .finally(() => retentionStops.delete(stopped))
+        .catch((error: unknown) => {
+          retentionStopFailures.add(error);
+        });
+      const remove = () => {
+        if (retentions.get(workspaceCwd) === controller) {
+          retentions.delete(workspaceCwd);
+        }
+      };
+      void stopped.then(remove, remove);
+      return stopped;
+    };
     const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
+      if (runtimeStopsClosing) return;
       const trusted = runtime.primary
         ? isPrimaryWorkspaceTrusted()
         : runtime.trusted;
@@ -4246,7 +4324,16 @@ export function createServeApp(
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
-      scheduledActivity.set(runtime, () => keepalive.activeWork);
+      retentions.set(
+        runtime.workspaceCwd,
+        startWorktreeRetention(runtime, workspaceRegistry, archiveCoordinator),
+      );
+      scheduledActivity.set(
+        runtime,
+        () =>
+          keepalive.activeWork ||
+          retentions.get(runtime.workspaceCwd)?.activeWork === true,
+      );
       rehydrateWorkspace(runtime);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
     };
@@ -4262,16 +4349,23 @@ export function createServeApp(
       app.locals as { stopScheduledTaskKeepalive?: () => void }
     ).stopScheduledTaskKeepalive = () => {
       runtimeStopsClosing = true;
+      for (const workspaceCwd of retentions.keys()) {
+        void stopRetentionForWorkspace(workspaceCwd);
+      }
       for (const stop of keepaliveStops.values()) stop();
       keepaliveStops.clear();
     };
     (
       app.locals as {
-        stopScheduledTaskKeepaliveForWorkspace?: (workspaceCwd: string) => void;
+        stopScheduledTaskKeepaliveForWorkspace?: (
+          workspaceCwd: string,
+        ) => Promise<void> | undefined;
       }
     ).stopScheduledTaskKeepaliveForWorkspace = (workspaceCwd) => {
+      const stopped = stopRetentionForWorkspace(workspaceCwd);
       keepaliveStops.get(workspaceCwd)?.();
       keepaliveStops.delete(workspaceCwd);
+      return stopped;
     };
     (
       app.locals as {
@@ -4618,6 +4712,29 @@ export function createServeApp(
   }
   if (stopHostedPackagePreparation)
     serveAppLifecycle.addAppDrain(stopHostedPackagePreparation);
+  serveAppLifecycle.addAppDrain(async () => {
+    (
+      app.locals as { stopScheduledTaskKeepalive?: () => void }
+    ).stopScheduledTaskKeepalive?.();
+    const drains = await Promise.allSettled([...retentionStops]);
+    const errors = [
+      ...new Set([
+        ...retentionStopFailures,
+        ...drains
+          .filter(
+            (result): result is PromiseRejectedResult =>
+              result.status === 'rejected',
+          )
+          .map((result) => result.reason as unknown),
+      ]),
+    ];
+    if (errors.length > 0) {
+      throw new AggregateError(
+        errors,
+        'Worktree retention drain is incomplete.',
+      );
+    }
+  });
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
@@ -4665,6 +4782,7 @@ export function createServeApp(
           .stopAgentHostRestore,
       );
       stopAppResource(() => webTerminalRegistry.dispose());
+      pendingDrains.push(...retentionStops);
       const drains = await Promise.allSettled(pendingDrains);
       stopAppResource(() => acpHandleRef.current?.dispose());
       const bridgeDrains = await Promise.allSettled(

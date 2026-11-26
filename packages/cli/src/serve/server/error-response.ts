@@ -90,6 +90,7 @@ import {
   WorktreeResetUnsupportedError,
   WorktreeSessionSupersededError,
 } from './worktree-reset-errors.js';
+import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -284,6 +285,15 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (
+    err instanceof Error &&
+    'code' in err &&
+    err.code === 'session_retirement_fenced'
+  ) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(409).json({ code: err.code, error: err.message });
+    return;
+  }
   if (err instanceof SessionAttachmentUploadError) {
     if (err.status >= 500) {
       reportBridgeError(err.cause ?? err, ctx, daemonLog);
@@ -755,6 +765,14 @@ export function sendBridgeError(
       code: 'worktree_session_superseded',
       sessionId: err.sessionId,
       replacementSessionId: err.replacementSessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeRestoreUnavailableError) {
+    res.status(409).json({
+      error: err.message,
+      code: err.code,
+      ...(ctx?.sessionId === undefined ? {} : { sessionId: ctx.sessionId }),
     });
     return;
   }

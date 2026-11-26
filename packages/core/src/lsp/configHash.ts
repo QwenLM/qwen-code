@@ -11,6 +11,7 @@ import { sortJsonValue } from './sort-json-value.js';
 export function lspServerConfigHash(config: LspServerConfig): string {
   const hashInput = {
     source: config.source,
+    extensionArtifactRevision: config.extensionArtifactRevision,
     name: config.name,
     languages: config.languages,
     transport: config.transport,

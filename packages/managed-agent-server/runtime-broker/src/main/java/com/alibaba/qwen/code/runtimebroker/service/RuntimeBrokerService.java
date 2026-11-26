@@ -22,6 +22,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeStageStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
@@ -50,6 +51,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -69,8 +71,8 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.m
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.newScheduler;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.prepareExecutionReference;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.referenceString;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireDuration;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireSameSession;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sameReceipt;
@@ -303,11 +305,11 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         this.executionRecovery.setAdoptedSessionLookup(observationCoordinator::requireOrAdoptReadySession);
     }
 
-    public void configureStageStore(com.alibaba.qwen.code.runtimebroker.RuntimeStageStore stageStore) {
+    public void configureStageStore(RuntimeStageStore stageStore) {
         observationCoordinator.configureStageStore(stageStore, null, null, -1, -1L);
     }
 
-    public void configureStageStore(com.alibaba.qwen.code.runtimebroker.RuntimeStageStore stageStore,
+    public void configureStageStore(RuntimeStageStore stageStore,
             Duration claimLease, Duration scanInterval, int longPollWaitMs, long attachedCooldownMs) {
         observationCoordinator.configureStageStore(
                 stageStore, claimLease, scanInterval, longPollWaitMs, attachedCooldownMs);
@@ -1198,14 +1200,27 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     Map<String, Object> durable = publicationVerifier.finished(saved);
                     if (durable != null) {
                         return CompletableFuture.completedFuture(executionReconciler.absorbRuntimeStatus(saved,
-                                Map.of("state", "settled", "result", durable), false).getRecord());
+                                RuntimeExecutionReconciler.requireRuntimeStatus(
+                                        Map.of("state", "settled", "result", durable)), false).getRecord());
                     }
                 }
             }
             return executionState.unknownWhenAdmissionClosed(
                     bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
-                            .thenApply(context -> executionState.requireExecution(context,
-                                    executionId)),
+                            .thenCompose(context -> {
+                                ToolExecutionRecord current = executionState.requireExecution(context, executionId);
+                                // Adoption may have checked while the tool was still running.
+                                if (current.getState() == ToolExecutionRecord.State.EXECUTING
+                                        && current.getDispatchOwner() != null
+                                        && !brokerOwnerId.equals(current.getDispatchOwner())) {
+                                    return executionReconciler.reconcileInContext(context, current, true, true)
+                                            .thenApply(ExecutionReconciliation::getRecord)
+                                            .toCompletableFuture()
+                                            // Bound this poll without abandoning the shared Worker lookup.
+                                            .completeOnTimeout(current, 2, TimeUnit.SECONDS);
+                                }
+                                return CompletableFuture.completedFuture(current);
+                            }),
                     harnessSessionId, runtimeSessionId, executionId);
         }));
     }

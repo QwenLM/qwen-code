@@ -26,6 +26,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -39,8 +40,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class ClientFilesController {
     private final ClientFilesRelayService service;
     /** One live downlink per (tenant, actor, Session); a new stream replaces it. */
-    private final java.util.concurrent.ConcurrentHashMap<String, SseEmitter> streams =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, SseEmitter> streams =
+            new ConcurrentHashMap<>();
 
     public ClientFilesController(ClientFilesRelayService service) {
         this.service = service;
