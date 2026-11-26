@@ -4379,7 +4379,7 @@ describe('runNonInteractive', () => {
       markApiHistoryPrompt(content, 'client-A');
       const historyOwner = {
         history: [content],
-        unaccountedMemorySnapshots: new WeakSet(),
+        unaccountedContextSnapshots: new WeakSet<Part>(),
       } as unknown as LlmChat;
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,

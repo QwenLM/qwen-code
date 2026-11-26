@@ -42,6 +42,7 @@ export const workspacePackageNames = new Set([
   '@qwen-code/node-repl-mcp',
   '@qwen-code/qwen-code',
   '@qwen-code/qwen-code-core',
+  '@qwen-code/qwen-code-next',
   '@qwen-code/qwen-live',
   '@qwen-code/sdk',
   '@qwen-code/web-shell',
