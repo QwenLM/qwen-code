@@ -1430,7 +1430,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         event.sessionId,
         event.promptId,
       );
-      if (publishedPromptSettlementsRef.current.has(key)) return;
+      if (publishedPromptSettlementsRef.current.has(key)) return false;
       publishedPromptSettlementsRef.current.add(key);
       const listeners = [...promptSettlementListenersRef.current];
       queueMicrotask(() => {
@@ -1446,6 +1446,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
         }
       });
+      return true;
     },
     [],
   );

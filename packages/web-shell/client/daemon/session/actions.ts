@@ -346,7 +346,7 @@ export interface CreateDaemonSessionActionsArgs {
       blockId?: string;
     },
   ) => void;
-  onPromptSettled?: (event: DaemonPromptSettledEvent) => void;
+  onPromptSettled?: (event: DaemonPromptSettledEvent) => boolean;
   onContinuationAdmitted?: (
     owner: DaemonSessionClient,
     promptId: string,
@@ -1765,7 +1765,28 @@ export function createDaemonSessionActions({
             const active = activePromptsRef.current.get(sessionId);
             if (active?.controller === ctrl) active.reject?.(error);
           });
-        return await turnResult;
+        try {
+          return await turnResult;
+        } catch (error) {
+          if (accepted.completion && !isDaemonTurnError(error)) {
+            const cancelled = isAbortError(error);
+            onPromptSettled?.({
+              sessionId,
+              promptId: accepted.promptId,
+              originatorClientId: session.clientId,
+              outcome: cancelled ? 'cancelled' : 'failed',
+              ...(cancelled
+                ? { stopReason: 'cancelled' }
+                : {
+                    error: {
+                      message:
+                        error instanceof Error ? error.message : String(error),
+                    },
+                  }),
+            });
+          }
+          throw error;
+        }
       } catch (error) {
         if (isAbortError(error)) {
           if (sessionRef.current?.sessionId === sessionId) {
@@ -2091,12 +2112,19 @@ export function createDaemonSessionActions({
         }
         throw error;
       }
-      void accepted.completion?.catch((error: unknown) => {
-        if (sessionRef.current === session && !isAbortError(error)) {
-          store.dispatch({ type: 'assistant.done', reason: 'error' });
-          dispatchActionError(addNotice, 'Prompt failed', error, 'send_prompt');
-        }
-      });
+      const completion = accepted.completion?.then(
+        () => ({ outcome: 'completed' as const, stopReason: 'end_turn' }),
+        (error: unknown) =>
+          isAbortError(error)
+            ? { outcome: 'cancelled' as const, stopReason: 'cancelled' }
+            : {
+                outcome: 'failed' as const,
+                error: {
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                },
+              },
+      );
       if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
         store.appendLocalUserMessage(
           text,
@@ -2144,6 +2172,34 @@ export function createDaemonSessionActions({
         uploaded.fileReferences,
         displayedFiles,
       );
+      void completion?.then((settlement) => {
+        if (
+          onPromptSettled?.({
+            sessionId: session.sessionId,
+            promptId: accepted.promptId,
+            originatorClientId: session.clientId,
+            ...settlement,
+          }) === false ||
+          sessionRef.current !== session ||
+          hasSessionActivePrompt()
+        )
+          return;
+        flushTranscript();
+        clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+        store.dispatch({
+          type: 'assistant.done',
+          reason: settlement.stopReason ?? 'error',
+        });
+        setPromptStatus('idle');
+        if (settlement.outcome === 'failed') {
+          dispatchActionError(
+            addNotice,
+            'Prompt failed',
+            settlement.error.message,
+            'send_prompt',
+          );
+        }
+      });
       if (options?.signal?.aborted) {
         throw (
           options.signal.reason ?? new DOMException('Aborted', 'AbortError')

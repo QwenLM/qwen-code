@@ -7968,6 +7968,7 @@ function createActionsHarness(
     hasSessionActivePrompt?: () => boolean;
     manualSessionClearRef?: { current: boolean };
     onPromptAdmitted?: ReturnType<typeof vi.fn>;
+    onPromptSettled?: ReturnType<typeof vi.fn>;
     onContinuationAdmitted?: ReturnType<typeof vi.fn>;
     onPromptRemoved?: ReturnType<typeof vi.fn>;
     onGeneratedUiInvalidated?: ReturnType<typeof vi.fn>;
@@ -8074,6 +8075,7 @@ function createActionsHarness(
     addNotice: opts.addNotice ?? vi.fn(),
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
     onPromptAdmitted: opts.onPromptAdmitted,
+    onPromptSettled: opts.onPromptSettled,
     onContinuationAdmitted: opts.onContinuationAdmitted,
     onPromptRemoved: opts.onPromptRemoved,
     onGeneratedUiInvalidated: opts.onGeneratedUiInvalidated,
@@ -9870,10 +9872,12 @@ describe('sendPrompt idempotent admission auto-retry', () => {
       submitPrompt,
     };
     const addNotice = vi.fn();
+    const onPromptSettled = vi.fn(() => true);
     const { actions, activePromptsRef, store } = createActionsHarness({
       session,
       getSessionAdapter: () => sessionAdapter,
       addNotice,
+      onPromptSettled,
       connection: {
         status: 'connected',
         sessionId: 'sa-prompt',
@@ -9915,6 +9919,9 @@ describe('sendPrompt idempotent admission auto-retry', () => {
     failing.reject(new Error('stream interrupted'));
 
     await expect(failedTurn).rejects.toThrow('stream interrupted');
+    expect(onPromptSettled).toHaveBeenCalledWith(
+      expect.objectContaining({ promptId: 'p-fail', outcome: 'failed' }),
+    );
     expect(submitPrompt).toHaveBeenCalledTimes(1);
     expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
     expect(addNotice).toHaveBeenCalledWith(
@@ -9937,6 +9944,48 @@ describe('sendPrompt idempotent admission auto-retry', () => {
     await expect(okTurn).resolves.toEqual({ stopReason: 'end_turn' });
     hanging.reject(new Error('late close'));
     await Promise.resolve();
+    expect(onPromptSettled).toHaveBeenCalledTimes(1);
+
+    const cancelled = Promise.withResolvers<void>();
+    submitPrompt.mockResolvedValueOnce({
+      promptId: 'p-cancelled',
+      completion: cancelled.promise,
+    });
+    const cancelledTurn = actions.sendPrompt('stop this turn');
+    await vi.waitFor(() =>
+      expect(activePromptsRef.current.get('sa-prompt')?.promptId).toBe(
+        'p-cancelled',
+      ),
+    );
+    activePromptsRef.current.get('sa-prompt')!.controller.abort();
+    await expect(cancelledTurn).resolves.toEqual({ stopReason: 'cancelled' });
+    expect(onPromptSettled).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        promptId: 'p-cancelled',
+        outcome: 'cancelled',
+      }),
+    );
+    cancelled.resolve();
+
+    const queued = Promise.withResolvers<void>();
+    submitPrompt.mockResolvedValueOnce({
+      promptId: 'p-queued',
+      completion: queued.promise,
+    });
+    await expect(actions.submitPrompt('queued prompt')).resolves.toEqual({
+      promptId: 'p-queued',
+    });
+    store.dispatch.mockClear();
+    queued.resolve();
+    await vi.waitFor(() =>
+      expect(onPromptSettled).toHaveBeenLastCalledWith(
+        expect.objectContaining({ promptId: 'p-queued', outcome: 'completed' }),
+      ),
+    );
+    expect(store.dispatch).toHaveBeenCalledWith({
+      type: 'assistant.done',
+      reason: 'end_turn',
+    });
   });
 
   it('detaches an adapter session at admission while its turn is still pending', async () => {
