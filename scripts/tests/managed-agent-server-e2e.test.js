@@ -41,6 +41,7 @@ import {
   isParenthesizedExpression,
   isPropertyAccessExpression,
   isPropertyAssignment,
+  isPropertyDeclaration,
   isReturnStatement,
   isSatisfiesExpression,
   isSetAccessorDeclaration,
@@ -124,11 +125,23 @@ const fencedShellBlocks = (text) =>
 // extractor shared by the AST helpers below: a key, a tool name and a call id
 // all mean the same thing whether they are spelled as a string or a template,
 // and two copies of this predicate drifted apart once already.
-const literalText = (node) =>
-  node !== undefined &&
-  (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node))
-    ? node.text
-    : undefined;
+const literalText = (node) => {
+  if (node === undefined) return undefined;
+  if (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node)) {
+    return node.text;
+  }
+  // A concatenation of literals is still a literal: `'tool' + 'Calls'` names
+  // the same member as `'toolCalls'`, so it is equally attributable.
+  if (
+    isBinaryExpression(node) &&
+    node.operatorToken.kind === SyntaxKind.PlusToken
+  ) {
+    const left = literalText(node.left);
+    const right = literalText(node.right);
+    return left !== undefined && right !== undefined ? left + right : undefined;
+  }
+  return undefined;
+};
 
 // The classifier delegation, as placement. The decision itself is executed
 // elsewhere; what is pinned here is only where the delegation sits and that
@@ -181,7 +194,11 @@ const classifierDelegation = (text) => {
   // Names written anywhere in the file. A hoisted array is only enumerable at
   // its declaration, so an answer built by writing to it afterwards must red
   // even though the declaration itself looks like a literal array.
-  const writtenNames = new Set();
+  // Only the writes that add something unattributable make a source unsafe.
+  const unsafeWrites = new Set();
+  // `const alias = calls` is one binding hop; an unsafe write through the
+  // alias is an unsafe write to the array it names.
+  const aliasOf = new Map();
   const rootName = (node) => {
     let current = unwrap(node);
     while (
@@ -195,14 +212,35 @@ const classifierDelegation = (text) => {
       ? current.text
       : undefined;
   };
+  // A write only makes a hoisted array unenumerable when what it adds cannot
+  // be attributed. `calls.push(fakeToolCall('cron_list', …))` builds the same
+  // bytes as an inline array, so it stays acceptable; a hand-built element
+  // does not.
+  const addsUnattributable = (values) =>
+    values.some((value) => {
+      const v = unwrap(value);
+      if (v === undefined) return true;
+      if (isArrayLiteralExpression(v)) {
+        return v.elements.some(
+          (el) =>
+            !isFakeToolCall(el) || literalText(el.arguments[0]) === undefined,
+        );
+      }
+      if (isMappedFakeToolCalls(v)) return false;
+      return !isFakeToolCall(v) || literalText(v.arguments[0]) === undefined;
+    });
+  const markWritten = (name, unsafe) => {
+    if (name === undefined) return;
+    if (unsafe) unsafeWrites.add(name);
+  };
   const collectWrite = (node) => {
     if (
       isBinaryExpression(node) &&
       node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
       node.operatorToken.kind <= SyntaxKind.LastAssignment
     ) {
-      const name = rootName(node.left);
-      if (name !== undefined) writtenNames.add(name);
+      // A plain assignment replaces the value wholesale.
+      markWritten(rootName(node.left), addsUnattributable([node.right]));
     }
     if (
       isCallExpression(node) &&
@@ -213,12 +251,11 @@ const classifierDelegation = (text) => {
       // Object/Reflect take the target as an argument; a mutator method has
       // it as the receiver.
       const ns = node.expression.expression;
-      const target =
-        isIdentifier(ns) && (ns.text === 'Object' || ns.text === 'Reflect')
-          ? node.arguments[0]
-          : ns;
-      const name = rootName(target);
-      if (name !== undefined) writtenNames.add(name);
+      const inPlace =
+        isIdentifier(ns) && (ns.text === 'Object' || ns.text === 'Reflect');
+      const target = inPlace ? node.arguments[0] : ns;
+      const added = inPlace ? node.arguments.slice(1) : [...node.arguments];
+      markWritten(rootName(target), addsUnattributable(added));
     }
     forEachChild(node, collectWrite);
   };
@@ -226,18 +263,39 @@ const classifierDelegation = (text) => {
     // A named function declaration binds its name just as a const does, so a
     // fake passed by reference resolves whether it was written as an arrow or
     // as `function skillFake(...) {}`.
-    const bound =
-      isVariableDeclaration(node) && isIdentifier(node.name)
-        ? { name: node.name.text, value: node.initializer }
-        : isFunctionDeclaration(node) && node.name !== undefined
-          ? { name: node.name.text, value: node }
-          : undefined;
-    if (bound !== undefined) {
-      const seen = declarations.get(bound.name);
-      declarations.set(bound.name, {
+    const record = (name, value) => {
+      const seen = declarations.get(name);
+      declarations.set(name, {
         count: (seen?.count ?? 0) + 1,
-        initializer: seen === undefined ? bound.value : undefined,
+        // Keep the first initializer: the count is what makes a second
+        // declaration ambiguous, so it must be the clause that rejects.
+        initializer: seen === undefined ? value : seen.initializer,
       });
+    };
+    if (isVariableDeclaration(node)) {
+      if (isIdentifier(node.name)) {
+        record(node.name.text, node.initializer);
+        const source = unwrap(node.initializer);
+        if (source !== undefined && isIdentifier(source)) {
+          aliasOf.set(node.name.text, source.text);
+        }
+      } else {
+        // A binding pattern declares names too. `const { toolCalls } = f()`
+        // shadows a hoisted array just as `const toolCalls = f()` does, and
+        // its source is not enumerable, so every name it binds is ambiguous.
+        const walk = (child) => {
+          if (isBindingElement(child) && isIdentifier(child.name)) {
+            record(child.name.text, undefined);
+          }
+          forEachChild(child, walk);
+        };
+        walk(node.name);
+      }
+    } else if (isFunctionDeclaration(node) && node.name !== undefined) {
+      // A named function declaration binds its name just as a const does, so a
+      // fake passed by reference resolves whether it was written as an arrow
+      // or as `function skillFake(...) {}`.
+      record(node.name.text, node);
     }
     forEachChild(node, collectDeclarations);
   };
@@ -329,7 +387,11 @@ const classifierDelegation = (text) => {
         isMethodDeclaration(fn) ||
         isGetAccessorDeclaration(fn) ||
         isSetAccessorDeclaration(fn) ||
-        isConstructorDeclaration(fn)
+        isConstructorDeclaration(fn) ||
+        // A class FIELD initialised with an arrow is a member too: something
+        // must read the field and invoke it, so it does not credit the fake
+        // either.
+        (fn.parent !== undefined && isPropertyDeclaration(fn.parent))
       ) {
         return undefined;
       }
@@ -355,9 +417,12 @@ const classifierDelegation = (text) => {
     const walk = (node) => {
       if (isBindingElement(node) && isIdentifier(node.name)) {
         const property = node.propertyName ?? node.name;
-        if (isIdentifier(property) && property.text === 'body') {
-          names.add(node.name.text);
-        }
+        // `{ 'body': body }` binds the same property as `{ body }`; the quoted
+        // key parses as a string literal, so read it either way.
+        const key = isIdentifier(property)
+          ? property.text
+          : literalText(property);
+        if (key === 'body') names.add(node.name.text);
       }
       forEachChild(node, walk);
     };
@@ -548,12 +613,13 @@ const classifierDelegation = (text) => {
             declared !== undefined && isIdentifier(declared)
               ? resolve(declared)
               : declared;
-          // A name written after its declaration no longer holds the array
-          // the declaration enumerates, so the resolution is not an answer.
+          // A name that received an unattributable write no longer holds the
+          // array the declaration enumerates, so the resolution is not an
+          // answer. A push of literal-named calls keeps it enumerable.
           const rewritten =
             declared !== undefined &&
             isIdentifier(declared) &&
-            writtenNames.has(declared.text);
+            unsafeWrites.has(declared.text);
           if (
             rewritten ||
             source === undefined ||
@@ -589,6 +655,17 @@ const classifierDelegation = (text) => {
   };
   collectDeclarations(file);
   collectWrite(file);
+  // Carry an unsafe write back along the alias chain to the array it names.
+  for (const [alias, source] of aliasOf) {
+    if (!unsafeWrites.has(alias)) continue;
+    let target = source;
+    const seen = new Set([alias]);
+    while (target !== undefined && !seen.has(target)) {
+      seen.add(target);
+      unsafeWrites.add(target);
+      target = aliasOf.get(target);
+    }
+  }
   collectFakes(file);
   visit(file);
   // The arms are the flags of the fakes that actually delegate. Filtering by
@@ -671,7 +748,9 @@ const delegationViolations = (delegation) => {
     violations.push('no-loop-hand-built');
   }
   return [...new Set(violations)];
-}; // The minted-id call sites and their loud-failure fallbacks, as structure: a
+};
+
+// The minted-id call sites and their loud-failure fallbacks, as structure: a
 // raw-text match over the whole runner is satisfied by a commented-out copy or
 // a duplicate in another arm, neither of which wires anything. The parser
 // cannot see comments, and each site carries the binding it initializes and
@@ -4597,6 +4676,44 @@ describe('managed-agent-server e2e runner', () => {
             "]);\nif (body['x']) return answer;",
         ),
       ],
+      // The same key spelled as a concatenation of literals: still the same
+      // member, so still attributable and still flagged.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst answer = { toolCalls: [] };\nReflect.set(answer, 'tool' + 'Calls', [" +
+            HAND +
+            "]);\nif (body['x']) return answer;",
+        ),
+      ],
+      // The unattributable write reaches the array one binding hop away.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst calls = [fakeToolCall('cron_list', {}, 'loop-cron-list')];\nconst alias = calls;\nalias.push(" +
+            HAND +
+            ");\nif (body['x']) return { toolCalls: calls };",
+        ),
+      ],
+      // A destructuring declaration shadows the hoisted array with a source
+      // the pin never enumerated, so the shorthand must not resolve to it.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst toolCalls = [fakeToolCall('cron_list', {}, 'c')];\n{ const { toolCalls } = makeCalls(); if (body['x']) return { toolCalls }; }",
+        ),
+      ],
+      // A class FIELD initialised with an arrow is a class member: something
+      // must read the field and invoke it, so it does not credit the fake.
+      [
+        'arm-scoping',
+        withSkill(
+          'class K { respond = () => {\n' + SKILL + '\n}; }\nvoid new K();',
+        ),
+      ],
       // The arm flag tested in the polarity that never runs the block.
       [
         'arm-scoping',
@@ -4700,7 +4817,8 @@ describe('managed-agent-server e2e runner', () => {
         ),
       ],
       // The same ambiguity with NO write anywhere: the name is declared twice
-      // and never assigned, so only the declaration count can reject it.
+      // and never assigned, so the declaration count is what rejects it: the
+      // first initializer is kept, so nothing else can mask the ambiguity.
       [
         'no-loop-hand-built',
         withSkill(
@@ -4915,6 +5033,26 @@ describe('managed-agent-server e2e runner', () => {
       ],
       // A non-null assertion on the request body is the same argument.
       ['asserted body argument', withSkill(SKILL.replace('(body,', '(body!,'))],
+      // A push of literal-named calls builds the same bytes as an inline
+      // array, so the write does not make the source unenumerable.
+      [
+        'push-built cron answer',
+        withSkill(
+          SKILL +
+            "\nconst calls = [];\ncalls.push(fakeToolCall('cron_list', {}, 'loop-cron-list'));\nif (body['x']) return { toolCalls: calls };",
+        ),
+      ],
+      // A quoted property key binds the same `body` property as a bare one.
+      [
+        'quoted body key',
+        [
+          decision,
+          "if (loopSkill) {\nfake = await startFakeOpenAIServer(({ 'body': body }) => {\n" +
+            SKILL +
+            '\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
       // The arm callback written as a named FUNCTION DECLARATION and passed by
       // reference: a declaration binds its name just as a const does.
       [
