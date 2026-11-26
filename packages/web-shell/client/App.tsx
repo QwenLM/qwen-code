@@ -21137,8 +21137,10 @@ export function App({
           }
           if (cmd === 'mcp') {
             const mcpArg = text.slice(match[0].length).trim().toLowerCase();
-            workspaceActions
-              .loadMcpStatus()
+            const mcpLoad = activeWorkspaceCwd
+              ? workspace.client.workspaceByCwd(activeWorkspaceCwd).runtimeMcp()
+              : workspaceActions.loadMcpStatus();
+            mcpLoad
               .then((status) => {
                 setMcpDialogMessage({
                   status,
@@ -21927,6 +21929,7 @@ export function App({
       t,
       workspaceActions,
       workspace.client,
+      activeWorkspaceCwd,
       workspaceContextActive,
       composerAttachmentsEnabled,
       effectiveSessionContext,
@@ -24819,6 +24822,7 @@ export function App({
               <MemoryMessage
                 addSignal={memoryAddSignal}
                 addScope={memoryAddScope}
+                workspaceCwd={activeWorkspaceCwd}
                 onMessage={(text, type = 'status') => {
                   store.dispatch([{ type, text }]);
                 }}
@@ -26009,6 +26013,7 @@ export function App({
                     ) : activePanel === 'mcp' && mcpDialogMessage ? (
                       <McpManagerPage
                         message={mcpDialogMessage}
+                        workspaceCwd={activeWorkspaceCwd}
                         onClose={() => {
                           setMcpDialogMessage(null);
                           closePanel();
