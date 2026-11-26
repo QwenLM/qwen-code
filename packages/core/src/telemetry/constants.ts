@@ -6,6 +6,12 @@
 
 export const SERVICE_NAME = 'qwen-code';
 
+/**
+ * Usage statistics collection endpoint (Alibaba Cloud RUM). Shared so the
+ * headless first-run notice names the same host the logger uploads to.
+ */
+export const USAGE_STATS_HOSTNAME = 'gb4w8c3ygj-default-sea.rum.aliyuncs.com';
+
 export const EVENT_USER_PROMPT = 'qwen-code.user_prompt';
 export const EVENT_USER_RETRY = 'qwen-code.user_retry';
 export const EVENT_TOOL_CALL = 'qwen-code.tool_call';

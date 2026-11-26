@@ -12,6 +12,7 @@ import {
   type ResultOptions,
 } from './BaseJsonOutputAdapter.js';
 import { observeHeadlessJsonToolResultWire } from '../tool-result-boundary-diagnostics.js';
+import { recordUsageStatisticsNoticeShown } from '../usage-statistics-notice.js';
 
 /**
  * JSON output adapter that collects all messages and emits them
@@ -132,6 +133,8 @@ export class JsonOutputAdapter
       const frame = `${json}\n`;
       observeHeadlessJsonToolResultWire(this.messages, frame);
       process.stdout.write(frame);
+      // A usage-statistics notice in this document has now been delivered.
+      recordUsageStatisticsNoticeShown();
     }
   }
 
