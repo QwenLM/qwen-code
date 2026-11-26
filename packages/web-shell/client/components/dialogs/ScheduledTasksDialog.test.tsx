@@ -108,7 +108,10 @@ async function mount(
       workspaceId?: string;
       sessionId?: string | null;
     }) => void;
-    onTaskMutated?: () => void;
+    onTaskMutated?: (task?: {
+      workspaceId?: string;
+      sessionId?: string | null;
+    }) => void;
     currentSession?: {
       sessionId: string;
       workspaceCwd: string;
@@ -1869,7 +1872,12 @@ describe('ScheduledTasksDialog run now', () => {
     actions.runScheduledTask.mockResolvedValue(task);
 
     click(document.querySelector('[aria-label="Run now"]'));
-    await vi.waitFor(() => expect(onTaskMutated).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(onTaskMutated).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: undefined,
+        sessionId: 'sess-notify',
+      }),
+    );
     // Mounted-only dialog reload skips redundant list fetches after showChat unmounts the dialog.
     expect(actions.listScheduledTasks).toHaveBeenCalledTimes(2);
   });

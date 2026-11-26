@@ -1091,6 +1091,20 @@ describe('CronScheduler', () => {
   describe('durable ownership', () => {
     useDurableTmpDir('cron-owner-test-');
 
+    it('retains session-only gates during scoped close before enableDurable is called', async () => {
+      const local = scheduler.create(
+        '* * * * *',
+        'standalone gate',
+        true,
+        'gate.sh',
+      );
+      collectFires();
+      expect(scheduler.forceFireJob(local.id)).toBe(true);
+      expect(scheduler.hasGatesInFlight('standalone-session')).toBe(true);
+      await expect(scheduler.delete(local.id)).resolves.toBe(true);
+      expect(scheduler.hasGatesInFlight('standalone-session')).toBe(false);
+    });
+
     it('retains session-only and unbound gates during scoped close', async () => {
       await scheduler.enableDurable('session-owner');
       const local = scheduler.create(

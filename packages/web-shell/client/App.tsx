@@ -9870,16 +9870,32 @@ export function App({
       reportScheduledTaskError(error, fallback, true),
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
-  const refreshSessionScheduledTasksRef = useRef(sessionScheduledTasks.refresh);
-  refreshSessionScheduledTasksRef.current = sessionScheduledTasks.refresh;
   const matchesCurrentScheduledTaskScope = useCallback(
-    (task: { id: string; workspaceId?: string; sessionId?: string | null }) =>
+    (task: { workspaceId?: string; sessionId?: string | null }) =>
       scheduledTaskWorkspaceTarget.resolvable &&
       task.sessionId === connection.sessionId &&
       (task.workspaceId ?? null) ===
         (scheduledTaskWorkspaceTarget.workspaceId ?? null),
     [scheduledTaskWorkspaceTarget, connection.sessionId],
   );
+  const isDurableTaskDeletedRef = useRef(
+    (task: { id: string; workspaceId?: string; sessionId?: string | null }) =>
+      matchesCurrentScheduledTaskScope(task) &&
+      sessionScheduledTasks.isDurableTaskDeletionConfirmed(task),
+  );
+  isDurableTaskDeletedRef.current = (task) =>
+    matchesCurrentScheduledTaskScope(task) &&
+    sessionScheduledTasks.isDurableTaskDeletionConfirmed(task);
+  const notifyScheduledTaskMutatedRef = useRef(
+    (task?: { workspaceId?: string; sessionId?: string | null }) => {
+      if (task && !matchesCurrentScheduledTaskScope(task)) return;
+      sessionScheduledTasks.refresh();
+    },
+  );
+  notifyScheduledTaskMutatedRef.current = (task) => {
+    if (task && !matchesCurrentScheduledTaskScope(task)) return;
+    sessionScheduledTasks.refresh();
+  };
   const openSessionScheduledTaskDetail = useCallback(
     (entry: SessionScheduledTask) => {
       openScheduledTaskPanel(
@@ -27320,13 +27336,10 @@ export function App({
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
                       isTaskDeleted={(task) =>
-                        matchesCurrentScheduledTaskScope(task) &&
-                        sessionScheduledTasks.isDurableTaskDeletionConfirmed(
-                          task,
-                        )
+                        isDurableTaskDeletedRef.current(task)
                       }
-                      onTaskMutated={() =>
-                        refreshSessionScheduledTasksRef.current()
+                      onTaskMutated={(task) =>
+                        notifyScheduledTaskMutatedRef.current(task)
                       }
                       onTaskDeleted={(task) => {
                         if (!matchesCurrentScheduledTaskScope(task)) return;

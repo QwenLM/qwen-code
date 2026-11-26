@@ -466,7 +466,11 @@ async function readTaskDeletionGenerations(
     throw error;
   }
 
-  const parsed = JSON.parse(raw) as {
+  const parsedRaw: unknown = JSON.parse(raw);
+  if (typeof parsedRaw !== 'object' || parsedRaw === null) {
+    throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
+  }
+  const parsed = parsedRaw as {
     version?: unknown;
     incarnation?: unknown;
     watermark?: unknown;

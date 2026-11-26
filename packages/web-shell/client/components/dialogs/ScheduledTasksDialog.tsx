@@ -197,7 +197,10 @@ interface ScheduledTasksDialogProps {
     workspaceId?: string;
     sessionId?: string | null;
   }) => void;
-  onTaskMutated?: () => void;
+  onTaskMutated?: (task?: {
+    workspaceId?: string;
+    sessionId?: string | null;
+  }) => void;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -1447,7 +1450,14 @@ export function ScheduledTasksDialog({
           formWorkspaceId,
         );
       }
-      onTaskMutated?.();
+      onTaskMutated?.({
+        workspaceId: formWorkspaceId,
+        sessionId: editingId
+          ? (editingSessionId ?? null)
+          : runDestination === 'current'
+            ? (currentSession?.sessionId ?? null)
+            : null,
+      });
       if (!mountedRef.current) return;
       resetForm();
       await reload();
@@ -1499,7 +1509,10 @@ export function ScheduledTasksDialog({
           task.sessionId,
         );
         await reload();
-        onTaskMutated?.();
+        onTaskMutated?.({
+          workspaceId: task.workspaceId,
+          sessionId: task.sessionId ?? null,
+        });
       } catch (err) {
         onError(err, t('scheduledTasks.error.toggleFailed'));
       } finally {
@@ -1549,7 +1562,10 @@ export function ScheduledTasksDialog({
       try {
         await runScheduledTaskManually(task, actions, onRunPrompt, t, {
           reload: async () => {
-            onTaskMutated?.();
+            onTaskMutated?.({
+              workspaceId: task.workspaceId,
+              sessionId: task.sessionId ?? null,
+            });
             if (mountedRef.current) {
               await reload();
             }
@@ -1566,7 +1582,7 @@ export function ScheduledTasksDialog({
           onOneShotError: onError,
         });
       } finally {
-        setRunningTaskId(null);
+        if (mountedRef.current) setRunningTaskId(null);
       }
     },
     [

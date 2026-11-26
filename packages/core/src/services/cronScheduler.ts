@@ -715,7 +715,9 @@ export class CronScheduler {
       this.restorablePerRunOneShots.delete(key);
       this.consumedPerRunOneShots.delete(key);
       this.consumedPerRunRemovalGenerations.delete(key);
-      return this.cancelWakeup(id);
+      return typeof expectedTaskSessionId === 'string'
+        ? false
+        : this.cancelWakeup(id);
     }
 
     this.jobs.delete(key);
@@ -808,7 +810,7 @@ export class CronScheduler {
       if (job.boundSessionId === ownerSessionId) return true;
       if (job.boundSessionId !== undefined) continue;
       if (job.durable && ownerSessionId !== this.sessionId) continue;
-      if (this.sessionId !== undefined && ownerSessionId !== this.sessionId) {
+      if (this.sessionId !== null && ownerSessionId !== this.sessionId) {
         continue;
       }
       return true;
