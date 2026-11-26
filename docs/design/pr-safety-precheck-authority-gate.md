@@ -288,7 +288,10 @@ content rules, as before. Only a missing head SHA still fails closed for them.
 
 ## Verified results (2026-11-26)
 
-- Unit suite: 119 passed, 0 failed. Two of those invoke the CLI from a checkout
+- Unit suite: 124 passed, 0 failed. One of those imports the module in a child
+  process with no script argument, because a guard that resolves the argument
+  throws when there is none — the exact call shape the suite itself uses. Two
+  invoke the CLI from a checkout
   path containing a space and through a symlink, because the entry guard used to
   compare the module URL with a hand-built path and matched neither — the child
   exited 0 with no output, which is indistinguishable from a clean decision when
@@ -303,7 +306,7 @@ content rules, as before. Only a missing head SHA still fails closed for them.
   `ambient_credential:cloud_metadata`, `ambient_credential:env_dump`.
 - #18364: `ambient_credential:cloud_metadata`,
   `ambient_credential:proc_environ`.
-- Mutation witness: 32 arms, all killed, none skipped, plus an unmutated control
+- Mutation witness: 34 arms, all killed, none skipped, plus an unmutated control
   that must stay green. The harness mirrors the repository layout in its temp
   dir, because the workflow-contract test reads the workflow through a relative
   URL — without the mirror that case reds in every arm for a missing file, and a
@@ -371,6 +374,25 @@ defect outside the rules entirely: the script's entry guard compared
 `import.meta.url` with a hand-built URL, so a checkout path containing a space or
 a symlink made the child exit 0 with **no output at all**. Both now have committed
 cases. Reverting the guard reds 2 tests; removing the new path reds 1.
+
+The sixth round added `)` to the terminator set, and that had a cost the round
+itself flagged: ordinary source whose last argument is `env` or `set` — `load(env)`,
+`.then(set)`, `map(set)` — was held. A bare `(` matched a function call as readily
+as a subshell, so the paren anchor is now a subshell anchor with a lookbehind that
+excludes a preceding word character; the four call shapes have committed release
+cases and a restoration arm reds them. The round also caught a stale code comment
+that still asserted the withdrawn "latent" trust premise — corrected in place with
+the design, not only in the docs. And the entry guard had to learn to tolerate
+being imported: resolving `process.argv[1]` when it is absent threw before any
+assertion, which is precisely how the test suite loads the module. That regression
+is pinned too.
+
+Two corrections to earlier statements in this design. The disclosed option-grammar
+residual named `env "FOO=bar"` but not `env FOO="bar baz"`, which is the same
+grammar and equally admitted. And the entry-guard fix does **not** eliminate the
+need, when replaying a base or previous head, to keep that older script copy
+inside the checkout: the workaround belongs to those arms, whose guard is still
+the hand-built URL, not to the fixed one.
 
 ## Open questions
 

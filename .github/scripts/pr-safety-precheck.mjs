@@ -41,9 +41,11 @@ const PROTECTED_DIR_PREFIXES = [
 ];
 // Context files load hierarchically, so a nested copy steers the agent too.
 // QWEN.local.md is the project-local slot the memory loader appends; both it
-// and .qwen/rules/ are read only under folder trust, so they are latent
-// channels today rather than live ones. Protected anyway: a lane that turns
-// trust on must not silently widen what an outside PR can inject.
+// and .qwen/rules/ reach the system prompt by default, because the trust flag is
+// opt-in hardening rather than an opt-out of trust (isWorkspaceTrusted returns
+// true when the flag is off). The review job avoids them only because it checks
+// out the default branch, so any lane that runs inside the contributed tree must
+// still meet them held.
 const PROTECTED_FILE_NAMES = new Set([
   'AGENTS.md',
   'QWEN.md',
@@ -88,7 +90,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   // prefixes outside the anchor set such as `time env` or `command env`.
   [
     'ambient_credential:env_dump',
-    /(?:^|[;&|(`]|\$\()\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>)]|$)|["'](?=\s*(?:[|;&>)]|$)))|(?:^|[;&|(`]|\$\()\s*printenv\b|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*(?:=\S+)?\s+)*-[a-z]*c[a-z]*\s*["']\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|printenv\b|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$))/m,
+    /(?:^|[;&|`]|\$\(|(?<![\w$])\()\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>)]|$)|["'](?=\s*(?:[|;&>)]|$)))|(?:^|[;&|`]|\$\(|(?<![\w$])\()\s*printenv\b|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*(?:=\S+)?\s+)*-[a-z]*c[a-z]*\s*["']\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|printenv\b|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$))/m,
   ],
   // `.credentials` needs a boundary that admits every spelling of a file read
   // — bare, quoted (including a markdown code span's backtick), or after a
@@ -320,6 +322,11 @@ function main() {
 // Compare resolved URLs: `file://${argv[1]}` never matches when the checkout
 // path contains a space (%20) or goes through a symlink (/tmp -> /private/tmp),
 // and a silent no-output exit 0 is indistinguishable from a clean decision.
-if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+// argv[1] is absent when the module is imported rather than executed, which the
+// unit tests and every direct probe do — realpathSync(undefined) throws there.
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+) {
   main();
 }

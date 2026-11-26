@@ -603,6 +603,10 @@ for (const [label, payload] of [
   ['single shell option', 'set -o pipefail'],
   ['declare that assigns one variable', 'declare -x FOO=bar'],
   ['shell -c running an ordinary command', 'bash -c "npm test"'],
+  ['a call whose last argument is env', 'load(env);'],
+  ['a then handler named set', '.then(set)'],
+  ['a map handler named set', 'map(set)'],
+  ['a call with an env argument', 'const x = fn(env);'],
   ['property access named credentials', 'const x = obj.credentials;'],
   ['optional chaining named credentials', 'const x = a?.credentials;'],
   [
@@ -853,6 +857,23 @@ for (const [label, launch] of [
     }
   });
 }
+
+test('the module imports cleanly, which is how the suite itself uses it', () => {
+  const href = new URL('./pr-safety-precheck.mjs', import.meta.url).href;
+  // With -e there is no script argument, and resolving it used to throw before
+  // any assertion ran. A static import inside this test cannot cover that case.
+  const stdout = execFileSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `const m = await import(${JSON.stringify(href)}); console.log(typeof m.assessPullRequestSafety);`,
+    ],
+    { encoding: 'utf8' },
+  );
+
+  assert.equal(stdout.trim(), 'function');
+});
 
 // Pinning the CLI alone is half a contract: renaming the flag in the workflow
 // would pass an argument the CLI ignores, and the fail-closed arm would go dark
