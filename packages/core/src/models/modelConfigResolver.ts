@@ -190,6 +190,8 @@ export function resolveModelConfig(
       'retryInitialDelayMs',
       'retryMaxDelayMs',
       'retryErrorCodes',
+      'maxOutputValidationRetries',
+      'outputValidationRetryDisabled',
     ] as const) {
       const value = settings?.generationConfig?.[field];
       if (value !== undefined) {
