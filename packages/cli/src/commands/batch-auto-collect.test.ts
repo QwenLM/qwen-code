@@ -254,8 +254,10 @@ describe('batch auto-collect', () => {
       `Batch task ${taskId} has a submission that could not be matched to a provider batch — it may exist and be billing. Check with: qwen batch collect ${taskId}`,
     ]);
     const lists = h.api.listBatches.mock.calls.length;
+    h.clock.now += 1_000;
+    // Its future poll time must not shorten the wait after the warning.
+    expect(await ac.tick()).toBe(60_000);
     h.clock.now += 10 * 60_000;
-    // Its stale poll time must not shrink the scan interval to the minimum.
     expect(await ac.tick()).toBe(60_000);
     expect(h.notices).toHaveLength(1);
     expect(h.api.listBatches.mock.calls.length).toBe(lists);

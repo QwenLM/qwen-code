@@ -288,6 +288,21 @@ describe('runPlan', () => {
     expect(h.api.deleteFile).toHaveBeenCalledWith(h.deps.ep, 'file-in-1');
   });
 
+  it('refuses an oversized UTF-8 request before uploading anything', async () => {
+    const h = (harness = setup());
+    fs.writeFileSync(
+      path.join(h.root, 'docs', 'zh', 'a.md'),
+      '文'.repeat(400_000),
+    );
+
+    await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(
+      /1048576-byte line limit/,
+    );
+    expect(h.api.uploadJsonl).not.toHaveBeenCalled();
+    expect(h.api.createBatch).not.toHaveBeenCalled();
+    expect(h.store.list()).toEqual([]);
+  });
+
   it('records an ambiguous create instead of resubmitting, and collect reconciles it', async () => {
     const h = (harness = setup());
     h.files.set(
@@ -314,6 +329,7 @@ describe('runPlan', () => {
     );
     const task = h.store.load(taskIdOf(h));
     expect(task.status).toBe('submit-unknown');
+    expect(h.api.deleteFile).not.toHaveBeenCalled();
 
     await collectTask(h.deps, task.id);
     expect(h.api.createBatch).toHaveBeenCalledTimes(1); // never resubmitted
@@ -1464,6 +1480,8 @@ describe('review fixes', () => {
     const task = h.store.load(taskIdOf(h));
     expect(task.attempts[0].submitState).toBe('unknown');
     expect(task.attempts[0].batchId).toBeUndefined();
+    expect(task.attempts[0].inputFileId).toBe('file-in-1');
+    expect(h.api.deleteFile).not.toHaveBeenCalled();
   });
 
   it('holds an item whose target cannot be written and still delivers the rest', async () => {
