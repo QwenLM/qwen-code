@@ -500,7 +500,6 @@ export default {
   'Screen Reader Mode': 'Режим программы чтения с экрана',
   'Max Session Turns': 'Макс. количество ходов сессии',
   'Skip Next Speaker Check': 'Пропустить проверку следующего говорящего',
-  'Skip Loop Detection': 'Пропустить обнаружение циклов',
   'Skip Startup Context': 'Пропустить начальный контекст',
   'Enable OpenAI Logging': 'Включить логирование OpenAI',
   'OpenAI Logging Directory': 'Директория логов OpenAI',

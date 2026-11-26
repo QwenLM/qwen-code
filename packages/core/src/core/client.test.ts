@@ -422,8 +422,6 @@ vi.mock('../telemetry/loggers.js', () => ({
   logNextSpeakerCheck: vi.fn(),
   logApiRequest: vi.fn(),
   logLoopDetected: vi.fn(),
-  logLoopDetectionDisabled: vi.fn(),
-  logLoopProtection: vi.fn(),
   logMemoryRecallConsumed: vi.fn(),
 }));
 

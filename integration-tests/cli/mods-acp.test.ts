@@ -74,6 +74,9 @@ describe.each([false, true])('Mods in an ACP session (shared=%s)', (shared) => {
       model: {
         skipNextSpeakerCheck: true,
         sessionTokenLimit: 9_000,
+        // The Goal scenario's third tool call crosses the cap and ends its
+        // turn with an error.
+        maxToolCallsPerTurn: 2,
       },
       ui: { enableFollowupSuggestions: false },
       telemetry: { enabled: false },

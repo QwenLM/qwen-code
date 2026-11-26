@@ -857,7 +857,7 @@ function buildStub(
     generatePreview(content);
   // sha256 of the FULL pre-truncation output (see FULL_OUTPUT_DIGEST_LABEL):
   // the envelope's per-call unique path would otherwise fingerprint uniquely
-  // every poll, silently disabling every result-aware loop guard for exactly
+  // every poll, defeating any consumer that fingerprints results for exactly
   // the largest results (issue #9450).
   const fullDigest = crypto.createHash('sha256').update(content).digest('hex');
 

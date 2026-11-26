@@ -785,15 +785,15 @@ session closes ends as `aborted` before `session.end`; a `turn.complete` that is
 already running or queued then still runs, within the same budget. The hook
 receives:
 
-| Field               | Value                                                                                                                                  |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `answer`            | the visible text of the turn's last model response, or `""`                                                                            |
-| `durationMs`        | how long the turn took                                                                                                                 |
-| `reason`            | `answer`; `aborted` when a person or a Mod cancelled the turn; `error` when an API error, a loop detection or a session limit ended it |
-| `isAborted`         | `true` when `reason` is `aborted`                                                                                                      |
-| `turnId`            | the id `turn.start` carried                                                                                                            |
-| `usage`             | `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, model}` summed over the turn's model responses    |
-| `isAnswerTruncated` | `true` when `answer` was cut to fit; absent otherwise                                                                                  |
+| Field               | Value                                                                                                                                                                                                             |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `answer`            | the visible text of the turn's last model response, or `""`                                                                                                                                                       |
+| `durationMs`        | how long the turn took                                                                                                                                                                                            |
+| `reason`            | `answer`; `aborted` when a person or a Mod cancelled the turn; `error` when an API error, a `loop_detected` stop (an explicit `model.maxToolCallsPerTurn` or a replayed tool call id) or a session limit ended it |
+| `isAborted`         | `true` when `reason` is `aborted`                                                                                                                                                                                 |
+| `turnId`            | the id `turn.start` carried                                                                                                                                                                                       |
+| `usage`             | `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, model}` summed over the turn's model responses                                                                               |
+| `isAnswerTruncated` | `true` when `answer` was cut to fit; absent otherwise                                                                                                                                                             |
 
 The fields of both events are pinned. `next(e)` resolves to `{text: e.answer}`,
 with `usage` when the turn has it. Return a different, non-blank `text` to show

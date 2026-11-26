@@ -9243,10 +9243,9 @@ export class Session implements SessionContext {
         pushCountBefore;
       round.onSettled?.(pushed);
       responseInterrupt.end();
-      // A round that stopped, such as on the client's loop
-      // guard, runs none of the calls it already yielded. The
-      // loop guard's calls are skipped, as ACP's guard skips
-      // them.
+      // A round that stopped, such as on the client's tool-call
+      // cap, runs none of the calls it already yielded. They are
+      // skipped, as ACP's own cap skips them.
       if (roundStop === 'loop_detected' && !streamFailed && !signal.aborted) {
         await this.#emitLoopSkippedToolCalls(
           preparationTracker.takePending().map(({ callId, toolName }) => ({
