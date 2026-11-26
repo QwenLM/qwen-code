@@ -11001,9 +11001,15 @@ describe('useLlmStream', () => {
       'Duplicate provider tool call id "tool-history"',
     );
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
-    // The breaker stops through the loop dialog, which names the replay.
-    expect(result.current.loopDetectionConfirmationRequest?.cause).toBe(
-      'the provider replayed a tool call id that had already run',
+    // The breaker's stop message names the replay.
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining(
+          'the provider replayed a tool call id that had already run',
+        ),
+      }),
+      expect.any(Number),
     );
   });
 
@@ -24611,19 +24617,8 @@ describe('useLlmStream', () => {
   });
 
   // --- New tests focused on recent modifications ---
-  describe('Loop Detection Confirmation', () => {
-    beforeEach(() => {
-      // Add mock for getLoopDetectionService to the config
-      const mockLoopDetectionService = {
-        disableForSession: vi.fn(),
-      };
-      mockConfig.getLlmClient = vi.fn().mockReturnValue({
-        ...new MockedLlmClientClass(mockConfig),
-        getLoopDetectionService: () => mockLoopDetectionService,
-      });
-    });
-
-    it('should set loopDetectionConfirmationRequest when LoopDetected event is received', async () => {
+  describe('Loop stops', () => {
+    it('shows the stop as an info item', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -24642,12 +24637,15 @@ describe('useLlmStream', () => {
         await result.current.submitQuery('test query');
       });
 
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-        expect(
-          typeof result.current.loopDetectionConfirmationRequest?.onComplete,
-        ).toBe('function');
-      });
+      await waitFor(() =>
+        expect(mockAddItem).toHaveBeenCalledWith(
+          {
+            type: 'info',
+            text: 'A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.',
+          },
+          expect.any(Number),
+        ),
+      );
       await waitFor(() =>
         expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
           sessionId: 'test-session-id',
@@ -24657,122 +24655,7 @@ describe('useLlmStream', () => {
       );
     });
 
-    it('should disable loop detection and show message when user selects "disable"', async () => {
-      const mockLoopDetectionService = {
-        disableForSession: vi.fn(),
-      };
-      const mockClient = {
-        ...new MockedLlmClientClass(mockConfig),
-        getLoopDetectionService: () => mockLoopDetectionService,
-      };
-      mockConfig.getLlmClient = vi.fn().mockReturnValue(mockClient);
-
-      mockSendMessageStream.mockReturnValueOnce(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      const { result } = renderTestHook([], mockClient);
-
-      await act(async () => {
-        await result.current.submitQuery('test query');
-      });
-
-      // Wait for confirmation request to be set
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
-
-      // Simulate user selecting "disable"
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'disable',
-        });
-      });
-
-      // Verify loop detection was disabled
-      expect(mockLoopDetectionService.disableForSession).toHaveBeenCalledTimes(
-        1,
-      );
-
-      // Verify confirmation request was cleared
-      expect(result.current.loopDetectionConfirmationRequest).toBeNull();
-
-      // Verify appropriate message was added
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'Loop detection has been disabled for this session. Please try your request again.',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('should keep loop detection enabled and show message when user selects "keep"', async () => {
-      const mockLoopDetectionService = {
-        disableForSession: vi.fn(),
-      };
-      const mockClient = {
-        ...new MockedLlmClientClass(mockConfig),
-        getLoopDetectionService: () => mockLoopDetectionService,
-      };
-      mockConfig.getLlmClient = vi.fn().mockReturnValue(mockClient);
-
-      mockSendMessageStream.mockReturnValue(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      const { result } = renderTestHook();
-
-      await act(async () => {
-        await result.current.submitQuery('test query');
-      });
-
-      // Wait for confirmation request to be set
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
-
-      // Simulate user selecting "keep"
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'keep',
-        });
-      });
-
-      // Verify loop detection was NOT disabled
-      expect(mockLoopDetectionService.disableForSession).not.toHaveBeenCalled();
-
-      // Verify confirmation request was cleared
-      expect(result.current.loopDetectionConfirmationRequest).toBeNull();
-
-      // Verify appropriate message was added
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('names the cause of the stop in the dialog and the message after "keep"', async () => {
-      const mockLoopDetectionService = {
-        disableForSession: vi.fn(),
-      };
-      const mockClient = {
-        ...new MockedLlmClientClass(mockConfig),
-        getLoopDetectionService: () => mockLoopDetectionService,
-      };
-      mockConfig.getLlmClient = vi.fn().mockReturnValue(mockClient);
-
+    it('names the cause of the stop', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -24793,137 +24676,15 @@ describe('useLlmStream', () => {
         await result.current.submitQuery('test query');
       });
 
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest?.cause).toBe(
-          'the turn reached the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
-        );
-      });
-
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'keep',
-        });
-      });
-
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'Loop detection halted the run (turn_tool_call_cap: the turn reached the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)). Raise `model.maxToolCallsPerTurn`, or set it to 0 to disable the cap.',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('should handle multiple loop detection events properly', async () => {
-      const { result } = renderTestHook();
-
-      // First loop detection - set up fresh mock for first call
-      mockSendMessageStream.mockReturnValueOnce(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      // First loop detection
-      await act(async () => {
-        await result.current.submitQuery('first query');
-      });
-
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
-
-      // Simulate user selecting "keep" for first request
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'keep',
-        });
-      });
-
-      expect(result.current.loopDetectionConfirmationRequest).toBeNull();
-
-      // Verify first message was added
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.',
-        },
-        expect.any(Number),
-      );
-
-      // Second loop detection - set up fresh mock for second call
-      mockSendMessageStream.mockReturnValueOnce(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      // Second loop detection
-      await act(async () => {
-        await result.current.submitQuery('second query');
-      });
-
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
-
-      // Simulate user selecting "disable" for second request
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'disable',
-        });
-      });
-
-      expect(result.current.loopDetectionConfirmationRequest).toBeNull();
-
-      // Verify second message was added
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'Loop detection has been disabled for this session. Please try your request again.',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('should process LoopDetected event after moving pending history to history', async () => {
-      mockSendMessageStream.mockReturnValue(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.Content,
-            value: 'Some response content',
-          };
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      const { result } = renderTestHook();
-
-      await act(async () => {
-        await result.current.submitQuery('test query');
-      });
-
-      // Verify that the content was added to history before the loop detection dialog
-      await waitFor(() => {
+      await waitFor(() =>
         expect(mockAddItem).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'gemini',
-            text: 'Some response content',
-          }),
+          {
+            type: 'info',
+            text: 'Loop detection halted the run (turn_tool_call_cap: the turn reached the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)). Raise `model.maxToolCallsPerTurn`, or set it to 0 to disable the cap.',
+          },
           expect.any(Number),
-        );
-      });
-
-      // Then verify loop detection confirmation request was set
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
+        ),
+      );
     });
   });
 
@@ -25935,8 +25696,14 @@ describe('useLlmStream', () => {
         });
 
         expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
-        expect(result.current.loopDetectionConfirmationRequest?.cause).toBe(
-          'the provider replayed a tool call id that had already run',
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'info',
+            text: expect.stringContaining(
+              'the provider replayed a tool call id that had already run',
+            ),
+          }),
+          expect.any(Number),
         );
       });
 

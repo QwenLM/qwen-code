@@ -12,7 +12,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * The UNKNOWN-lookup cooldown shared by sequential execution observers.
+ * The lookup cooldown shared by sequential execution observers.
  * A lookup that just ran is the freshest answer any sequential observer
  * can act on; without the cooldown every observation fans through to the
  * worker (issue #13183 saw hundreds of status calls per execution).
@@ -23,8 +23,7 @@ import java.util.concurrent.TimeUnit;
  * so the cooldown has no lifecycle of its own.
  */
 final class ExecutionObservationCooldown {
-    // An UNKNOWN record the Runtime just answered for is not asked again
-    // inside this window; sequential observations share the one lookup.
+    // Sequential observations inside this window share one Runtime lookup.
     static final Duration WINDOW = Duration.ofSeconds(1);
 
     private final ConcurrentMap<String, CooledObservation> entries =
@@ -41,25 +40,18 @@ final class ExecutionObservationCooldown {
      * The cached answer to replay for a cooled execution, or null when the
      * caller must run a fresh lookup.
      */
-    ExecutionReconciliation cooled(String executionId, ToolExecutionRecord unknown) {
+    ExecutionReconciliation cooled(String executionId, ToolExecutionRecord current) {
         CooledObservation cooledObservation = entries.get(executionId);
         if (cooledObservation != null
                 && clock.instant().isBefore(cooledObservation.deadline())) {
             ExecutionReconciliation cached = cooledObservation.reconciliation();
-            if (cached.getRecord().getState()
-                    != ToolExecutionRecord.State.UNKNOWN) {
-                // The cached lookup settled or abandoned the record:
-                // replay it whole. Pairing its terminal answer with this
-                // caller's pre-settlement UNKNOWN snapshot would report
-                // a settled execution as unknown.
+            if (cached.getRecord().isTerminal()) {
                 return cached;
             }
-            // Both records are UNKNOWN here; serve the fresher of the
-            // caller's snapshot and the lookup's own re-read (a cancel
-            // can land between them), with the cached worker answer.
+            // A cancel can land between observations; keep the newer row.
             ToolExecutionRecord freshest =
-                    cached.getRecord().getVersion() > unknown.getVersion()
-                            ? cached.getRecord() : unknown;
+                    cached.getRecord().getVersion() > current.getVersion()
+                            ? cached.getRecord() : current;
             return new ExecutionReconciliation(freshest,
                     cached.getOutcome(),
                     cached.getRuntimeState());

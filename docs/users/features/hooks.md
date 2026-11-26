@@ -370,31 +370,31 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                 | Triggered When                                                         | Matcher Target                                                   |
-| :-------------------- | :--------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `PreToolUse`          | Before tool execution                                                  | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.)   |
-| `PostToolUse`         | After successful tool execution                                        | Tool id                                                          |
-| `PostToolUseFailure`  | After tool execution fails                                             | Tool id                                                          |
-| `PostToolBatch`       | Once after every tool call in a batch has resolved                     | None (always fires)                                              |
-| `UserPromptSubmit`    | Before a fresh user message enters the model                           | None                                                             |
-| `UserPromptExpansion` | After a slash command expands into a prompt, before the prompt is sent | Command name, without the leading `/`                            |
-| `SessionStart`        | When session starts or resumes                                         | Source (`startup`, `resume`, `clear`, `compact`)                 |
-| `SessionEnd`          | When session ends                                                      | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)            |
-| `SessionDelete`       | After an explicitly selected session is deleted                        | None                                                             |
-| `MessageDisplay`      | Repeatedly, as the reply streams                                       | None (always fires)                                              |
-| `Stop`                | Before the turn ends                                                   | None (always fires)                                              |
-| `StopFailure`         | When an API error or loop detection ends the turn, instead of `Stop`   | Error type (`rate_limit`, `server_error`, `loop_detected`, etc.) |
-| `SubagentStart`       | When subagent starts                                                   | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                    |
-| `SubagentStop`        | When subagent stops                                                    | Agent type                                                       |
-| `PreCompact`          | Before conversation compaction                                         | Trigger (`manual`, `auto`)                                       |
-| `PostCompact`         | After conversation compaction succeeds                                 | Trigger (`manual`, `auto`)                                       |
-| `Notification`        | When notifications are sent                                            | Type (`permission_prompt`, `idle_prompt`, `auth_success`)        |
-| `PermissionRequest`   | When permission dialog is shown                                        | Tool id                                                          |
-| `PermissionDenied`    | When AUTO-mode classification denies a tool call                       | Tool id                                                          |
-| `TodoCreated`         | When a new todo item is created                                        | None (always fires)                                              |
-| `TodoCompleted`       | When a todo item is marked as completed                                | None (always fires)                                              |
-| `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded | File path of the loaded file                                     |
-| `FileChanged`         | After an explicitly watched file is added, modified, or deleted        | Basename of the changed file                                     |
+| Event                 | Triggered When                                                               | Matcher Target                                                   |
+| :-------------------- | :--------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `PreToolUse`          | Before tool execution                                                        | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.)   |
+| `PostToolUse`         | After successful tool execution                                              | Tool id                                                          |
+| `PostToolUseFailure`  | After tool execution fails                                                   | Tool id                                                          |
+| `PostToolBatch`       | Once after every tool call in a batch has resolved                           | None (always fires)                                              |
+| `UserPromptSubmit`    | Before a fresh user message enters the model                                 | None                                                             |
+| `UserPromptExpansion` | After a slash command expands into a prompt, before the prompt is sent       | Command name, without the leading `/`                            |
+| `SessionStart`        | When session starts or resumes                                               | Source (`startup`, `resume`, `clear`, `compact`)                 |
+| `SessionEnd`          | When session ends                                                            | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)            |
+| `SessionDelete`       | After an explicitly selected session is deleted                              | None                                                             |
+| `MessageDisplay`      | Repeatedly, as the reply streams                                             | None (always fires)                                              |
+| `Stop`                | Before the turn ends                                                         | None (always fires)                                              |
+| `StopFailure`         | When an API error or a `loop_detected` stop ends the turn, instead of `Stop` | Error type (`rate_limit`, `server_error`, `loop_detected`, etc.) |
+| `SubagentStart`       | When subagent starts                                                         | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                    |
+| `SubagentStop`        | When subagent stops                                                          | Agent type                                                       |
+| `PreCompact`          | Before conversation compaction                                               | Trigger (`manual`, `auto`)                                       |
+| `PostCompact`         | After conversation compaction succeeds                                       | Trigger (`manual`, `auto`)                                       |
+| `Notification`        | When notifications are sent                                                  | Type (`permission_prompt`, `idle_prompt`, `auth_success`)        |
+| `PermissionRequest`   | When permission dialog is shown                                              | Tool id                                                          |
+| `PermissionDenied`    | When AUTO-mode classification denies a tool call                             | Tool id                                                          |
+| `TodoCreated`         | When a new todo item is created                                              | None (always fires)                                              |
+| `TodoCompleted`       | When a todo item is marked as completed                                      | None (always fires)                                              |
+| `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded       | File path of the loaded file                                     |
+| `FileChanged`         | After an explicitly watched file is added, modified, or deleted              | Basename of the changed file                                     |
 
 ### Matcher Patterns
 
@@ -764,14 +764,22 @@ If the hooks fail, or do not finish within 15 seconds, the batch continues with 
 
 **Purpose**: Runs once when admitting a fresh user message, including a user message steered into an active turn. It can validate, block, or enrich that message. Tool results, Stop-driven continuations, model-request retries, and automated prompts skip the event. If a hook blocks a steering message, tool results in the same continuation can still proceed. ACP cancellation can preserve a message that the host has already delivered. This history operation skips the event.
 
+Set `"enableDelegatedPromptHooks": true` in the receiving workspace's `.qwen/settings.json` and restart its sessions to check messages sent from another session via `create_sub_session` or `/send`. With this setting enabled, delegated text that starts with a slash is handled as message text. The setting defaults to `false`. Scheduled task runs skip the event.
+
 **Event-specific fields**:
 
 ```json
 {
   "prompt": "legacy prompt for this invocation; semantics depend on the execution path",
-  "submitted_prompt": "optional user text captured at a supported submission boundary"
+  "submitted_prompt": "optional user text captured at a supported submission boundary",
+  "source": {
+    "session_id": "the session that sent this prompt (optional)",
+    "cwd": "that session's workspace"
+  }
 }
 ```
+
+`source` is present only on a prompt that another session sent. It names the sending session and its workspace. The event's own `session_id` and `cwd` belong to the receiving session. The daemon sets this field, and a prompt request cannot supply it. Such a prompt omits `submitted_prompt`. If a hook blocks it, the first-turn result has stop reason `blocked`, and any `sent` completion notification reports failure.
 
 `submitted_prompt` is optional. It is present on supported interactive TUI submissions and first-turn headless `UserQuery` sends. On the ACP session path used by ACP clients, `serve`, and daemon hosts, a fresh turn includes this field when it carries an explicit nonblank string declaration. Its value comes from the declaration, independently of `prompt` or a display label. Channel-classified turns omit this field, including human messages relayed through channel adapters.
 
@@ -1032,7 +1040,7 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 #### StopFailure
 
-**Purpose**: Runs instead of `Stop` when an API error or loop detection ends the turn. API errors fire it in the interactive UI and in ACP sessions, but not in headless (`-p`) runs. Loop detection fires it in the interactive UI and in headless runs, but not in ACP sessions. This is a **fire-and-forget** event: Qwen does not wait for the hooks, and their output and exit codes are ignored.
+**Purpose**: Runs instead of `Stop` when an API error or a `loop_detected` stop ends the turn. A `loop_detected` stop is an explicit `model.maxToolCallsPerTurn` being exceeded or a provider replaying an answered tool call id. API errors fire it in the interactive UI and in ACP sessions, but not in headless (`-p`) runs. A `loop_detected` stop fires it in the interactive UI and in headless runs, but not in ACP sessions. This is a **fire-and-forget** event: Qwen does not wait for the hooks, and their output and exit codes are ignored.
 
 **Event-specific fields**:
 
@@ -1858,6 +1866,83 @@ if len(user_prompt) > 1000:
 
 # No processing needed for normal cases
 sys.exit(0)
+```
+
+### Example 4: A Repeated-Call Guard
+
+Qwen Code does not judge whether the model is looping. This `PreToolUse` hook reminds the model after three consecutive identical calls in a turn and requests a stop on the sixth. The [shared agent loop](#hook-output-structure) ends the turn after the batch. Legacy loops can continue. The hook keeps a separate count for each `prompt_id` and skips calls that lack one.
+
+**repeat_guard.py**
+
+```python
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+
+data = json.load(sys.stdin)
+prompt_id = data.get("prompt_id")
+if not prompt_id:
+    sys.exit(0)
+
+key = hashlib.sha256(
+    json.dumps([data["tool_name"], data["tool_input"]], sort_keys=True).encode()
+).hexdigest()
+session_key = hashlib.sha256(data["session_id"].encode()).hexdigest()
+state_path = os.path.join(
+    tempfile.gettempdir(), f"qwen-repeat-guard-{session_key}.sqlite3"
+)
+
+with sqlite3.connect(state_path) as db:
+    # Serialize the read and update across concurrent hook processes.
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("""CREATE TABLE IF NOT EXISTS streaks (
+        prompt_id TEXT PRIMARY KEY, call_key TEXT NOT NULL, count INTEGER NOT NULL
+    )""")
+    previous = db.execute(
+        "SELECT call_key, count FROM streaks WHERE prompt_id = ?", (prompt_id,)
+    ).fetchone()
+    count = previous[1] + 1 if previous and previous[0] == key else 1
+    db.execute(
+        "INSERT OR REPLACE INTO streaks (prompt_id, call_key, count) VALUES (?, ?, ?)",
+        (prompt_id, key, count),
+    )
+
+if count >= 6:
+    print(json.dumps({
+        "continue": False,
+        "stopReason": f"{data['tool_name']} was called {count} times in a row with the same input.",
+    }))
+elif count >= 3:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": f"{data['tool_name']} has been called {count} times in a row with the same input. Use the result you already have or change the approach.",
+        }
+    }))
+sys.exit(0)
+```
+
+Configure it for every tool:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/repeat_guard.py",
+            "name": "repeat-guard"
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
 ## Troubleshooting

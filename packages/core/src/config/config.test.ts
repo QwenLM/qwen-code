@@ -66,7 +66,6 @@ const ON_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
-import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -11987,37 +11986,22 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('getMaxToolCallsPerTurn', () => {
-    it('should return the default cap when unset', () => {
+    it('has no cap when unset', () => {
       expect(makeConfig().getMaxToolCallsPerTurn()).toBe(
-        DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        Number.POSITIVE_INFINITY,
       );
     });
 
-    it('defaults loopProtection to warn', () => {
-      expect(makeConfig().getLoopProtection()).toBe('warn');
-      expect(makeConfig({ loopProtection: 'stop' }).getLoopProtection()).toBe(
-        'stop',
-      );
-    });
-
-    it('falls back to warn for an unknown loopProtection mode', () => {
-      expect(
-        makeConfig({
-          loopProtection: 'Stop' as never,
-        }).getLoopProtection(),
-      ).toBe('warn');
+    it('has no cap when a settings file sets it to null', () => {
+      const config = makeConfig({
+        maxToolCallsPerTurn: null as unknown as number,
+      });
+      expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
     });
 
     it('should use a custom maxToolCallsPerTurn if provided', () => {
       const config = makeConfig({ maxToolCallsPerTurn: 42 });
       expect(config.getMaxToolCallsPerTurn()).toBe(42);
-    });
-
-    it('tracks whether maxToolCallsPerTurn was explicitly set', () => {
-      expect(makeConfig().isMaxToolCallsPerTurnExplicit()).toBe(false);
-      expect(
-        makeConfig({ maxToolCallsPerTurn: 42 }).isMaxToolCallsPerTurnExplicit(),
-      ).toBe(true);
     });
 
     it.each([0, -1])(
@@ -13843,8 +13827,27 @@ describe('Model Switching and Config Updates', () => {
         'model prompt',
         undefined,
         expected,
+        undefined,
       );
       expect(response.success).toBe(true);
+    });
+
+    it('passes the sending session through', async () => {
+      const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
+      const config = await withHookSystem({ fireUserPromptSubmitEvent });
+      const source = { session_id: 'sender', cwd: '/workspace/a' };
+
+      await hookRequest(config, 'UserPromptSubmit', {
+        prompt: 'model prompt',
+        source,
+      });
+
+      expect(fireUserPromptSubmitEvent).toHaveBeenCalledWith(
+        'model prompt',
+        undefined,
+        undefined,
+        source,
+      );
     });
   });
 

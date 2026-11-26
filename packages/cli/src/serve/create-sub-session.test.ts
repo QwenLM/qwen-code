@@ -147,6 +147,7 @@ function makeFakeBridge(opts?: {
     approvalModeBeforeStart?: ApprovalMode;
   }> = [];
   const promptMetas: unknown[] = [];
+  const promptContexts: unknown[] = [];
   const externalRecords: Array<{ sessionId: string; request: unknown }> = [];
   const names: Array<{
     sessionId: string;
@@ -370,6 +371,8 @@ function makeFakeBridge(opts?: {
         assertCanDispatch?: () => void;
         expectedApprovalMode?: ApprovalMode;
         approvalModeBeforeStart?: ApprovalMode;
+        userPrompt?: true;
+        promptSource?: unknown;
       },
     ) => {
       capturedPromptId = ctx?.promptId ?? '';
@@ -379,6 +382,10 @@ function makeFakeBridge(opts?: {
         ctx?.assertCanDispatch?.();
         ctx?.onPromptWriteStarted?.();
         promptMetas.push(req._meta);
+        promptContexts.push({
+          userPrompt: ctx?.userPrompt,
+          promptSource: ctx?.promptSource,
+        });
         prompts.push({
           sessionId,
           promptId: ctx?.promptId ?? '',
@@ -492,6 +499,7 @@ function makeFakeBridge(opts?: {
     spawns,
     prompts,
     promptMetas,
+    promptContexts,
     externalRecords,
     names,
     closes,
@@ -589,6 +597,10 @@ describe('sub-session launcher', () => {
     });
     expect(fake.names[0]?.displayName).toBe('Hourly review');
     expect(fake.names[0]?.titleSource).toBe('auto');
+    // A scheduled run has no sender, so it is not input to the target.
+    expect(fake.promptContexts).toEqual([
+      { userPrompt: undefined, promptSource: undefined },
+    ]);
   });
 
   it('assigns a scheduled-task run session to its selected group', async () => {
@@ -1310,6 +1322,46 @@ describe('sub-session launcher', () => {
       parentSessionId: 'caller-1',
     });
     expect(fake.subscribeCalls()).toBe(1);
+  });
+
+  it('first-turn: sends the prompt as input from the caller and reports a hook block', async () => {
+    const fake = makeFakeBridge({
+      events: (pid) => [
+        chunk('blocked by hook'),
+        {
+          v: 1,
+          type: 'turn_complete',
+          data: {
+            sessionId: '',
+            stopReason: 'end_turn',
+            promptId: pid,
+            promptBlocked: true,
+          },
+        },
+      ],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    const res = await launcher.launch({
+      prompt: 'greet',
+      completion: 'first-turn',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(res).toEqual({
+      sessionId: 'sub-1',
+      result: 'blocked by hook',
+      stopReason: 'blocked',
+    });
+    expect(fake.promptContexts).toEqual([
+      {
+        userPrompt: true,
+        promptSource: { sessionId: 'caller-1', workspaceCwd: WS },
+      },
+    ]);
   });
 
   it.each([

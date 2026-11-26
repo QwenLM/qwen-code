@@ -981,9 +981,14 @@ describe('HookSystem', () => {
       method: 'fireUserPromptSubmitEvent',
       event: HookEventName.UserPromptSubmit,
       outputType: DefaultHookOutput,
-      args: ['model prompt', signal, 'submitted prompt'],
+      args: [
+        'model prompt',
+        signal,
+        'submitted prompt',
+        { session_id: 'sender', cwd: '/workspace/a' },
+      ],
       required: ['test prompt'],
-      defaults: [undefined, undefined],
+      defaults: [undefined, undefined, undefined],
     },
     {
       method: 'fireInstructionsLoadedEvent',

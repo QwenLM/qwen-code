@@ -9837,8 +9837,11 @@ export class WorkspaceDaemonClient {
     return this.get('/tools', 'GET /workspaces/:workspace/tools');
   }
 
-  workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
-    return this.get('/memory', 'GET /workspaces/:workspace/memory');
+  workspaceMemory(options?: {
+    includeContent?: boolean;
+  }): Promise<DaemonWorkspaceMemoryStatus> {
+    const query = options?.includeContent ? '?content=true' : '';
+    return this.get(`/memory${query}`, 'GET /workspaces/:workspace/memory');
   }
 
   previewMemoryImport(
