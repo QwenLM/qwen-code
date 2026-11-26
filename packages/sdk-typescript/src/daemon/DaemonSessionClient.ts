@@ -770,7 +770,8 @@ export class DaemonSessionClient {
    * results should use `prompt()` or manage SSE terminal events themselves.
    * `beforeDispatch` can reject a stale caller before each HTTP attempt,
    * including the retry after client registration recovery. An asynchronous
-   * caller revalidation must settle before the request is sent.
+   * caller revalidation must settle before the request is sent. Abortion
+   * interrupts that asynchronous wait as well.
    */
   async submitPrompt(
     req: PromptRequest,
@@ -779,9 +780,26 @@ export class DaemonSessionClient {
   ): Promise<NonBlockingPromptAccepted> {
     const accepted = await this.withClientIdSelfHeal(async () => {
       signal?.throwIfAborted();
-      if (beforeDispatch) {
+      if (beforeDispatch && signal) {
+        let onAbort: (() => void) | undefined;
+        const aborted = new Promise<never>((_, reject) => {
+          onAbort = () =>
+            reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+          if (signal.aborted) onAbort();
+          else signal.addEventListener('abort', onAbort, { once: true });
+        });
+        aborted.catch(() => {});
+        try {
+          // A signal must also settle an asynchronous caller guard before the
+          // transport has a request it could abort.
+          await Promise.race([beforeDispatch(this.clientId), aborted]);
+        } finally {
+          if (onAbort) signal.removeEventListener('abort', onAbort);
+        }
+      } else if (beforeDispatch) {
         await beforeDispatch(this.clientId);
       }
+      signal?.throwIfAborted();
       return this.client.promptNonBlocking(
         this.sessionId,
         req,
