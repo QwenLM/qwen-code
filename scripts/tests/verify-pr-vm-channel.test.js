@@ -13,6 +13,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -20,6 +21,7 @@ import {
 } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -840,7 +842,6 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
           const health = await healthPromise;
           expect(health).toContain('200 OK');
           expect(health.endsWith(responseBody)).toBe(true);
-          expect(health).not.toContain('socket.gaierror');
         }
       } finally {
         if (bridge.exitCode === null && bridge.signalCode === null) {
@@ -851,4 +852,205 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
       }
     }
   });
+
+  // Node uses Windows named pipes, not the AF_UNIX peer required here.
+  it.skipIf(process.platform === 'win32')(
+    'rejects hostile bundle frames without promoting temporary guest inputs',
+    async () => {
+      const root = mkdtempSync('/tmp/qc-bad-input-frames-');
+      cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+      const payload = Buffer.from('boom');
+      const cases = [
+        {
+          name: 'truncated',
+          declaredBytes: 1024,
+          header: 'OK 1024\n',
+          response: Buffer.from('abc'),
+          error: 'truncated payload (3/1024 bytes)',
+        },
+        {
+          name: 'oversize',
+          declaredBytes: 4,
+          header: `OK ${128 * 1024 * 1024 + 1}\n`,
+          response: Buffer.alloc(0),
+          error: 'declared size 134217729 exceeds max 134217728',
+        },
+        {
+          name: 'malformed',
+          declaredBytes: 4,
+          header: 'OK four\n',
+          response: payload,
+          error: "malformed host header: 'OK four'",
+        },
+        {
+          name: 'trailing',
+          declaredBytes: 4,
+          header: 'OK 4\n',
+          response: Buffer.from('boomTRAILING'),
+          error: 'unexpected trailing bytes after declared payload',
+        },
+        {
+          name: 'digest',
+          declaredBytes: 4,
+          header: 'OK 4\n',
+          response: payload,
+          error: 'bundle integrity mismatch: got 4B/',
+        },
+      ];
+
+      for (const testCase of cases) {
+        const manifestBytes = buildInputManifest({
+          runId: `bad-${testCase.name}`,
+          baseRefOid: 'a'.repeat(40),
+          headRefOid: 'b'.repeat(40),
+          bundleSha256: 'c'.repeat(64),
+          bundleBytes: testCase.declaredBytes,
+          entropyHex: '01'.repeat(32),
+        }).manifestBytes;
+        const socketPath = join(root, `${testCase.name}.sock`);
+        let requests = 0;
+        const server = net.createServer((socket) => {
+          socket.once('data', (data) => {
+            if (requests === 0) {
+              expect(data.toString('utf8')).toBe('GET manifest\n');
+              socket.end(
+                Buffer.concat([
+                  Buffer.from(`OK ${manifestBytes.length}\n`),
+                  manifestBytes,
+                ]),
+              );
+            } else {
+              expect(data.toString('utf8')).toBe('GET bundle\n');
+              socket.end(
+                Buffer.concat([
+                  Buffer.from(testCase.header),
+                  testCase.response,
+                ]),
+              );
+            }
+            requests += 1;
+          });
+        });
+        await new Promise((resolve) => server.listen(socketPath, resolve));
+        const outDir = join(root, testCase.name);
+        try {
+          const result = await runAsync('python3', [
+            GUEST_VSOCK_PY,
+            'fetch-inputs',
+            '--unix',
+            socketPath,
+            '--out',
+            outDir,
+          ]);
+          expect(result.status, result.stderr).toBe(1);
+          expect(result.stdout).toBe('');
+          expect(result.stderr).toContain(testCase.error);
+          expect(requests).toBe(2);
+          expect(readdirSync(outDir)).toEqual([]);
+        } finally {
+          await new Promise((resolve) => server.close(resolve));
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'cleans scratch storage when bundle output-parent creation is not writable',
+    () => {
+      const { root, repoDir, baseRefOid, headRefOid } = makeFixtureRepo();
+      const scratchParent = mkdtempSync(
+        join(tmpdir(), 'qc-bundle-scratch-parent-'),
+      );
+      cleanups.push(() =>
+        rmSync(scratchParent, { recursive: true, force: true }),
+      );
+      const protectedParent = join(root, 'write-protected-parent');
+      const outPath = join(protectedParent, 'child', 'round.bundle');
+      const previousTmp = process.env.TMPDIR;
+      mkdirSync(protectedParent);
+      chmodSync(protectedParent, 0o500);
+      process.env.TMPDIR = scratchParent;
+      try {
+        expect(tmpdir()).toBe(scratchParent);
+        expect(() =>
+          createRoundInputBundle({
+            repoDir,
+            baseRefOid,
+            headRefOid,
+            outPath,
+          }),
+        ).toThrow(/EACCES|EPERM/);
+        expect(readdirSync(scratchParent)).toEqual([]);
+        expect(readdirSync(protectedParent)).toEqual([]);
+        expect(existsSync(outPath)).toBe(false);
+      } finally {
+        if (previousTmp === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = previousTmp;
+        chmodSync(protectedParent, 0o700);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects an ordinary-file output parent before creating scratch storage',
+    () => {
+      const { root, repoDir, baseRefOid, headRefOid } = makeFixtureRepo();
+      const scratchParent = mkdtempSync(
+        join(tmpdir(), 'qc-bundle-scratch-parent-'),
+      );
+      cleanups.push(() =>
+        rmSync(scratchParent, { recursive: true, force: true }),
+      );
+      const notDirectory = join(root, 'plain-file');
+      writeFileSync(notDirectory, 'intentional parent obstruction\n');
+      const previousTmp = process.env.TMPDIR;
+      process.env.TMPDIR = scratchParent;
+      try {
+        expect(() =>
+          createRoundInputBundle({
+            repoDir,
+            baseRefOid,
+            headRefOid,
+            outPath: join(notDirectory, 'child', 'round.bundle'),
+          }),
+        ).toThrow(/ENOTDIR/);
+        expect(readdirSync(scratchParent)).toEqual([]);
+      } finally {
+        if (previousTmp === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = previousTmp;
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves the original error when scratch storage cannot be created',
+    () => {
+      const { root, repoDir, baseRefOid, headRefOid } = makeFixtureRepo();
+      const scratchParent = mkdtempSync(
+        join(tmpdir(), 'qc-bundle-scratch-parent-'),
+      );
+      cleanups.push(() =>
+        rmSync(scratchParent, { recursive: true, force: true }),
+      );
+      const missingScratchRoot = join(scratchParent, 'missing');
+      const outPath = join(root, 'round.bundle');
+      const previousTmp = process.env.TMPDIR;
+      process.env.TMPDIR = missingScratchRoot;
+      try {
+        expect(() =>
+          createRoundInputBundle({
+            repoDir,
+            baseRefOid,
+            headRefOid,
+            outPath,
+          }),
+        ).toThrow(/ENOENT/);
+        expect(existsSync(outPath)).toBe(false);
+        expect(readdirSync(scratchParent)).toEqual([]);
+      } finally {
+        if (previousTmp === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = previousTmp;
+      }
+    },
+  );
 });

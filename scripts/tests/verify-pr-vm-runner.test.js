@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  buildInputManifest,
   fetchRoundInputFromSocket,
   materializeTwoOidWorktrees,
   startLoopbackToUdsBridge,
@@ -508,6 +509,183 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
       contextSha256: createHash('sha256').update(text, 'utf8').digest('hex'),
     };
   }
+
+  it('forwards fixed entropy through the real CLI and still rejects a stale input digest', () => {
+    const root = mkdtempSync('/tmp/qc-en-');
+    tmpDirs.push(root);
+    const ctx = writeHostContext(root);
+    const entropyHex = '01'.repeat(32);
+    const kernel = join(root, 'kernel');
+    const golden = join(root, 'golden');
+    const bundlePath = join(root, 'fixture.bundle');
+    const bundleBytes = Buffer.from('prebuilt fixture bytes; never booted');
+    const bundleSha256 = createHash('sha256').update(bundleBytes).digest('hex');
+    writeFileSync(kernel, 'fixture kernel; never booted');
+    writeFileSync(golden, 'fixture golden; never booted');
+    writeFileSync(bundlePath, bundleBytes, { mode: 0o600 });
+    const exitFastBin = join(root, 'exit-fast.sh');
+    writeFileSync(exitFastBin, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+
+    const runCli = (runId, trustedInputDigest = null) => {
+      const plan = buildFirecrackerLaunchPlan({
+        runId,
+        jailBaseDir: join(root, `${runId}-jail`),
+        jailerBin: exitFastBin,
+        firecrackerBin: '/opt/firecracker-v1.18.0-aarch64',
+        vmmUid: process.getuid?.() || 65534,
+        vmmGid: process.getgid?.() || 65534,
+        inputVsockPort: 53,
+      });
+      mkdirSync(plan.jailRoot, { recursive: true });
+      writeFileSync(plan.kernelPath, 'fixture kernel; never booted');
+      writeFileSync(
+        plan.ownershipTemplate.workDiskPath,
+        'fixture golden; never booted',
+      );
+      const built = buildInputManifest({
+        runId,
+        repo: 'QwenLM/qwen-code',
+        prNumber: 18181,
+        baseRefOid: BASE_OID,
+        headRefOid: HEAD_OID,
+        bundleSha256,
+        bundleBytes: bundleBytes.length,
+        modelProxy: null,
+        entropyHex,
+      });
+      const launcherDir = join(root, `${runId}-launcher`);
+      const cfgPath = join(root, `${runId}.json`);
+      writeFileSync(
+        cfgPath,
+        `${JSON.stringify(
+          {
+            backend: 'firecracker',
+            planOptions: {
+              runId,
+              jailBaseDir: join(root, `${runId}-jail`),
+              jailerBin: exitFastBin,
+              firecrackerBin: '/opt/firecracker-v1.18.0-aarch64',
+              vmmUid: process.getuid?.() || 65534,
+              vmmGid: process.getgid?.() || 65534,
+              inputVsockPort: 53,
+            },
+            ...ctx,
+            launcherDir,
+            vaultDir: join(root, `${runId}-vault`),
+            approvedRoots: [root],
+            backendVersion: 'v1.18.0',
+            platform: 'linux-aarch64',
+            sourceKernelPath: kernel,
+            sourceRootfsPath: golden,
+            trustedInputDigest: trustedInputDigest ?? built.trustedInputDigest,
+            roundInput: { bundlePath, entropyHex },
+            modelProxy: null,
+          },
+          null,
+          2,
+        )}\n`,
+        { mode: 0o600 },
+      );
+      const proc = spawnSync(
+        process.execPath,
+        [RUNNER_SCRIPT, 'run', '--config', cfgPath],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            PATH: process.env.PATH,
+            HOME: process.env.HOME,
+            TMPDIR: process.env.TMPDIR ?? '/tmp',
+          },
+        },
+      );
+      expect(proc.error, proc.stderr).toBeUndefined();
+      expect(proc.status, proc.stderr).toBe(1);
+      return {
+        result: JSON.parse(proc.stdout),
+        expectedDigest: built.trustedInputDigest,
+        launcherDir,
+      };
+    };
+
+    const fixed = runCli('cli-entropy-fixed');
+    expect(fixed.result.trustedInputDigest).toBe(fixed.expectedDigest);
+    expect(fixed.result.errors.join('\n')).not.toMatch(
+      /trustedInputDigest does not match/,
+    );
+
+    const stale = runCli('cli-entropy-stale', SHA('f'));
+    expect(stale.result.errors).toContain(
+      'trustedInputDigest does not match generated roundInput manifest digest',
+    );
+    expect(existsSync(join(stale.launcherDir, 'token.json'))).toBe(false);
+  });
+
+  it('rejects guest model-proxy endpoint mismatches before startup', async () => {
+    const root = mkdtempSync('/tmp/qc-proxy-binding-');
+    tmpDirs.push(root);
+    const ctx = writeHostContext(root);
+    const kernel = join(root, 'kernel');
+    const golden = join(root, 'golden');
+    const bundlePath = join(root, 'fixture.bundle');
+    writeFileSync(kernel, 'fixture kernel; never booted');
+    writeFileSync(golden, 'fixture golden; never booted');
+    writeFileSync(bundlePath, 'prebuilt fixture bytes', { mode: 0o600 });
+
+    for (const kind of ['host-tcp', 'alternate-uds', 'missing-vsock-path']) {
+      const caseRoot = join(root, kind);
+      mkdirSync(caseRoot);
+      mkdirSync(join(caseRoot, 'sock'));
+      writeFileSync(join(caseRoot, 'work'), 'fixture golden; never booted');
+      const plan = buildVfkitLaunchPlan({
+        runId: `proxy-${kind}`,
+        vfkitBin: '/opt/vfkit',
+        seatbeltProfile: '/opt/sb',
+        pocDir: caseRoot,
+        socketDir: join(caseRoot, 'sock'),
+        kernelPath: kernel,
+        initramfsPath: kernel,
+        rootfsPath: join(caseRoot, 'work'),
+        guestLogPath: join(caseRoot, 'guest.log'),
+        pidFile: join(caseRoot, 'vfkit.pid'),
+        homeDir: join(caseRoot, 'home'),
+        tmpDir: caseRoot,
+        inputVsockPort: 53,
+        ...(kind === 'missing-vsock-path' ? {} : { modelVsockPort: 54 }),
+      });
+      if (kind === 'missing-vsock-path') plan.modelVsockPath = null;
+      let launchCalls = 0;
+      const result = await runHardwareRound({
+        ...ctx,
+        launcherDir: join(caseRoot, 'launcher'),
+        vaultDir: join(caseRoot, 'vault'),
+        approvedRoots: [root],
+        sourceKernelPath: kernel,
+        sourceRootfsPath: golden,
+        plan,
+        roundInput: { bundlePath },
+        modelProxy: {
+          baseUrl: 'http://127.0.0.1:65535/v1',
+          apiKey: 'fixture-key-not-a-secret',
+          maxRequests: 1,
+          ...(kind === 'host-tcp' ? { listenHost: '127.0.0.1' } : {}),
+          ...(kind === 'alternate-uds'
+            ? { socketPath: join(caseRoot, 'alternate.sock') }
+            : {}),
+        },
+        launchBackend: async () => {
+          launchCalls += 1;
+          throw new Error('fixture launcher must not run');
+        },
+      });
+      expect(result.ok).toBe(false);
+      expect(launchCalls).toBe(0);
+      expect(existsSync(join(caseRoot, 'launcher', 'token.json'))).toBe(false);
+      expect(result.errors).toContain(
+        'roundInput with modelProxy must bind plan.modelVsockPath for guest access',
+      );
+    }
+  });
 
   it('orchestrates model proxy (auth/budget/revocation), UDS collector (incl. PNG), live worker reap, finalize, and verify-pr-check end to end', async () => {
     const root = mkdtempSync('/tmp/qc-orch-');

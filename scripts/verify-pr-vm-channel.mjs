@@ -193,12 +193,14 @@ export function createRoundInputBundle({
     }
   }
 
-  const scratchBare = mkdtempSync(join(tmpdir(), 'qc-round-bundle-'));
   const absOut = resolve(outPath);
-  mkdirSync(dirname(absOut), { recursive: true, mode: 0o700 });
-  const tmpOut = `${absOut}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
+  let scratchBare = null;
+  let tmpOut = null;
 
   try {
+    scratchBare = mkdtempSync(join(tmpdir(), 'qc-round-bundle-'));
+    mkdirSync(dirname(absOut), { recursive: true, mode: 0o700 });
+    tmpOut = `${absOut}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
     runHardenedGit(['init', '--bare', '--quiet', scratchBare]);
     writeFileSync(
       join(scratchBare, 'objects', 'info', 'alternates'),
@@ -236,14 +238,18 @@ export function createRoundInputBundle({
       bundleBytes: bytes,
     };
   } catch (error) {
-    try {
-      unlinkSync(tmpOut);
-    } catch {
-      // Ignore cleanup error.
+    if (tmpOut !== null) {
+      try {
+        unlinkSync(tmpOut);
+      } catch {
+        // Ignore cleanup error.
+      }
     }
     throw error;
   } finally {
-    rmSync(scratchBare, { recursive: true, force: true });
+    if (scratchBare !== null) {
+      rmSync(scratchBare, { recursive: true, force: true });
+    }
   }
 }
 

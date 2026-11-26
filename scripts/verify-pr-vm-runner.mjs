@@ -1309,6 +1309,17 @@ export async function runHardwareRound({
         errors: ['roundInput requires repoDir or prebuilt bundlePath'],
       };
     }
+    if (
+      modelProxy !== null &&
+      (!plan.modelVsockPath || effectiveProxySocketPath !== plan.modelVsockPath)
+    ) {
+      return {
+        ok: false,
+        errors: [
+          'roundInput with modelProxy must bind plan.modelVsockPath for guest access',
+        ],
+      };
+    }
   }
   let kernelDigest = null;
   let rootfsDigest = null;
@@ -2284,6 +2295,7 @@ async function main(argv) {
           bundleBytes: rawRoundInput.bundleBytes,
           maxBundleBytes: rawRoundInput.maxBundleBytes,
           maxReads: rawRoundInput.maxReads,
+          entropyHex: rawRoundInput.entropyHex,
         }
       : null;
     const result = await runHardwareRound({
