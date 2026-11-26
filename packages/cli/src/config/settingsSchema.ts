@@ -4972,19 +4972,21 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       maxRetained: {
-        type: 'number',
+        type: 'integer',
         label: 'Maximum Retained Session Worktrees',
         category: 'Advanced',
         requiresRestart: false,
         default: 15,
+        minimum: 0,
+        maximum: Number.MAX_SAFE_INTEGER,
         description:
-          'Reserved for the future worktree retention sweep tracked in ' +
-          '#17237. This value is not yet applied. Deleting a chat snapshots ' +
-          'its worktree before removal when capture is required. The ' +
-          'retention sweep and restore-on-reopen are not implemented in this ' +
-          'slice. Does not affect tool/agent worktrees, which keep their ' +
-          'existing cleanup semantics.',
-        showInDialog: false,
+          'Keep this many recent eligible session worktrees per uniquely ' +
+          'owned management root. Live and pinned chats are preserved and ' +
+          'do not consume that quota. Set to 0 to disable automatic sweeping ' +
+          'without disabling explicit snapshot restore. Roots with ambiguous ' +
+          'ownership or unreadable settings are preserved. Does not apply to ' +
+          'tool/agent worktrees or delete orphan snapshots.',
+        showInDialog: true,
       },
     },
   },

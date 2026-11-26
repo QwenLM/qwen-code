@@ -215,6 +215,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   workspace_session_metadata: ['sessionOps'],
   session_worktree_persistence_v1: [],
   session_worktree_reset_v1: [],
+  session_worktree_restore_v1: [],
   session_worktree_branch_v1: [],
   session_worktree_handoff_v1: [],
   workspace_qualified_acp: [],

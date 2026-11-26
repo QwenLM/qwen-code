@@ -29,6 +29,7 @@ export {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type RestoreWorktreeSessionRequest,
   type ResumeSessionRequest,
   type SubscribeOptions,
   type WorktreeResetSessionRequest,

@@ -15,6 +15,7 @@ import {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type RestoreWorktreeSessionRequest,
   type ResumeSessionRequest,
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
@@ -67,6 +68,7 @@ import type {
   SessionSourceRemoveResult,
   DaemonSessionState,
   DaemonSession,
+  DaemonRestoredSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionCancelableTaskKind,
@@ -461,53 +463,7 @@ export class DaemonSessionClient {
     clientId?: string,
   ): Promise<DaemonSessionClient> {
     const restored = await client.loadSession(sessionId, req, clientId);
-    const replaySnapshotComplete =
-      Array.isArray(restored.compactedReplay) &&
-      Array.isArray(restored.liveJournal);
-    const {
-      state,
-      hasActivePrompt,
-      compactedReplay,
-      liveJournal,
-      lifecycleReplay,
-      lifecycleReplayIncomplete,
-      historyHasMore,
-      historyAnchorRecordId,
-      replayProjectionWatermark,
-      replayDegraded,
-      partial,
-      replayError,
-      lastEventId: serverLastEventId,
-      eventEpoch,
-      artifacts,
-      ...session
-    } = restored;
-    const result = new DaemonSessionClient({
-      client,
-      session,
-      hasActivePrompt,
-      state,
-      lastEventId: serverLastEventId ?? 0,
-      eventEpoch,
-      restoredArtifacts: artifacts,
-      replaySnapshot: {
-        compactedReplay: compactedReplay ?? [],
-        liveJournal: liveJournal ?? [],
-        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
-        ...(lifecycleReplayIncomplete !== undefined
-          ? { lifecycleReplayIncomplete }
-          : {}),
-      },
-      replaySnapshotComplete,
-      replayPartial: partial === true,
-      replayError,
-      historyHasMore,
-      historyAnchorRecordId,
-      replayProjectionWatermark,
-      replayDegraded,
-    });
-    await result.hydrateReplaySnapshot(req.signal);
-    return result;
+    return this.fromRestoredSession(client, restored, req.signal);
   }
 
   /**
@@ -574,6 +530,79 @@ export class DaemonSessionClient {
       lastEventId: 0,
       eventEpoch: session.eventEpoch,
     });
+  }
+
+  /**
+   * Restore this session's retained worktree, preserving its workspace owner.
+   * The server performs snapshot selection and ordinary session loading before
+   * this returns a client whose replay starts at the server's last event id.
+   */
+  static async restoreWorktree(
+    client: DaemonClient,
+    sessionId: string,
+    req: RestoreWorktreeSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSessionClient> {
+    const restored = await client.restoreWorktreeSession(
+      sessionId,
+      req,
+      clientId,
+    );
+    return this.fromRestoredSession(client, restored, req.signal);
+  }
+
+  private static async fromRestoredSession(
+    client: DaemonClient,
+    restored: DaemonRestoredSession,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionClient> {
+    const replaySnapshotComplete =
+      Array.isArray(restored.compactedReplay) &&
+      Array.isArray(restored.liveJournal);
+    const {
+      state,
+      hasActivePrompt,
+      compactedReplay,
+      liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete,
+      historyHasMore,
+      historyAnchorRecordId,
+      replayProjectionWatermark,
+      replayDegraded,
+      partial,
+      replayError,
+      lastEventId: serverLastEventId,
+      eventEpoch,
+      artifacts,
+      ...session
+    } = restored;
+    const result = new DaemonSessionClient({
+      client,
+      session,
+      hasActivePrompt,
+      state,
+      lastEventId: serverLastEventId ?? 0,
+      eventEpoch,
+      restoredArtifacts: artifacts,
+      replaySnapshot: {
+        compactedReplay: compactedReplay ?? [],
+        liveJournal: liveJournal ?? [],
+        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+        ...(lifecycleReplayIncomplete !== undefined
+          ? { lifecycleReplayIncomplete }
+          : {}),
+      },
+      replaySnapshotComplete,
+      replayPartial: partial === true,
+      replayError,
+      historyHasMore,
+      historyAnchorRecordId,
+      replayProjectionWatermark,
+      replayDegraded,
+    });
+    await result.hydrateReplaySnapshot(signal);
+    return result;
   }
 
   static async createStandalone(

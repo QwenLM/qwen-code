@@ -1335,6 +1335,8 @@ export interface BridgeSessionSummary {
     branch: string;
     baseCommit?: string;
     baseBranch?: string;
+    worktreeRemoved?: { archiveKey: string };
+    canRestore?: boolean;
   };
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string; baseCommit?: string };
