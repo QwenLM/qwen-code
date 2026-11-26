@@ -2,7 +2,9 @@
 
 [English](2026-11-22-managed-action-parking-coverage.md) | [简体中文](2026-11-22-managed-action-parking-coverage.zh-CN.md)
 
-状态：提案，实现前设计。日期：2026-11-22。本文接续[审批停靠设计](2026-11-21-managed-action-parking.zh-CN.md)（第四阶段，#18115 已合入），对照 `main` 的 `5714ee4c53` 核实。它逐项处理首个增量排除的等待形态，回答其开放问题 4，以及除团队计划审批外的开放问题 3。由 #18149 跟踪，其阶段 0–5 对应 §6 中的切片。下文的代码引用除各项另行注明外均对应该提交；标为"待验证"的结论来自代码阅读，未经测试证实，必须在对应切片实现前用测试确认。
+状态：截至 2026-11-26，阶段 0–5 已在 `main` 的 `6aadde9b6e` 实现。逐切片 CI 验收和放量测量仍待完成（§§6–8）。
+
+本文写于 2026-11-22，接续[审批停靠设计](2026-11-21-managed-action-parking.zh-CN.md)（第四阶段，#18115 已合入）。它逐项处理首个增量排除的等待形态，回答其开放问题 4，以及除团队计划审批外的开放问题 3。[#18149](https://github.com/QwenLM/qwen-code/issues/18149) 跟踪 §6 的各个切片。除另行注明外，基线代码引用与开工前问题均对应 `5714ee4c53`。
 
 ## 1. 问题与现状
 
@@ -147,15 +149,13 @@
 
 ### 4.8 S8：`uncaptured` 批次
 
-- **派发前的 Shell（S8a）。** 这是价值最高的一项：Shell profile 下的审批大多是 `run_shell_command`。G3 要求派发前的 Shell 建立自己的正面 continuation 与所有权证据。开工前检查已由测试确认，核对基线为 `main` 的 `7862c3eef3`：
+- **派发前的 Shell（S8a，已实现）。** G3 要求派发前的 `run_shell_command` 具备正面的 continuation 和所有权证据。最初的开工前测试对照 `main` 的 `7862c3eef3` 核实。
   - **Broker 不需要新增语义（已确认）。** Tool v3 的 Shell reservation 以 `dispatch = false` 做 prepare（`RuntimeBrokerService.java:995`）。用同一个 key 和 reference 再次 prepare，返回原来的 reservation，不会派发。同一个 key 下 `publicationId` 或 payload 摘要变了，会以 `runtime_idempotency_conflict` 拒绝（`:1654`）。执行结算之后，同一个 key 返回它原来的记录。
   - **public children Session 已经覆盖（已确认）。** 从 #15171 起，`publicChildAgentsVersion = 1` 的 Session 会捕获派发前的 Shell。生产者对它跳过 `shell_profile` 拒绝（`hosted-workspace-tool-turn.ts:4532`），并记录每个 Shell 调用的 `publicationId`（`:4620`）。`resumeSavedNativeBatch` 校验这个身份，再通过 `prepareV3` 用保存的 `runtimeCallId`、摘要和 `publicationId` 重新 prepare（`:4435`、`:6081`）。停靠资格里没有 Shell 相关的条件，所以这类等待今天已经能停靠。测试停靠了一个这样的等待，冷加载后 Allow，观察到一次带保存身份的 `prepareV3` 和一次执行。
-  - **这条路径在经过自己的 G3 审查之前就已经能停靠（决策 8）。** #15171 为崩溃恢复建了它，#18115 让它变成可停靠，但还没有设计按 G3 的用例核对过它。S8a 的 G3 扩展设计把它当作待验证的现有证据，而不是新工作。它在 §7 中的用例必须在任何部署打开 `action-parking.enabled` 之前通过，并且不必等 S8a 的其余部分。
-  - **门槛的单元用例已通过（已确认）。** 四种结局在停靠之后和 Harness 死亡之后都按 §7 的要求完成。后台 Shell 的审批同样能停靠并恢复：Allow 之后，所有 `child_run` 记录都属于预留的那一次执行，所以不会启动第二个进程。打开开关之前，§7 要求的 MySQL 8.4 真实进程用例仍待补上。
-  - **S8a 仍要覆盖的范围。** 没有 public children 的 Shell profile Session 仍以 `shell_profile` 拒绝。读取端只有在保存的计划带 `publicChildModel` 时才把它当作 Shell 计划（`hosted-approval-continuation.ts:248`、`:288`），而只有 public children 会记录这个字段（`hosted-workspace-tool-turn.ts:4627`），所以这类计划需要另一种识别方式。仍待验证：实际有哪些 Session 落在这里。
-  - 本切片仍然扩展 G3 契约，实现前要单独写一份 G3 扩展设计；它扩展的是现有证据，而不是新增 Broker 语义。已派发的 Shell 继续拒绝。这份设计见 [Managed Action Parking S8a](2026-11-24-managed-shell-action-parking.zh-CN.md)。
+  - **G3 审查（决策 8）。** [S8a 设计](2026-11-24-managed-shell-action-parking.zh-CN.md)（#18279）核对了两条通道上已有的 public-children 路径。用例矩阵在停靠及 Harness 死亡后分别验证 Allow、Deny、过期和代为放行的模式切换。后台 Shell 在发布通道上复用一次预留执行。真实进程验收记录见 §7。
+  - **版本 0 公开 Shell。** #18303 覆盖了没有 public children 的 `hosted-workspace-shell/1`、`/3` 和 `/4` profile 的两条通道。读取端从 Session 定义识别保存的计划，并校验 Shell 调用的 `publicationId`（发布通道为 UUID，旧 Shell 通道为 `null`）。team-lead 等待记为 `team_lead_profile`。带 MCP 的公开 Shell 和已派发的 Shell 仍排除。
 - **超过 64 KiB 的计划。** 暂不支持。P0 的拒绝计数会显示它的出现率；只有出现率可观时，才考虑把计划改存为非 inline 资源。
-- **仍然排除。** `todo` 批次、没有 Runtime 的批次、不支持的工具和未计算摘要的调用都保持拒绝；S8 只覆盖派发前的 Shell 和超大计划。
+- **仍然排除。** `todo` 批次、没有 Runtime 的批次、不支持的工具和未计算摘要的调用都保持拒绝。
 - **v1/v2。** 不支持。它们只存在于升级前写入的等待，G3 已明确遗留重建需要单独验证，收益随时间归零。
 
 ## 5. 决策与理由
@@ -171,27 +171,23 @@
    - 个人记忆召回的上下文，在今天已上线的停靠中也是如此：它只进入线上请求，恢复时不会重新召回。
    - 拒绝这类 Turn 会让大多数注入上下文的 Hooks Session 保持常驻，却挡不住上述路径本来就会暴露的内容。
    - 像排队消息那样把改写后的第一条 Prompt 也提交，会改变之后每个 Turn 的历史。这属于后续工作，不在本设计范围内。
-8. **public children 的 Shell 等待继续停靠，不加临时拒绝（S8a）。** 它们今天已经能停靠（§4.8，已确认），尽管还没有设计按 G3 核对过这条路径。
+8. **public children 的 Shell 等待继续停靠，无需临时拒绝（S8a）。** S8a 开始时，这类等待已能停靠。[G3 扩展设计](2026-11-24-managed-shell-action-parking.zh-CN.md)已完成该路径的审查。
    - 停靠没有引入新的恢复路径。Harness 在等待中死亡时，走的本来就是同一条冷恢复，所以决策 1 仍然成立。
-   - 但停靠让这条路径从只在崩溃后才走，变成每个闲置的 Shell 审批都会走。所以它在 §7 中的 S8a 用例是打开 `action-parking.enabled` 的前提（§8），而且排在 S8a 其余部分之前。
-   - 加一个停靠专属的拒绝条件也能守住同一条线，但那是默认关闭功能里的临时代码，这些用例通过后还要删掉。只有在这些用例通过之前就必须打开开关时，才加这个条件。
+   - 停靠让每个闲置的 Shell 审批都走这条路径。S8a 用例仍是启用 `action-parking.enabled` 的门槛（§8）。定向验收结果与剩余 CI 证据见 §7。
 9. **S5 与 S6b 一起合入（#18236）。** S5 单独放开的等待很少（§4.5），而目标形态，即同时带 Hooks 和 MCP 的 MCP profile Session，无论如何都需要 S6。S6 还必须放宽 S5 的 owner 条件，因为在那里 Hook owner 就是 MCP owner。回收守卫 S6a 先单独合入。
 
 ## 6. 推荐顺序与测量
 
-| 顺序 | #18149 阶段 | 切片                             | 改动面                     | 依赖                     |
-| ---- | ----------- | -------------------------------- | -------------------------- | ------------------------ |
-| 0    | 0           | P0 共享资格函数 + 拒绝原因       | Harness                    | —                        |
-| 1    | 1           | S1 纯图片 Prompt                 | Harness                    | P0                       |
-| 2    | 1           | S7 command-step                  | Harness                    | P0                       |
-| 3    | 2           | S2 后台 + 审批                   | Harness + Store            | P0、3b                   |
-| 4    | 2           | S4 wake Turn（S4b channel 在后） | Harness + Store            | P0                       |
-| 5    | 3           | S3 子 Session                    | Harness                    | P0、relay 预算缺口已关闭 |
-| 6    | 4           | S5 Hooks                         | Harness（G3）              | P0                       |
-| 7    | 4           | S6 MCP                           | Harness（G3）+ Broker 对齐 | P0、第二阶段 MCP parking |
-| 8    | 5           | S8a 派发前的 Shell               | Harness（G3）              | 单独的 G3 扩展设计       |
+| #18149 阶段 | 切片                                                         | 已合入 PR              |
+| ----------- | ------------------------------------------------------------ | ---------------------- |
+| 0           | P0 共享资格函数、类型化拒绝原因和实例指标                    | #18157、#18173         |
+| 1           | S1 纯图片 Prompt 和 S7 extension command step                | #18164、#18166         |
+| 2           | S2 后台任务 + 审批、S4 wake Turn 和 S4b channel / `pr_event` | #18187、#18194、#18203 |
+| 3           | S3 子 Session 和 session-message relay 等待处理              | #18224                 |
+| 4           | S6a MCP 回收守卫，随后一并交付 S5 Hooks 和 S6b MCP           | #18234、#18236         |
+| 5           | S8a 开工前检查、G3 扩展设计和 Shell 实现                     | #18231、#18279、#18303 |
 
-排序依据是代码级估算：先做改动小、只涉及 Harness 的切片，再做需要 G3 新证据的切片。这些估算未经实测。开始 S3 及之后的切片之前，用 P0 的拒绝计数，结合父设计 §7 的测量，查看各类等待在真实负载中的占比，按占比调整顺序；例如 Shell profile 的部署若占多数，S8a 应提前。
+[CLI/daemon 埋点分析](https://github.com/QwenLM/qwen-code/issues/18149#issuecomment-7121083917)为切片排序提供了依据。Hosted 放量仍需完成父设计的 [§7 测量](2026-11-21-managed-action-parking.zh-CN.md#7-测量启用门槛)，包括目标负载下的停靠率和延迟。
 
 ## 7. 验证计划
 
@@ -208,6 +204,8 @@
 - **S6**：在 MCP parking 开启和关闭两种配置下，开启时可停靠，关闭时不停靠；恢复后工具定义相等，已派发的 MCP 调用不重放；持有审批停靠证书的 owner 经过回收作业的空闲窗口扫描后仍保留原目录。退回到 activation 作用域 Hook owner 的 owner，在捕获时、停靠资格判断时以及每个恢复入口处都以 `mcp_activation_owner` 拒绝。同一个 owner 上的 Hooks 加 MCP Session 能停靠，并且在停靠之后和 Harness 在等待中死亡之后都能经由决定完成。裸加载不会回答停靠中的 MCP 批次。
 - **S8a**（已经能停靠的 public children Shell；决策 8）：Shell 审批分别经由 Allow、Deny、到期，以及代用户放行的审批模式变更完成，每种都要覆盖停靠之后和 Harness 在等待中死亡之后两种情况。Allow 和模式变更用保存的 reservation 重新 prepare，并恰好执行一次；Deny 和到期执行零次。后台 Shell（`is_background`）的审批要么能停靠并恢复、不启动第二个进程，要么在捕获时和停靠资格判断时都以带类型的原因拒绝。
 - **真实进程与 MySQL 8.4**：每个切片至少一个"停靠 → 换代 Harness → 决定"用例进入必跑 CI 层级；H2 结果不能替代。
+
+截至 2026-11-26，[Linux/MySQL 8.4 定向验收](https://github.com/QwenLM/qwen-code/actions/runs/45668596047/job/139397399975)通过 10 个用例，覆盖 public-children Shell、两条通道的版本 0 Shell，以及 Hooks + MCP。S1、S7、S2、S3、S4 和 S4b 的必跑层级真实进程证据仍待补齐。[#18410](https://github.com/QwenLM/qwen-code/pull/18410)另外补充已停靠 Shell Action 的健康池接管覆盖，当日仍在评审。
 
 ## 8. 验收标准
 
