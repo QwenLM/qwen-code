@@ -186,7 +186,9 @@ public class ManagedSessionStoreController {
         if (grant == null) {
             return null;
         }
-        WriterGrant advertised = wakeDispatch ? grant.withWakeDispatch() : grant;
+        WriterGrant advertised = wakeDispatch
+                ? grant.withWakeDispatch().withSuspensionPlacementRelease()
+                : grant;
         advertised = runtimeObservation ? advertised.withRuntimeObservation() : advertised;
         return actionParking ? advertised.withActionParking() : advertised;
     }
