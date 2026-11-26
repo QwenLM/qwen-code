@@ -12,6 +12,795 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.28.6](https://github.com/QwenLM/qwen-code/releases/tag/v0.28.6) - 2026-11-26
+
+### Highlights
+
+- Managed sessions can now park while awaiting tool approvals, questions, or Hooks/MCP decisions, surviving Harness restarts and resuming via cold recovery. ([#17953](https://github.com/QwenLM/qwen-code/pull/17953), [#18115](https://github.com/QwenLM/qwen-code/pull/18115), [#18164](https://github.com/QwenLM/qwen-code/pull/18164), [#18166](https://github.com/QwenLM/qwen-code/pull/18166), [#18187](https://github.com/QwenLM/qwen-code/pull/18187), [#18194](https://github.com/QwenLM/qwen-code/pull/18194), [#18203](https://github.com/QwenLM/qwen-code/pull/18203), [#18224](https://github.com/QwenLM/qwen-code/pull/18224), [#18236](https://github.com/QwenLM/qwen-code/pull/18236), [#18303](https://github.com/QwenLM/qwen-code/pull/18303))
+- Headless sessions and the Ink TUI now run on the event-bus kernel by default, with cancelled turns settling within 10 seconds; opt out via experimental.eventBusAgentLoop. ([#18154](https://github.com/QwenLM/qwen-code/pull/18154), [#18213](https://github.com/QwenLM/qwen-code/pull/18213))
+- New general.displayLanguage setting (off, zh-CN, en) translates completed replies and opened thoughts in Ink, OpenTUI, and Web Shell while keeping originals stored. ([#18175](https://github.com/QwenLM/qwen-code/pull/18175))
+- Web Shell now submits prompts with idempotency keys, silently retries transient failures twice, and shows a message-level resend indicator instead of a blocking dialog. ([#18177](https://github.com/QwenLM/qwen-code/pull/18177))
+- Send no longer stops a running shell command: it moves to the background and keeps running, and the model receives the background id, output location, and status. ([#17926](https://github.com/QwenLM/qwen-code/pull/17926))
+- Grep prefers a healthy system rg on PATH and falls back to the bundled binary, avoiding slow first launches on macOS. ([#17698](https://github.com/QwenLM/qwen-code/pull/17698))
+
+### Breaking Changes
+
+- Removes MessageRewriteMiddleware, the extra-model-call stopgap for rewriting ACP replies; mods now rewrite reply blocks and thoughts via hooks in Ink, OpenTUI, and Web Shell. ([#18156](https://github.com/QwenLM/qwen-code/pull/18156)) by @qqqys
+  - 移除 MessageRewriteMiddleware 这一通过额外模型调用重写 ACP 回复的临时方案；mods 现在通过 hooks 在 Ink、OpenTUI 和 Web Shell 中重写回复块和思考内容。
+
+### Managed session parking and recovery
+
+Turns can now park while awaiting approvals, questions, or background work, and recover across Harness restarts.
+
+- Moves managed-agent background capture into the worker so captures survive Harness restarts and sessions with live background work can suspend safely. ([#17953](https://github.com/QwenLM/qwen-code/pull/17953))
+- Idle hosted sessions can now suspend while a recoverable tool-approval Action awaits a decision, resuming on approval, cancel, or mode change. ([#18115](https://github.com/QwenLM/qwen-code/pull/18115))
+- Action parking now reports why a waiting Turn stays resident, and parking and cold recovery share one set of Session-shape checks. ([#18157](https://github.com/QwenLM/qwen-code/pull/18157))
+- Approval waits whose Prompt has only images or attachments can now park and survive a Harness crash through cold recovery. ([#18164](https://github.com/QwenLM/qwen-code/pull/18164))
+- Approval waits requested by extension command steps, such as Shell commands inside extensions, can now park while awaiting the decision. ([#18166](https://github.com/QwenLM/qwen-code/pull/18166))
+- A wake-started Turn that was waiting for tool approval when its Harness crashed now resumes that approval wait on the next Harness instead of failing. ([#18170](https://github.com/QwenLM/qwen-code/pull/18170))
+- A wake-started Turn that crashes while awaiting a tool approval or answer now advances the session checkpoint, so follow-up Turns can start and wake work no longer stalls. ([#18172](https://github.com/QwenLM/qwen-code/pull/18172))
+- Tool approval waits can now park while a verified background hold covers the Session's background runs, instead of keeping the Session resident until the human decides. ([#18187](https://github.com/QwenLM/qwen-code/pull/18187))
+- Turns started by wake inputs can now park while waiting for tool approval, and the wake pump resumes them at the park's due time instead of keeping the Session resident. ([#18194](https://github.com/QwenLM/qwen-code/pull/18194))
+- managed-agent: park channel and pr_event Turns' approval waits ([#18203](https://github.com/QwenLM/qwen-code/pull/18203))
+- Child Session Turns can now park while awaiting tool approval or a question, and cold recovery resumes them instead of staying resident. ([#18224](https://github.com/QwenLM/qwen-code/pull/18224))
+- Prevents the parked-MCP reclamation job from retiring MCP connections of Sessions whose seal parks a Turn waiting for an Action. ([#18234](https://github.com/QwenLM/qwen-code/pull/18234))
+- Managed agents can now park Hooks and MCP Session approval waits instead of blocking, landing alongside the Harness-side MCP plan. ([#18236](https://github.com/QwenLM/qwen-code/pull/18236))
+- Version-0 public Shell Sessions now park approval waits on both Shell lanes, including Shell calls before dispatch. ([#18303](https://github.com/QwenLM/qwen-code/pull/18303))
+- Restores Workspace registration for Action parking acceptance and aligns approval validation with durable Hooks and MCP formats, with MySQL 8.4 coverage. ([#18353](https://github.com/QwenLM/qwen-code/pull/18353))
+- Managed Agent recovery now uses session-level evidence after a turn is cancelled before Harness admission, allowing a cleanup recheck. ([#18132](https://github.com/QwenLM/qwen-code/pull/18132))
+- Cancellations of never-admitted turns can now settle while an earlier turn's owed runtime cleanup stays available for retry. ([#18212](https://github.com/QwenLM/qwen-code/pull/18212))
+
+### Reasoning and model support
+
+New reasoning-effort options and provider fixes for Gemini, Kimi, DashScope, and ACP sessions.
+
+- Gemini 4 Neon and Hydrogen models now support xhigh reasoning effort with high as default, while other Gemini 4 models keep low, medium, and high. ([#18121](https://github.com/QwenLM/qwen-code/pull/18121))
+- Adds built-in reasoning detection for Kimi K3 on OpenAI-compatible gateways, exposing low, high, and max effort with max as default and mandatory thinking. ([#18095](https://github.com/QwenLM/qwen-code/pull/18095))
+- Moves text out of Gemini functionResponse nested parts into the tool response payload, omitting empty parts so requests match Gemini's schema. ([#18220](https://github.com/QwenLM/qwen-code/pull/18220))
+- DashScope tool schemas now send omitted additionalProperties as true, while explicit false, true, and schema values stay unchanged. ([#18256](https://github.com/QwenLM/qwen-code/pull/18256))
+- ACP sessions can now replay retryable transport cuts after reasoning and tool calls when no output was delivered, and errors keep their underlying cause. ([#18228](https://github.com/QwenLM/qwen-code/pull/18228))
+- A stream that stalls mid tool-call arguments now gets a single retry instead of multiple replays, with a clearer error explaining the stall. ([#18242](https://github.com/QwenLM/qwen-code/pull/18242))
+- Fixes compression deadlocks in long sessions by stripping unsigned reasoning blocks and retrying with reduced input when output budgets are clamped. ([#18209](https://github.com/QwenLM/qwen-code/pull/18209))
+- Context overflow errors worded as "longer than the model's context length" are now recognized, triggering automatic compaction instead of failing. ([#18176](https://github.com/QwenLM/qwen-code/pull/18176))
+
+### Web Shell and chat UI
+
+Improvements to the shared chat surface, composer, settings, and mobile layout.
+
+- Adds older-history pagination state to the chat controllers and scopes ChatSurface cancel errors to the owning session and active turn. ([#18091](https://github.com/QwenLM/qwen-code/pull/18091))
+- web-shell: add pure Managed SessionChatController adapter core (slice 3a) ([#18117](https://github.com/QwenLM/qwen-code/pull/18117))
+- Adds a React binding that connects Managed Agent sessions, transcript streaming, pending approvals and questions, and turn cancellation to the backend-neutral chat controller. ([#18205](https://github.com/QwenLM/qwen-code/pull/18205))
+- The shared chat surface can now render and operate a live Managed session without daemon-specific contexts, defaulting host integrations to empty when unmounted. ([#18246](https://github.com/QwenLM/qwen-code/pull/18246))
+- Managed sessions now use the shared question card, adding draft persistence, multi-line text, and submit-only blocking for consistent chat interactions. ([#18273](https://github.com/QwenLM/qwen-code/pull/18273))
+- Web Shell now submits prompts with idempotency keys, silently retries transient failures twice, and shows a message-level resend indicator instead of a blocking dialog. ([#18177](https://github.com/QwenLM/qwen-code/pull/18177))
+- The touch composer editing bar stays on one compact row across phones and iPads, keeping all six editing controls while adapting layout across three width tiers. ([#18126](https://github.com/QwenLM/qwen-code/pull/18126))
+- Narrow touch-session rows now wrap auxiliary metadata instead of covering it, and open menus close competing hover details. ([#18092](https://github.com/QwenLM/qwen-code/pull/18092))
+- The floating environment panel in Web Shell now stops above a pending question and scrolls internally, updating its height on resize and returning to normal once answered. ([#18013](https://github.com/QwenLM/qwen-code/pull/18013))
+- Prevents Safari on iOS from zooming the page when focusing text inputs, textareas, editable content, or the composer, including inputs inside portaled dialogs. ([#17938](https://github.com/QwenLM/qwen-code/pull/17938))
+- Clicking a single-task composer chip again now collapses its task detail, while multi-task chips still open their list and row selection switches tasks. ([#18128](https://github.com/QwenLM/qwen-code/pull/18128))
+- Fixes Web Shell approval buttons losing theme colors, borders, and padding in embeds when a scoped button reset loads later. ([#18243](https://github.com/QwenLM/qwen-code/pull/18243))
+- The Web Shell settings panel now shows a "Not set" badge for booleans without a resolved value, and the first click writes the schema's unsetToggleValue when present. ([#18301](https://github.com/QwenLM/qwen-code/pull/18301))
+- Web Shell composer input history now persists on the local daemon per workspace, so desktop and mobile clients share prompt and shell command history. ([#18120](https://github.com/QwenLM/qwen-code/pull/18120))
+- Shows short Skill names in the slash menu and /skills list, and highlights the owning Extension in the details tooltip. ([#18227](https://github.com/QwenLM/qwen-code/pull/18227))
+- Skips redundant root scope guards in Web Shell CSS, cutting median click-to-visible history from 1,308 ms to 815 ms. ([#18223](https://github.com/QwenLM/qwen-code/pull/18223))
+- web-shell: scope library CSS with native @scope and remove :has() subtree wildcards ([#18239](https://github.com/QwenLM/qwen-code/pull/18239))
+- Coalesces transcript bottom-follow scrolling into one resize observer after layout, skipping redundant writes when already at the bottom. ([#18180](https://github.com/QwenLM/qwen-code/pull/18180))
+- The daemon now builds transcript catalog summaries from single bounded reads and loads Goal metadata only for the selected page, speeding up the sidebar's first page. ([#18146](https://github.com/QwenLM/qwen-code/pull/18146))
+
+### Generated UI cards
+
+Cards can persist view state and offer copy and download actions.
+
+- Generated UI cards can now persist view state via ui.state, with skill guidance teaching the model to restore and save meaningful changes. ([#17922](https://github.com/QwenLM/qwen-code/pull/17922))
+- Generated UI cards gain ui.copy and ui.download, letting a click copy text or download a small text file via Web Shell. ([#18158](https://github.com/QwenLM/qwen-code/pull/18158))
+
+### Agent loop and hooks
+
+Event-bus kernel rollout, hook lifecycle fixes, and stop behavior changes.
+
+- Headless sessions (-p, stream-json, SDK) now run on the event-bus kernel by default, with a setting and env var to opt out; cancelled runs settle within 10 seconds. ([#18154](https://github.com/QwenLM/qwen-code/pull/18154))
+- The Ink TUI now runs the shared agent loop on the event-bus kernel by default, with Esc-cancelled turns settling within 10 seconds; opt out via experimental.eventBusAgentLoop. ([#18213](https://github.com/QwenLM/qwen-code/pull/18213))
+- UserPromptSubmit hooks now run once per fresh user message, skipping tool-result requests, retries, continuations, and automated prompts. ([#18266](https://github.com/QwenLM/qwen-code/pull/18266))
+- A Stop or SubagentStop hook returning continue: false now ends the turn, and stopReason text is shown in terminal, headless, and ACP sessions. ([#18229](https://github.com/QwenLM/qwen-code/pull/18229))
+- PermissionRequest hooks that allow a tool call can now return updatedPermissions rules, which Qwen applies like an Always allow choice in the terminal UI and ACP sessions. ([#18237](https://github.com/QwenLM/qwen-code/pull/18237))
+- Hooks that Qwen Code cannot run as written now surface warnings at session start, in headless stderr, and after /hooks reloads instead of only in debug logs. ([#18299](https://github.com/QwenLM/qwen-code/pull/18299))
+- hooks: end the turn when a tool hook returns continue: false ([#18345](https://github.com/QwenLM/qwen-code/pull/18345))
+
+### Shell and tool execution
+
+Background shell commands, grep binary selection, and tool schema handling.
+
+- Send now no longer stops a running shell command: it moves to the background and keeps running, and the model receives the background id, output location, and status. ([#17926](https://github.com/QwenLM/qwen-code/pull/17926))
+- Grep now prefers a healthy system rg on PATH and falls back to the bundled binary, avoiding slow first launches on macOS. ([#17698](https://github.com/QwenLM/qwen-code/pull/17698))
+- Serve now pins a Skill or extension for the duration of a prompt and lets the next prompt pick up updated resources. ([#18179](https://github.com/QwenLM/qwen-code/pull/18179))
+
+### Performance and reliability
+
+Faster session loading, transcript handling, and query performance.
+
+- Shortens the inline memory policy and first-request prompts, omitting an empty memory catalog and trimming repeated generic tool examples. ([#17789](https://github.com/QwenLM/qwen-code/pull/17789))
+- Session creation no longer loads saved workflow snapshots or recovers interrupted workflows until workflow history is requested, removing 30 snapshot reads with 30 saved runs. ([#17896](https://github.com/QwenLM/qwen-code/pull/17896))
+- Restores index usage on MySQL for several identity joins by aligning column types and widths, improving query performance after the identity dehash. ([#18190](https://github.com/QwenLM/qwen-code/pull/18190))
+- Very large session transcripts now stay openable: the streaming file-size ceiling rises to 1 GiB with new memory guards and safe failure when limits are exceeded. ([#18111](https://github.com/QwenLM/qwen-code/pull/18111))
+- Token usage in the daemon status dashboard and cross-session stats now comes from the per-request usage ledger, attributing each response to the day it actually occurred. ([#17902](https://github.com/QwenLM/qwen-code/pull/17902))
+- After a successful summary compaction, a hint now points the model to the local transcript for exact older details, without retaining more raw history. ([#18018](https://github.com/QwenLM/qwen-code/pull/18018))
+- Deleting a live workspace session now waits for the recorder to flush and close, preserving files on timeout while other sessions keep running. ([#17707](https://github.com/QwenLM/qwen-code/pull/17707))
+- Archiving a session now blocks stale recorders from recreating its transcript or title, while newly loaded recorders resume normally. ([#18012](https://github.com/QwenLM/qwen-code/pull/18012))
+
+### Build, CI, and release tooling
+
+CI hardening, dependency audits, and release workflow fixes.
+
+- Clears all high-and-critical production dependency audit findings, including bumps to simple-git, shell-quote, sharp, markdown-it, and msteams packages. ([#18075](https://github.com/QwenLM/qwen-code/pull/18075))
+- Fork PR reviews now run on disposable hosted runners, keeping fork code and forged approval markers away from CI credentials. ([#18270](https://github.com/QwenLM/qwen-code/pull/18270))
+- Lets the main failure reporter file issues with the workflow token when its bot PAT is missing, avoiding duplicate filings. ([#18238](https://github.com/QwenLM/qwen-code/pull/18238))
+- triage: fall back to GITHUB_TOKEN when bot PATs are absent ([#18282](https://github.com/QwenLM/qwen-code/pull/18282))
+- Release workflow checkouts now use a size-bounded blob filter so trusted scripts fetch reliably within the retry window. ([#18309](https://github.com/QwenLM/qwen-code/pull/18309))
+- CI now provisions zip and unzip tools without sudo, so Linux unit tests no longer fail on runners lacking root access. ([#18343](https://github.com/QwenLM/qwen-code/pull/18343))
+- Release workflows now use an inline runner bootstrap instead of a self-repository action, avoiding full repository archive downloads during setup. ([#18366](https://github.com/QwenLM/qwen-code/pull/18366))
+- Fixes the Web Shell package publish failure by keeping private core imports out of published type declarations, unblocking the v0.28.5 release. ([#18377](https://github.com/QwenLM/qwen-code/pull/18377))
+- Managed Agent CI now runs Java and daemon checks only for relevant changed paths, while the full suite still runs on maintainer approval and schedule. ([#18310](https://github.com/QwenLM/qwen-code/pull/18310))
+- Fixes reproducible main CI failures across command IDs, storage guards, load admission, Windows socket tests, crash recovery, and class sizes. ([#18297](https://github.com/QwenLM/qwen-code/pull/18297))
+- capture-tui now drains queued signals across a full event loop turn before exiting, fixing a recurring CI test flake. ([#18312](https://github.com/QwenLM/qwen-code/pull/18312))
+- The Qwen CI Failure Patrol checkout no longer fails with a /dev/null config lock error, while keeping global and system Git config isolation. ([#18300](https://github.com/QwenLM/qwen-code/pull/18300))
+- Fixes a flaky workflow-runner test by waiting for run completion before cleaning up temporary directories, preventing ENOTEMPTY failures. ([#18371](https://github.com/QwenLM/qwen-code/pull/18371))
+- Docker integration runs now report the workspace input-history suite as properly skipped instead of failing with an empty-suite error. ([#18395](https://github.com/QwenLM/qwen-code/pull/18395))
+- Removes the reference build's unreachable helper-download fallback and adds bounded cleanup for helpers downloaded by older SDK source checkouts. ([#18101](https://github.com/QwenLM/qwen-code/pull/18101))
+- Adds tiered hardware-isolated execution to /verify-pr, classifying PRs by author trust and risk and blocking publication unless host execution succeeds. ([#18181](https://github.com/QwenLM/qwen-code/pull/18181))
+- verify-pr: add executable hardware microVM round orchestrator and token-revoked model proxy ([#18221](https://github.com/QwenLM/qwen-code/pull/18221))
+- NIC-less /verify-pr microVMs can now receive per-round source inputs, call the host model proxy with an ephemeral token, and stream artifacts back. ([#18277](https://github.com/QwenLM/qwen-code/pull/18277))
+- PR reviews can now execute inside hardware-isolated microVMs over a framed Unix socket/vsock bridge, with strict fail-closed fallback when prerequisites are missing. ([#18280](https://github.com/QwenLM/qwen-code/pull/18280))
+- PR review code execution now uses a tiered, trust-aware sandbox that escalates high-risk changes while keeping existing review sandbox modes compatible. ([#18226](https://github.com/QwenLM/qwen-code/pull/18226))
+
+### Other Changes
+
+- Corrects two misleading comments and test titles in the managed DingTalk witness tests; no behavior or production code changes. ([#18046](https://github.com/QwenLM/qwen-code/pull/18046))
+- Aligns transcript history documentation with the implemented live-flush barrier and in-process liveness check, clarifying the security boundary in English and Chinese. ([#18094](https://github.com/QwenLM/qwen-code/pull/18094))
+- Extracts tool-publication object-key construction into a shared component and lowers class-size ratchet ceilings, with no change to object layouts or validation. ([#18083](https://github.com/QwenLM/qwen-code/pull/18083))
+- Speeds up the HTML export formatter test by using a lightweight web-templates copy and async operations instead of a full monorepo build. ([#18104](https://github.com/QwenLM/qwen-code/pull/18104))
+- Updates bilingual sidebar design docs to match the active-work running color and adds stylesheet tests pinning the running dot's precedence over the base color. ([#18105](https://github.com/QwenLM/qwen-code/pull/18105))
+- Registers /artifacts as a pre-auth Web Shell page and adds staleness guards so archived-session jumps never override the user's current session. ([#18102](https://github.com/QwenLM/qwen-code/pull/18102))
+- Updates the mobile follow-up suggestion design doc to mark the feature as implemented and merged into main, with no product behavior changes. ([#18103](https://github.com/QwenLM/qwen-code/pull/18103))
+- Retires the Kubernetes Harness deployment templates and removes archived CSI remnants as a single cleanup change. ([#18118](https://github.com/QwenLM/qwen-code/pull/18118))
+- managed-agent: close three confirmed post-merge observation audit findings ([#18110](https://github.com/QwenLM/qwen-code/pull/18110))
+- Managed Agent Runtime Broker now discovers providers using the application class loader, fixing provider lookup from threads that cannot see application providers. ([#18125](https://github.com/QwenLM/qwen-code/pull/18125))
+- The conversation Change Overview now lists bound pull requests newest-bound first, so the latest delivery appears right after Uncommitted. ([#18134](https://github.com/QwenLM/qwen-code/pull/18134))
+- Test-only follow-up syncing the bilingual hover-status design doc and adding tests that pin the hover/dot precedence contract. ([#18093](https://github.com/QwenLM/qwen-code/pull/18093))
+- Adds a complete zh-display example Mod to the Mods guide that shows replies and thinking in Simplified Chinese across terminals and Web Shell. ([#18150](https://github.com/QwenLM/qwen-code/pull/18150))
+- Managed agent identity columns now use bounded VARCHAR with canonical references instead of hashed values, fixing the actor ID validation test failure. ([#18058](https://github.com/QwenLM/qwen-code/pull/18058))
+- Adds AGENTS.md rules for disposable background services, covering cleanup, log caps, and process termination to prevent runaway test processes from filling the host. ([#18168](https://github.com/QwenLM/qwen-code/pull/18168))
+- The instance metrics route now reports suspension counts, including clean suspensions, reverted attempts, eligibility failures, and cold opens, under a new suspension field. ([#18173](https://github.com/QwenLM/qwen-code/pull/18173))
+- Adds English and Chinese design docs for widening Action parking coverage and confirming its pre-start checks, linked from the parent design. ([#18151](https://github.com/QwenLM/qwen-code/pull/18151))
+- Moves MySQL-specific disposable service rules into the managed-agent-server module docs, leaving a short generic rule in the root instructions. ([#18183](https://github.com/QwenLM/qwen-code/pull/18183))
+- Corrects the Action parking design so MCP reclamation skipping parked owners is assigned to S6 rather than described as existing behavior. ([#18186](https://github.com/QwenLM/qwen-code/pull/18186))
+- Fixes the failing actor admission test to match the UTF-16 VARCHAR(36) identity cap; admission behavior itself is unchanged. ([#18195](https://github.com/QwenLM/qwen-code/pull/18195))
+- MySQL integration tests now verify recovery lookups use both target ID and revision, and cancel evidence uses Turn ID when probing the Turn key. ([#18211](https://github.com/QwenLM/qwen-code/pull/18211))
+- Documents the design and pre-start checks for parking tool approvals on Sessions with Hooks; no production code changes. ([#18218](https://github.com/QwenLM/qwen-code/pull/18218))
+- Two monitor-wake recovery tests now wait for the Session to have no active prompt before closing, avoiding 409 failures; no production changes. ([#18233](https://github.com/QwenLM/qwen-code/pull/18233))
+- Splits the Hosted Harness Session test suite into 33 independently runnable files while preserving all 905 existing test cases. ([#18216](https://github.com/QwenLM/qwen-code/pull/18216))
+- Adds tests confirming Shell execution supports prepare-without-dispatch and replay semantics, and pins existing Shell parking behavior. ([#18231](https://github.com/QwenLM/qwen-code/pull/18231))
+- New general.displayLanguage setting (off, zh-CN, en) translates completed replies and opened thoughts in Ink, OpenTUI, and Web Shell while keeping originals stored. ([#18175](https://github.com/QwenLM/qwen-code/pull/18175))
+- cli: refuse new sessions under sustained host load ([#18052](https://github.com/QwenLM/qwen-code/pull/18052))
+- Adds real-process Action parking acceptance tests covering Shell waits that survive Harness replacement and settle via allow, deny, cancellation, approval-mode change, or expiry. ([#18276](https://github.com/QwenLM/qwen-code/pull/18276))
+- Adds English and Chinese design docs for S8a Shell approval parking plus two passing pre-start check tests, linked from the coverage design. ([#18279](https://github.com/QwenLM/qwen-code/pull/18279))
+- Introduces a named type for the Runtime tool-result diagnostics envelope across transport and persistence, with focused tests and English/Chinese design docs. ([#18278](https://github.com/QwenLM/qwen-code/pull/18278))
+- Marks the GitHub registration-identity keying design as merged in both language versions, with no code changes. ([#17923](https://github.com/QwenLM/qwen-code/pull/17923))
+- Java SDK now accepts lifecycle v2 requests for the Hosted Workspace files profile when the Harness advertises hosted-workspace-files/1. ([#18268](https://github.com/QwenLM/qwen-code/pull/18268))
+- Splits the Hosted Harness Session into 16 responsibility-focused modules while preserving the HTTP contract and registration order. ([#18290](https://github.com/QwenLM/qwen-code/pull/18290))
+- GitHub channel now posts failure receipts only for explicit bot mentions and skips machine-authored comments that do not name the bot. ([#18281](https://github.com/QwenLM/qwen-code/pull/18281))
+- test(triage): supply HAS_BOT_PAT in re-run workflow fixtures ([#18328](https://github.com/QwenLM/qwen-code/pull/18328))
+- Adds the Harness CLI, core, and resource packages as workspaces so they install, build, and typecheck with the repository. ([#18314](https://github.com/QwenLM/qwen-code/pull/18314))
+- Managed Agent Server production code now uses Java imports and short type names, with the Harness SDK adapter keeping its qualified name. ([#18325](https://github.com/QwenLM/qwen-code/pull/18325))
+- Managed Agent JSON structures now use explicit typed fields while preserving existing payloads, database representation, and digest inputs. ([#18267](https://github.com/QwenLM/qwen-code/pull/18267))
+- Scheduled-tasks route tests now pin the clock, so reseat assertions no longer fail depending on when CI runs; duplicate workflow fixture keys were also removed. ([#18315](https://github.com/QwenLM/qwen-code/pull/18315))
+- Maven cache-helper failure tests now distinguish real permission denials from inconclusive probes and keep cleanup warnings and original process statuses observable. ([#18143](https://github.com/QwenLM/qwen-code/pull/18143))
+- Remaining daemon E2E fixtures now start with the host-load admission gate disabled, matching other fixtures; production behavior stays default-on. ([#18308](https://github.com/QwenLM/qwen-code/pull/18308))
+- Added test coverage pinning the embed listener force-close path for upgraded sockets and documented the drain pairing-teardown contract. ([#18275](https://github.com/QwenLM/qwen-code/pull/18275))
+- Updates the submitted-prompt provenance E2E test to expect a single UserPromptSubmit invocation per user message, matching the new hook lifecycle. ([#18363](https://github.com/QwenLM/qwen-code/pull/18363))
+- MCP approvals now stay valid after a session changes to a child directory, using the admission workspace to resolve configuration and approval records. ([#18262](https://github.com/QwenLM/qwen-code/pull/18262))
+
+### 中文摘要
+
+#### 亮点
+
+- 托管会话现在可在等待工具审批、提问或 Hooks/MCP 决定时挂起，Harness 重启后仍可经冷恢复继续。 ([#17953](https://github.com/QwenLM/qwen-code/pull/17953), [#18115](https://github.com/QwenLM/qwen-code/pull/18115), [#18164](https://github.com/QwenLM/qwen-code/pull/18164), [#18166](https://github.com/QwenLM/qwen-code/pull/18166), [#18187](https://github.com/QwenLM/qwen-code/pull/18187), [#18194](https://github.com/QwenLM/qwen-code/pull/18194), [#18203](https://github.com/QwenLM/qwen-code/pull/18203), [#18224](https://github.com/QwenLM/qwen-code/pull/18224), [#18236](https://github.com/QwenLM/qwen-code/pull/18236), [#18303](https://github.com/QwenLM/qwen-code/pull/18303))
+- 无头会话和 Ink TUI 现默认在事件总线内核上运行，取消的回合在 10 秒内结束；可通过 experimental.eventBusAgentLoop 关闭。 ([#18154](https://github.com/QwenLM/qwen-code/pull/18154), [#18213](https://github.com/QwenLM/qwen-code/pull/18213))
+- 新增 general.displayLanguage 设置（off、zh-CN、en），在 Ink、OpenTUI 和 Web Shell 中翻译已完成回复和已展开的思考，原文仍保留。 ([#18175](https://github.com/QwenLM/qwen-code/pull/18175))
+- Web Shell 现在为提示提交附带幂等键，对瞬时失败静默重试两次，并以消息级重发提示取代阻塞式对话框。 ([#18177](https://github.com/QwenLM/qwen-code/pull/18177))
+- Send 不再停止正在运行的 shell 命令，而是将其移到后台继续运行，模型会收到后台 id、输出位置和状态。 ([#17926](https://github.com/QwenLM/qwen-code/pull/17926))
+- Grep 现在优先使用 PATH 中可用的系统 rg，再回退到内置二进制，避免 macOS 上首次启动缓慢。 ([#17698](https://github.com/QwenLM/qwen-code/pull/17698))
+
+#### 托管会话挂起与恢复
+
+Turn 现在可在等待审批、提问或后台工作时挂起，并能跨 Harness 重启恢复。
+
+- 将 managed-agent 后台捕获移入 worker，使捕获在 Harness 重启后仍保留，且存在后台工作的会话可安全挂起。 ([#17953](https://github.com/QwenLM/qwen-code/pull/17953))
+- 空闲的托管会话现在可在可恢复的工具审批 Action 等待决定时挂起，并在批准、取消或模式变更时恢复。 ([#18115](https://github.com/QwenLM/qwen-code/pull/18115))
+- Action parking 现在会说明等待中的 Turn 为何保持驻留，且 parking 与冷恢复共用同一套 Session 形态检查。 ([#18157](https://github.com/QwenLM/qwen-code/pull/18157))
+- 仅含图片或附件的 Prompt 审批等待现在可以停放，并能在 Harness 崩溃后通过冷恢复继续。 ([#18164](https://github.com/QwenLM/qwen-code/pull/18164))
+- 扩展命令步骤请求的审批等待（例如扩展内的 Shell 命令）现在可以在等待决定时停放。 ([#18166](https://github.com/QwenLM/qwen-code/pull/18166))
+- 由唤醒启动的 Turn 在等待工具审批时若 Harness 崩溃，现在会在下一个 Harness 上恢复该审批等待，而不是报错。 ([#18170](https://github.com/QwenLM/qwen-code/pull/18170))
+- 由唤醒启动的 Turn 在等待工具批准或回答时崩溃后，现在会推进会话检查点，使后续 Turn 能启动，唤醒工作不再停滞。 ([#18172](https://github.com/QwenLM/qwen-code/pull/18172))
+- 当已验证的后台保持覆盖会话的后台运行时，工具审批等待现在可以挂起，而不再让会话一直驻留到人工决定。 ([#18187](https://github.com/QwenLM/qwen-code/pull/18187))
+- 由唤醒输入启动的 Turn 现在可在等待工具审批时挂起，唤醒泵会在到期时恢复它，而不再让会话一直驻留。 ([#18194](https://github.com/QwenLM/qwen-code/pull/18194))
+- managed-agent: park channel and pr_event Turns' approval waits ([#18203](https://github.com/QwenLM/qwen-code/pull/18203))
+- 子 Session 的 Turn 现在可在等待工具审批或提问时挂起，冷恢复可将其恢复，无需全程驻留。 ([#18224](https://github.com/QwenLM/qwen-code/pull/18224))
+- 防止 parked-MCP 回收任务回收因等待 Action 而暂停 Turn 的 Session 的 MCP 连接。 ([#18234](https://github.com/QwenLM/qwen-code/pull/18234))
+- 托管代理现可挂起 Hooks 和 MCP Session 审批等待而不再阻塞，并与 Harness 侧 MCP 方案一同落地。 ([#18236](https://github.com/QwenLM/qwen-code/pull/18236))
+- 版本 0 的公共 Shell 会话现在在两个 Shell 通道上等待审批，包括派发前的 Shell 调用。 ([#18303](https://github.com/QwenLM/qwen-code/pull/18303))
+- 恢复 Action 停放验收所需的 Workspace 注册，并使审批校验与持久化 Hooks 和 MCP 格式一致，新增 MySQL 8.4 覆盖。 ([#18353](https://github.com/QwenLM/qwen-code/pull/18353))
+- Managed Agent 在回合于 Harness 准入前取消后改用会话级证据进行恢复，允许清理复查。 ([#18132](https://github.com/QwenLM/qwen-code/pull/18132))
+- 从未被接纳的 turn 取消现在可以结算，同时较早 turn 欠下的运行时清理仍可重试。 ([#18212](https://github.com/QwenLM/qwen-code/pull/18212))
+
+#### 推理与模型支持
+
+为 Gemini、Kimi、DashScope 和 ACP 会话新增推理强度选项并修复提供程序问题。
+
+- Gemini 4 Neon 和 Hydrogen 模型现支持 xhigh 推理强度，默认 high；其他 Gemini 4 模型仍为 low、medium、high。 ([#18121](https://github.com/QwenLM/qwen-code/pull/18121))
+- 为 OpenAI 兼容网关上的 Kimi K3 增加内置推理检测，提供 low、high、max 强度，默认 max 并强制思考。 ([#18095](https://github.com/QwenLM/qwen-code/pull/18095))
+- 将文本从 Gemini functionResponse 的嵌套 parts 移入工具响应负载，并在无媒体时省略该字段以符合 Gemini schema。 ([#18220](https://github.com/QwenLM/qwen-code/pull/18220))
+- DashScope 工具 schema 现在将未声明的 additionalProperties 发送为 true，显式 false、true 及 schema 值保持不变。 ([#18256](https://github.com/QwenLM/qwen-code/pull/18256))
+- ACP 会话现可在未输出内容时重放推理和工具调用后的可重试传输中断，错误信息保留底层原因。 ([#18228](https://github.com/QwenLM/qwen-code/pull/18228))
+- 在工具调用参数中途停滞的流现在只重试一次而非多次重放，并提供更清晰的停滞错误说明。 ([#18242](https://github.com/QwenLM/qwen-code/pull/18242))
+- 修复长会话中的压缩死锁：移除未签名推理块，并在输出预算受限时以缩减输入重试。 ([#18209](https://github.com/QwenLM/qwen-code/pull/18209))
+- 现在能识别“longer than the model's context length”形式的上下文溢出错误，触发自动压缩而非直接失败。 ([#18176](https://github.com/QwenLM/qwen-code/pull/18176))
+
+#### Web Shell 与聊天界面
+
+改进共享聊天界面、输入框、设置和移动端布局。
+
+- 为聊天控制器添加更早历史分页状态，并将 ChatSurface 取消错误限定到所属会话和活动轮次。 ([#18091](https://github.com/QwenLM/qwen-code/pull/18091))
+- 新增纯 Managed SessionChatController 适配器核心，将 Managed 能力与会话状态映射到共享聊天模型，支持取消、分页和恢复。 ([#18117](https://github.com/QwenLM/qwen-code/pull/18117))
+- 新增 React 绑定层，将 Managed Agent 会话、转录流、待处理审批与提问及 Turn 取消接入后端无关的聊天控制器。 ([#18205](https://github.com/QwenLM/qwen-code/pull/18205))
+- 共享聊天界面现可在无 daemon 上下文时渲染并运行实时 Managed 会话，未挂载时宿主集成默认为空。 ([#18246](https://github.com/QwenLM/qwen-code/pull/18246))
+- Managed 会话现使用共享问题卡片，新增草稿持久化、多行文本和仅提交时阻塞，统一聊天交互体验。 ([#18273](https://github.com/QwenLM/qwen-code/pull/18273))
+- Web Shell 现在为提示提交附带幂等键，对瞬时失败静默重试两次，并以消息级重发提示取代阻塞式对话框。 ([#18177](https://github.com/QwenLM/qwen-code/pull/18177))
+- 触屏输入框编辑栏在手机和 iPad 上保持单行紧凑布局，保留全部六个编辑控件，并按三档宽度自适应。 ([#18126](https://github.com/QwenLM/qwen-code/pull/18126))
+- 窄屏触控会话行现在会换行显示辅助元数据而非遮挡，打开菜单时会关闭冲突的悬停详情。 ([#18092](https://github.com/QwenLM/qwen-code/pull/18092))
+- Web Shell 中浮动的环境面板现在会停在待回答问题上方并在内部滚动，尺寸变化时更新高度，问题回答后恢复正常。 ([#18013](https://github.com/QwenLM/qwen-code/pull/18013))
+- 防止 iOS 上 Safari 在聚焦文本输入框、文本域、可编辑内容或输入框时缩放页面，包括弹窗中的输入框。 ([#17938](https://github.com/QwenLM/qwen-code/pull/17938))
+- 再次点击单任务 composer chip 现在会折叠其任务详情，多任务 chip 仍打开列表，选择行会切换任务。 ([#18128](https://github.com/QwenLM/qwen-code/pull/18128))
+- 修复嵌入式 Web Shell 中审批按钮在样式重置后丢失主题颜色、边框和内边距的问题。 ([#18243](https://github.com/QwenLM/qwen-code/pull/18243))
+- Web Shell 设置面板现在对没有解析值的布尔项显示“Not set”徽章，首次点击时若存在 unsetToggleValue 则写入该值。 ([#18301](https://github.com/QwenLM/qwen-code/pull/18301))
+- Web Shell 输入历史现按工作区持久化到本地守护进程，桌面和移动客户端可共享提示与 shell 命令历史。 ([#18120](https://github.com/QwenLM/qwen-code/pull/18120))
+- 在斜杠菜单和 /skills 列表中显示简短 Skill 名称，并在详情提示中高亮所属 Extension。 ([#18227](https://github.com/QwenLM/qwen-code/pull/18227))
+- Web Shell CSS 跳过冗余的根作用域守卫，历史记录点击到可见的中位耗时从 1308 毫秒降至 815 毫秒。 ([#18223](https://github.com/QwenLM/qwen-code/pull/18223))
+- web-shell: scope library CSS with native @scope and remove :has() subtree wildcards ([#18239](https://github.com/QwenLM/qwen-code/pull/18239))
+- 将对话记录底部跟随滚动合并为布局后的单个 resize observer，在已处于底部时跳过冗余写入。 ([#18180](https://github.com/QwenLM/qwen-code/pull/18180))
+- 守护进程现在通过单次有界读取构建 transcript 目录摘要，仅为所选页加载 Goal 元数据，加快侧边栏首页加载。 ([#18146](https://github.com/QwenLM/qwen-code/pull/18146))
+
+#### 生成的 UI 卡片
+
+卡片可持久化视图状态，并提供复制和下载操作。
+
+- Generated UI 卡片现在可通过 ui.state 持久化视图状态，技能指引会教模型恢复并保存有意义的变更。 ([#17922](https://github.com/QwenLM/qwen-code/pull/17922))
+- Generated UI 卡片新增 ui.copy 和 ui.download，点击即可通过 Web Shell 复制文本或下载小型文本文件。 ([#18158](https://github.com/QwenLM/qwen-code/pull/18158))
+
+#### 代理循环与钩子
+
+事件总线内核推广、钩子生命周期修复及停止行为变更。
+
+- 无头会话（-p、stream-json、SDK）现在默认在 event-bus 内核上运行，可通过设置和环境变量关闭；取消的运行会在10秒内结束。 ([#18154](https://github.com/QwenLM/qwen-code/pull/18154))
+- Ink TUI 现默认在事件总线内核上运行共享代理循环，Esc 取消的回合在 10 秒内结束；可通过 experimental.eventBusAgentLoop 关闭。 ([#18213](https://github.com/QwenLM/qwen-code/pull/18213))
+- UserPromptSubmit 钩子现在每条新用户消息只运行一次，跳过工具结果请求、重试、续写和自动提示。 ([#18266](https://github.com/QwenLM/qwen-code/pull/18266))
+- Stop 或 SubagentStop 钩子返回 continue: false 时现会结束回合，stopReason 文本在终端、无头和 ACP 会话中显示。 ([#18229](https://github.com/QwenLM/qwen-code/pull/18229))
+- 允许工具调用的 PermissionRequest 钩子现可返回 updatedPermissions 规则，Qwen 会像选择 Always allow 一样应用，适用于终端 UI 和 ACP 会话。 ([#18237](https://github.com/QwenLM/qwen-code/pull/18237))
+- Qwen Code 无法按原样运行的钩子现在会在会话启动、无头 stderr 及 /hooks 重载后显示警告，而不再只写入调试日志。 ([#18299](https://github.com/QwenLM/qwen-code/pull/18299))
+- hooks: end the turn when a tool hook returns continue: false ([#18345](https://github.com/QwenLM/qwen-code/pull/18345))
+
+#### Shell 与工具执行
+
+后台 shell 命令、grep 二进制选择及工具 schema 处理。
+
+- Send now 不再停止正在运行的 shell 命令，而是将其移到后台继续运行，模型会收到后台 id、输出位置和状态。 ([#17926](https://github.com/QwenLM/qwen-code/pull/17926))
+- Grep 现在优先使用 PATH 中可用的系统 rg，再回退到内置二进制，避免 macOS 上首次启动缓慢。 ([#17698](https://github.com/QwenLM/qwen-code/pull/17698))
+- Serve 现在在单个 prompt 期间固定 Skill 或扩展，下一次 prompt 可选用更新后的资源。 ([#18179](https://github.com/QwenLM/qwen-code/pull/18179))
+
+#### 性能与可靠性
+
+加快会话加载、转录处理和查询性能。
+
+- 精简内联记忆策略和首次请求提示词，省略空记忆目录并删减重复的通用工具示例。 ([#17789](https://github.com/QwenLM/qwen-code/pull/17789))
+- 创建会话时不再加载已保存的工作流快照或恢复中断的工作流，直到请求工作流历史时才执行；有30个已保存运行时减少30次快照读取。 ([#17896](https://github.com/QwenLM/qwen-code/pull/17896))
+- 通过对齐列类型和宽度，恢复 MySQL 上多个身份关联的索引使用，提升身份去哈希后的查询性能。 ([#18190](https://github.com/QwenLM/qwen-code/pull/18190))
+- 超大会话记录现仍可打开：流式文件大小上限提升至 1 GiB，新增内存保护，超限时安全失败。 ([#18111](https://github.com/QwenLM/qwen-code/pull/18111))
+- 守护进程状态面板和跨会话统计中的 token 用量现在来自按请求的使用记录，将每次响应归到实际发生的日期。 ([#17902](https://github.com/QwenLM/qwen-code/pull/17902))
+- 摘要压缩成功后，现在会提示模型查看本地 transcript 以获取精确的旧细节，且不增加保留的原始历史。 ([#18018](https://github.com/QwenLM/qwen-code/pull/18018))
+- 删除活动工作区会话时现在会等待 recorder 刷新并关闭，超时则保留文件，其他会话继续运行。 ([#17707](https://github.com/QwenLM/qwen-code/pull/17707))
+- 归档会话后，旧记录器无法再重建其转录或标题，新加载的记录器可正常恢复。 ([#18012](https://github.com/QwenLM/qwen-code/pull/18012))
+
+#### 构建、CI 与发布工具
+
+CI 加固、依赖审计和发布工作流修复。
+
+- 清除所有高危和严重级别的生产依赖审计问题，包括升级 simple-git、shell-quote、sharp、markdown-it 和 msteams 相关包。 ([#18075](https://github.com/QwenLM/qwen-code/pull/18075))
+- Fork PR 审查改在一次性托管 runner 上运行，防止 fork 代码和伪造审批标记接触 CI 凭据。 ([#18270](https://github.com/QwenLM/qwen-code/pull/18270))
+- 当 bot PAT 缺失时，主分支失败报告器改用工作流令牌提交问题，避免重复提交。 ([#18238](https://github.com/QwenLM/qwen-code/pull/18238))
+- triage: fall back to GITHUB_TOKEN when bot PATs are absent ([#18282](https://github.com/QwenLM/qwen-code/pull/18282))
+- 发布工作流检出改用有大小上限的 blob 过滤器，使可信脚本在重试窗口内可靠获取。 ([#18309](https://github.com/QwenLM/qwen-code/pull/18309))
+- CI 现在无需 sudo 即可安装 zip 和 unzip 工具，Linux 单元测试不再因运行器缺少 root 权限而失败。 ([#18343](https://github.com/QwenLM/qwen-code/pull/18343))
+- 发布工作流改用内联 runner 引导而非自仓库 action，避免安装时下载完整仓库归档。 ([#18366](https://github.com/QwenLM/qwen-code/pull/18366))
+- 修复 Web Shell 包发布失败问题，将私有 core 导入排除在发布的类型声明之外，解除 v0.28.5 发布阻塞。 ([#18377](https://github.com/QwenLM/qwen-code/pull/18377))
+- Managed Agent CI 现仅针对相关变更路径运行 Java 和 daemon 检查，完整测试套件仍在维护者批准和定时计划下运行。 ([#18310](https://github.com/QwenLM/qwen-code/pull/18310))
+- 修复主分支 CI 中可复现的失败，涉及命令 ID、存储守卫、负载准入、Windows socket 测试、崩溃恢复和类大小。 ([#18297](https://github.com/QwenLM/qwen-code/pull/18297))
+- capture-tui 现在退出前会在完整事件循环轮次中排空排队信号，修复了反复出现的 CI 测试不稳定问题。 ([#18312](https://github.com/QwenLM/qwen-code/pull/18312))
+- Qwen CI Failure Patrol 的 checkout 不再因 /dev/null 配置锁定错误而失败，同时保留全局和系统 Git 配置隔离。 ([#18300](https://github.com/QwenLM/qwen-code/pull/18300))
+- 修复 workflow-runner 测试不稳定问题，在清理临时目录前等待运行完成，避免 ENOTEMPTY 失败。 ([#18371](https://github.com/QwenLM/qwen-code/pull/18371))
+- Docker 集成运行现在会将 workspace input-history 测试套件正确标记为跳过，而不再因空套件报错失败。 ([#18395](https://github.com/QwenLM/qwen-code/pull/18395))
+- 移除参考构建中不可达的辅助工具下载回退，并为旧版 SDK 源码检出下载的辅助工具增加有界清理。 ([#18101](https://github.com/QwenLM/qwen-code/pull/18101))
+- 为 /verify-pr 增加分级硬件隔离执行，按作者信任度和风险分类 PR，主机执行未成功时阻止发布。 ([#18181](https://github.com/QwenLM/qwen-code/pull/18181))
+- verify-pr 现可端到端运行硬件隔离 microVM 轮次，支持每轮令牌签发与吊销、宿主模型代理强制、受限产物收集及失败关闭式清理。 ([#18221](https://github.com/QwenLM/qwen-code/pull/18221))
+- 无网卡的 /verify-pr microVM 现可接收每轮源码输入、用临时令牌调用宿主模型代理，并将产物流式回传。 ([#18277](https://github.com/QwenLM/qwen-code/pull/18277))
+- PR 审查现可在硬件隔离的 microVM 中通过分帧 Unix socket/vsock 桥执行，缺少前置条件时严格失败关闭回退。 ([#18280](https://github.com/QwenLM/qwen-code/pull/18280))
+- PR 审查代码执行现采用分级信任感知沙箱，对高风险变更强制升级，同时保持现有审查沙箱模式兼容。 ([#18226](https://github.com/QwenLM/qwen-code/pull/18226))
+
+#### 其他变更
+
+- 修正托管 DingTalk witness 测试中两处与代码不符的注释和测试标题，不改变行为或生产代码。 ([#18046](https://github.com/QwenLM/qwen-code/pull/18046))
+- 使 transcript 历史文档与已实现的 live-flush 屏障和进程内存活检查保持一致，并在中英文中明确安全边界。 ([#18094](https://github.com/QwenLM/qwen-code/pull/18094))
+- 将工具发布对象键构建提取为共享组件并降低类大小上限，不改变对象布局或校验逻辑。 ([#18083](https://github.com/QwenLM/qwen-code/pull/18083))
+- 通过使用轻量 web-templates 副本和异步操作替代完整 monorepo 构建，加快 HTML 导出格式化测试。 ([#18104](https://github.com/QwenLM/qwen-code/pull/18104))
+- 更新双语侧边栏设计文档以匹配活动工作的运行颜色，并添加样式表测试固定运行圆点颜色优先级。 ([#18105](https://github.com/QwenLM/qwen-code/pull/18105))
+- 将 /artifacts 注册为免认证 Web Shell 页面，并添加过期保护，避免归档会话跳转覆盖用户当前会话。 ([#18102](https://github.com/QwenLM/qwen-code/pull/18102))
+- 更新移动端后续建议设计文档，标记该功能已实现并合并到 main，不涉及产品行为变更。 ([#18103](https://github.com/QwenLM/qwen-code/pull/18103))
+- 退役 Kubernetes Harness 部署模板并清理归档的 CSI 残留，作为一次性清理变更。 ([#18118](https://github.com/QwenLM/qwen-code/pull/18118))
+- 修复合并后审计发现的三个缺陷：校验客户端资源 ID 为单一路径段、会话接管前增加租户范围预检查、修复测试辅助函数的排空等待。 ([#18110](https://github.com/QwenLM/qwen-code/pull/18110))
+- Managed Agent Runtime Broker 现使用应用类加载器发现提供程序，修复无法看到应用提供程序的线程中的查找问题。 ([#18125](https://github.com/QwenLM/qwen-code/pull/18125))
+- 会话变更概览现在按最新绑定优先列出关联 PR，最新交付紧跟在 Uncommitted 之后显示。 ([#18134](https://github.com/QwenLM/qwen-code/pull/18134))
+- 仅测试的后续改动：同步双语悬停状态设计文档，并新增测试固定悬停与圆点的优先级规则。 ([#18093](https://github.com/QwenLM/qwen-code/pull/18093))
+- 在 Mods 指南中新增完整的 zh-display 示例 Mod，在各终端和 Web Shell 中以简体中文显示回复和思考内容。 ([#18150](https://github.com/QwenLM/qwen-code/pull/18150))
+- Managed agent 身份列改用有界 VARCHAR 和规范引用，不再使用哈希值，修复了 actor ID 校验测试失败。 ([#18058](https://github.com/QwenLM/qwen-code/pull/18058))
+- 在 AGENTS.md 中新增一次性后台服务规则，涵盖清理、日志上限和进程终止，防止失控的测试进程占满主机。 ([#18168](https://github.com/QwenLM/qwen-code/pull/18168))
+- 实例 metrics 路由新增 suspension 字段，报告挂起计数，包括正常挂起、回滚尝试、资格失败和冷启动。 ([#18173](https://github.com/QwenLM/qwen-code/pull/18173))
+- 新增中英文设计文档，说明扩大 Action parking 覆盖范围并确认其启动前检查，并从父设计文档链接。 ([#18151](https://github.com/QwenLM/qwen-code/pull/18151))
+- 将 MySQL 专用的一次性服务规则移入 managed-agent-server 模块文档，根指令仅保留简短的通用规则。 ([#18183](https://github.com/QwenLM/qwen-code/pull/18183))
+- 修正 Action parking 设计，将 MCP 回收跳过已停放 owner 的工作归入 S6，而非描述为现有行为。 ([#18186](https://github.com/QwenLM/qwen-code/pull/18186))
+- 修复失败的 actor 准入测试以匹配 UTF-16 VARCHAR(36) 身份上限；准入行为本身不变。 ([#18195](https://github.com/QwenLM/qwen-code/pull/18195))
+- MySQL 集成测试现在验证恢复查询同时使用 target ID 和 revision，取消证据在探测 Turn key 时使用 Turn ID。 ([#18211](https://github.com/QwenLM/qwen-code/pull/18211))
+- 记录带 Hooks 的 Session 上工具审批挂起的设计与启动前检查，无生产代码变更。 ([#18218](https://github.com/QwenLM/qwen-code/pull/18218))
+- 两个 monitor-wake 恢复测试现在会等待 Session 无活动提示后再关闭，避免 409 失败；无生产代码变更。 ([#18233](https://github.com/QwenLM/qwen-code/pull/18233))
+- 将 Hosted Harness Session 测试套件拆分为 33 个可独立运行的文件，并保留全部 905 个现有测试用例。 ([#18216](https://github.com/QwenLM/qwen-code/pull/18216))
+- 新增测试确认 Shell 执行支持预准备与重放语义，并固定现有 Shell 暂停行为。 ([#18231](https://github.com/QwenLM/qwen-code/pull/18231))
+- 新增 general.displayLanguage 设置（off、zh-CN、en），在 Ink、OpenTUI 和 Web Shell 中翻译已完成回复和已展开的思考，原文仍保留。 ([#18175](https://github.com/QwenLM/qwen-code/pull/18175))
+- cli: refuse new sessions under sustained host load ([#18052](https://github.com/QwenLM/qwen-code/pull/18052))
+- 新增真实进程 Action 挂起验收测试，覆盖 Shell 等待在 Harness 替换后经允许、拒绝、取消、审批模式变更或过期而结束。 ([#18276](https://github.com/QwenLM/qwen-code/pull/18276))
+- 新增 S8a Shell 审批挂起的中英文设计文档及两个通过的预启动检查测试，并从覆盖设计链接。 ([#18279](https://github.com/QwenLM/qwen-code/pull/18279))
+- 为 Runtime 工具结果 diagnostics 信封引入命名类型，覆盖传输与持久化，并附专项测试和中英文设计文档。 ([#18278](https://github.com/QwenLM/qwen-code/pull/18278))
+- 将 GitHub 注册身份键控设计在中英文文档中标记为已合并，无代码变更。 ([#17923](https://github.com/QwenLM/qwen-code/pull/17923))
+- 当 Harness 声明 hosted-workspace-files/1 时，Java SDK 现在接受 Hosted Workspace 文件配置的 lifecycle v2 请求。 ([#18268](https://github.com/QwenLM/qwen-code/pull/18268))
+- 将 Hosted Harness Session 拆分为 16 个按职责划分的模块，同时保持 HTTP 契约和注册顺序不变。 ([#18290](https://github.com/QwenLM/qwen-code/pull/18290))
+- GitHub 频道现在仅在明确提及 bot 时发布失败回执，并跳过未提及 bot 的机器账号评论。 ([#18281](https://github.com/QwenLM/qwen-code/pull/18281))
+- test(triage): supply HAS_BOT_PAT in re-run workflow fixtures ([#18328](https://github.com/QwenLM/qwen-code/pull/18328))
+- 将 Harness CLI、core 和 resource 包添加为工作区，使其随仓库一起安装、构建和类型检查。 ([#18314](https://github.com/QwenLM/qwen-code/pull/18314))
+- Managed Agent Server 生产代码现使用 Java 导入和短类型名，Harness SDK 适配器保留其限定名。 ([#18325](https://github.com/QwenLM/qwen-code/pull/18325))
+- Managed Agent 的 JSON 结构改用显式类型字段，同时保持现有载荷、数据库表示和摘要输入不变。 ([#18267](https://github.com/QwenLM/qwen-code/pull/18267))
+- scheduled-tasks 路由测试现在固定时钟，重新排期断言不再因 CI 运行时间而失败；同时移除了重复的工作流测试配置键。 ([#18315](https://github.com/QwenLM/qwen-code/pull/18315))
+- Maven 缓存辅助工具的失败测试现在能区分真正的权限拒绝与不确定的探测，并保留清理警告和原始进程状态。 ([#18143](https://github.com/QwenLM/qwen-code/pull/18143))
+- 其余守护进程 E2E 测试夹具现在以禁用主机负载准入闸门的方式启动，与其他夹具一致；生产行为仍默认开启。 ([#18308](https://github.com/QwenLM/qwen-code/pull/18308))
+- 新增测试覆盖升级套接字的嵌入监听器强制关闭路径，并记录了排空配对拆除的约定。 ([#18275](https://github.com/QwenLM/qwen-code/pull/18275))
+- 更新提交提示来源 E2E 测试，改为每个用户消息只期望一次 UserPromptSubmit 调用，以匹配新的 hook 生命周期。 ([#18363](https://github.com/QwenLM/qwen-code/pull/18363))
+- 会话切换到子目录后 MCP 审批仍然有效，使用准入工作区解析配置和审批记录。 ([#18262](https://github.com/QwenLM/qwen-code/pull/18262))
+
+### Complete Change List (128 pull requests)
+
+#### Features
+
+- managed-agent: runtime-owned background observation with suspend-safe staging and drain (Phase 3b) ([#17953](https://github.com/QwenLM/qwen-code/pull/17953)) by @doudouOUC
+- web-shell: bind transcript history pagination facts and scope ChatSurface cancel errors to the owning session ([#18091](https://github.com/QwenLM/qwen-code/pull/18091)) by @wenshao
+- core: infer reasoning defaults for Kimi K3 routes ([#18095](https://github.com/QwenLM/qwen-code/pull/18095)) by @wenshao
+- managed-agent: park recoverable Action waits behind a sealed certificate (Phase 4) ([#18115](https://github.com/QwenLM/qwen-code/pull/18115)) by @doudouOUC
+- generated-ui: teach cards to keep their state with ui.state ([#17922](https://github.com/QwenLM/qwen-code/pull/17922)) by @qqqys
+- core: run headless sessions on the event-bus kernel by default ([#18154](https://github.com/QwenLM/qwen-code/pull/18154)) by @qqqys
+- acp: move running shells to the background when queued input is sent now ([#17926](https://github.com/QwenLM/qwen-code/pull/17926)) by @qqqys
+- managed-agent: name why a waiting Turn cannot park ([#18157](https://github.com/QwenLM/qwen-code/pull/18157)) by @doudouOUC
+- managed-agent: report suspension counts on the instance metrics route ([#18173](https://github.com/QwenLM/qwen-code/pull/18173)) by @doudouOUC
+- web-shell: keep touch composer editing bar single-row across phone and iPad ([#18126](https://github.com/QwenLM/qwen-code/pull/18126)) by @wenshao
+- managed-agent: park and recover image-only approval waits ([#18164](https://github.com/QwenLM/qwen-code/pull/18164)) by @doudouOUC
+- managed-agent: park extension command-step approval waits ([#18166](https://github.com/QwenLM/qwen-code/pull/18166)) by @doudouOUC
+- managed-agent: park an approval wait beside a certified background hold ([#18187](https://github.com/QwenLM/qwen-code/pull/18187)) by @doudouOUC
+- managed-agent: park a wake-started Turn's approval wait ([#18194](https://github.com/QwenLM/qwen-code/pull/18194)) by @doudouOUC
+- web-shell: add pure Managed SessionChatController adapter core (slice 3a) ([#18117](https://github.com/QwenLM/qwen-code/pull/18117)) by @wenshao
+- managed-agent: park channel and pr_event Turns' approval waits ([#18203](https://github.com/QwenLM/qwen-code/pull/18203)) by @doudouOUC
+- core: point the compacted summary at its local transcript ([#18018](https://github.com/QwenLM/qwen-code/pull/18018)) by @callmeYe
+- managed-agent: park a child Session's approval wait ([#18224](https://github.com/QwenLM/qwen-code/pull/18224)) by @doudouOUC
+- web-shell: idempotent prompt auto-retry and message-level resend ([#18177](https://github.com/QwenLM/qwen-code/pull/18177)) by @callmeYe
+- generated-ui: let a click copy or download through the host ([#18158](https://github.com/QwenLM/qwen-code/pull/18158)) by @qqqys
+- web-shell: bind Managed provider to SessionChatController (slice 3b) ([#18205](https://github.com/QwenLM/qwen-code/pull/18205)) by @wenshao
+- managed-agent: park Hooks and MCP Session approval waits ([#18236](https://github.com/QwenLM/qwen-code/pull/18236)) by @doudouOUC
+- cli: add built-in display translation for replies and thoughts ([#18175](https://github.com/QwenLM/qwen-code/pull/18175)) by @qqqys
+- cli: refuse new sessions under sustained host load ([#18052](https://github.com/QwenLM/qwen-code/pull/18052)) by @wenshao
+- core: run the Ink TUI on the event-bus kernel by default ([#18213](https://github.com/QwenLM/qwen-code/pull/18213)) by @qqqys
+- web-shell: ready ChatSurface for Managed hosts (slice 3c.1) ([#18246](https://github.com/QwenLM/qwen-code/pull/18246)) by @wenshao
+- verify-pr: add executable hardware microVM round orchestrator and token-revoked model proxy ([#18221](https://github.com/QwenLM/qwen-code/pull/18221)) by @wenshao
+- serve: pin Skills and extensions for a turn and refresh them on the next prompt ([#18179](https://github.com/QwenLM/qwen-code/pull/18179)) by @chiga0
+- managed-agent: park Shell approvals on version-0 public Shell Sessions (S8a) ([#18303](https://github.com/QwenLM/qwen-code/pull/18303)) by @doudouOUC
+- harness: import the Harness cli, core and resource packages ([#18314](https://github.com/QwenLM/qwen-code/pull/18314)) by @sorrycc
+- verify-pr: add NIC-less microVM vsock input channel and model proxy bridge ([#18277](https://github.com/QwenLM/qwen-code/pull/18277)) by @wenshao
+- web-shell: unify Managed question card onto shared AskUserQuestion (slice 3c.2) ([#18273](https://github.com/QwenLM/qwen-code/pull/18273)) by @wenshao
+- serve,web-shell: share workspace input history across devices ([#18120](https://github.com/QwenLM/qwen-code/pull/18120)) by @wenshao
+
+#### Bug Fixes
+
+- managed-agent: extract publication object key construction ([#18083](https://github.com/QwenLM/qwen-code/pull/18083)) by @wenshao
+- managed-agent: close three confirmed post-merge observation audit findings ([#18110](https://github.com/QwenLM/qwen-code/pull/18110)) by @doudouOUC
+- core: support xhigh reasoning effort for Gemini 4 Neon and Hydrogen ([#18121](https://github.com/QwenLM/qwen-code/pull/18121)) by @wenshao
+- ci: clean up Maven seed helper downloads ([#18101](https://github.com/QwenLM/qwen-code/pull/18101)) by @wenshao
+- managed-agent: Discover runtime providers with the application loader ([#18125](https://github.com/QwenLM/qwen-code/pull/18125)) by @doudouOUC
+- managed-agent: Use session recovery after unadmitted cancellation ([#18132](https://github.com/QwenLM/qwen-code/pull/18132)) by @doudouOUC
+- web-shell: order Change Overview PRs by newest binding ([#18134](https://github.com/QwenLM/qwen-code/pull/18134)) by @wenshao
+- core: prefer a healthy system rg over the bundled binary ([#17698](https://github.com/QwenLM/qwen-code/pull/17698)) by @callmeYe
+- web-shell: prevent narrow actions from covering metadata ([#18092](https://github.com/QwenLM/qwen-code/pull/18092)) by @wenshao
+- web-shell: keep the environment panel reachable above pending questions ([#18013](https://github.com/QwenLM/qwen-code/pull/18013)) by @callmeYe
+- managed-agent: advance a crashed wake Turn's await_action wait ([#18172](https://github.com/QwenLM/qwen-code/pull/18172)) by @doudouOUC
+- web-shell: prevent iOS focus zoom in portaled inputs ([#17938](https://github.com/QwenLM/qwen-code/pull/17938)) by @callmeYe
+- managed-agent: resume a wake Turn's approval wait after a Harness crash ([#18170](https://github.com/QwenLM/qwen-code/pull/18170)) by @doudouOUC
+- managed-agent: align actor admission test with the UTF-16 VARCHAR(36) cap ([#18195](https://github.com/QwenLM/qwen-code/pull/18195)) by @doudouOUC
+- web-shell: allow composer task chips to collapse on repeat click ([#18128](https://github.com/QwenLM/qwen-code/pull/18128)) by @wenshao
+- serve: isolate session deletion from sibling sessions ([#17707](https://github.com/QwenLM/qwen-code/pull/17707)) by @callmeYe
+- core: recognize Kimi longer-than-context-length overflow errors ([#18176](https://github.com/QwenLM/qwen-code/pull/18176)) by @wenshao
+- managed-agent: Settle unadmitted cancellations with owed cleanup ([#18212](https://github.com/QwenLM/qwen-code/pull/18212)) by @doudouOUC
+- core: keep text out of Gemini functionResponse.parts ([#18220](https://github.com/QwenLM/qwen-code/pull/18220)) by @wenshao
+- web-shell: preserve approval button styling in embeds ([#18243](https://github.com/QwenLM/qwen-code/pull/18243)) by @callmeYe
+- managed-agent: keep an Action-parked Session's MCP owner from reclamation ([#18234](https://github.com/QwenLM/qwen-code/pull/18234)) by @doudouOUC
+- deps: clear the current high-and-critical prod audit findings ([#18075](https://github.com/QwenLM/qwen-code/pull/18075)) by @yiliang114
+- ci: keep the main failure reporter filing without its PAT ([#18238](https://github.com/QwenLM/qwen-code/pull/18238)) by @yiliang114
+- web-shell: show skill names in slash menu and highlight owning extension in details ([#18227](https://github.com/QwenLM/qwen-code/pull/18227)) by @callmeYe
+- core: prevent compression deadlocks from unsigned thoughts and clamped budgets ([#18209](https://github.com/QwenLM/qwen-code/pull/18209)) by @wenshao
+- cli,core: preserve ACP transport error cause and replay cut tool calls ([#18228](https://github.com/QwenLM/qwen-code/pull/18228)) by @wenshao
+- hooks: end the turn when a Stop hook returns continue: false ([#18229](https://github.com/QwenLM/qwen-code/pull/18229)) by @qqqys
+- hooks: apply PermissionRequest updatedPermissions rules ([#18237](https://github.com/QwenLM/qwen-code/pull/18237)) by @qqqys
+- core,cli,web-shell: support oversized session transcripts across daemon load and replay ([#18111](https://github.com/QwenLM/qwen-code/pull/18111)) by @wenshao
+- core: send omitted additionalProperties as true on DashScope tool schemas ([#18256](https://github.com/QwenLM/qwen-code/pull/18256)) by @qqqys
+- ci: keep fork PR code and forged approval markers away from CI credentials ([#18270](https://github.com/QwenLM/qwen-code/pull/18270)) by @yiliang114
+- sdk-java: allow the files profile in Hosted lifecycle v2 ([#18268](https://github.com/QwenLM/qwen-code/pull/18268)) by @jkxiao
+- triage: fall back to GITHUB_TOKEN when bot PATs are absent ([#18282](https://github.com/QwenLM/qwen-code/pull/18282)) by @yiliang114
+- channels: scope the GitHub failure receipt to explicit mentions ([#18281](https://github.com/QwenLM/qwen-code/pull/18281)) by @wenshao
+- core: fence stale session writers after archive ([#18012](https://github.com/QwenLM/qwen-code/pull/18012)) by @callmeYe
+- ci: scope Managed Agent fast checks by changed paths ([#18310](https://github.com/QwenLM/qwen-code/pull/18310)) by @yiliang114
+- release: fetch sparse checkout blobs with retries ([#18309](https://github.com/QwenLM/qwen-code/pull/18309)) by @yiliang114
+- ci: repair reproducible main branch failures ([#18297](https://github.com/QwenLM/qwen-code/pull/18297)) by @yiliang114
+- hooks: run UserPromptSubmit once per user message ([#18266](https://github.com/QwenLM/qwen-code/pull/18266)) by @callmeYe
+- core: stop re-sending a stream that stalls mid tool-call arguments ([#18242](https://github.com/QwenLM/qwen-code/pull/18242)) by @qqqys
+- hooks: warn about hooks that cannot run as written ([#18299](https://github.com/QwenLM/qwen-code/pull/18299)) by @qqqys
+- cli: drain queued signals across a full loop turn before capture-tui exits ([#18312](https://github.com/QwenLM/qwen-code/pull/18312)) by @yiliang114
+- ci: provision ZIP tools without sudo ([#18343](https://github.com/QwenLM/qwen-code/pull/18343)) by @qqqys
+- core: correct usage token accounting across the dashboard and /stats ([#17902](https://github.com/QwenLM/qwen-code/pull/17902)) by @wenshao
+- ci: keep patrol checkout off global Git config ([#18300](https://github.com/QwenLM/qwen-code/pull/18300)) by @qqqys
+- web-shell: show unset boolean settings as not set ([#18301](https://github.com/QwenLM/qwen-code/pull/18301)) by @qqqys
+- hooks: end the turn when a tool hook returns continue: false ([#18345](https://github.com/QwenLM/qwen-code/pull/18345)) by @qqqys
+- release: inline pre-checkout runner bootstrap to avoid full repo archive downloads ([#18366](https://github.com/QwenLM/qwen-code/pull/18366)) by @yiliang114
+- web-shell: keep private core imports out of published declarations ([#18377](https://github.com/QwenLM/qwen-code/pull/18377)) by @yiliang114
+- serve: preserve workspace MCP approvals after session cd ([#18262](https://github.com/QwenLM/qwen-code/pull/18262)) by @chiga0
+- managed-agent: Restore Workspace registration for Action parking acceptance ([#18353](https://github.com/QwenLM/qwen-code/pull/18353)) by @doudouOUC
+
+#### Performance
+
+- core: compact the inline memory and first-request prompts ([#17789](https://github.com/QwenLM/qwen-code/pull/17789)) by @callmeYe
+- serve: defer ACP workflow history until requested ([#17896](https://github.com/QwenLM/qwen-code/pull/17896)) by @callmeYe
+- managed-agent: keep identity joins on full index keys ([#18190](https://github.com/QwenLM/qwen-code/pull/18190)) by @doudouOUC
+- test(managed-agent): Pin identity join key parts in MySQL ([#18211](https://github.com/QwenLM/qwen-code/pull/18211)) by @doudouOUC
+- daemon: reduce session catalog scan I/O ([#18146](https://github.com/QwenLM/qwen-code/pull/18146)) by @callmeYe
+- web-shell: Skip redundant root scope guards ([#18223](https://github.com/QwenLM/qwen-code/pull/18223)) by @callmeYe
+- web-shell: coalesce transcript bottom follow ([#18180](https://github.com/QwenLM/qwen-code/pull/18180)) by @callmeYe
+- web-shell: scope library CSS with native @scope and remove :has() subtree wildcards ([#18239](https://github.com/QwenLM/qwen-code/pull/18239)) by @callmeYe
+
+#### Documentation
+
+- serve: align transcript live-flush descriptions ([#18094](https://github.com/QwenLM/qwen-code/pull/18094)) by @wenshao
+- test(web-shell): pin active-work running color token and sync design docs ([#18105](https://github.com/QwenLM/qwen-code/pull/18105)) by @wenshao
+- serve,web-shell: register /artifacts pre-auth route and address #18071 round-2 findings ([#18102](https://github.com/QwenLM/qwen-code/pull/18102)) by @wenshao
+- design: record touch follow-up suggestion landing ([#18103](https://github.com/QwenLM/qwen-code/pull/18103)) by @wenshao
+- test(web-shell): close #18088 hover-status follow-ups (doc sync + precedence pins) ([#18093](https://github.com/QwenLM/qwen-code/pull/18093)) by @wenshao
+- mods: add an example Mod that shows output in Chinese ([#18150](https://github.com/QwenLM/qwen-code/pull/18150)) by @qqqys
+- agents: add rules for disposable background services ([#18168](https://github.com/QwenLM/qwen-code/pull/18168)) by @doudouOUC
+- managed-agent: design widening Action parking coverage and confirm its pre-start checks ([#18151](https://github.com/QwenLM/qwen-code/pull/18151)) by @doudouOUC
+- agents: scope disposable MySQL rules to managed-agent-server ([#18183](https://github.com/QwenLM/qwen-code/pull/18183)) by @doudouOUC
+- managed-agent: schedule MCP reclamation guard for Action parks ([#18186](https://github.com/QwenLM/qwen-code/pull/18186)) by @doudouOUC
+- verify-pr: add tiered microVM design, trust classification, lifecycle gate, and backend planners ([#18181](https://github.com/QwenLM/qwen-code/pull/18181)) by @wenshao
+- managed-agent: scope S5 Hooks parking and confirm its pre-start checks ([#18218](https://github.com/QwenLM/qwen-code/pull/18218)) by @doudouOUC
+- cli: add tiered sandbox execution for PR reviews ([#18226](https://github.com/QwenLM/qwen-code/pull/18226)) by @wenshao
+- managed-agent: design S8a Shell approval parking and confirm its pre-start checks ([#18279](https://github.com/QwenLM/qwen-code/pull/18279)) by @doudouOUC
+- channels: mark GitHub registration-identity keying design merged (#17775) ([#17923](https://github.com/QwenLM/qwen-code/pull/17923)) by @wenshao
+- cli: add guest-exec UDS bridge for microVM review execution ([#18280](https://github.com/QwenLM/qwen-code/pull/18280)) by @wenshao
+
+#### Internal Changes
+
+- test(channels): correct two DingTalk witness descriptions that read against the code ([#18046](https://github.com/QwenLM/qwen-code/pull/18046)) by @wenshao
+- test(cli): isolate web-templates builds asynchronously in HTML export test ([#18104](https://github.com/QwenLM/qwen-code/pull/18104)) by @wenshao
+- chore(managed-agent): retire K8s harness deployment templates and clean up archived CSI remnants ([#18118](https://github.com/QwenLM/qwen-code/pull/18118)) by @doudouOUC
+- refactor(managed-agent): de-hash identity columns with bounded VARCHAR and canonical refs ([#18058](https://github.com/QwenLM/qwen-code/pull/18058)) by @doudouOUC
+- test(managed-agent): wait for the resumed wake Turn to free the Session before closing ([#18233](https://github.com/QwenLM/qwen-code/pull/18233)) by @doudouOUC
+- test(serve): Split Hosted Harness Session tests ([#18216](https://github.com/QwenLM/qwen-code/pull/18216)) by @doudouOUC
+- test(managed-agent): pin public-children Shell parking and confirm S8a pre-start checks ([#18231](https://github.com/QwenLM/qwen-code/pull/18231)) by @doudouOUC
+- test(managed-agent): Add real-process Action parking acceptance ([#18276](https://github.com/QwenLM/qwen-code/pull/18276)) by @doudouOUC
+- refactor(runtime-broker): Type measurement diagnostics metadata ([#18278](https://github.com/QwenLM/qwen-code/pull/18278)) by @doudouOUC
+- refactor(serve): Split Hosted Harness Session by responsibility ([#18290](https://github.com/QwenLM/qwen-code/pull/18290)) by @doudouOUC
+- test(triage): supply HAS_BOT_PAT in re-run workflow fixtures ([#18328](https://github.com/QwenLM/qwen-code/pull/18328)) by @qqqys
+- refactor(managed-agent): Simplify Java type references ([#18325](https://github.com/QwenLM/qwen-code/pull/18325)) by @doudouOUC
+- refactor(managed-agent): Make closed JSON fields explicit ([#18267](https://github.com/QwenLM/qwen-code/pull/18267)) by @doudouOUC
+- test(serve): pin the clock in scheduled-tasks reseat assertions ([#18315](https://github.com/QwenLM/qwen-code/pull/18315)) by @yiliang114
+- test(ci): harden Maven helper failure coverage ([#18143](https://github.com/QwenLM/qwen-code/pull/18143)) by @wenshao
+- test(e2e): keep the host-load gate out of daemon fixture session creation ([#18308](https://github.com/QwenLM/qwen-code/pull/18308)) by @yiliang114
+- test(serve): pin the embed force-close path and document the drain pairing-teardown contract ([#18275](https://github.com/QwenLM/qwen-code/pull/18275)) by @wenshao
+- test(e2e): pin UserPromptSubmit to once per user message ([#18363](https://github.com/QwenLM/qwen-code/pull/18363)) by @yiliang114
+- test(core): await run settlement before cleaning workflow-runner temp dirs ([#18371](https://github.com/QwenLM/qwen-code/pull/18371)) by @wenshao
+- test(integration): skip input history suite in Docker ([#18395](https://github.com/QwenLM/qwen-code/pull/18395)) by @yiliang114
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.28.4...v0.28.6
+
+## [0.28.4](https://github.com/QwenLM/qwen-code/releases/tag/v0.28.4) - 2026-11-22
+
+### Highlights
+
+- Web Shell local daemon mode adds a workspace artifact library page with progressive scanning and streaming updates. ([#18071](https://github.com/QwenLM/qwen-code/pull/18071))
+- Web Shell chat adds a shared ChatSurface, Continue badges, suggestion chips, and mobile layout fixes for sessions. ([#17952](https://github.com/QwenLM/qwen-code/pull/17952), [#18044](https://github.com/QwenLM/qwen-code/pull/18044), [#17918](https://github.com/QwenLM/qwen-code/pull/17918), [#17883](https://github.com/QwenLM/qwen-code/pull/17883), [#18011](https://github.com/QwenLM/qwen-code/pull/18011))
+- Core adds built-in Gemini 4 reasoning defaults. ([#18039](https://github.com/QwenLM/qwen-code/pull/18039))
+- Local Runtime now creates its state directory at process spawn with owner-private permissions. ([#17964](https://github.com/QwenLM/qwen-code/pull/17964))
+- Command migration creates Markdown destinations exclusively and preserves the original TOML on destination conflicts. ([#17873](https://github.com/QwenLM/qwen-code/pull/17873))
+- Extensions now load manifests saved with a UTF-8 BOM. ([#15786](https://github.com/QwenLM/qwen-code/pull/15786))
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Web Shell
+
+Improves the Web Shell chat experience with session continuation, artifact browsing, mobile layout, suggestion chips, and clearer status cues.
+
+- web-shell: keep mobile Send above software keyboard ([#17883](https://github.com/QwenLM/qwen-code/pull/17883))
+- Adds a tappable suggestion chip in Web Shell composers so touch users can insert and edit follow-up suggestions before sending. ([#17918](https://github.com/QwenLM/qwen-code/pull/17918))
+- Web Shell now renders Mod rewrites of expanded thinking rows while preserving the original stored thought and collapsed Done thinking line. ([#17920](https://github.com/QwenLM/qwen-code/pull/17920))
+- web-shell: update sidebar logo for dark theme ([#17935](https://github.com/QwenLM/qwen-code/pull/17935))
+- Web Shell adds a shared ChatSurface chat column that renders transcript, approvals, questions, and composer from session state. ([#17952](https://github.com/QwenLM/qwen-code/pull/17952))
+- web-shell: compact automatic trigger messages ([#17970](https://github.com/QwenLM/qwen-code/pull/17970))
+- Gives session titles more space on mobile and desktop by moving optional row actions into the More menu. ([#18011](https://github.com/QwenLM/qwen-code/pull/18011))
+- Web Shell sidebar now shows a Continue badge for sessions whose last turn was interrupted and needs continuation. ([#18044](https://github.com/QwenLM/qwen-code/pull/18044))
+- web-shell: scope ChatSurface admission locks to the owning session and bind loadOlder ([#18066](https://github.com/QwenLM/qwen-code/pull/18066))
+- web-shell: align session hover status with the row's status cues ([#18070](https://github.com/QwenLM/qwen-code/pull/18070))
+- Adds the workspace artifact library page in Web Shell local daemon mode, with progressive scanning and streaming updates. ([#18071](https://github.com/QwenLM/qwen-code/pull/18071))
+- web-shell: use running color for active work ([#18072](https://github.com/QwenLM/qwen-code/pull/18072))
+
+### Managed Agent and Hosted Harness
+
+Fixes hosted session races, preflight configuration, permissions, telemetry channels, and storage identifiers for Managed Agent environments.
+
+- managed-agent: close over the resources a config_install record names ([#17468](https://github.com/QwenLM/qwen-code/pull/17468))
+- Fixes a Hosted Harness race by using one lock when building, closing, and adopting the lazily built client. ([#17961](https://github.com/QwenLM/qwen-code/pull/17961))
+- Managed-agent preflight now treats a blank workspace-cwd as unconfigured instead of using the current working directory, and docs now match shipped state-directory rules. ([#17965](https://github.com/QwenLM/qwen-code/pull/17965))
+- Durable preflight fixtures now skip cleanly when nobody cannot be resolved, use explicit 0755 permissions, and docs clarify service-user ownership expectations. ([#18020](https://github.com/QwenLM/qwen-code/pull/18020))
+- Adds a managed telemetry client-channel value so Managed Agent sessions can be distinguished from ordinary daemon traffic. ([#18022](https://github.com/QwenLM/qwen-code/pull/18022))
+- Managed-agent OSS objects now use readable tenant, workspace, and session identifiers in keys, making bucket contents easier to inspect. ([#18048](https://github.com/QwenLM/qwen-code/pull/18048))
+
+### Core runtime and models
+
+Updates command migration, local Runtime state permissions, tool-output recovery, transcript performance, and Gemini 4 reasoning defaults.
+
+- Command migration now creates Markdown destinations exclusively and preserves the original TOML when a destination conflict exists. ([#17873](https://github.com/QwenLM/qwen-code/pull/17873))
+- core: protect persisted tool-output recovery ([#17875](https://github.com/QwenLM/qwen-code/pull/17875))
+- Caches oversized transcript indexes in a separate bounded class so large indexes no longer block small-session hook retention. ([#17910](https://github.com/QwenLM/qwen-code/pull/17910))
+- Creates the local Runtime state directory at process spawn with owner-private permissions instead of during provider creation. ([#17964](https://github.com/QwenLM/qwen-code/pull/17964))
+- core: add built-in Gemini 4 reasoning defaults ([#18039](https://github.com/QwenLM/qwen-code/pull/18039))
+
+### Extensions and channels
+
+Improves extension manifest loading and ACP channel liveness handling for busy agents.
+
+- extensions: load extension manifests saved with a UTF-8 BOM ([#15786](https://github.com/QwenLM/qwen-code/pull/15786))
+- Lets ACP channel liveness treat busy agents as healthy longer and records evidence when channels are closed. ([#18028](https://github.com/QwenLM/qwen-code/pull/18028))
+
+### Sessions and approvals
+
+- Docs now state that running interactive sessions automatically pick up mcpServers changes, with restart kept only as a troubleshooting fallback. ([#17743](https://github.com/QwenLM/qwen-code/pull/17743))
+- serve: refine create_sub_session workspace approvals ([#17863](https://github.com/QwenLM/qwen-code/pull/17863))
+
+### Autofix evidence
+
+Strips terminal control characters and Unicode Bidi overrides from Autofix failed-check evidence before display.
+
+- Autofix failed-check evidence now strips terminal control characters and Unicode Bidi overrides from log excerpts before display. ([#16748](https://github.com/QwenLM/qwen-code/pull/16748))
+
+### Other Changes
+
+- ci: use live review bot for manual re-review ([#17848](https://github.com/QwenLM/qwen-code/pull/17848))
+- Stabilizes the required Managed Agent check name as Managed Agent gate and prevents skipped or no-suite review runs from overwriting real results. ([#17865](https://github.com/QwenLM/qwen-code/pull/17865))
+- Replaces the receipt-catalog SpotBugs exclusion with an explicit assertion while keeping the HTTP 400 contract for missing receipt bytes unchanged. ([#17919](https://github.com/QwenLM/qwen-code/pull/17919))
+- Updates identity de-hash design docs to correct workspace and storage budgets and record duplicate-key constraints before VARCHAR conversion. ([#17960](https://github.com/QwenLM/qwen-code/pull/17960))
+- Makes RocketMQ stop checks wait for listeners to clear instead of immediately rebinding ports, reducing flaky CI failures. ([#17967](https://github.com/QwenLM/qwen-code/pull/17967))
+- Release retries can resume after a partial publish by reusing a matching release branch and publishing remaining packages; divergent same-version trees are still rejected. ([#17951](https://github.com/QwenLM/qwen-code/pull/17951))
+- Managed-agent identity storage removes redundant same-row hash key columns and rebuilds affected unique keys and indexes on raw identity columns without changing column order. ([#18019](https://github.com/QwenLM/qwen-code/pull/18019))
+- ci: isolate verify scratch in runner temp ([#17879](https://github.com/QwenLM/qwen-code/pull/17879))
+- web-shell: deliver per-turn assistant feedback to telemetry ([#18021](https://github.com/QwenLM/qwen-code/pull/18021))
+- refactor(managed-agent): drop dead and redundant schema objects ([#18041](https://github.com/QwenLM/qwen-code/pull/18041))
+- test(channels): make four managed DingTalk witnesses exclude what they claim ([#17968](https://github.com/QwenLM/qwen-code/pull/17968))
+- CI verification now fails clearly when the scratch directory is not prepared instead of silently using shared OS temp space. ([#18040](https://github.com/QwenLM/qwen-code/pull/18040))
+- The DingTalk recent-window cap test timeout is raised to 120 seconds and pinned to reduce flaky CI failures. ([#17837](https://github.com/QwenLM/qwen-code/pull/17837))
+- The CLI restart-recovery crash test now waits for transcript and partial-response state before killing the daemon. ([#18049](https://github.com/QwenLM/qwen-code/pull/18049))
+- Documentation now proposes a read-only workspace artifact library page for Web Shell local daemon mode. ([#18036](https://github.com/QwenLM/qwen-code/pull/18036))
+- Adds bilingual design documentation for managed-agent Action parking in stateless Hosted Harness Phase 4. ([#18047](https://github.com/QwenLM/qwen-code/pull/18047))
+- Marks the workspace artifact library design as accepted but not yet implemented in bilingual documentation. ([#18063](https://github.com/QwenLM/qwen-code/pull/18063))
+- Restores green CI builds by updating the document export renderer size budget for ChatSurface copy. ([#18067](https://github.com/QwenLM/qwen-code/pull/18067))
+- Fixes nightly desktop release checks by re-pinning the RHEL 10 rpm build root to a current CentOS Stream 10 digest. ([#18069](https://github.com/QwenLM/qwen-code/pull/18069))
+- Fixes macOS e2e tests for qwen serve assistant feedback telemetry by using real workspace transcript paths. ([#18074](https://github.com/QwenLM/qwen-code/pull/18074))
+- test(managed-agent): gate the four durable existing-dir preflight tests to Linux ([#18076](https://github.com/QwenLM/qwen-code/pull/18076))
+- refactor(managed-agent): move publication OSS scope naming to the contract ([#18085](https://github.com/QwenLM/qwen-code/pull/18085))
+- test(integration): deflake the SIGKILL restart-recovery case (#18055) ([#18057](https://github.com/QwenLM/qwen-code/pull/18057))
+- test(cli): deflake the admitted-mutation idle-timer case (#18053) ([#18056](https://github.com/QwenLM/qwen-code/pull/18056))
+- Updates design docs to mark the automatic-trigger message as landed and align renderer-budget history with implemented behavior. ([#18080](https://github.com/QwenLM/qwen-code/pull/18080))
+- Makes self-hosted Java CI jobs rebuild a writable job-local Maven repository and safely fall back when cache reuse fails. ([#18065](https://github.com/QwenLM/qwen-code/pull/18065))
+
+### 中文摘要
+
+#### 亮点
+
+- Web Shell 本地 daemon 模式新增 workspace artifact library 页面，支持渐进式扫描与流式更新。 ([#18071](https://github.com/QwenLM/qwen-code/pull/18071))
+- Web Shell 新增共享 ChatSurface、Continue 标记、suggestion chips，并优化移动端布局。 ([#17952](https://github.com/QwenLM/qwen-code/pull/17952), [#18044](https://github.com/QwenLM/qwen-code/pull/18044), [#17918](https://github.com/QwenLM/qwen-code/pull/17918), [#17883](https://github.com/QwenLM/qwen-code/pull/17883), [#18011](https://github.com/QwenLM/qwen-code/pull/18011))
+- Core 新增内置 Gemini 4 reasoning 默认设置。 ([#18039](https://github.com/QwenLM/qwen-code/pull/18039))
+- 本地 Runtime 现在在进程启动时创建状态目录，并仅允许属主访问。 ([#17964](https://github.com/QwenLM/qwen-code/pull/17964))
+- 命令迁移现在独占创建 Markdown 目标，冲突时保留原有 TOML。 ([#17873](https://github.com/QwenLM/qwen-code/pull/17873))
+- Extensions 现在可加载保存为 UTF-8 BOM 的 manifest。 ([#15786](https://github.com/QwenLM/qwen-code/pull/15786))
+
+#### Web Shell
+
+改进 Web Shell 聊天体验，新增会话继续、工件浏览、移动端布局、suggestion chips 和更清晰的状态提示。
+
+- web-shell: keep mobile Send above software keyboard ([#17883](https://github.com/QwenLM/qwen-code/pull/17883))
+- Web Shell 输入框新增可点按的 suggestion chip，触控用户可插入并编辑 follow-up suggestion 后再发送。 ([#17918](https://github.com/QwenLM/qwen-code/pull/17918))
+- Web Shell 现在可渲染展开的 thinking 行的 Mod 重写，同时保留原始存储内容和折叠的 Done thinking 行。 ([#17920](https://github.com/QwenLM/qwen-code/pull/17920))
+- web-shell: update sidebar logo for dark theme ([#17935](https://github.com/QwenLM/qwen-code/pull/17935))
+- Web Shell 新增共享 ChatSurface 聊天列，可根据会话状态渲染转录、审批、提问和输入区。 ([#17952](https://github.com/QwenLM/qwen-code/pull/17952))
+- web-shell: compact automatic trigger messages ([#17970](https://github.com/QwenLM/qwen-code/pull/17970))
+- 在移动端和桌面端为会话标题留出更多空间，并将可选操作移入 More 菜单。 ([#18011](https://github.com/QwenLM/qwen-code/pull/18011))
+- Web Shell 侧边栏会为上次回合被中断、需要继续的会话显示 Continue 标记。 ([#18044](https://github.com/QwenLM/qwen-code/pull/18044))
+- web-shell: scope ChatSurface admission locks to the owning session and bind loadOlder ([#18066](https://github.com/QwenLM/qwen-code/pull/18066))
+- web-shell: align session hover status with the row's status cues ([#18070](https://github.com/QwenLM/qwen-code/pull/18070))
+- Web Shell 本地 daemon 模式新增 workspace artifact library 页面，支持渐进式扫描与流式更新。 ([#18071](https://github.com/QwenLM/qwen-code/pull/18071))
+- web-shell: use running color for active work ([#18072](https://github.com/QwenLM/qwen-code/pull/18072))
+
+#### Managed Agent 与 Hosted Harness
+
+修复托管会话竞态、预检配置、权限、遥测通道和存储标识，提升 Managed Agent 环境可靠性。
+
+- managed-agent: close over the resources a config_install record names ([#17468](https://github.com/QwenLM/qwen-code/pull/17468))
+- 修复 Hosted Harness 竞态，在构建、关闭和接管延迟创建的客户端时统一使用同一个锁。 ([#17961](https://github.com/QwenLM/qwen-code/pull/17961))
+- managed-agent 将空白的 workspace-cwd 视为未配置，而不是使用当前工作目录，并同步预检文档。 ([#17965](https://github.com/QwenLM/qwen-code/pull/17965))
+- 持久预检 fixture 在无法解析 nobody 时跳过，使用显式 0755 权限，并说明 service-user 的所有者期望。 ([#18020](https://github.com/QwenLM/qwen-code/pull/18020))
+- 新增 managed 遥测 client-channel 值，以便区分 Managed Agent 会话与普通 daemon 流量。 ([#18022](https://github.com/QwenLM/qwen-code/pull/18022))
+- Managed-agent 的 OSS 对象键改用可读的 tenant、workspace 和 session 标识，便于运维查看。 ([#18048](https://github.com/QwenLM/qwen-code/pull/18048))
+
+#### 核心运行时与模型
+
+更新命令迁移、本地 Runtime 状态目录权限、工具输出恢复、转录性能以及 Gemini 4 推理默认值。
+
+- 命令迁移现在独占创建 Markdown 目标文件，遇到目标冲突时保留原有 TOML。 ([#17873](https://github.com/QwenLM/qwen-code/pull/17873))
+- core: protect persisted tool-output recovery ([#17875](https://github.com/QwenLM/qwen-code/pull/17875))
+- 将超大 transcript index 放入独立受限缓存类，避免大索引阻塞小会话的 hook 保留。 ([#17910](https://github.com/QwenLM/qwen-code/pull/17910))
+- 在本地 Runtime 进程启动时创建状态目录并使用仅属主可访问权限，而不是在 provider 创建时创建。 ([#17964](https://github.com/QwenLM/qwen-code/pull/17964))
+- core: add built-in Gemini 4 reasoning defaults ([#18039](https://github.com/QwenLM/qwen-code/pull/18039))
+
+#### 扩展与通道
+
+改进扩展清单加载，并优化繁忙 agent 的 ACP 通道存活检测。
+
+- extensions: load extension manifests saved with a UTF-8 BOM ([#15786](https://github.com/QwenLM/qwen-code/pull/15786))
+- 让 ACP 通道存活检测将繁忙 agent 视为暂时健康，并在关闭通道时记录证据。 ([#18028](https://github.com/QwenLM/qwen-code/pull/18028))
+
+#### 会话与审批
+
+- 文档现在说明运行中的交互式会话会自动应用 mcpServers 更改，重启仅作为故障排查手段。 ([#17743](https://github.com/QwenLM/qwen-code/pull/17743))
+- serve: refine create_sub_session workspace approvals ([#17863](https://github.com/QwenLM/qwen-code/pull/17863))
+
+#### Autofix 证据
+
+Autofix 失败检查证据在展示前会移除终端控制字符和 Unicode Bidi 覆盖字符。
+
+- Autofix 失败检查证据会在展示前移除日志摘录中的终端控制字符和 Unicode Bidi 覆盖字符。 ([#16748](https://github.com/QwenLM/qwen-code/pull/16748))
+
+#### 其他变更
+
+- ci: use live review bot for manual re-review ([#17848](https://github.com/QwenLM/qwen-code/pull/17848))
+- 将必需的 Managed Agent 检查名称稳定为 Managed Agent gate，并防止跳过或无套件的审查运行覆盖真实结果。 ([#17865](https://github.com/QwenLM/qwen-code/pull/17865))
+- 用显式断言替代 receipt-catalog 的 SpotBugs 排除，同时保持缺少 receipt 字节时返回 HTTP 400 的行为不变。 ([#17919](https://github.com/QwenLM/qwen-code/pull/17919))
+- 更新 identity de-hash 设计文档，修正 workspace 和 storage 预算，并记录 VARCHAR 转换前的重复键约束。 ([#17960](https://github.com/QwenLM/qwen-code/pull/17960))
+- 让 RocketMQ 停止检查等待 listener 清理完成，而不是立即重新绑定端口，减少 CI 偶发失败。 ([#17967](https://github.com/QwenLM/qwen-code/pull/17967))
+- 发布重试可在部分发布后恢复：匹配时复用现有 release branch 并发布剩余包；同版本内容不一致仍会被拒绝。 ([#17951](https://github.com/QwenLM/qwen-code/pull/17951))
+- managed-agent 移除仅重复本行原始身份列的哈希键列，并在原始身份列上重建唯一键和索引，保持列顺序。 ([#18019](https://github.com/QwenLM/qwen-code/pull/18019))
+- ci: isolate verify scratch in runner temp ([#17879](https://github.com/QwenLM/qwen-code/pull/17879))
+- web-shell: deliver per-turn assistant feedback to telemetry ([#18021](https://github.com/QwenLM/qwen-code/pull/18021))
+- refactor(managed-agent): drop dead and redundant schema objects ([#18041](https://github.com/QwenLM/qwen-code/pull/18041))
+- test(channels): make four managed DingTalk witnesses exclude what they claim ([#17968](https://github.com/QwenLM/qwen-code/pull/17968))
+- CI 校验在 scratch 目录未准备好时会明确失败，而不是静默使用共享 OS 临时空间。 ([#18040](https://github.com/QwenLM/qwen-code/pull/18040))
+- DingTalk recent-window cap 测试超时被提高到 120 秒并固定，以减少 CI 偶发失败。 ([#17837](https://github.com/QwenLM/qwen-code/pull/17837))
+- CLI 重启恢复崩溃测试现在会先等待会话记录和部分响应状态就绪，再终止 daemon。 ([#18049](https://github.com/QwenLM/qwen-code/pull/18049))
+- 新增设计文档，提议在 Web Shell 本地 daemon 模式下提供只读的 workspace 工件库页面。 ([#18036](https://github.com/QwenLM/qwen-code/pull/18036))
+- 新增 managed-agent 在 stateless Hosted Harness Phase 4 的 Action parking 双语设计文档。 ([#18047](https://github.com/QwenLM/qwen-code/pull/18047))
+- 将 workspace artifact library 双语设计文档状态更新为 accepted 且尚未实现。 ([#18063](https://github.com/QwenLM/qwen-code/pull/18063))
+- 恢复 CI 构建，更新文档导出渲染大小预算以适配 ChatSurface 复制。 ([#18067](https://github.com/QwenLM/qwen-code/pull/18067))
+- 通过重新固定 RHEL 10 rpm 构建根镜像到当前 CentOS Stream 10 digest，修复桌面发布夜间检查。 ([#18069](https://github.com/QwenLM/qwen-code/pull/18069))
+- 修复 macOS e2e 中 qwen serve assistant feedback telemetry 的 transcript 路径检查。 ([#18074](https://github.com/QwenLM/qwen-code/pull/18074))
+- test(managed-agent): gate the four durable existing-dir preflight tests to Linux ([#18076](https://github.com/QwenLM/qwen-code/pull/18076))
+- refactor(managed-agent): move publication OSS scope naming to the contract ([#18085](https://github.com/QwenLM/qwen-code/pull/18085))
+- test(integration): deflake the SIGKILL restart-recovery case (#18055) ([#18057](https://github.com/QwenLM/qwen-code/pull/18057))
+- test(cli): deflake the admitted-mutation idle-timer case (#18053) ([#18056](https://github.com/QwenLM/qwen-code/pull/18056))
+- 更新设计文档，将 automatic-trigger message 标记为已落地，并使 renderer-budget 历史说明与已实现行为一致。 ([#18080](https://github.com/QwenLM/qwen-code/pull/18080))
+- 自托管 Java CI 作业会重建可写的作业本地 Maven 仓库，缓存复用失败时安全回退。 ([#18065](https://github.com/QwenLM/qwen-code/pull/18065))
+
+### Complete Change List (54 pull requests)
+
+#### Features
+
+- serve,web-shell: draw Mod rewrites of thinking rows ([#17920](https://github.com/QwenLM/qwen-code/pull/17920)) by @qqqys
+- web-shell: deliver per-turn assistant feedback to telemetry ([#18021](https://github.com/QwenLM/qwen-code/pull/18021)) by @wenshao
+- web-shell: update sidebar logo for dark theme ([#17935](https://github.com/QwenLM/qwen-code/pull/17935)) by @wenshao
+- core: add built-in Gemini 4 reasoning defaults ([#18039](https://github.com/QwenLM/qwen-code/pull/18039)) by @wenshao
+- web-shell: mark sessions needing continuation in the sidebar ([#18044](https://github.com/QwenLM/qwen-code/pull/18044)) by @wenshao
+- web-shell: add the contract-driven ChatSurface chat column ([#17952](https://github.com/QwenLM/qwen-code/pull/17952)) by @wenshao
+- web-shell: compact automatic trigger messages ([#17970](https://github.com/QwenLM/qwen-code/pull/17970)) by @wenshao
+- web-shell: scope ChatSurface admission locks to the owning session and bind loadOlder ([#18066](https://github.com/QwenLM/qwen-code/pull/18066)) by @wenshao
+- web-shell: accept follow-up suggestions on touch composers ([#17918](https://github.com/QwenLM/qwen-code/pull/17918)) by @wenshao
+- cli: attribute Managed Agent sessions to the managed telemetry channel ([#18022](https://github.com/QwenLM/qwen-code/pull/18022)) by @wenshao
+- web-shell: implement the local-daemon workspace artifact library page ([#18071](https://github.com/QwenLM/qwen-code/pull/18071)) by @wenshao
+
+#### Bug Fixes
+
+- ci: use live review bot for manual re-review ([#17848](https://github.com/QwenLM/qwen-code/pull/17848)) by @yiliang114
+- refactor(managed-agent-server): retire the receipt-catalog SpotBugs exclusion with an analyzer-visible assertion ([#17919](https://github.com/QwenLM/qwen-code/pull/17919)) by @wenshao
+- managed-agent: hand the Hosted Harness client over under one lock ([#17961](https://github.com/QwenLM/qwen-code/pull/17961)) by @doudouOUC
+- cli: preserve command migration destinations ([#17873](https://github.com/QwenLM/qwen-code/pull/17873)) by @yiliang114
+- managed-agent: create the ephemeral Runtime state directory at spawn, not at provider creation ([#17964](https://github.com/QwenLM/qwen-code/pull/17964)) by @wenshao
+- release: resume a partial release instead of refusing its retry ([#17951](https://github.com/QwenLM/qwen-code/pull/17951)) by @yiliang114
+- managed-agent: treat blank workspace-cwd as unconfigured and align preflight docs ([#17965](https://github.com/QwenLM/qwen-code/pull/17965)) by @yiliang114
+- test(managed-agent): harden durable preflight fixtures ([#18020](https://github.com/QwenLM/qwen-code/pull/18020)) by @wenshao
+- ci: isolate verify scratch in runner temp ([#17879](https://github.com/QwenLM/qwen-code/pull/17879)) by @yiliang114
+- extensions: load extension manifests saved with a UTF-8 BOM ([#15786](https://github.com/QwenLM/qwen-code/pull/15786)) by @jaeminbird
+- core: protect persisted tool-output recovery ([#17875](https://github.com/QwenLM/qwen-code/pull/17875)) by @yiliang114
+- web-shell: keep mobile Send above software keyboard ([#17883](https://github.com/QwenLM/qwen-code/pull/17883)) by @yiliang114
+- ci: refuse verification without a prepared scratch directory ([#18040](https://github.com/QwenLM/qwen-code/pull/18040)) by @yiliang114
+- ci: strip terminal and Bidi controls from the autofix failed-check evidence ([#16748](https://github.com/QwenLM/qwen-code/pull/16748)) by @wenshao
+- web-templates: re-track export renderer budget for ChatSurface copy ([#18067](https://github.com/QwenLM/qwen-code/pull/18067)) by @wenshao
+- web-shell: prioritize session titles across devices ([#18011](https://github.com/QwenLM/qwen-code/pull/18011)) by @wenshao
+- ci: re-pin the RHEL 10 rpm build root to the current stream10 digest ([#18069](https://github.com/QwenLM/qwen-code/pull/18069)) by @yiliang114
+- managed-agent: close over the resources a config_install record names ([#17468](https://github.com/QwenLM/qwen-code/pull/17468)) by @yiliang114
+- acp-bridge: tolerate busy agents in channel liveness and capture failure evidence ([#18028](https://github.com/QwenLM/qwen-code/pull/18028)) by @wenshao
+- web-shell: use running color for active work ([#18072](https://github.com/QwenLM/qwen-code/pull/18072)) by @wenshao
+- web-shell: align session hover status with the row's status cues ([#18070](https://github.com/QwenLM/qwen-code/pull/18070)) by @wenshao
+- ci: isolate self-hosted Maven cache reuse ([#18065](https://github.com/QwenLM/qwen-code/pull/18065)) by @wenshao
+
+#### Performance
+
+- core: retain oversized transcript indexes in a bounded cache class ([#17910](https://github.com/QwenLM/qwen-code/pull/17910)) by @wenshao
+
+#### Documentation
+
+- managed-agent: correct identity budgets and record duplicate-key survey in de-hash design ([#17960](https://github.com/QwenLM/qwen-code/pull/17960)) by @doudouOUC
+- mcp: drop outdated restart instructions after mcpServers hot-reload ([#17743](https://github.com/QwenLM/qwen-code/pull/17743)) by @Barzabel
+- serve: refine create_sub_session workspace approvals ([#17863](https://github.com/QwenLM/qwen-code/pull/17863)) by @wenshao
+- design the local-daemon workspace artifact library page ([#18036](https://github.com/QwenLM/qwen-code/pull/18036)) by @wenshao
+- managed-agent: design Action parking (stateless Harness phase 4) ([#18047](https://github.com/QwenLM/qwen-code/pull/18047)) by @doudouOUC
+- mark the workspace artifact library design accepted (#18036) ([#18063](https://github.com/QwenLM/qwen-code/pull/18063)) by @wenshao
+- design: record automatic-trigger message landing ([#18080](https://github.com/QwenLM/qwen-code/pull/18080)) by @wenshao
+
+#### Internal Changes
+
+- ci(managed-agent): stabilize required gate name ([#17865](https://github.com/QwenLM/qwen-code/pull/17865)) by @yiliang114
+- test(ci): wait for RocketMQ listeners to clear after stop ([#17967](https://github.com/QwenLM/qwen-code/pull/17967)) by @yiliang114
+- refactor(managed-agent): drop redundant same-row identity hash keys ([#18019](https://github.com/QwenLM/qwen-code/pull/18019)) by @doudouOUC
+- refactor(managed-agent): drop dead and redundant schema objects ([#18041](https://github.com/QwenLM/qwen-code/pull/18041)) by @doudouOUC
+- test(channels): make four managed DingTalk witnesses exclude what they claim ([#17968](https://github.com/QwenLM/qwen-code/pull/17968)) by @wenshao
+- test(channels): deflake the DingTalk recent-window cap case (#17834) ([#17837](https://github.com/QwenLM/qwen-code/pull/17837)) by @qwen-code-dev-bot
+- refactor(managed-agent): use plaintext identity segments in OSS object keys ([#18048](https://github.com/QwenLM/qwen-code/pull/18048)) by @doudouOUC
+- test(cli): synchronize restart recovery crash fixture ([#18049](https://github.com/QwenLM/qwen-code/pull/18049)) by @wenshao
+- test(e2e): resolve the feedback transcript path by realpath on macOS ([#18074](https://github.com/QwenLM/qwen-code/pull/18074)) by @yiliang114
+- test(managed-agent): gate the four durable existing-dir preflight tests to Linux ([#18076](https://github.com/QwenLM/qwen-code/pull/18076)) by @yiliang114
+- refactor(managed-agent): move publication OSS scope naming to the contract ([#18085](https://github.com/QwenLM/qwen-code/pull/18085)) by @yiliang114
+- test(integration): deflake the SIGKILL restart-recovery case (#18055) ([#18057](https://github.com/QwenLM/qwen-code/pull/18057)) by @qwen-code-dev-bot
+- test(cli): deflake the admitted-mutation idle-timer case (#18053) ([#18056](https://github.com/QwenLM/qwen-code/pull/18056)) by @qwen-code-dev-bot
+
+### New Contributors
+
+- @jaeminbird made their first contribution in [#15786](https://github.com/QwenLM/qwen-code/pull/15786)
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.28.3...v0.28.4
+
 ## [0.28.3](https://github.com/QwenLM/qwen-code/releases/tag/v0.28.3) - 2026-11-21
 
 ### Highlights
