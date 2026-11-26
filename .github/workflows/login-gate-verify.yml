@@ -3,6 +3,7 @@
 # the gate job cannot run here. This push-triggered lane mirrors the gate job
 # (three-platform matrix, per-platform build) to prove it on GitHub-hosted
 # runners. REMOVED before the upstream PR; never merged.
+# (touch: re-register push delivery after the file was deleted and re-added)
 
 name: 'Login Gate Verify (temporary)'
 
