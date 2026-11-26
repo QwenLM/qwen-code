@@ -778,7 +778,7 @@ test('handles a padded whitespace run without unbounded regex backtracking', () 
 
 test('handles many 193-space lines without cubic rescanning', () => {
   const line = `${' '.repeat(193)}env\n`;
-  const payload = line.repeat(Math.ceil((64 * 1024) / line.length));
+  const payload = line.repeat(Math.ceil((128 * 1024) / line.length));
   const started = Date.now();
   const result = assessPullRequestSafety({
     pr: pr({ title: '', body: '' }),
@@ -789,7 +789,7 @@ test('handles many 193-space lines without cubic rescanning', () => {
   assert.equal(result.decision, 'allow_triage');
   assert.ok(
     elapsed < 500,
-    `64 KiB of 193-space lines took ${elapsed}ms; the no-list path must not enumerate 64³ splits`,
+    `128 KiB of 193-space lines took ${elapsed}ms; the no-list path must not enumerate 64³ splits`,
   );
 });
 
