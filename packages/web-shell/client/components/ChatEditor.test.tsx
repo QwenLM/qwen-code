@@ -941,6 +941,87 @@ describe('ChatEditor simple composer', () => {
     expect(composerCoreState.submitText).toHaveBeenCalledOnce();
   });
 
+  it.each(['Enter', ' '])(
+    'does not cancel a submitted prompt on a repeated %j key activation',
+    (key) => {
+      composerCoreState.hasContent = true;
+      const onCancel = vi.fn();
+      const props = { customization: simple, onCancel };
+      const container = renderChatEditor(props);
+      const submit = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!;
+      submit.focus();
+      act(() => submit.click());
+      expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+
+      composerCoreState.hasContent = false;
+      rerenderChatEditor(container, { ...props, isRunning: true });
+      const stop = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!;
+      const repeat = new KeyboardEvent('keydown', {
+        key,
+        repeat: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        stop.dispatchEvent(repeat);
+        // jsdom does not synthesize a button's native keyboard click.
+        if (!repeat.defaultPrevented) stop.click();
+      });
+      expect(onCancel).not.toHaveBeenCalled();
+      expect(repeat.defaultPrevented).toBe(true);
+      expect(document.activeElement).not.toBe(stop);
+
+      stop.focus();
+      const freshPress = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        stop.dispatchEvent(freshPress);
+        if (!freshPress.defaultPrevented) stop.click();
+      });
+      expect(onCancel).toHaveBeenCalledOnce();
+      expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not cancel a submitted prompt on the second click of a double-click', () => {
+    composerCoreState.hasContent = true;
+    const onCancel = vi.fn();
+    const props = { customization: simple, onCancel };
+    const container = renderChatEditor(props);
+    const submit = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!;
+    act(() => {
+      submit().dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+    composerCoreState.hasContent = false;
+    rerenderChatEditor(container, { ...props, isRunning: true });
+    act(() => {
+      submit().dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 2 }),
+      );
+    });
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+    expect(onCancel).not.toHaveBeenCalled();
+
+    act(() => {
+      submit().dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
   it('ingests session attachments from the simple add menu', async () => {
     const container = renderChatEditor({
       customization: simple,

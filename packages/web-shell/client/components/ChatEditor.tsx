@@ -4624,6 +4624,7 @@ export const ChatEditor = memo(
                 </button>
               )}
             <button
+              key={stopAffordance ? 'stop' : 'send'}
               className={
                 submitLoading || stopAffordance
                   ? `${styles.sendBtn} ${styles.sendBtnRunning}${
@@ -4640,9 +4641,17 @@ export const ChatEditor = memo(
               }
               data-web-shell-composer-submit
               {...touchDownGuard}
+              onKeyDown={(event) => {
+                if (
+                  event.repeat &&
+                  (event.key === 'Enter' || event.key === ' ')
+                ) {
+                  event.preventDefault();
+                }
+              }}
               onClick={(e) => {
                 e.stopPropagation();
-                if (submitLoading) {
+                if (submitLoading || e.detail > 1) {
                   return;
                 }
                 if (stopAffordance) {
