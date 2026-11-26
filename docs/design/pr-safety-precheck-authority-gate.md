@@ -279,7 +279,7 @@ the latency fix, so it is disclosed and pinned by a boundary test instead. The
 admitted. Attached values and option combinations such as `cat <(env -uNAME)`,
 `cat <(env --unset=NAME)`, `cat <(env -0 -u NAME)`, and `cat <(env -u A -u B)`
 are also admitted; the helper recognizes only the single separated option forms
-listed above. These are coverage gaps, not safety claims.
+listed above. These are coverage gaps, not safety claims. Dumps written for another runtime on the runner (`node -e 'console.log(process.env)'`, `python3 -c 'import os;print(dict(os.environ))'`) are also admitted; this rule recognizes shell command words only.
 
 ## Constraints
 
@@ -345,7 +345,7 @@ listed above. These are coverage gaps, not safety claims.
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 191 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 192 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout

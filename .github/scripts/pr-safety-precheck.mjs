@@ -95,7 +95,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   // signals documented in the design, not acceptance claims of this rule.
   [
     'ambient_credential:env_dump',
-    /(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})?|[;&|`]|\$\()[ \t]{0,64}\(?[ \t]{0,64}(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})?|[;&|`]|\$\()[ \t]{0,64}\(?[ \t]{0,64}printenv\b|\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{0,64}["']?[ \t]{0,64}(?:printenv\b|(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&>]|["']|$)))/m,
+    /(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|`]|\$\()[ \t]{0,64}\(?[ \t]{0,64})(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})?|[;&|`]|\$\()[ \t]{0,64}\(?[ \t]{0,64}printenv\b|\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{0,64}["']?[ \t]{0,64}(?:printenv\b|(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&>]|["']|$)))/m,
   ],
   // `.credentials` needs a boundary that admits every spelling of a file read
   // — bare, quoted (including a markdown code span's backtick), or after a
@@ -403,11 +403,19 @@ function main() {
 // Compare resolved URLs: `file://${argv[1]}` never matches when the checkout
 // path contains a space (%20) or goes through a symlink (/tmp -> /private/tmp),
 // and a silent no-output exit 0 is indistinguishable from a clean decision.
-// argv[1] is absent when the module is imported rather than executed, which the
-// unit tests and every direct probe do — realpathSync(undefined) throws there.
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
-) {
+// argv[1] is absent when the module is imported rather than executed, and it
+// can name a stale or non-existent path when a direct probe passes an argument.
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return (
+      import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main();
 }

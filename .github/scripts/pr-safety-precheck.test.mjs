@@ -776,6 +776,23 @@ test('handles a padded whitespace run without unbounded regex backtracking', () 
   );
 });
 
+test('handles many 193-space lines without cubic rescanning', () => {
+  const line = `${' '.repeat(193)}env\n`;
+  const payload = line.repeat(Math.ceil((64 * 1024) / line.length));
+  const started = Date.now();
+  const result = assessPullRequestSafety({
+    pr: pr({ title: '', body: '' }),
+    diff: diffFor('docs/note.md', payload),
+  });
+  const elapsed = Date.now() - started;
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.ok(
+    elapsed < 500,
+    `64 KiB of 193-space lines took ${elapsed}ms; the no-list path must not enumerate 64³ splits`,
+  );
+});
+
 test('pins the 192-column indentation recognition boundary', () => {
   for (const [columns, decision] of [
     [192, 'manual_required'],
@@ -1087,18 +1104,22 @@ for (const [label, launch] of [
 test('the module imports cleanly, which is how the suite itself uses it', () => {
   const href = new URL('./pr-safety-precheck.mjs', import.meta.url).href;
   // With -e there is no script argument, and resolving it used to throw before
-  // any assertion ran. A static import inside this test cannot cover that case.
-  const stdout = execFileSync(
-    process.execPath,
-    [
-      '--input-type=module',
-      '-e',
-      `const m = await import(${JSON.stringify(href)}); console.log(typeof m.assessPullRequestSafety);`,
-    ],
-    { encoding: 'utf8' },
-  );
+  // any assertion ran. A trailing argument can also be a stale or non-existent
+  // path, so both shapes must import without executing main or throwing.
+  for (const extraArgs of [[], ['somearg']]) {
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `const m = await import(${JSON.stringify(href)}); console.log(typeof m.assessPullRequestSafety);`,
+        ...extraArgs,
+      ],
+      { encoding: 'utf8' },
+    );
 
-  assert.equal(stdout.trim(), 'function');
+    assert.equal(stdout.trim(), 'function');
+  }
 });
 
 // Pinning the CLI alone is half a contract: renaming the flag in the workflow
