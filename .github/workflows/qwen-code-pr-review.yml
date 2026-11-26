@@ -1294,8 +1294,12 @@ jobs:
           # an empty canary or percent keeps today's single model, and
           # the bucket selection below turns them into OPENAI_MODEL.
           REVIEW_MODEL_DEFAULT: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          REVIEW_MODEL_CANARY: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}'
-          REVIEW_MODEL_CANARY_PERCENT: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}'
+          # Fork lanes run on hosted runners that cannot reach the internal
+          # canary endpoint (connect ETIMEDOUT from the VM), and every failed
+          # fork review is a PR-visible comment storm, so the canary split is
+          # trusted-lane only until the canary endpoint is publicly routable.
+          REVIEW_MODEL_CANARY: "${{ needs.review-trust.outputs.untrusted == 'true' && '' || vars.QWEN_PR_REVIEW_MODEL_CANARY }}"
+          REVIEW_MODEL_CANARY_PERCENT: "${{ needs.review-trust.outputs.untrusted == 'true' && '0' || vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}"
           # The canary cohort may also carry its own endpoint: a second
           # gateway with its own quota, or a provider the default gateway
           # does not serve. The pair is all-or-nothing — a URL without its

@@ -7783,11 +7783,13 @@ describe('review model canary routing', () => {
     expect(step.env.REVIEW_MODEL_DEFAULT).toBe(
       '${{ vars.QWEN_PR_REVIEW_MODEL }}',
     );
+    // Fork lanes must not route to the canary: hosted runners cannot reach
+    // the internal canary endpoint, so the split is trusted-lane only.
     expect(step.env.REVIEW_MODEL_CANARY).toBe(
-      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}',
+      "${{ needs.review-trust.outputs.untrusted == 'true' && '' || vars.QWEN_PR_REVIEW_MODEL_CANARY }}",
     );
     expect(step.env.REVIEW_MODEL_CANARY_PERCENT).toBe(
-      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}',
+      "${{ needs.review-trust.outputs.untrusted == 'true' && '0' || vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}",
     );
     // The canary cohort's optional endpoint pair: the URL is a variable,
     // the key is a secret, and neither is pinned into the script.
