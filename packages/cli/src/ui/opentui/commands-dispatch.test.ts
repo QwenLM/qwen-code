@@ -992,6 +992,7 @@ describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () =
     ['effort', 'high'],
     ['output-style', 'Concise'],
     ['statusline', 'show'],
+    ['theme', 'Dracula'],
   ])('keeps /%s %j (work-performing)', (root, args) => {
     expect(shouldHideSlashCommandInvocation(cmd(root), [root], args)).toBe(
       false,

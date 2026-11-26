@@ -508,6 +508,17 @@ export default {
   'Theme "{{themeName}}" not found.': '未找到主題 "{{themeName}}"。',
   'Theme "{{themeName}}" not found in selected scope.':
     '在所選作用域中未找到主題 "{{themeName}}"。',
+  'Settings service not available.': '設定服務無法使用。',
+  'Unknown theme "{{value}}". Choose one of: {{themes}}.':
+    '未知的主題 "{{value}}"。可選主題：{{themes}}。',
+  'The theme is set in system settings, so /theme cannot change it.':
+    '主題由系統設定指定，/theme 無法變更。',
+  'Theme "{{themeName}}" could not be applied.':
+    '無法套用主題 "{{themeName}}"。',
+  'Theme set to {{themeName}} (project settings).':
+    '主題已設定為 {{themeName}}（專案設定）。',
+  'Theme set to {{themeName}} (user settings).':
+    '主題已設定為 {{themeName}}（使用者設定）。',
   'Clear conversation history and free up context': '清除對話歷史並釋放上下文',
   'Compresses the context by replacing it with a summary.':
     '通過摘要替換來壓縮上下文',

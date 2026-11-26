@@ -58,6 +58,8 @@ export interface OpenTuiCommandHost {
   loadHistory: CommandContext['ui']['loadHistory'];
   resetTranscript(events: OpenTuiStreamEvent[]): void;
   refreshStatic(): void;
+  /** Re-derives the renderer colors after a command changed the theme. */
+  applyActiveTheme?(): void;
   clearPendingState(): void;
   cancelBtw(): void;
   btwItem: HistoryItemBtw | null;
@@ -162,6 +164,7 @@ export function createOpenTuiCommandContext(
         }
       },
       refreshStatic: () => host.refreshStatic(),
+      onThemeChanged: () => host.applyActiveTheme?.(),
       setDebugMessage: (message) => host.setDebugMessage(message),
       pendingItem: host.pendingItem,
       setPendingItem: (item) => host.setPendingItem(item),

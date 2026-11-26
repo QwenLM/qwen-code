@@ -10,6 +10,7 @@ import type { LoadedSettings, SettingScope } from '../../config/settings.js'; //
 import { type HistoryItemWithoutId, MessageType } from '../types.js';
 import process from 'node:process';
 import { t } from '../../i18n/index.js';
+import { applyThemeSetting } from '../themes/theme-selection.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 
 interface UseThemeCommandReturn {
@@ -54,8 +55,9 @@ export const useThemeCommand = (
     // The theme may temporarily change while navigating the list; keep the
     // original value to restore it if user cancels with Esc/Ctrl+C.
     setThemeBeforeDialogOpen(themeManager.getActiveTheme().name);
+    setThemeError(null);
     setIsThemeDialogOpen(true);
-  }, [addItem, config]);
+  }, [addItem, config, setThemeError]);
 
   const applyTheme = useCallback(
     (themeName: string | undefined) => {
@@ -91,6 +93,8 @@ export const useThemeCommand = (
         return;
       }
 
+      // Failed selections keep the dialog open so the error is shown.
+      let keepOpen = false;
       try {
         // Merge user and workspace custom themes (workspace takes precedence)
         const mergedCustomThemes = {
@@ -107,17 +111,34 @@ export const useThemeCommand = (
               themeName: themeName ?? '',
             }),
           );
-          setIsThemeDialogOpen(true);
+          keepOpen = true;
           return;
         }
-        loadedSettings.setValue(scope, 'ui.theme', themeName); // Update the merged settings
-        if (loadedSettings.merged.ui?.customThemes) {
-          themeManager.loadCustomThemes(loadedSettings.merged.ui?.customThemes);
+        const { effective, applied, pinnedBySystem } = applyThemeSetting(
+          loadedSettings,
+          scope,
+          themeName,
+        );
+        if (pinnedBySystem) {
+          setThemeError(
+            t(
+              'The theme is set in system settings, so /theme cannot change it.',
+            ),
+          );
+          keepOpen = true;
+          return;
         }
-        applyTheme(loadedSettings.merged.ui?.theme); // Apply the current theme
+        // Not applied, or saved but overridden by another settings scope.
+        if (!applied || effective !== themeName) {
+          setThemeError(
+            t('Theme "{{themeName}}" could not be applied.', { themeName }),
+          );
+          keepOpen = true;
+          return;
+        }
         setThemeError(null);
       } finally {
-        setIsThemeDialogOpen(false); // Close the dialog
+        setIsThemeDialogOpen(keepOpen);
       }
     },
     [applyTheme, loadedSettings, setThemeError, themeBeforeDialogOpen],

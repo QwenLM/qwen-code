@@ -2008,6 +2008,7 @@ describe('useSlashCommandProcessor', () => {
       ['/output-style Concise', 'output-style'],
       ['/statusline make it compact', 'statusline'],
       ['/stats export', 'stats export'],
+      ['/theme Dracula', 'theme'],
     ])(
       'keeps the invocation for the direct action %s',
       async (input, canonicalPath) => {

@@ -124,6 +124,16 @@ describe('createOpenTuiCommandContext (ink commandContext parity)', () => {
     expect(host.sessionNames).toEqual([null]);
   });
 
+  it('routes onThemeChanged to the host so the palette is re-derived', () => {
+    const host = createFakeHost();
+    host.applyActiveTheme = () => {
+      host.calls.push('applyActiveTheme');
+    };
+    const context = createOpenTuiCommandContext(host, services, idle);
+    context.ui.onThemeChanged?.();
+    expect(host.calls).toEqual(['applyActiveTheme']);
+  });
+
   it('keeps the host receiver on session.startNewSession', () => {
     const host = createFakeHost();
     const context = createOpenTuiCommandContext(host, services, idle);

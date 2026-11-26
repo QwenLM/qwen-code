@@ -77,6 +77,7 @@ interface FakeSettings {
 
 function createFakeSettings(options?: {
   isTrusted?: boolean;
+  system?: Settings;
   user?: Settings;
   workspace?: Settings;
 }): FakeSettings {
@@ -85,6 +86,7 @@ function createFakeSettings(options?: {
   const workspace = options?.workspace ?? {};
   const merged: Record<string, unknown> = {};
   const settings = {
+    system: { settings: options?.system ?? {} },
     user: { settings: user },
     workspace: { settings: workspace },
     get merged() {
@@ -1225,6 +1227,16 @@ describe('applyThemeSelection', () => {
     expect(result).toEqual({ applied: 'mytheme' });
     expect(loadCustomThemes).toHaveBeenCalled();
     expect(setActiveTheme).toHaveBeenCalledWith('mytheme');
+  });
+
+  it('refuses without writing when system settings pin the theme', () => {
+    const { settings, written } = createFakeSettings({
+      system: { ui: { theme: 'Qwen Light' } } as Settings,
+    });
+    const result = applyThemeSelection(settings, 'Default', SettingScope.User);
+    expect(result.applied).toBeUndefined();
+    expect(result.error).toContain('system settings');
+    expect(written).toEqual([]);
   });
 
   it('rejects themes unknown to the selected scope', () => {

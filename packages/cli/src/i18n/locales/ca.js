@@ -275,6 +275,18 @@ export default {
   'Theme "{{themeName}}" not found.': 'Tema "{{themeName}}" no trobat.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Tema "{{themeName}}" no trobat en l\'àmbit seleccionat.',
+  'Settings service not available.':
+    'El servei de configuració no està disponible.',
+  'Unknown theme "{{value}}". Choose one of: {{themes}}.':
+    'Tema desconegut "{{value}}". Trieu-ne un: {{themes}}.',
+  'The theme is set in system settings, so /theme cannot change it.':
+    'El tema està definit a la configuració del sistema, així que /theme no el pot canviar.',
+  'Theme "{{themeName}}" could not be applied.':
+    'No s\'ha pogut aplicar el tema "{{themeName}}".',
+  'Theme set to {{themeName}} (project settings).':
+    'Tema establert a {{themeName}} (configuració del projecte).',
+  'Theme set to {{themeName}} (user settings).':
+    "Tema establert a {{themeName}} (configuració de l'usuari).",
   'Clear conversation history and free up context':
     "Esborra l'historial de la conversa i allibera context",
   'Compresses the context by replacing it with a summary.':

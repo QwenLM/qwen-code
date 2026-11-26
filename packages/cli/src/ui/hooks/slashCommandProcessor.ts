@@ -156,11 +156,11 @@ function shouldHideSlashCommandInvocation(
     canonicalPath.length === 1 &&
     SLASH_COMMAND_ROOTS_HIDE_INVOCATION.has(canonicalPath[0] ?? '')
   ) {
-    // NO_COLOR prevents the theme dialog from opening, so /theme prints
-    // feedback instead and keeps its invocation like any work-performing
-    // command.
-    if (canonicalPath[0] === 'theme' && process.env['NO_COLOR']) {
-      return false;
+    // `/theme <name>` changes the theme and NO_COLOR keeps the dialog shut,
+    // so both print feedback and keep their invocation like any
+    // work-performing command. Only bare `/theme` opens the picker.
+    if (canonicalPath[0] === 'theme') {
+      return !process.env['NO_COLOR'] && args.trim() === '';
     }
     return true;
   }

@@ -252,6 +252,17 @@ export default {
   'Theme "{{themeName}}" not found.': 'Design "{{themeName}}" nicht gefunden.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Design "{{themeName}}" im ausgewählten Bereich nicht gefunden.',
+  'Settings service not available.': 'Einstellungsdienst nicht verfügbar.',
+  'Unknown theme "{{value}}". Choose one of: {{themes}}.':
+    'Unbekanntes Design "{{value}}". Verfügbar: {{themes}}.',
+  'The theme is set in system settings, so /theme cannot change it.':
+    'Das Design ist in den Systemeinstellungen festgelegt, daher kann /theme es nicht ändern.',
+  'Theme "{{themeName}}" could not be applied.':
+    'Design "{{themeName}}" konnte nicht angewendet werden.',
+  'Theme set to {{themeName}} (project settings).':
+    'Design auf {{themeName}} gesetzt (Projekteinstellungen).',
+  'Theme set to {{themeName}} (user settings).':
+    'Design auf {{themeName}} gesetzt (Benutzereinstellungen).',
   'Clear conversation history and free up context':
     'Gesprächsverlauf löschen und Kontext freigeben',
   'Compresses the context by replacing it with a summary.':

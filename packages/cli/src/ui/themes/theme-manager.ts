@@ -322,7 +322,11 @@ class ThemeManager {
     return this.findThemeByName(themeName);
   }
 
-  private isPath(themeName: string): boolean {
+  /**
+   * Whether a theme name is read as a file path (`.json` suffix, leading `.`,
+   * or absolute). Such names are loaded from disk, never from `customThemes`.
+   */
+  isPath(themeName: string): boolean {
     return (
       themeName.endsWith('.json') ||
       themeName.startsWith('.') ||

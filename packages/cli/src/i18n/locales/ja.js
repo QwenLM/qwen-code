@@ -228,6 +228,17 @@ export default {
   'Theme "{{themeName}}" not found.': 'テーマ "{{themeName}}" が見つかりません',
   'Theme "{{themeName}}" not found in selected scope.':
     '選択したスコープにテーマ "{{themeName}}" が見つかりません',
+  'Settings service not available.': '設定サービスを利用できません。',
+  'Unknown theme "{{value}}". Choose one of: {{themes}}.':
+    '不明なテーマ "{{value}}" です。次から選択してください: {{themes}}。',
+  'The theme is set in system settings, so /theme cannot change it.':
+    'テーマはシステム設定で指定されているため、/theme では変更できません。',
+  'Theme "{{themeName}}" could not be applied.':
+    'テーマ "{{themeName}}" を適用できませんでした。',
+  'Theme set to {{themeName}} (project settings).':
+    'テーマを {{themeName}} に設定しました（プロジェクト設定）。',
+  'Theme set to {{themeName}} (user settings).':
+    'テーマを {{themeName}} に設定しました（ユーザー設定）。',
   'Clear conversation history and free up context':
     '会話履歴をクリアしてコンテキストを解放',
   'Compresses the context by replacing it with a summary.':

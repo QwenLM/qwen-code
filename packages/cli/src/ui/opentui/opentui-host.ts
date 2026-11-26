@@ -110,6 +110,8 @@ export interface OpenTuiAppHostDeps {
     map: Map<string, ExtensionUpdateStatus>,
     action: ExtensionUpdateAction,
   ): void;
+  /** Re-derives the OpenTUI palette from the active theme (wired by the shell). */
+  applyActiveTheme?(): void;
 }
 
 type HistoryItemUpdater = (
@@ -305,6 +307,11 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
 
   /** Renderer repaint hint — the cell-diff painter re-renders on `notify`. */
   refreshStatic(): void {
+    this.notify();
+  }
+
+  applyActiveTheme(): void {
+    this.deps.applyActiveTheme?.();
     this.notify();
   }
 
