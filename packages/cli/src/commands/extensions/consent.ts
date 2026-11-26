@@ -11,7 +11,7 @@ import chalk from 'chalk';
 import prompts from 'prompts';
 import stripAnsi from 'strip-ansi';
 import { t } from '../../i18n/index.js';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 /**
  * Requests consent from the user to perform an action, by reading a Y/n
@@ -105,17 +105,57 @@ export async function requestConsentInteractive(
 async function promptForConsentNonInteractive(
   prompt: string,
 ): Promise<boolean> {
+  // stdin can already be finished before the prompt exists: the marketplace
+  // plugin picker runs first on the same stdin, and its EOF leaves an
+  // interface created here unable to emit any event at all — no line, no
+  // close, no callback — so the promise never settles and the process exits 0
+  // having installed nothing.
+  if (process.stdin.readableEnded || process.stdin.destroyed) {
+    writeStderrLine(
+      t(
+        'Could not read an answer from stdin (input closed); treating this as a refusal.',
+      ),
+    );
+    return false;
+  }
+
   const readline = await import('node:readline');
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
 
+  const isAffirmative = (answer: string): boolean =>
+    ['y', ''].includes(answer.trim().toLowerCase());
+
   return new Promise((resolve) => {
-    rl.question(prompt, (answer) => {
+    let answered = false;
+    const finish = (value: boolean): void => {
+      if (answered) return;
+      answered = true;
       rl.close();
-      resolve(['y', ''].includes(answer.trim().toLowerCase()));
+      resolve(value);
+    };
+    // readline emits `line` for a final unterminated line but skips the
+    // question callback once the interface is closing, so `printf 'y' |
+    // qwen ...` would otherwise read as a refusal.
+    rl.once('line', (line: string) => finish(isAffirmative(line)));
+    // EOF on a stdin that is not a terminal closes the interface without an
+    // answer. Left unhandled, the pending promise is dropped and the process
+    // exits 0 having installed nothing — a refusal reported as success. An
+    // explicit "n" takes the same branch, so name the cause; the command's own
+    // "Installation cancelled" line would read as a decline that never
+    // happened. The `answered` guard keeps that line off answered prompts.
+    rl.once('close', () => {
+      if (answered) return;
+      writeStderrLine(
+        t(
+          'Could not read an answer from stdin (input closed); treating this as a refusal.',
+        ),
+      );
+      finish(false);
     });
+    rl.question(prompt, (answer) => finish(isAffirmative(answer)));
   });
 }
 

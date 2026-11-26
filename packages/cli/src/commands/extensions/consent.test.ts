@@ -10,6 +10,7 @@ import {
   extensionConsentString,
   requestConsentOrFail,
   requestChoicePluginNonInteractive,
+  requestConsentNonInteractive,
 } from './consent.js';
 import type {
   ExtensionConfig,
@@ -30,6 +31,12 @@ vi.mock('../../i18n/index.js', () => ({
 }));
 
 vi.mock('prompts');
+
+const readlineMock = vi.hoisted(() => ({ createInterface: vi.fn() }));
+
+vi.mock('node:readline', () => ({
+  createInterface: readlineMock.createInterface,
+}));
 
 describe('extensionConsentString', () => {
   it('should include extension name', () => {
@@ -488,4 +495,157 @@ describe('requestChoicePluginNonInteractive', () => {
       requestChoicePluginNonInteractive(marketplace),
     ).rejects.toThrow('Plugin selection cancelled.');
   });
+});
+
+describe('requestConsentNonInteractive', () => {
+  /**
+   * A stand-in for readline's Interface: `once`/`emit` plus the calls the
+   * consent prompt makes. `undefined` models stdin at EOF (close with no
+   * answer); `newline: false` models a final line the terminal never
+   * newline-terminated, which readline delivers as a `line` event instead of
+   * the question callback.
+   */
+  const fakeInterface = (
+    answer: string | undefined,
+    { newline = true }: { newline?: boolean } = {},
+  ) => {
+    type Handler = (value?: string) => void;
+    const handlers = new Map<string, Handler[]>();
+    const fake = {
+      once(event: string, cb: Handler) {
+        handlers.set(event, [...(handlers.get(event) ?? []), cb]);
+        return fake;
+      },
+      emit(event: string, value?: string) {
+        for (const cb of handlers.get(event) ?? []) cb(value);
+        handlers.delete(event);
+      },
+      question(_prompt: string, cb: (value: string) => void) {
+        setImmediate(() => {
+          if (answer === undefined) {
+            fake.emit('close');
+          } else if (newline) {
+            cb(answer);
+            // Real readline closes the interface after an answered prompt.
+            fake.emit('close');
+          } else {
+            fake.emit('line', answer);
+            fake.emit('close');
+          }
+        });
+      },
+      close() {
+        fake.emit('close');
+      },
+    };
+    return fake;
+  };
+
+  const setStdinState = (state: {
+    readableEnded?: boolean;
+    destroyed?: boolean;
+  }) => {
+    for (const [key, value] of Object.entries(state)) {
+      Object.defineProperty(process.stdin, key, {
+        value,
+        configurable: true,
+      });
+    }
+  };
+
+  beforeEach(() => {
+    readlineMock.createInterface.mockReset();
+    setStdinState({ readableEnded: false, destroyed: false });
+  });
+
+  it('treats a closed stdin as a refusal instead of hanging into exit 0', async () => {
+    // `qwen extensions install` / `link` under a non-interactive stdin: the
+    // prompt is printed, readline closes at EOF, and the command used to exit
+    // 0 having installed nothing. A refused operation must not report success.
+    readlineMock.createInterface.mockReturnValue(fakeInterface(undefined));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(false);
+
+    // The cause is named; the command's own cancellation line would read as a
+    // decline that never happened.
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('Could not read an answer from stdin'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('refuses a stdin that already ended before the prompt (#15037 review)', async () => {
+    // The marketplace plugin picker can consume EOF first; an interface created
+    // after that emits nothing at all, so the promise would never settle and
+    // the process would exit 0 silently.
+    setStdinState({ readableEnded: true, destroyed: true });
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(false);
+
+    expect(readlineMock.createInterface).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('Could not read an answer from stdin'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('accepts an answer that never got a newline (#15037 review)', async () => {
+    // `printf 'y' | qwen extensions install …` reaches readline as a final
+    // unterminated line: the question callback is skipped once the interface
+    // closes, but the `line` event still carries the answer.
+    readlineMock.createInterface.mockReturnValue(
+      fakeInterface('y', { newline: false }),
+    );
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(true);
+  });
+
+  it('does not report an EOF refusal for an answered prompt (#15037 review)', async () => {
+    // The `answered` guard in the close handler is what keeps the diagnostic
+    // off a real answer; without it every successful consent prints a
+    // spurious refusal.
+    readlineMock.createInterface.mockReturnValue(fakeInterface('y'));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(true);
+
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not read an answer from stdin'),
+    );
+    stderr.mockRestore();
+  });
+
+  it.each([
+    ['y', true],
+    ['', true],
+    ['n', false],
+    ['yes', false],
+  ])('maps answer %j to %s', async (answer, expected) => {
+    readlineMock.createInterface.mockReturnValue(fakeInterface(answer));
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(
+      expected,
+    );
+  });
+
+  it.each([
+    ['y', true],
+    ['n', false],
+    ['yes', false],
+  ])(
+    'maps unterminated answer %j to %s (#15037 review)',
+    async (answer, expected) => {
+      // An empty stdin emits only `close`, never `line`, so '' is not reachable
+      // on this path and is deliberately absent from this table.
+      readlineMock.createInterface.mockReturnValue(
+        fakeInterface(answer, { newline: false }),
+      );
+
+      await expect(requestConsentNonInteractive('consent?')).resolves.toBe(
+        expected,
+      );
+    },
+  );
 });
