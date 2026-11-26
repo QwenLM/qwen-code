@@ -124,6 +124,7 @@ class HostedHarnessClientTest {
         String preparation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         AtomicReference<String> upload = new AtomicReference<>();
         AtomicReference<String> receivedScope = new AtomicReference<>();
+        AtomicReference<String> releasedScope = new AtomicReference<>();
         server.createContext("/internal/hosted-harness/v1/managed-packages/prepare", exchange -> {
             assertEquals(BOOT_ID, exchange.getRequestHeaders().getFirst(HostedHarnessClient.BOOT_ID_HEADER));
             assertEquals("1", exchange.getRequestHeaders().getFirst(HostedHarnessClient.PROTOCOL_HEADER));
@@ -139,6 +140,11 @@ class HostedHarnessClientTest {
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
+        server.createContext("/internal/hosted-harness/v1/managed-packages/" + preparation, exchange -> {
+            assertEquals("DELETE", exchange.getRequestMethod());
+            releasedScope.set(exchange.getRequestURI().getRawQuery());
+            sendSessionNoContent(exchange, false);
+        });
         Map<String, Object> scope = Map.of("tenantId", "tenant", "workspaceId", "workspace", "actorKey", "a".repeat(64));
         try (HostedHarnessClient client = newClient()) {
             Map<String, Object> descriptor = client.prepareManagedPackage(Map.of("input", Map.of(), "tenantId", "tenant",
@@ -147,8 +153,10 @@ class HostedHarnessClientTest {
             try (InputStream input = client.managedPackageArchive(preparation, scope)) {
                 assertEquals("archive", new String(input.readAllBytes(), StandardCharsets.UTF_8));
             }
+            client.releaseManagedPackage(preparation, scope);
             assertEquals("source", upload.get());
             assertTrue(receivedScope.get().startsWith("scope="));
+            assertEquals(receivedScope.get(), releasedScope.get());
         }
     }
 
