@@ -12,9 +12,11 @@ import {
   mkdirSync,
   rmSync,
 } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
@@ -1327,10 +1329,97 @@ describe('e2e workflow', () => {
       // bimodal, so a short probe of the default cannot veto the override
       // (#16214 recurrence on hz4-2, run 41743539611). Pin its absence.
       expect(aptProbeScript).not.toContain('slow_default');
+      // The probe must bypass host proxy env vars because `docker build`
+      // containers do not inherit them; measuring deb.debian.org through a
+      // host egress proxy hides direct-path throttling inside the build.
+      expect(aptProbeScript).toMatch(/reply="\$\(curl[^\n]*--noproxy '\*'/);
       // The measurements have to reach the log, or the next slow build is
       // another manual investigation.
       expect(aptProbeScript).toContain('apt probe:');
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'bypasses host proxy env vars when probing apt mirrors',
+      async () => {
+        const execFileAsync = promisify(execFile);
+        let targetHits = 0;
+        let proxyHits = 0;
+        const payload = Buffer.alloc(4096, 0x61);
+        const listen = (server) =>
+          new Promise((resolve, reject) => {
+            server.once('error', reject);
+            server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+          });
+        const close = (server) => {
+          if (!server.listening) {
+            return Promise.resolve();
+          }
+          return new Promise((resolve) => {
+            server.closeAllConnections?.();
+            server.close(() => resolve());
+          });
+        };
+
+        const targetServer = createServer((req, res) => {
+          if (
+            req.url === '/debian/dists/bookworm/main/binary-arm64/Packages.gz'
+          ) {
+            targetHits += 1;
+            res.writeHead(206, {
+              'Content-Length': String(payload.length),
+              Connection: 'close',
+            });
+            res.end(payload);
+            return;
+          }
+          res.writeHead(404, { Connection: 'close' });
+          res.end();
+        });
+        const proxyServer = createServer((_req, res) => {
+          proxyHits += 1;
+          res.writeHead(206, {
+            'Content-Length': String(payload.length),
+            Connection: 'close',
+          });
+          res.end(payload);
+        });
+
+        try {
+          const [targetPort, proxyPort] = await Promise.all([
+            listen(targetServer),
+            listen(proxyServer),
+          ]);
+          const proxyUrl = `http://127.0.0.1:${proxyPort}`;
+          const { stdout } = await execFileAsync(
+            'bash',
+            [
+              '-ec',
+              'source .github/scripts/apt-mirror-probe.sh; apt_mirror_probe_rate "$1"',
+              '_',
+              `127.0.0.1:${targetPort}`,
+            ],
+            {
+              env: {
+                ...process.env,
+                HTTP_PROXY: proxyUrl,
+                http_proxy: proxyUrl,
+                ALL_PROXY: proxyUrl,
+                all_proxy: proxyUrl,
+                NO_PROXY: 'example.invalid',
+                no_proxy: 'example.invalid',
+              },
+              encoding: 'utf8',
+              timeout: 15_000,
+            },
+          );
+          expect(Number(stdout.trim())).toBeGreaterThan(0);
+          expect(targetHits).toBe(1);
+          expect(proxyHits).toBe(0);
+        } finally {
+          await Promise.all([close(targetServer), close(proxyServer)]);
+        }
+      },
+    );
 
     it('keeps one bounded retry without pruning the shared daemon', () => {
       expect(e2eRunScript.match(/build_image/g)).toHaveLength(3);
