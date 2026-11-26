@@ -127,6 +127,7 @@ class HostedPublicWorkspaceIT {
     private boolean publicChildFallback;
     private boolean personalMemory;
     private boolean holdRuntimeStartup;
+    private boolean coldApprovalReplica;
     private final Map<String, Map<String, Object>> memoryEntries = new java.util.concurrent.ConcurrentHashMap<>();
     private final AtomicInteger memoryRequests = new AtomicInteger();
     private final AtomicInteger memoryWrites = new AtomicInteger();
@@ -958,6 +959,80 @@ class HostedPublicWorkspaceIT {
     @Timeout(150)
     void publicChildrenShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql(String outcome) throws Exception {
         shellApprovalSettlesAfterParking(outcome, true, true);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allow", "deny"})
+    @Timeout(120)
+    void coldControlPlaneDeliversActionOnTheOriginalActiveHarness(String decision) throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        approvals = true;
+        shell = true;
+        shellDecision = decision;
+        definitionApproval = true;
+        shellLifecycleV2 = true;
+        publicChildren = true;
+        coldApprovalReplica = true;
+        List<Path> roots = boot();
+        register("workspace-0", "storage-0");
+        var settings = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
+        int harnessPort = URI.create(settings.getHarness().getBaseUrl()).getPort();
+        Path replicaBroker = Files.createDirectory(temporary.resolve("replica-broker"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        Path cli = Path.of(System.getProperty("qwen.cli.entry")).toAbsolutePath();
+        try (var replica = startControlPlane(cli, roots, harnessPort, reservePort(), 0, replicaBroker, "100ms")) {
+            var cold = replica.getBean(HarnessConnector.class);
+            int replicaPort = replica.getWebServer().getPort();
+            String session = request("POST", "/v1/agents/sessions", Map.of(
+                    "agent_id", "qwen-code",
+                    "input", List.of(Map.of("type", "input_text", "text", "G0_SHELL")),
+                    "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                    "start-action", "actor", 202).path("id").asText();
+            String route = "/v1/agents/sessions/" + session;
+            var action = new AtomicReference<JsonNode>();
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?", String.class, session))
+                        .isEqualTo("RUNNING");
+                JsonNode actions = request("GET", route + "/actions", null, null, "actor", 200).path("data");
+                assertThat(actions).hasSize(1);
+                action.set(actions.get(0));
+            });
+            assertThat(cold.attachedSessions()).isEmpty();
+            assertThat(writerGeneration(session)).isEqualTo(1L);
+            assertThat(modelRequests).hasSize(1);
+            Path proof = roots.getFirst().resolve("child/shell-proof.txt");
+            assertThat(proof).doesNotExist();
+
+            JsonNode pending = action.get();
+            String response = route + "/actions/" + pending.path("id").asText() + "/responses";
+            var body = Map.of("kind", "permission", "option_id", decision,
+                    "input_revision", pending.path("input_revision").asLong(),
+                    "policy_revision", pending.path("policy_revision").asText());
+            String operation = request(replicaPort, "POST", response, body, "cold-decision", "actor", 202)
+                    .path("id").asText();
+            assertThat(request(replicaPort, "POST", response, body, "cold-decision", "actor", 202)
+                    .path("id").asText()).isEqualTo(operation);
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+                assertThat(request(replicaPort, "GET", route + "/operations/" + operation, null, null, "actor", 200)
+                        .at("/action_resolution/outcome").asText()).isEqualTo("decided");
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?", String.class, session))
+                        .isEqualTo("COMPLETED");
+            });
+            assertThat(cold.attachedSessions()).anyMatch(ref -> session.equals(ref.sessionId()));
+            assertThat(writerGeneration(session)).isEqualTo(1L);
+            assertThat(modelRequests).hasSize(2);
+            if ("allow".equals(decision)) {
+                assertThat(Files.readString(proof)).isEqualTo("once\n");
+            } else {
+                assertThat(proof).doesNotExist();
+            }
+            assertThat(modelFailure.get()).isNull();
+        }
+    }
+
+    private long writerGeneration(String session) {
+        return jdbc.queryForObject("SELECT writer_generation FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'", Long.class, tenant, session);
     }
 
     @ParameterizedTest(name = "publication={0}, outcome={1}")
@@ -2278,6 +2353,20 @@ class HostedPublicWorkspaceIT {
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) throws IOException {
+        spring = startControlPlane(cli, roots, harnessPort, brokerPort, port, temporary.resolve("broker"),
+                coldApprovalReplica ? "120s" : null);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
+        if (!restarted && (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
+            var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
+            for (int index = 0; index < roots.size(); index++) {
+                WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
+                guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
+            }
+        }
+    }
+
+    private ServletWebServerApplicationContext startControlPlane(Path cli, List<Path> roots, int harnessPort,
+            int brokerPort, int httpPort, Path brokerDirectory, String scanDelay) throws IOException {
         boolean mysql = System.getProperty("mysql.url") != null;
         var isolatedDatabase = parkingDatabase == null ? poolDatabase : parkingDatabase;
         String databaseUrl = isolatedDatabase != null ? isolatedDatabase.url() : System.getProperty("mysql.url",
@@ -2291,7 +2380,7 @@ class HostedPublicWorkspaceIT {
                     + "; process.argv[1]=" + json.writeValueAsString(cli.toString())
                     + "; await import(" + json.writeValueAsString(cli.toUri().toString()) + ");\n");
         }
-        List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
+        List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + httpPort,
                 "--spring.datasource.url=" + databaseUrl,
                 "--spring.datasource.driver-class-name=" + (mysql ? "com.mysql.cj.jdbc.Driver" : "org.h2.Driver"),
                 "--spring.datasource.username=" + System.getProperty("mysql.user", "sa"),
@@ -2310,7 +2399,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
-                "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
+                "--qwen.managed-agent.runtime-broker.state-directory=" + brokerDirectory,
                 "--qwen.managed-agent.runtime-broker.credential-key-id=g0-fixture",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable="
@@ -2331,6 +2420,9 @@ class HostedPublicWorkspaceIT {
                     "--qwen.managed-agent.dispatch.retry-initial-delay=10ms",
                     "--qwen.managed-agent.dispatch.max-pre-admission-retries=2",
                     "--qwen.managed-agent.harness.load-timeout=20s"));
+        }
+        if (scanDelay != null) {
+            arguments.add("--qwen.managed-agent.dispatch.scan-delay=" + scanDelay);
         }
         if (approvals) {
             arguments.add("--qwen.managed-agent.harness.approval-mode="
@@ -2386,7 +2478,7 @@ class HostedPublicWorkspaceIT {
             arguments.add(prefix + "storage-id=storage-" + i);
             arguments.add(prefix + "root=" + roots.get(i));
         }
-        spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
+        return (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
                 .initializers(context -> {
                     context.getBeanFactory().registerSingleton("g0Authentication", authentication());
                     if (shellLifecycleV2) {
@@ -2398,14 +2490,6 @@ class HostedPublicWorkspaceIT {
                     }
                 })
                 .run(arguments.toArray(String[]::new));
-        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
-        if (!restarted && (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
-            var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
-            for (int index = 0; index < roots.size(); index++) {
-                WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
-                guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
-            }
-        }
     }
 
     private FilterRegistrationBean<Filter> authentication() {
@@ -2974,7 +3058,12 @@ class HostedPublicWorkspaceIT {
 
     private HttpResponse<String> rawRequest(String method, String path, Object body, String key, String actor)
             throws Exception {
-        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+        return rawRequest(port, method, path, body, key, actor);
+    }
+
+    private HttpResponse<String> rawRequest(int httpPort, String method, String path, Object body, String key, String actor)
+            throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + httpPort + path))
                 .timeout(Duration.ofSeconds(10)).header("X-Qwen-Tenant-Id", tenant)
                 .header("Accept", "application/json").header("Content-Type", "application/json")
                 .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
@@ -2990,7 +3079,12 @@ class HostedPublicWorkspaceIT {
 
     private JsonNode request(String method, String path, Object body, String key, String actor, int expected)
             throws Exception {
-        HttpResponse<String> response = rawRequest(method, path, body, key, actor);
+        return request(port, method, path, body, key, actor, expected);
+    }
+
+    private JsonNode request(int httpPort, String method, String path, Object body, String key, String actor, int expected)
+            throws Exception {
+        HttpResponse<String> response = rawRequest(httpPort, method, path, body, key, actor);
         assertThat(response.statusCode()).as("%s %s: %s", method, path, response.body()).isEqualTo(expected);
         return json.readTree(response.body());
     }
