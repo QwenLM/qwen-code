@@ -1525,6 +1525,17 @@ describe('qwen serve — archive coordinator over real HTTP', () => {
     const activePaths = [firstId, secondId].map((sessionId) =>
       writePersistedTranscript(sessionId, [
         chatRecord(sessionId, 'u-1', null, 'archive me'),
+        {
+          uuid: 'system-1',
+          parentUuid: 'u-1',
+          sessionId,
+          timestamp: '2026-07-08T00:00:02.000Z',
+          type: 'system',
+          subtype: 'custom_title',
+          cwd: REPO_ROOT,
+          version: '1.0.0',
+          systemPayload: { customTitle: 'archive me', titleSource: 'auto' },
+        },
       ]),
     );
     const archivedPaths = activePaths.map((activePath) =>
@@ -1554,8 +1565,11 @@ describe('qwen serve — archive coordinator over real HTTP', () => {
       expect(existsSync(activePath)).toBe(true);
       expect(existsSync(archivedPaths[index]!)).toBe(false);
       const restoredLines = readFileSync(activePath, 'utf8').trim().split('\n');
-      expect(restoredLines[0]).toBe(
-        transcriptBytes[index]!.toString('utf8').trim(),
+      const originalLines = transcriptBytes[index]!.toString('utf8')
+        .trim()
+        .split('\n');
+      expect(restoredLines.slice(0, originalLines.length)).toEqual(
+        originalLines,
       );
       for (const line of restoredLines.slice(1)) {
         const record = JSON.parse(line) as { type: string; sessionId: string };
