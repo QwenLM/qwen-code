@@ -31,6 +31,7 @@ type UnitBase = 'token' | 'turn' | 'minute' | 'second';
 const LOCALE_BY_LANGUAGE: Record<WebShellLanguage, string> = {
   en: 'en-US',
   'zh-CN': 'zh-CN',
+  'zh-TW': 'zh-TW',
   ru: 'ru-RU',
 };
 
