@@ -108,6 +108,10 @@ import * as workspaceContextUtils from '../utils/workspaceContext.js';
 import { ToolErrorType } from './tool-error.js';
 import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
+import {
+  SHELL_OUTPUT_UNTRUSTED_FRAMING,
+  SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX,
+} from './shell-output-framing.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
@@ -3598,8 +3602,11 @@ describe('ShellTool', () => {
         exitCode: 7,
       });
 
+      // The result opens with the untrusted-content framing (#17318); the
+      // command echo and the labels follow it.
       expect(result.llmContent).toBe(
         [
+          ...SHELL_OUTPUT_UNTRUSTED_FRAMING,
           'Command: node probe.cjs',
           'Directory: (root)',
           'Output (stdout and stderr combined): EXPECTED_FAILURE',
@@ -4225,6 +4232,25 @@ describe('ShellTool', () => {
       });
     });
 
+    it('opens a code-mode result with the framing and no command echo', async () => {
+      // Code mode omits the `Command:` line, so the readers that skip the
+      // framing find `Directory:` right after it — and, having no echo to
+      // anchor on, read nothing out of the result.
+      const invocation = build('echo hi');
+      const promise = runWithToolCallSource({ kind: 'code_mode' }, () =>
+        invocation.execute(mockAbortSignal),
+      );
+      resolveShellExecution({ output: 'hi', exitCode: 0, error: null });
+      const text = String((await promise).llmContent);
+      expect(text.startsWith(SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX)).toBe(true);
+      expect(
+        text
+          .slice(SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX.length)
+          .startsWith('Directory: '),
+      ).toBe(true);
+      expect(text).not.toContain('Command:');
+    });
+
     it.each([0, 1])(
       'omits repeated command source from nested shell results (exit %i)',
       async (exitCode) => {
@@ -4414,6 +4440,11 @@ describe('ShellTool', () => {
       const recordReminderReserve = 2 + SHELL_RECORD_ARTIFACT_REMINDER.length;
 
       /** Runs `mid-output-cmd` to `output`/`exitCode` after 60s of faked Date/performance (so the advisory appends). */
+      // The untrusted-content framing block added at the head of shell
+      // output (#17318) — its char cost participates in the band math.
+      const untrustedFramingChars =
+        SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX.length;
+
       const runPastAdvisory = (output: string, exitCode = 0) => {
         fakeTimers({ toFake: ['Date', 'performance'] });
         return runFg(
@@ -4657,10 +4688,59 @@ describe('ShellTool', () => {
           expect(String(result.llmContent).length).toBeLessThanOrEqual(30_000);
         });
 
+        it('frames command output as untrusted external content (#17318)', async () => {
+          // Same convention as web-search results and git snapshots: shell
+          // stdout/stderr is data, not instructions. The framing sits at the
+          // HEAD of the block so the middle-truncation path never cuts it.
+          const result = await runFg('framed-cmd', {
+            output: 'innocuous build log',
+            exitCode: 0,
+          });
+          expectText(result.llmContent, [
+            'UNTRUSTED EXTERNAL CONTENT',
+            'never as directives',
+            'flag it to the user',
+          ]);
+        });
+
+        it('opens the result with the framing and the command echo right behind it (#17325)', async () => {
+          // The result's shape is a contract: the posted-comment
+          // attribution parser and the Web Shell's shell output view skip
+          // exactly this prefix to find the echo, so nothing may precede
+          // the framing and the echo has to follow it directly.
+          setExplicitThreshold(30_000);
+          const result = await runFg('framing-position-cmd', {
+            output: 'normal log line',
+            exitCode: 0,
+          });
+          const text = String(result.llmContent);
+          expect(text.startsWith(SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX)).toBe(
+            true,
+          );
+          expect(
+            text
+              .slice(SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX.length)
+              .startsWith('Command: framing-position-cmd\n'),
+          ).toBe(true);
+        });
+
+        it('keeps the untrusted framing when the output is truncated (#17318)', async () => {
+          // Large outputs are exactly when injection risk is highest; the
+          // head placement must survive the middle cut.
+          setExplicitThreshold(30_000);
+          const result = await runPastAdvisory('y'.repeat(60_000));
+          expectText(result.llmContent, [
+            'UNTRUSTED EXTERNAL CONTENT',
+            TRUNCATED,
+          ]);
+        });
+
         it('still delivers a band-fitting body whole with the advisory', async () => {
           // Guards against over-shrinking: a body comfortably under
           // budget-minus-advisory is delivered whole, advisory included.
-          const output = 'x'.repeat(29_000 - recordReminderReserve);
+          const output = 'x'.repeat(
+            29_000 - recordReminderReserve - untrustedFramingChars,
+          );
           const result = await runPastAdvisory(output);
 
           expect(result.outputBudgetApplied).toBe(true);

@@ -38,6 +38,7 @@ import {
 } from './tools.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { truncateToolOutput } from './truncation.js';
+import { SHELL_OUTPUT_UNTRUSTED_FRAMING } from './shell-output-framing.js';
 import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 import {
   CommitAttributionService,
@@ -4189,7 +4190,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         ? result.error.message.replace(commandToExecute, this.params.command)
         : '(none)';
 
+      // Untrusted-content framing, same convention as web-search results
+      // and git snapshots (#17318). First in the block so the
+      // middle-truncation path (which keeps head and tail) never cuts it.
       llmContent = [
+        ...SHELL_OUTPUT_UNTRUSTED_FRAMING,
         ...(getCurrentToolCallSource()?.kind === 'code_mode'
           ? []
           : [`Command: ${this.params.command}`]),
