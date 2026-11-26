@@ -78,19 +78,17 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
 // Merged main through 68388f5d41 plus the focus-stable touch-control changes
 // measures 2,155,573 renderer JS bytes and 2,428,500 CSS bytes on 2026-11-22,
-// across independent local transcript/export builds.
-// Merging origin/main (91a14e3349, including #17918) with the overload-
-// indicator slice (#18054) adds two catalog entries to the EN and ZH-CN
-// catalogs the document entry inlines (sidebar.overloadPaused and the
-// interpolating function sidebar.overloadDetail; zh-TW and RU are
-// transcript-stubbed and contribute no document bytes), adding +445 bytes:
-// rebuilt @qwen-code/web-shell transcript lib + export-html on the merged
-// tree measures 2,156,018 renderer JS bytes and 2,428,500 CSS bytes
-// (2,155,573 + 445 = 2,156,018 exact). A later rebuild of this branch
-// merged with main, using Node v26.12.1 on 2026-11-25, measured 2,156,867
-// bytes. Re-track the warning and hard ceiling to that later measurement
-// while preserving the house margins of 713 and 1,713 bytes respectively.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_157_580;
+// across independent local transcript/export builds. Keep the house margins:
+// warning = measurement + 713, hard ceiling = measurement + 1,713.
+// Main CI then measured 2,156,327 on a0dced748e (run 45741862667), 2,156,357
+// after #18437, 2,156,880 after #18009 and 2,157,683 after #18140 (build job
+// 139890640548 on run 45814470900), which crossed the old 2,157,286 ceiling.
+// #18140 adds nine sidebar and workspace-hooks keys to the EN and ZH-CN
+// catalogs; the export entry inlines the whole table (see above), so none of
+// that PR's component code reaches the document entry and the forbidden-input
+// guard still passes. Re-track against the 2,157,683-byte measurement with the
+// same margins: 2,158,396 / 2,159,396.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_158_396;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main

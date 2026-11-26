@@ -828,6 +828,27 @@ describe('getConnectionAfterSessionClear', () => {
     },
   );
 
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'forwards the input-history opt-out through %s',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const { actions } = createActionsHarness({ session });
+      const pending = actions[method]('host command', {
+        suppressInputHistory: true,
+      });
+      await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+      expect(session.submitPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [{ type: 'text', text: 'host command' }],
+          suppressInputHistory: true,
+        }),
+        ...(method === 'sendPrompt' ? [expect.any(AbortSignal)] : []),
+      );
+      if (method === 'sendPrompt') await actions.cancel();
+      await pending;
+    },
+  );
+
   it('does not promote reviewed Generated UI data to declared human input', async () => {
     const session = createMockSession('session-a');
     const { actions } = createActionsHarness({ session });
@@ -2340,14 +2361,20 @@ describe('createDaemonSessionActions', () => {
       createDetachedStandaloneSession,
     });
 
+    const startupConfig = {
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      reasoningEffort: 'none' as const,
+    };
     await expect(
       actions.createSession({
         sessionContext: { kind: 'standalone' },
         approvalMode: 'yolo',
+        startupConfig,
       }),
     ).resolves.toBe(standaloneRecord);
     expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
       approvalMode: 'yolo',
+      startupConfig,
     });
     expect(activeSession.client.createOrAttachSession).not.toHaveBeenCalled();
     expect(getConnection()).toEqual(connection);
@@ -3576,7 +3603,11 @@ describe('createDaemonSessionActions', () => {
     const result = await actions.sendDetachedPrompt(
       session as unknown as DaemonSessionClient,
       'background prompt',
-      { submittedPrompt: 'background prompt', onAdmitted },
+      {
+        submittedPrompt: 'background prompt',
+        suppressInputHistory: true,
+        onAdmitted,
+      },
     );
 
     expect(result).toEqual({ promptId: 'prompt-1' });
@@ -3592,6 +3623,7 @@ describe('createDaemonSessionActions', () => {
     expect(request._meta).toEqual({
       'qwen.submittedPrompt': 'background prompt',
     });
+    expect(request).toMatchObject({ suppressInputHistory: true });
     expect(onAdmitted).toHaveBeenCalledWith({ promptId: 'prompt-1' });
     expect(session.detach).toHaveBeenCalledOnce();
     expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
@@ -4059,6 +4091,70 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().models).toBeUndefined();
     expect(getConnection().currentModel).toBeUndefined();
     expect(getConnection().contextWindow).toBeUndefined();
+  });
+
+  it('passes a hydrated worktree restore into the existing pending load', async () => {
+    const restored = createMockSession('session-b', 'restore-client');
+    const restoreDetachedWorktreeSession = vi.fn(async () => restored);
+    const { actions, getConnection, pendingSessionLoadRef } =
+      createActionsHarness({ restoreDetachedWorktreeSession });
+
+    const restoredSession = await actions.restoreWorktreeSession('session-b', {
+      workspaceCwd: '/work/b',
+    });
+    expect(restoreDetachedWorktreeSession).toHaveBeenCalledExactlyOnceWith(
+      'session-b',
+      '/work/b',
+    );
+    expect(restoredSession).toBe(restored);
+
+    const load = actions.loadSession('session-b', {
+      workspaceCwd: '/work/b',
+      sessionContext: { kind: 'workspace', cwd: '/work/b' },
+      artifactCountHint: 4,
+      restoredSession,
+    });
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      sessionId: 'session-b',
+      sessionContext: { kind: 'workspace', cwd: '/work/b' },
+      restoredSession,
+    });
+    expect(getConnection()).toMatchObject({
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+    expect(restored.detach).not.toHaveBeenCalled();
+
+    const pending = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pending?.timeout);
+    pending?.resolve();
+    await load;
+  });
+
+  it('detaches only an unconsumed restored client when navigation supersedes it', async () => {
+    const first = createMockSession('session-a', 'restore-a');
+    const second = createMockSession('session-b', 'restore-b');
+    const { actions, pendingSessionLoadRef } = createActionsHarness();
+
+    const firstLoad = actions.loadSession('session-a', {
+      restoredSession: first as unknown as DaemonSessionClient,
+    });
+    const secondLoad = actions.loadSession('session-b', {
+      restoredSession: second as unknown as DaemonSessionClient,
+    });
+
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    expect(first.detach).toHaveBeenCalledOnce();
+    expect(second.detach).not.toHaveBeenCalled();
+    expect(pendingSessionLoadRef.current?.restoredSession).toBe(second);
+
+    const pending = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pending?.timeout);
+    pending?.resolve();
+    await secondLoad;
   });
 
   it('carries the daemon-advertised restore budget into the load request', async () => {
@@ -8104,6 +8200,7 @@ function createActionsHarness(
     onConnectionChange?: (connection: DaemonConnectionState) => void;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
+    restoreDetachedWorktreeSession?: ReturnType<typeof vi.fn>;
     daemonActivePromptRef?: {
       current: DaemonActivePromptState | undefined;
     };
@@ -8199,6 +8296,10 @@ function createActionsHarness(
           createMockSession(
             'detached-standalone-session',
           ) as unknown as DaemonSessionClient,
+      )) as () => Promise<DaemonSessionClient>,
+    restoreDetachedWorktreeSession: (opts.restoreDetachedWorktreeSession ??
+      vi.fn(async (sessionId: string) =>
+        createMockSession(sessionId),
       )) as () => Promise<DaemonSessionClient>,
     getDefaultSessionContext:
       opts.getDefaultSessionContext ?? (() => undefined),

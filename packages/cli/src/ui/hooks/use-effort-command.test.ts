@@ -24,6 +24,7 @@ describe('useEffortCommand', () => {
     setValue = vi.fn();
     config = {
       setReasoningEffort,
+      getModelPreferenceKey: () => undefined,
       getReasoningEffort,
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
@@ -69,11 +70,30 @@ describe('useEffortCommand', () => {
     expect(result.current.isEffortDialogOpen).toBe(false);
   });
 
+  it('reports save errors and closes the dialog', () => {
+    const addItem = vi.fn();
+    setValue.mockImplementation(() => {
+      throw new Error('Could not write settings');
+    });
+    const { result } = renderHook(() =>
+      useEffortCommand(settings, config, addItem),
+    );
+    act(() => result.current.openEffortDialog());
+    act(() => result.current.handleEffortSelect('high'));
+
+    expect(addItem).toHaveBeenCalledWith(
+      { type: 'error', text: 'Could not write settings' },
+      expect.any(Number),
+    );
+    expect(result.current.isEffortDialogOpen).toBe(false);
+  });
+
   it('confirms the requested tier in-chat on success', () => {
     const addItem = vi.fn();
     const recordSlashCommand = vi.fn();
     config = {
       setReasoningEffort,
+      getModelPreferenceKey: () => undefined,
       getReasoningEffort: vi.fn().mockReturnValue('xhigh'),
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
@@ -100,6 +120,7 @@ describe('useEffortCommand', () => {
     const addItem = vi.fn();
     config = {
       setReasoningEffort,
+      getModelPreferenceKey: () => undefined,
       // Thinking disabled: setReasoningEffort is a no-op, so the read-back
       // returns something other than the requested tier.
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
@@ -121,6 +142,7 @@ describe('useEffortCommand', () => {
     const addItem = vi.fn();
     config = {
       setReasoningEffort,
+      getModelPreferenceKey: () => undefined,
       getReasoningEffort: vi.fn().mockReturnValue('max'),
       getReasoningEffortOverride: vi.fn().mockReturnValue({
         source: 'samplingParams',

@@ -199,7 +199,6 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     providerUpdateRequest: undefined,
     settingInputRequests: [],
     pluginChoiceRequests: [],
-    loopDetectionConfirmationRequest: null,
     geminiMdFileCount: 0,
     streamingState: {} as UIState['streamingState'],
     initError: null,

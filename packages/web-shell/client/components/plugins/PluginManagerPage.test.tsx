@@ -53,6 +53,8 @@ vi.mock('../extensions/ExtensionsManagerPage', async () => {
         workspaceId?: string;
         sessionId?: string;
       };
+      workspaceCwd?: string;
+      workspaceControl?: ReactNode;
       onClose: () => void;
     }) =>
       props.managed ? (
@@ -61,7 +63,12 @@ vi.mock('../extensions/ExtensionsManagerPage', async () => {
           onClose={props.onClose}
         />
       ) : (
-        <div data-testid="daemon-extensions-page">Extensions</div>
+        <div
+          data-testid="daemon-extensions-page"
+          data-workspace={props.workspaceCwd ?? ''}
+        >
+          Extensions
+        </div>
       ),
   };
 });
@@ -753,5 +760,50 @@ describe('PluginManagerPage MCP workspace selection', () => {
         .querySelector('[data-testid="mcp-page"]')
         ?.getAttribute('data-workspace'),
     ).toBe('/work/secondary');
+  });
+
+  it('targets initialWorkspaceCwd on Extensions and follows navigationRequest updates', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={vi.fn()}
+            onUseSkill={vi.fn()}
+            initialTab="extensions"
+            initialWorkspaceCwd="/work/secondary"
+            navigationRequest={1}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container
+        .querySelector('[data-testid="daemon-extensions-page"]')
+        ?.getAttribute('data-workspace'),
+    ).toBe('/work/secondary');
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={vi.fn()}
+            onUseSkill={vi.fn()}
+            initialTab="mcp"
+            initialWorkspaceCwd="/work/primary"
+            navigationRequest={2}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container
+        .querySelector('[data-testid="mcp-page"]')
+        ?.getAttribute('data-workspace'),
+    ).toBe('/work/primary');
   });
 });

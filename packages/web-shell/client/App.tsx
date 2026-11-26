@@ -69,6 +69,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
@@ -283,6 +284,7 @@ import {
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
+import { WorkspaceHooksDialog } from './components/dialogs/WorkspaceHooksDialog';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
 import type {
   ManagedAgentProvider,
@@ -290,6 +292,13 @@ import type {
 } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import { DropdownMenuItem } from './components/ui/dropdown-menu';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from './components/ui/select';
 import {
   managedSelectionFromRoute,
   managedSelectionFromUrl,
@@ -693,7 +702,11 @@ import {
 import { useAssistantTurnSettlementProjection } from './assistant-turn-settlement';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
-import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
+import {
+  ArrowKeyHistoryProvider,
+  CompactModeContext,
+  TodoContextsProvider,
+} from './WebShellContexts';
 import styles from './App.module.css';
 
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
@@ -924,6 +937,7 @@ function resolvePreparedSubmit(
 
 interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
+  suppressInputHistory?: boolean;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   bindBlockId?: string;
@@ -1040,6 +1054,7 @@ type CancelledRetryState =
       files?: PromptFile[];
       inputAnnotations?: DaemonInputAnnotation[];
       idempotencyKey?: string;
+      suppressInputHistory?: boolean;
       previousRetriedTurnErrorId: string | null;
       previousShowRetryHint: boolean;
     };
@@ -1650,6 +1665,8 @@ export interface WebShellProps {
   composerVariant?: 'default' | 'simple';
   /** Show the composer focus glow and typing animation. Defaults to true. */
   composerGlowEnabled?: boolean;
+  /** Turn off Up/Down prompt recall for this shell, regardless of the browser preference. */
+  disableArrowKeyHistory?: boolean;
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -1781,7 +1798,11 @@ export interface WebShellProps {
    * mobile CSS reordering to take effect.
    */
   mobileWelcomeFooterMiddle?: boolean;
-  /** Parse user-message text into display parts such as chips. */
+  /**
+   * Parse user-message text into display parts such as chips. Desktop composer
+   * drafts also use this parser to restore inline chips when its parts preserve
+   * the complete original text.
+   */
   parseUserMessageContent?: UserMessageContentParser;
   /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
   renderUserMessageContent?: UserMessageContentRenderer;
@@ -3737,6 +3758,25 @@ function isVisionBridgeSetting(
   return key === 'visionModel' || key === 'visionBridgeTimeoutMs';
 }
 
+function SecondaryWorkspaceSettingsBridge({
+  workspaceCwd,
+  reloadRef,
+  render,
+}: {
+  workspaceCwd: string;
+  reloadRef: { current: (() => Promise<unknown>) | undefined };
+  render: (state: ReturnType<typeof useSettings>) => ReactNode;
+}) {
+  const state = useSettings({ workspaceCwd, autoLoad: true, enabled: true });
+  useEffect(() => {
+    reloadRef.current = state.reload;
+    return () => {
+      reloadRef.current = undefined;
+    };
+  }, [reloadRef, state.reload]);
+  return <>{render(state)}</>;
+}
+
 export function App({
   onRefreshModels,
   askUserFreeTextLabel,
@@ -3823,6 +3863,7 @@ export function App({
   allowedApprovalModes: allowedApprovalModesProp,
   composerVariant = 'default',
   composerGlowEnabled,
+  disableArrowKeyHistory,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -4353,8 +4394,29 @@ export function App({
     cwd: string;
   }>();
   const [pluginInitialTab, setPluginInitialTab] = useState<
-    'extensions' | 'skills'
+    'extensions' | 'mcp' | 'skills'
   >('extensions');
+  const [pluginWorkspaceCwd, setPluginWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
+  const [pluginNavigationRequest, setPluginNavigationRequest] = useState<
+    number | undefined
+  >(undefined);
+  const [channelsWorkspaceCwd, setChannelsWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
+  const [channelsNavigationRequest, setChannelsNavigationRequest] = useState<
+    number | undefined
+  >(undefined);
+  const [settingsWorkspaceCwd, setSettingsWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
+  const [memoryDialogWorkspaceCwd, setMemoryDialogWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
+  const [hooksDialogWorkspaceCwd, setHooksDialogWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
   const skillsSourceCwd =
     skillsSource?.client === workspace.client
       ? skillsSource.cwd
@@ -10089,6 +10151,7 @@ export function App({
   const lastSubmittedInputAnnotationsRef = useRef<
     DaemonInputAnnotation[] | undefined
   >(undefined);
+  const lastSubmittedSuppressInputHistoryRef = useRef(false);
   const lastSubmittedSourceVersionRef = useRef(
     composerSourceVersionRef.current,
   );
@@ -10108,6 +10171,7 @@ export function App({
     images?: PromptImage[];
     files?: PromptFile[];
     inputAnnotations?: DaemonInputAnnotation[];
+    suppressInputHistory?: boolean;
     owner: CancelledRetryOwner;
   } | null>(null);
   const [showRetryHint, setShowRetryHint] = useState(false);
@@ -10115,6 +10179,7 @@ export function App({
   showRetryHintRef.current = showRetryHint;
   const disarmSubmittedPromptRetry = useCallback(() => {
     lastSubmittedPromptRef.current = '';
+    lastSubmittedSuppressInputHistoryRef.current = false;
     lastSubmittedImagesRef.current = undefined;
     lastSubmittedFilesRef.current = undefined;
     lastSubmittedInputAnnotationsRef.current = undefined;
@@ -10159,6 +10224,8 @@ export function App({
       lastSubmittedImagesRef.current = failedRetry.images;
       lastSubmittedFilesRef.current = failedRetry.files;
       lastSubmittedInputAnnotationsRef.current = failedRetry.inputAnnotations;
+      lastSubmittedSuppressInputHistoryRef.current =
+        failedRetry.suppressInputHistory === true;
       lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
       retryableTurnErrorIdRef.current = retryableTurnError.id;
       retryableTurnErrorIdentityRef.current = { block: retryableTurnError };
@@ -10232,6 +10299,7 @@ export function App({
       snapshot: currentSnapshot,
     };
     lastSubmittedPromptRef.current = '';
+    lastSubmittedSuppressInputHistoryRef.current = false;
     lastSubmittedImagesRef.current = undefined;
     lastSubmittedFilesRef.current = undefined;
     lastSubmittedInputAnnotationsRef.current = undefined;
@@ -10330,6 +10398,8 @@ export function App({
       lastSubmittedImagesRef.current = state.images;
       lastSubmittedFilesRef.current = state.files;
       lastSubmittedInputAnnotationsRef.current = state.inputAnnotations;
+      lastSubmittedSuppressInputHistoryRef.current =
+        state.suppressInputHistory === true;
       lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
       retryableTurnErrorIdRef.current = renderedTurnError.id;
       retryableTurnErrorIdentityRef.current = { block: renderedTurnError };
@@ -11334,8 +11404,17 @@ export function App({
   useEffect(() => {
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
+      setSettingsWorkspaceCwd(undefined);
     }
-    if (activePanel !== 'plugins') setPluginInitialTab('extensions');
+    if (activePanel !== 'plugins') {
+      setPluginInitialTab('extensions');
+      setPluginWorkspaceCwd(undefined);
+      setPluginNavigationRequest(undefined);
+    }
+    if (activePanel !== 'channels') {
+      setChannelsWorkspaceCwd(undefined);
+      setChannelsNavigationRequest(undefined);
+    }
   }, [activePanel]);
   const closePanel = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
@@ -11371,7 +11450,11 @@ export function App({
     setShowResumeDialog(false);
     setShowDeleteDialog(false);
     setShowReleaseDialog(false);
-    if (!projectFeaturesAvailable) setShowMemoryDialog(false);
+    if (!projectFeaturesAvailable) {
+      setShowMemoryDialog(false);
+      setMemoryDialogWorkspaceCwd(undefined);
+      setHooksDialogWorkspaceCwd(undefined);
+    }
     if (!workspaceBrowseActiveRef.current) {
       setShowAddWorkspaceDialog(false);
     }
@@ -13363,6 +13446,10 @@ export function App({
               SessionActionsWithCreate,
             modelId: startupConfig || useWorkspaceDefault ? undefined : modelId,
             startupConfig,
+            supportsSessionStartupConfig:
+              connectionRef.current.capabilities?.features?.includes(
+                'session_startup_config',
+              ),
             reasoningEffort,
             modeId,
             planMode,
@@ -13816,6 +13903,7 @@ export function App({
         skipPrepareSubmit?: boolean;
         skipSubmitBefore?: boolean;
         submittedPrompt?: string;
+        suppressInputHistory?: boolean;
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
@@ -14049,6 +14137,9 @@ export function App({
               ...(opts?.submittedPrompt !== undefined
                 ? { submittedPrompt: opts.submittedPrompt }
                 : {}),
+              ...(opts?.suppressInputHistory
+                ? { suppressInputHistory: true }
+                : {}),
               images,
               files,
               inputAnnotations:
@@ -14129,6 +14220,8 @@ export function App({
           preparedInputAnnotations.length > 0
             ? preparedInputAnnotations
             : undefined;
+        lastSubmittedSuppressInputHistoryRef.current =
+          opts?.suppressInputHistory === true;
         lastSubmittedSourceVersionRef.current =
           composerSourceVersionRef.current;
         retryableTurnErrorIdRef.current = null;
@@ -14201,6 +14294,7 @@ export function App({
         ...(opts?.submittedPrompt !== undefined
           ? { submittedPrompt: opts.submittedPrompt }
           : {}),
+        ...(opts?.suppressInputHistory ? { suppressInputHistory: true } : {}),
         ...(opts?.source ? { source: opts.source } : {}),
         images,
         files,
@@ -14589,6 +14683,7 @@ export function App({
     // mcpDialogMessage survives closing the Plugins panel; MCP surfaces are
     // already blocked by activePanel below, so including it would lock chat.
     showMemoryDialog ||
+    hooksDialogWorkspaceCwd !== undefined ||
     (modelManagementPolicy.allowAdd && showAuthDialog) ||
     showAddWorkspaceDialog ||
     managedWorkspaceCreationOpen ||
@@ -14753,6 +14848,11 @@ export function App({
       skipPrepareSubmit: true,
       idempotencyKey: retryIdempotencyKey,
       inputAnnotations: failed.inputAnnotations,
+      ...(lastSubmittedSuppressInputHistoryRef.current &&
+      lastSubmittedPromptRef.current === failed.text &&
+      lastSubmittedSourceVersionRef.current === failed.owner.sourceVersion
+        ? { suppressInputHistory: true }
+        : {}),
       onAdmissionStarted: () => {
         admissionStarted = true;
       },
@@ -15658,6 +15758,54 @@ export function App({
     autoLoad: projectFeaturesAvailable,
     enabled: projectFeaturesAvailable,
   });
+  const uiLanguageWorkspaceCwd =
+    effectiveSessionContext?.kind === 'live'
+      ? (workspace.capabilities?.workspaceCwd ?? workspace.workspaceCwd)
+      : getComposerWorkspaceCwd();
+  const secondarySettingsWorkspaceCwd =
+    settingsWorkspaceCwd &&
+    settingsWorkspaceCwd !== uiLanguageWorkspaceCwd &&
+    ordinaryWorkspaces.some(
+      (entry) => entry.cwd === settingsWorkspaceCwd && entry.trusted,
+    )
+      ? settingsWorkspaceCwd
+      : undefined;
+  const secondarySettingsReloadRef = useRef<
+    (() => Promise<unknown>) | undefined
+  >(undefined);
+  useEffect(() => {
+    const isKnownTrustedWorkspace = (cwd: string) =>
+      ordinaryWorkspaces.length > 0
+        ? ordinaryWorkspaces.some((entry) => entry.cwd === cwd && entry.trusted)
+        : cwd === workspace.workspaceCwd;
+    if (
+      settingsWorkspaceCwd &&
+      !isKnownTrustedWorkspace(settingsWorkspaceCwd)
+    ) {
+      setSettingsWorkspaceCwd(undefined);
+    }
+    if (
+      hooksDialogWorkspaceCwd &&
+      !isKnownTrustedWorkspace(hooksDialogWorkspaceCwd)
+    ) {
+      setHooksDialogWorkspaceCwd(undefined);
+    }
+    if (
+      showMemoryDialog &&
+      memoryDialogWorkspaceCwd &&
+      !isKnownTrustedWorkspace(memoryDialogWorkspaceCwd)
+    ) {
+      setShowMemoryDialog(false);
+      setMemoryDialogWorkspaceCwd(undefined);
+    }
+  }, [
+    hooksDialogWorkspaceCwd,
+    memoryDialogWorkspaceCwd,
+    ordinaryWorkspaces,
+    settingsWorkspaceCwd,
+    showMemoryDialog,
+    workspace.workspaceCwd,
+  ]);
   const providersEnabled =
     projectFeaturesAvailable &&
     (activePanel === 'settings' || modelDialogMode === 'fast');
@@ -16397,12 +16545,12 @@ export function App({
     });
   }, [brandResolved, brandNameValue, brandLogoUri]);
 
-  const uiLanguageWorkspaceCwd =
-    effectiveSessionContext?.kind === 'live'
-      ? (workspace.capabilities?.workspaceCwd ?? workspace.workspaceCwd)
-      : getComposerWorkspaceCwd();
   const handleSettingsLanguageChange = useCallback(
-    (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
+    (
+      nextLanguage: WebShellLanguage,
+      scope: 'user' | 'workspace' = 'user',
+      targetWorkspaceCwd?: string,
+    ) => {
       if (sessionWriteBlocked) return;
       const owner = { current: sessionOwnerGuard.capture() };
       const previousLanguage = selectedLanguage;
@@ -16411,13 +16559,23 @@ export function App({
       // row on the Workspace tab there; keep this guard for a scope that was
       // picked before the session context settled.
       const effectiveScope = sessionIsStandalone ? 'user' : scope;
+      const resolvedWorkspaceCwd =
+        effectiveScope === 'workspace' && targetWorkspaceCwd
+          ? targetWorkspaceCwd
+          : uiLanguageWorkspaceCwd;
+      const targetsDifferentWorkspace =
+        effectiveScope === 'workspace' &&
+        Boolean(targetWorkspaceCwd) &&
+        targetWorkspaceCwd !== uiLanguageWorkspaceCwd;
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
+        const reloadSecondary = secondarySettingsReloadRef.current;
         await Promise.all([
           ...(connectionRef.current.sessionId
             ? [sessionActions.refreshCommands()]
             : []),
           reloadWorkspaceSettings(),
+          ...(reloadSecondary ? [reloadSecondary()] : []),
         ]);
       };
       if (
@@ -16434,7 +16592,7 @@ export function App({
       // opinion; the observe-only channel keeps settings-derived values from
       // shadowing later settings.json edits (#11955).
       const hostControlsLanguage = providedLanguage !== undefined;
-      if (!hostControlsLanguage) {
+      if (!hostControlsLanguage && !targetsDifferentWorkspace) {
         setSelectedLanguage(nextLanguage);
         onLanguageResolvedRef.current?.(nextLanguage);
       }
@@ -16442,14 +16600,18 @@ export function App({
         .setUiLanguage(
           nextLanguage === 'zh-CN' ? 'zh' : nextLanguage,
           effectiveScope,
-          uiLanguageWorkspaceCwd,
+          resolvedWorkspaceCwd,
         )
         .then((result) => {
           if (!owner.current.isCurrent()) return;
           const appliedLanguage =
             languageSettingToWebShellLanguage(result.language) ??
             normalizeLanguage(result.language);
-          if (!hostControlsLanguage && appliedLanguage !== nextLanguage) {
+          if (
+            !hostControlsLanguage &&
+            !targetsDifferentWorkspace &&
+            appliedLanguage !== nextLanguage
+          ) {
             setSelectedLanguage(appliedLanguage);
             onLanguageResolvedRef.current?.(appliedLanguage);
           }
@@ -16468,7 +16630,7 @@ export function App({
         })
         .catch((error: unknown) => {
           if (!owner.current.isCurrent()) return;
-          if (!hostControlsLanguage) {
+          if (!hostControlsLanguage && !targetsDifferentWorkspace) {
             setSelectedLanguage(previousLanguage);
             onLanguageResolvedRef.current?.(previousLanguage);
           }
@@ -16513,6 +16675,7 @@ export function App({
         const admitted = await sendPrompt(command, undefined, undefined, {
           ownerRef: owner,
           suppressSessionTitle: true,
+          suppressInputHistory: true,
         });
         if (admitted === false) return false;
       } catch (error) {
@@ -16523,7 +16686,11 @@ export function App({
       }
       if (!owner.current.isCurrent()) return true;
       try {
-        await reloadWorkspaceSettings();
+        const reloadSecondary = secondarySettingsReloadRef.current;
+        await Promise.all([
+          reloadWorkspaceSettings(),
+          ...(reloadSecondary ? [reloadSecondary()] : []),
+        ]);
       } catch (error) {
         if (owner.current.isCurrent()) {
           reportError(
@@ -16857,6 +17024,7 @@ export function App({
         (lastSubmittedFilesRef.current?.length ?? 0) > 0);
     if (retryableTurnError && previousIdentity && !identityMatches) {
       lastSubmittedPromptRef.current = '';
+      lastSubmittedSuppressInputHistoryRef.current = false;
       lastSubmittedImagesRef.current = undefined;
       lastSubmittedFilesRef.current = undefined;
       lastSubmittedInputAnnotationsRef.current = undefined;
@@ -18824,6 +18992,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
       artifactCountHint?: number,
+      restoredSession?: DaemonSessionClient,
     ) => {
       // Suppress the generation bump for the jump's own load so a rejection
       // from `loadSidebarSession` stays current in `runArtifactLibrarySessionJump`'s
@@ -18883,6 +19052,7 @@ export function App({
                 : workspaceCwd,
           sessionContext: targetContext,
           artifactCountHint,
+          ...(restoredSession ? { restoredSession } : {}),
         });
         if (
           sessionOpenInvocationRef.current === invocation &&
@@ -19228,6 +19398,7 @@ export function App({
       sessionId: string,
       workspaceCwd?: string,
       explicitContext?: DaemonProductSessionContext,
+      restoredSession?: DaemonSessionClient,
     ) => {
       splitClassificationGenerationRef.current += 1;
       // Explicit navigation cancels any pending shrink-fold split restore.
@@ -19240,6 +19411,7 @@ export function App({
       const current = connectionRef.current;
       if (
         explicitContext &&
+        !restoredSession &&
         !pendingSessionContextRef.current &&
         current.status === 'connected' &&
         !current.loadingTranscript &&
@@ -19268,6 +19440,8 @@ export function App({
         sessionId,
         workspaceCwd,
         explicitContext ?? inheritedContext,
+        undefined,
+        restoredSession,
       ).catch((error: unknown) => {
         reportError(error, 'Failed to open session');
       });
@@ -19462,7 +19636,10 @@ export function App({
           admitted = true;
           resolve();
         };
-        sendPrompt(prompt, undefined, undefined, { onAdmitted: admit }).then(
+        sendPrompt(prompt, undefined, undefined, {
+          onAdmitted: admit,
+          suppressInputHistory: true,
+        }).then(
           (result) => {
             if (result === false) {
               if (!admitted) {
@@ -21443,6 +21620,7 @@ export function App({
               );
               setMemoryAddSignal((signal) => signal + 1);
             }
+            setMemoryDialogWorkspaceCwd(undefined);
             setShowMemoryDialog(true);
             return true;
           }
@@ -22467,6 +22645,7 @@ export function App({
         !matchesTurnErrorIdentity(currentRetryError, savedRetryErrorIdentity)
       ) {
         lastSubmittedPromptRef.current = '';
+        lastSubmittedSuppressInputHistoryRef.current = false;
         lastSubmittedImagesRef.current = undefined;
         lastSubmittedFilesRef.current = undefined;
         lastSubmittedInputAnnotationsRef.current = undefined;
@@ -22489,6 +22668,8 @@ export function App({
       const retryImages = lastSubmittedImagesRef.current;
       const retryFiles = lastSubmittedFilesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
+      const retrySuppressInputHistory =
+        lastSubmittedSuppressInputHistoryRef.current;
       const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
       const previousShowRetryHint = showRetryHintRef.current;
       const retryAttemptId = ++cancelledRetryAttemptRef.current;
@@ -22527,6 +22708,7 @@ export function App({
         retry: true,
         idempotencyKey: retryIdempotencyKey,
         inputAnnotations: retryInputAnnotations,
+        ...(retrySuppressInputHistory ? { suppressInputHistory: true } : {}),
         onAdmissionStarted: () => {
           admissionStarted = true;
         },
@@ -22553,6 +22735,7 @@ export function App({
             files: retryFiles,
             inputAnnotations: retryInputAnnotations,
             idempotencyKey: retryIdempotencyKey,
+            suppressInputHistory: retrySuppressInputHistory,
             previousRetriedTurnErrorId,
             previousShowRetryHint,
           });
@@ -22575,6 +22758,7 @@ export function App({
               files: retryFiles,
               inputAnnotations: retryInputAnnotations,
               idempotencyKey: retryIdempotencyKey,
+              suppressInputHistory: retrySuppressInputHistory,
               previousRetriedTurnErrorId,
               previousShowRetryHint,
             });
@@ -22596,6 +22780,7 @@ export function App({
               files: retryFiles,
               inputAnnotations: retryInputAnnotations,
               idempotencyKey: retryIdempotencyKey,
+              suppressInputHistory: retrySuppressInputHistory,
               previousRetriedTurnErrorId,
               previousShowRetryHint,
             });
@@ -22612,6 +22797,7 @@ export function App({
                 images: retryImages,
                 files: retryFiles,
                 inputAnnotations: retryInputAnnotations,
+                suppressInputHistory: retrySuppressInputHistory,
                 owner: retryOwner,
               };
             }
@@ -23407,6 +23593,7 @@ export function App({
       sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, undefined, {
         ownerRef: owner,
         suppressSessionTitle: true,
+        suppressInputHistory: true,
       })
         .then(() => {
           if (!owner.current.isCurrent()) return;
@@ -24848,6 +25035,7 @@ export function App({
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
+          <ArrowKeyHistoryProvider disabledByHost={disableArrowKeyHistory}>
         <div
           ref={appRootRef}
           className={appClassName}
@@ -25019,16 +25207,37 @@ export function App({
           )}
           {workspaceContextActive && showMemoryDialog && (
             <DialogShell
-              title={t('memory.menu')}
+              title={
+                memoryDialogWorkspaceCwd
+                  ? `${t('memory.menu')} · ${workspaceLabelForCwd(memoryDialogWorkspaceCwd, ordinaryWorkspaces)}`
+                  : t('memory.menu')
+              }
               size="lg"
-              onClose={() => setShowMemoryDialog(false)}
+              onClose={() => {
+                setShowMemoryDialog(false);
+                setMemoryDialogWorkspaceCwd(undefined);
+              }}
             >
               <MemoryMessage
+                key={memoryDialogWorkspaceCwd ?? 'default'}
+                workspaceCwd={memoryDialogWorkspaceCwd}
                 addSignal={memoryAddSignal}
                 addScope={memoryAddScope}
                 onMessage={(text, type = 'status') => {
                   store.dispatch([{ type, text }]);
                 }}
+              />
+            </DialogShell>
+          )}
+          {workspaceContextActive && hooksDialogWorkspaceCwd && (
+            <DialogShell
+              title={`${t('workspaceHooks.title')} · ${workspaceLabelForCwd(hooksDialogWorkspaceCwd, ordinaryWorkspaces)}`}
+              size="lg"
+              onClose={() => setHooksDialogWorkspaceCwd(undefined)}
+            >
+              <WorkspaceHooksDialog
+                key={hooksDialogWorkspaceCwd}
+                workspaceCwd={hooksDialogWorkspaceCwd}
               />
             </DialogShell>
           )}
@@ -25686,9 +25895,38 @@ export function App({
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
                   workspaceOverview={sidebarOptions.workspaceOverview}
-                  onOpenWorkspaceManagement={(target) => {
+                  onOpenWorkspaceManagement={(target, workspaceCwd) => {
                     closeMobileDrawer();
-                    openPanel(target);
+                    if (
+                      target === 'mcp' ||
+                      target === 'skills' ||
+                      target === 'extensions'
+                    ) {
+                      setPluginInitialTab(target);
+                      setPluginWorkspaceCwd(workspaceCwd);
+                      setPluginNavigationRequest((n) => (n ?? 0) + 1);
+                      openPanel('plugins');
+                      return;
+                    }
+                    if (target === 'channels') {
+                      setChannelsWorkspaceCwd(workspaceCwd);
+                      setChannelsNavigationRequest((n) => (n ?? 0) + 1);
+                      openPanel('channels');
+                      return;
+                    }
+                    if (target === 'settings') {
+                      setSettingsWorkspaceCwd(workspaceCwd);
+                      openPanel('settings');
+                      return;
+                    }
+                    if (target === 'context') {
+                      setMemoryDialogWorkspaceCwd(workspaceCwd);
+                      setShowMemoryDialog(true);
+                      return;
+                    }
+                    if (target === 'hooks') {
+                      setHooksDialogWorkspaceCwd(workspaceCwd);
+                    }
                   }}
                   onOpenWorkspacesOverview={() => {
                     closeMobileDrawer();
@@ -26125,95 +26363,174 @@ export function App({
                       }
                     >
                       {activePanel === 'settings' ? (
-                      <SettingsMessage
-                        settingsState={targetedWorkspaceSettingsState}
-                        presentation={settingsPresentation}
-                        embedded
-                        initialCategory={settingsInitialCategory}
-                        onLanguageChange={handleSettingsLanguageChange}
-                        onOutputLanguageChange={
-                          handleSettingsOutputLanguageChange
-                        }
-                        workspaceSettingsWritable={!sessionIsStandalone}
-                        onThemeChange={handleThemeChange}
-                        chatWidthMode={chatWidthMode}
-                        onChatWidthModeChange={handleChatWidthModeChange}
-                        connections={
-                          standalone ? <DaemonConnectionsSettings /> : undefined
-                        }
-                        archivedSessions={
-                          archiveManagementAvailable ? (
-                            <div ref={setArchivedSessionsTarget} data-web-shell-archived-sessions />
-                          ) : undefined
-                        }
-                        workspaceDirectoriesSection={
-                          workspaceDirectoriesSupported ? (
-                            <WorkspaceDirectoriesSection />
-                          ) : undefined
-                        }
-                        modelManagementSectionProps={projectFeaturesAvailable ? {
-                          ...modelManagementPolicy,
-                          providers: providersState.providers,
-                          configurations: modelConfigurations.models,
-                          onUpdateContextWindow: handleModelContextWindowUpdate,
-                          currentModelId:
-                            (connection.sessionId
-                              ? connection.currentModel
-                              : currentModel || connection.currentModel) ??
-                            undefined,
-                          loading:
-                            providersState.loading ||
-                            modelConfigurations.loading,
-                          error:
-                            providersState.error ?? modelConfigurations.error,
-                          busy: modelActionBusy,
-                          onSelectModel: handleModelSelect,
-                          onDeleteModel: handleDeleteModel,
-                          onAddModel: () => {
-                            if (!modelManagementRef.current.allowAdd) return;
-                            if (
-                              !isItemVisible(
-                                'builtin:model-management',
-                                settingsPresentation,
+                      (() => {
+                        const renderSettingsPanel = (
+                          panelSettingsState: ReturnType<typeof useSettings>,
+                        ) => (
+                          <SettingsMessage
+                            settingsState={panelSettingsState}
+                            presentation={settingsPresentation}
+                            embedded
+                            initialCategory={settingsInitialCategory}
+                            onLanguageChange={(nextLanguage, scope) =>
+                              handleSettingsLanguageChange(
+                                nextLanguage,
+                                scope,
+                                secondarySettingsWorkspaceCwd,
                               )
-                            )
-                              return;
-                            settingsDialogKeyRef.current =
-                              'builtin:model-management';
-                            setShowAuthDialog(true);
-                          },
-                        } : undefined}
-                        onSubDialog={(key, scope) => {
-                          if (!isSettingVisible(key, settingsPresentation)) return;
-                          settingsDialogKeyRef.current = key;
-                          // Record the persist scope only for model settings —
-                          // the reset effect is gated on the dialog/fallback/auth
-                          // flags, so it never runs for the approvalMode dialog
-                          // and would leave a stale scope behind.
-                          if (key === 'advisorModel' || key === 'imageModel') {
-                            void reloadModelConfigurations();
-                            if (key === 'advisorModel') void reloadProviders();
-                            setModelSettingScope(scope);
-                            setModelDialogMode(
-                              key === 'advisorModel' ? 'advisor' : 'image',
-                            );
-                          } else if (key === 'fastModel') {
-                            setModelSettingScope(scope);
-                            setModelDialogMode('fast');
-                          } else if (key === 'visionModel') {
-                            setModelSettingScope(scope);
-                            setModelDialogMode('vision');
-                          } else if (key === 'voiceModel') {
-                            void openVoiceModelPicker(scope, 'settings');
-                          } else if (key === 'modelFallbacks') {
-                            setModelSettingScope(scope);
-                            setShowFallbacksDialog(true);
-                          } else if (key === 'tools.approvalMode') {
-                            // Not a model setting — leave modelSettingScope alone.
-                            setShowApprovalModeDialog(true);
-                          }
-                        }}
-                      />
+                            }
+                            onOutputLanguageChange={
+                              handleSettingsOutputLanguageChange
+                            }
+                            workspaceSettingsWritable={!sessionIsStandalone}
+                            onThemeChange={handleThemeChange}
+                            chatWidthMode={chatWidthMode}
+                            onChatWidthModeChange={handleChatWidthModeChange}
+                            connections={
+                              standalone ? (
+                                <DaemonConnectionsSettings />
+                              ) : undefined
+                            }
+                            archivedSessions={
+                              archiveManagementAvailable ? (
+                                <div
+                                  ref={setArchivedSessionsTarget}
+                                  data-web-shell-archived-sessions
+                                />
+                              ) : undefined
+                            }
+                            workspaceControl={
+                              !sessionIsStandalone &&
+                              ordinaryWorkspaces.length > 1 ? (
+                                <Select
+                                  value={
+                                    secondarySettingsWorkspaceCwd ??
+                                    uiLanguageWorkspaceCwd
+                                  }
+                                  onValueChange={(cwd) =>
+                                    setSettingsWorkspaceCwd(cwd)
+                                  }
+                                >
+                                  <SelectTrigger
+                                    className="h-8 w-48"
+                                    aria-label={t(
+                                      'sidebar.workspaceSelectLabel',
+                                    )}
+                                  >
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {ordinaryWorkspaces.map((entry) => (
+                                      <SelectItem
+                                        key={entry.id}
+                                        value={entry.cwd}
+                                        disabled={!entry.trusted}
+                                      >
+                                        {workspaceLabel(entry)}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              ) : undefined
+                            }
+                            workspaceDirectoriesSection={
+                              workspaceDirectoriesSupported ? (
+                                <WorkspaceDirectoriesSection
+                                  workspaceCwd={
+                                    secondarySettingsWorkspaceCwd ??
+                                    uiLanguageWorkspaceCwd
+                                  }
+                                />
+                              ) : undefined
+                            }
+                            modelManagementSectionProps={
+                              projectFeaturesAvailable
+                                ? {
+                                    ...modelManagementPolicy,
+                                    providers: providersState.providers,
+                                    configurations: modelConfigurations.models,
+                                    onUpdateContextWindow:
+                                      handleModelContextWindowUpdate,
+                                    currentModelId:
+                                      (connection.sessionId
+                                        ? connection.currentModel
+                                        : currentModel ||
+                                          connection.currentModel) ?? undefined,
+                                    loading:
+                                      providersState.loading ||
+                                      modelConfigurations.loading,
+                                    error:
+                                      providersState.error ??
+                                      modelConfigurations.error,
+                                    busy: modelActionBusy,
+                                    onSelectModel: handleModelSelect,
+                                    onDeleteModel: handleDeleteModel,
+                                    onAddModel: () => {
+                                      if (!modelManagementRef.current.allowAdd)
+                                        return;
+                                      if (
+                                        !isItemVisible(
+                                          'builtin:model-management',
+                                          settingsPresentation,
+                                        )
+                                      )
+                                        return;
+                                      settingsDialogKeyRef.current =
+                                        'builtin:model-management';
+                                      setShowAuthDialog(true);
+                                    },
+                                  }
+                                : undefined
+                            }
+                            onSubDialog={(key, scope) => {
+                              if (!isSettingVisible(key, settingsPresentation))
+                                return;
+                              settingsDialogKeyRef.current = key;
+                              // Record the persist scope only for model settings —
+                              // the reset effect is gated on the dialog/fallback/auth
+                              // flags, so it never runs for the approvalMode dialog
+                              // and would leave a stale scope behind.
+                              if (
+                                key === 'advisorModel' ||
+                                key === 'imageModel'
+                              ) {
+                                void reloadModelConfigurations();
+                                if (key === 'advisorModel')
+                                  void reloadProviders();
+                                setModelSettingScope(scope);
+                                setModelDialogMode(
+                                  key === 'advisorModel' ? 'advisor' : 'image',
+                                );
+                              } else if (key === 'fastModel') {
+                                setModelSettingScope(scope);
+                                setModelDialogMode('fast');
+                              } else if (key === 'visionModel') {
+                                setModelSettingScope(scope);
+                                setModelDialogMode('vision');
+                              } else if (key === 'voiceModel') {
+                                void openVoiceModelPicker(scope, 'settings');
+                              } else if (key === 'modelFallbacks') {
+                                setModelSettingScope(scope);
+                                setShowFallbacksDialog(true);
+                              } else if (key === 'tools.approvalMode') {
+                                // Not a model setting — leave modelSettingScope alone.
+                                setShowApprovalModeDialog(true);
+                              }
+                            }}
+                          />
+                        );
+                        return secondarySettingsWorkspaceCwd &&
+                          projectFeaturesAvailable ? (
+                          <SecondaryWorkspaceSettingsBridge
+                            key={secondarySettingsWorkspaceCwd}
+                            workspaceCwd={secondarySettingsWorkspaceCwd}
+                            reloadRef={secondarySettingsReloadRef}
+                            render={renderSettingsPanel}
+                          />
+                        ) : (
+                          renderSettingsPanel(targetedWorkspaceSettingsState)
+                        );
+                      })()
                     ) : activePanel === 'status' ? (
                       <DaemonStatusDialog />
                     ) : activePanel === 'extensions' ? (
@@ -26270,6 +26587,8 @@ export function App({
                         showBackButton={!navigationRailVisible}
                         initialFocusRef={pluginTabRef}
                         initialTab={pluginInitialTab}
+                        initialWorkspaceCwd={pluginWorkspaceCwd}
+                        navigationRequest={pluginNavigationRequest}
                         skillsWorkspaceCwd={skillsSourceCwd}
                         onSkillsWorkspaceChange={selectSkillsWorkspace}
                         managedSkills={managedAgentProvider !== undefined}
@@ -26299,6 +26618,8 @@ export function App({
                           connection.sessionId ? connection.clientId : undefined
                         }
                         sessionWorkspaceCwd={connection.workspaceCwd}
+                        initialWorkspaceCwd={channelsWorkspaceCwd}
+                        navigationRequest={channelsNavigationRequest}
                       />
                     ) : activePanel === 'channel-events' ? (
                       <ChannelEventsPage
@@ -28532,6 +28853,7 @@ export function App({
           </div>
           </GeneratedUiRuntimeProvider>
         </div>
+        </ArrowKeyHistoryProvider>
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>

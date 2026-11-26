@@ -276,6 +276,8 @@ afterEach(() => {
   for (let index = localStorage.length - 1; index >= 0; index--) {
     const key = localStorage.key(index);
     if (
+      key?.startsWith('qwen-web-shell-history:') ||
+      key?.startsWith('qwen-web-shell-command-history:') ||
       key?.startsWith('qwen-web-shell-session-draft:') ||
       key?.startsWith('qwen-web-shell-pending-task-draft:')
     ) {

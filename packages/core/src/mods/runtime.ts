@@ -346,7 +346,18 @@ export class ModRuntime {
             !/^[a-zA-Z0-9_-]{1,64}$/.test(command.name) ||
             typeof command.description !== 'string' ||
             (command.argumentHint !== undefined &&
-              typeof command.argumentHint !== 'string'),
+              typeof command.argumentHint !== 'string') ||
+            (command.aliases !== undefined &&
+              !(
+                Array.isArray(command.aliases) &&
+                command.aliases.every(
+                  (alias: unknown) =>
+                    typeof alias === 'string' &&
+                    /^[a-zA-Z0-9_-]{1,64}$/.test(alias),
+                )
+              )) ||
+            (command.isTerminalOnly !== undefined &&
+              command.isTerminalOnly !== true),
         )
       )
         throw new Error('Invalid Mod command declarations.');
