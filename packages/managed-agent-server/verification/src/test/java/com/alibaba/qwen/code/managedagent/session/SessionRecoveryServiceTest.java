@@ -298,9 +298,8 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.nextTurnAllowed()).isTrue();
     }
 
-    // #17538: only the replica holding the attachment reads live evidence.
-    // Every other replica reads null, which must not turn a Turn the Harness
-    // already settled in its journal into an operator failure.
+    // #17538: when a replica has no live evidence, a native terminal can
+    // still prove that the Harness settled this Turn.
     private void terminalEvent(String sourceKey) {
         jdbc.update("INSERT INTO ma_public_event VALUES ('tenant', 'session', 'turn', 'SESSION', 1, ?)",
                 sourceKey);
@@ -685,10 +684,9 @@ class SessionRecoveryServiceTest {
         verify(harness, never()).recheckRecoveryCleanup(anyString(), anyString(), anyString());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void attachedAndUnattachedReadsAgreeWithoutOpeningAnActiveTurn(boolean active) {
-        turn(active ? "RUNNING" : "FAILED", active ? AgentStateStore.RUNTIME_RECOVERY_BLOCKED : "failure");
+    @Test
+    void attachedAndUnattachedReadsAgreeForAHistoricalFailure() {
+        turn("FAILED", "failure");
         var ready = new RecoveryStatus("ready", null, "private-prompt", true, true, true);
         when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(externalSession);
         when(harness.inspectRecovery("tenant", "session", "private-prompt")).thenReturn(ready, (RecoveryStatus) null);
@@ -697,10 +695,23 @@ class SessionRecoveryServiceTest {
         var attached = service.query("tenant", "actor", "session");
         var unattached = service.projection(externalSession, "actor");
         assertThat(unattached).isEqualTo(attached);
-        assertThat(unattached.nextTurnAllowed()).isEqualTo(!active);
-        assertThat(unattached.reasonCode()).isEqualTo(active ? "turn_settlement_pending" : "ready");
+        assertThat(unattached.nextTurnAllowed()).isTrue();
+        assertThat(unattached.reasonCode()).isEqualTo("ready");
         verify(harness).inspectUnattachedRecovery(externalSession, "private-prompt");
         verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void anActiveExternalTurnUsesDurableRecoveryWithoutQueryingTheHarness() {
+        turn("RUNNING", AgentStateStore.RUNTIME_RECOVERY_BLOCKED);
+        when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(externalSession);
+
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(service.projection(externalSession, "actor")).isEqualTo(recovery);
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.actions().recheck()).isTrue();
+        verifyNoInteractions(harness, coordinator);
     }
 
     @Test

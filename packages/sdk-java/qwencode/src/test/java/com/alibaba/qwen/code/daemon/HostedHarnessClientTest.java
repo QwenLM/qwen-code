@@ -336,6 +336,33 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void unattachedStatusTimesOutWhileWaitingForTheResponseBody() {
+        CountDownLatch startedBody = new CountDownLatch(1);
+        CountDownLatch releaseBody = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
+            try {
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().write('{');
+                exchange.getResponseBody().flush();
+                startedBody.countDown();
+                releaseBody.await(8, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                exchange.close();
+            }
+        });
+        try (HostedHarnessClient client = newClient()) {
+            DaemonTransportException error = assertThrows(DaemonTransportException.class,
+                    () -> client.getUnattachedStatus(SESSION_ID, PROMPT_ID));
+            assertTrue(error.getCause() instanceof java.net.http.HttpTimeoutException);
+            assertEquals(0, startedBody.getCount());
+        } finally {
+            releaseBody.countDown();
+        }
+    }
+
+    @Test
     void refusesRecoveryEvidenceForAnotherInput() {
         createSessionRoute();
         server.createContext("/session/" + SESSION_ID + "/status", exchange ->

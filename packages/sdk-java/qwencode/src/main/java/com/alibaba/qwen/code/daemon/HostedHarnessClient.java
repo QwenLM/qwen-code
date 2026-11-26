@@ -10,6 +10,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -30,6 +31,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -46,6 +48,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             "qwen.daemon.managedRuntimeRecovery";
 
     private static final int PROTOCOL_VERSION = 1;
+    private static final Duration UNATTACHED_STATUS_TIMEOUT = Duration.ofSeconds(2);
     private static final Pattern UUID_PATTERN = Pattern.compile(
             "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
                     + "[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -1579,6 +1582,8 @@ public final class HostedHarnessClient implements AutoCloseable {
      * Reads the committed recovery evidence of a Session that this client did
      * not attach, without loading it. Returns null when the Session is not
      * resident in this Harness, or the Harness only answers its attachment.
+     * The status exchange is bounded to two seconds or the configured
+     * request timeout, whichever is shorter.
      */
     public HarnessSessionStatus getUnattachedStatus(String harnessSessionId, String promptId) {
         ensureOpen();
@@ -2520,8 +2525,11 @@ public final class HostedHarnessClient implements AutoCloseable {
     private HttpSupport.Response sendRead(String path, String sessionId,
             String clientId, String operation) {
         try {
-            HttpResponse<HttpSupport.Body> raw = send(path, "GET", null,
-                    clientId);
+            boolean unattached = clientId == null;
+            Duration timeout = unattached && requestTimeout.compareTo(UNATTACHED_STATUS_TIMEOUT) > 0
+                    ? UNATTACHED_STATUS_TIMEOUT : requestTimeout;
+            HttpResponse<HttpSupport.Body> raw = send(path, "GET", null, clientId,
+                    timeout, new AtomicBoolean(), unattached);
             validateGeneration(raw.headers(), raw.statusCode());
             return HttpSupport.consume(raw, operation);
         } catch (HostedHarnessGenerationException e) {
@@ -2658,6 +2666,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             Map<String, Object> body, String clientId, Duration timeout,
             AtomicBoolean dispatched)
             throws IOException, InterruptedException {
+        return send(path, method, body, clientId, timeout, dispatched, false);
+    }
+
+    private HttpResponse<HttpSupport.Body> send(String path, String method,
+            Map<String, Object> body, String clientId, Duration timeout,
+            AtomicBoolean dispatched, boolean boundResponseBody)
+            throws IOException, InterruptedException {
         HttpRequest.Builder builder = sessionRequestBuilder(path, clientId)
                 .header("Accept", "application/json")
                 .header("Accept-Encoding", "identity")
@@ -2690,7 +2705,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         // failure from here on is mid-flight.
         dispatched.set(true);
         try {
-            return pending.get();
+            return boundResponseBody ? pending.get(timeout.toNanos(), TimeUnit.NANOSECONDS) : pending.get();
+        } catch (TimeoutException e) {
+            pending.cancel(true);
+            throw new HttpTimeoutException("Hosted Harness response timed out");
         } catch (InterruptedException e) {
             pending.cancel(true);
             throw e;
