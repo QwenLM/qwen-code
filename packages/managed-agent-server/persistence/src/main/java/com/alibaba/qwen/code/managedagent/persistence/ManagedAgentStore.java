@@ -37,6 +37,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionKey;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
@@ -794,6 +795,10 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public List<EventRecord> findEvents(String tenantId, String sessionId, long afterSequence, int limit) {
         return eventJournal.findEvents(tenantId, sessionId, afterSequence, limit);
+    }
+
+    public Map<SessionKey, Long> findEventTails(Collection<SessionKey> sessions) {
+        return eventJournal.findEventTails(sessions);
     }
 
     public Map<String, EventRecord> findLatestEnvironmentEvents(

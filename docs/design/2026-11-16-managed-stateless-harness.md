@@ -72,7 +72,7 @@ Goals:
 
 - Release the per-Session resources of an eligible idle Session without cancelling its inputs or losing history.
 - Reopen a cleanly suspended Session on the next request, wake input or lifecycle operation. Expose failed suspension as recovery work, rather than silently reopening an uncertain writer.
-- Add no supported configuration key and no capability negotiation; the Harness and the control plane are released and upgraded together. The only override is the test-only idle period described below.
+- ~~Add no supported configuration key and no capability negotiation~~; the Harness and the control plane are released and upgraded together. The only override is the test-only idle period described below. (This was the Phase 1 constraint; the [suspension placement-release addendum](2026-11-26-managed-suspension-placement-release.md) adds a writer-grant capability for mixed-version safety but still adds no configuration key.)
 - Define the target architecture, a Harness that holds no Session between requests, and the boundaries of the steps that lead there.
 
 Non-goals for Phase 1:
@@ -80,7 +80,7 @@ Non-goals for Phase 1:
 - Redesigning journal restore. Phase 1 measures its current cost before enabling suspension; a failed cost gate requires targeted load improvements first. Phase 2 removes the MCP/Hook reconnect component, not all history-dependent restore cost.
 - Moving the wake scheduler, approval waits or observation loops out of the Harness. Sessions that need them stay resident in Phase 1.
 - Adopting the earlier proposal's Store park transaction or changing the writer lease protocol without evidence that the existing protocol cannot satisfy the failure gates.
-- Releasing placements of suspended Sessions.
+- ~~Releasing placements of suspended Sessions~~ (superseded by the [suspension placement-release addendum](2026-11-26-managed-suspension-placement-release.md); pull scheduling remains a separate design).
 
 ## Target architecture
 

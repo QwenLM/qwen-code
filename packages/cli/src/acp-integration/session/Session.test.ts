@@ -39,6 +39,7 @@ import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { REPETITIVE_TOOL_CALLS_HINT } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
@@ -53797,6 +53798,72 @@ describe('Session', () => {
             message: 'quota fallback',
             data: { details: 'quota fallback', subscriptionQuota },
           });
+        });
+        it('adds the recovery hint to a repeated-tool-call rejection', async () => {
+          const message =
+            '400 Repetitive tool calls detected in the conversation history.';
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            throw Object.assign(new Error(message), { status: 400 });
+          });
+          const expected = message + REPETITIVE_TOOL_CALLS_HINT;
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            message: expected,
+            data: {
+              errorKind: 'repetitive_tool_calls',
+              details: expected,
+            },
+          });
+        });
+        it('adds the recovery hint to a legacy Stop-hook continuation failure', async () => {
+          mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(false);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockResolvedValueOnce({
+              success: true,
+              output: { decision: 'block', reason: 'Continue after Stop hook' },
+            }),
+          });
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          const message =
+            '400 Repetitive tool calls detected in the conversation history.';
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createEmptyStream())
+            .mockRejectedValueOnce(
+              Object.assign(new Error(message), { status: 400 }),
+            );
+          const expected = message + REPETITIVE_TOOL_CALLS_HINT;
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            message: expected,
+            data: {
+              errorKind: 'repetitive_tool_calls',
+              details: expected,
+            },
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
         });
         it('preserves the subscription backend rate-limit message', async () => {
           mockConfig.getAuthType = vi

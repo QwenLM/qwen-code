@@ -363,6 +363,7 @@ function isBusyWorkspaceAcquisition(cause: unknown): boolean {
 export interface HostedShellTurnOptions {
   resources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
+  writerOwner?: HttpToolPublicationOwner['owner'];
   // The Session-scoped publisher instance: one server owns every Shell
   // capture of the Session across turns, so background traffic keeps its
   // endpoint after the registering turn ends (H3 fifth slice drains it at
@@ -5944,8 +5945,10 @@ export class HostedWorkspaceToolTurn {
             this.monitors,
             () => this.shell!.monitorWakeKick?.(),
           );
+          const writer = await this.shell.writerOwner?.();
           this.bindingGeneration = await this.broker.registerPublisher(
             await this.publisher.start(),
+            writer?.writerGeneration,
           );
           this.workerOwnsObservation = this.broker.observationOwned;
         } else if (

@@ -26,6 +26,7 @@ import org.mockito.ArgumentCaptor;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -314,6 +315,99 @@ class HarnessPoolConnectorTest {
             assertThatThrownBy(() -> pool.createOrLoad("tenant", "new", false))
                     .hasMessageContaining("No compatible Harness owner");
             verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @Test
+    void refreshReapsDepartedPlacementWithoutOpeningAnAttachment() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var b = endpoint("b", 4102);
+        var leafB = leaf();
+        var clientB = client("b");
+        var expected = new Placement("tenant", "session", "workspace", "a", "old-boot", 3, "QUIESCING");
+        var successor = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 4, "ACTIVE");
+        when(placements.findExpiredSuspensions(Set.of("b"), 32)).thenReturn(List.of(expected));
+        when(placements.takeover("tenant", "session", expected, "b", successor.bootId())).thenReturn(successor);
+        when(placements.get("tenant", "session")).thenReturn(successor);
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(b), true), ignored -> leafB, null, null,
+                ignored -> clientB)) {
+            pool.refresh();
+            verify(placements).takeover("tenant", "session", expected, "b", successor.bootId());
+            verify(leafB, never()).createOrLoad(anyString(), anyString(), eq(true));
+
+            pool.createOrLoad("tenant", "session", true);
+            verify(leafB).createOrLoad("tenant", "session", true);
+        }
+    }
+
+    @Test
+    void knownUnreachableOwnerIsOfferedOnlyWithTheStoreProof() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var expected = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1, "ACTIVE");
+        var successor = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 2, "ACTIVE");
+        when(clientA.readInstance()).thenThrow(new RuntimeException("temporary outage"));
+        when(placements.findExpiredSuspensions(Set.of("b"), 32)).thenReturn(List.of(expected));
+        when(placements.takeover("tenant", "session", expected, "b", successor.bootId())).thenReturn(successor);
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            verify(placements).findExpiredSuspensions(Set.of("b"), 32);
+            verify(placements).takeover("tenant", "session", expected, "b", successor.bootId());
+        }
+    }
+
+    @Test
+    void healthyConfiguredOwnerStaysExcludedFromTheReaper() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            verify(placements).findExpiredSuspensions(Set.of("a", "b"), 32);
+            verify(placements, never()).takeover(anyString(), anyString(), any(), anyString(), anyString());
+        }
+    }
+
+    @Test
+    void uncertainDiscoveryDoesNotInvokeTheReaper() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a), false), ignored -> leaf(), null, null,
+                ignored -> client("a"))) {
+            pool.refresh();
+            verify(placements, never()).findExpiredSuspensions(any(), eq(32));
+        }
+    }
+
+    @Test
+    void noAcceptingSuccessorSkipsTheReaper() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.readInstance()).thenReturn(Map.of("state", "QUIESCING"));
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            pool.refresh();
+            verify(placements, never()).findExpiredSuspensions(any(), eq(32));
+            verify(placements, never()).takeover(anyString(), anyString(), any(), anyString(), anyString());
         }
     }
 

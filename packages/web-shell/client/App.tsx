@@ -693,7 +693,11 @@ import {
 import { useAssistantTurnSettlementProjection } from './assistant-turn-settlement';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
-import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
+import {
+  ArrowKeyHistoryProvider,
+  CompactModeContext,
+  TodoContextsProvider,
+} from './WebShellContexts';
 import styles from './App.module.css';
 
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
@@ -1653,6 +1657,8 @@ export interface WebShellProps {
   composerVariant?: 'default' | 'simple';
   /** Show the composer focus glow and typing animation. Defaults to true. */
   composerGlowEnabled?: boolean;
+  /** Turn off Up/Down prompt recall for this shell, regardless of the browser preference. */
+  disableArrowKeyHistory?: boolean;
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -3981,6 +3987,7 @@ export function App({
   allowedApprovalModes: allowedApprovalModesProp,
   composerVariant = 'default',
   composerGlowEnabled,
+  disableArrowKeyHistory,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -13656,6 +13663,10 @@ export function App({
               SessionActionsWithCreate,
             modelId: startupConfig || useWorkspaceDefault ? undefined : modelId,
             startupConfig,
+            supportsSessionStartupConfig:
+              connectionRef.current.capabilities?.features?.includes(
+                'session_startup_config',
+              ),
             reasoningEffort,
             modeId,
             planMode,
@@ -25284,6 +25295,7 @@ export function App({
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
+          <ArrowKeyHistoryProvider disabledByHost={disableArrowKeyHistory}>
         <div
           ref={appRootRef}
           className={appClassName}
@@ -29014,6 +29026,7 @@ export function App({
           </div>
           </GeneratedUiRuntimeProvider>
         </div>
+        </ArrowKeyHistoryProvider>
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>

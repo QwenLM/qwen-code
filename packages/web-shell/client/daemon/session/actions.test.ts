@@ -2446,14 +2446,20 @@ describe('createDaemonSessionActions', () => {
       createDetachedStandaloneSession,
     });
 
+    const startupConfig = {
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      reasoningEffort: 'none' as const,
+    };
     await expect(
       actions.createSession({
         sessionContext: { kind: 'standalone' },
         approvalMode: 'yolo',
+        startupConfig,
       }),
     ).resolves.toBe(standaloneRecord);
     expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
       approvalMode: 'yolo',
+      startupConfig,
     });
     expect(activeSession.client.createOrAttachSession).not.toHaveBeenCalled();
     expect(getConnection()).toEqual(connection);

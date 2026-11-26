@@ -37,8 +37,7 @@ const SKIP =
   process.platform === 'win32' ||
   Boolean(process.env['QWEN_SANDBOX'] === 'docker');
 
-describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
-  if (SKIP) return;
+describe.skipIf(SKIP)('daemon workspace input history', () => {
   let root: string;
   let workspace: string;
   let daemon: SpawnedDaemon;
