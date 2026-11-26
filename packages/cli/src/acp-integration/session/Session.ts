@@ -2431,6 +2431,8 @@ export function resolveHomeLoopResolverRoots({
 } = {}): { homeConfineRoot: string; homeQwenDir: string } {
   // qwenHome truthy → QWEN_HOME is itself the global dir, so confine within
   // homeQwenDir; the homeDir param is only consulted when qwenHome is unset.
+  // readLoopTaskFile also accepts a target inside homeQwenDir, which covers a
+  // global dir that an absolute XDG_CONFIG_HOME puts outside the home dir.
   return {
     homeConfineRoot:
       (qwenHome ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),

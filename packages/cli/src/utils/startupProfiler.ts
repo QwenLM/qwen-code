@@ -9,7 +9,7 @@
  *
  * Activated by setting QWEN_CODE_PROFILE_STARTUP=1. When enabled, collects
  * high-resolution timestamps at key phases of CLI startup and writes a JSON
- * report to ~/.qwen/startup-perf/ on finalization.
+ * report to startup-perf/ in the global Qwen dir on finalization.
  *
  * Usage (already wired in index.ts / llm.tsx):
  *   initStartupProfiler()        — call once at process start to record T0
@@ -26,11 +26,11 @@
  * Zero overhead when disabled (single env var check).
  */
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import type { StartupEventAttrs } from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { isServeFastPathArgv } from './serve-fast-path-argv.js';
 
 interface Checkpoint {
@@ -336,7 +336,7 @@ export function finalizeStartupProfile(sessionId?: string): void {
   }
 
   try {
-    const dir = path.join(os.homedir(), '.qwen', 'startup-perf');
+    const dir = path.join(Storage.getGlobalQwenDir(), 'startup-perf');
     fs.mkdirSync(dir, { recursive: true });
 
     const prefix = report.outerProcess ? 'outer-' : '';

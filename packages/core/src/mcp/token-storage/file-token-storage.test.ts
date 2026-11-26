@@ -94,11 +94,15 @@ describe('FileTokenStorage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // node:fs is mocked without existsSync, which the default global dir
+    // consults on Linux.
+    vi.stubEnv('QWEN_HOME', qwenDir);
     storage = new FileTokenStorage('test-storage');
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe('getCredentials', () => {
@@ -479,6 +483,9 @@ describe('FileTokenStorage runtime identity compatibility', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     runtime(true);
+    // As above: node:fs is mocked without existsSync, and runtime() forces
+    // Linux, where the default global dir consults it.
+    vi.stubEnv('QWEN_HOME', qwenDir);
     vi.stubEnv('USER', 'legacy-env-user');
     vi.mocked(os.userInfo).mockReturnValue(osUser('legacy-env-user'));
     vi.mocked(execFileSync).mockReturnValue(`${canonicalUsername}\n`);

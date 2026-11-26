@@ -30,10 +30,15 @@ export function resolvePath(dir: string): string {
   return path.resolve(resolved);
 }
 
+// Written into the XDG directory while it is the default global dir in use;
+// see Storage.getGlobalQwenDir() in packages/core.
+const GLOBAL_DIR_MARKER = '.qwen-global-dir';
+
 /**
  * Returns the global Qwen home directory (config, credentials, etc.).
  *
- * Priority: QWEN_HOME env var > ~/.qwen
+ * Priority: QWEN_HOME env var > the platform default (~/.qwen, or the XDG
+ * config directory on Linux)
  *
  * This mirrors packages/core Storage.getGlobalQwenDir() without importing
  * from core to avoid cross-package dependencies.
@@ -44,9 +49,24 @@ export function getGlobalQwenDir(): string {
     return resolvePath(envDir);
   }
   const homeDir = os.homedir();
-  return homeDir
-    ? path.join(homeDir, '.qwen')
-    : path.join(os.tmpdir(), '.qwen');
+  if (!homeDir) {
+    return path.join(os.tmpdir(), '.qwen');
+  }
+  const legacyDir = path.join(homeDir, '.qwen');
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    return legacyDir;
+  }
+  const xdgConfigHome = process.env['XDG_CONFIG_HOME'];
+  const xdgDir = path.join(
+    xdgConfigHome && path.isAbsolute(xdgConfigHome)
+      ? xdgConfigHome
+      : path.join(homeDir, '.config'),
+    'qwen',
+  );
+  return !fs.existsSync(legacyDir) ||
+    fs.existsSync(path.join(xdgDir, GLOBAL_DIR_MARKER))
+    ? xdgDir
+    : legacyDir;
 }
 
 /**

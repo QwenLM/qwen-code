@@ -95,6 +95,16 @@ const getPortFromMock = (
   return port;
 };
 
+// On Linux the default global dir depends on which config directories exist;
+// pin it to the fake home's ~/.qwen the lock-file assertions use.
+beforeEach(() => {
+  vi.stubEnv('QWEN_HOME', path.join('/home/test', '.qwen'));
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe('IDEServer', () => {
   let ideServer: IDEServer;
   let mockContext: vscode.ExtensionContext;
