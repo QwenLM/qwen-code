@@ -13,15 +13,13 @@ import { TABLE_MAX_ROW_LINES as MAX_ROW_LINES } from './pending-rendered-height.
 import { theme } from '../semantic-colors.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
-  INLINE_CODE_SPAN_PATTERN_SOURCE,
   mergeInlineMathMatches,
   unescapeMarkdownBeforeMath,
   unescapeMarkdownDollars,
 } from './inline-math.js';
 import {
-  BARE_URL_PATTERN,
+  INK_INLINE_MARKDOWN_PATTERN,
   MD_LINK_CAPTURE,
-  MD_LINK_PATTERN,
   isSafeOscScheme,
   labelMayDeceive,
   osc8Close,
@@ -49,11 +47,7 @@ const ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH = 24;
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
 
-const INLINE_MARKDOWN_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|(?<![\w\u3400-\u9fff])_(?!_)[^_]*_(?![\w\u3400-\u9fff])|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`,
-  'g',
-);
+const INLINE_MARKDOWN_REGEX = new RegExp(INK_INLINE_MARKDOWN_PATTERN, 'g');
 
 export type ColumnAlign = 'left' | 'center' | 'right';
 

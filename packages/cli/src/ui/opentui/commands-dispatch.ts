@@ -48,6 +48,7 @@ import {
   type CommandContext,
   type SlashCommand,
 } from '../commands/types.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import {
   MAX_STACKED_SKILLS,
   parseSlashCommand,
@@ -188,7 +189,7 @@ export type OpenTuiDispatchOutcome =
       /** What the Mods' prompt hooks attached to the `?`-form input. */
       promptContext?: readonly string[];
     }
-  | { kind: 'quit'; messages: HistoryItem[] }
+  | { kind: 'quit'; messages: HistoryItem[]; invocationItemId?: number }
   | { kind: 'open_dialog'; request: OpenTuiDialogRequest }
   /** Typed input the Mods' prompt hooks kept out; the composer gets it back. */
   | { kind: 'refused' };
@@ -1098,7 +1099,15 @@ export class OpenTuiSlashDispatcher {
                 return { kind: 'handled' };
               }
               case 'quit':
-                return { kind: 'quit', messages: result.messages };
+                return {
+                  kind: 'quit',
+                  messages: result.messages,
+                  ...(commandToExecute.kind === CommandKind.BUILT_IN &&
+                  commandToExecute.action === quitCommand.action &&
+                  invocationItemId !== undefined
+                    ? { invocationItemId }
+                    : {}),
+                };
               case 'submit_prompt': {
                 const invocation = fullCommandContext.invocation;
                 let content = result.content;

@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
@@ -10,9 +12,10 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SyncRename;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -28,7 +31,7 @@ final class AgentSessionCommands {
     private final AgentEventJournal eventJournal;
     private final AgentSessionPolicies sessionPolicies;
     private final AgentStoreRows storeRows;
-    private final com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
+    private final WorktreeFiles worktreeFiles;
     private final JdbcTemplate jdbc;
     private final Clock clock;
     private final JdbcManagedWorkspaceRegistry workspaces;
@@ -38,7 +41,7 @@ final class AgentSessionCommands {
     AgentSessionCommands(AgentEventJournal eventJournal,
             AgentSessionPolicies sessionPolicies,
             AgentStoreRows storeRows,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             JdbcTemplate jdbc,
             Clock clock,
             JdbcManagedWorkspaceRegistry workspaces,
@@ -75,7 +78,7 @@ final class AgentSessionCommands {
         // installation and physical fencing, and nothing later in this
         // transaction takes the guard. The Session lock comes first, so this
         // transaction's snapshot is taken after it.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
@@ -170,7 +173,7 @@ final class AgentSessionCommands {
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -188,11 +191,12 @@ final class AgentSessionCommands {
             // D7-2: a user cancel is due at once, never behind the Runtime
             // recovery park's recheck window.
             int updated = jdbc.update("UPDATE ma_turn SET status ="
-                            + " 'CANCELLING', retry_after = NULL, gmt_modified = ?,"
-                            + " version = version + 1 WHERE tenant_id = ? AND"
+                            + " 'CANCELLING', retry_after = NULL,"
+                            + " error_code = CASE WHEN error_code = ? THEN NULL ELSE error_code END,"
+                            + " gmt_modified = ?, version = version + 1 WHERE tenant_id = ? AND"
                             + " session_id = ? AND turn_id = ? AND status IN"
                             + " ('ACCEPTED', 'RUNNING')",
-                    now, tenantId, sessionId, turnId);
+                    AgentStateStore.HARNESS_ACTION_PARKED, now, tenantId, sessionId, turnId);
             commandEffect = updated == 1;
             if (commandEffect) {
                 eventJournal.appendEvent(tenantId, sessionId, turnId,
@@ -257,7 +261,7 @@ final class AgentSessionCommands {
         // No tenant guard, as in changeSessionModel: settlement writes no delivery row, so no
         // operation range is locked. The Session lock comes first, so the replay probe's snapshot
         // follows it; a racing Session reusing the key loses on the receipt's unique key.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
             requireRenameReplayOwner(session, previous.get(), actorId);
@@ -291,7 +295,7 @@ final class AgentSessionCommands {
         // read that misses gap-locks the tenant-shared receipt index, and concurrent admissions
         // of different keys would deadlock inserting into that gap. A racing Session reusing the
         // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -368,7 +372,7 @@ final class AgentSessionCommands {
     SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -417,10 +421,13 @@ final class AgentSessionCommands {
                         "metadata", Map.of("title", title));
             }
             // An archived Session was closed first, so it stays closed.
-            case UNARCHIVE -> jdbc.update("UPDATE ma_session SET"
-                            + " status = 'CLOSED', gmt_modified = ?, version ="
-                            + " version + 1 WHERE tenant_id = ? AND" + " session_id = ?",
-                    now, tenantId, sessionId);
+            case UNARCHIVE -> {
+                jdbc.update("UPDATE ma_session SET"
+                                + " status = 'CLOSED', gmt_modified = ?, version ="
+                                + " version + 1 WHERE tenant_id = ? AND" + " session_id = ?",
+                        now, tenantId, sessionId);
+                JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
+            }
         }
         jdbc.update(
                 "UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ? WHERE"
@@ -435,7 +442,6 @@ final class AgentSessionCommands {
 
     void abandonSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         // Keep the digest and receipt for replay and concurrent completion.
         // A completed outcome must never be overwritten by a failing sibling.
         jdbc.update("UPDATE ma_request_receipt SET state = 'FAILED',"
@@ -459,33 +465,29 @@ final class AgentSessionCommands {
             String sessionId, String turnId, OperationKind kind,
             String command, String idempotencyKey, String requestDigest,
             byte[] actorKey, String sessionStatus, long now) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        String target = turnOperationTarget(turnId);
         String operationId = AgentStoreRows.publicId("op");
-        String operationKey = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
-                scope, target, operationId);
+        String operationRef = ManagedIdentityRefs.operationRef(
+                kind.name(), tenantId, "SESSION", sessionId, turnOperationTarget(turnId), operationId);
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
-                    + " target_kind, target_key, target_id, phase, request_json,"
+                "INSERT INTO ma_operation (operation_ref, scope_kind, scope_id,"
+                    + " target_kind, target_id, phase, request_json,"
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
-                    + " actor_key, idempotency_key, request_digest, state, admission_stage,"
+                    + " actor_id, idempotency_key, request_digest, state, admission_stage,"
                     + " delivery_state, session_status_before, available_at, gmt_create,"
-                    + " gmt_modified) VALUES (?, ?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
+                    + " gmt_modified) VALUES (?, 'SESSION', ?, 'TURN', ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
                     + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?)",
-                operationKey,
-                scope,
-                scope,
-                target,
-                turnId,
+                ManagedSchemaKeys.identity(operationRef),
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(turnOperationTarget(turnId)),
                 storeRows.writeJson(Map.of("schemaVersion", 1, "kind", kind.name(),
                         "sessionId", sessionId, "turnId", turnId)),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+                ManagedSchemaKeys.key(
                         idempotencyKey),
                 tenantId,
                 sessionId,
                 operationId,
-                kind.name(), actorKey,
+                kind.name(),
+                actorKey == null ? null : new String(actorKey, StandardCharsets.UTF_8),
                 idempotencyKey,
                 requestDigest,
                 sessionStatus,
@@ -493,12 +495,12 @@ final class AgentSessionCommands {
                 now,
                 now);
         ManagedReceipts.linkCommandOperation(jdbc, tenantId, command,
-                idempotencyKey, operationKey);
+                idempotencyKey, operationRef);
         return operationId;
     }
 
     static String turnOperationTarget(String turnId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(turnId);
+        return turnId;
     }
 
     /**
@@ -578,23 +580,25 @@ final class AgentSessionCommands {
         // operations. Left to the optimizer, a long settled history steers it
         // to a (kind, state) index whose range holds every Session's pending
         // rows, and two Sessions' settles then deadlock. H2 skips the hint.
-        for (String operationKey : jdbc.queryForList("SELECT operation_key"
-                        + " FROM ma_operation /*! FORCE INDEX (uk_ma_operation_identity) */"
-                        + " WHERE scope_key = ? AND"
-                        + " operation_kind = ? AND target_key = ? AND state ="
+        for (String operationRef : jdbc.queryForList("SELECT operation_ref"
+                        + " FROM ma_operation /*! FORCE INDEX (uk_ma_operation_request) */"
+                        + " WHERE scope_kind = 'SESSION' AND scope_id = ? AND"
+                        + " operation_kind = ? AND target_id = ? AND state ="
                         + " 'PENDING' FOR UPDATE",
                 String.class,
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                kind.name(), turnOperationTarget(turnId))) {
+                ManagedSchemaKeys.identity(sessionId),
+                kind.name(),
+                ManagedSchemaKeys.identity(turnOperationTarget(turnId)))) {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ?,"
                             + " admission_stage = ?, delivery_state = ?,"
                             + " receipt_id = ?, failure_code = ?,"
                             + " available_at = ?, gmt_modified = ?," + " completed_at = ? WHERE"
-                            + " operation_key = ? AND state = 'PENDING'",
+                            + " operation_ref = ? AND state = 'PENDING'",
                     state, state, admissionStage,
                     completed ? "CONFIRMED" : "BLOCKED",
                     completed ? AgentStoreRows.publicId("rcpt") : null, failureCode, now,
-                    now, parked ? null : now, operationKey);
+                    now, parked ? null : now,
+                    ManagedSchemaKeys.identity(operationRef));
         }
     }
 
@@ -614,8 +618,8 @@ final class AgentSessionCommands {
         }
         String operationId = command.resultOperationKey() == null ? null
                 : jdbc.queryForObject("SELECT operation_id FROM ma_operation"
-                                + " WHERE operation_key = ?", String.class,
-                        command.resultOperationKey());
+                                + " WHERE operation_ref = ?", String.class,
+                        ManagedSchemaKeys.identity(command.resultOperationKey()));
         return new Admission(command.sessionId(), command.turnId(), true,
                 false, operationId);
     }
@@ -644,7 +648,7 @@ final class AgentSessionCommands {
             + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
             + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4','hosted-workspace-external-files/1')"
             + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
-            + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
+            + " (agent_id = 'qwen-code' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
 
     void insertTurn(String tenantId, String sessionId,
             String turnId, String promptId, List<Map<String, Object>> input,
@@ -664,11 +668,11 @@ final class AgentSessionCommands {
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, storeRows.writeJson(input),
-                payloadDigest, now, now, "qwen-code".getBytes(StandardCharsets.UTF_8),
-                "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
-                "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
-                "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
-                "qwen-code".getBytes(StandardCharsets.UTF_8), tenantId, sessionId);
+                payloadDigest, now, now, "qwen-code",
+                "qwen-code", "qwen-code",
+                "qwen-code", "qwen-code",
+                "qwen-code", "qwen-code",
+                "qwen-code", tenantId, sessionId);
     }
 
     void insertCommand(String tenantId, String operation,
@@ -724,7 +728,7 @@ final class AgentSessionCommands {
                         "SELECT COALESCE( c.mutation_attempt_sequence, e.sequence_id) FROM"
                             + " ma_request_receipt c LEFT JOIN ma_public_event e ON e.tenant_id ="
                             + " c.tenant_id AND e.session_id = c.session_id AND e.stream_kind ="
-                            + " 'SESSION' AND e.stream_id = X'' AND e.source_key = ? WHERE"
+                            + " 'SESSION' AND e.stream_id = '' AND e.source_key = ? WHERE"
                             + " c.namespace = 'SESSION_COMMAND' AND c.receipt_key = ? AND"
                             + " c.session_id = ?",
                         Long.class,
@@ -737,7 +741,7 @@ final class AgentSessionCommands {
         Integer later =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                            + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND"
+                            + " stream_id = '' AND tenant_id = ? AND session_id = ? AND"
                             + " sequence_id > ? AND event_type = ? AND source_key LIKE 'control:%'",
                         Integer.class,
                         tenantId,
@@ -748,7 +752,7 @@ final class AgentSessionCommands {
 
     // Automation-verb session boot-id bind (#14548); fill only when still empty.
     void bindSessionHarness(String tenantId, String sessionId, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (harnessBootId.equals(session.harnessBootId())) {
             return;
         }

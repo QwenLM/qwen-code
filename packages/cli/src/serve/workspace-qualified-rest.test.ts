@@ -9,7 +9,11 @@ import * as path from 'node:path';
 import { promises as fsp, realpathSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
+import {
+  getTokenUsageFilePath,
+  hashDaemonWorkspace,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { createServeApp } from './server.js';
 import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
@@ -26,10 +30,7 @@ import {
 } from './workspace-registry.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import type { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
-import {
-  WorkspaceSkillNotFoundError,
-  type DaemonWorkspaceService,
-} from './workspace-service/types.js';
+import type { DaemonWorkspaceService } from './workspace-service/types.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -2082,7 +2083,7 @@ describe('workspace-qualified core REST', () => {
     try {
       const res = await request(h.app)
         .post(
-          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/review/enable`,
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/not-installed/enable`,
         )
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-1')
@@ -2090,13 +2091,26 @@ describe('workspace-qualified core REST', () => {
         .send({ enabled: false });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        skillName: 'review',
+        skillName: 'not-installed',
         enabled: false,
         changed: true,
         activation: 'deferred',
         sessionsRefreshed: 0,
         sessionsFailed: 0,
       });
+      expect(
+        h.secondaryWorkspaceService.getWorkspaceSkillsStatus,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceCwd: h.secondaryCwd,
+          originatorClientId: 'client-1',
+        }),
+        'not-installed',
+        false,
+      );
 
       const batch = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
@@ -2137,16 +2151,16 @@ describe('workspace-qualified core REST', () => {
 
       vi.mocked(
         h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
-      ).mockRejectedValueOnce(new WorkspaceSkillNotFoundError('missing'));
-      const missing = await request(h.app)
+      ).mockRejectedValueOnce(new Error('settings write failed'));
+      const failedWrite = await request(h.app)
         .post(
-          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/missing/enable`,
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/not-installed/enable`,
         )
         .set('Authorization', 'Bearer secret')
         .set('Host', host())
         .send({ enabled: false });
-      expect(missing.status).toBe(404);
-      expect(missing.body.code).toBe('skill_not_found');
+      expect(failedWrite.status).toBe(500);
+      expect(failedWrite.body.error).toBe('settings write failed');
 
       const invalidClient = await request(h.app)
         .post(
@@ -2852,6 +2866,160 @@ describe('workspace-qualified core REST', () => {
       expect(res.body.error).not.toContain(h.secondaryCwd);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('usage dashboard runtime roots', () => {
+  it('includes both the workspace and shared CLI ledgers through createServeApp', async () => {
+    const originalHome = process.env['QWEN_HOME'];
+    const originalRuntime = process.env['QWEN_RUNTIME_DIR'];
+    let h: Awaited<ReturnType<typeof makeHarness>> | undefined;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-05-25T10:00:00.000Z'));
+    try {
+      h = await makeHarness();
+      const sharedRoot = path.join(h.scratch, 'shared-cli-runtime');
+      process.env['QWEN_HOME'] = sharedRoot;
+      process.env['QWEN_RUNTIME_DIR'] = path.join(h.scratch, 'ambient-runtime');
+      Storage.setRuntimeBaseDir(null);
+      const seed = async (
+        root: string,
+        sessionId: string,
+        inputTokens: number,
+        outputTokens: number,
+      ) => {
+        await Storage.runWithResolvedRuntimeBaseDir(root, async () => {
+          const file = getTokenUsageFilePath('2026-05');
+          await fsp.mkdir(path.dirname(file), { recursive: true });
+          await fsp.writeFile(
+            file,
+            JSON.stringify({
+              schemaVersion: 1,
+              id: `${sessionId}-request`,
+              timestamp: '2026-05-25T10:00:00.000Z',
+              localDate: '2026-05-25',
+              localMonth: '2026-05',
+              sessionId,
+              model: 'mock-model',
+              authType: 'openai',
+              source: 'main',
+              inputTokens,
+              outputTokens,
+              cachedTokens: 0,
+              thoughtsTokens: 0,
+              totalTokens: inputTokens + outputTokens,
+              apiDurationMs: 50,
+            }) + '\n',
+            'utf8',
+          );
+        });
+      };
+      await seed(
+        path.join(h.primaryCwd, '.runtime'),
+        'workspace-session',
+        500,
+        100,
+      );
+      await seed(sharedRoot, 'default-cli-session', 800, 200);
+
+      const response = await request(h.app)
+        .get('/usage/dashboard?range=today')
+        .set('Host', host());
+      expect(response.status).toBe(200);
+      expect(response.body.summary).toMatchObject({
+        totalTokens: 1600,
+        requests: 2,
+      });
+    } finally {
+      Storage.setRuntimeBaseDir(null);
+      vi.useRealTimers();
+      if (originalHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = originalHome;
+      if (originalRuntime === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = originalRuntime;
+      if (h) await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('includes trusted live-conversation runtimes and excludes untrusted workspaces in /usage/dashboard', async () => {
+    const originalHome = process.env['QWEN_HOME'];
+    const originalRuntime = process.env['QWEN_RUNTIME_DIR'];
+    let h: Awaited<ReturnType<typeof makeHarness>> | undefined;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-05-25T10:00:00.000Z'));
+    try {
+      h = await makeHarness({
+        secondaryTrusted: false,
+        liveConversation: true,
+      });
+      const sharedRoot = path.join(h.scratch, 'shared-cli-runtime');
+      process.env['QWEN_HOME'] = sharedRoot;
+      process.env['QWEN_RUNTIME_DIR'] = path.join(h.scratch, 'ambient-runtime');
+      Storage.setRuntimeBaseDir(null);
+      const seed = async (
+        root: string,
+        sessionId: string,
+        inputTokens: number,
+        outputTokens: number,
+      ) => {
+        await Storage.runWithResolvedRuntimeBaseDir(root, async () => {
+          const file = getTokenUsageFilePath('2026-05');
+          await fsp.mkdir(path.dirname(file), { recursive: true });
+          await fsp.writeFile(
+            file,
+            JSON.stringify({
+              schemaVersion: 1,
+              id: `${sessionId}-request`,
+              timestamp: '2026-05-25T10:00:00.000Z',
+              localDate: '2026-05-25',
+              localMonth: '2026-05',
+              sessionId,
+              model: 'mock-model',
+              authType: 'openai',
+              source: 'main',
+              inputTokens,
+              outputTokens,
+              cachedTokens: 0,
+              thoughtsTokens: 0,
+              totalTokens: inputTokens + outputTokens,
+              apiDurationMs: 50,
+            }) + '\n',
+            'utf8',
+          );
+        });
+      };
+      await seed(path.join(h.primaryCwd, '.runtime'), 'primary-sess', 500, 100);
+      await seed(
+        path.join(h.secondaryCwd, '.runtime'),
+        'untrusted-sess',
+        9000,
+        999,
+      );
+      await seed(
+        path.join(h.scratch, 'conversations', '.runtime'),
+        'live-conv-sess',
+        250,
+        50,
+      );
+      await seed(sharedRoot, 'default-cli-sess', 800, 200);
+
+      const response = await request(h.app)
+        .get('/usage/dashboard?range=today')
+        .set('Host', host());
+      expect(response.status).toBe(200);
+      expect(response.body.summary).toMatchObject({
+        totalTokens: 1900,
+        requests: 3,
+      });
+    } finally {
+      Storage.setRuntimeBaseDir(null);
+      vi.useRealTimers();
+      if (originalHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = originalHome;
+      if (originalRuntime === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = originalRuntime;
+      if (h) await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
 });

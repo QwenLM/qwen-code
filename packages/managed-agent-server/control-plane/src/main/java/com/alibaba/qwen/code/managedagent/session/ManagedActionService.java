@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -25,6 +26,7 @@ import org.springframework.stereotype.Service;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -107,7 +109,7 @@ public class ManagedActionService {
     }
 
     private String childCursorScope(String tenant, String session) {
-        return "children:" + org.apache.commons.codec.digest.DigestUtils.sha256Hex(tenant + "\u0000" + session) + ":";
+        return "children:" + DigestUtils.sha256Hex(tenant + "\u0000" + session) + ":";
     }
 
     private List<ManagedActionStore.ScopedAction> childPage(String tenant, String actor, String session,
@@ -143,8 +145,12 @@ public class ManagedActionService {
             }
         }
         var rows = actions.listWithChildren(tenant, session, before, beforeSession, beforeId, limit + 1);
+        Set<String> checkedSessions = new HashSet<>();
+        checkedSessions.add(session);
         for (var row : rows) {
-            sessions.requireReadableSession(tenant, actor, row.sessionId());
+            if (checkedSessions.add(row.sessionId())) {
+                sessions.requireReadableSession(tenant, actor, row.sessionId());
+            }
         }
         return rows;
     }
@@ -380,7 +386,7 @@ public class ManagedActionService {
         JsonNode options = action.options();
         String tool = options.path("toolName").asText();
         if (!"requested".equals(action.state())
-                || !List.of(2L, 3L).contains(options.path("v").asLong())
+                || options.path("v").asLong() != 3
                 || !PREVIEW_TOOLS.contains(tool)) {
             return null;
         }

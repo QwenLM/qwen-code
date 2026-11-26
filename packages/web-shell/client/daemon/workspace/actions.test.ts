@@ -1066,4 +1066,47 @@ describe('workspace actions', () => {
     expect(addDirectory).toHaveBeenCalledWith('/extra');
     expect(removeDirectory).toHaveBeenCalledWith('/extra');
   });
+
+  it('forwards artifactLibrary and artifactLibraryStream to the selected workspace client', async () => {
+    const libraryResult = { v: 1 as const, sessions: [], errors: [] };
+    const artifactLibrary = vi.fn().mockResolvedValue(libraryResult);
+    const artifactLibraryStream = vi.fn(async function* () {
+      yield { type: 'start' as const, v: 1 as const, total: 0 };
+      yield {
+        type: 'complete' as const,
+        v: 1 as const,
+        total: 0,
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+      };
+    });
+    const workspaceByCwd = vi.fn(() => ({
+      artifactLibrary,
+      artifactLibraryStream,
+    }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    const controller = new AbortController();
+    await expect(
+      actions.artifactLibrary('/ws-target', { signal: controller.signal }),
+    ).resolves.toEqual(libraryResult);
+    const events = [];
+    for await (const ev of actions.artifactLibraryStream('/ws-target', {
+      signal: controller.signal,
+    })) {
+      events.push(ev.type);
+    }
+
+    expect(workspaceByCwd).toHaveBeenCalledWith('/ws-target');
+    expect(artifactLibrary).toHaveBeenCalledWith({ signal: controller.signal });
+    expect(artifactLibraryStream).toHaveBeenCalledWith({
+      signal: controller.signal,
+    });
+    expect(events).toEqual(['start', 'complete']);
+  });
 });

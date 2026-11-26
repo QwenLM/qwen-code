@@ -17,6 +17,7 @@ import {
 import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { hooksCommand } from './hooksCommand.js';
+import { MessageType } from '../types.js';
 import {
   hashProjectHooks,
   loadHookApprovals,
@@ -278,7 +279,14 @@ describe('/hooks reload with real settings files', () => {
       fs.writeFileSync(settings[scope].path, malformed);
       fs.writeFileSync(
         settings.user.path,
-        JSON.stringify({ hooks: { PostToolUse: hook('echo edited') } }),
+        JSON.stringify({
+          hooks: {
+            PostToolUse: [
+              ...hook('echo edited'),
+              { hooks: [{ type: 'mcp_tool' }] },
+            ],
+          },
+        }),
       );
 
       expect(await hooksCommand.action!(context, '')).toEqual({
@@ -307,6 +315,13 @@ describe('/hooks reload with real settings files', () => {
       );
       expect(entries().some(({ eventName }) => eventName === 'Stop')).toBe(
         false,
+      );
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.WARNING,
+          text: 'Hook #1 in entry #2 for PostToolUse from user config has a missing or unsupported "type" and was skipped.',
+        },
+        expect.any(Number),
       );
       expect(context.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -363,6 +378,71 @@ describe('/hooks reload with real settings files', () => {
     expect(system.map(({ config }) => config)).toEqual([
       expect.objectContaining({ command: 'echo system edited' }),
     ]);
+  });
+
+  it('shows a warning for a hook the reload skips', async () => {
+    const { config, settings, context, entries } = await setup();
+    fs.writeFileSync(
+      settings.workspace.path,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { hooks: [{ type: 'mcp_tool', server: 'scanner', tool: 'scan' }] },
+          ],
+        },
+      }),
+    );
+
+    await hooksCommand.action!(context, '');
+
+    const warning =
+      'Hook #1 in entry #1 for PreToolUse from project config has a missing or unsupported "type" and was skipped.';
+    expect(entries().some(({ eventName }) => eventName === 'PreToolUse')).toBe(
+      false,
+    );
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      { type: MessageType.WARNING, text: warning },
+      expect.any(Number),
+    );
+    expect(config.getWarnings()).toContain(warning);
+  });
+
+  it('distinguishes an empty configuration from a skipped hook in the text listing', async () => {
+    const { settings, context } = await setup();
+    fs.writeFileSync(settings.workspace.path, '{}');
+    fs.writeFileSync(settings.user.path, '{}');
+    await hooksCommand.action!(context, '');
+
+    const textContext = {
+      ...context,
+      executionMode: 'non_interactive' as const,
+    };
+    expect(await hooksCommand.action!(textContext, '')).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('No hooks configured.'),
+    });
+
+    fs.writeFileSync(
+      settings.user.path,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              hooks: [{ type: 'command', command: 'node', args: ['check.js'] }],
+            },
+          ],
+        },
+      }),
+    );
+    await hooksCommand.action!(context, '');
+
+    expect(await hooksCommand.action!(textContext, '')).toEqual({
+      type: 'message',
+      messageType: 'warning',
+      content:
+        'No hooks were loaded.\nHook #1 in entry #1 for PreToolUse from user config uses "args", which Qwen Code does not support yet, and was skipped.',
+    });
   });
 
   it('removes deleted project hooks from the live registry', async () => {

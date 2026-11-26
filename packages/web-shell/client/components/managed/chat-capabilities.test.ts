@@ -3,8 +3,10 @@ import type { ManagedAgentSessionSummary } from './managed-agent-provider.js';
 import {
   MANAGED_CHAT_CAPABILITY_MAP,
   isManagedCapabilityOn,
+  managedCapabilitiesFromSummary,
   type ManagedCapabilityKey,
 } from './chat-capabilities.js';
+import type { ChatRegion } from '../../chat-core/capabilities.js';
 
 // Every non-empty decision, pinned literally: any assignment moving to []
 // or to another region, and any empty key gaining a region, flips this red.
@@ -81,5 +83,24 @@ describe('tri-state managed terminal capability', () => {
     expect(isManagedCapabilityOn(false)).toBe(false);
     expect(isManagedCapabilityOn(null)).toBe(false);
     expect(isManagedCapabilityOn(undefined)).toBe(false);
+  });
+
+  it('derives ChatCapabilities from ManagedAgentSessionSummary capabilities', () => {
+    const empty = managedCapabilitiesFromSummary(undefined);
+    expect(Object.values(empty).every((enabled) => enabled === false)).toBe(
+      true,
+    );
+    expect(managedCapabilitiesFromSummary({ terminal: null }).terminal).toBe(
+      false,
+    );
+    for (const [key, expected] of Object.entries(NON_EMPTY_DECISIONS)) {
+      const caps = managedCapabilitiesFromSummary({
+        [key as ManagedCapabilityKey]: true,
+      });
+      const active = (Object.keys(caps) as ChatRegion[]).filter(
+        (region) => caps[region],
+      );
+      expect(active).toEqual(expected);
+    }
   });
 });

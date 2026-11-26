@@ -72,7 +72,29 @@ jobs:
       - &restore_release_workspace
         name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
-        uses: '$/.github/actions/prepare-release-runner'
+        working-directory: '${{ runner.temp }}'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          WORKFLOW_SHA: '${{ github.workflow_sha }}'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          bootstrap=$(mktemp -d "${RUNNER_TEMP:?}/release-bootstrap.XXXXXX")
+          trap 'rm -rf -- "$bootstrap"' EXIT
+          export GH_CONFIG_DIR="$bootstrap/gh"
+          mkdir -p "$GH_CONFIG_DIR"
+          for script in prepare-release-runner.sh check-disk-floor.sh; do
+            for attempt in 1 2 3; do
+              if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${script}?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script" && [ -s "$bootstrap/$script" ]; then
+                break
+              fi
+              [ "$attempt" -lt 3 ] || exit 1
+              sleep 2
+            done
+          done
+          bash "$bootstrap/prepare-release-runner.sh"
+          node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
+          bash "$bootstrap/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -86,6 +108,9 @@ jobs:
         with:
           ref: '${{ github.workflow_sha }}'
           fetch-depth: 1
+          # Keep sparse checkout from fetching missing blobs after the
+          # action's retryable fetch has already succeeded.
+          filter: 'blob:limit=1g'
           persist-credentials: false
           sparse-checkout: |-
             /.github/scripts
@@ -766,9 +791,12 @@ jobs:
       }}
     outputs:
       version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'
+      reused_commit: '${{ steps.push_release_branch.outputs.reused_commit }}'
     # Serialize each real/dry release tag; never cancel an active publish.
     concurrency:
-      group: 'release-publish-${{ needs.prepare.outputs.release_tag }}-${{ needs.prepare.outputs.is_dry_run }}'
+      # Group by npm channel (not release tag) so a newer version cannot
+      # publish on the same channel while an older version is resuming.
+      group: 'release-publish-${{ needs.prepare.outputs.npm_tag }}-${{ needs.prepare.outputs.is_dry_run }}'
       cancel-in-progress: false
     timeout-minutes: 90
     environment:
@@ -849,6 +877,8 @@ jobs:
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          RELEASE_SHA: '${{ needs.prepare.outputs.release_sha }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh push-release-branch'
 
@@ -864,7 +894,9 @@ jobs:
       - *checkout_release_workflow_scripts
 
       - name: 'Build Bundle and Prepare Package'
-        if: "${{ needs.build_release.result != 'success' }}"
+        # A resume rebuilds from the adopted commit through these two steps
+        # so the trusted reset/checkout pair also covers the retry path.
+        if: "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}"
         env:
           QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
@@ -873,7 +905,7 @@ jobs:
       - *checkout_release_workflow_scripts
 
       - name: 'Build Standalone Archives'
-        if: "${{ needs.build_release.result != 'success' }}"
+        if: "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}"
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"

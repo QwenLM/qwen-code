@@ -55,7 +55,7 @@ public class HostedCleanupRetryCoordinator {
     private final Set<String> active = ConcurrentHashMap.newKeySet();
     private final Map<String, Attempt> attempts = new ConcurrentHashMap<>();
     // The cursor lives on the single fixed-delay scheduler thread; -1/"" is
-    // the start of the projection (gmt_create is unsigned, owner_key non-empty).
+    // the start of the projection (gmt_create is unsigned, owner_ref non-empty).
     private long cursorCreate = -1;
     private String cursorOwnerKey = "";
 

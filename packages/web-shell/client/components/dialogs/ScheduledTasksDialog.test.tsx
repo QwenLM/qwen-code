@@ -3170,6 +3170,29 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     );
   });
 
+  it.each(['chat', 'user'] as const)(
+    'identifies a %s delivery card by Channel name and destination ID',
+    async (type) => {
+      await mount(
+        [
+          baseTask({
+            delivery: {
+              kind: 'channel',
+              target: { channelName: 'receiver', type, id: 'destination-42' },
+            },
+          }),
+        ],
+        options,
+      );
+      const row = container?.querySelector(
+        '[data-testid="scheduled-task-delivery"]',
+      );
+      expect(row?.textContent).toContain('receiver · destination-42');
+      expect(row?.textContent).not.toMatch(/ · (Chat|User) · /);
+      expect(row?.getAttribute('title')).toBe(row?.textContent);
+    },
+  );
+
   it('only warns about per-run delivery while a target is selected', async () => {
     const warning =
       'A new session every run does not support Channel delivery.';

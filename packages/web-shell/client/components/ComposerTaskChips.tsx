@@ -9,9 +9,9 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
-import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import {
   BotIcon,
+  CircleAlertIcon,
   CircleHelpIcon,
   CirclePauseIcon,
   LoaderCircleIcon,
@@ -19,16 +19,18 @@ import {
   SquareTerminalIcon,
   WorkflowIcon,
 } from 'lucide-react';
+import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { useSharedNow } from '../hooks/useSharedNow';
+import { getShadowAwareActiveElement, isFocusUnclaimed } from '../utils/dom';
 import {
   explainDisplayLabel,
   getComposerTaskChipGroups,
+  type ComposerChipTask,
   type ComposerTaskChipGroup,
   type ComposerTaskChipKind,
 } from '../utils/composerTasks';
 import { formatRuntime } from '../utils/formatRuntime';
-import { isFocusUnclaimed } from '../utils/dom';
 import styles from './ComposerTaskChips.module.css';
 
 export interface ComposerTaskChipsHandle {
@@ -37,11 +39,13 @@ export interface ComposerTaskChipsHandle {
 }
 
 export interface ComposerTaskChipsProps {
-  tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
+  tasks: readonly ComposerChipTask[];
   /** Whether background agents get a chip (hosts without agent surfaces opt out). */
   includeAgents: boolean;
-  /** Open the task: locate a workflow in the transcript, open a shell's output, … */
-  onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+  /** Select a task; direct single-chip activation also allows collapsing it. */
+  onSelectTask: (task: ComposerChipTask, toggle?: boolean) => void;
+  /** Whether a single-task chip's target panel or dialog is currently open. */
+  isTaskOpen?: (task: ComposerChipTask) => boolean;
   /** Ask the model to explain the task as a side question, without opening it. */
   onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
   /** Hand focus back to the composer, optionally with a typed character. */
@@ -51,16 +55,19 @@ export interface ComposerTaskChipsProps {
 const LABEL_KEYS: Record<ComposerTaskChipKind, [string, string]> = {
   workflow: ['tasks.pill.workflow', 'tasks.pill.workflows'],
   agent: ['tasks.pill.agent', 'tasks.pill.agents'],
+  session: ['tasks.pill.session', 'tasks.pill.sessions'],
   shell: ['tasks.pill.shell', 'tasks.pill.shells'],
   monitor: ['tasks.pill.monitor', 'tasks.pill.monitors'],
 };
 
-function kindIcon(kind: ComposerTaskChipKind): ReactNode {
+function kindIcon(kind: ComposerTaskChipKind): ReactNode | undefined {
   switch (kind) {
     case 'workflow':
       return <WorkflowIcon aria-hidden="true" />;
     case 'agent':
       return <BotIcon aria-hidden="true" />;
+    case 'session':
+      return undefined;
     case 'shell':
       return <SquareTerminalIcon aria-hidden="true" />;
     case 'monitor':
@@ -68,29 +75,39 @@ function kindIcon(kind: ComposerTaskChipKind): ReactNode {
   }
 }
 
-function taskLabel(task: DaemonSessionTaskWithWorkflowStatus): string {
+function taskLabel(task: ComposerChipTask): string {
   switch (task.kind) {
     case 'shell':
       return task.command;
     case 'monitor':
       return task.description;
     case 'agent':
+    case 'session':
     case 'workflow':
       return task.label;
   }
 }
 
-function isMoving(task: DaemonSessionTaskWithWorkflowStatus): boolean {
+/**
+ * The session's own background task, which the model can explain; a message
+ * sent to another session is not one of them.
+ */
+function isChildTask(
+  task: ComposerChipTask,
+): task is DaemonSessionTaskWithWorkflowStatus {
+  return task.kind !== 'session';
+}
+
+/** A session the message went to is waiting on a permission or a question. */
+function isWaiting(task: ComposerChipTask): boolean {
+  return task.kind === 'session' && task.waitingForInput === true;
+}
+
+function isMoving(task: ComposerChipTask): boolean {
   return task.status === 'running' || task.status === 'pausing';
 }
 
-function TaskElapsed({
-  task,
-  now,
-}: {
-  task: DaemonSessionTaskWithWorkflowStatus;
-  now: number;
-}) {
+function TaskElapsed({ task, now }: { task: ComposerChipTask; now: number }) {
   // A paused task's clock stopped; the snapshot's runtime is the honest number.
   const ms = isMoving(task)
     ? Math.max(task.runtimeMs, now - task.startTime)
@@ -101,14 +118,22 @@ function TaskElapsed({
 /**
  * Chips above the composer for this session's unfinished background work —
  * one per kind ("1 workflow", "2 shells"). A chip that stands for a single
- * task opens it directly; one that stands for several opens a list above the
- * row to pick from. Finished tasks have no chip, so the row clears itself.
+ * task toggles its detail; one that stands for several opens a list above the
+ * row to pick from and collapses that list on repeat activation. Finished
+ * tasks have no chip, so the row clears itself.
  */
 export const ComposerTaskChips = forwardRef<
   ComposerTaskChipsHandle,
   ComposerTaskChipsProps
 >(function ComposerTaskChips(
-  { tasks, includeAgents, onSelectTask, onExplainTask, onReturnToInput },
+  {
+    tasks,
+    includeAgents,
+    onSelectTask,
+    isTaskOpen,
+    onExplainTask,
+    onReturnToInput,
+  },
   ref,
 ) {
   const { t } = useI18n();
@@ -126,6 +151,7 @@ export const ComposerTaskChips = forwardRef<
   const focusedElementRef = useRef<{ element: HTMLElement; root: Node } | null>(
     null,
   );
+  const pointerDownInsideRef = useRef(false);
   const now = useSharedNow(Boolean(openGroup));
 
   useImperativeHandle(
@@ -175,27 +201,60 @@ export const ComposerTaskChips = forwardRef<
     else onReturnToInput?.();
   }, [groups, openKind, onReturnToInput]);
 
+  const listOpen = Boolean(openGroup);
+
   // The list closes on a click anywhere outside the chip row.
   useEffect(() => {
-    if (!openGroup) return;
+    if (!listOpen) return;
     const closeOnOutsidePointerDown = (event: PointerEvent) => {
       if (rootRef.current && event.composedPath().includes(rootRef.current)) {
         return;
       }
+      pointerDownInsideRef.current = false;
+      focusedElementRef.current = null;
+      setOpenKind(null);
+    };
+    const clearInsidePointerDown = () => {
+      if (!pointerDownInsideRef.current) return;
+      pointerDownInsideRef.current = false;
+      const activeElement =
+        getShadowAwareActiveElement(rootRef.current) ?? document.activeElement;
+      if (rootRef.current?.contains(activeElement)) return;
+      focusedElementRef.current = null;
+      setOpenKind(null);
+    };
+    const closeOnWindowBlur = () => {
+      pointerDownInsideRef.current = false;
       focusedElementRef.current = null;
       setOpenKind(null);
     };
     document.addEventListener('pointerdown', closeOnOutsidePointerDown);
-    return () =>
+    document.addEventListener('pointerup', clearInsidePointerDown, true);
+    document.addEventListener('pointercancel', clearInsidePointerDown, true);
+    window.addEventListener('blur', closeOnWindowBlur);
+    return () => {
+      pointerDownInsideRef.current = false;
       document.removeEventListener('pointerdown', closeOnOutsidePointerDown);
-  }, [openGroup]);
+      document.removeEventListener('pointerup', clearInsidePointerDown, true);
+      document.removeEventListener(
+        'pointercancel',
+        clearInsidePointerDown,
+        true,
+      );
+      window.removeEventListener('blur', closeOnWindowBlur);
+    };
+  }, [listOpen]);
 
   if (groups.length === 0) return null;
 
-  const selectTask = (task: DaemonSessionTaskWithWorkflowStatus) => {
+  const selectTask = (task: ComposerChipTask, toggle = false) => {
     chipRefs.current.get(task.kind)?.focus({ preventScroll: true });
     setOpenKind(null);
-    onSelectTask(task);
+    if (toggle) {
+      onSelectTask(task, true);
+    } else {
+      onSelectTask(task);
+    }
   };
 
   const handleListKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -232,10 +291,15 @@ export const ComposerTaskChips = forwardRef<
 
   const activateChip = (group: ComposerTaskChipGroup) => {
     if (group.tasks.length === 1) {
-      selectTask(group.tasks[0]);
+      selectTask(group.tasks[0], true);
       return;
     }
-    setOpenKind((current) => (current === group.kind ? null : group.kind));
+    if (openKind === group.kind) {
+      setOpenKind(null);
+      chipRefs.current.get(group.kind)?.focus({ preventScroll: true });
+      return;
+    }
+    setOpenKind(group.kind);
   };
 
   const focusChipAt = (index: number) => {
@@ -296,6 +360,8 @@ export const ComposerTaskChips = forwardRef<
   };
 
   const groupLabel = (group: ComposerTaskChipGroup) => {
+    const waiting = group.tasks.filter(isWaiting).length;
+    if (waiting > 0) return t('tasks.pill.sessionWaiting', { count: waiting });
     const [singular, plural] = LABEL_KEYS[group.kind];
     return t(group.tasks.length === 1 ? singular : plural, {
       count: group.tasks.length,
@@ -308,6 +374,12 @@ export const ComposerTaskChips = forwardRef<
       className={styles.root}
       data-web-shell-composer-task-chips=""
       data-testid="composer-task-chips"
+      onPointerDown={() => {
+        if (openGroup) pointerDownInsideRef.current = true;
+      }}
+      onMouseDown={(event) => {
+        if (openGroup) event.preventDefault();
+      }}
       onFocus={(event) => {
         focusedElementRef.current = {
           element: event.target,
@@ -316,8 +388,10 @@ export const ComposerTaskChips = forwardRef<
       }}
       onBlur={(event) => {
         if (
-          event.relatedTarget instanceof Node &&
-          event.currentTarget.contains(event.relatedTarget)
+          (pointerDownInsideRef.current &&
+            !(event.relatedTarget instanceof Node)) ||
+          (event.relatedTarget instanceof Node &&
+            event.currentTarget.contains(event.relatedTarget))
         ) {
           return;
         }
@@ -347,15 +421,24 @@ export const ComposerTaskChips = forwardRef<
                 onClick={() => selectTask(task)}
                 onKeyDown={handleListKeyDown}
               >
-                <span className={styles.rowIcon}>
-                  {kindIcon(openGroup.kind)}
-                </span>
+                {kindIcon(openGroup.kind) && (
+                  <span className={styles.rowIcon}>
+                    {kindIcon(openGroup.kind)}
+                  </span>
+                )}
                 <span className={styles.rowLabel} title={taskLabel(task)}>
                   {taskLabel(task)}
                 </span>
-                <TaskElapsed task={task} now={now} />
+                {isWaiting(task) ? (
+                  <span className={styles.waitingTag}>
+                    {t('tasks.waitingForInput')}
+                  </span>
+                ) : (
+                  <TaskElapsed task={task} now={now} />
+                )}
               </button>
               {onExplainTask &&
+                isChildTask(task) &&
                 explainButton(
                   task,
                   `${styles.explainButton} ${styles.rowExplain}`,
@@ -372,6 +455,7 @@ export const ComposerTaskChips = forwardRef<
       >
         {groups.map((group, index) => {
           const moving = group.tasks.some(isMoving);
+          const waiting = group.tasks.some(isWaiting);
           const multiple = group.tasks.length > 1;
           const chip = (
             <button
@@ -382,16 +466,28 @@ export const ComposerTaskChips = forwardRef<
               type="button"
               className={styles.chip}
               data-kind={group.kind}
-              aria-expanded={multiple ? openGroup === group : undefined}
+              data-waiting={waiting ? '' : undefined}
+              aria-expanded={
+                multiple
+                  ? openGroup === group
+                  : isTaskOpen
+                    ? isTaskOpen(group.tasks[0])
+                    : undefined
+              }
               aria-haspopup={multiple ? 'true' : undefined}
               title={
                 multiple ? undefined : taskLabel(group.tasks[0]) || undefined
               }
+              onMouseDown={(event) => {
+                if (openGroup) event.preventDefault();
+              }}
               onClick={() => activateChip(group)}
               onKeyDown={(event) => handleChipKeyDown(event, index)}
             >
               <span className={styles.state} aria-hidden="true">
-                {moving ? (
+                {waiting ? (
+                  <CircleAlertIcon />
+                ) : moving ? (
                   <LoaderCircleIcon className={styles.spinning} />
                 ) : (
                   <CirclePauseIcon />
@@ -408,6 +504,7 @@ export const ComposerTaskChips = forwardRef<
               {chip}
               {!multiple &&
                 onExplainTask &&
+                isChildTask(group.tasks[0]) &&
                 explainButton(
                   group.tasks[0],
                   `${styles.explainButton} ${styles.chipExplain}`,

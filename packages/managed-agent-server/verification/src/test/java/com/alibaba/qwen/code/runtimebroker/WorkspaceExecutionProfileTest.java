@@ -27,6 +27,14 @@ class WorkspaceExecutionProfileTest {
     }
 
     @Test
+    void externalShellDigestIsTheCanonicalCapabilityHash() {
+        assertEquals("sha256:" + DigestUtils.sha256Hex(
+                        WorkspaceExecutionProfile.EXTERNAL_SHELL_PROFILE
+                                .getBytes(StandardCharsets.UTF_8)),
+                WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST);
+    }
+
+    @Test
     void terminalDigestIsAMeasuredWorkspaceCapability() {
         assertTrue(WorkspaceExecutionProfile.admitsCapabilityDigest(
                 WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST));

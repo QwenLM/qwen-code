@@ -1,22 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
-import {
-  DaemonHttpError,
-  type DaemonSessionArtifact,
-} from '@qwen-code/sdk/daemon';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   useConnection,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
-import { artifactPreviewDocument } from '../artifacts/artifactUtils';
+import {
+  artifactPreviewDocument,
+  isArtifactSnapshotUnavailableError,
+  isSessionNotFoundArtifactError,
+} from '../artifacts/artifactUtils';
 import { Button } from '../ui/button';
 
 export function SavedWebPreview({
   artifact,
   sourceSessionId,
+  onSessionNotFound,
 }: {
   artifact: DaemonSessionArtifact;
   sourceSessionId?: string;
+  onSessionNotFound?: () => void;
 }) {
   const { t } = useI18n();
   const { client } = useWorkspace();
@@ -24,6 +27,8 @@ export function SavedWebPreview({
   const sessionId = sourceSessionId ?? connection.sessionId;
   const clientId =
     sessionId === connection.sessionId ? connection.clientId : undefined;
+  const onSessionNotFoundRef = useRef(onSessionNotFound);
+  onSessionNotFoundRef.current = onSessionNotFound;
   const [attempt, setAttempt] = useState(0);
   const [frameRevision, setFrameRevision] = useState(0);
   const [result, setResult] = useState<{
@@ -48,19 +53,20 @@ export function SavedWebPreview({
           if (!controller.signal.aborted) setResult({ key, html });
         },
         (error: unknown) => {
-          if (!controller.signal.aborted)
-            setResult({
-              key,
-              failed:
-                error instanceof DaemonHttpError &&
-                error.status === 404 &&
-                typeof error.body === 'object' &&
-                error.body !== null &&
-                'error' in error.body &&
-                error.body.error === 'artifact_snapshot_unavailable'
-                  ? 'unavailable'
-                  : 'request',
-            });
+          if (controller.signal.aborted) return;
+          if (
+            isSessionNotFoundArtifactError(error) &&
+            onSessionNotFoundRef.current
+          ) {
+            onSessionNotFoundRef.current();
+            return;
+          }
+          setResult({
+            key,
+            failed: isArtifactSnapshotUnavailableError(error)
+              ? 'unavailable'
+              : 'request',
+          });
         },
       );
     return () => controller.abort();

@@ -410,6 +410,7 @@ function isStrictlyValidSchema(schema: object): boolean {
 export async function convertLlmToolsToOpenAI(
   llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
+  openUndeclaredObjects = false,
 ): Promise<OpenAI.Chat.ChatCompletionTool[]> {
   const openAITools: OpenAI.Chat.ChatCompletionTool[] = [];
 
@@ -484,6 +485,7 @@ export async function convertLlmToolsToOpenAI(
             parameters = relaxSchemaForFunctionCalling(
               parameters,
               canValidateLocally,
+              openUndeclaredObjects,
             );
             if (
               canValidateLocally &&

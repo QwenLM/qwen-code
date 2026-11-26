@@ -2,6 +2,8 @@
 
 [English](2026-10-25-managed-harness-kubernetes-qualification.md) | [简体中文](2026-10-25-managed-harness-kubernetes-qualification.zh-CN.md)
 
+> **Archived.** The qualification tools described here operated on the Kubernetes Harness pool deployment retired by [#17415](https://github.com/QwenLM/qwen-code/pull/17415) and [#17427](https://github.com/QwenLM/qwen-code/issues/17427); the scripts, templates, and their tests now live under `packages/sdk-java/managed-kubernetes-archive/`. This document is preserved as the historical design record.
+
 ## Problem and current state
 
 The shared Harness pool is implemented, but its deployment templates require manual image, identity, settings and scheduling edits. The stock Java image contains the Server JAR without Node or the complete CLI required by local-process Runtime workers. Existing process failover tests start their own Java and database processes; they cannot qualify an external Kubernetes pool. Passing those tests does not prove public multi-user authorization, physical tool effects or event reconnection on two Pods.

@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   CircleDashedIcon,
@@ -65,6 +65,12 @@ interface WorkspaceSelectorProps {
   onSelectStandalone?: () => void;
   onCreateScratch: () => void;
   onOpenExistingFolder: () => void;
+  /** Touch activation can otherwise release over a newly opened option. */
+  contentSide?: 'top' | 'bottom';
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  newWorkspaceOpen?: boolean;
+  onNewWorkspaceOpenChange?: (open: boolean) => void;
 }
 
 /** Radio-group value that stands for the projectless target. */
@@ -91,11 +97,42 @@ export function WorkspaceSelector({
   onSelectStandalone,
   onCreateScratch,
   onOpenExistingFolder,
+  contentSide = 'top',
+  open: openProp,
+  onOpenChange,
+  newWorkspaceOpen: newWorkspaceOpenProp,
+  onNewWorkspaceOpenChange,
 }: WorkspaceSelectorProps) {
   const { t } = useI18n();
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [internalMenuOpen, setInternalMenuOpen] = useState(false);
+  const menuOpen = openProp ?? internalMenuOpen;
+  const setMenuOpen = (value: boolean) => {
+    setInternalMenuOpen(value);
+    onOpenChange?.(value);
+  };
+  const [internalNewWorkspaceOpen, setInternalNewWorkspaceOpen] =
+    useState(false);
+  const newWorkspaceOpen = newWorkspaceOpenProp ?? internalNewWorkspaceOpen;
+  const setNewWorkspaceOpen = (value: boolean) => {
+    setInternalNewWorkspaceOpen(value);
+    onNewWorkspaceOpenChange?.(value);
+  };
   const [tooltipOpen, setTooltipOpen] = useState(false);
-  const menuOpenRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const subMountSettledRef = useRef(false);
+  useEffect(() => {
+    let active = true;
+    subMountSettledRef.current = false;
+    queueMicrotask(() => {
+      if (active) subMountSettledRef.current = true;
+    });
+    return () => {
+      active = false;
+      subMountSettledRef.current = false;
+    };
+  }, []);
+  const menuOpenRef = useRef(menuOpen);
+  menuOpenRef.current = menuOpen;
   const suppressTooltipRef = useRef(false);
   const pointerDismissedRef = useRef(false);
   const selected = workspaces.find((workspace) =>
@@ -143,6 +180,7 @@ export function WorkspaceSelector({
           if (open) pointerDismissedRef.current = false;
           menuOpenRef.current = open;
           setMenuOpen(open);
+          if (!open) setNewWorkspaceOpen(false);
           suppressTooltipRef.current = true;
           setTooltipOpen(false);
         }}
@@ -159,6 +197,7 @@ export function WorkspaceSelector({
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild disabled={disabled || busy}>
               <button
+                ref={triggerRef}
                 type="button"
                 className={className}
                 aria-label={t('sidebar.workspaceSelectLabel')}
@@ -189,7 +228,7 @@ export function WorkspaceSelector({
           <TooltipContent side="top">{triggerLabel}</TooltipContent>
         </Tooltip>
         <DropdownMenuContent
-          side="top"
+          side={contentSide}
           align="start"
           className="min-w-56"
           onPointerDownCapture={() => {
@@ -296,12 +335,41 @@ export function WorkspaceSelector({
           {canCreate && (
             <>
               <DropdownMenuSeparator />
-              <DropdownMenuSub>
+              <DropdownMenuSub
+                open={newWorkspaceOpen}
+                onOpenChange={(next) => {
+                  // Radix MenuSub fires onOpenChange(false) from its passive
+                  // cleanup on both responsive unmount and StrictMode's
+                  // synchronous mount check; ignore teardown while preserving
+                  // all interactive closes once mounted.
+                  if (
+                    !next &&
+                    (!triggerRef.current?.isConnected ||
+                      !subMountSettledRef.current)
+                  ) {
+                    return;
+                  }
+                  setNewWorkspaceOpen(next);
+                }}
+              >
                 <DropdownMenuSubTrigger disabled={busy}>
                   <FolderPlusIcon />
                   {t('sidebar.newWorkspace')}
                 </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent
+                  onFocusOutside={(event) => {
+                    // Remounting the open root menu auto-focuses its container;
+                    // ignore that focus so the open submenu stays open across
+                    // responsive tier switches while still closing on other
+                    // items or outside interactions.
+                    if (
+                      event.target instanceof Element &&
+                      event.target.getAttribute('data-slot') ===
+                        'dropdown-menu-content'
+                    ) {
+                      event.preventDefault();
+                    }
+                  }}
                   onPointerDownCapture={() => {
                     pointerDismissedRef.current = true;
                   }}

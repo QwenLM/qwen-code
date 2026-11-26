@@ -774,9 +774,13 @@ export interface CreateSubSessionInfo {
    */
   workspace?: string;
   workspaceGeneration?: string;
+  /** Revalidate YOLO because the calling tool skipped one-time approval. */
+  requiresYolo?: true;
+  /** Revalidate AUTO because the authorization was automatic, not human. */
+  requiresAutoMode?: true;
   /**
-   * A sub-session the caller created earlier, in `workspace`, to send the
-   * prompt to instead of creating one. Never set for scheduled-task runs.
+   * An existing session in `workspace` to send the prompt to.
+   * Never set for scheduled-task runs.
    */
   sessionId?: string;
   /** Optional immutable creator attribution for the fresh session. */

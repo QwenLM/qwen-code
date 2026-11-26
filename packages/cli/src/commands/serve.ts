@@ -281,6 +281,7 @@ interface ServeArgs {
   token?: string;
   'max-sessions'?: number;
   'max-total-sessions'?: number;
+  'load-admission': boolean;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'max-sse-connections'?: number;
@@ -418,6 +419,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Non-negative integer cap on concurrent live sessions across all ' +
           'workspace runtimes. Set to 0 to disable.',
       })
+      .option('load-admission', {
+        type: 'boolean',
+        default: true,
+        description:
+          'Refuse new sessions with 503 system_overloaded while host load ' +
+          'or daemon event-loop lag stays saturated. Live sessions and the ' +
+          'control plane are never gated. Use --no-load-admission to disable.',
+      })
       .option('max-pending-prompts-per-session', {
         type: 'number',
         default: 5,
@@ -460,10 +469,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('max-sse-connections', {
         type: 'number',
         description:
-          'Admission cap on concurrent SSE streams (GET /session/:id/events). ' +
+          'Admission cap on concurrent long-lived streams: every SSE surface ' +
+          '(session events, agent session-events, generation, artifact-library, ' +
+          'hosted-harness events) plus ACP SSE/WebSocket. ' +
           'Defaults to 80% of --max-connections so short requests (/health, static ' +
           'assets) keep listener headroom; streams at the cap get 503 + Retry-After ' +
-          'instead of a silent socket close. Explicit values floor to at least one ' +
+          'instead of a silent socket close. Pairing listeners (local-control / ' +
+          'remote-access) additionally clamp at 80% of their own 64-socket budget. ' +
+          'Explicit values floor to at least one ' +
           'stream and clamp to that headroom ceiling. Set to 0 to disable.',
       })
       .option('require-auth', {
@@ -1239,6 +1252,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['max-total-sessions'] !== undefined
           ? { maxTotalSessions: argv['max-total-sessions'] }
           : {}),
+        loadAdmission: argv['load-admission'],
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         ...(argv['max-sse-connections'] !== undefined
