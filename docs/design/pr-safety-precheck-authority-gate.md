@@ -95,7 +95,9 @@ instructions, yields `protected_path:authority_surface`.
 Directory prefixes: `.github/`, `.agents/`, `scripts/`, `.qwen/skills/`,
 `.qwen/commands/`, `.qwen/agents/`, `.qwen/workflows/`, `.qwen/extensions/`,
 `.qwen/scripts/`, `.qwen/rules/`, `.qwen/hooks/`, `.qwen/fork-profiles/`,
-`patches/`, `eslint-rules/`.
+`patches/`, `eslint-rules/`. This is an incomplete initial surface, not an
+inventory of every executable lifecycle target; installed git hooks and package
+lifecycle script targets are not additionally enumerated here.
 
 File names at any depth, because context files load hierarchically:
 `AGENTS.md`, `QWEN.md`, `QWEN.local.md`, `CLAUDE.md`, `package.json`,
@@ -103,7 +105,7 @@ File names at any depth, because context files load hierarchically:
 `esbuild.config.js`, `vitest.config.ts`, `.npmrc`, `.pnpmfile.mjs`,
 `.mcp.json`. Settings variants follow the repository's own self-modification
 glob at any depth: `.qwen/settings.json` and `.qwen/settings.<variant>.json`.
-Exact paths: `.qwen/output-language.md`.
+Exact path: `.qwen/output-language.md`.
 
 Paths are derived from the diff, the only path source the workflow supplies.
 Side headers (`---` and `+++`) are recognized only outside hunks, so example
@@ -118,7 +120,8 @@ added as `.github/workflows/evil<TAB>.yml` returned `allow_triage`.
 
 ### 2. Ambient credential sources
 
-The source itself is the signal; no sink pairing is required.
+For the recognized forms, the source is a review signal; no sink pairing is
+required. Unrecognized forms are not certified safe.
 
 | Reason code                          | Matches                                                                                                                                                                                                                                                                                                                                              |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -142,6 +145,20 @@ spelling after another cannot establish safety and repeatedly changes what count
 as ordinary prose, so this PR does not keep widening those grammars. The gaps are
 left for the maintainer reading the reason codes rather than presented as closed.
 This is a disclosure of exposure, not a completed runner or egress control.
+
+Host normalization applies only to explicit `http(s)://` URLs; a numeric host
+token without a scheme is outside the claim. The exact `.credentials` basename
+does not include the runner's `.credentials_rsaparams` private key, or other
+credential filenames. Likewise, this PR does not infer every installed git hook
+or workspace lifecycle target from the manifests. Those inputs can still be
+admitted unless another rule fires; removing their execution authority requires
+controls in the runner environment, not further literal additions here.
+
+The command-position anchors also exclude reserved-word positions such as `then`
+and `do`, a leading assignment prefix such as `FOO=1 env`, and a trailing `#`
+comment after a dump. The shell `-c` wrapper does not recognize an input redirect
+after its dump command. These forms are not repaired by this change and remain
+admitted unless a different rule fires.
 
 Two boundaries keep the rules from gating ordinary work. The dump commands share
 one terminator lookahead, applied once **outside** their alternation in both the
@@ -317,7 +334,7 @@ changed at this head.
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 173 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 176 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout

@@ -77,7 +77,8 @@ const PROTECTED_FILE_PATHS = new Set([
 // Credentials the runner holds ambiently, reachable without naming a single
 // GitHub secret. #18362 read these from a CI script and #18364 asked the agent
 // to read them; neither payload names `secrets.*`, so the sink pairs above
-// cannot see them. The source itself is the signal.
+// cannot see them. Recognized source forms are warning signals, not a complete
+// inventory of the credentials exposed to a runner.
 const AMBIENT_CREDENTIAL_PATTERNS = [
   [
     'ambient_credential:cloud_metadata',
@@ -94,7 +95,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   // signals documented in the design, not acceptance claims of this rule.
   [
     'ambient_credential:env_dump',
-    /(?:^[ \t]*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?|[;&|`]|\$\()\s*\(?\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&<>)]|\d*[<>]|$)|["'](?=\s*(?:[|;&<>)]|\d*[<>]|$)))|(?:^[ \t]*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?|[;&|`]|\$\()\s*\(?\s*printenv\b|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*(?:=\S+)?\s+)*-[a-z]*c[a-z]*\s*["']?\s*(?:printenv\b|(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$)))/m,
+    /(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})?|[;&|`]|\$\()[ \t]{0,64}\(?[ \t]{0,64}(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})?|[;&|`]|\$\()[ \t]{0,64}\(?[ \t]{0,64}printenv\b|\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{0,64}["']?[ \t]{0,64}(?:printenv\b|(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&>]|["']|$)))/m,
   ],
   // `.credentials` needs a boundary that admits every spelling of a file read
   // — bare, quoted (including a markdown code span's backtick), or after a
@@ -108,6 +109,10 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
     /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'`])\.credentials\b/,
   ],
 ];
+
+// Restores the historical process-substitution regression without restoring a
+// bare-parenthesis anchor that would hold ordinary function calls.
+const CAT_ENV_SUBSTITUTION = /\bcat[ \t]{1,64}[<>]\([ \t]{0,64}env\b/;
 
 const METADATA_HOSTNAMES = new Set([
   '100.100.100.200',
@@ -143,6 +148,7 @@ function hasCloudMetadataHost(text) {
   return false;
 }
 
+// Secret-shaped strings are signals in both PR prose and added diff content.
 const SECRET_VALUE_PATTERNS = [
   ['secret_value:private_key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   [
@@ -312,6 +318,9 @@ export function assessPullRequestSafety({
   checkPatterns(prText, SECRET_VALUE_PATTERNS, reasons);
   checkPatterns(prText, PROMPT_INJECTION_PATTERNS, reasons);
   checkPatterns(prText, AMBIENT_CREDENTIAL_PATTERNS, reasons);
+  if (CAT_ENV_SUBSTITUTION.test(prText)) {
+    addReason(reasons, 'ambient_credential:env_dump');
+  }
   if (hasCloudMetadataHost(prText)) {
     addReason(reasons, 'ambient_credential:cloud_metadata');
   }

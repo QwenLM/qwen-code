@@ -623,6 +623,16 @@ for (const [label, payload, code] of [
     'ambient_credential:credential_file',
   ],
   [
+    'process substitution using cat',
+    'cat <(env)',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'output process substitution using cat',
+    'cat >(env)',
+    'ambient_credential:env_dump',
+  ],
+  [
     'printenv with an argument inside a wrapper',
     "sh -c 'printenv CI_BOT_PAT'",
     'ambient_credential:env_dump',
@@ -710,6 +720,21 @@ for (const payload of ['1. env', '- env']) {
     assert.ok(result.reason_codes.includes('ambient_credential:env_dump'));
   });
 }
+
+test('handles a padded whitespace run without unbounded regex backtracking', () => {
+  const started = Date.now();
+  const result = assessPullRequestSafety({
+    pr: pr({ title: '', body: '' }),
+    diff: `+${' '.repeat(8000)}\n`,
+  });
+  const elapsed = Date.now() - started;
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.ok(
+    elapsed < 2000,
+    `8000 spaces took ${elapsed}ms; a bounded assess should finish within 2000ms`,
+  );
+});
 
 for (const [label, payload] of [
   ['ordinary property access', 'rows.map((env) => env.id);'],
