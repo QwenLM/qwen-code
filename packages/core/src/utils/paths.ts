@@ -10,6 +10,7 @@ import os from 'node:os';
 import * as crypto from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { isNodeError } from './errors.js';
+import { getShellConfiguration } from './shell-utils.js';
 
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -356,6 +357,51 @@ export function unescapePath(filePath: string): string {
     return filePath;
   }
   return unescapeShellSpecials(filePath);
+}
+
+/**
+ * Converts a POSIX-style path produced by an MSYS shell (Git Bash) on Windows
+ * into the real Windows path. A file the shell wrote as `/tmp/report.json`
+ * lives in the OS temp directory, and `/c/temp` is `C:\temp`; without this
+ * conversion the file tools answer "not found" for a file that exists.
+ *
+ * No-op on other platforms and for paths that are not POSIX-absolute.
+ */
+export function toWindowsPath(filePath: string): string {
+  if (os.platform() !== 'win32' || !filePath.startsWith('/')) {
+    return filePath;
+  }
+  if (filePath === '/tmp') {
+    return os.tmpdir();
+  }
+  if (filePath.startsWith('/tmp/')) {
+    return path.join(os.tmpdir(), filePath.slice('/tmp/'.length));
+  }
+  const drive = /^\/([a-zA-Z])(\/|$)/.exec(filePath);
+  if (drive) {
+    const rest = filePath.slice(2).replace(/\//g, '\\');
+    return `${drive[1].toUpperCase()}:${rest || '\\'}`;
+  }
+  return filePath;
+}
+
+/**
+ * Normalization applied by the file tools to every incoming path: shell
+ * unescaping, then the MSYS-to-Windows conversion, so a path that came from
+ * a shell command resolves to the place the shell actually wrote it.
+ *
+ * The MSYS-to-Windows conversion is shell-conditional, not platform-conditional:
+ * it retargets `/tmp` and `/c/...` to their Windows meaning, which is correct
+ * only under a bash/MSYS session. Under cmd.exe or PowerShell those spellings
+ * mean the drive-rooted path, so converting them would silently read or write
+ * the wrong file. Unescaping shell specials is always safe, so it stays applied
+ * regardless of shell.
+ */
+export function normalizeFilePath(filePath: string): string {
+  const unescaped = unescapePath(filePath);
+  return getShellConfiguration().shell === 'bash'
+    ? toWindowsPath(unescaped)
+    : unescaped;
 }
 
 /**
