@@ -190,17 +190,25 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 - **两个信号。** 主机 load average 捕捉整机饱和，包括 daemon 之外进程的
   压力。事件循环延迟直接捕捉 daemon 被饿死，且在 `os.loadavg()` 恒为零的
   Windows 上仍然有效。
-- **CPU 信号需要佐证。** Linux 与 macOS 的 load average 都计入不可中断
-  IO 等待，因此原始 ratio 闸门会在 IO 风暴期间、CPU 与 daemon 循环都空闲
-  时拒绝新建。2026-11-26，一次重启后的 Spotlight 索引风暴让一台 10 核 Mac
-  的 load ratio 峰值达 10.8，而 CPU 63% 空闲、daemon p99 延迟 21–30 ms、
-  零 swap；闸门拒绝会话加载约 13 分钟，只在短暂的负荷波谷打开过。因此
-  CPU 信号仅在延迟佐证（p99 ≥ 250 ms）——daemon 已感受到压力——时进入，
-  并在负荷降到退出 ratio 以下、或循环恢复健康（p99 < 100 ms）时退出。
-  主机繁忙本身不再拒绝一个健康的 daemon。保护仍然成立：本闸门防范的卡死
-  定义上就是 daemon 被饿死，佐证后的 CPU 信号比纯延迟信号更早捕捉它
-  （250 ms 对 1000 ms）；纯延迟信号与观测缺口锁存仍覆盖硬卡顿、Windows
-  与容器饥饿。
+- **CPU 信号需要佐证。** 主机 load average 在不同系统上以不同方式误读
+  daemon 承受力：Linux 计入不可中断 IO 等待，IO 风暴在 CPU 空闲时仍显示
+  高负荷；macOS（XNU）采样可运行线程数，但其衰减平均在启动或索引的 CPU
+  突发后仍居高不下，而此时 CPU 与 daemon 循环已空闲。2026-11-26，一次
+  重启后的 Spotlight 索引风暴让一台 10 核 Mac 的 load ratio 峰值达 10.8，
+  而 CPU 63% 空闲、daemon p99 延迟 21–30 ms、零 swap；闸门拒绝会话加载
+  约 13 分钟，只在短暂的负荷波谷打开过。因此 CPU 信号仅在延迟佐证
+  （p99 ≥ 250 ms）——daemon 已感受到压力——时进入，并在负荷降到退出
+  ratio 以下、或循环恢复健康（p99 < 100 ms）时退出。主机繁忙本身不再
+  拒绝一个健康的 daemon。保护仍然成立：本闸门防范的卡死定义上就是 daemon
+  被饿死，佐证后的 CPU 信号比纯延迟信号更早捕捉它（250 ms 对 1000 ms）；
+  纯延迟信号与观测缺口锁存仍覆盖硬卡顿、Windows 与容器饥饿。
+- **佐证带的不对称是刻意滞回。** CPU 信号在 p99 ≥ 250 ms 佐证进入，但
+  经延迟退出只在低于 100 ms 时成立，因此循环在 [100, 250) ms 区间徘徊时
+  保持当前状态——既不单独进入也不单独退出。这与 ratio（2.0/1.0）、延迟
+  （1000/250 ms）信号用的是同一套进入/退出滞回；把退出侧收紧到 250 ms
+  会消除该区间，重新引入本次修订要消除的波谷抖动。低于 100 ms 按延迟
+  信号自身的度量已是健康，故在此释放并非「有压力时释放」；达到或超过
+  1000 ms 的循环则由独立延迟信号保持触闸，与 CPU 信号无关。
 - **观测缺口锁存。** 事件循环停摆时 tick 不运行，缓存判定会在 lag 信号最该起作用时保持健康。监视器在最后一次 tick 的单调年龄超过三个间隔时锁存 `observation_gap`，以同一 503 家族拒绝；锁存仅在三次按时健康 tick 后清除，跳过的间隔不算健康读数，冷启动（尚无 tick）保持 fail-open。新鲜度时钟用单调钟（`performance.now()`）而非 `Date.now()`，NTP 跳变与挂起不会伪造缺口。
 - **比值分子分母同为主机作用域。** `/proc/loadavg` 不做命名空间隔离，而
   `os.availableParallelism()` 遵守 cgroup 配额与亲和性掩码；两者相除曾让
@@ -227,10 +235,11 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
   可能在自身空闲时看到主机高负荷；2026-11-26 修订后仅凭这一点不再触发 CPU
   信号（空闲容器的循环保持健康）。延迟信号是 daemon 本地的，不受影响；运维
   仍可 `--no-load-admission`。cgroup PSI 压力是后续工作。
-- **IO wait（Linux 与 macOS）：** load average 计入不可中断 IO 等待，
-  IO 密集主机在 CPU 空闲时仍显示高负荷。2026-11-26 修订后 CPU 信号需要
-  延迟佐证，纯 IO 风暴（索引、备份）在 daemon 循环健康时不再触闸；同时
-  饿死 daemon 的风暴仍会经延迟信号触闸。
+- **load average 不等于 daemon 承受力（Linux IO wait、macOS 可运行线程
+  平均）：** Linux load average 计入不可中断 IO 等待，IO 密集主机在 CPU
+  空闲时仍显示高负荷；macOS 平均可运行线程数，其衰减平均在 CPU 突发后
+  仍会滞留。2026-11-26 修订后 CPU 信号需要延迟佐证，这两种形状在 daemon
+  循环健康时都不再触闸；同时饿死 daemon 的风暴仍会经延迟信号触闸。
 - **误报会挡住新建。** 拒绝可见（toast、status issue、daemon 日志）且可逆
   （退出开关、负荷消退）。闸门绝不触碰已放行的工作。
 - **开销：** 多一个直方图与一个 2 秒定时器，与现有 5 秒 metrics sampler

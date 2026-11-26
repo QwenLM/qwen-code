@@ -273,19 +273,23 @@ describe('createLoadAdmissionMonitor', () => {
     monitor.dispose();
   });
 
+  it('pins the corroboration thresholds to the documented contract', () => {
+    // The user-facing docs promise 250 ms enter / 100 ms exit; pin the
+    // exported constants so a drift fails here rather than silently moving
+    // the boundary cells below along with the implementation.
+    expect(LOAD_CORROBORATION_ENTER_MS).toBe(250);
+    expect(LOAD_CORROBORATION_EXIT_MS).toBe(100);
+  });
+
   it('engages only when the lag corroborates the high ratio', () => {
     const monitor = makeMonitor();
-    signals = {
-      loadRatio: LOAD_RATIO_ENTER + 1,
-      eventLoopLagP99Ms: LOAD_CORROBORATION_ENTER_MS - 1,
-    };
+    // Literal 249/250 ms pin the documented enter boundary independently
+    // of the exported constant.
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 249 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 2);
     expect(monitor.snapshot().overloaded).toBe(false);
 
-    signals = {
-      loadRatio: LOAD_RATIO_ENTER + 1,
-      eventLoopLagP99Ms: LOAD_CORROBORATION_ENTER_MS,
-    };
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 250 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
     expect(monitor.snapshot().overloaded).toBe(false);
     tick(1);
@@ -312,20 +316,47 @@ describe('createLoadAdmissionMonitor', () => {
 
   it('releases when the loop turns healthy even while host load stays high', () => {
     const monitor = makeMonitor();
+    // 300 ms corroborates the CPU enter but is far below the lag signal's
+    // 1000 ms enter, so only cpu_load is armed here — the release below is
+    // the corroboration exit path, not the lag signal draining.
     signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
-    expect(monitor.snapshot().overloaded).toBe(true);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: true,
+      reason: 'cpu_load',
+    });
 
-    signals = {
-      loadRatio: LOAD_RATIO_ENTER + 1,
-      eventLoopLagP99Ms: LOAD_CORROBORATION_EXIT_MS - 1,
-    };
+    // Literal 99 ms pins the documented exit boundary.
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 99 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
     expect(monitor.snapshot().overloaded).toBe(true);
     tick(1);
     expect(monitor.snapshot()).toMatchObject({
       overloaded: false,
       reason: null,
+    });
+    monitor.dispose();
+  });
+
+  it('releases a cpu_load-only gate at 50 ms with the ratio still above enter', () => {
+    // Arm at 260 ms: corroborates the CPU enter (>= 250) yet stays inside
+    // the lag signal's inactive band (< 1000), so the lag signal never
+    // engages. Dropping to 50 ms must release via the corroboration exit
+    // alone while the ratio remains above 2.0.
+    const monitor = makeMonitor();
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 260 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: true,
+      reason: 'cpu_load',
+    });
+
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 50 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: false,
+      reason: null,
+      loadRatio: LOAD_RATIO_ENTER + 1,
     });
     monitor.dispose();
   });
@@ -365,12 +396,9 @@ describe('createLoadAdmissionMonitor', () => {
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
     expect(monitor.snapshot().overloaded).toBe(true);
 
-    // Exactly LOAD_CORROBORATION_EXIT_MS is inside the hold band: the
-    // strict `<` matters, a `<=` here would release the gate early.
-    signals = {
-      loadRatio: LOAD_RATIO_ENTER + 1,
-      eventLoopLagP99Ms: LOAD_CORROBORATION_EXIT_MS,
-    };
+    // Literal 100 ms is inside the hold band: the strict `<` matters, a
+    // `<=` here would release the gate early.
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 100 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 2);
     expect(monitor.snapshot()).toMatchObject({
       overloaded: true,
@@ -388,7 +416,7 @@ describe('createLoadAdmissionMonitor', () => {
     for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES * 2; i++) {
       signals = {
         loadRatio: LOAD_RATIO_ENTER + 1,
-        eventLoopLagP99Ms: i % 2 === 0 ? LOAD_CORROBORATION_EXIT_MS - 1 : 300,
+        eventLoopLagP99Ms: i % 2 === 0 ? 99 : 300,
       };
       tick(1);
       expect(monitor.snapshot().overloaded).toBe(true);

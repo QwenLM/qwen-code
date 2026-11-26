@@ -222,21 +222,33 @@ as today.
   including pressure from processes outside the daemon. Event-loop lag
   captures daemon starvation directly, and still works on Windows where
   `os.loadavg()` is always zero.
-- **Corroborated CPU signal.** Load average counts uninterruptible IO wait
-  on both Linux and macOS, so a raw ratio gate refuses creations during IO
-  storms while CPUs and the daemon loop are idle. On 2026-11-26 a
-  post-reboot Spotlight indexing storm held a 10-core Mac at load ratio
-  10.8 (peak) with CPU 63% idle, daemon p99 lag 21–30 ms, and zero swap;
-  the gate refused session loads for ~13 minutes and flapped open only in
-  brief load troughs. The CPU signal therefore engages only when the lag
-  corroborates it (p99 ≥ 250 ms) — the daemon is already feeling the
-  pressure — and releases when either the load drains below its exit ratio
-  or the loop is healthy again (p99 < 100 ms). Host busyness alone no longer
-  refuses a healthy daemon. Protection is preserved: the freeze this gate
-  guards against is daemon starvation by definition, which the corroborated
-  CPU signal catches earlier than the lag-alone signal (250 ms vs 1000 ms),
-  and the lag-alone signal plus the observation-gap latch still cover hard
-  stalls, Windows, and container starvation.
+- **Corroborated CPU signal.** Host load average misreads daemon capacity
+  in different ways per OS: Linux counts uninterruptible IO wait, so an IO
+  storm shows high load with idle CPUs; macOS (XNU) samples runnable
+  threads, but its decaying average still rides high after a boot or
+  indexing CPU burst while CPUs and the daemon loop have gone idle. On
+  2026-11-26 a post-reboot Spotlight indexing storm held a 10-core Mac at
+  load ratio 10.8 (peak) with CPU 63% idle, daemon p99 lag 21–30 ms, and
+  zero swap; the gate refused session loads for ~13 minutes and flapped
+  open only in brief load troughs. The CPU signal therefore engages only
+  when the lag corroborates it (p99 ≥ 250 ms) — the daemon is already
+  feeling the pressure — and releases when either the load drains below
+  its exit ratio or the loop is healthy again (p99 < 100 ms). Host busyness
+  alone no longer refuses a healthy daemon. Protection is preserved: the
+  freeze this gate guards against is daemon starvation by definition, which
+  the corroborated CPU signal catches earlier than the lag-alone signal
+  (250 ms vs 1000 ms), and the lag-alone signal plus the observation-gap
+  latch still cover hard stalls, Windows, and container starvation.
+- **Asymmetric corroboration band is deliberate hysteresis.** The CPU
+  signal corroborates enter at p99 ≥ 250 ms but releases via lag only below
+  100 ms, so a loop hovering in [100, 250) ms holds whatever state it is
+  in — neither engages nor releases on its own. This is the same
+  enter/exit hysteresis the ratio (2.0/1.0) and lag (1000/250 ms) signals
+  use; collapsing the release side to 250 ms would remove the band and
+  reintroduce the trough-flapping the revision eliminates. A loop below
+  100 ms is healthy by the lag signal's own measure, so releasing there is
+  not "release while pressured"; a loop at or above 1000 ms is held by the
+  independent lag signal regardless of the CPU signal.
 - **Observation-gap latch.** A stalled event loop runs no ticks, so the cached verdict would stay healthy exactly when the lag signal matters. The monitor latches `observation_gap` when the monotonic age of the last tick exceeds three intervals and refuses through the same 503 family; the latch clears only after three timely healthy ticks, skipped intervals never count as healthy readings, and cold start (no tick yet) stays fail-open. The freshness clock is monotonic (`performance.now()`), not `Date.now()`, so NTP steps and suspends cannot fake a gap.
 - **Host scope on both sides of the ratio.** `/proc/loadavg` is not
   namespaced, while `os.availableParallelism()` honours cgroup quota and
@@ -273,12 +285,13 @@ as today.
   container's loop stays healthy). The lag signal is daemon-local and
   unaffected; operators can still `--no-load-admission`. cgroup PSI pressure
   is a follow-up.
-- **IO wait (Linux and macOS):** load average counts uninterruptible IO
-  wait, so an IO-heavy host shows high load with idle CPUs. Since the
-  2026-11-26 revision the CPU signal requires lag corroboration, so pure IO
-  storms (indexing, backups) no longer engage it while the daemon loop is
-  healthy; a storm that also starves the daemon still engages via the lag
-  signal.
+- **Load average is not daemon capacity (Linux IO wait, macOS runnable
+  averaging):** Linux load average counts uninterruptible IO wait, so an
+  IO-heavy host shows high load with idle CPUs; macOS averages runnable
+  threads, whose decaying average lingers after a CPU burst. Since the
+  2026-11-26 revision the CPU signal requires lag corroboration, so neither
+  shape engages it while the daemon loop is healthy; a storm that also
+  starves the daemon still engages via the lag signal.
 - **False positives block creation.** The refusal is visible (toast, status
   issue, daemon log) and reversible (opt-out, load subsiding). The gate never
   touches work already admitted.

@@ -161,10 +161,13 @@ export function createLoadAdmissionMonitor(
     lastTickMono = mono;
     latest = readSignals!();
     sampledAtMs = Date.now();
-    // loadavg counts uninterruptible IO wait on Linux and macOS: an
-    // indexing storm otherwise refuses creations while CPUs and this loop
-    // are idle (2026-11-26: ratio 10.8, 63% idle CPU, p99 21–30 ms, ~13 min
-    // of false refusals). Engage only when the loop already feels the
+    // Linux loadavg counts uninterruptible IO wait, so an IO storm refuses
+    // creations with idle CPUs; macOS (XNU) loadavg samples runnable
+    // threads, but its decaying average still rides high after a boot or
+    // indexing CPU burst while CPUs and this loop have gone idle
+    // (2026-11-26 Spotlight storm: ratio 10.8, 63% idle CPU, p99 21–30 ms,
+    // ~13 min of false refusals). Either way host load alone misreads
+    // daemon capacity: engage only when the loop already feels the
     // pressure; release once it is healthy again, even if host load stays
     // high.
     advanceSignal(cpu, latest.loadRatio, LOAD_RATIO_ENTER, LOAD_RATIO_EXIT, {
