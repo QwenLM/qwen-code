@@ -45,7 +45,20 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   clearScreen: vi.fn(),
 }));
 
+// A failed update must leave a non-zero exit status, and the command calls
+// process.exit(1) in both catch paths. Spy once for the whole file so a handler
+// executed by yargs (parser.parse(...) runs it) cannot kill the worker.
+const exitSpy = vi
+  .spyOn(process, 'exit')
+  .mockImplementation((() => undefined) as never);
+
 describe('extensions update command', () => {
+  beforeEach(() => {
+    mockGetLoadedExtensions.mockReturnValue([]);
+    mockCheckForAllExtensionUpdates.mockResolvedValue(undefined);
+    mockUpdateAllUpdatableExtensions.mockResolvedValue([]);
+  });
+
   it('should fail if neither name nor --all is provided', () => {
     const validationParser = yargs([])
       .command(updateCommand)
@@ -120,6 +133,29 @@ describe('handleUpdate', () => {
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         'Extension "test-extension" is already up to date.',
       );
+    });
+
+    it('should exit 1 when the update check resolves to an error (#15043)', async () => {
+      const mockExtension = {
+        name: 'test-extension',
+        installMetadata: { source: 'test' },
+      };
+      mockGetLoadedExtensions.mockReturnValueOnce([mockExtension]);
+      mockCheckForExtensionUpdate.mockResolvedValueOnce(
+        ExtensionUpdateState.ERROR,
+      );
+      exitSpy.mockClear();
+
+      await handleUpdate({ name: 'test-extension' });
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Failed to check "test-extension" for updates.',
+      );
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        'Extension "test-extension" is already up to date.',
+      );
+      expect(mockUpdateExtension).not.toHaveBeenCalled();
+      expect(exitSpy).toHaveBeenCalledWith(1);
     });
 
     it('should update extension when update is available', async () => {
@@ -212,6 +248,8 @@ describe('handleUpdate', () => {
       await handleUpdate({ name: 'test-extension' });
 
       expect(mockWriteStderrLine).toHaveBeenCalledWith('Update check failed');
+      // A failed update must not look like a successful one to a script.
+      expect(exitSpy).toHaveBeenCalledWith(1);
     });
   });
 
@@ -280,6 +318,7 @@ describe('handleUpdate', () => {
       await handleUpdate({ all: true });
 
       expect(mockWriteStderrLine).toHaveBeenCalledWith('Update all failed');
+      expect(exitSpy).toHaveBeenCalledWith(1);
     });
   });
 });

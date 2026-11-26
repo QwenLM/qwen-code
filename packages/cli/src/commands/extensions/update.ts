@@ -69,6 +69,15 @@ export async function handleUpdate(args: UpdateArgs) {
         extension,
         extensionManager,
       );
+      if (updateState === ExtensionUpdateState.ERROR) {
+        // A registry that fails the lookup resolves to ERROR instead of
+        // throwing, so this is the only place a named update can fail quietly.
+        writeStderrLine(
+          t('Failed to check "{{name}}" for updates.', { name: args.name }),
+        );
+        process.exit(1);
+        return;
+      }
       if (updateState !== ExtensionUpdateState.UPDATE_AVAILABLE) {
         writeStdoutLine(
           t('Extension "{{name}}" is already up to date.', { name: args.name }),
@@ -104,6 +113,9 @@ export async function handleUpdate(args: UpdateArgs) {
       if (warnings) writeStderrLine(warnings);
     } catch (error) {
       writeStderrLine(getErrorMessage(error));
+      // Match install/link/uninstall: a failed update must not exit 0, or a
+      // caller cannot tell it from a successful one.
+      process.exit(1);
     }
   }
   if (args.all) {
@@ -136,6 +148,7 @@ export async function handleUpdate(args: UpdateArgs) {
       if (warnings) writeStderrLine(warnings);
     } catch (error) {
       writeStderrLine(getErrorMessage(error));
+      process.exit(1);
     }
   }
 }
