@@ -14,6 +14,11 @@ import wrapAnsi from 'wrap-ansi';
 import { DiffRenderer } from './DiffRenderer.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import {
+  sanitizeTerminalText,
+  sanitizeTerminalLine,
+  sanitizeTerminalLineLosslessWithFlag,
+} from '../../utils/textUtils.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
   ToolCallConfirmationDetails,
@@ -408,7 +413,7 @@ export const ToolConfirmationMessage: React.FC<
       confirmationDetails as ToolExecuteConfirmationDetails;
 
     question = t("Allow execution of: '{{command}}'?", {
-      command: executionProps.rootCommand,
+      command: sanitizeTerminalLine(executionProps.rootCommand),
     });
     options.push({
       label: t('Yes, allow once'),
@@ -416,24 +421,49 @@ export const ToolConfirmationMessage: React.FC<
       key: 'Yes, allow once',
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
-      const friendlyLabel = executionProps.permissionRules?.length
-        ? ` ${buildHumanReadableRuleLabel(executionProps.permissionRules)}`
+      // sanitizeTerminalLineLosslessWithFlag makes every code point in its
+      // own input legible, but buildHumanReadableRuleLabel runs first and is
+      // not itself injective (it joins multiple rules and wraps each
+      // specifier in quotes without escaping a quote inside the specifier),
+      // so two structurally different inputs to that function can already
+      // produce the same string before this sanitizer ever sees it. That is
+      // a pre-existing property of buildHumanReadableRuleLabel, shared by
+      // its other call sites, and out of scope for this control-character
+      // fix.
+      const sanitizedRuleLabel = executionProps.permissionRules?.length
+        ? sanitizeTerminalLineLosslessWithFlag(
+            buildHumanReadableRuleLabel(executionProps.permissionRules),
+          )
+        : null;
+      const friendlyLabel = sanitizedRuleLabel
+        ? ` ${sanitizedRuleLabel.text}`
         : '';
+      // The in-place marker sanitizeTerminalLineLosslessWithFlag writes can
+      // itself be truncated away on a long rule, since RadioButtonSelect
+      // renders this label with wrap="truncate" -- that would silently
+      // recreate the exact collision this sanitizer exists to prevent. A
+      // fixed marker at the very start of the label survives truncation
+      // regardless of how long the rule is.
+      const dirtyMarkerPrefix = sanitizedRuleLabel?.replaced ? '⚠ ' : '';
       options.push({
-        label: friendlyLabel
-          ? t('Always allow {{action}} in this project', {
-              action: friendlyLabel.trim(),
-            })
-          : t('Always allow in this project'),
+        label:
+          dirtyMarkerPrefix +
+          (friendlyLabel
+            ? t('Always allow {{action}} in this project', {
+                action: friendlyLabel.trim(),
+              })
+            : t('Always allow in this project')),
         value: ToolConfirmationOutcome.ProceedAlwaysProject,
         key: 'Always allow in this project',
       });
       options.push({
-        label: friendlyLabel
-          ? t('Always allow {{action}} for this user', {
-              action: friendlyLabel.trim(),
-            })
-          : t('Always allow for this user'),
+        label:
+          dirtyMarkerPrefix +
+          (friendlyLabel
+            ? t('Always allow {{action}} for this user', {
+                action: friendlyLabel.trim(),
+              })
+            : t('Always allow for this user')),
         value: ToolConfirmationOutcome.ProceedAlwaysUser,
         key: 'Always allow for this user',
       });
@@ -456,7 +486,15 @@ export const ToolConfirmationMessage: React.FC<
     // and use the same wrapping semantics as Ink's Text renderer.
     const warnings = executionProps.warnings ?? [];
     const warningsCount = warnings.length;
-    const reservedWarningsHeight = warningsHeight(warnings);
+    // Reserve height from the SANITIZED strings, not the raw ones: the box
+    // below paints sanitizeTerminalText(warning), and an ESC-prefixed
+    // sequence that wrap-ansi counts as zero columns in the raw string
+    // expands to several visible characters once sanitized, so reserving
+    // against the raw array can under-budget the painted height.
+    const sanitizedWarnings = warnings.map((warning) =>
+      sanitizeTerminalText(warning),
+    );
+    const reservedWarningsHeight = warningsHeight(sanitizedWarnings);
 
     let bodyContentHeight = availableBodyContentHeight();
     if (bodyContentHeight !== undefined) {
@@ -486,13 +524,15 @@ export const ToolConfirmationMessage: React.FC<
             overflowDirection="bottom"
           >
             <Box>
-              <Text color={theme.text.link}>{executionProps.command}</Text>
+              <Text color={theme.text.link}>
+                {sanitizeTerminalText(executionProps.command)}
+              </Text>
             </Box>
           </MaxSizedBox>
         </Box>
         {warningsCount > 0 ? (
           <Box flexDirection="column" paddingX={1} marginLeft={1} marginTop={1}>
-            {warnings.map((warning, idx) => (
+            {sanitizedWarnings.map((warning, idx) => (
               <Text key={idx} color={theme.status.warning}>
                 ⚠ {warning}
               </Text>
