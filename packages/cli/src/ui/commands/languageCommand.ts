@@ -13,7 +13,7 @@ import type {
 import { CommandKind } from './types.js';
 import { SettingScope } from '../../config/settings.js';
 import {
-  setLanguageAsync,
+  initializeI18n,
   getCurrentLanguage,
   resolveLanguageSetting,
   type SupportedLanguage,
@@ -180,7 +180,7 @@ async function setUiLanguage(
     }
   }
 
-  await setLanguageAsync(
+  await initializeI18n(
     resolveLanguageSetting(
       String(services.settings?.merged.general?.language ?? lang),
     ),

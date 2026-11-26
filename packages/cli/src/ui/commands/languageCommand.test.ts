@@ -13,6 +13,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 // Mock i18n module
 vi.mock('../../i18n/index.js', () => ({
   setLanguageAsync: vi.fn().mockResolvedValue(undefined),
+  initializeI18n: vi.fn(),
   getCurrentLanguage: vi.fn().mockReturnValue('en'),
   detectSystemLanguage: vi.fn().mockReturnValue('en'),
   resolveLanguageSetting: vi.fn(
@@ -111,6 +112,9 @@ describe('languageCommand', () => {
       if (language !== 'auto') {
         vi.mocked(i18n.getCurrentLanguage).mockReturnValue(language);
       }
+    });
+    vi.mocked(i18n.initializeI18n).mockImplementation(async (language) => {
+      await i18n.setLanguageAsync(language ?? 'auto');
     });
     vi.mocked(i18n.t).mockImplementation(
       (key: string, params?: Record<string, string>) => {
@@ -457,11 +461,24 @@ describe('languageCommand', () => {
           { throwOnWriteFailure: true },
         );
         expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
+        expect(i18n.initializeI18n).toHaveBeenCalledWith('zh');
         expect(result).toMatchObject({
           content: 'UI language changed to 中文 (Chinese) [zh-CN]',
         });
       },
     );
+
+    it('resolves an automatic workspace language the way startup does', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      mockContext.services.settings.merged.general = { language: 'auto' };
+
+      await languageCommand.action(mockContext, 'ui de --global');
+
+      expect(i18n.initializeI18n).toHaveBeenCalledWith('auto');
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('auto');
+    });
 
     it('uses the merged language after a project write', async () => {
       if (!languageCommand.action) {
