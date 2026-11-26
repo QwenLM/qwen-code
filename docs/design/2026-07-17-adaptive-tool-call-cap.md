@@ -2,6 +2,7 @@
 
 Date: 2026-07-17
 Status: Implemented
+Superseded by: [remove loop detection](2026-11-25-remove-loop-detection.md)
 Area: `packages/core` loop detection
 
 ## Problem

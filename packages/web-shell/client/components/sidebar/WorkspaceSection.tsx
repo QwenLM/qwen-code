@@ -274,6 +274,13 @@ interface WorkspaceSectionProps {
   onOpenGitDiff?: (workspaceCwd: string) => void;
   /** Commit entry for the same picker; the row still opens without it. */
   onOpenCommit?: (workspaceCwd: string) => void;
+  /** Opens the management view for a clicked overview facet in this workspace. */
+  onOpenOverviewItem?: (
+    item: WorkspaceOverviewItem,
+    workspaceCwd: string,
+  ) => void;
+  /** Facets that render as interactive rows in the hover details popover. */
+  manageableOverviewItems?: ReadonlySet<WorkspaceOverviewItem>;
 }
 
 export function WorkspaceSection({
@@ -331,6 +338,8 @@ export function WorkspaceSection({
   onOpenTerminalLocally,
   onOpenGitDiff,
   onOpenCommit,
+  onOpenOverviewItem,
+  manageableOverviewItems,
 }: WorkspaceSectionProps) {
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
@@ -1136,6 +1145,15 @@ export function WorkspaceSection({
               ? () => onOpenTerminalLocally(workspace.cwd)
               : undefined
           }
+          onOpenOverviewItem={
+            onOpenOverviewItem &&
+            gitPollCwd &&
+            workspace.trusted &&
+            !workspace.ssh
+              ? (item) => onOpenOverviewItem(item, workspace.cwd)
+              : undefined
+          }
+          manageableItems={manageableOverviewItems}
         >
           {headerRow}
         </WorkspaceDetailsTooltip>

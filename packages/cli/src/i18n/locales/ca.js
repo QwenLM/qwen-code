@@ -554,7 +554,6 @@ export default {
   'Screen Reader Mode': 'Mode de lector de pantalla',
   'Max Session Turns': 'Torns màxims de sessió',
   'Skip Next Speaker Check': 'Omet la comprovació del proper parlant',
-  'Skip Loop Detection': 'Omet la detecció de bucles',
   'Skip Startup Context': "Omet el context d'inici",
   'Enable OpenAI Logging': "Activa el registre d'OpenAI",
   'OpenAI Logging Directory': "Directori de registres d'OpenAI",

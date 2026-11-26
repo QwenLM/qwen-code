@@ -25,6 +25,11 @@ import {
   type SessionService,
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
+import {
+  selectWorktreeSnapshot,
+  verifyRestoredWorktreeSnapshot,
+  type WorktreeSnapshotPaths,
+} from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import { runGit } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
@@ -132,7 +137,12 @@ export async function preclassifyWorktreeCleanup(
   service: SessionService,
   sessionId: string,
   runtimeWorkspaceCwd?: string,
+  options: { quiet?: boolean; runtimeRoots?: readonly string[] } = {},
 ): Promise<WorktreeCleanupPlan | undefined> {
+  const preserve = (reason: string): undefined => {
+    if (!options.quiet) logWorktreeCleanupPreserve(sessionId, reason);
+    return undefined;
+  };
   // The delete path covers active and archived records alike, and the
   // sidecar moves with the record — check the active location first.
   let sidecarPath = service.getWorktreeSessionPath(sessionId);
@@ -149,11 +159,7 @@ export async function preclassifyWorktreeCleanup(
   }
   if (sidecar.state === 'missing') return undefined;
   if (sidecar.state === 'invalid') {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      `unreadable sidecar (${sidecar.reason})`,
-    );
-    return undefined;
+    return preserve(`unreadable sidecar (${sidecar.reason})`);
   }
   const session = sidecar.session;
   if (session.workspaceCwd === undefined) return undefined;
@@ -162,39 +168,31 @@ export async function preclassifyWorktreeCleanup(
     !path.isAbsolute(session.workspaceCwd) ||
     !path.isAbsolute(session.originalCwd)
   ) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'sidecar base is not an absolute path',
-    );
-    return undefined;
+    return preserve('sidecar base is not an absolute path');
   }
   if (runtimeWorkspaceCwd !== undefined) {
     if (
       canonicalPath(session.workspaceCwd) !== canonicalPath(runtimeWorkspaceCwd)
     ) {
-      logWorktreeCleanupPreserve(
-        sessionId,
-        'sidecar belongs to another workspace',
-      );
-      return undefined;
+      return preserve('sidecar belongs to another workspace');
     }
-    const workspaceRoots = [canonicalPath(runtimeWorkspaceCwd)];
-    try {
-      const repoTop = await new GitWorktreeService(
-        runtimeWorkspaceCwd,
-      ).getRepoTopLevel();
-      if (repoTop && canonicalPath(repoTop) !== workspaceRoots[0]) {
-        workspaceRoots.push(canonicalPath(repoTop));
+    const workspaceRoots = (options.runtimeRoots ?? [runtimeWorkspaceCwd]).map(
+      canonicalPath,
+    );
+    if (options.runtimeRoots === undefined) {
+      try {
+        const repoTop = await new GitWorktreeService(
+          runtimeWorkspaceCwd,
+        ).getRepoTopLevel();
+        if (repoTop && canonicalPath(repoTop) !== workspaceRoots[0]) {
+          workspaceRoots.push(canonicalPath(repoTop));
+        }
+      } catch {
+        // Not a git repo — the workspace root alone bounds originalCwd.
       }
-    } catch {
-      // Not a git repo — the workspace root alone bounds originalCwd.
     }
     if (!workspaceRoots.includes(canonicalPath(session.originalCwd))) {
-      logWorktreeCleanupPreserve(
-        sessionId,
-        'sidecar original cwd is outside the accepted roots',
-      );
-      return undefined;
+      return preserve('sidecar original cwd is outside the accepted roots');
     }
   }
   const activeDir = path.dirname(service.getWorktreeSessionPath(sessionId));
@@ -219,30 +217,70 @@ export function acquireWorktreeCleanupLock(
   return acquireWorktreeOwnershipOp(plan.lockKey);
 }
 
+const PERMANENT_SIDECAR_CORRUPTION_REASONS = new Set([
+  'invalid sidecar JSON',
+  'invalid sidecar contents',
+  'unsafe sidecar size or identity',
+]);
+
+async function readSidecarForArchiveLock(sidecarPath: string) {
+  let sidecar = await readWorktreeSessionStrict(sidecarPath);
+  for (const delayMs of [5, 10, 20]) {
+    if (
+      sidecar.state !== 'invalid' ||
+      PERMANENT_SIDECAR_CORRUPTION_REASONS.has(sidecar.reason)
+    ) {
+      return sidecar;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    sidecar = await readWorktreeSessionStrict(sidecarPath);
+  }
+  return sidecar;
+}
+
 export async function withWorktreeArchiveMove<T>(
   service: SessionService,
   sessionId: string,
   sourceState: 'active' | 'archived',
   move: () => Promise<T>,
 ): Promise<T> {
-  const sidecarPath = service.getWorktreeSessionPathForArchiveState(
-    sessionId,
-    sourceState,
-  );
-  if (!fs.existsSync(sidecarPath)) return move();
-  const sidecar = await readWorktreeSessionStrict(sidecarPath);
-  if (sidecar.state !== 'valid') return move();
-  const release = await acquireWorktreeOwnershipOp(
-    canonicalPath(sidecar.session.worktreePath),
-  );
+  const otherState: 'active' | 'archived' =
+    sourceState === 'active' ? 'archived' : 'active';
+  const lockKeys = new Set<string>();
+  for (const state of [sourceState, otherState] as const) {
+    const sidecarPath = service.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      state,
+    );
+    const sidecar = await readSidecarForArchiveLock(sidecarPath);
+    if (sidecar.state === 'valid') {
+      lockKeys.add(canonicalPath(sidecar.session.worktreePath));
+    } else if (
+      sidecar.state === 'invalid' &&
+      !PERMANENT_SIDECAR_CORRUPTION_REASONS.has(sidecar.reason)
+    ) {
+      throw new Error(
+        `Could not read worktree sidecar for archive lock: ${sidecar.reason}`,
+      );
+    }
+  }
+  if (lockKeys.size === 0) return move();
+  const releases: Array<() => void> = [];
   try {
+    // Acquire in deterministic order to avoid ABBA deadlocks if a conflict
+    // state names two different worktree paths across active/archived.
+    for (const key of [...lockKeys].sort()) {
+      releases.push(await acquireWorktreeOwnershipOp(key));
+    }
     return await move();
   } finally {
-    release();
+    for (let i = releases.length - 1; i >= 0; i -= 1) {
+      releases[i]!();
+    }
   }
 }
 
-async function worktreeAllowedRoots(
+export async function worktreeAllowedRoots(
   workspaceCwd: string,
   originalCwd: string,
 ): Promise<string[]> {
@@ -336,18 +374,21 @@ export async function verifyWorktreeCleanupOwnership(
   if (!contained) {
     return { ok: false, reason: 'checkout outside workspace worktree roots' };
   }
-  const chatsDir = path.dirname(plan.sidecarPath);
-  const ownFile = path.basename(plan.sidecarPath);
+  const currentDir = path.dirname(plan.sidecarPath);
+  const directories = new Set([currentDir]);
+  if (plan.otherStateSidecarDir !== undefined) {
+    directories.add(plan.otherStateSidecarDir);
+  }
+  const ownFile = path.resolve(plan.sidecarPath);
   const tombstoneIds = new Set<string>();
   let olderTombstone = false;
-  for (const dir of [chatsDir, plan.otherStateSidecarDir]) {
-    if (dir === undefined) continue;
+  for (const directory of directories) {
     let entries: string[];
     try {
-      entries = await fsp.readdir(dir);
+      entries = await fsp.readdir(directory);
     } catch (error) {
       if (
-        dir !== chatsDir &&
+        directory !== currentDir &&
         (error as NodeJS.ErrnoException).code === 'ENOENT'
       ) {
         continue;
@@ -360,15 +401,28 @@ export async function verifyWorktreeCleanupOwnership(
       };
     }
     for (const entry of entries) {
-      if (!entry.endsWith(SIDECAR_SUFFIX) || entry === ownFile) continue;
-      const other = await readWorktreeSessionStrict(path.join(dir, entry));
+      if (!entry.endsWith(SIDECAR_SUFFIX)) continue;
+      const filePath = path.join(directory, entry);
+      if (path.resolve(filePath) === ownFile) continue;
+      const other = await readWorktreeSessionStrict(filePath);
       if (other.state === 'missing') continue;
       if (other.state === 'invalid') {
-        return { ok: false, reason: `unreadable sibling sidecar ${entry}` };
+        return {
+          ok: false,
+          reason: `unreadable sibling sidecar ${path.relative(
+            path.dirname(currentDir),
+            filePath,
+          )}`,
+        };
       }
       if (canonicalPath(other.session.worktreePath) !== plan.lockKey) continue;
-      // Tombstones record a transfer. Each reset updates only the pair
-      // involved, so older tombstones may point to deleted sessions.
+      // A tombstone (a session that handed the checkout on in a reset)
+      // legitimately names the same checkout; it is evidence of the
+      // transfer, not sharing. It cannot own the checkout while the marker,
+      // read above under the ownership lock every reset also takes, names
+      // this session. The link is not followed: each reset rewrites only the
+      // pair it transfers between, so after several resets older tombstones
+      // name sessions that may since have been deleted or archived.
       if (other.session.supersededBy === undefined) {
         return { ok: false, reason: `checkout shared with ${entry}` };
       }
@@ -579,17 +633,41 @@ export const checkoutChangeDigestForTesting = checkoutChangeDigest;
  * removed, branch kept" stays distinguishable from "checkout kept,
  * ownership doubtful".
  */
+export interface WorktreeCleanupExecutionOptions {
+  /** Retained chats always require an archive, unlike a bare carried delete. */
+  requireSnapshot?: boolean;
+  /** Last chance to protect a newly live/pinned chat before physical removal. */
+  beforeRemoval?: (snapshot?: WorktreeSnapshotPaths) => Promise<boolean>;
+  /** Runs after all guards, immediately before the destructive Git operation. */
+  beforePhysicalRemoval?: () => Promise<boolean>;
+}
+
+export interface WorktreeCleanupExecution {
+  removed: boolean;
+  snapshot?: WorktreeSnapshotPaths;
+  removal?: Awaited<ReturnType<GitWorktreeService['removeUserWorktree']>>;
+}
+
 export async function executeWorktreeCleanup(
   plan: WorktreeCleanupPlan,
-): Promise<void> {
+  options: WorktreeCleanupExecutionOptions = {},
+): Promise<WorktreeCleanupExecution> {
   const { sessionId, sidecar } = plan;
+  let snapshot: WorktreeSnapshotPaths | undefined;
+  const preserved = (
+    removal?: WorktreeCleanupExecution['removal'],
+  ): WorktreeCleanupExecution => ({
+    removed: false,
+    ...(snapshot ? { snapshot } : {}),
+    ...(removal ? { removal } : {}),
+  });
   const marker = await readWorktreeSessionMarkerStrict(plan.lockKey);
   if (marker.state !== 'valid' || marker.sessionId !== sessionId) {
     logWorktreeCleanupPreserve(
       sessionId,
       'marker changed after session mutation',
     );
-    return;
+    return preserved();
   }
   // An initialized submodule holds its own object database (possibly unpushed
   // commits) that neither the worktree tar nor the removal preserves, so the
@@ -601,7 +679,7 @@ export async function executeWorktreeCleanup(
       sessionId,
       'initialized submodule present (or gitlink probe unreadable)',
     );
-    return;
+    return preserved();
   }
   // Exempt the recorded carried overlay only while its content still matches
   // the carry-time identities, so a checkout whose only content is the
@@ -612,10 +690,9 @@ export async function executeWorktreeCleanup(
   // this classification: source verification may read a large carried file,
   // and a new session file saved meanwhile must differ from this baseline.
   const beforeDigest = await checkoutChangeDigest(plan.lockKey);
-  let needsSnapshot = await worktreeHasWork(
-    plan.lockKey,
-    sidecar.carriedEntries,
-  );
+  let needsSnapshot =
+    options.requireSnapshot === true ||
+    (await worktreeHasWork(plan.lockKey, sidecar.carriedEntries));
   // A pristine carried-only checkout reads clean, but collecting it WITHOUT an
   // archive is safe only while the source checkout still holds the overlay —
   // the overlay is a copy of the source's dirty state, and the source may have
@@ -649,9 +726,9 @@ export async function executeWorktreeCleanup(
       const meta = await buildWorktreeSnapshotMeta(plan.lockKey, {
         sessionId,
         slug: sidecar.slug,
-        baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
+        baseCommit: sidecar.worktreeBase || sidecar.originalHeadCommit,
       });
-      const snapshot = await captureWorktreeSnapshot({
+      snapshot = await captureWorktreeSnapshot({
         worktreePath: plan.lockKey,
         snapshotDir: path.dirname(plan.sidecarPath),
         meta,
@@ -667,73 +744,143 @@ export async function executeWorktreeCleanup(
         sessionId,
         `snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return;
+      return preserved();
     }
   }
-  // An editor autosave can land between the has-work gate and the end of the
-  // tar stream (P1 edits during capture). Removal is conditional on the
-  // checkout still matching the captured contents: any drift — a late file,
-  // a new edit, a staged change — preserves rather than deleting what the
-  // archive could not cover (fail-closed on a read failure too).
-  const afterDigest = await checkoutChangeDigest(plan.lockKey);
-  if (
-    beforeDigest === null ||
-    afterDigest === null ||
-    beforeDigest !== afterDigest
-  ) {
+  const checkoutRemovalGuardsPass = async (): Promise<boolean> => {
+    if (
+      options.beforePhysicalRemoval &&
+      !(await options.beforePhysicalRemoval())
+    ) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'retention scope is no longer exclusively owned',
+      );
+      return false;
+    }
+    // An editor autosave can land between the has-work gate and the end of the
+    // tar stream (P1 edits during capture). Removal is conditional on the
+    // checkout still matching the captured contents: any drift — a late file,
+    // a new edit, a staged change — preserves rather than deleting what the
+    // archive could not cover (fail-closed on a read failure too).
+    const currentDigest = await checkoutChangeDigest(plan.lockKey);
+    if (
+      beforeDigest === null ||
+      currentDigest === null ||
+      beforeDigest !== currentDigest
+    ) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'checkout changed during cleanup (or its change digest is unreadable)',
+      );
+      return false;
+    }
+    // An index bit set during capture can hide a tracked edit from every
+    // content digest. The shared probe keeps the clean-sparse carve-out.
+    if (await hasHiddenIndexBit(plan.lockKey)) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'hidden index bit appeared during cleanup',
+      );
+      return false;
+    }
+    // The archive check below also runs Git, so administrative state must be
+    // observed after it (and every other guard) rather than before it.
+    if (
+      !needsSnapshot &&
+      sidecar.carriedEntries &&
+      sidecar.carriedEntries.length > 0 &&
+      !(await carriedOverlayStillHeldBySource(
+        sidecar.carriedFrom ?? sidecar.originalCwd,
+        sidecar.carriedEntries,
+        plan.lockKey,
+      ))
+    ) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'carried source changed during cleanup',
+      );
+      return false;
+    }
+    // A submodule initialized during capture keeps its object store outside
+    // the checkout root: neither the archive nor removal preserves that store.
+    if (await worktreeHasPopulatedGitlink(plan.lockKey)) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'initialized submodule appeared during cleanup',
+      );
+      return false;
+    }
+    if (snapshot !== undefined) {
+      const selected = await selectWorktreeSnapshot({
+        directory: path.dirname(plan.sidecarPath),
+        sessionId,
+        slug: sidecar.slug,
+        archiveKey: path.basename(snapshot.snapshotPath),
+      });
+      if (
+        !selected ||
+        selected.snapshotPath !== snapshot.snapshotPath ||
+        selected.metaPath !== snapshot.metaPath ||
+        !(await verifyRestoredWorktreeSnapshot({
+          worktreePath: plan.lockKey,
+          snapshotPath: selected.snapshotPath,
+          meta: selected.meta,
+        }))
+      ) {
+        logWorktreeCleanupPreserve(
+          sessionId,
+          'checkout no longer matches the captured snapshot',
+        );
+        return false;
+      }
+    }
+    if (await worktreeHasPendingGitOperation(plan.lockKey)) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'git operation became pending during cleanup',
+      );
+      return false;
+    }
+    return true;
+  };
+  try {
+    if (!(await checkoutRemovalGuardsPass())) return preserved();
+  } catch (error) {
     logWorktreeCleanupPreserve(
       sessionId,
-      'checkout changed during cleanup (or its change digest is unreadable)',
+      `guard failed before removal: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     );
-    return;
-  }
-  // An index bit set during capture can hide a tracked edit from every
-  // content digest. The shared probe keeps the clean-sparse carve-out.
-  if (await hasHiddenIndexBit(plan.lockKey)) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'hidden index bit appeared during cleanup',
-    );
-    return;
-  }
-  // A bisect/rebase/revert can start AFTER the pre-capture check without
-  // changing file bytes or HEAD. Its private administrative state is not in
-  // the archive or content digest, so re-observe it immediately before removal.
-  if (await worktreeHasPendingGitOperation(plan.lockKey)) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'git operation became pending during cleanup',
-    );
-    return;
-  }
-  if (
-    !needsSnapshot &&
-    sidecar.carriedEntries &&
-    sidecar.carriedEntries.length > 0 &&
-    !(await carriedOverlayStillHeldBySource(
-      sidecar.carriedFrom ?? sidecar.originalCwd,
-      sidecar.carriedEntries,
-      plan.lockKey,
-    ))
-  ) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'carried source changed during cleanup',
-    );
-    return;
-  }
-  // A submodule initialized during capture keeps its object store outside
-  // the checkout root: neither the archive nor removal preserves that store.
-  if (await worktreeHasPopulatedGitlink(plan.lockKey)) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'initialized submodule appeared during cleanup',
-    );
-    return;
+    return preserved();
   }
   if (!checkoutMatchesCapture) {
     logWorktreeCleanupPreserve(sessionId, 'checkout changed during capture');
-    return;
+    return preserved();
+  }
+  if (options.beforeRemoval) {
+    if (!(await options.beforeRemoval(snapshot))) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'retention eligibility changed before removal',
+      );
+      return preserved();
+    }
+    // The eligibility callback may wait, but no new capture follows it. Close
+    // that ack-to-removal window with the same fail-closed guards; a rejected
+    // removal still preserves every new file and any non-content Git state.
+    try {
+      if (!(await checkoutRemovalGuardsPass())) return preserved();
+    } catch (error) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        `post-binding guard failed before removal: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return preserved();
+    }
   }
   // originalCwd is the root the creating worktree service used; the
   // sidecar contract reserves it for exactly this resolution, and the
@@ -750,23 +897,46 @@ export async function executeWorktreeCleanup(
     branchOwned:
       sidecar.worktreeBranch !== '' &&
       sidecar.worktreeBranch === worktreeBranchForSlug(sidecar.slug),
-    baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
+    baseCommit: sidecar.worktreeBase || sidecar.originalHeadCommit,
   });
+  const remaining = await fsp
+    .lstat(plan.lockKey)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      return undefined;
+    });
+  if (remaining === undefined) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'checkout presence could not be confirmed after removal',
+    );
+    return preserved(result);
+  }
   if (!result.success) {
     const errorText = result.error ?? 'unknown error';
-    if (await checkoutStillPopulated(plan.lockKey)) {
-      logWorktreeCleanupPreserve(
-        sessionId,
-        `checkout removal failed: ${errorText}`,
-      );
-    } else {
-      logWarning(
-        `worktree cleanup removal failed, checkout may be partially deleted action=delete session=${safeLogValue(
+    if (remaining !== null) {
+      if (await checkoutStillPopulated(plan.lockKey)) {
+        logWorktreeCleanupPreserve(
           sessionId,
-        )} reason=${safeLogValue(errorText)}`,
-      );
+          `checkout removal failed: ${errorText}`,
+        );
+      } else {
+        logWarning(
+          `worktree cleanup removal failed, checkout may be partially deleted action=delete session=${safeLogValue(
+            sessionId,
+          )} reason=${safeLogValue(errorText)}`,
+        );
+      }
+      return preserved(result);
     }
-    return;
+    // A later prune or bookkeeping step can fail after the directory really
+    // disappeared. Keep that diagnostic, but use the observed ENOENT so the
+    // caller can persist the already-complete snapshot binding.
+    logWarning(
+      `worktree cleanup removal failed, checkout may be partially deleted action=delete session=${safeLogValue(
+        sessionId,
+      )} reason=${safeLogValue(errorText)}`,
+    );
   }
   if (result.branchPreserved || result.keptBranch) {
     logWarning(
@@ -777,4 +947,16 @@ export async function executeWorktreeCleanup(
       )} reason=${result.branchPreserved ? 'unmerged commits' : 'branch kept'}`,
     );
   }
+  if (remaining !== null) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'checkout still present after removal',
+    );
+    return preserved(result);
+  }
+  return {
+    removed: true,
+    ...(snapshot ? { snapshot } : {}),
+    removal: result,
+  };
 }

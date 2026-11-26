@@ -67,6 +67,19 @@ case "${step}" in
     ;;
 
   resolve-version)
+    if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null || true)" == "true" ]]; then
+      for attempt in 1 2 3; do
+        if git fetch --depth=1 --filter=tree:0 --no-tags origin '+refs/tags/v*:refs/tags/v*'; then
+          break
+        fi
+        if [[ "${attempt}" -eq 3 ]]; then
+          echo "::error::Failed to fetch version tags for release version resolution."
+          exit 1
+        fi
+        sleep 2
+      done
+    fi
+
     version_args=()
     if [[ "${IS_NIGHTLY}" == "true" ]]; then
       version_args+=(--type=nightly)

@@ -196,7 +196,7 @@ class SurfaceRegistryGateTest {
             return new TerminalTicketController(
                     mock(com.alibaba.qwen.code.managedagent.workspace.runtime
                             .WorkspaceTerminalRelayService.class),
-                    new TerminalTicketStore(java.time.Clock.systemUTC()));
+                    mock(TerminalTicketStore.class));
         }
     }
 }

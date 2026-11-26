@@ -427,7 +427,7 @@ final class JournalWriterLifecycle {
                 throw JournalStoreRows.invalid(
                         "A parked Turn claims a wake exactly when the wake pump owns it.");
             }
-            JournalStoreRows.validateStableId(parked.promptId(), "wake.parkedTurn.promptId", 64);
+            JournalStoreRows.validateStableId(parked.promptId(), "wake.parkedTurn.promptId", 128);
             JournalStoreRows.validateCounter(parked.wakeAt(), "wake.parkedTurn.wakeAt", 0);
             if (parked.approvalRevision() != null) {
                 JournalStoreRows.validateCounter(parked.approvalRevision(),
@@ -551,7 +551,18 @@ final class JournalWriterLifecycle {
         JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         Timestamp now = storeRows.databaseNow();
-        fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
+        boolean sealedRelease = "SEALED".equals(head.state());
+        if (sealedRelease) {
+            if (request.writerGeneration() != head.writerGeneration()
+                    || !request.writerId().equals(head.writerId())
+                    || !JournalFencing.secureEquals(JournalFencing.tokenHash(writerToken),
+                            head.leaseTokenHash())
+                    || !Objects.equals(head.wakeSealRevision(), head.journalRevision())) {
+                throw JournalFencing.writerConflict();
+            }
+        } else {
+            fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
+        }
         if (head.journalRevision() != request.journalRevision()
                 || head.committedSequence() != request.commitProof().lastCommitSequence()
                 || !Objects.equals(head.lastCommitDigest(), request.commitProof().committedPrefixHash())
@@ -582,9 +593,11 @@ final class JournalWriterLifecycle {
                 ManagedSchemaKeys.identity(ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES,
                         sessionId, JdbcHarnessPlacementStore.RELEASE_DOMAIN, recordId)),
                 tenantId, request.workspaceId(), sessionId, resourceId, now.getTime());
-        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_id = ? AND"
-                + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION'", now.getTime(),
-                tenantId, sessionId);
+        if (!sealedRelease) {
+            jdbc.update("UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_id = ? AND"
+                    + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION'", now.getTime(),
+                    tenantId, sessionId);
+        }
         jdbc.update("UPDATE ma_session SET harness_placement_state = 'RELEASED' WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId);
         return receipt;
