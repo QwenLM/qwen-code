@@ -125,6 +125,11 @@ async function testBootstrapWorkspaceVisibility() {
     /#error \{[^}]*max-height:\s*\d+px;[^}]*overflow:\s*auto;/,
     'The bootstrap error log must scroll in place so long crash output cannot push action buttons off-screen.',
   );
+  assert.match(
+    bootstrapHtml,
+    /id="download"/,
+    'The bootstrap markup must keep the #download button: bootstrap.js wires its click listener at load time.',
+  );
   const runtimeSource = fs.readFileSync(
     path.join(packageDir, 'src-tauri', 'src', 'runtime.rs'),
     'utf8',
@@ -241,6 +246,7 @@ async function testBootstrapWorkspaceVisibility() {
     workspace: '/Users/example/Documents/Qwen',
     error: 'runtime failed',
     isRosetta: true,
+    errorIsRuntime: true,
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(
@@ -267,9 +273,129 @@ async function testBootstrapWorkspaceVisibility() {
   assert.equal(nonRosettaFailure.element('#download').hidden, true);
   assert.equal(nonRosettaFailure.element('#choose').hidden, false);
   assert.equal(nonRosettaFailure.element('#retry').hidden, false);
+
+  // A workspace-stage failure on a Rosetta host is not an architecture
+  // mismatch: keep the generic card and the recovery buttons (R1-1).
+  const rosettaWorkspaceFailure = await createBootstrapHarness();
+  rosettaWorkspaceFailure.listeners['workspace-failed']({
+    payload: 'EACCES: permission denied, mkdir ~/Documents/Qwen',
+  });
+  rosettaWorkspaceFailure.resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'idle',
+    workspace: '/Users/example/Documents/Qwen',
+    error: 'EACCES: permission denied, mkdir ~/Documents/Qwen',
+    isRosetta: true,
+    errorIsRuntime: false,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    rosettaWorkspaceFailure.element('#title').textContent,
+    'Qwen Code could not start',
+  );
+  assert.equal(rosettaWorkspaceFailure.element('#download').hidden, true);
+  assert.equal(rosettaWorkspaceFailure.element('#choose').hidden, false);
+  assert.equal(rosettaWorkspaceFailure.element('#retry').hidden, false);
+
+  const rosettaWorkspaceSnapshot = await createBootstrapHarness();
+  rosettaWorkspaceSnapshot.resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'idle',
+    workspace: '/Users/example/Documents/Qwen',
+    error: 'EACCES: permission denied, mkdir ~/Documents/Qwen',
+    isRosetta: true,
+    errorIsRuntime: false,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    rosettaWorkspaceSnapshot.element('#title').textContent,
+    'Qwen Code could not start',
+  );
+  assert.equal(rosettaWorkspaceSnapshot.element('#download').hidden, true);
+
+  // A failed "Open logs" click must not drop the download button or bring
+  // back the unusable recovery buttons on the Rosetta card (R1-2).
+  const rosettaLogsFailure = await createBootstrapHarness();
+  rosettaLogsFailure.listeners['runtime-failed']({
+    payload: 'Check failed: 12 == (*__error()).',
+  });
+  rosettaLogsFailure.resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'idle',
+    workspace: '/Users/example/Documents/Qwen',
+    error: 'Check failed: 12 == (*__error()).',
+    isRosetta: true,
+    errorIsRuntime: true,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await rosettaLogsFailure.element('#logs').listeners.click();
+  assert.equal(
+    rosettaLogsFailure.element('#title').textContent,
+    'Logs could not open',
+  );
+  assert.equal(rosettaLogsFailure.element('#download').hidden, false);
+  assert.equal(rosettaLogsFailure.element('#retry').hidden, true);
+  assert.equal(rosettaLogsFailure.element('#choose').hidden, true);
+
+  // A failed download keeps the crash output and shows the release address
+  // instead of repainting them away (R1-4).
+  const rosettaDownloadFailure = await createBootstrapHarness({
+    rejectDownload: true,
+  });
+  rosettaDownloadFailure.listeners['runtime-failed']({
+    payload: 'Check failed: 12 == (*__error()).',
+  });
+  rosettaDownloadFailure.resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'idle',
+    workspace: '/Users/example/Documents/Qwen',
+    error: 'Check failed: 12 == (*__error()).',
+    isRosetta: true,
+    errorIsRuntime: true,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await rosettaDownloadFailure.element('#download').listeners.click();
+  assert.match(
+    rosettaDownloadFailure.element('#error').textContent,
+    /Check failed: 12 == \(\*__error\(\)\)\./,
+  );
+  assert.match(
+    rosettaDownloadFailure.element('#error').textContent,
+    /releases\/tag\/desktop-latest/,
+  );
+  assert.equal(rosettaDownloadFailure.element('#download').hidden, false);
+
+  // A pending update must not offer reinstalling the same x64 build on the
+  // Rosetta card, but stays available elsewhere (R1-5).
+  const rosettaUpdate = await createBootstrapHarness();
+  rosettaUpdate.listeners['runtime-failed']({
+    payload: 'Check failed: 12 == (*__error()).',
+  });
+  rosettaUpdate.resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'idle',
+    workspace: '/Users/example/Documents/Qwen',
+    error: 'Check failed: 12 == (*__error()).',
+    isRosetta: true,
+    errorIsRuntime: true,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  rosettaUpdate.listeners['update-available']({ payload: '0.28.4' });
+  assert.equal(rosettaUpdate.element('#update').hidden, true);
+  const plainUpdate = await createBootstrapHarness();
+  plainUpdate.resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'idle',
+    workspace: '/Users/example/Documents/Qwen',
+    error: null,
+    isRosetta: false,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  plainUpdate.listeners['update-available']({ payload: '0.28.4' });
+  assert.equal(plainUpdate.element('#update').hidden, false);
 }
 
-async function createBootstrapHarness() {
+async function createBootstrapHarness({ rejectDownload = false } = {}) {
   const elements = {};
   const element = (selector) => {
     elements[selector] ??= {
@@ -294,7 +420,14 @@ async function createBootstrapHarness() {
             resolveBootstrapState = resolve;
           });
         }
-        if (command === 'open_download_page') return undefined;
+        if (command === 'open_download_page') {
+          if (rejectDownload) {
+            throw new Error(
+              'Failed to open download page: no handler. Open https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest in your browser.',
+            );
+          }
+          return undefined;
+        }
         if (command === 'open_logs') throw new Error('no file handler');
         if (command === 'choose_workspace') return null;
         if (command === 'restart_runtime') return new Promise(() => {});

@@ -19,6 +19,7 @@ macosTitlebar.hidden = window.__QWEN_CODE_MACOS_TITLEBAR__ !== true;
 
 let currentWorkspace = '';
 let currentError = '';
+let currentErrorIsRuntime = true;
 let isRosetta = false;
 let snapshotOverrideStatus;
 let updateVersion;
@@ -45,16 +46,18 @@ function setStatus(
   retry.hidden = kind !== 'error' || showDownload;
   choose.hidden = kind === 'starting' || showDownload;
   choose.disabled = kind === 'starting';
+  update.hidden = showDownload || !updateVersion;
   setWorkspace(kind === 'starting' ? '' : currentWorkspace);
 }
 
-function showRuntimeFailure(message) {
+function showRuntimeFailure(message, isRuntimeFailure = true) {
   currentError = message;
-  if (isRosetta) {
+  currentErrorIsRuntime = isRuntimeFailure;
+  if (isRosetta && isRuntimeFailure) {
     setStatus(
       'error',
       'Intel version installed on Apple Silicon',
-      'This Intel (x64) build of Qwen Code Desktop is running under Rosetta 2 and could not start. Download and install the Apple Silicon (arm64) version instead.',
+      'This Intel (x64) build of Qwen Code Desktop is running under Rosetta 2 and could not start. Download and install the Apple Silicon (arm64) version instead. The release page links the current installers; choose the Apple Silicon (arm64) one.',
       message,
       { showDownload: true },
     );
@@ -135,11 +138,12 @@ async function openDownloadPage() {
   try {
     await invoke('open_download_page');
   } catch (failure) {
+    const failureText = String(failure);
     setStatus(
       'error',
       'Download page could not open',
-      'Review the details or open the release page in your browser.',
-      String(failure),
+      'The release address is included in the details below.',
+      currentError ? `${currentError}\n\n${failureText}` : failureText,
       { showDownload: isRosetta },
     );
   }
@@ -155,6 +159,7 @@ async function openLogs() {
       'Logs could not open',
       'Review the details or try again.',
       String(failure),
+      { showDownload: isRosetta },
     );
   }
 }
@@ -188,11 +193,15 @@ async function initialize() {
     }),
     listen('runtime-failed', ({ payload }) => {
       snapshotOverrideStatus = 'failed';
-      showRuntimeFailure(String(payload));
+      showRuntimeFailure(String(payload), true);
+    }),
+    listen('workspace-failed', ({ payload }) => {
+      snapshotOverrideStatus = 'failed';
+      showRuntimeFailure(String(payload), false);
     }),
     listen('update-available', ({ payload }) => {
       updateVersion = String(payload);
-      update.hidden = false;
+      update.hidden = download.hidden === false;
       update.textContent = `Install ${updateVersion}`;
     }),
   ]);
@@ -203,7 +212,7 @@ async function initialize() {
   currentWorkspace ||= String(state.workspace || '');
   if (snapshotOverrideStatus) {
     if (snapshotOverrideStatus === 'failed') {
-      if (isRosetta) showRuntimeFailure(currentError);
+      if (isRosetta) showRuntimeFailure(currentError, currentErrorIsRuntime);
       else setWorkspace(currentWorkspace);
     }
     return;
@@ -221,7 +230,7 @@ async function initialize() {
       'Connecting to the local Web Shell…',
     );
   } else if (state.error) {
-    showRuntimeFailure(state.error);
+    showRuntimeFailure(state.error, Boolean(state.errorIsRuntime));
   } else {
     setStatus(
       'idle',
