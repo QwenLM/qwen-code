@@ -19225,6 +19225,8 @@ export function App({
             ? ({ kind: 'live' } as const)
             : ({ kind: 'workspace', cwd: workspaceCwd } as const)
           : undefined);
+      const navigationWorkspaceCwd =
+        targetContext?.kind === 'workspace' ? targetContext.cwd : workspaceCwd;
       const selectedWorkspace = workspacesRef.current.find(
         (entry) => entry.cwd === workspaceCwd,
       );
@@ -19232,10 +19234,10 @@ export function App({
       if (
         boundRun &&
         (boundRun.sessionId !== sessionId ||
-          boundRun.workspaceCwd !== workspaceCwd)
+          boundRun.workspaceCwd !== navigationWorkspaceCwd)
       ) {
         if (boundRun.timer !== undefined) clearTimeout(boundRun.timer);
-        if (boundRun.owner?.isCurrent() !== false) {
+        if (pendingBoundRunRef.current === boundRun) {
           pendingBoundRunRef.current = null;
         }
         boundRun.reject(

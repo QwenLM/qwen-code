@@ -60325,6 +60325,47 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     expect(admitted).toBe(0);
   });
 
+  it('does not revive a cancelled run after owner reattachment', async () => {
+    const restore = deferred<void>();
+    const { container, rerender } = renderApp();
+    admitOnSend();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/repo/owner';
+      mockConnection.catchingUp = true;
+      await restore.promise;
+    });
+    let settlement!: Promise<unknown>;
+    act(() => {
+      settlement = run(
+        'do the thing',
+        'session-2',
+        '/repo/owner',
+        () => false,
+      ).catch((error) => error);
+    });
+    await flush();
+    testState.ownerVersion += 1;
+
+    const button = container.querySelector(
+      '[data-testid="load-session-with-count"]',
+    );
+    expect(button).not.toBeNull();
+    await act(async () => (button as HTMLButtonElement).click());
+    const result = await settlement;
+    expect(isScheduledTaskCancellation(result)).toBe(true);
+
+    await act(async () => {
+      restore.resolve();
+      mockConnection.catchingUp = false;
+      rerender({});
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('R21 binds a live stale guard to the raw dispatch hooks', async () => {
     const { container } = renderApp();
     await flush();
