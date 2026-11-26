@@ -4,6 +4,7 @@ import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcHostedCleanupDebtStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -19,17 +20,53 @@ import org.springframework.transaction.support.TransactionTemplate;
 import javax.sql.DataSource;
 
 import java.time.Clock;
+import java.util.Base64;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class ManagedAgentEmbeddingTest {
     private ApplicationContextRunner runner() {
         return new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(JacksonAutoConfiguration.class, TaskSchedulingAutoConfiguration.class))
                 .withUserConfiguration(ManagedAgentConfiguration.class, Host.class);
+    }
+
+    @Test
+    void externalWorkspaceFilesUseTheEmbeddedClientWithoutHttpProviderCredentials() {
+        var external = runner().withPropertyValues(
+                "qwen.managed-agent.datasource.url=" + url(),
+                "qwen.managed-agent.harness.enabled=true",
+                "qwen.managed-agent.harness.workspace-files-enabled=true",
+                "qwen.managed-agent.harness.base-url=http://127.0.0.1:9",
+                "qwen.managed-agent.harness.token=test-harness-token",
+                "qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
+                "qwen.managed-agent.session-store.enabled=true",
+                "qwen.managed-agent.session-store.base-url=http://127.0.0.1:9",
+                "qwen.managed-agent.session-store.binding-key=" + "k".repeat(32),
+                "qwen.managed-agent.runtime-broker.enabled=true",
+                "qwen.managed-agent.runtime-broker.port=0",
+                "qwen.managed-agent.runtime-broker.token=test-broker-token",
+                "qwen.managed-agent.runtime-broker.credential-key-id=test-key",
+                "qwen.managed-agent.runtime-broker.credential-key=" + Base64.getEncoder().encodeToString(new byte[32]),
+                "qwen.managed-agent.runtime-broker.provisioner=external-workspace",
+                "qwen.managed-agent.runtime-broker.workspace-id=workspace",
+                "qwen.managed-agent.runtime-broker.workspace-cwd=/worker/workspace",
+                "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false");
+        var client = mock(ExternalRuntimeClient.class);
+        external.withBean(ExternalRuntimeClient.class, () -> client).run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context.getBean(ManagedAgentProperties.class).isExternalWorkspaceFilesConfigured()).isTrue();
+            verifyNoInteractions(client);
+        });
+        external.run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure()).hasStackTraceContaining("External Runtime provider URL");
+        });
     }
 
     @Test

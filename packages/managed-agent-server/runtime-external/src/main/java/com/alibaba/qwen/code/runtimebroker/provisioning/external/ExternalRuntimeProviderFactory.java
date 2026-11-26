@@ -83,6 +83,15 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
 
     @Override
     public void validate(ManagedAgentSettings settings, RuntimeProviderDependencies dependencies) {
+        validateProfile(settings);
+        var broker = settings.getRuntimeBroker();
+        if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && dependencies.externalRuntime().isEmpty()) {
+            validateHttpProvider(broker);
+        }
+    }
+
+    @Override
+    public void validateProfile(ManagedAgentSettings settings) {
         var runtimeBroker = settings.getRuntimeBroker();
         var harness = settings.getHarness();
         String provisioner = runtimeBroker.getProvisioner();
@@ -97,7 +106,7 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         boolean externalShell = workspace && harness.isExternalWorkspaceShellEnabled();
         // Only the Shell lane's own extras are checked here. Calling
         // settings.isExternalWorkspaceFilesConfigured() would re-enter this
-        // method through its own factory.validate() and recurse forever; the
+        // method through its own factory.validateProfile() and recurse forever; the
         // rest of this method already is the external-files eligibility rule.
         if (harness.isWorkspaceFilesEnabled() && !workspace
                 || harness.isWorkspaceShellEnabled()
@@ -136,31 +145,6 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
             throw new IllegalStateException("External Runtime requires"
                     + " QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false");
         }
-        if (dependencies.externalRuntime().isEmpty()) {
-            URI provider;
-            try {
-                provider = URI.create(runtimeBroker.getExternalProviderUrl());
-            } catch (IllegalArgumentException | NullPointerException error) {
-                throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL");
-            }
-            if ((!"http".equals(provider.getScheme()) && !"https".equals(provider.getScheme()))
-                    || provider.getHost() == null || provider.getUserInfo() != null
-                    || provider.getQuery() != null || provider.getFragment() != null) {
-                throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL"
-                        + " without credentials, query or fragment");
-            }
-            String token = runtimeBroker.getExternalProviderToken();
-            if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
-                throw new IllegalStateException("External Runtime provider token must be 16-4096 safe characters");
-            }
-            // The shipped templates' placeholder satisfies the format rule, but
-            // anyone can read it in the distribution (preflight refuses the same
-            // shape for the Harness token).
-            if (token.startsWith("replace-")) {
-                throw new IllegalStateException("External Runtime provider token is still"
-                        + " the shipped template placeholder");
-            }
-        }
         String digest = harness.getCapabilityDigest();
         if (StringUtils.isNotBlank(digest) && !digest.matches("sha256:[0-9a-f]{64}")) {
             throw new IllegalStateException("External Runtime Harness capability digest"
@@ -180,6 +164,32 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         if (request == null || request.compareTo(Duration.ofMillis(1)) < 0
                 || startup == null || startup.compareTo(Duration.ofMillis(1)) < 0) {
             throw new IllegalStateException("External Runtime request and startup timeouts must be at least 1ms");
+        }
+    }
+
+    private static void validateHttpProvider(ManagedAgentSettings.RuntimeBroker runtimeBroker) {
+        URI provider;
+        try {
+            provider = URI.create(runtimeBroker.getExternalProviderUrl());
+        } catch (IllegalArgumentException | NullPointerException error) {
+            throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL");
+        }
+        if ((!"http".equals(provider.getScheme()) && !"https".equals(provider.getScheme()))
+                || provider.getHost() == null || provider.getUserInfo() != null
+                || provider.getQuery() != null || provider.getFragment() != null) {
+            throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL"
+                    + " without credentials, query or fragment");
+        }
+        String token = runtimeBroker.getExternalProviderToken();
+        if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
+            throw new IllegalStateException("External Runtime provider token must be 16-4096 safe characters");
+        }
+        // The shipped templates' placeholder satisfies the format rule, but
+        // anyone can read it in the distribution (preflight refuses the same
+        // shape for the Harness token).
+        if (token.startsWith("replace-")) {
+            throw new IllegalStateException("External Runtime provider token is still"
+                    + " the shipped template placeholder");
         }
     }
 }

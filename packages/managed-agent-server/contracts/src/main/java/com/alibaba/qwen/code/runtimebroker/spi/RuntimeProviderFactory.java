@@ -15,6 +15,11 @@ public interface RuntimeProviderFactory {
     public default void validate(ManagedAgentSettings settings) {
     }
 
+    /** Validates profile settings before the host transport is known. */
+    public default void validateProfile(ManagedAgentSettings settings) {
+        validate(settings);
+    }
+
     /** Configuration-only validation with optional host-provided dependencies; no host probes or resource creation. */
     public default void validate(ManagedAgentSettings settings, RuntimeProviderDependencies dependencies) {
         validate(settings);

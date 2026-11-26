@@ -561,7 +561,7 @@ public class ManagedAgentProperties
         }
     }
 
-    /** Static configuration eligibility, never negotiated readiness or worker proof. */
+    /** Static Workspace profile eligibility. Provider transport is validated at assembly or preflight. */
     public boolean isExternalWorkspaceFilesConfigured() {
         if (!ExternalRuntimeKinds.isWorkspace(runtimeBroker.getProvisioner())
                 || !harness.isWorkspaceFilesEnabled() || !harness.isEnabled()
@@ -571,7 +571,7 @@ public class ManagedAgentProperties
         try {
             new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
                     .require(runtimeBroker.getProvisioner())
-                    .validate(this);
+                    .validateProfile(this);
             return harness.getApprovalMode() != null
                     && Set.of("yolo", "default", "auto-edit").contains(harness.getApprovalMode().toLowerCase(Locale.ROOT));
         } catch (IllegalStateException | IllegalArgumentException invalid) {
