@@ -38,6 +38,8 @@ export interface ScheduledTaskManualRunErrorHandlers {
   reload: () => void | Promise<void>;
   onError: (err: unknown, fallback: string) => void;
   isCurrent?: () => boolean;
+  /** Checks the direct daemon path selected by the fresh task mode. */
+  isDirectDispatchCurrent?: () => boolean;
   /** Optional stronger guard for the original SDK owner of a one-shot. */
   isOwnerCurrent?: () => boolean;
   /** Reports a consumed one-shot even when its original UI scope is gone. */
@@ -80,6 +82,7 @@ export async function runScheduledTaskManually(
     onError,
     isCurrent,
     isStale,
+    isDirectDispatchCurrent,
     isOwnerCurrent,
     onOneShotError,
   }: ScheduledTaskManualRunErrorHandlers,
@@ -114,6 +117,7 @@ export async function runScheduledTaskManually(
     await actions.assertScheduledTaskOwnerSelection(fresh.sessionId);
     if (!current(fresh.recurring)) return;
     if (fresh.sessionMode === 'per_run') {
+      if (isDirectDispatchCurrent?.() === false) return;
       // The daemon dispatches a fresh child session and records it on this
       // run. Never also enqueue the prompt into the controller session.
       await actions.runScheduledTask(
@@ -134,6 +138,12 @@ export async function runScheduledTaskManually(
         task.workspaceCwd,
         isStale ?? (() => false),
         async () => {
+          if (!current()) {
+            throw new DOMException(
+              t('scheduledTasks.error.runFailed'),
+              'AbortError',
+            );
+          }
           const candidates = (
             await actions.listScheduledTasks(task.workspaceId)
           ).filter(
@@ -142,6 +152,7 @@ export async function runScheduledTaskManually(
               (candidate.sessionId ?? null) === (fresh.sessionId ?? null),
           );
           if (
+            !current() ||
             candidates.length !== 1 ||
             !candidates[0].enabled ||
             candidates[0].recurring !== fresh.recurring ||

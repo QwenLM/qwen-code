@@ -4797,6 +4797,61 @@ describe('DaemonSessionClient clientId self-heal', () => {
     },
   );
 
+  it('revalidates a queued admission after another caller reattaches', async () => {
+    let releaseGuard!: () => void;
+    const firstGuard = new Promise<void>((resolve) => {
+      releaseGuard = resolve;
+    });
+    const promptRequests: string[] = [];
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/prompt')) {
+        const clientId = req.headers['x-qwen-client-id'];
+        promptRequests.push(clientId);
+        return clientId === 'client-1'
+          ? invalidClientIdResponse()
+          : jsonResponse(202, { promptId: 'accepted', lastEventId: 0 });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const beforeDispatch = vi.fn(async (clientId: string | undefined) => {
+      if (clientId !== 'client-1') {
+        throw new DOMException('Caller expired', 'AbortError');
+      }
+      await firstGuard;
+    });
+    const pending = session.submitPrompt(
+      { prompt: [{ type: 'text', text: 'queued caller' }] },
+      undefined,
+      beforeDispatch,
+    );
+    await vi.waitFor(() => expect(beforeDispatch).toHaveBeenCalledOnce());
+
+    await expect(
+      session.submitPrompt({
+        prompt: [{ type: 'text', text: 'other caller' }],
+      }),
+    ).resolves.toEqual({ promptId: 'accepted', lastEventId: 0 });
+    expect(session.clientId).toBe('client-2');
+    expect(promptRequests).toEqual(['client-1', 'client-2']);
+
+    releaseGuard();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(beforeDispatch.mock.calls).toEqual([['client-1'], ['client-2']]);
+    expect(promptRequests).toEqual(['client-1', 'client-2']);
+  });
+
   it('retries a worktree prompt only after matching durable reattachment', async () => {
     let promptCalls = 0;
     const { fetch } = recordingFetch((req) => {

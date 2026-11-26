@@ -926,6 +926,56 @@ describe('useSessionScheduledTasks', () => {
     },
   );
 
+  it('blocks queued admission after durable reads are revoked', async () => {
+    const task = durableTask({ id: 'revoked-queued-run' });
+    let releaseRevalidation!: () => void;
+    const revalidation = new Promise<void>((resolve) => {
+      releaseRevalidation = resolve;
+    });
+    sdkMock.workspaceActions.listScheduledTasks
+      .mockResolvedValueOnce([task])
+      .mockResolvedValueOnce([task])
+      .mockImplementationOnce(async () => {
+        await revalidation;
+        return [task];
+      });
+    sdkMock.workspaceActions.runScheduledTask.mockResolvedValue(undefined);
+    let admitted = 0;
+    onRunPrompt.mockImplementation(async (...args: unknown[]) => {
+      const beforeDispatch = args[4] as
+        | (() => void | Promise<void>)
+        | undefined;
+      await beforeDispatch?.();
+      admitted += 1;
+    });
+    const harness = {
+      sessionId: 'session-1',
+      workspaceId: 'ws-a',
+      activityKey: ACTIVE_KEY,
+    };
+    renderHarness(harness);
+    await act(async () => Promise.resolve());
+    const entry = latest!.tasks[0] as SessionDurableScheduledTask;
+    let running!: Promise<void>;
+    await act(async () => {
+      running = latest!.runDurableTask(entry);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(onRunPrompt).toHaveBeenCalledOnce());
+
+    renderHarness({ ...harness, durableEnabled: false });
+    await act(async () => {
+      releaseRevalidation();
+      await running;
+    });
+
+    expect(admitted).toBe(0);
+    expect(sdkMock.workspaceActions.runScheduledTask).not.toHaveBeenCalled();
+    expect(latest?.manualRunActive).toBe(false);
+    expect(latest?.busyIds.size).toBe(0);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it('does not resume an older session manual run or clear a newer run lock', async () => {
     const taskA = durableTask({ id: 'a-run', sessionId: 'session-1' });
     const taskB = durableTask({ id: 'b-run', sessionId: 'session-2' });

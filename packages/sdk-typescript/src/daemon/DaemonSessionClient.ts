@@ -809,22 +809,26 @@ export class DaemonSessionClient {
   ): Promise<NonBlockingPromptAccepted> {
     const accepted = await this.withClientIdSelfHeal(async () => {
       signal?.throwIfAborted();
-      if (beforeDispatch && signal) {
-        // A signal must also settle an asynchronous caller guard before the
-        // transport has a request it could abort.
-        await this.waitForCallerAbort(
-          () => beforeDispatch(this.clientId),
-          signal,
-        );
-      } else if (beforeDispatch) {
-        await beforeDispatch(this.clientId);
-      }
+      let guardedClientId: string | undefined;
+      do {
+        guardedClientId = this.clientId;
+        if (beforeDispatch && signal) {
+          // A signal must also settle an asynchronous caller guard before the
+          // transport has a request it could abort.
+          await this.waitForCallerAbort(
+            () => beforeDispatch(guardedClientId),
+            signal,
+          );
+        } else if (beforeDispatch) {
+          await beforeDispatch(guardedClientId);
+        }
+      } while (guardedClientId !== this.clientId);
       signal?.throwIfAborted();
       return this.client.promptNonBlocking(
         this.sessionId,
         req,
         signal,
-        this.clientId,
+        guardedClientId,
       );
     }, signal);
     if (!isNonBlockingAccepted(accepted)) {

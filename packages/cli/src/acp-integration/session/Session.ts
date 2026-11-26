@@ -12993,6 +12993,7 @@ export class Session implements SessionContext {
           (queued) =>
             queued.taskId === item.taskId &&
             (queued.taskSessionId ?? null) === (item.taskSessionId ?? null) &&
+            queued.source === item.source &&
             !this.#cronContinuesTodoStopGuardWorkChain(queued),
         );
         if (duplicateIndex >= 0) {

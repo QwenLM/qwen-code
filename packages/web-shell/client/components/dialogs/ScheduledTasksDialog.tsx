@@ -23,6 +23,7 @@ import {
   Trash2Icon,
 } from 'lucide-react';
 import {
+  useWorkspace,
   useWorkspaceActions,
   type DaemonAutofixPrWatch,
   type DaemonScheduledTask,
@@ -667,6 +668,9 @@ export function ScheduledTasksDialog({
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
+  const workspace = useWorkspace();
+  const workspaceClientRef = useRef(workspace.client);
+  workspaceClientRef.current = workspace.client;
   const actions = useWorkspaceActions();
   const portalRoot = useWebShellPortalRoot();
 
@@ -1530,17 +1534,21 @@ export function ScheduledTasksDialog({
       // one manual run in flight, since the App holds a single pending bound-run
       // latch and overlapping runs could drop a prompt.
       if (!task.enabled || runningTaskId !== null) return;
+      const originalClient = workspaceClientRef.current;
       setRunningTaskId(task.id);
       try {
         await runScheduledTaskManually(task, actions, onRunPrompt, t, {
           reload,
           onError,
           isCurrent: () =>
-            task.sessionId != null ||
-            currentSessionIdRef.current === currentSession?.sessionId,
+            workspaceClientRef.current === originalClient &&
+            (task.sessionId != null ||
+              currentSessionIdRef.current === currentSession?.sessionId),
+          isDirectDispatchCurrent: () => mountedRef.current,
           isStale: () =>
             confirmedDeletionsRef.current.has(taskDeletionKey(task)) ||
             isTaskDeleted?.(task) === true,
+          onOneShotError: onError,
         });
       } finally {
         setRunningTaskId(null);

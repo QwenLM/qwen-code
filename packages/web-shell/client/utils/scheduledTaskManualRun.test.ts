@@ -321,6 +321,62 @@ describe('runScheduledTaskManually owner matching', () => {
     },
   );
 
+  it.each([
+    { remainsCurrent: true, admissions: 1, recordings: 1 },
+    { remainsCurrent: false, admissions: 0, recordings: 0 },
+  ])(
+    'checks caller scope across queued revalidation ($remainsCurrent)',
+    async ({ remainsCurrent, admissions, recordings }) => {
+      const task = makeTask();
+      let current = true;
+      let releaseRevalidation!: () => void;
+      const revalidation = new Promise<void>((resolve) => {
+        releaseRevalidation = resolve;
+      });
+      const actions = {
+        listScheduledTasks: vi
+          .fn()
+          .mockResolvedValueOnce([task])
+          .mockImplementationOnce(async () => {
+            await revalidation;
+            return [task];
+          }),
+        runScheduledTask: vi.fn().mockResolvedValue(task),
+        assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+      };
+      let admitted = 0;
+      const onRunPrompt = vi.fn(async (...args: unknown[]) => {
+        const beforeDispatch = args[4] as
+          | (() => void | Promise<void>)
+          | undefined;
+        await beforeDispatch?.();
+        admitted += 1;
+      });
+      const onError = vi.fn();
+
+      const running = runScheduledTaskManually(
+        task,
+        actions,
+        onRunPrompt,
+        (key) => key,
+        {
+          reload: vi.fn(),
+          onError,
+          isCurrent: () => current,
+          isStale: () => false,
+        },
+      );
+      await vi.waitFor(() => expect(onRunPrompt).toHaveBeenCalledOnce());
+      current = remainsCurrent;
+      releaseRevalidation();
+      await running;
+
+      expect(admitted).toBe(admissions);
+      expect(actions.runScheduledTask).toHaveBeenCalledTimes(recordings);
+      expect(onError).not.toHaveBeenCalled();
+    },
+  );
+
   it('surfaces recurring recording failure when the scope remains current', async () => {
     const task = makeTask();
     const recordError = new Error('record failed');

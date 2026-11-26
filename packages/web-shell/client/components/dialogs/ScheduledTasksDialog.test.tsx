@@ -53,8 +53,9 @@ interface MockTask {
   }>;
 }
 
-const { actions, useDaemonChannels } = vi.hoisted(() => ({
+const { actions, useDaemonChannels, mockWorkspace } = vi.hoisted(() => ({
   useDaemonChannels: vi.fn(),
+  mockWorkspace: { client: { id: 'runtime-a' } },
   actions: {
     listScheduledTasks: vi.fn(),
     listChannelObservedContacts: vi.fn(),
@@ -74,6 +75,7 @@ const { actions, useDaemonChannels } = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useWorkspace: () => mockWorkspace,
   useWorkspaceActions: () => actions,
   useChannels: useDaemonChannels,
 }));
@@ -1814,6 +1816,108 @@ describe('ScheduledTasksDialog run now', () => {
     );
   });
 
+  it.each([true, false])(
+    'does not cancel a persistent manual run when the manager unmounts ($recurring)',
+    async (recurring) => {
+      const task = baseTask({
+        recurring,
+        sessionId: 'sess-persistent',
+        sessionMode: 'persistent',
+      });
+      let admitted = 0;
+      const onRunPrompt = vi.fn(async (...args: unknown[]) => {
+        act(() => {
+          root!.unmount();
+          root = null;
+        });
+        const beforeDispatch = args[4]
+          ? (args[4] as () => void | Promise<void>)
+          : undefined;
+        await beforeDispatch?.();
+        admitted += 1;
+      });
+      const onError = vi.fn();
+      await mount([task], { onRunPrompt, onError });
+      actions.listScheduledTasks.mockResolvedValue([task]);
+
+      click(document.querySelector('[aria-label="Run now"]'));
+      await vi.waitFor(() => {
+        expect(admitted).toBe(1);
+        expect(actions.runScheduledTask).toHaveBeenCalledOnce();
+      });
+
+      expect(onError).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['persistent', 'per_run', 0],
+    ['per_run', 'persistent', 1],
+  ] as const)(
+    'checks lifecycle for the fresh mode: %s -> %s',
+    async (snapshotMode, freshMode, expectedAdmissions) => {
+      const task = baseTask({
+        sessionMode: snapshotMode,
+        sessionId: 'sess-mode-transition',
+      });
+      const freshTask = { ...task, sessionMode: freshMode };
+      const freshRead = deferred<(typeof task)[]>();
+      const ownerSelection = deferred<void>();
+      let admitted = 0;
+      const onRunPrompt = vi.fn(async (...args: unknown[]) => {
+        act(() => {
+          root!.unmount();
+          root = null;
+        });
+        const beforeDispatch = args[4]
+          ? (args[4] as () => void | Promise<void>)
+          : undefined;
+        await beforeDispatch?.();
+        admitted += 1;
+      });
+      const onError = vi.fn();
+      await mount([task], { onRunPrompt, onError });
+      actions.listScheduledTasks
+        .mockReturnValueOnce(freshRead.promise)
+        .mockResolvedValue([freshTask]);
+      actions.assertScheduledTaskOwnerSelection.mockReturnValueOnce(
+        ownerSelection.promise,
+      );
+      actions.runScheduledTask.mockResolvedValue(freshTask);
+
+      click(document.querySelector('[aria-label="Run now"]'));
+      await act(async () => {
+        freshRead.resolve([freshTask]);
+        await freshRead.promise;
+      });
+      await vi.waitFor(() =>
+        expect(
+          actions.assertScheduledTaskOwnerSelection,
+        ).toHaveBeenCalledOnce(),
+      );
+      if (freshMode === 'per_run') {
+        act(() => {
+          root!.unmount();
+          root = null;
+        });
+      }
+      await act(async () => {
+        ownerSelection.resolve(undefined);
+        await ownerSelection.promise;
+      });
+      await flush();
+      if (expectedAdmissions > 0) {
+        await vi.waitFor(() => expect(admitted).toBe(expectedAdmissions));
+      }
+
+      expect(admitted).toBe(expectedAdmissions);
+      expect(actions.runScheduledTask).toHaveBeenCalledTimes(
+        expectedAdmissions,
+      );
+      expect(onError).not.toHaveBeenCalled();
+    },
+  );
+
   it('records a RECURRING task after enqueuing (enqueue → record)', async () => {
     const order: string[] = [];
     const onRunPrompt = vi.fn(() => {
@@ -2084,12 +2188,13 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
+    const onRunPrompt = vi.fn();
     const rerender = async (nextWorkspaces: typeof WORKSPACES) => {
       await act(async () => {
         root!.render(
           <I18nProvider language="en">
             <ScheduledTasksDialog
-              onRunPrompt={vi.fn()}
+              onRunPrompt={onRunPrompt}
               onCreateViaChat={vi.fn()}
               workspaces={nextWorkspaces}
               lockedWorkspace={lockedWorkspace}
@@ -2101,7 +2206,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
       await flush();
     };
     await rerender(ws);
-    return { rerender };
+    return { rerender, onRunPrompt };
   }
 
   const findWorkspaceSelect = () =>
@@ -2184,6 +2289,42 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
     expect(actions.listScheduledTasks).not.toHaveBeenCalledWith(undefined);
   });
+
+  it.each([true, false])(
+    'guards full-page per-run dispatch against runtime replacement ($runtimeReplaced)',
+    async (runtimeReplaced) => {
+      const task = baseTask({
+        sessionMode: 'per_run',
+        sessionId: 'session-in-original-runtime',
+      });
+      const { rerender, onRunPrompt } = await mountMulti({ primary: [task] });
+      const originalClient = mockWorkspace.client;
+      const freshRead = deferred<(typeof task)[]>();
+      actions.listScheduledTasks.mockClear();
+      actions.listScheduledTasks.mockReturnValueOnce(freshRead.promise);
+      actions.runScheduledTask.mockResolvedValue(task);
+      actions.runScheduledTask.mockClear();
+      click(document.querySelector('[aria-label="Run now"]'));
+      await vi.waitFor(() =>
+        expect(actions.listScheduledTasks).toHaveBeenCalledOnce(),
+      );
+
+      mockWorkspace.client = runtimeReplaced
+        ? { id: 'replacement-runtime' }
+        : originalClient;
+      await rerender(WORKSPACES);
+      await act(async () => {
+        freshRead.resolve([task]);
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(actions.runScheduledTask).toHaveBeenCalledTimes(
+        runtimeReplaced ? 0 : 1,
+      );
+      expect(onRunPrompt).not.toHaveBeenCalled();
+    },
+  );
 
   it('displays the legacy primary path without changing session navigation', async () => {
     const onOpenSession = vi.fn();
