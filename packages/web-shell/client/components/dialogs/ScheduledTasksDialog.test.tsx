@@ -1870,6 +1870,8 @@ describe('ScheduledTasksDialog run now', () => {
 
     click(document.querySelector('[aria-label="Run now"]'));
     await vi.waitFor(() => expect(onTaskMutated).toHaveBeenCalledOnce());
+    // Mounted-only dialog reload skips redundant list fetches after showChat unmounts the dialog.
+    expect(actions.listScheduledTasks).toHaveBeenCalledTimes(2);
   });
 
   it.each([

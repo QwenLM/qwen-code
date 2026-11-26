@@ -8,6 +8,7 @@
  * Session-only tasks never touch this module.
  */
 
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Mutex } from 'async-mutex';
@@ -380,15 +381,60 @@ const updateMutexes = new Map<string, Mutex>();
 // ACP child. Both files are read and written under the task-file lock below.
 const MAX_TASK_DELETION_GENERATIONS = 10_000;
 
-interface CronTaskDeletionGenerations {
-  version: 2;
+export interface CronTaskDeletionHistory {
+  incarnation: string | null;
   watermark: number;
+  evictedThrough: number;
+  historyLost: boolean;
+}
+
+export interface CronTaskDeletionObservation {
+  generations: ReadonlyMap<string, number>;
+  history: CronTaskDeletionHistory;
+}
+
+/**
+ * Verifies that none of the observed deletion guard keys changed since
+ * `before`, and that no deletion history newer than `before` was lost via
+ * sidecar corruption rebuild, eviction, or removal.
+ */
+export function isCronTaskDeletionObservationIntact(
+  before: CronTaskDeletionObservation | undefined,
+  after: CronTaskDeletionObservation | undefined,
+  ids: Iterable<string>,
+): boolean {
+  if (!before || !after) return false;
+  if (before.history.incarnation === null) {
+    if (after.history.historyLost) return false;
+  } else if (after.history.incarnation !== before.history.incarnation) {
+    return false;
+  }
+  if (after.history.evictedThrough > before.history.watermark) {
+    return false;
+  }
+  for (const id of ids) {
+    if (after.generations.get(id) !== before.generations.get(id)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+interface CronTaskDeletionGenerations {
+  version: 3;
+  incarnation: string;
+  watermark: number;
+  evictedThrough: number;
+  historyLost: boolean;
   entries: Array<[string, number]>;
 }
 
 interface CronTaskDeletionState {
+  incarnation: string | null;
   generations: Map<string, number>;
   watermark: number;
+  evictedThrough: number;
+  historyLost: boolean;
 }
 
 function getUpdateMutex(filePath: string): Mutex {
@@ -409,23 +455,55 @@ async function readTaskDeletionGenerations(
     raw = await fs.readFile(statePath, 'utf-8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { generations: new Map(), watermark: 0 };
+      return {
+        incarnation: null,
+        generations: new Map(),
+        watermark: 0,
+        evictedThrough: 0,
+        historyLost: false,
+      };
     }
     throw error;
   }
 
   const parsed = JSON.parse(raw) as {
     version?: unknown;
+    incarnation?: unknown;
     watermark?: unknown;
+    evictedThrough?: unknown;
+    historyLost?: unknown;
     entries?: unknown;
   };
   if (
-    parsed.version !== 2 ||
+    (parsed.version !== 2 && parsed.version !== 3) ||
     !Number.isSafeInteger(parsed.watermark) ||
     (parsed.watermark as number) < 0 ||
     !Array.isArray(parsed.entries)
   ) {
     throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
+  }
+  const watermark = parsed.watermark as number;
+  let incarnation: string;
+  let evictedThrough: number;
+  let historyLost: boolean;
+  if (parsed.version === 2) {
+    incarnation = 'v2';
+    evictedThrough = 0;
+    historyLost = false;
+  } else {
+    if (
+      typeof parsed.incarnation !== 'string' ||
+      parsed.incarnation.length === 0 ||
+      !Number.isSafeInteger(parsed.evictedThrough) ||
+      (parsed.evictedThrough as number) < 0 ||
+      (parsed.evictedThrough as number) > watermark ||
+      typeof parsed.historyLost !== 'boolean'
+    ) {
+      throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
+    }
+    incarnation = parsed.incarnation;
+    evictedThrough = parsed.evictedThrough as number;
+    historyLost = parsed.historyLost;
   }
   const generations = new Map<string, number>();
   let maximumGeneration = 0;
@@ -443,11 +521,10 @@ async function readTaskDeletionGenerations(
     generations.set(entry[0], entry[1]);
     maximumGeneration = Math.max(maximumGeneration, entry[1]);
   }
-  const watermark = parsed.watermark as number;
   if (watermark < maximumGeneration) {
     throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
   }
-  return { generations, watermark };
+  return { incarnation, generations, watermark, evictedThrough, historyLost };
 }
 
 /**
@@ -479,9 +556,14 @@ async function writeTaskDeletionGenerations(
   deletionState: CronTaskDeletionState,
   assertCanCommit?: () => void,
 ): Promise<void> {
+  const incarnation = deletionState.incarnation ?? randomUUID();
+  deletionState.incarnation = incarnation;
   const state: CronTaskDeletionGenerations = {
-    version: 2,
+    version: 3,
+    incarnation,
     watermark: deletionState.watermark,
+    evictedThrough: deletionState.evictedThrough,
+    historyLost: deletionState.historyLost,
     entries: [...deletionState.generations],
   };
   await atomicWriteJSON(`${filePath}.deletions`, state, {
@@ -679,7 +761,10 @@ export async function updateCronTasks(
     observeDeletionIds?:
       | readonly string[]
       | ((tasks: readonly DurableCronTask[]) => readonly string[]);
-    onDeletionGenerations?: (generations: ReadonlyMap<string, number>) => void;
+    onDeletionGenerations?: (
+      generations: ReadonlyMap<string, number>,
+      history: CronTaskDeletionHistory,
+    ) => void;
   } = {},
 ): Promise<void> {
   const filePath = getCronFilePath(projectRoot);
@@ -717,6 +802,12 @@ export async function updateCronTasks(
                 observedDeletionState.generations.get(id) ?? 0,
               ]),
             ),
+            {
+              incarnation: observedDeletionState.incarnation,
+              watermark: observedDeletionState.watermark,
+              evictedThrough: observedDeletionState.evictedThrough,
+              historyLost: observedDeletionState.historyLost,
+            },
           );
         }
         // Unreadable sidecar: skip the observation entirely so consumers
@@ -729,13 +820,20 @@ export async function updateCronTasks(
           ? options.deletionIds()
           : options.deletionIds;
       if (deletionIds?.length) {
-        // An unreadable sidecar is rebuilt from empty: the new tombstones
-        // land, and any pre-corruption generation a restore observed can no
-        // longer match, so the restore declines rather than resurrecting.
-        deletionState = (await loadDeletionState()) ?? {
+        // An unreadable sidecar is rebuilt with a fresh incarnation and
+        // historyLost: true so any pre-corruption observation (including an
+        // ENOENT generation-0 observation) declines restoration.
+        const loaded = await loadDeletionState();
+        deletionState = loaded ?? {
+          incarnation: randomUUID(),
           generations: new Map(),
           watermark: 0,
+          evictedThrough: 0,
+          historyLost: true,
         };
+        if (deletionState.incarnation === null) {
+          deletionState.incarnation = randomUUID();
+        }
         for (const id of new Set(deletionIds)) {
           if (deletionState.watermark === Number.MAX_SAFE_INTEGER) {
             throw new Error(
@@ -747,9 +845,14 @@ export async function updateCronTasks(
           deletionState.generations.set(id, deletionState.watermark);
         }
         while (deletionState.generations.size > MAX_TASK_DELETION_GENERATIONS) {
-          const oldest = deletionState.generations.keys().next().value;
-          if (oldest === undefined) break;
-          deletionState.generations.delete(oldest);
+          const oldestEntry = deletionState.generations.entries().next().value;
+          if (oldestEntry === undefined) break;
+          const [oldestKey, oldestGeneration] = oldestEntry;
+          deletionState.evictedThrough = Math.max(
+            deletionState.evictedThrough,
+            oldestGeneration,
+          );
+          deletionState.generations.delete(oldestKey);
         }
         await writeTaskDeletionGenerations(
           filePath,

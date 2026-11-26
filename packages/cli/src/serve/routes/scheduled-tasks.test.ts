@@ -1122,6 +1122,88 @@ describe('scheduled-tasks routes', () => {
     expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
+  it.each([
+    { scenario: 'corrupt-rebuild', expectRestored: false },
+    { scenario: 'eviction', expectRestored: false },
+    { scenario: 'intact-no-delete', expectRestored: true },
+    { scenario: 'intact-unrelated-delete', expectRestored: true },
+  ] as const)(
+    'rejects failed-dispatch restoration when deletion history is lost ($scenario)',
+    async ({ scenario, expectRestored }) => {
+      addLiveSession(
+        h.bridge,
+        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        h.workspace,
+      );
+      const owned = await create({
+        cron: '0 0 1 1 *',
+        prompt: `one-shot ${scenario}`,
+        recurring: false,
+        sessionMode: 'per_run',
+        sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        modelServiceId: 'missing-model',
+      });
+      expect(owned.status).toBe(201);
+      const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(
+        async (req) => {
+          const child = await originalSpawn(req);
+          expect(await readCronTasks(h.workspace)).toEqual([]);
+          if (scenario === 'corrupt-rebuild') {
+            const deleted = await request(h.app)
+              .delete(`/scheduled-tasks/${owned.body.id}`)
+              .query({ expectedSessionId: owned.body.sessionId });
+            expect(deleted.status).toBe(404);
+            await fsp.writeFile(
+              `${getCronFilePath(h.workspace)}.deletions`,
+              '{corrupt',
+            );
+            await updateCronTasks(h.workspace, (tasks) => tasks, {
+              deletionIds: ['unrelated-after-corrupt'],
+            });
+          } else if (scenario === 'eviction') {
+            const deleted = await request(h.app)
+              .delete(`/scheduled-tasks/${owned.body.id}`)
+              .query({ expectedSessionId: owned.body.sessionId });
+            expect(deleted.status).toBe(404);
+            await updateCronTasks(h.workspace, (tasks) => tasks, {
+              deletionIds: Array.from(
+                { length: 10_000 },
+                (_, i) => `evict-route-${i}`,
+              ),
+            });
+          } else if (scenario === 'intact-unrelated-delete') {
+            await updateCronTasks(h.workspace, (tasks) => tasks, {
+              deletionIds: ['unrelated-intact'],
+            });
+          }
+          return { ...child, modelApplied: false };
+        },
+      );
+
+      try {
+        const run = await request(h.app)
+          .post(`/scheduled-tasks/${owned.body.id}/run`)
+          .query({ expectedSessionId: owned.body.sessionId });
+        expect(run.status).toBe(500);
+      } finally {
+        warn.mockRestore();
+      }
+
+      const remaining = await readCronTasks(h.workspace);
+      if (expectRestored) {
+        expect(remaining).toHaveLength(1);
+        expect(remaining[0]).toMatchObject({
+          id: owned.body.id,
+          enabled: false,
+        });
+      } else {
+        expect(remaining).toEqual([]);
+      }
+    },
+  );
+
   it('honours an owner-qualified delete after a legacy run consumed the task', async () => {
     addLiveSession(
       h.bridge,

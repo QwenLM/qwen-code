@@ -2,7 +2,10 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DurableCronTask } from './cronTasksFile.js';
+import type {
+  CronTaskDeletionObservation,
+  DurableCronTask,
+} from './cronTasksFile.js';
 import {
   addCronTask,
   annotateCronRunSession,
@@ -11,6 +14,7 @@ import {
   cronTaskLegacyDeletionId,
   generateCronTaskId,
   getCronFilePath,
+  isCronTaskDeletionObservationIntact,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   MAX_TASK_RUNS,
   readCronTasks,
@@ -651,7 +655,10 @@ describe('cronTasksFile', () => {
   describe('updateCronTasks', () => {
     type DeletionState = {
       version: number;
+      incarnation: string;
       watermark: number;
+      evictedThrough: number;
+      historyLost: boolean;
       entries: Array<[string, number]>;
     };
     const statePath = () => `${getCronFilePath(tmpDir)}.deletions`;
@@ -681,6 +688,10 @@ describe('cronTasksFile', () => {
 
       expect(await removeCronTasks(tmpDir, ['newest'])).toBe(0);
       let state = await readState();
+      expect(state.version).toBe(3);
+      expect(state.incarnation).toBe('v2');
+      expect(state.evictedThrough).toBe(1);
+      expect(state.historyLost).toBe(false);
       expect(state.entries).toHaveLength(10_000);
       expect(state.entries.at(-1)).toEqual(['newest', 2]);
       expect(state.entries.some(([id]) => id === 'old-0')).toBe(false);
@@ -690,6 +701,7 @@ describe('cronTasksFile', () => {
       expect(state.entries).toHaveLength(10_000);
       expect(state.entries.at(-1)).toEqual(['old-0', 3]);
       expect(state.watermark).toBe(3);
+      expect(state.evictedThrough).toBe(1);
     });
 
     it('rebuilds a corrupt deletion sidecar instead of failing the update', async () => {
@@ -714,10 +726,131 @@ describe('cronTasksFile', () => {
 
       expect(await readCronTasks(tmpDir)).toEqual([]);
       expect(await readState()).toEqual({
-        version: 2,
+        version: 3,
+        incarnation: expect.any(String),
         watermark: 1,
+        evictedThrough: 0,
+        historyLost: true,
         entries: [['task-1', 1]],
       });
+    });
+
+    it('treats lost deletion history from corrupt rebuild, eviction, or sidecar removal as changed while keeping intact controls valid', async () => {
+      const observe = async (ids: string[]) => {
+        let observation: CronTaskDeletionObservation | undefined;
+        await updateCronTasks(tmpDir, (tasks) => tasks, {
+          observeDeletionIds: ids,
+          onDeletionGenerations: (generations, history) => {
+            observation = { generations, history };
+          },
+        });
+        return observation;
+      };
+
+      await writeIds('target', 'other');
+      const atEnoent = await observe(['target']);
+      expect(atEnoent?.history).toEqual({
+        incarnation: null,
+        watermark: 0,
+        evictedThrough: 0,
+        historyLost: false,
+      });
+
+      // Intact no-delete and unrelated-delete controls stay valid.
+      expect(
+        isCronTaskDeletionObservationIntact(
+          atEnoent,
+          await observe(['target']),
+          ['target'],
+        ),
+      ).toBe(true);
+      await updateCronTasks(tmpDir, (tasks) => tasks, {
+        deletionIds: ['other'],
+      });
+      const afterUnrelated = await observe(['target']);
+      expect(
+        isCronTaskDeletionObservationIntact(atEnoent, afterUnrelated, [
+          'target',
+        ]),
+      ).toBe(true);
+
+      // Corrupt rebuild after deleting target rejects both ENOENT and pre-rebuild observations.
+      await updateCronTasks(tmpDir, (tasks) => tasks, {
+        deletionIds: ['target'],
+      });
+      await seedFile(statePath(), '{corrupt');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await updateCronTasks(tmpDir, (tasks) => tasks, {
+          deletionIds: ['unrelated-after-corrupt'],
+        });
+      } finally {
+        warn.mockRestore();
+      }
+      const afterRebuild = await observe(['target']);
+      expect(afterRebuild?.generations.get('target')).toBe(0);
+      expect(
+        isCronTaskDeletionObservationIntact(atEnoent, afterRebuild, ['target']),
+      ).toBe(false);
+      expect(
+        isCronTaskDeletionObservationIntact(afterUnrelated, afterRebuild, [
+          'target',
+        ]),
+      ).toBe(false);
+
+      // New observations taken after rebuild still allow intact unrelated deletes.
+      await updateCronTasks(tmpDir, (tasks) => tasks, {
+        deletionIds: ['unrelated-2'],
+      });
+      const afterPostRebuildUnrelated = await observe(['target']);
+      expect(
+        isCronTaskDeletionObservationIntact(
+          afterRebuild,
+          afterPostRebuildUnrelated,
+          ['target'],
+        ),
+      ).toBe(true);
+
+      // Evicting target past the 10,000-entry cap rejects pre-eviction observations.
+      await updateCronTasks(tmpDir, (tasks) => tasks, {
+        deletionIds: ['target'],
+      });
+      await updateCronTasks(tmpDir, (tasks) => tasks, {
+        deletionIds: Array.from({ length: 10_000 }, (_, i) => `evict-${i}`),
+      });
+      const afterEviction = await observe(['target']);
+      expect(afterEviction?.generations.get('target')).toBe(0);
+      expect(
+        isCronTaskDeletionObservationIntact(
+          afterPostRebuildUnrelated,
+          afterEviction,
+          ['target'],
+        ),
+      ).toBe(false);
+
+      // An observation taken after eviction still allows a newer unrelated delete.
+      await updateCronTasks(tmpDir, (tasks) => tasks, {
+        deletionIds: ['unrelated-after-eviction'],
+      });
+      const afterPostEvictionUnrelated = await observe(['target']);
+      expect(
+        isCronTaskDeletionObservationIntact(
+          afterEviction,
+          afterPostEvictionUnrelated,
+          ['target'],
+        ),
+      ).toBe(true);
+
+      // Removing the sidecar file invalidates any prior non-ENOENT observation.
+      await fs.rm(statePath(), { force: true });
+      const afterSidecarRemoved = await observe(['target']);
+      expect(
+        isCronTaskDeletionObservationIntact(
+          afterPostEvictionUnrelated,
+          afterSidecarRemoved,
+          ['target'],
+        ),
+      ).toBe(false);
     });
 
     it('skips the deletion observation when the sidecar is unreadable', async () => {

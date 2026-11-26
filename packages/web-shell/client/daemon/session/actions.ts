@@ -1550,7 +1550,11 @@ export function createDaemonSessionActions({
         }
         if (ctrl.signal.aborted) {
           await removeUploadedAttachments(session, uploaded.references);
-          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+          if (
+            shouldAppendOptimisticMessage &&
+            !optimisticMessageAppended &&
+            !options?.beforeDispatch
+          ) {
             store.appendLocalUserMessage(
               text,
               displayedImages,

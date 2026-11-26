@@ -419,6 +419,42 @@ describe('runScheduledTaskManually owner matching', () => {
     expect(onOneShotError).not.toHaveBeenCalled();
   });
 
+  it('uses fresh.recurring when surfacing onRunPrompt failure after a concurrent flip to recurring', async () => {
+    const staleOneShot = makeTask({ recurring: false });
+    const freshRecurring = makeTask({ recurring: true });
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([freshRecurring]),
+      runScheduledTask: vi.fn(),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    let ownerCurrent = true;
+    const failure = new Error('Timed out waiting for session replay');
+    const onRunPrompt = vi.fn(async () => {
+      ownerCurrent = false;
+      throw failure;
+    });
+    const onError = vi.fn();
+
+    await runScheduledTaskManually(
+      staleOneShot,
+      actions,
+      onRunPrompt,
+      (key) => key,
+      {
+        reload: vi.fn(),
+        onError,
+        isCurrent: () => true,
+        isOwnerCurrent: () => ownerCurrent,
+        isStale: () => false,
+      },
+    );
+
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      failure,
+      'scheduledTasks.error.runFailed',
+    );
+  });
+
   it('surfaces recurring recording failure when the scope remains current', async () => {
     const task = makeTask();
     const recordError = new Error('record failed');

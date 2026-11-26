@@ -38,6 +38,7 @@ import {
   getCronFilePath,
   cronTaskSessionDeletionId,
   cronTaskLegacyDeletionId,
+  isCronTaskDeletionObservationIntact,
   updateCronTasks,
   generateCronTaskId,
   appendCronRun,
@@ -57,6 +58,7 @@ import {
   type CronGateStatus,
   type CronRunSessionOutcome,
   type CronTaskDelivery,
+  type CronTaskDeletionObservation,
   type DurableCronTask,
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
@@ -556,7 +558,7 @@ async function restoreConsumedOneShot(
   target: ScheduledTaskTarget,
   before: DurableCronTask[] | undefined,
   failedTask: DurableCronTask,
-  removalGenerations: ReadonlyMap<string, number> | undefined,
+  removalObservation: CronTaskDeletionObservation | undefined,
   route: string,
   deletionGuardId?: string,
 ): Promise<void> {
@@ -582,20 +584,21 @@ async function restoreConsumedOneShot(
         (task.sessionId ?? null) === (failedTask.sessionId ?? null),
     ) ?? -1;
   const original = index === -1 ? undefined : before![index];
-  if (!original || !removalGenerations) return;
-  let restoreGenerations: ReadonlyMap<string, number> | undefined;
+  if (!original || !removalObservation) return;
+  let restoreObservation: CronTaskDeletionObservation | undefined;
   await runWithScheduledTaskTarget(target, () =>
     updateCronTasks(
       target.workspaceCwd,
       (tasks) => {
         if (
-          guardIds.some(
-            (guardId) =>
-              restoreGenerations?.get(guardId) !==
-              removalGenerations.get(guardId),
+          !isCronTaskDeletionObservationIntact(
+            removalObservation,
+            restoreObservation,
+            guardIds,
           )
-        )
+        ) {
           return tasks;
+        }
         if (
           tasks.some(
             (task) =>
@@ -614,8 +617,8 @@ async function restoreConsumedOneShot(
       },
       {
         observeDeletionIds: guardIds,
-        onDeletionGenerations: (generations) => {
-          restoreGenerations = generations;
+        onDeletionGenerations: (generations, history) => {
+          restoreObservation = { generations, history };
         },
       },
     ),
@@ -2195,7 +2198,7 @@ function registerScheduledTaskCrudRoutes(
       let updated: DurableCronTask | undefined;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
-      let removalGenerations: ReadonlyMap<string, number> | undefined;
+      let removalObservation: CronTaskDeletionObservation | undefined;
       try {
         await runWithScheduledTaskTarget(target, () =>
           updateCronTasks(
@@ -2275,8 +2278,8 @@ function registerScheduledTaskCrudRoutes(
                 }
                 return generationGuards;
               },
-              onDeletionGenerations: (generations) => {
-                removalGenerations = generations;
+              onDeletionGenerations: (generations, history) => {
+                removalObservation = { generations, history };
               },
             },
           ),
@@ -2377,7 +2380,7 @@ function registerScheduledTaskCrudRoutes(
               target,
               rollbackBefore,
               updated,
-              removalGenerations,
+              removalObservation,
               `POST ${base}/${id}/run fresh-session dispatch`,
               scheduledTaskDeletionGuardId(id, expectedOwner),
             );

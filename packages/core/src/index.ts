@@ -369,6 +369,8 @@ export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
 export type {
   CronTaskDelivery,
+  CronTaskDeletionHistory,
+  CronTaskDeletionObservation,
   DurableCronTask,
   CronTaskRun,
   CronRunSessionOutcome,
@@ -381,6 +383,7 @@ export {
   withTaskGate,
   cronTaskSessionDeletionId,
   cronTaskLegacyDeletionId,
+  isCronTaskDeletionObservationIntact,
   updateCronTasks,
   removeCronTasks,
   getCronFilePath,

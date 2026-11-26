@@ -2195,6 +2195,65 @@ describe('CronScheduler', () => {
       expect(await readCronTasks(tmpDir)).toEqual([]);
     });
 
+    it.each([
+      'corrupt-rebuild',
+      'eviction',
+      'intact-unrelated-delete',
+    ] as const)(
+      'guards consumed one-shot restoration across sidecar history state (%s)',
+      async (scenario) => {
+        const original = await loadOneShot(`once-history-${scenario}`);
+        const fired = collectFires();
+        tickPastFirstFire(original);
+        expectOnly(fired, { missed: undefined });
+        await internals().pendingPersist;
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+
+        if (scenario === 'corrupt-rebuild') {
+          await deleteOnDisk(original.id);
+          const sidecarPath = `${getCronFilePath(tmpDir)}.deletions`;
+          await fs.writeFile(sidecarPath, '{torn-json');
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          try {
+            await updateCronTasks(tmpDir, (tasks) => tasks, {
+              deletionIds: ['unrelated-rebuild'],
+            });
+          } finally {
+            warn.mockRestore();
+          }
+        } else if (scenario === 'eviction') {
+          await deleteOnDisk(original.id);
+          await updateCronTasks(tmpDir, (tasks) => tasks, {
+            deletionIds: Array.from(
+              { length: 10_000 },
+              (_, i) => `unrelated-evict-${i}`,
+            ),
+          });
+        } else {
+          await updateCronTasks(tmpDir, (tasks) => tasks, {
+            deletionIds: ['unrelated-intact'],
+          });
+        }
+
+        const restored = await scheduler.restoreConsumedOneShot(
+          original.id,
+          original.sessionId ?? null,
+        );
+        if (scenario === 'intact-unrelated-delete') {
+          expect(restored).toBe(true);
+          const onDisk = await readCronTasks(tmpDir);
+          expect(onDisk).toHaveLength(1);
+          expect(onDisk[0]).toMatchObject({
+            id: original.id,
+            enabled: false,
+          });
+        } else {
+          expect(restored).toBe(false);
+          expect(await readCronTasks(tmpDir)).toEqual([]);
+        }
+      },
+    );
+
     it('does not restore after a cross-process delete follows a failed fire removal', async () => {
       const original = await loadOneShot('once-delete-after-failed-persist');
       const dispatch = deferred();

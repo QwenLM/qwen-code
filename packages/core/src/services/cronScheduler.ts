@@ -17,6 +17,8 @@ import type {
   CronGateRunOutcome,
   CronGateStatus,
   CronRunSessionOutcome,
+  CronTaskDeletionHistory,
+  CronTaskDeletionObservation,
   CronTaskDelivery,
   DurableCronTask,
 } from './cronTasksFile.js';
@@ -25,6 +27,7 @@ import {
   annotateCronRunSession,
   cronTaskSessionDeletionId,
   cronTaskLegacyDeletionId,
+  isCronTaskDeletionObservationIntact,
   CRON_TASKS_DISPLAY_PATH,
   appendCronRun,
   generateCronTaskId,
@@ -349,11 +352,11 @@ export class CronScheduler {
     { task: DurableCronTask; index: number; runId?: string }
   >();
   private consumedPerRunOneShots = new Set<string>();
-  // The durable deletion generation observed by the task-file mutation that
+  // The durable deletion observation recorded by the task-file mutation that
   // removed each consumed one-shot.
   private consumedPerRunRemovalGenerations = new Map<
     string,
-    ReadonlyMap<string, number>
+    CronTaskDeletionObservation
   >();
   // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
   // precondition) already reported as skipped, so the fail-closed remediation
@@ -1348,7 +1351,10 @@ export class CronScheduler {
       case 'final': {
         const fired: Array<Pick<DurableCronTask, 'id' | 'sessionId'>> = [];
         for (const job of pending.jobs) {
-          if (job.durable && !this.#shouldFireDurable(job)) continue;
+          if (job.durable && !this.#shouldFireDurable(job)) {
+            this.pendingRemoval.delete(runtimeJobKey(job));
+            continue;
+          }
           // Same skip as the tick loop (job.durable && …): a skipped durable
           // job is left on disk (not in removeMissedFromDisk) so the owning
           // session still gets its one final fire + delete.
@@ -1895,18 +1901,21 @@ export class CronScheduler {
       return false;
     }
     this.armedDurableOneShots.delete(key);
-    let restoreGenerations: ReadonlyMap<string, number> = new Map();
+    let restoreObservation: CronTaskDeletionObservation | undefined;
     let restored = false;
     try {
       await updateCronTasks(
         projectRoot,
         (tasks) => {
           if (
-            [...removalGeneration].some(
-              ([id, generation]) => restoreGenerations.get(id) !== generation,
+            !isCronTaskDeletionObservationIntact(
+              removalGeneration,
+              restoreObservation,
+              removalGeneration.generations.keys(),
             )
-          )
+          ) {
             return tasks;
+          }
           const existing = tasks.findIndex(
             (task) =>
               task.id === taskId &&
@@ -1935,9 +1944,9 @@ export class CronScheduler {
           return next;
         },
         {
-          observeDeletionIds: [...removalGeneration.keys()],
-          onDeletionGenerations: (generations) => {
-            restoreGenerations = generations;
+          observeDeletionIds: [...removalGeneration.generations.keys()],
+          onDeletionGenerations: (generations, history) => {
+            restoreObservation = { generations, history };
           },
         },
       );
@@ -2194,6 +2203,7 @@ export class CronScheduler {
       const removed = new Set(removedIds);
       const removedByFire = new Set<string>();
       let removalGenerations: ReadonlyMap<string, number> = new Map();
+      let removalHistory: CronTaskDeletionHistory | undefined;
       // Guard the just-fired recurring ids against re-detection by a reload that
       // races this async write (removed one-shots are already covered by
       // pendingRemoval). Cleared when the write lands. Symmetric to the
@@ -2201,6 +2211,7 @@ export class CronScheduler {
       const guarded = [...firedAt.keys()];
       this.markFirePersistPending(guarded);
       const recordRemovalGenerations = () => {
+        if (!removalHistory) return;
         for (const key of removedByFire) {
           const owner = removedOneShotSessionIds.get(key);
           const generation = removalGenerations.get(key);
@@ -2219,7 +2230,10 @@ export class CronScheduler {
               if (sessionGeneration === undefined) continue;
               observed.set(deletionId, sessionGeneration);
             }
-            this.consumedPerRunRemovalGenerations.set(key, observed);
+            this.consumedPerRunRemovalGenerations.set(key, {
+              generations: observed,
+              history: removalHistory,
+            });
           }
         }
       };
@@ -2312,8 +2326,9 @@ export class CronScheduler {
                 ];
               }),
             ],
-            onDeletionGenerations: (generations) => {
+            onDeletionGenerations: (generations, history) => {
               removalGenerations = generations;
+              removalHistory = history;
             },
           },
         )

@@ -87,7 +87,8 @@ export async function runScheduledTaskManually(
     onOneShotError,
   }: ScheduledTaskManualRunErrorHandlers,
 ): Promise<void> {
-  const current = (recurring = task.recurring) =>
+  let effectiveRecurring = task.recurring;
+  const current = (recurring = effectiveRecurring) =>
     isCurrent?.() !== false &&
     !isStale?.() &&
     (recurring || isOwnerCurrent?.() !== false);
@@ -104,6 +105,9 @@ export async function runScheduledTaskManually(
         (candidate.sessionId ?? null) === (task.sessionId ?? null),
     );
     const fresh = candidates.length === 1 ? candidates[0] : undefined;
+    if (fresh) {
+      effectiveRecurring = fresh.recurring;
+    }
     if (!current(fresh?.recurring)) return;
     if (!fresh || !fresh.enabled) {
       await Promise.resolve(reload()).catch(() => {});

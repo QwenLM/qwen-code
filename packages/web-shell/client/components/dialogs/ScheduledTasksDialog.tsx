@@ -1550,7 +1550,9 @@ export function ScheduledTasksDialog({
         await runScheduledTaskManually(task, actions, onRunPrompt, t, {
           reload: async () => {
             onTaskMutated?.();
-            await reload();
+            if (mountedRef.current) {
+              await reload();
+            }
           },
           onError,
           isCurrent: () =>

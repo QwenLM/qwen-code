@@ -9870,6 +9870,8 @@ export function App({
       reportScheduledTaskError(error, fallback, true),
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
+  const refreshSessionScheduledTasksRef = useRef(sessionScheduledTasks.refresh);
+  refreshSessionScheduledTasksRef.current = sessionScheduledTasks.refresh;
   const matchesCurrentScheduledTaskScope = useCallback(
     (task: { id: string; workspaceId?: string; sessionId?: string | null }) =>
       scheduledTaskWorkspaceTarget.resolvable &&
@@ -14434,6 +14436,18 @@ export function App({
           prompt: preparedPrompt,
           queued: false,
         });
+        let beforeDetachedDispatchRejected = false;
+        const wrappedBeforeDetachedDispatch = opts?.beforeDetachedDispatch
+          ? async (clientId: string | undefined) => {
+              beforeDetachedDispatchRejected = false;
+              try {
+                await opts.beforeDetachedDispatch!(clientId);
+              } catch (error) {
+                beforeDetachedDispatchRejected = true;
+                throw error;
+              }
+            }
+          : undefined;
         try {
           await sessionActions.sendDetachedPrompt(
             detachedSession,
@@ -14455,9 +14469,9 @@ export function App({
               ...(opts?.idempotencyKey
                 ? { idempotencyKey: opts.idempotencyKey }
                 : {}),
-              ...(opts?.beforeDetachedDispatch
+              ...(wrappedBeforeDetachedDispatch
                 ? {
-                    beforeDetachedDispatch: opts.beforeDetachedDispatch,
+                    beforeDetachedDispatch: wrappedBeforeDetachedDispatch,
                   }
                 : {}),
               onAdmissionStarted: () => {
@@ -14483,6 +14497,7 @@ export function App({
         } catch (error) {
           if (
             detachedWorkspaceCwd &&
+            !beforeDetachedDispatchRejected &&
             !isDefinitelyRejectedPromptAdmission(error)
           ) {
             sessionCatalogController.promptAdmissionUncertain(
@@ -27310,7 +27325,9 @@ export function App({
                           task,
                         )
                       }
-                      onTaskMutated={sessionScheduledTasks.refresh}
+                      onTaskMutated={() =>
+                        refreshSessionScheduledTasksRef.current()
+                      }
                       onTaskDeleted={(task) => {
                         if (!matchesCurrentScheduledTaskScope(task)) return;
                         sessionScheduledTasks.confirmDurableDeletion(task);

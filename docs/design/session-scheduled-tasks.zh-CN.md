@@ -48,7 +48,9 @@ PATCH、DELETE 和 Run 都用 `expectedSessionId` 声明预期的任务 owner，
 规范化的 owner 范围视图同时供应 Environment 列表和已经打开的详情。详情只消费 source session、任务 ID 和 workspace 全部匹配的 live durable 记录，或身份相同的已确认删除记录。即使历史回退已经恢复了原始创建记录，同 ID 绑定到另一个 session 的任务也不能作为可编辑替代对象。读取和 mutation 回执还会比较请求 owner 与当前任务 scope。
 
 详情只通过这个受保护的投影接入 live 字段，不会为每次更新额外发起一次列表请求。详情确认删除后，通过共享确认函数立即移除 Environment 行、记录带 workspace 的 tombstone，并淘汰旧读取，而不是依赖下一轮旧数据刷新来收敛。删除确认属于任务/session scope，而不是易变的 provider 对象身份。后续被接纳的列表响应也会应用 tombstone，旧响应或重复记录不能复活已确认删除的行。
-全页任务管理器共享当前会话同步更新的确认谓词，并为自己直接确认删除的任务记录 workspace+session+id tombstone。两条路径都拦截尚未验证的 Manual Run 旧读取。共享刷新回调在 React 发起替代读取前淘汰旧列表响应，已确认保存的详情不能被更早接纳的旧投影回写；更新的读取仍可正常更新详情。全页管理器成功创建、编辑或启停后，也调用所选会话的 owner 范围刷新，因此返回聊天时，头部和 Environment 不必等待无关 cron 活动才能反映最新任务状态。
+全页任务管理器共享当前会话同步更新的确认谓词，并为自己直接确认删除的任务记录 workspace+session+id tombstone。两条路径都拦截尚未验证的 Manual Run 旧读取。共享刷新回调在 React 发起替代读取前淘汰旧列表响应，已确认保存的详情不能被更早接纳的旧投影回写；更新的读取仍可正常更新详情。全页管理器成功创建、编辑、启停或手动运行后，也调用当前活跃会话的 owner 范围刷新，因此返回聊天（包括跨会话手动运行后）时，头部和 Environment 不必等待无关 cron 活动才能反映最新任务状态。
+
+已消费 durable one-shot 在派发失败后的恢复守卫，通过持久化的 deletion-sidecar 历史 `incarnation`、单调 `watermark`、淘汰下界（`evictedThrough`）与损坏重建标记（`historyLost`）进行校验。当 sidecar 历史完整时，无删除与无关删除对照仍允许恢复；一旦损坏 sidecar 被重建、sidecar 文件消失、或有界淘汰丢弃了晚于消费时刻观测值的记录，缺失的删除历史绝不被当作“未删除”的证明，恢复会 fail-closed 拒绝。
 
 服务端已确认的 session 停止也存入 Environment 使用的同一 owner 状态，并以只读取消 ID 集合提供给详情。当前详情以及同一 owner 下之后创建的详情实例，都必须显示已确认停止的快照，不能把它与自然过期或 live 状态未知混为一谈；其他 source session 不能借用这份确认。详情内的直接停止可以把焦点还给稳定的 detail group，而 Environment 的停止是独立的焦点事务，不能被详情的本地 effect 覆盖。
 
