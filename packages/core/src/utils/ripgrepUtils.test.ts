@@ -10,6 +10,7 @@ import {
   _resetRipgrepUtilsCachesForTest,
   canUseRipgrep,
   getBuiltinRipgrep,
+  resolveHealthyBuiltinRipgrep,
   resolveRipgrep,
   runRipgrep,
 } from './ripgrepUtils.js';
@@ -779,12 +780,51 @@ describe('ripgrepUtils', () => {
       expect(systemProbe.mock.results[0].value.stdin.end).toHaveBeenCalledWith(
         'qwen-ripgrep-probe\n',
       );
+      expect(execCommand).not.toHaveBeenCalled();
     });
 
     it('falls back to the bundled binary when PATH rg exists but cannot run', async () => {
       systemFailsBuiltinWorks();
 
       await expect(canUseRipgrep(true)).resolves.toBe(true);
+    });
+
+    it('returns a healthy bundled path even when PATH rg is healthy', async () => {
+      systemWorks();
+
+      await expect(resolveHealthyBuiltinRipgrep()).resolves.toBe(
+        getBuiltinRipgrep(),
+      );
+      expect(fileExists).toHaveBeenCalledWith(getBuiltinRipgrep());
+      expect(execCommand).toHaveBeenCalledWith(
+        getBuiltinRipgrep(),
+        ['--version'],
+        expect.anything(),
+      );
+      expect(isCommandAvailable).not.toHaveBeenCalled();
+      expect(systemProbe).not.toHaveBeenCalled();
+
+      await expect(canUseRipgrep(true)).resolves.toBe(true);
+      await expect(resolveRipgrep(true)).resolves.toEqual({
+        mode: 'system',
+        command: 'rg',
+      });
+      expect(systemProbe).toHaveBeenCalledOnce();
+    });
+
+    it('declines a broken bundled binary without falling back to healthy PATH rg', async () => {
+      systemWorks();
+      vi.mocked(execCommand).mockRejectedValue(new Error('bundled rg broken'));
+
+      await expect(resolveHealthyBuiltinRipgrep()).resolves.toBeNull();
+      expect(fileExists).toHaveBeenCalledWith(getBuiltinRipgrep());
+      expect(execCommand).toHaveBeenCalledWith(
+        getBuiltinRipgrep(),
+        ['--version'],
+        expect.anything(),
+      );
+      expect(isCommandAvailable).not.toHaveBeenCalled();
+      expect(systemProbe).not.toHaveBeenCalled();
     });
 
     it('caches the bundled fallback and does not re-probe the broken PATH rg', async () => {

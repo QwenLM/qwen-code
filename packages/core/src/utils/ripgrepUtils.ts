@@ -514,6 +514,24 @@ export async function canUseRipgrep(
   return selection !== null;
 }
 
+/**
+ * Resolves the bundled ripgrep, but only once it is known to run.
+ *
+ * Callers that must name a concrete bundled path — rather than accept the
+ * system rg fallback — get null instead of a broken path, so they can decline
+ * the feature and leave the dedicated search tools in place.
+ */
+export async function resolveHealthyBuiltinRipgrep(): Promise<string | null> {
+  try {
+    const selection = await resolveBuiltinRipgrep();
+    if (!selection) return null;
+    await ensureRipgrepHealthy(selection);
+    return selection.command;
+  } catch {
+    return null;
+  }
+}
+
 function errorCodeOf(
   error: RipgrepProcessError,
 ): string | number | undefined | null {

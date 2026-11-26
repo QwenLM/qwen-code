@@ -2798,8 +2798,13 @@ describe('Gemini Client (client.ts)', () => {
       // mocked getters are backed by that state), or gating renders with
       // `declaredTools === undefined` and never engages.
       const surface = vi.mocked(getCoreSystemPrompt).mock.calls.at(-1)?.[7] as
-        | { declaredTools?: ReadonlySet<string>; agentReachable?: boolean }
+        | {
+            declaredTools?: ReadonlySet<string>;
+            agentReachable?: boolean;
+            searchConfig?: object;
+          }
         | undefined;
+      expect(surface?.searchConfig).toBe(mockConfig);
       expect(surface?.agentReachable).toBe(true);
       expect(surface?.declaredTools).toEqual(
         new Set([ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL]),
@@ -12028,7 +12033,10 @@ Other open files:
         const send = () => run([{ text: 'Plan this change' }], promptId);
         await (inSubagent ? runWithAgentContext('agent-1', send) : send());
 
-        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(forSubagent);
+        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(
+          forSubagent,
+          mockConfig,
+        );
       },
     );
 
@@ -16797,6 +16805,7 @@ Other open files:
         // startChat recorded: no declarations in the registry mock, and no
         // bridge-reachable Agent.
         {
+          searchConfig: mockConfig,
           declaredTools: new Set(),
           agentReachable: false,
           executionSandboxFilesystem: undefined,

@@ -127,6 +127,19 @@ describe('QwenIgnoreParser', () => {
     });
   });
 
+  describe('cross-file precedence', () => {
+    it('lets .qwenignore override an earlier custom ignore rule', async () => {
+      await createTestFile('.agentignore', '*.log\n');
+      await createTestFile('.qwenignore', '!keep.log\n');
+      await createTestFile('keep.log', 'visible');
+
+      const parser = new QwenIgnoreParser(projectRoot, ['.agentignore']);
+
+      expect(parser.isIgnored('keep.log')).toBe(false);
+      expect(parser.getIgnoreFileNameForPath('keep.log')).toBeUndefined();
+    });
+  });
+
   describe('when custom ignore files are configured', () => {
     beforeEach(async () => {
       await createTestFile('.cursorignore', 'cursor-secret.txt\n');

@@ -153,6 +153,7 @@ class TeamCreateInvocation extends BaseToolInvocation<
       this.config.getSubagentManager(),
       {
         maxTeammates: this.config.getAgentsSettings().team?.maxTeammates,
+        searchConfig: this.config,
       },
     );
 
