@@ -8968,6 +8968,37 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('keeps preferences when setting the same OAuth model programmatically', async () => {
+      const authType = AuthType.QWEN_OAUTH;
+      const model = 'coder-model';
+      const actual = await vi.importActual<
+        typeof import('../core/contentGenerator.js')
+      >('../core/contentGenerator.js');
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        actual.resolveContentGeneratorConfigWithSources,
+      );
+      stubContentGenerator();
+      const config = makeConfig({ authType, model, modelPreferences: {} });
+      await config.refreshAuth(authType);
+      expect(config.getCurrentModelRegistryBaseUrl()).toBeNull();
+      const { baseUrl } = config.getContentGeneratorConfig();
+      expect(baseUrl).toBeTruthy();
+      const key = config.getModelPreferenceKey()!;
+      config.setModelPreferences({
+        [key]: { reasoning: { effort: 'high' }, contextWindow: 128_000 },
+      });
+
+      await config.setModel(model);
+
+      expect(config.getCurrentModelRegistryBaseUrl()).toBeUndefined();
+      expect(config.getContentGeneratorConfig().baseUrl).toBe(baseUrl);
+      expect(config.getModelPreferenceKey()).toBe(key);
+      expect(config.getReasoningEffort()).toBe('high');
+      expect(config.getContentGeneratorConfig().contextWindowSize).toBe(
+        128_000,
+      );
+    });
+
     it('should notify model change listeners after switchModel', async () => {
       const config = await qwenOauthConfig();
       const listener = vi.fn();

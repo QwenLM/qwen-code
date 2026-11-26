@@ -7302,12 +7302,11 @@ export class Config {
     const registryEndpoint = this.getCurrentModelRegistryBaseUrl();
     const endpointSource = sources['baseUrl']?.kind;
     const endpoint =
-      registryEndpoint === undefined ||
       endpointSource === 'cli' ||
       endpointSource === 'env' ||
       endpointSource === 'settings'
         ? config.baseUrl
-        : registryEndpoint;
+        : (registryEndpoint ?? config.baseUrl);
     const modelId = encodeURIComponent(
       stripRuntimeSnapshotPrefix(config.model),
     );
