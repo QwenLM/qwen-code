@@ -345,6 +345,10 @@ function safeNonJsonRpcCode(value: unknown): string | undefined {
  * Replace an opaque Zod parse failure with safe response metadata when the
  * compatibility fetch captured a non-JSON-RPC body for this server. The raw
  * body is never retained or surfaced: it may contain credentials or PII.
+ * The improved error keeps a cause for chain shape, but the cause is
+ * redacted — `getErrorMessage` appends cause details into discovery logs
+ * and status surfaces, so the original parse failure's message and issues
+ * (which can embed received body values) must not survive.
  * Returns the original error untouched when no capture applies, so success
  * paths and unrelated failures keep their existing behavior.
  */
@@ -365,12 +369,22 @@ export function improveMcpNonJsonRpcError<T>(
       const truncated = capture.truncated ? ', body truncated' : '';
       const items =
         capture.items === undefined ? '' : `, items=${capture.items}`;
+      // Only the machine-generated error name crosses into the cause; the
+      // message and issues are response-derived and stay behind.
+      const originalName =
+        typeof error === 'object' && error !== null
+          ? (error as { name?: unknown }).name
+          : undefined;
+      const causeName =
+        typeof originalName === 'string' && originalName
+          ? originalName
+          : 'Error';
       return new Error(
         `MCP server '${serverName}' returned a non-JSON-RPC response ` +
           `(HTTP ${capture.status}, ${capture.contentType}${code}${items}${truncated}) — ` +
           `the endpoint or its gateway rejected the request; check ` +
           `credentials or retry later.`,
-        { cause: error },
+        { cause: new Error(`${causeName} (response details redacted)`) },
       );
     }
     current = (current as { cause?: unknown }).cause;
@@ -878,9 +892,9 @@ export class McpClient {
       );
       if (!this.isDisconnecting) {
         // F1 (review): the recorded lastError must not carry the Zod dump. The
-        // improved error keeps the original as `cause` for debugging, but the
-        // recorded message is the improved text alone; unrelated failures keep
-        // the full cause chain.
+        // improved error carries a redacted cause (response content never
+        // survives), and the recorded message is the improved text alone;
+        // unrelated failures keep the full cause chain.
         recordMCPServerLastError(
           this.serverName,
           surfacedError === error || !(surfacedError instanceof Error)
@@ -1057,9 +1071,9 @@ export class McpClient {
       );
       if (!this.isDisconnecting) {
         // F1 (review): the recorded lastError must not carry the Zod dump. The
-        // improved error keeps the original as `cause` for debugging, but the
-        // recorded message is the improved text alone; unrelated failures keep
-        // the full cause chain.
+        // improved error carries a redacted cause (response content never
+        // survives), and the recorded message is the improved text alone;
+        // unrelated failures keep the full cause chain.
         recordMCPServerLastError(
           this.serverName,
           surfacedError === error || !(surfacedError instanceof Error)

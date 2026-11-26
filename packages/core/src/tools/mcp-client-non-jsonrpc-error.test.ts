@@ -23,9 +23,11 @@ import {
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { MCPServerConfig } from '../config/config.js';
+import type { Config, MCPServerConfig } from '../config/config.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
+import { getErrorMessage } from '../utils/errors.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import { McpClientManager } from './mcp-client-manager.js';
 import type { ToolRegistry } from './tool-registry.js';
 import {
   _resetNonJsonRpcCapturesForTest,
@@ -299,7 +301,14 @@ describe('non-JSON-RPC 200 response error surface', () => {
     expect(message).toContain('code=401');
     expect(message).not.toContain('token expired or incorrect');
     expect(message).not.toContain('invalid_union');
-    expect((surfaced as Error).cause).toBe(caught);
+    // The cause is retained for chain shape but redacted: the original
+    // message/issues must not survive, because getErrorMessage appends
+    // cause details into discovery logs and status surfaces.
+    expect((surfaced as Error).cause).toBeInstanceOf(Error);
+    expect(((surfaced as Error).cause as Error).message).not.toContain(
+      'invalid_union',
+    );
+    expect(getErrorMessage(surfaced)).not.toContain('invalid_union');
   });
 
   it('connectToMcpServer reports the captured response code in its connection error', async () => {
@@ -337,6 +346,15 @@ describe('non-JSON-RPC 200 response error surface', () => {
     expect((caught as Error).message).toContain('code=401');
     expect((caught as Error).message).not.toContain(TEST_MARKER);
 
+    // Formatter boundary (review): getErrorMessage appends `cause` details,
+    // and the discovery manager logs exactly that formatter output. The
+    // FORMATTED thrown error must be as clean as the direct message —
+    // neither the secret marker nor the opaque Zod dump may ride the cause.
+    const formatted = getErrorMessage(caught);
+    expect(formatted).toContain('code=401');
+    expect(formatted).not.toContain(TEST_MARKER);
+    expect(formatted).not.toContain('invalid_union');
+
     const lastError = getMCPServerLastError(serverName);
     expect(lastError).toContain('code=401');
     expect(lastError).not.toContain(TEST_MARKER);
@@ -345,6 +363,78 @@ describe('non-JSON-RPC 200 response error surface', () => {
     const debugOutput = debugErrorMock.mock.calls.flat().join('\n');
     expect(debugOutput).toContain('code=401');
     expect(debugOutput).not.toContain(TEST_MARKER);
+    expect(debugOutput).not.toContain('invalid_union');
+  });
+
+  it('formatter boundary: a synthetic cause carrying the marker never reaches getErrorMessage', async () => {
+    // Review control: no real credentials — a synthetic original error whose
+    // own message AND nested cause carry the marker, plus the opaque dump
+    // text. improveMcpNonJsonRpcError keeps the original as `cause`, so this
+    // pins the composition of the error construction with getErrorMessage.
+    const compat = createStreamableHttpCompatibilityFetch(
+      serverName,
+      fetch,
+      config(),
+    );
+    await compat(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }),
+    });
+    const synthetic = Object.assign(
+      new Error(
+        `parse failed: Authorization: Bearer ${TEST_MARKER} invalid_union`,
+      ),
+      {
+        issues: [{ code: 'invalid_union' }],
+        cause: new Error(`nested cause ${TEST_MARKER}`),
+      },
+    );
+    const surfaced = improveMcpNonJsonRpcError(serverName, synthetic, config());
+    expect(surfaced).toBeInstanceOf(Error);
+    expect((surfaced as Error).message).toContain('code=401');
+    expect((surfaced as Error).message).not.toContain(TEST_MARKER);
+    const formatted = getErrorMessage(surfaced);
+    expect(formatted).toContain('code=401');
+    expect(formatted).not.toContain(TEST_MARKER);
+    expect(formatted).not.toContain('invalid_union');
+  });
+
+  it('discovery-manager log carries neither the marker nor the Zod dump', async () => {
+    // The manager's discovery catch logs getErrorMessage(error) where error
+    // is what McpClient.connect threw — the improved error. Drive the REAL
+    // manager against the secret200 server so the log line is produced by
+    // the production composition, not a reconstruction of it.
+    mode = 'secret200';
+    const workspaceContext = {
+      getDirectories: () => [],
+      onDirectoriesChanged: () => () => {},
+    } as unknown as WorkspaceContext;
+    const cliConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ [serverName]: config() }),
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/tmp',
+      getResourceRegistry: () => ({ removeResourcesByServer: () => {} }),
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => workspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+      isMcpServerPendingApproval: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(cliConfig, {} as ToolRegistry);
+    try {
+      await manager.discoverAllMcpTools(cliConfig);
+    } finally {
+      await manager.stop();
+    }
+    const logOutput = debugErrorMock.mock.calls.flat().join('\n');
+    expect(logOutput).toContain(
+      `Error during discovery for server '${serverName}'`,
+    );
+    expect(logOutput).toContain('code=401');
+    expect(logOutput).not.toContain(TEST_MARKER);
+    expect(logOutput).not.toContain('invalid_union');
   });
 
   it('rejects a nonnumeric code as untrusted text rather than a machine code', async () => {
@@ -485,7 +575,14 @@ describe('non-JSON-RPC 200 response error surface', () => {
     const surfaced = improveMcpNonJsonRpcError(serverName, wrapped, config());
     expect(surfaced).toBeInstanceOf(Error);
     expect((surfaced as Error).message).toContain('code=401');
-    expect((surfaced as Error).cause).toBe(wrapped);
+    // Redacted cause: the wrapped chain's content ('outer', 'middle', the
+    // Zod-like message) must not survive into the formatted surface.
+    expect((surfaced as Error).cause).toBeInstanceOf(Error);
+    const formatted = getErrorMessage(surfaced);
+    expect(formatted).toContain('code=401');
+    expect(formatted).not.toContain('parse failed');
+    expect(formatted).not.toContain('outer');
+    expect(formatted).not.toContain('middle');
   });
 
   it('F2: a 513-byte body still surfaces safe metadata, never the dump', async () => {
