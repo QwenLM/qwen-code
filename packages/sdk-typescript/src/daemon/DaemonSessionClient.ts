@@ -781,20 +781,12 @@ export class DaemonSessionClient {
     const accepted = await this.withClientIdSelfHeal(async () => {
       signal?.throwIfAborted();
       if (beforeDispatch && signal) {
-        let onAbort: (() => void) | undefined;
-        const aborted = new Promise<never>((_, reject) => {
-          onAbort = () => reject(signal.reason);
-          if (signal.aborted) onAbort();
-          else signal.addEventListener('abort', onAbort, { once: true });
-        });
-        aborted.catch(() => {});
-        try {
-          // A signal must also settle an asynchronous caller guard before the
-          // transport has a request it could abort.
-          await Promise.race([beforeDispatch(this.clientId), aborted]);
-        } finally {
-          if (onAbort) signal.removeEventListener('abort', onAbort);
-        }
+        // A signal must also settle an asynchronous caller guard before the
+        // transport has a request it could abort.
+        await this.waitForCallerAbort(
+          () => beforeDispatch(this.clientId),
+          signal,
+        );
       } else if (beforeDispatch) {
         await beforeDispatch(this.clientId);
       }
@@ -891,6 +883,29 @@ export class DaemonSessionClient {
   }
 
   /**
+   * Cancel only this caller's wait, preserving the caller's exact reason.
+   * The operation has its own lifecycle: shared reattachment and an async
+   * caller-supplied guard may still settle after the wait is cancelled.
+   */
+  private async waitForCallerAbort<T>(
+    operation: () => Promise<T> | T,
+    signal: AbortSignal,
+  ): Promise<T> {
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    });
+    aborted.catch(() => {});
+    try {
+      return await Promise.race([operation(), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  /**
    * Run a prompt-admission call, recovering from a stale `clientId`.
    *
    * A daemon restart (or session reload) wipes the daemon's in-memory client
@@ -913,7 +928,11 @@ export class DaemonSessionClient {
     } catch (err) {
       if (signal?.aborted) throw signal.reason;
       if (!isInvalidClientId(err)) throw err;
-      await this.reattach();
+      if (signal) {
+        await this.waitForCallerAbort(() => this.reattach(), signal);
+      } else {
+        await this.reattach();
+      }
       return await fn();
     }
   }

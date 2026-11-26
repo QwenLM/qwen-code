@@ -4493,6 +4493,170 @@ describe('DaemonSessionClient clientId self-heal', () => {
     },
   );
 
+  it.each(['success', 'failure'] as const)(
+    'aborts the caller during reattach: %s',
+    async (resumeOutcome) => {
+      let releaseResume!: (response: Response) => void;
+      const resume = new Promise<Response>((resolve) => {
+        releaseResume = resolve;
+      });
+      let promptCalls = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/resume')) return resume;
+        if (req.url.endsWith('/prompt')) {
+          promptCalls++;
+          return promptCalls === 1
+            ? invalidClientIdResponse()
+            : jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      const caller = new AbortController();
+      const pending = session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        caller.signal,
+      );
+      let settled = false;
+      const outcome = pending.then(
+        (value) => ({ kind: 'accepted', value }) as const,
+        (error: unknown) => ({ kind: 'error', error }) as const,
+      );
+      void outcome.then(() => {
+        settled = true;
+      });
+      await vi.waitFor(() =>
+        expect(calls.some((call) => call.url.endsWith('/resume'))).toBe(true),
+      );
+      expect(promptCalls).toBe(1);
+      const reason = new DaemonHttpError(
+        400,
+        { code: 'invalid_client_id' },
+        'caller stop',
+      );
+      caller.abort(reason);
+      try {
+        await vi.waitFor(() => expect(settled).toBe(true), {
+          timeout: 1000,
+          interval: 1,
+        });
+      } finally {
+        if (resumeOutcome === 'success') {
+          releaseResume(
+            jsonResponse(200, {
+              sessionId: 's-1',
+              workspaceCwd: '/work/a',
+              attached: true,
+              clientId: 'client-2',
+              state: {},
+            }),
+          );
+        } else {
+          releaseResume(jsonResponse(500, { error: 'recovery failed' }));
+        }
+      }
+      expect(promptCalls).toBe(1);
+      const result = await outcome;
+      expect(result.kind).toBe('error');
+      if (result.kind !== 'error') throw new Error('unexpected acceptance');
+      expect(result.error).toBe(reason);
+    },
+  );
+
+  it('keeps a shared reattach alive for the unaborted caller', async () => {
+    let releaseResume!: (response: Response) => void;
+    const resume = new Promise<Response>((resolve) => {
+      releaseResume = resolve;
+    });
+    let promptCalls = 0;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/resume')) return resume;
+      if (req.url.endsWith('/prompt')) {
+        promptCalls++;
+        return promptCalls <= 2
+          ? invalidClientIdResponse()
+          : jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const first = new AbortController();
+    const second = new AbortController();
+    const firstPending = session.submitPrompt(
+      { prompt: [{ type: 'text', text: 'first' }] },
+      first.signal,
+    );
+    const secondPending = session.submitPrompt(
+      { prompt: [{ type: 'text', text: 'second' }] },
+      second.signal,
+    );
+    let firstSettled = false;
+    let secondSettled = false;
+    const firstOutcome = firstPending.then(
+      (value) => ({ kind: 'accepted', value }) as const,
+      (error: unknown) => ({ kind: 'error', error }) as const,
+    );
+    const secondOutcome = secondPending.then(
+      (value) => ({ kind: 'accepted', value }) as const,
+      (error: unknown) => ({ kind: 'error', error }) as const,
+    );
+    void firstOutcome.then(() => {
+      firstSettled = true;
+    });
+    void secondOutcome.then(() => {
+      secondSettled = true;
+    });
+
+    await vi.waitFor(() =>
+      expect(calls.filter((call) => call.url.endsWith('/resume'))).toHaveLength(
+        1,
+      ),
+    );
+    expect(promptCalls).toBe(2);
+    const reason = new DaemonHttpError(
+      400,
+      { code: 'invalid_client_id' },
+      'first caller cancels',
+    );
+    first.abort(reason);
+    try {
+      await vi.waitFor(() => expect(firstSettled).toBe(true), {
+        timeout: 1000,
+        interval: 1,
+      });
+      expect(secondSettled).toBe(false);
+    } finally {
+      releaseResume(
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        }),
+      );
+    }
+    const firstResult = await firstOutcome;
+    expect(firstResult.kind).toBe('error');
+    if (firstResult.kind !== 'error') {
+      throw new Error('unexpected first acceptance');
+    }
+    expect(firstResult.error).toBe(reason);
+    await expect(secondOutcome).resolves.toEqual({
+      kind: 'accepted',
+      value: { promptId: 'p-1', lastEventId: 0 },
+    });
+    expect(promptCalls).toBe(3);
+    expect(calls.filter((call) => call.url.endsWith('/resume'))).toHaveLength(
+      1,
+    );
+    expect(calls.at(-1)?.headers['x-qwen-client-id']).toBe('client-2');
+  });
+
   it('honors cancellation while asynchronous revalidation is pending', async () => {
     let releaseResume!: (response: Response) => void;
     const resume = new Promise<Response>((resolve) => {
