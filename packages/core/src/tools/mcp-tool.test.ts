@@ -3175,6 +3175,26 @@ describe('DiscoveredMCPTool', () => {
       );
     });
 
+    it('does not classify an SDK-shaped timeout that races with a parent abort as a timeout', async () => {
+      // The v2 SDK rejects an aborted request with
+      // SdkError(REQUEST_TIMEOUT, String(reason)), the shape the timeout gate
+      // now also accepts. The abort side must still win.
+      const requestTimeout = new SdkError(
+        SdkErrorCode.RequestTimeout,
+        'AbortError: Tool call aborted',
+      );
+      const request = pending();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockReturnValue(request.promise),
+      };
+
+      await expectAbortWins(
+        mkTool({ trust: true, client }),
+        request,
+        requestTimeout,
+      );
+    });
+
     it('classifies an MCP SDK request timeout on the callable fallback', async () => {
       mockCallTool.mockRejectedValueOnce(coded('fallback timeout'));
 

@@ -98,10 +98,10 @@ const MCP_CONNECTION_ERROR_PATTERNS = [
   // HTTP server restart. Reconnect (a fresh `initialize`) is the remedy.
   MCP_DEAD_SESSION_ERROR_PATTERN,
 ];
-// The MCP SDK's generic `RequestTimeout` code. It is emitted for both
-// client-configured timeouts (`timeout` / `resetTimeoutOnProgress`) and
-// server-side timeouts, so both collapse into a single EXECUTION_TIMEOUT
-// classification here.
+// The JSON-RPC `RequestTimeout` code. With the v2 SDK it only arrives from a
+// server; the SDK's own timeouts and aborts are `SdkError(REQUEST_TIMEOUT)`
+// (see `isMcpSdkRequestTimeout`). Both collapse into a single
+// EXECUTION_TIMEOUT classification here.
 const MCP_REQUEST_TIMEOUT_CODE = -32001;
 
 // Structural dead-session signal. Per the MCP spec, an HTTP server that no
@@ -148,7 +148,8 @@ function isMcpDeadSessionHttpError(error: unknown): boolean {
 }
 
 /**
- * A `-32001` rejection only tells us the request never got a response. That is
+ * A request-timeout rejection (a server's JSON-RPC `-32001`, or the v2 SDK's
+ * `SdkError(REQUEST_TIMEOUT)`) only tells us the request never got a response. That is
  * a genuine execution timeout while the transport is believed healthy, but
  * when the server is known to be DISCONNECTED the same code just means the
  * connection died mid-request — which `handleReconnectOnError` can still
@@ -167,9 +168,10 @@ function isExecutionTimeoutFailure(
   serverName: string,
   signal: AbortSignal,
 ): boolean {
-  // A `-32001` that lands while the parent signal is aborted is the SDK's
-  // abort rejection (forwarded by createParentAbortRace) or a timeout that
-  // raced with a cancel. Classifying it as EXECUTION_TIMEOUT would count a
+  // A timeout-shaped rejection that lands while the parent signal is aborted
+  // is the SDK's abort rejection (the v2 SDK wraps the reason forwarded by
+  // createParentAbortRace as `SdkError(REQUEST_TIMEOUT, String(reason))`) or
+  // a timeout that raced with a cancel. Classifying it as EXECUTION_TIMEOUT would count a
   // user cancellation against the timeout SLI, so the abort side wins.
   if (signal.aborted) return false;
   // The v2 SDK rejects with SdkError(REQUEST_TIMEOUT) when the `timeout`
@@ -226,7 +228,8 @@ function createParentAbortRace(
     onAbort = () => {
       const reason = createToolCallAbortError();
       // Freeze the parent outcome before forwarding to the SDK, whose abort
-      // rejection uses the same -32001 code as a genuine request timeout.
+      // rejection (`SdkError(REQUEST_TIMEOUT, String(reason))`) has the same
+      // shape as a genuine request timeout.
       // Ordering-safe: resolve() queues its Promise.race reaction as a
       // microtask before forwardAbort triggers the SDK rejection, so the
       // parent outcome always wins the race.
