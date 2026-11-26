@@ -54,6 +54,7 @@ import {
   parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
+import { configuredOutputBudget } from './openaiContentGenerator/output-budget-key.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
@@ -236,7 +237,7 @@ function budgetOutputTokensForWindow(
     process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
   );
   const explicitCeiling =
-    contentGeneratorConfig?.samplingParams?.max_tokens ??
+    configuredOutputBudget(contentGeneratorConfig?.samplingParams) ??
     (envCeiling === undefined
       ? undefined
       : Math.min(

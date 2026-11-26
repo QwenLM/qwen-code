@@ -208,6 +208,35 @@ describe('freezeRequest', () => {
     expect(body).not.toHaveProperty('max_tokens');
   });
 
+  it('writes the output limit under the model family key when the frozen params name none', () => {
+    // An entry installed without a Max-output-tokens value freezes no
+    // budget; the plan's limit must still reach a GPT-5 / o-series body as
+    // `max_completion_tokens`, the key realtime sends for these ids.
+    const bodyFor = (model: string, frozen: Record<string, unknown>) =>
+      assembleRequests(
+        { ...plan, maxOutputTokens: 8000 },
+        [item()],
+        1,
+        root,
+        model,
+        freezeRequest({ samplingParams: frozen }, model),
+      )[0]!.line['body'] as Record<string, unknown>;
+    const gpt5 = bodyFor('openai.gpt-5.5', {});
+    expect(gpt5['max_completion_tokens']).toBe(8000);
+    expect(gpt5).not.toHaveProperty('max_tokens');
+    const o3 = bodyFor('o3', {});
+    expect(o3['max_completion_tokens']).toBe(8000);
+    expect(o3).not.toHaveProperty('max_tokens');
+    const qwen = bodyFor('qwen-plus', {});
+    expect(qwen['max_tokens']).toBe(8000);
+    expect(qwen).not.toHaveProperty('max_completion_tokens');
+    // An explicit frozen `max_tokens` is the higher precedent, even for a
+    // GPT-5 id: the limit replaces it in place and no pair goes out.
+    const explicit = bodyFor('openai.gpt-5.5', { max_tokens: 1000 });
+    expect(explicit['max_tokens']).toBe(8000);
+    expect(explicit).not.toHaveProperty('max_completion_tokens');
+  });
+
   it('sends samplingParams and extra_body verbatim, as realtime does', () => {
     const { params } = freezeRequest({
       samplingParams: {

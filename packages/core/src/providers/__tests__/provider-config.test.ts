@@ -1143,3 +1143,151 @@ describe('resolveMetadataKey dotted-id guard', () => {
     expect(() => resolveMetadataKeySrc(config)).toThrow(/must not contain/);
   });
 });
+
+describe('output budget key written by the installer', () => {
+  // The provider-setup "Max output tokens" field becomes a samplingParams
+  // entry, and samplingParams passes through to the wire verbatim, so on
+  // Chat Completions it has to use the key the model family accepts (GPT-5 /
+  // o-series reject `max_tokens`, #16343). The Responses wire reads
+  // `max_tokens` and maps it to `max_output_tokens`, so it keeps that key.
+  const budgetsOf = (
+    modelIds: string[],
+    extra: Partial<ProviderSetupInputs> = {},
+  ) =>
+    modelsOf(
+      buildInstallPlanSrc(customProvider, {
+        ...customInputs(modelIds),
+        protocol: AuthType.USE_OPENAI,
+        advancedConfig: { maxTokens: 32000 },
+        ...extra,
+      }),
+    ).map((model) => model.generationConfig?.samplingParams);
+
+  it('writes max_completion_tokens for GPT-5 / o-series ids on Chat Completions and max_tokens for the rest', () => {
+    expect(
+      budgetsOf(['openai.gpt-5.5', 'o3', 'gpt-4.1', 'xai.grok-4.3']),
+    ).toEqual([
+      { max_completion_tokens: 32000 },
+      { max_completion_tokens: 32000 },
+      { max_tokens: 32000 },
+      { max_tokens: 32000 },
+    ]);
+  });
+
+  it('keeps max_tokens for every family on the Responses wire', () => {
+    expect(
+      budgetsOf(['openai.gpt-5.5', 'gpt-4.1'], { wireApi: 'responses' }),
+    ).toEqual([{ max_tokens: 32000 }, { max_tokens: 32000 }]);
+  });
+
+  it('clears an installed max_completion_tokens on replaceExisting like max_tokens', () => {
+    const inputs = {
+      ...customInputs(['openai.gpt-5.5']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const existing = modelsOf(
+      buildInstallPlanSrc(customProvider, {
+        ...inputs,
+        advancedConfig: { maxTokens: 32000 },
+      }),
+    );
+    expect(existing[0]!.generationConfig?.samplingParams).toEqual({
+      max_completion_tokens: 32000,
+    });
+    const cleared = modelsOf(
+      buildInstallPlanSrc(
+        customProvider,
+        { ...inputs, advancedConfig: { replaceExisting: true } },
+        existing,
+      ),
+    )[0]!;
+    expect(cleared.generationConfig?.samplingParams).toBeUndefined();
+  });
+
+  it('replaces an older max_tokens budget on re-install without replaceExisting instead of keeping both keys', () => {
+    // An entry an earlier installer wrote as `max_tokens` for a GPT-5 id must
+    // not come out of a plain re-run as `{ max_tokens, max_completion_tokens }`:
+    // the pipeline would keep `max_tokens` as the wire key and the endpoint
+    // would still reject it. Only the budget key is swapped; the other
+    // preserved samplingParams stay.
+    const inputs = {
+      ...customInputs(['openai.gpt-5.5']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const existing = modelsOf(
+      buildInstallPlanSrc(customProvider, {
+        ...inputs,
+        advancedConfig: { maxTokens: 32000 },
+      }),
+    );
+    existing[0]!.generationConfig!.samplingParams = {
+      max_tokens: 32000,
+      temperature: 0.2,
+    };
+    const rerun = (
+      advancedConfig: NonNullable<ProviderSetupInputs['advancedConfig']>,
+    ) =>
+      modelsOf(
+        buildInstallPlanSrc(
+          customProvider,
+          { ...inputs, advancedConfig },
+          existing,
+        ),
+      )[0]!.generationConfig?.samplingParams;
+    expect(rerun({ maxTokens: 32000 })).toEqual({
+      temperature: 0.2,
+      max_completion_tokens: 32000,
+    });
+    // No new budget submitted: the preserved entry is left as it was.
+    expect(rerun({})).toEqual({ max_tokens: 32000, temperature: 0.2 });
+  });
+
+  it('leaves a preserved max_tokens alone for a GPT-5 id on a plain re-run', () => {
+    // A plain re-run of provider setup passes no advancedConfig at all. The
+    // installer cannot tell an earlier installer-written `max_tokens` from a
+    // hand-written one kept for a gateway that only accepts that key, so it
+    // does not rewrite either; a new "Max output tokens" value replaces it.
+    const inputs = {
+      ...customInputs(['openai.gpt-5.5']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const existing = modelsOf(buildInstallPlanSrc(customProvider, inputs));
+    existing[0]!.generationConfig = {
+      samplingParams: { max_tokens: 32000, temperature: 0.2 },
+    };
+    const refreshed = modelsOf(
+      buildInstallPlanSrc(customProvider, inputs, existing),
+    )[0]!;
+    expect(refreshed.generationConfig?.samplingParams).toEqual({
+      max_tokens: 32000,
+      temperature: 0.2,
+    });
+  });
+
+  it('replaces a preserved family key with a new max_tokens value on a model that reads max_tokens', () => {
+    // The "new budget replaces the preserved keys" guard in the other
+    // direction: a preserved `max_completion_tokens` (or `max_new_tokens`) on
+    // gpt-4.1 plus a new value. Without it the entry would come out as
+    // `{ max_completion_tokens: 4096, max_tokens: 8000 }`, the pair the
+    // endpoint rejects.
+    const inputs = {
+      ...customInputs(['gpt-4.1']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const rerunOver = (samplingParams: Record<string, unknown>) => {
+      const existing = modelsOf(buildInstallPlanSrc(customProvider, inputs));
+      existing[0]!.generationConfig = { samplingParams };
+      return modelsOf(
+        buildInstallPlanSrc(
+          customProvider,
+          { ...inputs, advancedConfig: { maxTokens: 8000 } },
+          existing,
+        ),
+      )[0]!.generationConfig?.samplingParams;
+    };
+    expect(
+      rerunOver({ max_completion_tokens: 4096, temperature: 0.2 }),
+    ).toEqual({ temperature: 0.2, max_tokens: 8000 });
+    expect(rerunOver({ max_new_tokens: 2048 })).toEqual({ max_tokens: 8000 });
+  });
+});

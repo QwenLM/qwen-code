@@ -46,6 +46,7 @@ import type {
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import type { RequestContext } from '../openaiContentGenerator/types.js';
+import { outputBudgetWireKey } from '../openaiContentGenerator/output-budget-key.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
@@ -1286,7 +1287,12 @@ export class LoggingContentGenerator implements ContentGenerator {
       openaiRequest.top_p = request.config.topP;
     }
     if (request.config?.maxOutputTokens !== undefined) {
-      openaiRequest.max_tokens = request.config.maxOutputTokens;
+      // Log the key the pipeline sends for this model family.
+      if (outputBudgetWireKey(request.model) === 'max_completion_tokens') {
+        openaiRequest.max_completion_tokens = request.config.maxOutputTokens;
+      } else {
+        openaiRequest.max_tokens = request.config.maxOutputTokens;
+      }
     }
     if (request.config?.presencePenalty !== undefined) {
       openaiRequest.presence_penalty = request.config.presencePenalty;

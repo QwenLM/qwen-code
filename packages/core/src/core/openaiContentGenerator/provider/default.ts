@@ -5,6 +5,10 @@ import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_MAX_RETRIES, resolveRequestTimeout } from '../constants.js';
 import type { OpenAICompatibleProvider } from './types.js';
 import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
+import {
+  OUTPUT_BUDGET_KEYS,
+  outputBudgetWireKey,
+} from '../output-budget-key.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import {
   tokenLimit,
@@ -255,8 +259,26 @@ export class DefaultOpenAICompatibleProvider
       messages,
       ...(extraBody ? extraBody : {}),
     };
+    if (extraBody) this.dropBudgetKeyShadowedByExtraBody(result, extraBody);
     this.flattenGptReasoningEffort(result);
     return this.flattenDeepSeekReasoningEffort(result);
+  }
+
+  /**
+   * An output budget spelled in `extra_body` is the wire key the user chose,
+   * like an explicit `samplingParams.max_tokens`: it goes out as written and
+   * the other budget keys (`OUTPUT_BUDGET_KEYS`) are dropped, so a GPT-5 /
+   * o-series body never carries `max_tokens` next to `max_completion_tokens`
+   * and an `extra_body.max_new_tokens` does not ride beside the clamp's key.
+   */
+  protected dropBudgetKeyShadowedByExtraBody(
+    body: Record<string, unknown>,
+    extraBody: Record<string, unknown>,
+  ): void {
+    if (!OUTPUT_BUDGET_KEYS.some((key) => extraBody[key] !== undefined)) return;
+    for (const key of OUTPUT_BUDGET_KEYS) {
+      if (extraBody[key] === undefined) delete body[key];
+    }
   }
 
   protected flattenDeepSeekReasoningEffort<T extends object>(body: T): T {
@@ -378,11 +400,19 @@ export class DefaultOpenAICompatibleProvider
    * - User not set, model limit 4K → uses 4K (model limit is lower)
    * - User not set, env QWEN_CODE_MAX_OUTPUT_TOKENS=16000 -> uses 16K
    *
+   * The budget goes out under the key the model family accepts
+   * (`max_completion_tokens` for GPT-5 / o-series, `max_tokens` otherwise, see
+   * `outputBudgetWireKey`), whichever key it arrived under, and never both.
+   *
    * @param request - The chat completion request parameters
-   * @returns The request with max_tokens adjusted according to the logic
+   * @returns The request with the output budget adjusted according to the logic
    */
   protected applyOutputTokenLimit<
-    T extends { max_tokens?: number | null; model: string },
+    T extends {
+      max_tokens?: number | null;
+      max_completion_tokens?: number | null;
+      model: string;
+    },
   >(request: T): T {
     // When samplingParams is set, it is the source of truth for the wire shape.
     // Don't inject a max_tokens default — honor the user's explicit choice.
@@ -390,7 +420,7 @@ export class DefaultOpenAICompatibleProvider
       return request;
     }
 
-    const userMaxTokens = request.max_tokens;
+    const userMaxTokens = request.max_tokens ?? request.max_completion_tokens;
 
     // Get model-specific output limit and check if model is known
     const modelLimit = tokenLimit(request.model, 'output');
@@ -426,9 +456,11 @@ export class DefaultOpenAICompatibleProvider
       }
     }
 
-    return {
-      ...request,
-      max_tokens: effectiveMaxTokens,
-    };
+    // Emit the budget under the key the model family accepts, never both.
+    const adjusted = { ...request } as Record<string, unknown>;
+    delete adjusted['max_tokens'];
+    delete adjusted['max_completion_tokens'];
+    adjusted[outputBudgetWireKey(request.model)] = effectiveMaxTokens;
+    return adjusted as T;
   }
 }

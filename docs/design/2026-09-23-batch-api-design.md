@@ -133,7 +133,9 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
   (`reasoning_effort: "none"` for the tiered family, `enable_thinking: false`
   otherwise) and is only reported for other model families; an output limit
   is written under the budget key the frozen params already use
-  (`max_completion_tokens` / `max_new_tokens`, else `max_tokens`).
+  (`max_completion_tokens` / `max_new_tokens` / `max_tokens`), else under the
+  key the model family accepts (`max_completion_tokens` for GPT-5 / o-series,
+  `max_tokens` otherwise), as realtime does.
 - **No money figure without prices.** Token estimates are always shown
   (rough: ~4 characters per token for Latin text, ~1.5 for CJK). A dollar
   estimate needs
