@@ -1072,6 +1072,10 @@ describe('local container recipe pins', () => {
     ]);
     const shellFragmentResults = new Map();
     const boundaryCache = new Map();
+    const astGuardCache = new Map();
+    const rawLineScanCache = new Map();
+    const rawLeadBaseCache = new Map();
+    const rawControlKindCache = new Map();
     const onlyDocumentedPrepareCalls = async (document) => {
       // This is a closed grammar for the recipe's executable examples, not an
       // OS-level shell sandbox. Data citations stay data; every selected shell
@@ -3173,12 +3177,1483 @@ describe('local container recipe pins', () => {
         'setsid',
         'which',
       ]);
+      const astWrappers = new Set([
+        'builtin',
+        'command',
+        'env',
+        'exec',
+        'eval',
+        'time',
+        'nice',
+        'sudo',
+        'doas',
+        'nohup',
+        'setsid',
+        'timeout',
+        'stdbuf',
+        'chrt',
+        'ionice',
+        'caffeinate',
+        'rlwrap',
+      ]);
+      const astDangerCmds = new Set([
+        'gh',
+        'make',
+        'rm',
+        'mv',
+        'cp',
+        'chmod',
+        'chown',
+        'curl',
+        'wget',
+        'bash',
+        'sh',
+        'zsh',
+        'ksh',
+        'dash',
+        'python',
+        'python3',
+        'ruby',
+        'perl',
+        'nc',
+        'dd',
+        'tee',
+        'truncate',
+        'kill',
+        'docker',
+        'qwen',
+        'source',
+        'awk',
+        'find',
+        'xargs',
+        'node',
+        'alias',
+        'shopt',
+      ]);
+      const astRawSkipProseCmds = new Set([
+        'make',
+        'truncate',
+        'tee',
+        'kill',
+        'find',
+        'source',
+        'node',
+        'alias',
+      ]);
+      const astArithSubscriptCmds = new Set([
+        '[',
+        'test',
+        'let',
+        'printf',
+        'declare',
+        'typeset',
+        'readonly',
+        'local',
+        'export',
+        'unset',
+        'read',
+      ]);
+      const astDisallowedTypes = new Set([
+        'case_statement',
+        'c_style_for_statement',
+        'for_statement',
+        'if_statement',
+        'while_statement',
+        'function_definition',
+        'process_substitution',
+      ]);
+      const astControlParents = new Set([
+        'list',
+        'pipeline',
+        'subshell',
+        'compound_statement',
+        'do_group',
+        'command_substitution',
+        'process_substitution',
+        'redirected_statement',
+        'for_statement',
+        'if_statement',
+        'while_statement',
+        'negated_command',
+      ]);
+      const decodeAnsiCSegment = (body) => {
+        const decoded = body.replace(
+          /\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|c([\s\S])|(.))/g,
+          (_, hex, u4, u8, oct, ctrl, ch) => {
+            if (hex) return String.fromCharCode(parseInt(hex, 16));
+            if (u4) return String.fromCodePoint(parseInt(u4, 16));
+            if (u8) {
+              const cp = parseInt(u8, 16);
+              return cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+            }
+            if (oct) return String.fromCharCode(parseInt(oct, 8) & 0xff);
+            if (ctrl) {
+              return String.fromCharCode(
+                ctrl.toUpperCase().charCodeAt(0) ^ 0x40,
+              );
+            }
+            return ch ?? '';
+          },
+        );
+        const nul = decoded.indexOf('\0');
+        return nul === -1 ? decoded : decoded.slice(0, nul);
+      };
+      const astUnquoteArg = (raw) =>
+        raw
+          .replace(/\\\r?\n/g, '')
+          .replace(/\$'((?:[^'\\]|\\.)*)'/g, (_, inner) =>
+            decodeAnsiCSegment(inner),
+          )
+          .replace(/\$(?=")/g, '')
+          .replaceAll('\\', '')
+          .replace(/["']/g, '');
+      const astCleanToken = (raw) => astUnquoteArg(raw).split('/').at(-1) ?? '';
+      const astProseFirstArg = (first) =>
+        !first ||
+        /^(?:is|are|was|were|be|been|has|have|had|can|could|may|might|must|should|will|would|does|do|did|to|of|for|in|on|at|by|with|from|as|that|this|these|those|the|a|an|and|or|but|if|when|where|while|room;?|processes,?|redirected|line|block|call|flag|flags|output|input|file|files|path|argument|arguments|value|values|script|scripts|step|round|header|text|only|not|also|still|never|always|here|there|above|below|caps,?)$/i.test(
+          first,
+        );
+      const astRealWrapperArg = (rawArg) => {
+        const unq = astUnquoteArg(rawArg);
+        if (unq === '--' || /^-[A-Za-z0-9]/.test(unq)) return true;
+        const base = unq.split('/').at(-1) ?? '';
+        return (
+          base === '.' ||
+          base === 'trap' ||
+          base === 'coproc' ||
+          astDangerCmds.has(base) ||
+          astWrappers.has(base) ||
+          astArithSubscriptCmds.has(base)
+        );
+      };
+      const astHasSplicedCmdSub = (raw, allowBacktick) => {
+        const folded = raw.replace(/\\\r?\n/g, '');
+        const rawUnq = folded.replaceAll('\\', '').replace(/['"]/g, '');
+        const decodedAnsiC = folded.replace(
+          /\$'((?:[^'\\]|\\.)*)'/g,
+          (_, inner) => decodeAnsiCSegment(inner),
+        );
+        const decodedUnq = decodedAnsiC
+          .replaceAll('\\', '')
+          .replace(/['"]/g, '');
+        if (
+          folded.includes('$(') ||
+          rawUnq.includes('$(') ||
+          decodedAnsiC.includes('$(') ||
+          decodedUnq.includes('$(') ||
+          (allowBacktick &&
+            (folded.includes('`') ||
+              rawUnq.includes('`') ||
+              decodedAnsiC.includes('`') ||
+              decodedUnq.includes('`')))
+        ) {
+          return true;
+        }
+        for (const candidate of [rawUnq, decodedUnq]) {
+          let bracket = candidate.indexOf('[');
+          while (bracket !== -1) {
+            if (
+              bracket > 0 &&
+              /[A-Za-z0-9_}@*$]/.test(candidate[bracket - 1])
+            ) {
+              let depth = 1;
+              let j = bracket + 1;
+              while (j < candidate.length && depth > 0) {
+                const ch = candidate[j];
+                if (ch === '[') depth += 1;
+                else if (ch === ']') depth -= 1;
+                else if (ch === '$' || (allowBacktick && ch === '`')) {
+                  return true;
+                }
+                j += 1;
+              }
+              bracket = candidate.indexOf('[', j);
+            } else {
+              bracket = candidate.indexOf('[', bracket + 1);
+            }
+          }
+        }
+        return false;
+      };
+      const isEnglishContractionAt = (str, idx) =>
+        idx > 0 &&
+        /[A-Za-z`]/.test(str[idx - 1]) &&
+        /^(?:s|t|d|m|re|ve|ll)(?=$|[\s,.:;!?)\]])/i.test(
+          str.slice(idx + 1, idx + 4),
+        );
+      const hasShellBacktickMismatch = (str) => {
+        if (!str.includes('`')) return false;
+        let i = 0;
+        let noMoreSingle = false;
+        while (i < str.length) {
+          const ch = str[i];
+          if (ch === '\\' && i + 1 < str.length) {
+            if (str[i + 1] === '`') return true;
+            i += 2;
+            continue;
+          }
+          if (ch === '$' && str[i + 1] === "'") {
+            let j = i + 2;
+            let btCount = 0;
+            while (j < str.length && str[j] !== "'") {
+              if (str[j] === '\\' && j + 1 < str.length) {
+                if (str[j + 1] === '`') btCount += 1;
+                j += 2;
+                continue;
+              }
+              if (str[j] === '`') btCount += 1;
+              j += 1;
+            }
+            if (j < str.length && str[j] === "'") {
+              if (btCount > 0) return true;
+              i = j + 1;
+              continue;
+            }
+          }
+          if (ch === "'") {
+            if (!noMoreSingle) {
+              const end = str.indexOf("'", i + 1);
+              if (end === -1) {
+                noMoreSingle = true;
+              } else {
+                let sawNl = false;
+                let btCount = 0;
+                for (let k = i + 1; k < end; k += 1) {
+                  if (str[k] === '\n') sawNl = true;
+                  if (str[k] === '`') btCount += 1;
+                }
+                const startContraction = isEnglishContractionAt(str, i);
+                const endContraction = isEnglishContractionAt(str, end);
+                if (!sawNl) {
+                  if (
+                    btCount > 0 &&
+                    (!(startContraction && endContraction) || btCount % 2 === 1)
+                  ) {
+                    return true;
+                  }
+                  i = end + 1;
+                  continue;
+                }
+                if (!startContraction && !endContraction && btCount % 2 === 1) {
+                  return true;
+                }
+              }
+            }
+          }
+          if (ch === '"') {
+            let j = i + 1;
+            while (j < str.length && str[j] !== '"' && str[j] !== '\n') {
+              if (str[j] === '\\' && j + 1 < str.length) {
+                if (str[j + 1] === '`') return true;
+                j += 2;
+                continue;
+              }
+              j += 1;
+            }
+            if (j < str.length && str[j] === '"') {
+              i = j + 1;
+              continue;
+            }
+          }
+          i += 1;
+        }
+        return false;
+      };
+      const stripNonCommentContinuations = (input) => {
+        const lines = input.split('\n');
+        let out = '';
+        let inSingle = false;
+        let inAnsiC = false;
+        const frames = [];
+        let lineOffset = 0;
+        let noMoreSingle = false;
+        for (let li = 0; li < lines.length; li += 1) {
+          const line = lines[li];
+          const clean = line.endsWith('\r') ? line.slice(0, -1) : line;
+          let i = 0;
+          let hasComment = false;
+          let escapedCharAt = -1;
+          while (i < clean.length) {
+            const ch = clean[i];
+            if (inAnsiC) {
+              if (ch === '\\' && i + 1 < clean.length) {
+                i += 2;
+                continue;
+              }
+              if (ch === "'") inAnsiC = false;
+              i += 1;
+              continue;
+            }
+            if (inSingle) {
+              if (ch === "'") inSingle = false;
+              i += 1;
+              continue;
+            }
+            if (ch === '\\' && i + 1 < clean.length) {
+              escapedCharAt = i + 1;
+              i += 2;
+              continue;
+            }
+            const topFrame = frames.at(-1);
+            if (topFrame === 'd') {
+              if (ch === '$' && clean[i + 1] === '{') {
+                frames.push('p');
+                i += 2;
+                continue;
+              }
+              if (ch === '"') frames.pop();
+              i += 1;
+              continue;
+            }
+            if (ch === '$' && clean[i + 1] === "'") {
+              inAnsiC = true;
+              i += 2;
+              continue;
+            }
+            if (ch === '$' && clean[i + 1] === '{') {
+              frames.push('p');
+              i += 2;
+              continue;
+            }
+            if (ch === '}' && topFrame === 'p') {
+              frames.pop();
+              i += 1;
+              continue;
+            }
+            if (ch === "'") {
+              if (
+                !noMoreSingle &&
+                input.indexOf("'", lineOffset + i + 1) !== -1
+              ) {
+                inSingle = true;
+              } else {
+                noMoreSingle = true;
+              }
+              i += 1;
+              continue;
+            }
+            if (ch === '"') {
+              frames.push('d');
+              i += 1;
+              continue;
+            }
+            if (
+              frames.length === 0 &&
+              ch === '#' &&
+              (i === 0 ||
+                (/[\s;|&()]/.test(clean[i - 1]) && i - 1 !== escapedCharAt))
+            ) {
+              hasComment = true;
+              break;
+            }
+            i += 1;
+          }
+          let bs = 0;
+          if (!hasComment && !inSingle && !inAnsiC) {
+            while (bs < clean.length && clean[clean.length - 1 - bs] === '\\') {
+              bs += 1;
+            }
+          }
+          if (bs % 2 === 1 && li + 1 < lines.length) {
+            out += clean.slice(0, -1);
+          } else {
+            out += line + (li + 1 < lines.length ? '\n' : '');
+          }
+          lineOffset += line.length + 1;
+        }
+        return out;
+      };
+      const astControlKeywordSet = new Set([
+        'case',
+        'select',
+        'for',
+        'if',
+        'while',
+        'until',
+        'coproc',
+        'trap',
+      ]);
+      const astCasePrefixWordSet = new Set([
+        'then',
+        'do',
+        'else',
+        'if',
+        'elif',
+        'while',
+        'until',
+        '!',
+        'coproc',
+      ]);
+      const isFuncNameChar = (ch) =>
+        ch !== ' ' &&
+        ch !== '\t' &&
+        ch !== '\r' &&
+        ch !== '\n' &&
+        ch !== ';' &&
+        ch !== '|' &&
+        ch !== '&' &&
+        ch !== '(' &&
+        ch !== ')' &&
+        ch !== '{' &&
+        ch !== '}' &&
+        ch !== '<' &&
+        ch !== '>' &&
+        ch !== "'" &&
+        ch !== '"' &&
+        ch !== '`';
+      const isCmdBoundaryChar = (ch) =>
+        ch === ';' ||
+        ch === '\n' ||
+        ch === '|' ||
+        ch === '&' ||
+        ch === '(' ||
+        ch === '{';
+      const stripAstLeadingPrefixes = (src) => {
+        if (!/\b(?:case|select|for|if|while|until|coproc|trap)\b/.test(src)) {
+          return src;
+        }
+        let out = '';
+        let lastEmit = 0;
+        let i = 0;
+        let atBoundary = true;
+        let escapedAt = -1;
+        while (i < src.length) {
+          if (
+            src[i] === '#' &&
+            (i === 0 ||
+              (/[ \t\r\n;|&({]/.test(src[i - 1]) && escapedAt !== i - 1))
+          ) {
+            while (i < src.length && src[i] !== '\n') i += 1;
+            continue;
+          }
+          if (src[i] === '\\' && i + 1 < src.length) {
+            escapedAt = i + 1;
+            atBoundary = false;
+            i += 2;
+            continue;
+          }
+          if (src[i] === '$' && src[i + 1] === "'") {
+            i += 2;
+            while (i < src.length && src[i] !== "'") {
+              i += src[i] === '\\' && i + 1 < src.length ? 2 : 1;
+            }
+            if (i < src.length) i += 1;
+            atBoundary = false;
+            continue;
+          }
+          if (src[i] === "'") {
+            const end = src.indexOf("'", i + 1);
+            i = end < 0 ? src.length : end + 1;
+            atBoundary = false;
+            continue;
+          }
+          if (src[i] === '"') {
+            i += 1;
+            while (i < src.length && src[i] !== '"') {
+              i += src[i] === '\\' && i + 1 < src.length ? 2 : 1;
+            }
+            if (i < src.length) i += 1;
+            atBoundary = false;
+            continue;
+          }
+          if (atBoundary) {
+            while (i < src.length && (src[i] === ' ' || src[i] === '\t')) {
+              i += 1;
+            }
+            if (i >= src.length) break;
+            const prefixStart = i;
+            let j = i;
+            let consumedPrefix = false;
+            while (j < src.length) {
+              if (src[j] === '!') {
+                let p = j + 1;
+                let sawSep = false;
+                while (p < src.length && (src[p] === ' ' || src[p] === '\t')) {
+                  sawSep = true;
+                  p += 1;
+                }
+                if (sawSep && p < src.length && src[p] === '#') {
+                  while (p < src.length && src[p] !== '\n') p += 1;
+                }
+                if (p < src.length && (src[p] === '\r' || src[p] === '\n')) {
+                  if (src[p] === '\r' && src[p + 1] === '\n') p += 2;
+                  else p += 1;
+                  while (
+                    p < src.length &&
+                    (src[p] === ' ' || src[p] === '\t')
+                  ) {
+                    p += 1;
+                  }
+                  sawSep = true;
+                }
+                if (sawSep) {
+                  j = p;
+                  consumedPrefix = true;
+                  continue;
+                }
+                break;
+              }
+              const wStart = j;
+              let wEnd = j;
+              while (wEnd < src.length && isFuncNameChar(src[wEnd])) wEnd += 1;
+              if (wEnd === wStart) break;
+              const word = src.slice(wStart, wEnd);
+              if (
+                word === 'function' &&
+                wEnd < src.length &&
+                (src[wEnd] === ' ' || src[wEnd] === '\t')
+              ) {
+                let p = wEnd;
+                while (p < src.length && (src[p] === ' ' || src[p] === '\t')) {
+                  p += 1;
+                }
+                const nStart = p;
+                while (p < src.length && isFuncNameChar(src[p])) p += 1;
+                if (p > nStart) {
+                  const afterName = p;
+                  while (
+                    p < src.length &&
+                    (src[p] === ' ' || src[p] === '\t')
+                  ) {
+                    p += 1;
+                  }
+                  if (src[p] === '(') {
+                    let q = p + 1;
+                    while (
+                      q < src.length &&
+                      (src[q] === ' ' || src[q] === '\t')
+                    ) {
+                      q += 1;
+                    }
+                    if (src[q] === ')') {
+                      q += 1;
+                      while (
+                        q < src.length &&
+                        (src[q] === ' ' || src[q] === '\t')
+                      ) {
+                        q += 1;
+                      }
+                      j = q;
+                      consumedPrefix = true;
+                      continue;
+                    }
+                  } else if (p > afterName) {
+                    j = p;
+                    consumedPrefix = true;
+                    continue;
+                  }
+                }
+              }
+              let p = wEnd;
+              while (p < src.length && (src[p] === ' ' || src[p] === '\t')) {
+                p += 1;
+              }
+              if (src[p] === '(') {
+                let q = p + 1;
+                while (q < src.length && (src[q] === ' ' || src[q] === '\t')) {
+                  q += 1;
+                }
+                if (src[q] === ')') {
+                  q += 1;
+                  while (
+                    q < src.length &&
+                    (src[q] === ' ' || src[q] === '\t')
+                  ) {
+                    q += 1;
+                  }
+                  j = q;
+                  consumedPrefix = true;
+                  continue;
+                }
+              }
+              break;
+            }
+            if (consumedPrefix) {
+              let kEnd = j;
+              while (kEnd < src.length && /[A-Za-z0-9_]/.test(src[kEnd])) {
+                kEnd += 1;
+              }
+              if (astControlKeywordSet.has(src.slice(j, kEnd))) {
+                out += src.slice(lastEmit, prefixStart);
+                lastEmit = j;
+              }
+              i = j;
+              atBoundary = false;
+              continue;
+            }
+          }
+          const ch = src[i];
+          if (isCmdBoundaryChar(ch)) {
+            atBoundary = true;
+          } else if (ch !== ' ' && ch !== '\t') {
+            atBoundary = false;
+          }
+          i += 1;
+        }
+        return lastEmit === 0 ? src : out + src.slice(lastEmit);
+      };
+      const skipBalancedGroup = (s, start, openCh, closeCh, recDepth = 0) => {
+        if (recDepth > 16) return s.length;
+        let k = start;
+        let depth = 0;
+        while (k < s.length) {
+          const ch = s[k];
+          if (ch === '\\' && k + 1 < s.length) {
+            k += 2;
+            continue;
+          }
+          if (ch === '$' && s[k + 1] === "'") {
+            k += 2;
+            while (k < s.length && s[k] !== "'") {
+              k += s[k] === '\\' && k + 1 < s.length ? 2 : 1;
+            }
+            if (k < s.length) k += 1;
+            continue;
+          }
+          if (ch === "'") {
+            const end = s.indexOf("'", k + 1);
+            k = end < 0 ? s.length : end + 1;
+            continue;
+          }
+          if (ch === '"') {
+            k += 1;
+            while (k < s.length && s[k] !== '"') {
+              if (s[k] === '\\' && k + 1 < s.length) {
+                k += 2;
+              } else if (s[k] === '$' && s[k + 1] === '(') {
+                k = skipBalancedGroup(s, k + 1, '(', ')', recDepth + 1);
+              } else if (s[k] === '$' && s[k + 1] === '{') {
+                k = skipBalancedGroup(s, k + 1, '{', '}', recDepth + 1);
+              } else if (s[k] === '`') {
+                k += 1;
+                while (k < s.length && s[k] !== '`') {
+                  k += s[k] === '\\' && k + 1 < s.length ? 2 : 1;
+                }
+                if (k < s.length) k += 1;
+              } else {
+                k += 1;
+              }
+            }
+            if (k < s.length) k += 1;
+            continue;
+          }
+          if (
+            openCh === '(' &&
+            ch === '#' &&
+            (k === start || /[ \t\r\n;|&({]/.test(s[k - 1]))
+          ) {
+            while (k < s.length && s[k] !== '\n') k += 1;
+            continue;
+          }
+          if (ch === '$' && s[k + 1] === '(' && openCh !== '(') {
+            k = skipBalancedGroup(s, k + 1, '(', ')', recDepth + 1);
+            continue;
+          }
+          if (ch === '$' && s[k + 1] === '{' && openCh !== '{') {
+            k = skipBalancedGroup(s, k + 1, '{', '}', recDepth + 1);
+            continue;
+          }
+          if (ch === openCh) depth += 1;
+          else if (ch === closeCh) {
+            depth -= 1;
+            if (depth === 0) return k + 1;
+          }
+          k += 1;
+        }
+        return k;
+      };
+      const skipBashWord = (s, start) => {
+        let k = start;
+        while (k < s.length) {
+          const ch = s[k];
+          if (
+            ch === ' ' ||
+            ch === '\t' ||
+            ch === '\r' ||
+            ch === '\n' ||
+            ch === ';' ||
+            ch === '|' ||
+            ch === '&' ||
+            ch === '(' ||
+            ch === ')' ||
+            ch === '<' ||
+            ch === '>'
+          ) {
+            break;
+          }
+          if (ch === '\\' && k + 1 < s.length) {
+            k += 2;
+          } else if (ch === '$' && s[k + 1] === "'") {
+            k += 2;
+            while (k < s.length && s[k] !== "'") {
+              k += s[k] === '\\' && k + 1 < s.length ? 2 : 1;
+            }
+            if (k < s.length) k += 1;
+          } else if (ch === '$' && s[k + 1] === '(') {
+            k = skipBalancedGroup(s, k + 1, '(', ')');
+          } else if (ch === '$' && s[k + 1] === '{') {
+            k = skipBalancedGroup(s, k + 1, '{', '}');
+          } else if (ch === '"') {
+            k += 1;
+            while (k < s.length && s[k] !== '"') {
+              if (s[k] === '\\' && k + 1 < s.length) k += 2;
+              else if (s[k] === '$' && s[k + 1] === '(') {
+                k = skipBalancedGroup(s, k + 1, '(', ')');
+              } else if (s[k] === '$' && s[k + 1] === '{') {
+                k = skipBalancedGroup(s, k + 1, '{', '}');
+              } else {
+                k += 1;
+              }
+            }
+            if (k < s.length) k += 1;
+          } else if (ch === "'") {
+            const end = s.indexOf("'", k + 1);
+            k = end < 0 ? s.length : end + 1;
+          } else if (ch === '`') {
+            k += 1;
+            while (k < s.length && s[k] !== '`') {
+              k += s[k] === '\\' && k + 1 < s.length ? 2 : 1;
+            }
+            if (k < s.length) k += 1;
+          } else {
+            k += 1;
+          }
+        }
+        return k;
+      };
+      const scanBashCaseIn = (s, depth = 0) => {
+        if (!s.includes('case')) return false;
+        if (depth > 4) return true;
+        const scanWordForCaseIn = (word, wordDepth = 0) => {
+          if (!word.includes('case')) return false;
+          if (!word.includes('$(') && !word.includes('`')) return false;
+          if (wordDepth > 8) return true;
+          let wi = 0;
+          while (wi < word.length) {
+            const wch = word[wi];
+            if (wch === '\\' && wi + 1 < word.length) {
+              wi += 2;
+            } else if (wch === '$' && word[wi + 1] === "'") {
+              wi += 2;
+              while (wi < word.length && word[wi] !== "'") {
+                wi += word[wi] === '\\' && wi + 1 < word.length ? 2 : 1;
+              }
+              if (wi < word.length) wi += 1;
+            } else if (wch === "'") {
+              const end = word.indexOf("'", wi + 1);
+              wi = end < 0 ? word.length : end + 1;
+            } else if (wch === '"') {
+              wi += 1;
+              while (wi < word.length && word[wi] !== '"') {
+                if (word[wi] === '\\' && wi + 1 < word.length) {
+                  wi += 2;
+                } else if (word[wi] === '$' && word[wi + 1] === '(') {
+                  const subEnd = skipBalancedGroup(word, wi + 1, '(', ')');
+                  const subInnerEnd =
+                    subEnd > wi + 2 && word[subEnd - 1] === ')'
+                      ? subEnd - 1
+                      : subEnd;
+                  if (
+                    scanBashCaseIn(word.slice(wi + 2, subInnerEnd), depth + 1)
+                  ) {
+                    return true;
+                  }
+                  wi = subEnd;
+                } else if (word[wi] === '$' && word[wi + 1] === '{') {
+                  const subEnd = skipBalancedGroup(word, wi + 1, '{', '}');
+                  const subInnerEnd =
+                    subEnd > wi + 2 && word[subEnd - 1] === '}'
+                      ? subEnd - 1
+                      : subEnd;
+                  if (
+                    scanWordForCaseIn(
+                      word.slice(wi + 2, subInnerEnd),
+                      wordDepth + 1,
+                    )
+                  ) {
+                    return true;
+                  }
+                  wi = subEnd;
+                } else if (word[wi] === '`') {
+                  let btEnd = wi + 1;
+                  while (btEnd < word.length && word[btEnd] !== '`') {
+                    btEnd +=
+                      word[btEnd] === '\\' && btEnd + 1 < word.length ? 2 : 1;
+                  }
+                  if (scanBashCaseIn(word.slice(wi + 1, btEnd), depth + 1)) {
+                    return true;
+                  }
+                  wi = btEnd < word.length ? btEnd + 1 : btEnd;
+                } else {
+                  wi += 1;
+                }
+              }
+              if (wi < word.length) wi += 1;
+            } else if (wch === '$' && word[wi + 1] === '(') {
+              const subEnd = skipBalancedGroup(word, wi + 1, '(', ')');
+              const subInnerEnd =
+                subEnd > wi + 2 && word[subEnd - 1] === ')'
+                  ? subEnd - 1
+                  : subEnd;
+              if (scanBashCaseIn(word.slice(wi + 2, subInnerEnd), depth + 1)) {
+                return true;
+              }
+              wi = subEnd;
+            } else if (wch === '$' && word[wi + 1] === '{') {
+              const subEnd = skipBalancedGroup(word, wi + 1, '{', '}');
+              const subInnerEnd =
+                subEnd > wi + 2 && word[subEnd - 1] === '}'
+                  ? subEnd - 1
+                  : subEnd;
+              if (
+                scanWordForCaseIn(
+                  word.slice(wi + 2, subInnerEnd),
+                  wordDepth + 1,
+                )
+              ) {
+                return true;
+              }
+              wi = subEnd;
+            } else if (wch === '`') {
+              let btEnd = wi + 1;
+              while (btEnd < word.length && word[btEnd] !== '`') {
+                btEnd +=
+                  word[btEnd] === '\\' && btEnd + 1 < word.length ? 2 : 1;
+              }
+              if (scanBashCaseIn(word.slice(wi + 1, btEnd), depth + 1)) {
+                return true;
+              }
+              wi = btEnd < word.length ? btEnd + 1 : btEnd;
+            } else {
+              wi += 1;
+            }
+          }
+          return false;
+        };
+        let i = 0;
+        let atCmdStart = true;
+        while (i < s.length) {
+          const ch = s[i];
+          if (ch === ' ' || ch === '\t' || ch === '\r') {
+            i += 1;
+            continue;
+          }
+          if (
+            ch === ';' ||
+            ch === '\n' ||
+            ch === '|' ||
+            ch === '&' ||
+            ch === '(' ||
+            ch === '{'
+          ) {
+            atCmdStart = true;
+            i += 1;
+            continue;
+          }
+          if (ch === '`') {
+            let btEnd = i + 1;
+            while (btEnd < s.length && s[btEnd] !== '`') {
+              btEnd += s[btEnd] === '\\' && btEnd + 1 < s.length ? 2 : 1;
+            }
+            if (scanBashCaseIn(s.slice(i + 1, btEnd), depth + 1)) {
+              return true;
+            }
+            i = btEnd < s.length ? btEnd + 1 : btEnd;
+            atCmdStart = false;
+            continue;
+          }
+          if (ch === '#' && (i === 0 || /[ \t\r\n;|&({]/.test(s[i - 1]))) {
+            while (i < s.length && s[i] !== '\n') i += 1;
+            continue;
+          }
+          if (ch === ')' || ch === '}' || ch === '<' || ch === '>') {
+            atCmdStart = false;
+            i += 1;
+            continue;
+          }
+          if (
+            atCmdStart &&
+            s.startsWith('case', i) &&
+            i + 4 < s.length &&
+            (s[i + 4] === ' ' || s[i + 4] === '\t')
+          ) {
+            let k = i + 4;
+            while (k < s.length && (s[k] === ' ' || s[k] === '\t')) k += 1;
+            const wordStart = k;
+            k = skipBashWord(s, k);
+            const afterWord = k;
+            if (k > wordStart) {
+              let sawSep = false;
+              while (k < s.length) {
+                if (
+                  s[k] === ' ' ||
+                  s[k] === '\t' ||
+                  s[k] === '\r' ||
+                  s[k] === '\n'
+                ) {
+                  sawSep = true;
+                  k += 1;
+                } else if (s[k] === '#' && sawSep) {
+                  while (k < s.length && s[k] !== '\n') k += 1;
+                } else {
+                  break;
+                }
+              }
+              if (
+                sawSep &&
+                s.startsWith('in', k) &&
+                (k + 2 === s.length || /[ \t;\r\n;|&()#`]/.test(s[k + 2]))
+              ) {
+                return true;
+              }
+              if (scanWordForCaseIn(s.slice(wordStart, afterWord))) {
+                return true;
+              }
+            }
+            i = afterWord > i ? afterWord : i + 4;
+            atCmdStart = false;
+            continue;
+          }
+          if (ch === '$' && s[i + 1] === '(') {
+            atCmdStart = true;
+            i += 2;
+            continue;
+          }
+          if (ch === '"') {
+            i += 1;
+            while (i < s.length && s[i] !== '"') {
+              if (s[i] === '\\' && i + 1 < s.length) {
+                i += 2;
+              } else if (s[i] === '$' && s[i + 1] === '(') {
+                const subEnd = skipBalancedGroup(s, i + 1, '(', ')');
+                const subInnerEnd =
+                  subEnd > i + 2 && s[subEnd - 1] === ')' ? subEnd - 1 : subEnd;
+                if (scanBashCaseIn(s.slice(i + 2, subInnerEnd), depth + 1)) {
+                  return true;
+                }
+                i = subEnd;
+              } else if (s[i] === '$' && s[i + 1] === '{') {
+                const subEnd = skipBalancedGroup(s, i + 1, '{', '}');
+                const subInnerEnd =
+                  subEnd > i + 2 && s[subEnd - 1] === '}' ? subEnd - 1 : subEnd;
+                if (scanWordForCaseIn(s.slice(i + 2, subInnerEnd))) {
+                  return true;
+                }
+                i = subEnd;
+              } else if (s[i] === '`') {
+                let btEnd = i + 1;
+                while (btEnd < s.length && s[btEnd] !== '`') {
+                  btEnd += s[btEnd] === '\\' && btEnd + 1 < s.length ? 2 : 1;
+                }
+                if (scanBashCaseIn(s.slice(i + 1, btEnd), depth + 1)) {
+                  return true;
+                }
+                i = btEnd < s.length ? btEnd + 1 : btEnd;
+              } else {
+                i += 1;
+              }
+            }
+            if (i < s.length) i += 1;
+            atCmdStart = false;
+            continue;
+          }
+          const wStart = i;
+          const wEnd = skipBashWord(s, i);
+          if (wEnd === wStart) {
+            i += 1;
+            atCmdStart = false;
+            continue;
+          }
+          const word = s.slice(wStart, wEnd);
+          if (scanWordForCaseIn(word)) {
+            return true;
+          }
+          i = wEnd;
+          if (atCmdStart && astCasePrefixWordSet.has(word)) {
+            continue;
+          }
+          if (atCmdStart && word === 'function') {
+            while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i += 1;
+            while (i < s.length && isFuncNameChar(s[i])) i += 1;
+            while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i += 1;
+            if (s[i] === '(') {
+              let q = i + 1;
+              while (q < s.length && (s[q] === ' ' || s[q] === '\t')) q += 1;
+              if (s[q] === ')') i = q + 1;
+            }
+            continue;
+          }
+          if (atCmdStart) {
+            let p = i;
+            while (p < s.length && (s[p] === ' ' || s[p] === '\t')) p += 1;
+            if (s[p] === '(') {
+              let q = p + 1;
+              while (q < s.length && (s[q] === ' ' || s[q] === '\t')) q += 1;
+              if (s[q] === ')') {
+                i = q + 1;
+                continue;
+              }
+            }
+          }
+          atCmdStart = false;
+        }
+        return false;
+      };
+      const hasBashCaseInSyntax = (src) => {
+        if (
+          !src.includes('case') &&
+          !src.includes('\\\n') &&
+          !src.includes('\\\r\n')
+        ) {
+          return false;
+        }
+        const candidates = [src];
+        if (src.includes('\\\n') || src.includes('\\\r\n')) {
+          const folded = stripNonCommentContinuations(src);
+          if (folded !== src) candidates.push(folded);
+        }
+        for (const candidate of candidates) {
+          if (!candidate.includes('case')) continue;
+          if (scanBashCaseIn(stripAstLeadingPrefixes(candidate))) return true;
+        }
+        return false;
+      };
+      const hasDangerousShellAst = async (
+        source,
+        { rawLine = false, depth = 0 } = {},
+      ) => {
+        if (depth > 4) return true;
+        if (
+          !/[;|&()$<>\\`{['"]|^!|(?:^|[\s;|&({])\.|\b(?:trap|case|coproc|select|for|if|while|until|gh|git|make|builtin|command|exec|eval|env|sudo|doas|nice|time|nohup|setsid|timeout|stdbuf|chrt|ionice|caffeinate|rlwrap|source|awk|find|xargs|node|alias|shopt|let|printf|declare|typeset|readonly|read|rm|mv|cp|chmod|chown|curl|wget|bash|sh|zsh|ksh|dash|python3?|ruby|perl|nc|dd|tee|truncate|kill|docker|qwen)\b/.test(
+            source,
+          )
+        ) {
+          return false;
+        }
+        const cacheKey = depth === 0 ? `${rawLine ? '1' : '0'}\0${source}` : '';
+        if (cacheKey && astGuardCache.has(cacheKey)) {
+          return astGuardCache.get(cacheKey);
+        }
+        const remember = (result) => {
+          if (cacheKey) astGuardCache.set(cacheKey, result);
+          return result;
+        };
+        if (source.length > 8192) {
+          return remember(true);
+        }
+        const hasQuotedBacktick = rawLine && hasShellBacktickMismatch(source);
+        const preNormalized = source
+          .replace(
+            /(^|[\s/="'])<([A-Za-z0-9][A-Za-z0-9_.-]*)>(?=$|[\s/="',:.)])/g,
+            (_, lead, inner) => `${lead}${'P'.repeat(inner.length + 2)}`,
+          )
+          .replaceAll('!=', '= ')
+          .replace(/((?:^|[^\\])(?:\\\\)*\))(?=#)/g, '$1 ');
+        const normalized = stripAstLeadingPrefixes(preNormalized);
+        // tree-sitter-bash 0.23.1 crashes inside its WASM scanner on `case ... in`,
+        // leaking a WebAssembly table slot on every throw (~80 throws exhaust the
+        // process). Short-circuit disallowed `case ... in` before invoking WASM.
+        if (hasBashCaseInSyntax(normalized)) {
+          return remember(true);
+        }
+        let tree;
+        try {
+          tree = await parseShellCommand(normalized);
+        } catch {
+          return remember(true);
+        }
+        try {
+          const wordInternalCommentTails = [];
+          const falseCommentIndices = [];
+          const stack = [tree.rootNode];
+          while (stack.length > 0) {
+            const node = stack.pop();
+            if (astDisallowedTypes.has(node.type)) {
+              const isJsMethodChain =
+                node.type === 'function_definition' &&
+                !node.text.includes('{') &&
+                (normalized[node.endIndex] === '.' ||
+                  /\)\.[A-Za-z_]/.test(node.text));
+              if (!isJsMethodChain) {
+                return remember(true);
+              }
+            }
+            if (node.type === 'comment') {
+              if (
+                node.parent?.type === 'command_substitution' &&
+                node.text.includes('`')
+              ) {
+                falseCommentIndices.push(node.startIndex);
+              } else if (node.startIndex > 0) {
+                const prevCh = normalized[node.startIndex - 1];
+                let escapedPrev = false;
+                if (/[\s;|&()]/.test(prevCh)) {
+                  let bs = 0;
+                  while (
+                    node.startIndex - 2 - bs >= 0 &&
+                    normalized[node.startIndex - 2 - bs] === '\\'
+                  ) {
+                    bs += 1;
+                  }
+                  escapedPrev = bs % 2 === 1;
+                }
+                if (!/[\s;|&()]/.test(prevCh) || escapedPrev) {
+                  falseCommentIndices.push(node.startIndex);
+                }
+              }
+            }
+            if (
+              node.type === 'test_command' ||
+              node.type === 'declaration_command' ||
+              node.type === 'unset_command'
+            ) {
+              const allowBt =
+                node.type === 'test_command' ||
+                !rawLine ||
+                node.text.includes('[');
+              if (astHasSplicedCmdSub(node.text, allowBt)) {
+                return remember(true);
+              }
+            }
+            if (node.type === 'command_substitution') {
+              if (
+                node.text.startsWith('$(') &&
+                !(
+                  node.parent?.type === 'string' &&
+                  /^\$\(base64\s+…\)$/.test(node.text)
+                )
+              ) {
+                return remember(true);
+              }
+              if (node.text.startsWith('`')) {
+                if (!node.text.endsWith('`')) {
+                  for (const child of node.namedChildren) {
+                    if (child.type === 'comment' && child.text.includes('`')) {
+                      falseCommentIndices.push(child.startIndex);
+                    }
+                  }
+                  continue;
+                }
+                if (!rawLine) {
+                  const btInner = node.text.slice(1, -1).trim();
+                  const singleBenignToken =
+                    /^[A-Za-z0-9_.-]+$/.test(btInner) &&
+                    btInner !== 'trap' &&
+                    btInner !== 'coproc' &&
+                    !astDangerCmds.has(btInner) &&
+                    !astWrappers.has(btInner) &&
+                    !astArithSubscriptCmds.has(btInner);
+                  if (!singleBenignToken) return remember(true);
+                  continue;
+                }
+                if (hasQuotedBacktick) return remember(true);
+                continue;
+              }
+            }
+            if (node.type === 'expansion' && node.text.includes('`')) {
+              return remember(true);
+            }
+            if (node.type === 'command') {
+              const nameNode = node.childForFieldName('name');
+              const rawName = nameNode?.text ?? '';
+              const foldedRaw = rawName.replace(/\\\r?\n/g, '');
+              if (/\$['"]/.test(foldedRaw)) {
+                return remember(true);
+              }
+              const name = astCleanToken(rawName);
+              const args = node.namedChildren
+                .filter(
+                  (c) =>
+                    c.type !== 'command_name' &&
+                    c.type !== 'file_redirect' &&
+                    c.type !== 'variable_assignment',
+                )
+                .map((c) => c.text);
+              const redirNodes = [
+                ...(node.parent?.type === 'redirected_statement'
+                  ? node.parent.namedChildren.filter(
+                      (c) => c.type === 'file_redirect',
+                    )
+                  : []),
+                ...node.namedChildren.filter((c) => c.type === 'file_redirect'),
+              ];
+              const hasRedir = redirNodes.some(
+                (r) =>
+                  !(
+                    r.text.startsWith('>') &&
+                    r.startIndex > 0 &&
+                    normalized[r.startIndex - 1] === '-'
+                  ),
+              );
+              const parentType = node.parent?.type ?? '';
+              const inControl = astControlParents.has(parentType);
+              if (rawName.startsWith('`') && rawName.endsWith('`')) {
+                const btCmd = rawName.slice(1, -1).trim();
+                const btHasSpace = /\s/.test(btCmd);
+                if (
+                  (parentType === 'pipeline' &&
+                    btHasSpace &&
+                    !(rawLine && /^[ \t]*\|/.test(normalized))) ||
+                  (args.length > 0 &&
+                    (hasRedir ||
+                      parentType === 'negated_command' ||
+                      /^(?:(?:echo|printf|cat|head|tail|grep|base64|tr|cut|sed|awk)\b|(?:\/bin\/)?(?:bash|sh)[ \t]+-l?c\b)/.test(
+                        btCmd,
+                      )))
+                ) {
+                  return remember(true);
+                }
+                if (args.length > 0) {
+                  wordInternalCommentTails.push(args.join(' '));
+                }
+              }
+              if (
+                !rawName.startsWith('`') &&
+                !(
+                  rawLine &&
+                  nameNode &&
+                  nameNode.startIndex > 0 &&
+                  normalized[nameNode.startIndex - 1] === '`'
+                ) &&
+                /\$[A-Za-z0-9_{@*#?$-]/.test(rawName) &&
+                (inControl ||
+                  hasRedir ||
+                  args.length > 0 ||
+                  source.includes('\n') ||
+                  /\$(?:[@*]|\{[^}]*\[[@*]\]\})/.test(rawName))
+              ) {
+                return remember(true);
+              }
+              if (astArithSubscriptCmds.has(name)) {
+                if (
+                  astHasSplicedCmdSub(
+                    node.text,
+                    !rawLine || node.text.includes('['),
+                  ) ||
+                  (name === 'read' &&
+                    (hasRedir ||
+                      node.namedChildren.some(
+                        (c) => c.type === 'herestring_redirect',
+                      )))
+                ) {
+                  return remember(true);
+                }
+              }
+              if (name === '.') {
+                if (
+                  hasRedir ||
+                  (args.length > 0 &&
+                    (inControl ||
+                      !rawLine ||
+                      /^(?:\/|~|\.\.?\/|<)/.test(args[0])))
+                ) {
+                  return remember(true);
+                }
+              } else if (name === 'coproc') {
+                if (
+                  hasRedir ||
+                  inControl ||
+                  args.length > 0 ||
+                  node.nextNamedSibling?.type === 'ERROR'
+                ) {
+                  return remember(true);
+                }
+              } else if (name === 'trap') {
+                if (
+                  hasRedir ||
+                  inControl ||
+                  !rawLine ||
+                  rawName !== name ||
+                  (args.length > 0 &&
+                    (!astProseFirstArg(args[0]) ||
+                      args.some((a) =>
+                        /^(?:\+?\d+|EXIT|ERR|DEBUG|RETURN|(?:SIG)?[A-Z]{2,})$/i.test(
+                          astCleanToken(a),
+                        ),
+                      )))
+                ) {
+                  return remember(true);
+                }
+              } else if (name === 'node') {
+                const unqArgs = args.map((a) => astUnquoteArg(a));
+                if (
+                  hasRedir ||
+                  unqArgs.some((a) =>
+                    /^(?:-e|--eval(?:=|$)|-p|--print(?:=|$)|-r|--require(?:=|$)|--import(?:=|$)|--loader(?:=|$))/.test(
+                      a,
+                    ),
+                  )
+                ) {
+                  return remember(true);
+                }
+              } else if (name === 'git') {
+                const unqArgs = args.map((a) => astUnquoteArg(a));
+                if (
+                  unqArgs.some((a) =>
+                    /^(?:-c(?:$|=)|--config-env(?:$|=)|--upload-pack(?:$|=)|--receive-pack(?:$|=))/.test(
+                      a,
+                    ),
+                  ) ||
+                  (inControl &&
+                    unqArgs.some((a) =>
+                      /^(?:push|tag|branch|checkout|switch|reset|rebase|commit|merge|cherry-pick|config|remote|submodule|clone|fetch|pull)$/.test(
+                        a,
+                      ),
+                    ))
+                ) {
+                  return remember(true);
+                }
+              } else if (name === 'alias' || name === 'shopt') {
+                if (
+                  hasRedir ||
+                  inControl ||
+                  args.some((a) => {
+                    const c = astUnquoteArg(a);
+                    return c.includes('=') || c.startsWith('-');
+                  })
+                ) {
+                  return remember(true);
+                }
+              } else if (
+                astDangerCmds.has(name) &&
+                !(
+                  rawLine &&
+                  astRawSkipProseCmds.has(name) &&
+                  !inControl &&
+                  !hasRedir &&
+                  rawName === name &&
+                  !args.some((a) => astUnquoteArg(a).startsWith('-'))
+                )
+              ) {
+                const foldedCmd = (
+                  node.parent?.type === 'redirected_statement'
+                    ? node.parent.text
+                    : node.text
+                ).replace(/\\\r?\n/g, '');
+                if (
+                  name === 'gh'
+                    ? hasRedir || isDangerousCommandText(foldedCmd, { rawLine })
+                    : name === 'qwen'
+                      ? hasRedir ||
+                        inControl ||
+                        (args[0] !== undefined &&
+                          astUnquoteArg(args[0]).startsWith('-'))
+                      : !(
+                          rawLine &&
+                          tree.rootNode.hasError &&
+                          parentType === 'subshell' &&
+                          rawName === name &&
+                          /^(?:[+/]|or|and)$/.test(args[0] ?? '')
+                        ) &&
+                        (rawName !== name ||
+                          hasRedir ||
+                          args.some((a) =>
+                            /^-[A-Za-z-]/.test(astUnquoteArg(a)),
+                          ) ||
+                          (inControl &&
+                            !(
+                              rawLine &&
+                              astRawSkipProseCmds.has(name) &&
+                              rawName === name &&
+                              astProseFirstArg(args[0]) &&
+                              !args.some((a) =>
+                                astUnquoteArg(a).startsWith('-'),
+                              )
+                            )) ||
+                          (args.length > 0 && !astProseFirstArg(args[0])))
+                ) {
+                  return remember(true);
+                }
+              } else if (astWrappers.has(name)) {
+                const firstClean = args[0] ? astCleanToken(args[0]) : '';
+                const evalLike = name === 'eval' || name === 'exec';
+                if (
+                  hasRedir ||
+                  (evalLike && args.length > 0) ||
+                  (!(name === 'command' && /^-[vV]$/.test(firstClean)) &&
+                    !(
+                      rawLine &&
+                      !evalLike &&
+                      /^(?:is|are|was|were)$/i.test(args[0] ?? '')
+                    ) &&
+                    args.some((arg) => astRealWrapperArg(arg)))
+                ) {
+                  return remember(true);
+                }
+              }
+            }
+            for (const child of node.namedChildren) stack.push(child);
+          }
+          if (falseCommentIndices.length > 0) {
+            const chars = normalized.split('');
+            for (const idx of falseCommentIndices) chars[idx] = 'P';
+            if (
+              await hasDangerousShellAst(chars.join(''), {
+                rawLine,
+                depth: depth + 1,
+              })
+            ) {
+              return remember(true);
+            }
+          }
+          for (const tail of wordInternalCommentTails) {
+            if (
+              await hasDangerousShellAst(tail, { rawLine, depth: depth + 1 })
+            ) {
+              return remember(true);
+            }
+          }
+          if (tree.rootNode.hasError) {
+            if (
+              normalized.includes(')') &&
+              normalized.includes(';') &&
+              /^[ \t]*\(?[^()\r\n\s][^()\r\n]*\)[ \t]*\S[^\r\n]*;(?=[;&])/m.test(
+                normalized,
+              )
+            ) {
+              return remember(true);
+            }
+            if (
+              (normalized.includes('{') || /\bdo\b/.test(normalized)) &&
+              /(?:^|[;\n|&({])[ \t]*(?:select[ \t]+[A-Za-z_][A-Za-z0-9_]*(?:[ \t]+in\b|[ \t]*[;\r\n{#])|for[ \t]*\(\()/.test(
+                normalized,
+              )
+            ) {
+              return remember(true);
+            }
+            if (
+              normalized.includes('{') &&
+              /(?:^|[;\n|&({])[ \t]*for[ \t]+[A-Za-z_][A-Za-z0-9_]*(?:[ \t]+in\b|[ \t]*[;\r\n{#])/.test(
+                normalized,
+              )
+            ) {
+              return remember(true);
+            }
+          }
+          if (depth <= 1 && /\\\r?\n/.test(normalized)) {
+            const foldedUncommented = stripNonCommentContinuations(normalized);
+            if (
+              foldedUncommented !== normalized &&
+              (await hasDangerousShellAst(foldedUncommented, {
+                rawLine,
+                depth: depth + 1,
+              }))
+            ) {
+              return remember(true);
+            }
+          }
+          return remember(false);
+        } finally {
+          tree.delete();
+        }
+      };
       const executableBoundaryUncached = async (
         source,
         { rawLine = false } = {},
       ) => {
         const text = foldContinuations(source).trim();
         if (isDangerousCommandText(text, { rawLine })) return true;
+        if (await hasDangerousShellAst(source, { rawLine })) return true;
         const strippedForDangerous = stripLeadingWrappers(text);
         if (strippedForDangerous.overflow) return true;
         if (strippedForDangerous.wrapped) {
@@ -3288,7 +4763,12 @@ describe('local container recipe pins', () => {
           (executionWrappers.has(literalFirstCommand) ||
             /^\$'.*'$/.test(firstToken ?? ''));
         // A wrapper-looking word followed by a copula is prose, not a command.
-        if (literalWrapper && /^(?:is|are|was|were)\b/.test(wrapperArguments)) {
+        if (
+          literalWrapper &&
+          literalFirstCommand !== 'eval' &&
+          literalFirstCommand !== 'exec' &&
+          /^(?:is|are|was|were)\b/.test(wrapperArguments)
+        ) {
           return false;
         }
         const wrappedProgram = literalWrapper && hasFollowingProgram;
@@ -3599,26 +5079,30 @@ describe('local container recipe pins', () => {
           fragments.push({ source: body, quotedGate: false });
           continue;
         }
-        const foldedLines = foldContinuations(body)
-          .split('\n')
-          .map((line) => line.trim())
-          .filter(
-            (line) =>
-              line !== '' &&
-              !line.startsWith('#') &&
-              !/^<!--[\s\S]*-->$/.test(line),
-          );
-        let hasExecutableLine = false;
-        for (const line of foldedLines) {
-          if (
-            language === 'text' &&
-            /^node\s+[A-Za-z][A-Za-z0-9_-]*$/.test(line)
-          ) {
-            continue;
-          }
-          if (await executableBoundary(line)) {
-            hasExecutableLine = true;
-            break;
+        let hasExecutableLine = await hasDangerousShellAst(body, {
+          rawLine: false,
+        });
+        if (!hasExecutableLine) {
+          const foldedLines = foldContinuations(body)
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(
+              (line) =>
+                line !== '' &&
+                !line.startsWith('#') &&
+                !/^<!--[\s\S]*-->$/.test(line),
+            );
+          for (const line of foldedLines) {
+            if (
+              language === 'text' &&
+              /^node\s+[A-Za-z][A-Za-z0-9_-]*$/.test(line)
+            ) {
+              continue;
+            }
+            if (await executableBoundary(line)) {
+              hasExecutableLine = true;
+              break;
+            }
           }
         }
         if (hasExecutableLine) {
@@ -3629,6 +5113,7 @@ describe('local container recipe pins', () => {
       const inFences = (index) => inRanges(mergedFencedRanges, index);
       for (const body of transcriptBodies) {
         const lines = body.split('\n');
+        const unpromptedLines = [];
         for (let index = 0; index < lines.length; index += 1) {
           const prompted = lines[index].match(/^[ \t]*[$#][ \t]+(.*)$/)?.[1];
           const raw = lines[index].trim();
@@ -3637,6 +5122,7 @@ describe('local container recipe pins', () => {
             heredocDeclarations(raw).length === 0 &&
             !(await executableBoundary(raw))
           ) {
+            unpromptedLines.push(lines[index].replace(/^[ \t]*>[ \t]?/, ''));
             continue;
           }
           const selected = [prompted ?? raw];
@@ -3659,6 +5145,18 @@ describe('local container recipe pins', () => {
             if (!collected.complete) return false;
           }
           fragments.push({ source: selected.join('\n'), quotedGate: false });
+        }
+        if (unpromptedLines.length > 0) {
+          const unpromptedBody = unpromptedLines.join('\n');
+          const ps2StrippedBody = body.replace(/^[ \t]*>[ \t]?/gm, '');
+          if (await hasDangerousShellAst(unpromptedBody, { rawLine: false })) {
+            fragments.push({ source: unpromptedBody, quotedGate: false });
+          } else if (
+            unpromptedLines.length < lines.length &&
+            (await hasDangerousShellAst(ps2StrippedBody, { rawLine: false }))
+          ) {
+            fragments.push({ source: ps2StrippedBody, quotedGate: false });
+          }
         }
       }
       const rawLines = document.split('\n');
@@ -3723,20 +5221,698 @@ describe('local container recipe pins', () => {
       );
       const inCodeSpan = (index) => inRanges(codeSpanRanges, index);
       const inlineTailLines = new Set();
+      const lineIndexForOffset = (offset) => {
+        let lo = 0;
+        let hi = rawLineOffsets.length - 1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (rawLineOffsets[mid] === offset) return mid;
+          if (rawLineOffsets[mid] < offset) lo = mid + 1;
+          else hi = mid - 1;
+        }
+        return Math.max(0, hi);
+      };
+      const endsWithOddBackslash = (s) => {
+        let count = 0;
+        for (let i = s.length - 1; i >= 0 && s[i] === '\\'; i -= 1) count += 1;
+        return count % 2 === 1;
+      };
+      const scanBashLine = (
+        line,
+        initQuote = null,
+        allowContraction = true,
+      ) => {
+        const useCache =
+          initQuote === null && allowContraction && line.length <= 512;
+        if (useCache && rawLineScanCache.has(line)) {
+          return rawLineScanCache.get(line);
+        }
+        const clean = line.endsWith('\r') ? line.slice(0, -1) : line;
+        let inSingle = initQuote === "'";
+        let inAnsiC = initQuote === "$'";
+        const frames = initQuote === '"' ? ['d'] : [];
+        let escapedAt = -1;
+        let commentAt = -1;
+        let closedOffset = -1;
+        let sawContraction = false;
+        let noMoreSq = false;
+        let unquotedCode = '';
+        const markClosed = (pos) => {
+          if (initQuote && closedOffset < 0) closedOffset = pos;
+        };
+        for (let k = 0; k < clean.length; k += 1) {
+          const ch = clean[k];
+          if (inAnsiC) {
+            if (ch === '\\' && k + 1 < clean.length) {
+              k += 1;
+            } else if (ch === "'") {
+              inAnsiC = false;
+              markClosed(k + 1);
+              unquotedCode += ' ';
+            }
+            continue;
+          }
+          if (inSingle) {
+            if (ch === "'") {
+              inSingle = false;
+              markClosed(k + 1);
+              unquotedCode += ' ';
+            }
+            continue;
+          }
+          const top = frames[frames.length - 1];
+          if (top === 'd') {
+            if (ch === '\\' && k + 1 < clean.length) {
+              k += 1;
+            } else if (ch === '$' && clean[k + 1] === '{') {
+              frames.push('p');
+              k += 1;
+            } else if (ch === '"') {
+              frames.pop();
+              if (frames.length === 0) {
+                markClosed(k + 1);
+                unquotedCode += ' ';
+              }
+            }
+            continue;
+          }
+          if (
+            ch === '#' &&
+            frames.length === 0 &&
+            (k === 0 ||
+              (/[ \t;|&()]/.test(clean[k - 1]) && escapedAt !== k - 1))
+          ) {
+            commentAt = k;
+            break;
+          }
+          if (ch === '\\' && k + 1 < clean.length) {
+            escapedAt = k + 1;
+            if (frames.length === 0) unquotedCode += ch + clean[k + 1];
+            k += 1;
+            continue;
+          }
+          if (ch === '$' && clean[k + 1] === '{') {
+            frames.push('p');
+            if (frames.length === 1) unquotedCode += '${';
+            k += 1;
+            continue;
+          }
+          if (ch === '}' && top === 'p') {
+            frames.pop();
+            if (frames.length === 0) unquotedCode += '}';
+            continue;
+          }
+          if (ch === '`' && frames.length === 0) {
+            const closeBt = clean.indexOf('`', k + 1);
+            if (closeBt === -1) break;
+            unquotedCode += ' ';
+            k = closeBt;
+            continue;
+          }
+          if (ch === '$' && clean[k + 1] === "'") {
+            inAnsiC = true;
+            k += 1;
+            continue;
+          }
+          if (ch === '"') {
+            frames.push('d');
+            continue;
+          }
+          if (ch === "'") {
+            if (
+              frames.length === 0 &&
+              allowContraction &&
+              isEnglishContractionAt(clean, k)
+            ) {
+              let nextSq = -1;
+              if (!noMoreSq) {
+                nextSq = clean.indexOf("'", k + 1);
+                if (nextSq === -1) noMoreSq = true;
+              }
+              if (nextSq === -1 || isEnglishContractionAt(clean, nextSq)) {
+                sawContraction = true;
+                unquotedCode += ch;
+                continue;
+              }
+            }
+            inSingle = true;
+            continue;
+          }
+          if (frames.length === 0) unquotedCode += ch;
+        }
+        const quote = inAnsiC
+          ? "$'"
+          : inSingle
+            ? "'"
+            : frames.includes('d')
+              ? '"'
+              : null;
+        const codeBeforeComment =
+          commentAt >= 0 ? clean.slice(0, commentAt) : clean;
+        const result = {
+          clean,
+          quote,
+          commentAt,
+          closedOffset,
+          sawContraction,
+          codeBeforeComment,
+          unquotedCode,
+        };
+        if (useCache && rawLineScanCache.size < 20_000) {
+          rawLineScanCache.set(line, result);
+        }
+        return result;
+      };
+      const stripUnquotedHashComment = (line) => {
+        const clean = line.endsWith('\r') ? line.slice(0, -1) : line;
+        return clean.includes('#')
+          ? scanBashLine(clean, null, true).codeBeforeComment
+          : clean;
+      };
+      const rawCaseLeadRe =
+        /(?:^|[;|&({])[ \t]*(?:![ \t]+)*case(?:[ \t]*\\$|[ \t]+(?:(?:[^ \t\r\n;|&()<>'"`\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*'|`[^`]*`)+[ \t]*(?:$|#|\\|\bin\b)|[^ \t\r\n;|&()<>]*['"$`]))/;
+      const rawMultilineShellLeadRe =
+        /^[ \t]*(?:\([ \t]*(?:[:([{!$"'\\%]|(?:for|case|select|if|while|until|trap|coproc|gh|env|command|builtin|exec|eval|true|false|set|let|declare|shopt)\b|[A-Za-z_][A-Za-z0-9_]*\+?=)|[{!]|[:[]|if\b|while\b|until\b|for\b|select\b|case(?:[ \t]*\\$|[ \t]+(?:(?:[^ \t\r\n;|&()<>'"`\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*'|`[^`]*`)+[ \t]*(?:$|#|\\|\bin\b)|[^ \t\r\n;|&()<>]*['"$`]))|coproc\b|trap\b|function\b|[^\s;|&(){}<>'"`]+[ \t]*\(\s*\)|#|<!--)/;
+      const rawMidlineControlRe =
+        /[;|&({][ \t]*(?:![ \t]+|(?:function[ \t]+)?[^\s;|&(){}<>'"`]+[ \t]*\(\s*\)[ \t]*|function[ \t]+[^\s;|&(){}<>'"`]+[ \t]+)*(?:case|select|for|if|while|until|coproc|trap)\b/;
+      const rawControlCloserRes = {
+        case: /(?:^|[;|&({])[ \t]*esac(?=$|[ \t;|&()<>{}#])/,
+        loop: /(?:^|[;|&({])[ \t]*(?:done|\})(?=$|[ \t;|&()<>{}#])/,
+        if: /(?:^|[;|&({])[ \t]*fi(?=$|[ \t;|&()<>{}#])/,
+        brace: /(?:^|[;|&({])[ \t]*\}(?=$|[ \t;|&()<>{}#])/,
+        subshell: /(?:^|[;|&({])[ \t]*\)(?=$|[ \t;|&()<>{}#])/,
+      };
+      const detectRawControlKind = (line) => {
+        if (line.length <= 512 && rawControlKindCache.has(line)) {
+          return rawControlKindCache.get(line);
+        }
+        const compute = () => {
+          const rawCode = stripUnquotedHashComment(line);
+          if (
+            /(?:^|[;|&({])[ \t]*(?:![ \t]+)*(?:(?:function[ \t]+)?[^\s;|&(){}<>'"`]+[ \t]*\(\s*\)|function[ \t]+[^\s;|&(){}<>'"`]+)[ \t]*\{[ \t]*$/.test(
+              rawCode,
+            )
+          ) {
+            return 'brace';
+          }
+          if (
+            /(?:^|[;|&({])[ \t]*(?:![ \t]+)*(?:(?:function[ \t]+)?[^\s;|&(){}<>'"`]+[ \t]*\(\s*\)|function[ \t]+[^\s;|&(){}<>'"`]+|coproc(?:[ \t]+[A-Za-z_][A-Za-z0-9_]*)?)[ \t]*\([ \t]*$/.test(
+              rawCode,
+            )
+          ) {
+            return 'subshell';
+          }
+          const code = rawCode.replace(
+            /(^|[;|&({])[ \t]*(?:![ \t]+|(?:function[ \t]+)?[^\s;|&(){}<>'"`]+[ \t]*\(\s*\)[ \t]*|function[ \t]+[^\s;|&(){}<>'"`]+[ \t]+)+/g,
+            '$1',
+          );
+          if (rawCaseLeadRe.test(code)) return 'case';
+          if (
+            /(?:^|[;|&({])[ \t]*(?:![ \t]+)*(?:select|for|while|until)\b/.test(
+              code,
+            )
+          ) {
+            return 'loop';
+          }
+          if (/(?:^|[;|&({])[ \t]*(?:![ \t]+)*if\b/.test(code)) return 'if';
+          return null;
+        };
+        const res = compute();
+        if (line.length <= 512 && rawControlKindCache.size < 20_000) {
+          rawControlKindCache.set(line, res);
+        }
+        return res;
+      };
+      const classifyRawMultilineLead = (line, startLineIdx) => {
+        let base;
+        if (line.length <= 512 && rawLeadBaseCache.has(line)) {
+          base = rawLeadBaseCache.get(line);
+        } else {
+          const cleanLine = line.endsWith('\r') ? line.slice(0, -1) : line;
+          const matchedLead =
+            rawMultilineShellLeadRe.test(line) ||
+            rawMidlineControlRe.test(line);
+          if (
+            !matchedLead &&
+            !cleanLine.includes('"') &&
+            !cleanLine.includes("'") &&
+            !cleanLine.trimEnd().endsWith('\\')
+          ) {
+            base = null;
+          } else {
+            const scanned = scanBashLine(cleanLine, null, true);
+            const openQuote = scanned.quote;
+            const controlKind = detectRawControlKind(scanned.clean);
+            if (
+              !matchedLead &&
+              !openQuote &&
+              !scanned.sawContraction &&
+              !controlKind &&
+              !scanned.clean.trimEnd().endsWith('\\')
+            ) {
+              base = null;
+            } else {
+              base = {
+                matchedLead,
+                openQuote,
+                sawContraction: scanned.sawContraction,
+                controlKind,
+                endsWithSlash: scanned.clean.trimEnd().endsWith('\\'),
+                sawLoopBody:
+                  controlKind === 'loop' &&
+                  /(?:^|[ \t;|&({])(?:do(?=$|[ \t;|&()<>{}#])|\{)/.test(
+                    scanned.unquotedCode,
+                  ),
+                startedShellKeyword:
+                  /^[ \t]*(?:case|select|for|if|while|until|trap|coproc)\b/.test(
+                    line,
+                  ),
+              };
+            }
+          }
+          if (line.length <= 512 && rawLeadBaseCache.size < 20_000) {
+            rawLeadBaseCache.set(line, base);
+          }
+        }
+        if (!base) return null;
+        let contractionCloseLine = -1;
+        if (!base.openQuote && base.sawContraction) {
+          const limit = Math.min(rawLines.length - 1, startLineIdx + 64);
+          for (let j = startLineIdx + 1; j <= limit; j += 1) {
+            if (
+              !inFences(rawLineOffsets[j]) &&
+              /^[^'\n]*'[ \t]*[;|&({]/.test(rawLines[j])
+            ) {
+              contractionCloseLine = j;
+              break;
+            }
+          }
+        }
+        if (
+          !base.matchedLead &&
+          !base.openQuote &&
+          contractionCloseLine < 0 &&
+          !base.controlKind &&
+          !base.endsWithSlash
+        ) {
+          return null;
+        }
+        return {
+          openQuote: base.openQuote,
+          contractionCloseLine,
+          controlKind: base.controlKind,
+          sawLoopBody: base.sawLoopBody,
+          startedShellKeyword: base.startedShellKeyword,
+        };
+      };
+      const collectRawMultilineBlock = (
+        startLineIdx,
+        rawLead,
+        firstLineOverride = null,
+        overrideEndLineIdx = startLineIdx,
+      ) => {
+        const scanLimit = Math.min(rawLines.length - 1, startLineIdx + 64);
+        const firstPart = firstLineOverride ?? rawLines[startLineIdx];
+        let contiguousEnd = overrideEndLineIdx;
+        let blockBytes = firstPart.length;
+        while (
+          contiguousEnd + 1 <= scanLimit &&
+          blockBytes <= 8192 &&
+          rawLines[contiguousEnd + 1].trim() !== '' &&
+          (rawLead.startedShellKeyword ||
+            !/^[ \t]*-\s+\*\*/.test(rawLines[contiguousEnd + 1])) &&
+          !inFences(rawLineOffsets[contiguousEnd + 1])
+        ) {
+          contiguousEnd += 1;
+          blockBytes += rawLines[contiguousEnd].length + 1;
+        }
+        let blockEnd = contiguousEnd;
+        let quote = rawLead.openQuote;
+        let controlKind = rawLead.controlKind;
+        let controlStartLine = controlKind ? startLineIdx : -1;
+        let quoteStartLine = quote ? startLineIdx : -1;
+        let sawLoopBody = rawLead.sawLoopBody;
+        let contractionCloseLine = rawLead.contractionCloseLine;
+        let pendingContLine = '';
+        for (let j = overrideEndLineIdx + 1; j <= contiguousEnd; j += 1) {
+          const wasQuoted = quote !== null;
+          const lineScan = scanBashLine(rawLines[j], quote, true);
+          quote = lineScan.quote;
+          if (!wasQuoted && quote) {
+            quoteStartLine = j;
+          } else if (!quote) {
+            quoteStartLine = -1;
+          }
+          if (!wasQuoted) {
+            const combined = pendingContLine
+              ? pendingContLine + lineScan.clean
+              : lineScan.clean;
+            if (
+              lineScan.commentAt < 0 &&
+              endsWithOddBackslash(lineScan.clean)
+            ) {
+              pendingContLine = combined.slice(0, -1);
+            } else {
+              pendingContLine = '';
+            }
+            const lineControl =
+              detectRawControlKind(combined) ||
+              (/^[ \t]*\{[ \t]*$/.test(lineScan.unquotedCode)
+                ? 'brace'
+                : /^[ \t]*\([ \t]*$/.test(lineScan.unquotedCode)
+                  ? 'subshell'
+                  : null);
+            if (lineControl && !controlKind) {
+              controlKind = lineControl;
+              controlStartLine = j;
+              sawLoopBody =
+                lineControl === 'loop' &&
+                /(?:^|[ \t;|&({])(?:do(?=$|[ \t;|&()<>{}#])|\{)/.test(
+                  lineScan.unquotedCode,
+                );
+            } else if (
+              controlKind === 'loop' &&
+              /(?:^|[ \t;|&({])(?:do(?=$|[ \t;|&()<>{}#])|\{)/.test(
+                lineScan.unquotedCode,
+              )
+            ) {
+              sawLoopBody = true;
+            }
+          } else {
+            pendingContLine = '';
+            if (lineScan.closedOffset >= 0) {
+              const tailText = lineScan.clean.slice(lineScan.closedOffset);
+              const tailControl = detectRawControlKind(tailText);
+              if (tailControl && !controlKind) {
+                controlKind = tailControl;
+                controlStartLine = j;
+                sawLoopBody =
+                  tailControl === 'loop' &&
+                  /(?:^|[ \t;|&({])(?:do(?=$|[ \t;|&()<>{}#])|\{)/.test(
+                    lineScan.unquotedCode,
+                  );
+              } else if (
+                controlKind === 'loop' &&
+                /(?:^|[ \t;|&({])(?:do(?=$|[ \t;|&()<>{}#])|\{)/.test(
+                  lineScan.unquotedCode,
+                )
+              ) {
+                sawLoopBody = true;
+              }
+            }
+          }
+          if (!quote && lineScan.sawContraction && contractionCloseLine < 0) {
+            for (let m = j + 1; m <= scanLimit; m += 1) {
+              if (
+                !inFences(rawLineOffsets[m]) &&
+                /^[^'\n]*'[ \t]*[;|&({]/.test(rawLines[m])
+              ) {
+                contractionCloseLine = m;
+                break;
+              }
+            }
+          }
+        }
+        let lastQuoteCloseLine = -1;
+        let lastQuoteCloseTail = '';
+        if (quote) {
+          for (let j = contiguousEnd + 1; j <= scanLimit; j += 1) {
+            const lineInFence = inFences(rawLineOffsets[j]);
+            const lineScan = scanBashLine(rawLines[j], quote, true);
+            quote = lineScan.quote;
+            if (!lineInFence && lineScan.closedOffset >= 0) {
+              lastQuoteCloseLine = j;
+              lastQuoteCloseTail = lineScan.clean.slice(lineScan.closedOffset);
+            }
+            if (quote === null && lastQuoteCloseLine >= 0) break;
+          }
+          if (lastQuoteCloseLine > blockEnd) {
+            blockEnd = lastQuoteCloseLine;
+            while (
+              blockEnd + 1 <= scanLimit &&
+              rawLines[blockEnd + 1].trim() !== '' &&
+              !inFences(rawLineOffsets[blockEnd + 1])
+            ) {
+              blockEnd += 1;
+            }
+          }
+        }
+        if (contractionCloseLine > blockEnd) {
+          blockEnd = contractionCloseLine;
+          while (
+            blockEnd + 1 <= scanLimit &&
+            rawLines[blockEnd + 1].trim() !== '' &&
+            !inFences(rawLineOffsets[blockEnd + 1])
+          ) {
+            blockEnd += 1;
+          }
+        }
+        const effectiveControlKind =
+          controlKind ||
+          (lastQuoteCloseLine >= 0
+            ? detectRawControlKind(lastQuoteCloseTail)
+            : null);
+        let closerFound = false;
+        if (effectiveControlKind) {
+          const closerRe = rawControlCloserRes[effectiveControlKind];
+          const closerStart =
+            lastQuoteCloseLine >= 0
+              ? lastQuoteCloseLine + 1
+              : contiguousEnd + 1;
+          let closerLine = -1;
+          let closerQuote = null;
+          let pendingCloser = '';
+          let loopBodySeen =
+            effectiveControlKind !== 'loop' ||
+            sawLoopBody ||
+            (lastQuoteCloseLine >= 0 &&
+              /(?:^|[ \t;|&({])(?:do(?=$|[ \t;|&()<>{}#])|\{)/.test(
+                scanBashLine(lastQuoteCloseTail, null, true).unquotedCode,
+              ));
+          for (let j = closerStart; j <= scanLimit; j += 1) {
+            if (inFences(rawLineOffsets[j])) break;
+            const lineScan = scanBashLine(rawLines[j], closerQuote, true);
+            closerQuote = lineScan.quote;
+            const unq = pendingCloser
+              ? pendingCloser + lineScan.unquotedCode
+              : lineScan.unquotedCode;
+            if (
+              !closerQuote &&
+              lineScan.commentAt < 0 &&
+              endsWithOddBackslash(lineScan.unquotedCode)
+            ) {
+              pendingCloser = unq.slice(0, -1);
+            } else {
+              pendingCloser = '';
+            }
+            if (
+              effectiveControlKind === 'loop' &&
+              !loopBodySeen &&
+              /(?:^|[ \t;|&({])(?:do(?=$|[ \t;|&()<>{}#])|\{)/.test(unq)
+            ) {
+              loopBodySeen = true;
+            }
+            if (loopBodySeen && closerRe.test(unq)) {
+              closerLine = j;
+              closerFound = true;
+              break;
+            }
+          }
+          if (closerLine > blockEnd) {
+            blockEnd = closerLine;
+            while (
+              blockEnd + 1 <= scanLimit &&
+              rawLines[blockEnd + 1].trim() !== '' &&
+              !inFences(rawLineOffsets[blockEnd + 1])
+            ) {
+              blockEnd += 1;
+            }
+          }
+        }
+        let safeSkipEnd = contiguousEnd;
+        if (
+          controlStartLine > overrideEndLineIdx &&
+          effectiveControlKind &&
+          !closerFound
+        ) {
+          safeSkipEnd = Math.min(safeSkipEnd, controlStartLine - 1);
+        }
+        if (quoteStartLine > overrideEndLineIdx && quote) {
+          safeSkipEnd = Math.min(safeSkipEnd, quoteStartLine - 1);
+        }
+        const tailLines =
+          blockEnd > overrideEndLineIdx
+            ? rawLines.slice(overrideEndLineIdx + 1, blockEnd + 1)
+            : [];
+        const blockSource =
+          tailLines.length > 0
+            ? `${firstPart}\n${tailLines.join('\n')}`
+            : firstPart;
+        return { contiguousEnd, safeSkipEnd, blockEnd, blockSource };
+      };
+      const recordInlineTailLine = async (match, closingLineStart, lineEnd) => {
+        inlineTailLines.add(closingLineStart);
+        const fullClosingLine = document.slice(
+          closingLineStart,
+          lineEnd < 0 ? document.length : lineEnd,
+        );
+        if (await hasDangerousShellAst(fullClosingLine, { rawLine: true })) {
+          fragments.push({ source: fullClosingLine, quotedGate: false });
+          return;
+        }
+        if (match.index > closingLineStart) {
+          const prefixBeforeSpan = document
+            .slice(closingLineStart, match.index)
+            .trim();
+          if (prefixBeforeSpan) {
+            const strippedPrefix = prefixBeforeSpan
+              .replace(/[ \t]*(?:&&|\|\||\|&?|[;&])[ \t]*$/, '')
+              .trim();
+            if (
+              (await executableBoundary(prefixBeforeSpan, { rawLine: true })) ||
+              (strippedPrefix &&
+                strippedPrefix !== prefixBeforeSpan &&
+                (await executableBoundary(strippedPrefix, { rawLine: true })))
+            ) {
+              fragments.push({
+                source: strippedPrefix || prefixBeforeSpan,
+                quotedGate: false,
+              });
+            }
+          }
+        }
+      };
+      let checkedSpanTailBlockEnd = -1;
       for (const match of spans) {
         if (inFences(match.index) || inHeredocData(match.index)) continue;
-        const lineStart = document.lastIndexOf('\n', match.index - 1) + 1;
-        if (inlineTailLines.has(lineStart)) continue;
         const closing = match.index + match[0].length;
+        const closingLineStart = document.lastIndexOf('\n', closing - 1) + 1;
+        if (inlineTailLines.has(closingLineStart)) continue;
         const lineEnd = document.indexOf('\n', closing);
         const trailing = document.slice(
           closing,
           lineEnd < 0 ? document.length : lineEnd,
         );
         const tail = await executableInlineTail(trailing);
-        if (!tail) continue;
-        fragments.push({ source: tail, quotedGate: false });
-        inlineTailLines.add(lineStart);
+        if (tail) {
+          fragments.push({ source: tail, quotedGate: false });
+          await recordInlineTailLine(match, closingLineStart, lineEnd);
+        } else if (match[0].includes('\n') && trailing.trim()) {
+          const trimmedTail = trailing.trim();
+          const tailAfterCitation = trimmedTail.replace(/^[^`\n]*`\s*/, '');
+          let candidateTail = trimmedTail;
+          let curLineEnd = lineEnd;
+          let latestTrimmed = trimmedTail;
+          let extraLines = 0;
+          while (
+            /(?:\\|&&|\|\||\|&?)$/.test(latestTrimmed) &&
+            curLineEnd >= 0 &&
+            extraLines < 64
+          ) {
+            const nextLineEnd = document.indexOf('\n', curLineEnd + 1);
+            const nextLine = document.slice(
+              curLineEnd + 1,
+              nextLineEnd < 0 ? document.length : nextLineEnd,
+            );
+            if (!nextLine.trim()) break;
+            candidateTail = `${candidateTail}\n${nextLine}`;
+            latestTrimmed = nextLine.trim();
+            curLineEnd = nextLineEnd;
+            extraLines += 1;
+          }
+          const hitContCap =
+            extraLines >= 64 && /(?:\\|&&|\|\||\|&?)$/.test(latestTrimmed);
+          if (
+            hitContCap ||
+            (await executableBoundary(candidateTail, { rawLine: true }))
+          ) {
+            fragments.push({ source: candidateTail, quotedGate: false });
+            await recordInlineTailLine(match, closingLineStart, lineEnd);
+          } else if (
+            tailAfterCitation !== trimmedTail &&
+            tailAfterCitation &&
+            (await executableBoundary(tailAfterCitation, { rawLine: true }))
+          ) {
+            fragments.push({ source: tailAfterCitation, quotedGate: false });
+            await recordInlineTailLine(match, closingLineStart, lineEnd);
+          } else if (
+            curLineEnd >= 0 &&
+            (/[;|&]/.test(trimmedTail) ||
+              trimmedTail.includes("'") ||
+              trimmedTail.includes('"') ||
+              /^(?:case|select|for|if|while|until|trap|coproc)\b/.test(
+                trimmedTail,
+              ))
+          ) {
+            const closingLineIdx = lineIndexForOffset(closingLineStart);
+            if (closingLineIdx <= checkedSpanTailBlockEnd) continue;
+            const tailLeadInput = candidateTail.replace(
+              /^[ \t]*[;|&]+[ \t]*/,
+              '',
+            );
+            const tailLead = classifyRawMultilineLead(
+              tailLeadInput.replace(/\\\r?\n/g, ''),
+              closingLineIdx,
+            );
+            let blockTail = '';
+            let hasExtra = false;
+            let blockTailEnd = closingLineIdx + extraLines;
+            let spanContiguousEnd = closingLineIdx + extraLines;
+            if (tailLead) {
+              const collected = collectRawMultilineBlock(
+                closingLineIdx,
+                tailLead,
+                tailLeadInput,
+                closingLineIdx + extraLines,
+              );
+              blockTail = collected.blockSource;
+              hasExtra = collected.blockEnd > closingLineIdx + extraLines;
+              blockTailEnd = collected.blockEnd;
+              spanContiguousEnd = collected.safeSkipEnd;
+            } else {
+              blockTail = tailLeadInput;
+              let pEnd = curLineEnd;
+              let pLines = 0;
+              while (pEnd >= 0 && pLines < 64 && blockTail.length <= 8192) {
+                const nextEnd = document.indexOf('\n', pEnd + 1);
+                const nextLine = document.slice(
+                  pEnd + 1,
+                  nextEnd < 0 ? document.length : nextEnd,
+                );
+                if (!nextLine.trim()) break;
+                blockTail = `${blockTail}\n${nextLine}`;
+                pEnd = nextEnd;
+                pLines += 1;
+              }
+              hasExtra = pLines > 0;
+              blockTailEnd = closingLineIdx + extraLines + pLines;
+              spanContiguousEnd = blockTailEnd;
+            }
+            if (
+              hasExtra &&
+              (await hasDangerousShellAst(blockTail, { rawLine: true }))
+            ) {
+              fragments.push({ source: blockTail, quotedGate: false });
+              await recordInlineTailLine(match, closingLineStart, lineEnd);
+              checkedSpanTailBlockEnd = Math.max(
+                checkedSpanTailBlockEnd,
+                blockTailEnd,
+              );
+            } else {
+              let safeSpanEnd = closingLineIdx + extraLines;
+              while (
+                safeSpanEnd + 1 <= spanContiguousEnd &&
+                !inCodeSpan(rawLineOffsets[safeSpanEnd + 1])
+              ) {
+                safeSpanEnd += 1;
+              }
+              checkedSpanTailBlockEnd = Math.max(
+                checkedSpanTailBlockEnd,
+                safeSpanEnd,
+              );
+            }
+          }
+        }
       }
       for (const match of spans) {
         if (
@@ -3759,6 +5935,7 @@ describe('local container recipe pins', () => {
       }
       let lineStart = 0;
       let leadingCitationSpanIndex = 0;
+      let checkedRawBlockEnd = -1;
       for (let lineIndex = 0; lineIndex < rawLines.length; lineIndex += 1) {
         const heredoc = rawHeredocs.get(lineIndex);
         if (heredoc) {
@@ -3772,16 +5949,23 @@ describe('local container recipe pins', () => {
         const inSpan = inCodeSpan(lineStart);
         let continuationEnd = lineIndex;
         let chainContinues = false;
-        while (continuationEnd + 1 < rawLines.length) {
+        while (
+          !inlineTailLines.has(lineStart) &&
+          continuationEnd + 1 < rawLines.length
+        ) {
           const line = rawLines[continuationEnd];
           if (chainContinues && /^\s*#/.test(line)) {
             continuationEnd += 1;
             continue;
           }
-          chainContinues = /(?:&&|\|\||\|&?)[ \t]*(?:#[^\r\n]*)?\r?$/.test(
-            line,
-          );
-          if (!/\\[ \t]*\r?$/.test(line) && !chainContinues) break;
+          const uncommentedLine =
+            line.includes('#') || line.includes('&') || line.includes('|')
+              ? stripUnquotedHashComment(line)
+              : line;
+          chainContinues =
+            (line.includes('&') || line.includes('|')) &&
+            /(?:&&|\|\||\|&?)[ \t]*\r?$/.test(uncommentedLine);
+          if (!/\\[ \t]*\r?$/.test(uncommentedLine) && !chainContinues) break;
           continuationEnd += 1;
         }
         const selected = rawLines.slice(lineIndex, continuationEnd + 1);
@@ -3815,20 +5999,64 @@ describe('local container recipe pins', () => {
             break;
           }
         }
+        const foldedHeader =
+          continuationEnd > lineIndex
+            ? commandHeader.replace(/\\\r?\n/g, '')
+            : rawLines[lineIndex];
+        const rawLead =
+          !inFence &&
+          (!inSpan || leadingCitation) &&
+          lineIndex > checkedRawBlockEnd
+            ? classifyRawMultilineLead(foldedHeader, lineIndex)
+            : null;
+        if (rawLead) {
+          const { safeSkipEnd, blockEnd, blockSource } =
+            collectRawMultilineBlock(
+              lineIndex,
+              rawLead,
+              continuationEnd > lineIndex ? commandHeader : null,
+              continuationEnd,
+            );
+          checkedRawBlockEnd = safeSkipEnd;
+          if (blockEnd > lineIndex) {
+            if (await hasDangerousShellAst(blockSource, { rawLine: true })) {
+              fragments.push({ source: blockSource, quotedGate: false });
+            }
+          }
+        }
+        const trailingAfterLeadingCitation = leadingCitation
+          ? commandHeader
+              .slice(
+                leadingCitation.index + leadingCitation[0].length - lineStart,
+              )
+              .trim()
+          : '';
+        const leadingCitationHasExecutableBody =
+          !!trailingAfterLeadingCitation &&
+          !/^\*\*/.test(trailingAfterLeadingCitation) &&
+          /^[A-Za-z0-9_./$!({[:'"\\<>`?*~-]/.test(
+            trailingAfterLeadingCitation,
+          ) &&
+          ((await executableBoundary(trailingAfterLeadingCitation, {
+            rawLine: true,
+          })) ||
+            (await hasDangerousShellAst(source, { rawLine: true })));
         const citationLineWithoutExecutableTrailer =
           leadingCitation &&
           !(await executableInlineTail(
             commandHeader.slice(
               leadingCitation.index + leadingCitation[0].length - lineStart,
             ),
-          ));
+          )) &&
+          !leadingCitationHasExecutableBody;
         if (
           !inFence &&
           !inlineTailLines.has(lineStart) &&
           (!inSpan || leadingCitation) &&
           !plainCitation &&
           !citationLineWithoutExecutableTrailer &&
-          (await executableBoundary(source, { rawLine: true }))
+          (leadingCitationHasExecutableBody ||
+            (await executableBoundary(source, { rawLine: true })))
         ) {
           fragments.push({ source, quotedGate: false });
         }
@@ -3937,13 +6165,18 @@ describe('local container recipe pins', () => {
         },
         depth = 0,
       ) => {
-        if (depth > 4 || source.length > 200_000) return false;
-        // tree-sitter-bash 0.23.1 crashes on `!=` inside `[ ... ]` under the
-        // current WASM runtime. Polarity is irrelevant to command validation;
-        // this equal-length parser-only spelling preserves every source offset.
+        if (depth > 4 || source.length > 8192) return false;
+        // tree-sitter-bash 0.23.1 crashes on `!=` inside `[ ... ]` and on
+        // `case ... in` under the current WASM runtime, leaking a table slot
+        // per crash. Neutralize `!=` and reject disallowed `case ... in` first.
+        if (hasBashCaseInSyntax(source)) return false;
         const parsed = source
-          .replace(/<[^<>\r\n]+>/g, (placeholder) =>
-            'P'.repeat(placeholder.length),
+          .replace(
+            /"<[A-Za-z0-9](?:[A-Za-z0-9_.,+ -]*[A-Za-z0-9])?>"|(?<=^|[\s/="'`:-]|\bpr)<(?:n|owner|repo|clone|pr-clone|trusted-clone|ts|assets-repo|default|branch|path|dir|round-dir|trusted-dir)>(?=\/)|(?<=^|[\s/="'`:-]|\bpr)<[A-Za-z0-9](?:[A-Za-z0-9_,+ -]*[A-Za-z0-9])?>(?![A-Za-z0-9_./])/g,
+            (placeholder) =>
+              placeholder.startsWith('"')
+                ? `"${'P'.repeat(placeholder.length - 2)}"`
+                : 'P'.repeat(placeholder.length),
           )
           .replaceAll('!=', '= ');
         let tree;
@@ -4319,10 +6552,16 @@ describe('local container recipe pins', () => {
             }
             if (name === 'echo') {
               return (
-                values.every(
-                  (value) =>
-                    typeof value === 'string' && !value.startsWith('-'),
-                ) ||
+                (rawValues.every(
+                  (raw) =>
+                    raw.startsWith('"') ||
+                    raw.startsWith("'") ||
+                    !/[<>]/.test(raw),
+                ) &&
+                  values.every(
+                    (value) =>
+                      typeof value === 'string' && !value.startsWith('-'),
+                  )) ||
                 (rawValues.length === 1 &&
                   ['$!', '"$RUNNER_TEMP"'].includes(rawValues[0]))
               );
@@ -4344,7 +6583,13 @@ describe('local container recipe pins', () => {
                 values.length >= 2 &&
                 values.length <= 3 &&
                 ['-E', '-e'].includes(values[0]) &&
-                typeof values[1] === 'string'
+                typeof values[1] === 'string' &&
+                rawValues.every(
+                  (raw) =>
+                    raw.startsWith('"') ||
+                    raw.startsWith("'") ||
+                    !/[<>]/.test(raw),
+                )
               ) {
                 return values.length === 2 || relativeDataPath(rawValues[2]);
               }
@@ -4394,7 +6639,10 @@ describe('local container recipe pins', () => {
                 return false;
               }
               return (
-                typeof values[1] === 'string' || rawValues[1] === '"$PREV"'
+                (rawValues[1].startsWith('"') ||
+                  rawValues[1].startsWith("'") ||
+                  !/[<>]/.test(rawValues[1])) &&
+                (typeof values[1] === 'string' || rawValues[1] === '"$PREV"')
               );
             }
             if (name === 'read') {
@@ -4405,7 +6653,14 @@ describe('local container recipe pins', () => {
               );
             }
             if (name === 'readlink') {
-              return rawValues.length === 2 && rawValues[0] === '-f';
+              return (
+                rawValues.length === 2 &&
+                rawValues[0] === '-f' &&
+                typeof values[1] === 'string' &&
+                (rawValues[1].startsWith('"') ||
+                  rawValues[1].startsWith("'") ||
+                  !/[<>]/.test(rawValues[1]))
+              );
             }
             if (name === 'tail') {
               return (
@@ -4529,6 +6784,45 @@ describe('local container recipe pins', () => {
               );
               return;
             }
+            if (node.type === 'test_command') {
+              const tStack = [...node.namedChildren];
+              while (tStack.length > 0) {
+                const child = tStack.pop();
+                if (child.type === 'process_substitution') {
+                  continue;
+                }
+                if (child.type === 'command_substitution') {
+                  if (
+                    /\b(?:echo|printf)\b/.test(child.text) ||
+                    /(?:^|\s)(?:-(?:eq|ne|lt|le|gt|ge|v|R))(?=\s|$)/.test(
+                      node.text,
+                    )
+                  ) {
+                    valid = false;
+                    return;
+                  }
+                }
+                if (
+                  child.type === 'raw_string' ||
+                  child.type === 'string' ||
+                  child.type === 'concatenation'
+                ) {
+                  const nonCmdSubText = child.namedChildren.some(
+                    (c) => c.type === 'command_substitution',
+                  )
+                    ? child.namedChildren
+                        .filter((c) => c.type !== 'command_substitution')
+                        .map((c) => c.text)
+                        .join('')
+                    : child.text;
+                  if (astHasSplicedCmdSub(nonCmdSubText, true)) {
+                    valid = false;
+                    return;
+                  }
+                }
+                for (const next of child.namedChildren) tStack.push(next);
+              }
+            }
             if (node.type === 'file_redirect') {
               const raw = foldContinuations(
                 source.slice(node.startIndex, node.endIndex),
@@ -4566,6 +6860,9 @@ describe('local container recipe pins', () => {
                 (values.length === 4 &&
                   values[0] === 'api' &&
                   typeof values[1] === 'string' &&
+                  (rawValues[1].startsWith('"') ||
+                    rawValues[1].startsWith("'") ||
+                    !/[<>]/.test(rawValues[1])) &&
                   values.slice(2).join(' ') === '--paginate --slurp');
               return;
             }
@@ -4650,7 +6947,10 @@ describe('local container recipe pins', () => {
                 flags.join(' ') === '--auth-type --approval-mode --prompt' &&
                 values[1] === 'openai' &&
                 values[3] === 'yolo' &&
-                typeof values[5] === 'string';
+                typeof values[5] === 'string' &&
+                (rawValues[5].startsWith('"') ||
+                  rawValues[5].startsWith("'") ||
+                  !/[<>]/.test(rawValues[5]));
               return;
             }
             if (['bash', 'sh', '/bin/bash', '/bin/sh'].includes(name)) {
@@ -5352,6 +7652,513 @@ describe('local container recipe pins', () => {
       ],
       ['bare quoted prefix cmd subst', "'a b'$(gh pr merge <n>)"],
       ['bare quoted prefix proc subst', "'a b'<(gh pr merge <n>)"],
+      ['bare trap gh merge', "trap 'gh pr merge <n>' EXIT"],
+      ['bare case gh merge', 'case x in x) gh pr merge <n>;; esac'],
+      ['bare coproc gh merge', 'coproc gh pr merge <n>'],
+      ['bare select gh merge', 'select x in 1; do gh pr merge <n>; done'],
+      [
+        'bare select brace body',
+        'set 1; select x; { gh pr merge <n>; break; } <<< 1',
+      ],
+      ['bare for omitted in', 'for x; do gh pr merge <n>; done'],
+      ['bare for brace body', 'set 1; for x; { gh pr merge <n>; }'],
+      [
+        'bare c-style for gh merge',
+        'for ((i=0;i<1;i++)); do gh pr merge <n>; done',
+      ],
+      ['bare trap semi gh merge', 'trap; gh pr merge <n>'],
+      ['bare colon and gh merge', ': && gh pr merge <n>'],
+      ['bare if then paren gh merge', 'if :; then(gh pr merge <n>); fi'],
+      [
+        'bare builtin quoted double-dash trap',
+        'builtin "--" trap \'gh pr merge <n>\' EXIT',
+      ],
+      [
+        'bare command glued redir quoted flag trap',
+        'command</dev/null "-p" trap \'gh pr merge <n>\' EXIT',
+      ],
+      [
+        'bare dq cmdsub case',
+        ': "$(true)"; case "x" in x) gh pr merge <n>;; esac',
+      ],
+      [
+        'bare nested param dq trap',
+        ': "${x:-"a\'$(trap "gh pr merge <n>" EXIT)\'"}"',
+      ],
+      [
+        'text param backtick case',
+        '```text\n: ${a:-`case x in x) gh pr merge <n>;; esac`}\n```',
+      ],
+      [
+        'text comment trailing backslash gh',
+        '```text\n#comment\\\ngh pr merge <n>\n```',
+      ],
+      [
+        'text rparen comment trailing backslash gh',
+        '```text\n((1))#\\\ngh pr merge <n>\n```',
+      ],
+      [
+        'text html comment redirect gh',
+        '```text\n<!-- || gh pr merge <n> # -->\n```',
+      ],
+      [
+        'text multiline function case',
+        '```text\nf() case x\nin\nx) gh pr merge <n>;;\nesac\nf\n```',
+      ],
+      [
+        'bare colon-name function case',
+        'a:b() case x in x) gh pr merge <n>;; esac; a:b',
+      ],
+      ['bare single-quoted backtick gh', ": '`'; gh pr merge <n>; : '`'"],
+      ['bare gh glued redir', 'gh</dev/null pr merge <n>'],
+      [
+        'text escaped nested backtick expansion',
+        '```text\n: ${a:-`echo \\`gh pr merge <n>\\``}\n```',
+      ],
+      [
+        'bare split keyword select',
+        'se\\\nlect x in 1; do gh pr merge <n>; done',
+      ],
+      ['bare quoted eval gh', "'e'val 'gh pr merge <n>'"],
+      [
+        'bare colon source stdin',
+        ": && source /dev/stdin <<< 'gh pr merge <n>'",
+      ],
+      ['bare leading backtick true gh', '`true` gh pr merge <n>'],
+      ['bare test array subscript cmdsub', "[[ -v 'a[$(gh pr merge <n>)]' ]]"],
+      [
+        'text multiline word containing case',
+        '```text\ncase "testcase\nb" in\n"testcase\nb") gh pr merge <n>;;\nesac\n```',
+      ],
+      [
+        'text multiline quote closing after hash',
+        '```text\ncase "a\n# "\nin\n"a\n# ") gh pr merge <n>;;\nesac\n```',
+      ],
+      [
+        'console ps2 multiline case',
+        '```console\ncase x\n> in\n> x) gh pr merge <n>;;\n> esac\n```',
+      ],
+      [
+        'console interleaved prompt single-quote gh',
+        "```console\ngh pr view '\n# # '\ng\\\nh pr merge <n>\n#'\n```",
+      ],
+      [
+        'bash echo redir semi gh placeholder bypass',
+        '```bash\necho </dev/null; gh pr merge 1 >/dev/null\n```',
+      ],
+      [
+        'bare spliced test subscript cmdsub',
+        "[[ 'a[$''(gh pr merge 1)]' -eq 0 ]]",
+      ],
+      ['bare spliced let subscript cmdsub', "let 'a[$''(gh pr merge 1)]'"],
+      ['bare eval copula gh', "eval is '||' 'gh pr merge 1'"],
+      ['bare word-internal hash func gh', 'x#y() { :; }; gh pr merge 1'],
+      [
+        'bare quoted hash continuation case',
+        ": '#'; ca\\\nse x in x) gh pr merge 1;; esac",
+      ],
+      ['bare single-quoted backtick cmdsub gh', ": '`' `gh pr merge 1`"],
+      ['bare multiline backtick span tail gh', '`true\n` gh pr merge 1'],
+      [
+        'bare quoted find exec gh',
+        "'f'ind . -maxdepth 0 -exec gh pr merge 1 \\;",
+      ],
+      ['bare quoted trap no angle', "t'r'ap '\"g\"h pr merge 123' EXIT"],
+      [
+        'bare multiline colon-name func case',
+        'a:b() case x\nin\nx) gh pr merge 123;;\nesac\na:b',
+      ],
+      [
+        'bash echo pipe placeholder bypass',
+        '```bash\necho <a|gh pr merge 1 >/dev/null\n```',
+      ],
+      [
+        'bash test spliced empty param subscript',
+        "```bash\n[[ 'a[$'${QWEN_UNSET_X}'(gh pr merge 1)]' -eq 0 ]]\n```",
+      ],
+      [
+        'bash test concat cmdsub spliced subscript',
+        "```bash\n[[ $(true)'a[$''(gh pr merge 1)]' -eq 0 ]]\n```",
+      ],
+      ['bare spaced single-quoted backtick cmdsub', ": 'a `' `gh pr merge 1`"],
+      ['bare escaped rparen hash gh', ': \\)#; gh pr merge 1'],
+      ['bare gh glued angle redir', ': >a; gh<a>/dev/null pr merge 1'],
+      [
+        'bare multiline single-quote then split case',
+        ": '\n'; ca\\\nse x in x) gh pr merge 1;; esac",
+      ],
+      ['bare redir before backtick true gh', '</dev/null `true` gh pr merge 1'],
+      [
+        'bare quoted find prose-word arg exec',
+        "'f'ind a -exec gh pr merge 1 \\;",
+      ],
+      ['bare indirect var command gh', ':; x=gh; $x pr merge 1'],
+      ['bare git config alias gh', ":; git -c alias.x='!gh pr merge 1' x"],
+      [
+        'bash test echo subscript cmdsub',
+        "```bash\n[[ $(echo 'a[$(gh pr merge 1)]') -eq 0 ]]\n```",
+      ],
+      ['bare colon backtick true gh', ':; `true` gh pr merge 1'],
+      [
+        'bare escaped rparen hash split case',
+        ': \\)#; ca\\\nse x in x) gh pr merge 1;; esac',
+      ],
+      [
+        'bare git ansi-c flag alias gh',
+        ":; git $'-c' alias.x='!gh pr merge 1' x",
+      ],
+      ['bare word-glued single-quoted backtick gh', ": a'`' `gh pr merge 1`"],
+      [
+        'bash echo file redir placeholder bypass',
+        '```bash\necho pwned <package.json>evil.txt\n```',
+      ],
+      [
+        'bash printf file redir slash placeholder bypass',
+        "```bash\nprintf '%s' hello<package.json>/dev/stderr\n```",
+      ],
+      [
+        'bash test nested subscript empty param cmdsub',
+        "```bash\n[[ 'a[b[0]+$'${QWEN_UNSET_X}'(echo 0; gh pr merge 1)]' -eq 0 ]]\n```",
+      ],
+      [
+        'bash test multi-echo spliced subscript',
+        "```bash\n[[ $(echo 'a[0+')$(echo '$')$(echo '(gh pr merge 1)]') -eq 0 ]]\n```",
+      ],
+      ['bare command ansi-c hex gh', ":; command $'g\\x68' pr merge 1"],
+      [
+        'bare git ansi-c hex flag alias gh',
+        ":; git $'-\\x63' alias.x='!gh pr merge 1' x",
+      ],
+      [
+        'bare escaped semi hash split case',
+        ': \\;#; ca\\\nse x in x) gh pr merge 1;; esac',
+      ],
+      ['bare escaped space hash trap', ': \\ #; trap \'"g"h pr merge 1\' EXIT'],
+      [
+        'bare fake contraction single-quoted backtick gh',
+        ": a's`' `gh pr merge 1`",
+      ],
+      [
+        'bare find prose-word first arg exec',
+        ":; find is . -maxdepth 0 -exec 'g'h pr merge 1 \\;",
+      ],
+      [
+        'bare multiline unclosed double-quote gh',
+        'pwd "\n"; gh pr merge 1 # "',
+      ],
+      [
+        'bare multiline backtick span backslash cont gh',
+        '`true\n` \\\ngh pr merge 1',
+      ],
+      [
+        'bare read herestring indirect var gh',
+        'read x <<< "gh pr merge 1"\n$x',
+      ],
+      [
+        'bare ansi-c nul-truncated builtin trap',
+        ":; builtin $'trap\\x00x' '\"g\"h pr merge 1' EXIT",
+      ],
+      [
+        'text multiline ansi-c split case',
+        '```text\n: $\'\n#\'; ca\\\nse x in x) "g"h pr merge 1;; esac\n```',
+      ],
+      ['bare double-contraction odd backtick gh', ": a's `x's `gh pr merge 1`"],
+      [
+        'bare test spliced backtick trap',
+        "[[ 'a[`'\"trap 'gh pr merge 1' EXIT\"'`]' -eq 0 ]]",
+      ],
+      [
+        'bare indented multiline unclosed double-quote gh',
+        '  pwd "a\n"; gh pr merge 1 # "',
+      ],
+      [
+        'bare multiline backtick span double cont gh',
+        '`true\n` g\\\n\\\nh pr merge 1',
+      ],
+      [
+        'bash test cat heredoc subscript cmdsub',
+        "```bash\n[[ $(cat <<'EOF'\na[$(gh pr merge 1)]\nEOF\n) -eq 0 ]]\n```",
+      ],
+      [
+        'bash printf glued path placeholder redir',
+        "```bash\nprintf '%s' hello<path>/tmp/evil.txt\n```",
+      ],
+      [
+        'bare ansi-c ctrl-nul builtin trap',
+        ":; builtin $'trap\\c@x' '\"g\"h pr merge 1' EXIT",
+      ],
+      ['bare ansi-c escaped quote backtick gh', ": $'a\\'`' `gh pr merge 1`"],
+      [
+        'bash test empty-param before bracket subscript',
+        "```bash\n[[ 'a'${QWEN_UNSET_A}'[$'${QWEN_UNSET_B}'(gh pr merge 1)]' -eq 0 ]]\n```",
+      ],
+      [
+        'bare param-expansion hash before split case',
+        ': ${x:- #}; ca\\\nse x in x) "g"h pr merge 1;; esac',
+      ],
+      [
+        'bare builtin let subscript cmdsub',
+        ":; builtin let 'a[$(gh pr merge 1)]'",
+      ],
+      [
+        'bare multiline backtick span semi multiline case',
+        '`true\n`; case x\nin\nx) gh pr merge 1;;\nesac',
+      ],
+      [
+        'bare func body js-chain decoy trap',
+        "f() { : ').a'; trap 'gh pr merge 1' EXIT; }; f",
+      ],
+      [
+        'bare ansi-c escaped-quote hex subscript',
+        "[[ $'a[\\'\\x24(gh pr merge 1)]' -eq 0 ]]",
+      ],
+      [
+        'bare let spliced backtick trap',
+        'let \'a[`\'"trap \\"gh pr merge 1\\" EXIT"\'`]\'',
+      ],
+      [
+        'bare nested dq param hash split case',
+        ': "${x:-" #"}"; ca\\\nse x in x) "g"h pr merge 1;; esac',
+      ],
+      ['bare multiline ansi-c backtick gh', ": $'\na `' `gh pr merge 1`"],
+      [
+        'bare wait semi multiline case',
+        'wait; case x\nin x) gh pr merge 1;;\nesac',
+      ],
+      [
+        'bare multiline backtick span cont multiline case',
+        '`true\n`; ca\\\nse x\nin\nx) gh pr merge 1;;\nesac',
+      ],
+      [
+        'bare prefix trap before inline code tail',
+        "trap 'gh pr merge 1' EXIT; `echo true` && echo ok",
+      ],
+      [
+        'bare prefix case before inline code tail',
+        'case x in x) gh pr merge 1;; esac; `echo true` && echo ok',
+      ],
+      [
+        'bare prefix coproc before inline code tail',
+        'coproc gh pr merge 1; wait; `echo true` && echo ok',
+      ],
+      [
+        'bare prefix select before inline code tail',
+        'select x in 1; do gh pr merge 1; break; done <<< 1; `echo true` && echo ok',
+      ],
+      [
+        'bare prefix c-for before inline code tail',
+        'for ((i=0;i<1;i++)); do gh pr merge 1; done; `echo true` && echo ok',
+      ],
+      [
+        'bare semi negated multiline case',
+        'wait; ! case x\nin\nx) gh pr merge 1;;\nesac',
+      ],
+      [
+        'bare multiline case below punctuation word',
+        'case below.\nin\nbelow.) gh pr merge 1;;\nesac',
+      ],
+      [
+        'bare multiline case with blank line',
+        'case x\n\nin\nx) gh pr merge 1;;\nesac',
+      ],
+      [
+        'bare multiline select with blank line',
+        'select x in 1\n\ndo\n break\ndone <<< 1',
+      ],
+      [
+        'bare multiline c-for with blank line',
+        'for ((i=0;i<1;i++))\n\ndo\n wait\ndone',
+      ],
+      [
+        'bare multiline double-quote blank line trap',
+        ': "\n\n"; trap \'gh pr merge 1\' EXIT # "',
+      ],
+      [
+        'bare multiline double-quote bullet case',
+        ': "\n- **a**\n"; case x in x) gh pr merge 1;; esac # "',
+      ],
+      [
+        'bare multiline single-quote blank line trap',
+        ": '\n\n'; trap \"gh pr merge 1\" EXIT # '",
+      ],
+      [
+        'bare comment lead then double-quote blank trap',
+        '# note\n: "\n\n"; trap \'gh pr merge 1\' EXIT # "',
+      ],
+      [
+        'bare comment lead then multiline case body',
+        '# note\ncase x\n\nin\nx)\n wait\n;;\nesac',
+      ],
+      [
+        'bare select multiline quoted word blank line',
+        'select x in "a\n\nb"\n\ndo\n break\ndone <<< 1',
+      ],
+      [
+        'bare open quote closing into blank-line case',
+        ': "\n"; case x\n\nin\nx)\n wait\n;;\nesac # "',
+      ],
+      [
+        'bare case hash quote comment blank line',
+        'case x # "\n\nin\nx) gh pr merge 1\nesac',
+      ],
+      [
+        'bare case commented fake esac blank line',
+        'case x\n# ; esac\n\nin\nx) gh pr merge 1\nesac',
+      ],
+      [
+        'bare coproc backtick arg with inline tail',
+        'coproc `echo "gh pr merge 1"` && id -u',
+      ],
+      [
+        'bare pipe into backtick cmd with inline tail',
+        'echo ok | `echo "gh pr merge 1"` && id -u',
+      ],
+      [
+        'bare backtick trap with args before inline tail',
+        '`echo trap` "gh pr merge 1" EXIT; `true` && id -u',
+      ],
+      [
+        'bare select in brace body',
+        'select x in 1; { gh pr merge 1; break; } <<< 1',
+      ],
+      [
+        'bare c-for brace body with blank line',
+        'for ((i=0;i<1;i++))\n\n{\n wait\n}',
+      ],
+      [
+        'bare multiline backtick span blank-line case',
+        '`true\n`; case x\n\nin\nx) gh pr merge 1\nesac',
+      ],
+      [
+        'bare case mid-word quote without double-semi',
+        'case a"b"\nin\nab) gh pr merge 1\nesac',
+      ],
+      [
+        'bare contraction quote across blank line trap',
+        ": a's\n\n'; trap \"gh pr merge 1\" EXIT # '",
+      ],
+      [
+        'bare single quote across tilde data fence trap',
+        ": '\n~~~json\n~~~\n'; gh pr merge 1 # '",
+      ],
+      [
+        'bare param length hash before blank-line case',
+        ': ${#x}; case y\n\nin\ny)\n wait\nesac',
+      ],
+      [
+        'bare escaped space hash before blank-line case',
+        ': \\ #; case y\n\nin\ny)\n wait\nesac',
+      ],
+      [
+        'bare param expansion hash before blank-line case',
+        ': ${x:- #}; case y\n\nin\ny)\n wait\nesac',
+      ],
+      [
+        'bare contraction-quoted hash before blank-line case',
+        ": a's # '; case y\n\nin\ny)\n wait\nesac",
+      ],
+      [
+        'bare backtick hash before blank-line case',
+        ': ` #`; case x\n\nin\nx)\n echo HIT\nesac',
+      ],
+      ['bare for brace body without in', 'for x; { wait; }'],
+      [
+        'bare select comment before in do gh',
+        'select x # c\nin 1; do gh pr merge 1; break; done <<< 1',
+      ],
+      ['bare trap prose-word with signal', 'trap file EXIT'],
+      ['bare coproc prose-word command', 'coproc file'],
+      ['bare func prefix blank-line case', 'f() case x\n\nin\nx)\n wait\nesac'],
+      ['bare func brace body across blank line', 'f() {\n\n wait\n}'],
+      [
+        'bare line-continued split case blank line',
+        'ca\\\nse x\n\nin\nx) gh pr merge 1\nesac',
+      ],
+      [
+        'bare select quoted done word before blank-line do',
+        'select x in "a\n; done "\n\ndo\n break\ndone <<< 1',
+      ],
+      [
+        'bare select literal done word before blank-line do',
+        'select x in \\\ndone\n\ndo gh pr merge 1; break; done <<< 1',
+      ],
+      [
+        'bare inline tail commented && before trap',
+        "`true` && id -u # &&\ntrap 'gh pr merge 1' EXIT",
+      ],
+      [
+        'fenced readlink placeholder redirect',
+        '```bash\nreadlink -f <path>/tmp/evil.txt\n```',
+      ],
+      [
+        'fenced gh api placeholder redirect',
+        '```bash\ngh api <owner>/tmp/evil.txt --paginate --slurp\n```',
+      ],
+      [
+        'fenced readlink quoted-prefix placeholder redirect',
+        '```bash\nreadlink -f "."<path>/tmp/evil.txt\n```',
+      ],
+      [
+        'bare param-expansion quoted default inside blank-line case',
+        'case x\n\nin\ny) : ${y:-"a"}\n;;\nx) gh pr merge 1\nesac',
+      ],
+      [
+        'bare open quote closing into quoted case word',
+        ': "\n"; case "y"\n\nin\ny)\n wait\nesac',
+      ],
+      [
+        'bare negated newline multiline case',
+        '!\ncase x\nin\nx) gh pr merge 1\nesac',
+      ],
+      ['bare inline for-in brace body', 'wait; for x in 1; { gh pr merge 1; }'],
+      ['bare trap lowercase signal', 'trap file exit'],
+      ['bare quoted trap lowercase signal', "'trap' file exit"],
+      [
+        'bare backtick bash-c command synthesis',
+        "`bash -c 'echo gh'` pr merge 1",
+      ],
+      [
+        'bare leading double backtick before trap',
+        "`true` `true` trap 'gh pr merge 1' EXIT",
+      ],
+      ['bare leading backtick before glob gh', '`true` ?h pr merge 1'],
+      [
+        'bare comment trailing backslash before blank-line case',
+        '# comment\\\ncase y\n\nin\ny)\n wait\nesac',
+      ],
+      [
+        'bare split esac line continuation in blank-line case',
+        'case x\n\nin\nx)\n wait\nes\\\nac',
+      ],
+      ['bare coproc subshell across blank line', 'coproc (\n\n wait\n)'],
+      [
+        'bare function without parens blank-line case',
+        ':; function f case x\n\nin\nx)\n wait\nesac',
+      ],
+      [
+        'bare negated function blank-line case',
+        '! f() case x\n\nin\nx)\n wait\nesac',
+      ],
+      [
+        'bare select multiline word with literal if before blank-line do',
+        'select x in "a\n" if\n\ndo\n wait\n break\ndone',
+      ],
+      [
+        'bare second multiline backtick span blank-line case',
+        '`a\n`; x\n`b\n`; case y\n\nin\ny) gh pr merge 1\nesac',
+      ],
+      [
+        'bare even-backslash line inside blank-line case',
+        'case x\n\nin\nx) echo \\\\\\\\\nesac',
+      ],
+      [
+        'bare base64 ellipsis hash comment bypass',
+        ': $(base64 …)#; gh pr merge 1',
+      ],
+      [
+        'fenced text comment bang newline case',
+        '```text\n# ; !\ncase x\nin\nx) gh pr merge 1\nesac\n```',
+      ],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
@@ -5359,6 +8166,11 @@ describe('local container recipe pins', () => {
       ).toBe(false);
     }
     for (const hostile of [
+      "`trap 'gh pr merge <n>' EXIT`",
+      '`case x in x) gh pr merge <n>;; esac`',
+      '`coproc gh pr merge <n>`',
+      '`select x in 1; do gh pr merge <n>; done`',
+      '`for ((i=0;i<1;i++)); do gh pr merge <n>; done`',
       '`g? pr merge <n>`',
       '`[g]h pr merge <n>`',
       '`[]g]h pr merge <n>`',
@@ -6594,7 +9406,7 @@ describe('local container recipe pins', () => {
       ),
       'an operation after the multi-line span remains executable',
     ).toBe(false);
-  }, 30_000);
+  }, 90_000);
 
   it('base-pins `.qwen` and states that root AGENTS/QWEN.md still come from the PR', () => {
     expect(skill).toContain('git -C <pr-clone> archive "$BASE_OID" -- .qwen');
