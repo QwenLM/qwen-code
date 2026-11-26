@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolStage
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeExtensionCommandVerifier;
@@ -15,7 +14,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionCommandProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -23,6 +21,7 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.StreamSupport;
 
 /** Reads command permissions from the committed journal, never from caller-supplied approval data. */
 @Component
@@ -57,19 +56,19 @@ public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCo
         ManagedExtensionRecords.requireOperationGrant(grant);
         long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
         check(grant.get("expiresAt").longValue() > now);
-        check(java.util.stream.StreamSupport.stream(grant.get("resourceScope").get("phases").spliterator(), false)
+        check(StreamSupport.stream(grant.get("resourceScope").get("phases").spliterator(), false)
                 .anyMatch(phase -> phase.equals(operation.get("action"))));
         JsonNode recordRef = grant.get("resourceScope").get("recordRef");
-        var projection = jdbc.query("SELECT revision, record_resource_id, operation_hash FROM ma_session_record"
-                        + " WHERE record_kind='DOMAIN' AND session_scope_key=? AND tenant_id=? AND workspace_id=?"
+        var projection = jdbc.query("SELECT revision, record_resource_id, operation_id FROM ma_session_record"
+                        + " WHERE record_kind='DOMAIN' AND tenant_id=? AND workspace_id=?"
                         + " AND session_id=? AND domain='tool_stage' AND record_id=?",
                 (row, index) -> new Projection(row.getLong(1), row.getString(2), row.getString(3)),
-                ManagedSessionStore.sessionScopeKey(tenant, harness), tenant, session.getScope().getWorkspaceId(), harness, stageId);
+                tenant, session.getScope().getWorkspaceId(), harness, stageId);
         check(projection.size() == 1);
         Projection latest = projection.getFirst();
         check(latest.revision() == grant.get("operationRevision").longValue()
                 && latest.resourceId().equals(recordRef.get("resourceId").textValue())
-                && latest.operationHash().equals(DigestUtils.sha256Hex(grant.get("operationId").textValue())));
+                && latest.operationId().equals(grant.get("operationId").textValue()));
         JsonNode stage = records.readRecordResource(tenant, harness, recordRef);
         ManagedToolStageRecords.requireStage(stage);
         check(stageId.equals(stage.get("toolStageId").textValue()) && operation.get("toolName").equals(stage.get("toolName")));
@@ -117,12 +116,12 @@ public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCo
             check("managed-extension-config-bundle".equals(bundle.path("kind").asText())
                     && bundle.path("formatVersion").asInt() == 1 && bundle.get("configRevision").equals(operation.get("revision"))
                     && bundle.path("packages").isArray()
-                    && java.util.stream.StreamSupport.stream(bundle.get("packages").spliterator(), false)
+                    && StreamSupport.stream(bundle.get("packages").spliterator(), false)
                     .anyMatch(entry -> operation.get("extensionId").equals(entry.path("pin").get("extensionId"))));
         }
     }
 
-    private record Projection(long revision, String resourceId, String operationHash) { }
+    private record Projection(long revision, String resourceId, String operationId) { }
 
     private static void check(boolean condition) {
         if (!condition) {

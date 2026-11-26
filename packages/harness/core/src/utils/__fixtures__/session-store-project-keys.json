@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "algorithm": "ascii-replacement-plus-32-bit-djb2-xor-over-utf16-code-units",
+  "maxSanitizedLength": 200,
+  "cases": [
+    {
+      "name": "short_ascii",
+      "input": "/Users/foo/my-project",
+      "expected": "-Users-foo-my-project"
+    },
+    {
+      "name": "exact_limit",
+      "input": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "long_ascii",
+      "input": "/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/tail",
+      "expected": "-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-mhwdza"
+    },
+    {
+      "name": "long_non_bmp",
+      "input": "/workspace/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/😀/tail",
+      "expected": "-workspace-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------rcjj80"
+    },
+    {
+      "name": "long_windows_style",
+      "input": "C:\\workspace\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\nested-folder\\project",
+      "expected": "C--workspace-nested-folder-nested-folder-nested-folder-nested-folder-nested-folder-nested-folder-nested-folder-nested-folder-nested-folder-nested-folder-nested-folder-nested-folder-nested-folder-neste-3ps9pw"
+    }
+  ]
+}

@@ -62,6 +62,7 @@ export class HostedHarnessInstance {
     readonly contract: HostedHarnessContract & { instanceId: string },
     private readonly counters: () => HostedHarnessCounters,
     private readonly onDrain?: () => void,
+    private readonly suspension?: () => object,
   ) {}
 
   get accepting(): boolean {
@@ -152,6 +153,7 @@ export class HostedHarnessInstance {
           heapUsedBytes: memory.heapUsed,
           eventLoopUtilization: performance.eventLoopUtilization().utilization,
         },
+        ...(this.suspension ? { suspension: this.suspension() } : {}),
       });
     });
   }

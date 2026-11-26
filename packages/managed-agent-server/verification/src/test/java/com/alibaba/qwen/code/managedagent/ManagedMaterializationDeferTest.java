@@ -54,7 +54,7 @@ class ManagedMaterializationDeferTest {
         var row = jdbc.queryForMap("SELECT covered_sequence, gmt_modified FROM"
                         + " ma_event_stream WHERE"
                         + " tenant_id = ? AND session_id = ? AND"
-                        + " stream_kind = ? AND stream_id = X''",
+                        + " stream_kind = ? AND stream_id = ''",
                 "tenant", "session", "SESSION");
         assertThat(row.get("gmt_modified")).isEqualTo(123456789L);
         assertThat(row.get("covered_sequence")).isEqualTo(9L);

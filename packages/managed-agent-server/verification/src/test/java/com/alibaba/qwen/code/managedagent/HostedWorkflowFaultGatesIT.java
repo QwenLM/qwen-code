@@ -97,7 +97,7 @@ class HostedWorkflowFaultGatesIT {
                 "fg10-cases", letter);
         deleteRecursively(casesRoot);
         Files.createDirectories(casesRoot);
-        String tenant = "hosted-workflow-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Path cli = cliEntry();
         String node = System.getProperty("node.executable");
         Files.createDirectory(temporary.resolve("runtime"));

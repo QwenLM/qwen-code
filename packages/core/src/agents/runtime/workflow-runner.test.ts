@@ -365,9 +365,17 @@ describe('WorkflowRunner', () => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
     await Promise.all(
-      storageRoots
-        .splice(0)
-        .map((root) => fs.rm(root, { recursive: true, force: true })),
+      storageRoots.splice(0).map((root) =>
+        fs.rm(root, {
+          recursive: true,
+          force: true,
+          // The launch record is appended fire-and-forget, so a run that
+          // settled just before this hook can still be flushing its journal.
+          // The recursive rm then races that write and fails with ENOTEMPTY.
+          maxRetries: 10,
+          retryDelay: 100,
+        }),
+      ),
     );
   });
 
@@ -396,6 +404,29 @@ describe('WorkflowRunner', () => {
       modelText.indexOf('</recovery>'),
     );
     expect(recovery).toContain(hint);
+  });
+
+  // Clients draw the declared phases from the start of a run, so the entry
+  // carries the script's meta before the script reaches any phase.
+  it('registers the script meta before the first phase starts', async () => {
+    const { config, registry } = await storedConfig();
+    let release: ((value: string) => void) | undefined;
+    const handle = await startRun(config, {
+      script:
+        "export const meta = { name: 'plan', description: 'plan', phases: [{ title: 'Review', detail: 'read' }, { title: 'Fix' }] }; phase('Review'); return await agent('read');",
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          release = resolve;
+        }),
+    });
+
+    expect(registry.get(handle.runId)?.meta).toMatchObject({
+      name: 'plan',
+      phases: [{ title: 'Review', detail: 'read' }, { title: 'Fix' }],
+    });
+    await vi.waitFor(() => expect(release).toBeDefined());
+    release?.('done');
+    expect((await handle.completion).ok).toBe(true);
   });
 
   // The Workflow tool shows the user the file a `scriptPath` or `name` call
@@ -1072,9 +1103,10 @@ describe('WorkflowRunner', () => {
 
   it.each([
     [true, true, false, true],
-    [true, false, false, false],
-    // An ACP session (Web Shell, IDE clients) reports non-interactive, and
-    // still resumes in the background: it delivers completion too.
+    // A headless run waits for a background run's completion, and an ACP
+    // session (Web Shell, IDE clients) delivers it too: both report
+    // non-interactive and still resume in the background.
+    [true, false, false, true],
     [true, false, true, true],
     [true, true, true, true],
     [false, true, false, false],
@@ -1191,8 +1223,14 @@ describe('WorkflowRunner', () => {
         }
       } finally {
         finishLoad?.(saved);
-        await start.catch(() => undefined);
+        const handle = await start.catch(() => undefined);
         registry.abortAll();
+        // The background=false arm starts a real run whose checkpoint write
+        // is still in flight after `start` resolves. Wait for the settlement
+        // (it drains the journal and the checkpoint write) before afterEach
+        // removes the storage root, or the recursive rm races the late write
+        // and fails with ENOTEMPTY under load.
+        await handle?.completion.catch(() => undefined);
       }
     },
   );

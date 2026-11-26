@@ -2,7 +2,11 @@
 
 [English](2026-11-15-early-session-artifact-entry.md) | [简体中文](2026-11-15-early-session-artifact-entry.zh-CN.md)
 
-状态：已实现（范围 A）；范围 B 为提案。
+状态：已实现（范围 A 与范围 B）。范围 B 已在
+[会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)中落地。
+头部入口的*目的地*已被取代：现在打开右侧面板的产物列表 tab，而非环境面板的
+产物小节——见[产物入口改开右侧面板](2026-11-18-artifacts-entry-opens-right-panel.zh-CN.md)。
+load 内嵌产物列表与会话列表摘要仍按原设计保留。
 
 ## 问题陈述
 
@@ -48,7 +52,8 @@ replay。只要列表早到，入口就能早显示。
   artifact 字段。
 - 会话摘要已携带派生的每会话数据（`prs`），在
   `packages/cli/src/serve/routes/session.ts` 中从 sidecar 尽力读取回填——这是
-  元数据增强的先例，留作后续（范围 B）。
+  元数据增强的先例，范围 B 后来复用了它
+  （[会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)）。
 - 聊天头部项由 `WebShellChatHeaderItem`
   （`packages/web-shell/client/customization.tsx`）声明，在
   `DEFAULT_CHAT_HEADER_ITEMS` 给默认值、在 `packages/web-shell/client/App.tsx`
@@ -64,11 +69,14 @@ replay。只要列表早到，入口就能早显示。
 
 ## 非目标 / 范围边界
 
-- 仅范围 A：把 artifact 列表内嵌进 `/load`（及 `/resume`）响应。范围 B（会话列表
-  元数据中的产物摘要，用于点击即现）是后续，不在本次实现。
+- 本设计仅覆盖范围 A：把 artifact 列表内嵌进 `/load`（及 `/resume`）响应。范围 B
+  （会话列表元数据中的产物摘要，用于点击即现）已在
+  [会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)中单独实现。
 - 按轮 `TurnOutputs` 芯片不变，仍等 replay。
 - 不改变产物面板的 live 更新路径（`artifactsVersion` 事件）。
-- 不新增 artifact 存储格式或 sidecar。
+- 范围 A 不新增 artifact 存储格式或 sidecar；范围 B 新增派生的
+  `.artifacts.json` 摘要 sidecar，见
+  [会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)。
 
 ## 提议方案
 
@@ -119,7 +127,9 @@ replay。只要列表早到，入口就能早显示。
 ## 关键设计决策与理由
 
 - **内嵌列表而非仅数量。** 列表很小（几 KB）且已在内存恢复；携带它可播种 artifact
-  缓存，使从按钮打开的面板立即有内容，也为范围 B 铺路。
+  缓存，使从按钮打开的面板立即有内容。范围 B 后来复用了这个头部入口，并为
+  加载响应之前的时间窗补上 sidecar 派生计数——范围 A 的缓存在点击时刻按定义
+  为空；列表落地后头部仍优先使用它。
 - **load 路径不做 workspace 状态刷新。** 廉价 accessor 避免 stat/hash，从而不拖慢
   `/load`。状态准确性由随后既有的门控拉取恢复。
 - **播种而非取代门控拉取。** 早到列表是快照；live 正确性仍来自既有刷新路径。这保持
@@ -173,11 +183,14 @@ replay。只要列表早到，入口就能早显示。
 ## 验收标准
 
 - 含产物的冷会话，头部产物入口在对话正文首帧之前可见，数量正确。
-- 点击入口打开环境面板的 artifacts 区，并填充该会话的产物。
+- 点击入口打开产物界面并填充该会话的产物。原为环境面板的 artifacts 区；已被
+  右侧面板的产物列表 tab 取代（见
+  [产物入口改开右侧面板](2026-11-18-artifacts-entry-opens-right-panel.zh-CN.md)）。
 - `/load` 服务端耗时不回退。
 - 旧 daemon（无字段）行为与今天完全一致。
 - build、typecheck、聚焦单测通过。
 
 ## 开放问题
 
-- 范围 B 后续：用于会话列表点击即现的产物摘要 sidecar。
+- 无遗留。范围 B 后续（用于会话列表点击即现的产物摘要 sidecar）已在
+  [会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)中实现。

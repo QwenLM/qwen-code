@@ -26,6 +26,8 @@ export const RU_PART4: Record<
   'sidebar.switchFailed': 'Не удалось переключить сессию',
   'sidebar.currentDeleteDisabled':
     'Текущая сессия выполняется и не может быть удалена',
+  'sidebar.deleteRunningDisabled':
+    'Сессию с фоновыми задачами нельзя удалить: удаление остановит их',
   'sidebar.currentStandaloneDeleteDisabled':
     'Сначала откройте другой чат, чтобы удалить текущую сессию без рабочей области',
   'sidebar.deleteConfirmDescription': (v) =>
@@ -104,11 +106,6 @@ export const RU_PART4: Record<
     'Восстановленная сводка очереди не может вернуть исходные вложения.',
   'queue.admissionUnknown':
     'Доставка не подтверждена. Проверьте сессию перед повторной попыткой.',
-  'queue.restoreUnknown': 'Восстановить локальную копию',
-  'queue.discardUnknown': 'Отбросить локальную копию',
-  'queue.continueEditing': 'Продолжить редактирование',
-  'queue.continueEditingConfirm':
-    'Запрос, возможно, уже выполняется. Продолжайте редактирование, только если принимаете риск повторной отправки.',
   'queue.commandBlocked':
     'Slash-команды нельзя ставить в очередь, пока выполняется ход.',
   'queue.commandGoalBlocked':
@@ -128,7 +125,7 @@ export const RU_PART4: Record<
   'queue.insertCommandDisabled': 'Команды нельзя вставить в середине хода',
   'queue.sendNow': 'Отправить сейчас',
   'queue.sendNowTip':
-    'Немедленно отправить сообщения из очереди, прервав текущий ответ модели, если она ещё не начала вызов инструмента; выполняющиеся инструменты сначала завершатся',
+    'Отправить сообщения из очереди сейчас. Текущий ответ или вызов инструмента может прерваться. Команды оболочки с поддержкой фонового режима продолжат работу в фоне.',
   'queue.sendNowFailed': 'Не удалось немедленно отправить сообщения из очереди',
   'queue.footer':
     'Нажмите ↑, чтобы изменить последнее сообщение в очереди · Esc — очистить очередь',
@@ -361,13 +358,13 @@ export const RU_PART4: Record<
   'slash.category.system': 'Системные команды',
   'language.changed': (v) => `Язык UI изменён на ${v?.language ?? ''}`,
   'language.current': (v) => `Текущий язык UI: ${v?.language ?? ''}`,
-  'language.invalid': 'Недопустимый язык. Доступно: en, zh-CN, ru',
+  'language.invalid': 'Недопустимый язык. Доступно: en, zh-CN, zh-TW, ru',
   'language.options': 'Доступные варианты:',
   'language.set': 'Задать язык UI',
   'language.refreshFailed':
     'Язык UI сохранён, но не удалось применить его полностью.',
   'language.usage':
-    'Использование: /language ui [en|zh-CN|ru] [--project|--global] | output <language>',
+    'Использование: /language ui [en|zh-CN|zh-TW|ru] [--project|--global] | output <language>',
   'localCommand.noSession':
     'Пока нет активной сессии. Отправьте первое сообщение, прежде чем использовать эту команду.',
   'localCommand.diffNoWorkspace':

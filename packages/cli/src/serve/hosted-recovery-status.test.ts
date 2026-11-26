@@ -89,7 +89,7 @@ async function fixture(checkpoint = false) {
   };
   const promptId = await submit();
   if (checkpoint) await createManagedHarnessHandle(managed).ensureRunnable();
-  const terminal = () =>
+  const terminal = (settledPromptId = promptId) =>
     managed.sink.write({
       uuid: randomUUID(),
       parentUuid: null,
@@ -100,7 +100,7 @@ async function fixture(checkpoint = false) {
       cwd: root,
       version: 'test',
       systemPayload: {
-        promptId,
+        promptId: settledPromptId,
         state: 'cancelled',
         stopReason: 'cancelled',
         endedAt: Date.now(),
@@ -142,6 +142,22 @@ it('does not let an old settled input admit work over a newer input', async () =
     inputSettled: true,
     continuationReady: false,
     nextTurnAllowed: false,
+  });
+});
+
+it('evaluates the last accepted input when no prompt is requested', async () => {
+  const f = await fixture();
+  await f.terminal();
+  const second = await f.submit();
+  await f.terminal(second);
+  await createManagedHarnessHandle(f.managed).ensureRunnable();
+  expect(await inspectHostedRecovery(f.session)).toEqual({
+    state: 'ready',
+    reasonCode: null,
+    promptId: second,
+    inputSettled: true,
+    continuationReady: true,
+    nextTurnAllowed: true,
   });
 });
 

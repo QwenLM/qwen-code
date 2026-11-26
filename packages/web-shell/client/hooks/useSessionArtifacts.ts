@@ -41,6 +41,13 @@ export interface SessionArtifactsState {
   error: string | null;
   hydrated: boolean;
   refresh: () => Promise<void>;
+  /**
+   * Click-time artifact count from the session-list summary, valid only
+   * while no authoritative data exists for the current session (no cache
+   * entry, no keyed restored snapshot). Undefined once the load-embedded
+   * snapshot or a gated fetch lands, so a stale hint cannot outlive the load.
+   */
+  artifactCountHint?: number;
 }
 
 export function useSessionArtifacts(): SessionArtifactsState {
@@ -159,6 +166,20 @@ export function useSessionArtifacts(): SessionArtifactsState {
     sessionKey &&
       artifactsBySessionRef.current.get(sessionKey)?.hydratedOwner === owner,
   );
+  // The hint bridges the click→load window only. Any authoritative data for
+  // this session — a cache entry (even an empty list from a successful fetch)
+  // or the keyed restored snapshot — retires it; the session keying keeps the
+  // optimistic switch from leaking the previous session's count.
+  const artifactCountHint =
+    sessionKey &&
+    supportsArtifacts &&
+    connection.artifactCountHintSessionId === sessionId &&
+    connection.artifactCountHint !== undefined &&
+    connection.artifactCountHint > 0 &&
+    !artifactsBySessionRef.current.has(sessionKey) &&
+    restoredSnapshot === undefined
+      ? connection.artifactCountHint
+      : undefined;
   return {
     artifacts: visibleArtifacts,
     artifactById,
@@ -173,5 +194,6 @@ export function useSessionArtifacts(): SessionArtifactsState {
     error: null,
     hydrated,
     refresh,
+    artifactCountHint,
   };
 }

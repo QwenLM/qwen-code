@@ -4,11 +4,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -59,7 +56,7 @@ public class ManagedSchemaSessionStoreTest {
                         ignored -> {},
                         new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        tenant = "tenant-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         session =
                 tx.execute(
                                 status ->
@@ -80,7 +77,6 @@ public class ManagedSchemaSessionStoreTest {
     @Test
     void executionFactsReadNullableUnsignedWorkspaceGenerations() {
         assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
-        byte[] actor = ManagedWorkspaceRegistry.actorKey(tenant, "actor");
         jdbc.update(
                 "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state) VALUES"
@@ -89,14 +85,14 @@ public class ManagedSchemaSessionStoreTest {
         jdbc.update(
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES"
                         + " (?, 'workspace', ?, 'OPERATOR')",
-                tenant, actor);
+                tenant, "actor");
         jdbc.update(
                 "UPDATE ma_session SET workspace_id = 'workspace', workspace_generation = 7,"
                         + " workspace_storage_id = 'storage', cwd_relative = '',"
                         + " context_config_ref = 'context', context_revision = 1,"
                         + " workspace_config_ref = 'config', workspace_policy_ref = 'policy',"
                         + " creator_actor_key = ? WHERE tenant_id = ? AND session_id = ?",
-                actor, tenant, session);
+                "actor", tenant, session);
         assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).containsExactly(session);
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
         assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
@@ -106,14 +102,14 @@ public class ManagedSchemaSessionStoreTest {
     void publicAndPrivateSessionScopesRemainDistinctAndByteExact() {
         assertThat(store.findSession(tenant, session)).isPresent();
         assertThat(store.findSession(tenant.toUpperCase(), session)).isEmpty();
-        assertThat(store.findSession(tenant + " ", session)).isEmpty();
+        assertThat(store.findSession(tenant.substring(0, 35) + " ", session)).isEmpty();
         assertThat(
                         jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?",
                                 Integer.class,
                                 tenant))
                 .isEqualTo(2);
-        for (String scope : List.of(tenant, tenant + "other")) {
+        for (String scope : List.of(tenant, tenant.substring(0, 31) + "other")) {
             jdbc.update(
                     "INSERT INTO ma_session (tenant_id, session_id, session_kind, gmt_create,"
                             + " gmt_modified) VALUES (?, ?, 'CONTROL', 1, 1)",
@@ -177,10 +173,10 @@ public class ManagedSchemaSessionStoreTest {
                 .isEqualTo(derived);
         assertThat(
                         jdbc.queryForObject(
-                                "SELECT body_resource_key FROM ma_message WHERE tenant_id = ?",
+                                "SELECT body_resource_ref FROM ma_message WHERE tenant_id = ?",
                                 String.class,
                                 tenant))
-                .hasSize(64);
+                .startsWith("v1|");
         assertThat(
                         jdbc.queryForObject(
                                 "SELECT parts_json FROM ma_message WHERE tenant_id = ?",
@@ -198,9 +194,9 @@ public class ManagedSchemaSessionStoreTest {
         assertThat(
                         jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'MESSAGE'"
-                                        + " AND session_scope_key = ?",
+                                        + " AND tenant_id = ? AND session_id = ?",
                                 Integer.class,
-                                ManagedSessionStore.sessionScopeKey(tenant, session)))
+                                tenant, session))
                 .isEqualTo(1);
     }
 
@@ -262,8 +258,8 @@ public class ManagedSchemaSessionStoreTest {
             projectionCollector().runOnce();
             lease.check();
             assertThat(resourceState(original)).isEqualTo("REFERENCED");
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?",
-                    Integer.class, original)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                    Integer.class, tenant, session, bodyResourceId(original))).isZero();
         }
         makeProjectionCandidatesDue();
         assertThat(projectionCollector().runOnce()).isTrue();
@@ -278,17 +274,17 @@ public class ManagedSchemaSessionStoreTest {
         event("big", "a".repeat(70_000));
         materialize();
         String original = messageBody("big");
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                scope, scope, original, tenant, session);
+        String ownerRef = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session);
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref, owner_revision, resource_id, tenant_id, session_id, gmt_create) VALUES ('JOURNAL', ?, 1, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")", ownerRef, bodyResourceId(original), tenant, session);
         event("big", "b");
         clock.advance(Duration.ofSeconds(6));
         materialize();
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("REFERENCED");
         tx.executeWithoutResult(status -> {
-            ManagedProjectionResourceCollector.release(jdbc, scope, "JOURNAL", scope);
-            jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND owner_key = ?", scope);
+            ManagedProjectionResourceCollector.release(jdbc, tenant, session, "JOURNAL", ownerRef);
+            jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND owner_ref = ?", ownerRef);
             jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
         });
         projectionCollector().runOnce();
@@ -297,7 +293,7 @@ public class ManagedSchemaSessionStoreTest {
         makeProjectionCandidatesDue();
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("COLLECTED");
-        assertThat(resourceState(ManagedSessionStore.resourceKey(scope, privateBody.resourceId()))).isEqualTo("PUBLISHED");
+        assertThat(resourceState(com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.resourceRef(tenant, session, privateBody.resourceId()))).isEqualTo("PUBLISHED");
     }
 
     private void alignProjectionClock() {
@@ -310,12 +306,18 @@ public class ManagedSchemaSessionStoreTest {
     }
 
     private String messageBody(String item) {
-        return jdbc.queryForObject("SELECT body_resource_key FROM ma_message WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
+        return jdbc.queryForObject("SELECT body_resource_ref FROM ma_message WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
                 String.class, tenant, session, item);
     }
 
-    private String resourceState(String resource) {
-        return jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_key = ?", String.class, resource);
+    private static String bodyResourceId(String resourceRef) {
+        return com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef.decode(
+                resourceRef.getBytes(java.nio.charset.StandardCharsets.US_ASCII)).get(2);
+    }
+
+    private String resourceState(String resourceRef) {
+        return jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                String.class, tenant, session, bodyResourceId(resourceRef));
     }
 
     private void makeProjectionCandidatesDue() {
@@ -403,7 +405,7 @@ public class ManagedSchemaSessionStoreTest {
         // Synchronous settlement writes no delivery row, so the tenant placement guard was the
         // only lock a first rename held across Sessions. Holding one rename's transaction open
         // must not hold back another Session's first rename, in the same tenant or another.
-        String otherTenant = sameTenant ? tenant : tenant + "-other";
+        String otherTenant = sameTenant ? tenant : UUID.randomUUID().toString();
         String other = tx.execute(status -> store.insertSessionCommand(
                 otherTenant, "actor", "CREATE_SESSION", "create-other", "other-digest",
                 "qwen-code", null, "other", List.of(), null)).sessionId();
@@ -464,12 +466,18 @@ public class ManagedSchemaSessionStoreTest {
     void messageProjectionRefusesAValidDigestBodyWithAnotherSessionScope() {
         event("big", "a".repeat(70_000));
         materialize();
+        String bodyRef =
+                jdbc.queryForObject(
+                        "SELECT body_resource_ref FROM ma_message WHERE tenant_id = ? AND item_id = ?",
+                        String.class,
+                        tenant,
+                        "big");
         jdbc.update(
-                "UPDATE ma_resource SET session_scope_key = ? WHERE resource_key = (SELECT"
-                    + " body_resource_key FROM ma_message WHERE tenant_id = ? AND item_id = ?)",
-                ManagedSessionStore.sessionScopeKey(tenant, "another-session"),
+                "UPDATE ma_resource SET session_id = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                "another-session",
                 tenant,
-                "big");
+                session,
+                bodyResourceId(bodyRef));
         assertThatThrownBy(() -> messages())
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Message body resource is unavailable");
@@ -488,8 +496,8 @@ public class ManagedSchemaSessionStoreTest {
         String body = messageBody("big");
         event("big", "b");
         materialize();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?",
-                Integer.class, body)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                Integer.class, tenant, session, bodyResourceId(body))).isZero();
         assertThat(page(first.nextCursor(), 0, 1).items()).extracting(StoreModels.ItemRecord::itemId)
                 .containsExactly("last");
         assertThat(messages().items().getFirst().content().stream().map(StoreModels.ItemPartRecord::text)
@@ -577,11 +585,7 @@ public class ManagedSchemaSessionStoreTest {
     void harnessOnlyHeadHasNoPrivateJournalReadAuthority() {
         String token = "a".repeat(32);
         jdbc.update(
-                "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                RuntimeAdmissionFences.harnessDrainKey(
-                        tenant),
-                RuntimeAdmissionFences.harnessDrainKey(
-                        session),
+                "INSERT INTO ma_session_head (tenant_id, harness_session_id, session_id, head_kind, gmt_create, gmt_modified) VALUES (?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 tenant,
                 session,
                 session);
@@ -645,7 +649,7 @@ public class ManagedSchemaSessionStoreTest {
         var frozen = page(null, 0, 1);
         String oldBody =
                 jdbc.queryForObject(
-                        "SELECT body_resource_key FROM ma_message WHERE"
+                        "SELECT body_resource_ref FROM ma_message WHERE"
                                 + " tenant_id = ? AND session_id = ? AND item_id = ?",
                         String.class,
                         tenant,
@@ -669,13 +673,15 @@ public class ManagedSchemaSessionStoreTest {
                 .doesNotContain("withdrawn");
         assertThat(
                         jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?"
+                                "SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
                                         + " AND owner_kind = 'MESSAGE'",
                                 Integer.class,
-                                oldBody))
+                                tenant,
+                                session,
+                                bodyResourceId(oldBody)))
                 .isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?",
-                Integer.class, oldBody)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                Integer.class, tenant, session, bodyResourceId(oldBody))).isZero();
         assertThatThrownBy(() -> page(frozen.nextCursor(), 0, 10))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("message_projection_changed"));
@@ -847,25 +853,25 @@ public class ManagedSchemaSessionStoreTest {
                     && sql.startsWith("INSERT INTO ma_resource ")
                     && sql.contains("'managed-message-parts'")) {
                 injected = true;
+                long body = super.queryForObject(
+                        "SELECT MAX(id) FROM ma_resource WHERE kind = X'6d616e616765642d6d6573736167652d7061727473'", Long.class);
                 switch (corruption) {
                     case "scope" ->
                             super.update(
-                                    "UPDATE ma_resource SET session_scope_key = ?"
-                                            + " WHERE resource_key = ?",
-                                    "0".repeat(64),
-                                    arguments[0]);
+                                    "UPDATE ma_resource SET session_id = ? WHERE id = ?",
+                                    "another-session",
+                                    body);
                     case "bytes" ->
                             super.update(
-                                    "UPDATE ma_resource SET inline_bytes = ? WHERE"
-                                            + " resource_key = ?",
+                                    "UPDATE ma_resource SET inline_bytes = ? WHERE id = ?",
                                     new byte[] {1},
-                                    arguments[0]);
+                                    body);
                     case "deletion" ->
                             super.update(
-                                    "UPDATE ma_resource SET deletion_operation_key"
-                                            + " = ? WHERE resource_key = ?",
-                                    "0".repeat(64),
-                                    arguments[0]);
+                                    "UPDATE ma_resource SET deletion_operation_ref = ? WHERE id = ?",
+                                    com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs
+                                            .tenantOperationRef("SESSION_RESOURCE_GC", "witness", "gc"),
+                                    body);
                 }
                 return super.update(sql, arguments);
             }

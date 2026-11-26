@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type RefObject,
 } from 'react';
 import {
   LightbulbIcon,
@@ -15,6 +16,8 @@ import {
 } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { SelectionCopyMenu } from './SelectionCopyMenu';
+import { ThinkingBody, useThinkingBodyRewrite } from './ThinkingBody';
+import { getShadowAwareActiveElement, isFocusUnclaimed } from '../../utils/dom';
 import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
@@ -55,7 +58,7 @@ import styles from './AssistantMessage.module.css';
 import { HookStatistics } from './HookStatistics';
 import type { HookStatisticsTurn } from './hook-statistics-context';
 
-interface AssistantMessageProps {
+export interface AssistantMessageProps {
   hookTurn?: HookStatisticsTurn;
   content: string;
   author?: DaemonMessageAuthor;
@@ -77,6 +80,8 @@ interface AssistantMessageProps {
   customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
   turnSources?: readonly WebShellSource[];
   onSourceOpen?: (source: WebShellSource) => void;
+  displayContent?: string;
+  copySource?: RefObject<HTMLDivElement | null>;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -97,6 +102,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   customFooterInfo,
   turnSources,
   onSourceOpen,
+  displayContent = content,
+  copySource,
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
@@ -143,7 +150,7 @@ export const AssistantMessage = memo(function AssistantMessage({
     (format: 'text' | 'markdown') => {
       let value = content;
       if (format === 'text') {
-        const body = contentRef.current;
+        const body = (copySource ?? contentRef).current;
         if (!body) return;
         const range = body.ownerDocument.createRange();
         range.selectNodeContents(body);
@@ -154,7 +161,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         .then(format === 'text' ? flashCopied : flashMarkdownCopied)
         .catch(warnClipboardWriteFailure);
     },
-    [content, flashCopied, flashMarkdownCopied],
+    [content, copySource, flashCopied, flashMarkdownCopied],
   );
   // Clicking the lit icon clears the mark; clicking the other one switches it.
   const handleFeedback = useCallback(
@@ -243,11 +250,11 @@ export const AssistantMessage = memo(function AssistantMessage({
         >
           <SelectionCopyMenu
             className={styles.contentBody}
-            content={content}
+            content={displayContent}
             enabled={renderMode === 'interactive' && !isStreaming}
           >
             <Markdown
-              content={content}
+              content={displayContent}
               source="assistant"
               isStreaming={isStreaming}
             />
@@ -430,6 +437,8 @@ interface ThinkingMessageProps {
   content: string;
   author?: DaemonMessageAuthor;
   isStreaming?: boolean;
+  /** A subagent's thought, drawn outside its tool card. */
+  fromSubagent?: boolean;
   timestamp?: number;
   isLocateFlashing?: boolean;
   generateContent?: SessionContentGenerator;
@@ -477,6 +486,7 @@ interface ThinkingSummaryHeaderProps {
    */
   translateContent?: string;
   showTranslateButton: boolean;
+  hideTranslateWhenClosed: boolean;
   generateContent?: SessionContentGenerator;
   onToggle: () => void;
 }
@@ -494,10 +504,12 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
   authorName,
   translateContent,
   showTranslateButton,
+  hideTranslateWhenClosed,
   generateContent,
   onToggle,
 }: ThinkingSummaryHeaderProps) {
   const { t } = useI18n();
+  const summaryRef = useRef<HTMLButtonElement>(null);
   return (
     <div
       className={`${styles.thinkingHeader}${
@@ -513,6 +525,7 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
       }}
     >
       <button
+        ref={summaryRef}
         type="button"
         disabled={documentMode}
         tabIndex={documentMode ? -1 : undefined}
@@ -549,6 +562,8 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
             content={translateContent}
             generateContent={generateContent}
             className={styles.translateButton}
+            hideWhenClosed={hideTranslateWhenClosed}
+            fallbackFocusRef={summaryRef}
           />
         )}
       <span
@@ -567,6 +582,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   content,
   author,
   isStreaming,
+  fromSubagent,
   timestamp,
   isLocateFlashing = false,
   generateContent,
@@ -576,6 +592,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const documentMode = transcriptRenderMode === 'document';
   const documentExpanded = useTranscriptDocumentExpanded();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const [rewritten, onRewrittenChange] = useThinkingBodyRewrite(content);
   const showThinking = documentMode ? documentExpanded : thinkingExpanded;
   const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
@@ -646,10 +663,11 @@ export const ThinkingMessage = memo(function ThinkingMessage({
               translateContent={thinkingActive ? undefined : content}
               showTranslateButton={
                 !documentMode &&
-                language === 'zh-CN' &&
+                (language === 'zh-CN' || language === 'zh-TW') &&
                 !thinkingActive &&
                 generateContent !== undefined
               }
+              hideTranslateWhenClosed={!fromSubagent && rewritten}
               generateContent={generateContent}
               onToggle={handleToggle}
             />
@@ -657,10 +675,11 @@ export const ThinkingMessage = memo(function ThinkingMessage({
               <div className={styles.thinkingExpandedClip}>
                 <div className={styles.thinkingExpandedInner}>
                   <div className={styles.thinkingExpandedWrap}>
-                    <Markdown
+                    <ThinkingBody
                       content={content}
-                      source="thinking"
                       isStreaming={isStreaming}
+                      fromSubagent={fromSubagent}
+                      onRewrittenChange={onRewrittenChange}
                     />
                   </div>
                 </div>
@@ -678,6 +697,8 @@ interface ThinkingTranslateButtonProps {
   generateContent?: SessionContentGenerator;
   className?: string;
   mode?: 'translate' | 'explain-shell';
+  hideWhenClosed?: boolean;
+  fallbackFocusRef?: RefObject<HTMLButtonElement | null>;
 }
 
 export function ThinkingTranslateButton({
@@ -685,6 +706,8 @@ export function ThinkingTranslateButton({
   generateContent,
   className,
   mode = 'translate',
+  hideWhenClosed,
+  fallbackFocusRef,
 }: ThinkingTranslateButtonProps) {
   const { language, t } = useI18n();
   const [translationOpen, setTranslationOpen] = useState(false);
@@ -693,6 +716,22 @@ export function ThinkingTranslateButton({
   const [translationThinking, setTranslationThinking] = useState(false);
   const [translationError, setTranslationError] = useState(false);
   const translationAbortRef = useRef<AbortController | undefined>(undefined);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const setTriggerRef = useCallback(
+    (node: HTMLButtonElement | null) => {
+      const previous = triggerRef.current;
+      // A rewrite can remove the focused trigger after its popover has closed.
+      if (
+        !node &&
+        previous &&
+        getShadowAwareActiveElement(previous) === previous
+      ) {
+        fallbackFocusRef?.current?.focus({ preventScroll: true });
+      }
+      triggerRef.current = node;
+    },
+    [fallbackFocusRef],
+  );
 
   useEffect(
     () => () => {
@@ -724,7 +763,11 @@ export function ThinkingTranslateButton({
       let completed = false;
       try {
         const targetLanguage =
-          language === 'zh-CN' ? 'Simplified Chinese' : 'English';
+          language === 'zh-TW'
+            ? 'Traditional Chinese'
+            : language === 'zh-CN'
+              ? 'Simplified Chinese'
+              : 'English';
         const prompt =
           mode === 'explain-shell'
             ? `Explain the following shell command in ${targetLanguage}. Describe what it does and call out any notable risks. Be concise and output only the explanation.\n\n\`\`\`shell\n${content}\n\`\`\``
@@ -784,10 +827,18 @@ export function ThinkingTranslateButton({
     setTranslationOpen(false);
   }, []);
 
+  const hidden = hideWhenClosed && !translationOpen;
+  useEffect(() => {
+    if (hidden && translationAbortRef.current) handleCancelOrCloseTranslation();
+  }, [hidden, handleCancelOrCloseTranslation]);
+
+  if (hidden) return null;
+
   return (
     <Popover open={translationOpen} onOpenChange={handleTranslationOpenChange}>
       <PopoverTrigger asChild>
         <button
+          ref={setTriggerRef}
           type="button"
           className={className}
           title={t(
@@ -810,6 +861,17 @@ export function ThinkingTranslateButton({
       </PopoverTrigger>
       <PopoverContent
         align="start"
+        onCloseAutoFocus={(event) => {
+          const fallback = fallbackFocusRef?.current;
+          if (
+            hideWhenClosed &&
+            fallback &&
+            isFocusUnclaimed(fallback.getRootNode())
+          ) {
+            event.preventDefault();
+            fallback.focus({ preventScroll: true });
+          }
+        }}
         // A width utility lets tailwind-merge drop PopoverContent's default w-72;
         // a CSS-module width ties on specificity and loses when utilities load later.
         className={`${styles.translationPopover} w-[min(480px,calc(100vw-32px))]`}

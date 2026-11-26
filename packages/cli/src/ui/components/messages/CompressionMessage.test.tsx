@@ -253,6 +253,21 @@ describe('<CompressionMessage />', () => {
       );
     });
 
+    it('shows the input-too-large failure message (#9455)', () => {
+      const props = createCompressionProps({
+        isPending: false,
+        originalTokenCount: 100000,
+        newTokenCount: 100000,
+        compressionStatus: CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+      const output = lastFrame();
+
+      expect(output).toContain(
+        'Could not compress chat history because it is too large for the context window.',
+      );
+    });
+
     it('shows empty summary failure message', () => {
       const props = createCompressionProps({
         isPending: false,

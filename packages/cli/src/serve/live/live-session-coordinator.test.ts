@@ -1280,7 +1280,7 @@ describe('LiveSessionCoordinator', () => {
       {
         type: 'tool_update',
         toolName: 'create_sub_session',
-        rawOutput: '[🧵 worker-1](qwen-session://worker-1) started',
+        rawOutput: '[worker-1](qwen-session://worker-1) started',
       },
       { type: 'message', text: '任务已创建。' },
     ]);

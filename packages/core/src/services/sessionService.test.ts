@@ -58,6 +58,10 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  deleteSessionGoalSidecar,
+  moveSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import { SessionWriterLostError } from './session-writer-lease.js';
 import {
   content,
@@ -78,12 +82,28 @@ vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
+// The storage-boundary fence is exercised against disk in
+// session-archive-write-fence.test.ts, not this mocked filesystem.
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  advanceSessionArchiveGeneration: vi.fn(),
+}));
 // The archive-transition move runs real filesystem locks this mocked-fs suite
 // cannot host; its semantics (rename, split-pair merge, lock coverage) are
 // pinned in session-pr-service.test.ts.
 vi.mock('./session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./session-pr-service.js')>()),
   moveSessionPrSidecar: vi.fn().mockResolvedValue(undefined),
+}));
+// Same rationale: the goal move does real fs/promises I/O this mocked-fs
+// suite cannot host; its semantics are pinned in session-goal-sidecar.test.ts.
+vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-goal-sidecar.js')>()),
+  moveSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+  deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
 }));
 
 type Line = Record<string, unknown>;
@@ -1621,7 +1641,9 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(8);
+      // One fence check per cleanup step: main's goal + artifact-summary
+      // sidecars (10) plus this PR's branch sidecar removal (1) → 11.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(11);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
@@ -1741,6 +1763,10 @@ describe('SessionService', () => {
       [
         'should remove pr sidecars in both states when removing a session',
         '.pr.json',
+      ],
+      [
+        'should remove goal sidecars in both states when removing a session',
+        '.goal.json',
       ],
       [
         'should remove prompt ledger sidecars in both archive states',
@@ -1871,13 +1897,19 @@ describe('SessionService', () => {
       existsFor(
         `${sessionIdA}.worktree.json`,
         `${sessionIdA}.pr.json`,
+        `${sessionIdA}.goal.json`,
         `${sessionIdA}.ledger.jsonl`,
       );
       const removeOrganizationSpy = spyOrganizationRemove().mockResolvedValue();
 
       await sessionService.cleanupRemovedSessionState(sessionIdA);
 
-      for (const sidecar of ['.worktree.json', '.pr.json', '.ledger.jsonl']) {
+      for (const sidecar of [
+        '.worktree.json',
+        '.pr.json',
+        '.goal.json',
+        '.ledger.jsonl',
+      ]) {
         expect(unlinkSyncSpy).toHaveBeenCalledWith(
           expect.stringContaining(`${sessionIdA}${sidecar}`),
         );
@@ -2017,6 +2049,78 @@ describe('SessionService', () => {
         ),
       ).toBe(true);
     },
+    movesGoalSidecar: async (kind: MoveKind) => {
+      const m = seeded(kind);
+
+      const result = await m.run();
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(moveSessionGoalSidecar).toHaveBeenCalledWith(
+        m.from('.goal.json'),
+        m.to('.goal.json'),
+      );
+    },
+    warnsOnGoalSidecarFailure: async (kind: MoveKind) => {
+      const m = seeded(kind);
+      vi.mocked(moveSessionGoalSidecar).mockRejectedValueOnce(
+        new Error('goal move failed'),
+      );
+      const { service, warnings } = withWarnings();
+
+      const result = await m.run(undefined, service);
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(
+        warnings.some((message) =>
+          message.includes('failed to move goal sidecar'),
+        ),
+      ).toBe(true);
+    },
+    reconcilesGoalSidecarOnConflict: async (kind: MoveKind) => {
+      const toArchive = kind === 'archive';
+      const keptGoal = toArchive
+        ? `/chats/archive/${sessionIdA}.goal.json`
+        : `/chats/${sessionIdA}.goal.json`;
+      const droppedGoal = toArchive
+        ? `/chats/${sessionIdA}.goal.json`
+        : `/chats/archive/${sessionIdA}.goal.json`;
+
+      // Kept projection present: the dropped lineage is deleted, never
+      // renamed over the survivor (which would show the deleted transcript's
+      // Goal).
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsFor(keptGoal);
+
+      const keptResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(keptResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+      );
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
+
+      // Kept projection absent: the dropped projection is discarded too, NOT
+      // adopted. Absence is a value here (the survivor's goal may be cleared),
+      // so adopting the dropped lineage would resurrect a goal the kept
+      // transcript no longer records — and an archived survivor never
+      // re-projects to repair it.
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsSyncSpy.mockReturnValue(false);
+
+      const absentResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(absentResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+      );
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
+    },
     movesKnownLocation: async (kind: MoveKind) => {
       const m = seeded(kind);
 
@@ -2073,7 +2177,9 @@ describe('SessionService', () => {
         errors: [],
       });
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(4);
+      // The goal sidecar move added one fence check to the conflict path (5);
+      // this PR's separate branch-sidecar reconcile try adds one more → 6.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(6);
     },
     warnsOnWorktreeSidecarFailure: async (kind: MoveKind) => {
       const m = seeded(kind, '.worktree.json');
@@ -2219,6 +2325,15 @@ describe('SessionService', () => {
 
     it('should warn but still archive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('archive'));
+
+    it('should move the goal sidecar into the archive directory', () =>
+      mirrored.movesGoalSidecar('archive'));
+
+    it('should warn but still archive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('archive'));
+
+    it('should let the kept goal sidecar win on an archive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('archive'));
 
     const bothPrSidecarsExist = () => {
       archive.seed();
@@ -2422,6 +2537,15 @@ describe('SessionService', () => {
 
     it('should warn but still unarchive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('unarchive'));
+
+    it('should move the goal sidecar back to the active directory', () =>
+      mirrored.movesGoalSidecar('unarchive'));
+
+    it('should warn but still unarchive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('unarchive'));
+
+    it('should let the kept goal sidecar win on an unarchive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('unarchive'));
 
     it('should unarchive known archived sessions', () =>
       mirrored.movesKnownLocation('unarchive'));
