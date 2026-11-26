@@ -518,6 +518,44 @@ describe('local provider extension example', () => {
   const FAIL_FAST_CASE_TIMEOUT_MS = POOL_SCALED ? 300_000 : 30_000;
 
   it.skipIf(!npmCli)(
+    'enforces the fail-fast spawn bound (the timeout must reach execFileAsync)',
+    async () => {
+      // Regression pin for a two-character bug: `}),` was once `},`, which moved
+      // `timeout:` out of the execFileAsync options and into the stringEnvironment()
+      // argument list. stringEnvironment(env) takes exactly ONE parameter, so the
+      // bound silently did nothing and the fail-fast spawn had no timeout at all --
+      // the opposite of what FAIL_FAST_SPAWN_TIMEOUT_MS exists to guarantee.
+      //
+      // The child below never exits, so a lost bound shows up as a hang. The race
+      // converts that into a clean assertion failure instead of a stuck suite,
+      // because a hanging test is exactly how this defect shipped unnoticed.
+      const neverExits = 'setInterval(() => {}, 1_000)';
+      const outcome = await Promise.race([
+        execFileAsync(process.execPath, ['-e', neverExits], {
+          cwd: exampleRoot,
+          env: stringEnvironment({
+            ...process.env,
+            http_proxy: undefined,
+            https_proxy: undefined,
+            all_proxy: undefined,
+            no_proxy: undefined,
+          }),
+          timeout: FAIL_FAST_SPAWN_TIMEOUT_MS,
+        }).then(
+          () => 'resolved',
+          (error: unknown) => error,
+        ),
+        new Promise((resolve) =>
+          setTimeout(() => resolve('NOT_ENFORCED'), FAIL_FAST_SPAWN_TIMEOUT_MS * 4),
+        ),
+      ]);
+      expect(outcome).not.toBe('NOT_ENFORCED');
+      expect(outcome).toMatchObject({ killed: true });
+    },
+    FAIL_FAST_CASE_TIMEOUT_MS,
+  );
+
+  it.skipIf(!npmCli)(
     'packs an executable that fails fast without provider configuration',
     async () => {
       await buildExample();
