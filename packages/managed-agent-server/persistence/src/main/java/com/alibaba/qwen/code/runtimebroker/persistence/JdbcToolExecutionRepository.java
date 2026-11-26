@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.fromJson;
 import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.insertExecution;
@@ -874,13 +875,13 @@ public final class JdbcToolExecutionRepository
         return JdbcRepositorySupport.read(dataSource, connection ->
                 hasActiveByRuntimeSession(connection, bindingId,
                         runtimeGeneration, runtimeSessionId,
-                        java.util.Set.of()));
+                        Set.of()));
     }
 
     @Override
     public boolean hasActiveByRuntimeSession(String bindingId,
             long runtimeGeneration, String runtimeSessionId,
-            java.util.Set<String> excludingExecutionCallIds) {
+            Set<String> excludingExecutionCallIds) {
         return JdbcRepositorySupport.read(dataSource, connection ->
                 hasActiveByRuntimeSession(connection, bindingId,
                         runtimeGeneration, runtimeSessionId,
@@ -917,12 +918,12 @@ public final class JdbcToolExecutionRepository
             String bindingId, long runtimeGeneration, String runtimeSessionId)
             throws SQLException {
         return hasActiveByRuntimeSession(connection, bindingId,
-                runtimeGeneration, runtimeSessionId, java.util.Set.of());
+                runtimeGeneration, runtimeSessionId, Set.of());
     }
 
     static boolean hasActiveByRuntimeSession(Connection connection,
             String bindingId, long runtimeGeneration, String runtimeSessionId,
-            java.util.Set<String> excludingExecutionCallIds)
+            Set<String> excludingExecutionCallIds)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT binding_id, runtime_session_id, execution_call_id FROM"

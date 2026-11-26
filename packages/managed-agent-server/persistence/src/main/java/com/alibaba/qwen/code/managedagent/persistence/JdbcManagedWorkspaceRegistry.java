@@ -1,14 +1,24 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.managedagent.settings.SshSettings;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcExternalWorkspaceOwnership;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -18,25 +28,32 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.BooleanSupplier;
+import java.util.stream.IntStream;
 
 @Repository
 public class JdbcManagedWorkspaceRegistry
         implements ManagedWorkspaceRegistry {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
-    private com.alibaba.qwen.code.managedagent.settings.SshSettings ssh;
-    private java.util.function.BooleanSupplier externalFilesActivation = () -> false;
+    private SshSettings ssh;
+    private BooleanSupplier externalFilesActivation = () -> false;
     private ExternalStorageRegistrationStore externalRegistrations;
-    private com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties;
+    private ManagedAgentSettings properties;
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    void configureExternalFiles(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings,
+    @Autowired(required = false)
+    void configureExternalFiles(ManagedAgentSettings settings,
             ExternalStorageRegistrationStore registrations,
-            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector> harnesses,
-            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer> warmers) {
+            ObjectProvider<HarnessConnector> harnesses,
+            ObjectProvider<RuntimeWarmer> warmers) {
         this.properties = settings;
         this.externalRegistrations = registrations;
         this.externalFilesActivation = () -> {
@@ -45,7 +62,7 @@ public class JdbcManagedWorkspaceRegistry
             }
             var harness = harnesses.getIfAvailable();
             var warmer = warmers.getIfAvailable();
-            String profile = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES;
+            String profile = WorkspaceToolProfiles.EXTERNAL_FILES;
             return harness != null && warmer != null && harness.supportsLifecycle(profile)
                     && warmer.supportsWorkspaceClose(profile);
         };
@@ -56,7 +73,7 @@ public class JdbcManagedWorkspaceRegistry
     }
 
     public boolean isExternal(ContextBinding binding) {
-        return com.alibaba.qwen.code.runtimebroker.persistence.JdbcExternalWorkspaceOwnership.externalStorage(jdbc, binding);
+        return JdbcExternalWorkspaceOwnership.externalStorage(jdbc, binding);
     }
 
     public boolean externalFilesAllowed(ContextBinding binding) {
@@ -66,13 +83,13 @@ public class JdbcManagedWorkspaceRegistry
     private boolean externalBindingCurrent(ContextBinding binding) {
         if (binding == null || properties == null || externalRegistrations == null
                 || !".".equals(binding.getCwdRelative())
-                || !com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(binding.getContextConfigRef())) {
+                || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(binding.getContextConfigRef())) {
             return false;
         }
         var rows = jdbc.query("SELECT config_ref, policy_ref FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?"
                 + " AND workspace_generation = ? AND storage_id = ? AND workspace_kind = 'ROOT' AND state = 'ACTIVE'",
-                (row, index) -> com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF.equals(row.getString("config_ref"))
-                        && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF.equals(row.getString("policy_ref")),
+                (row, index) -> WorkspaceExecutionProfile.CONFIG_REF.equals(row.getString("config_ref"))
+                        && WorkspaceExecutionProfile.POLICY_REF.equals(row.getString("policy_ref")),
                 binding.getTenantId(), binding.getWorkspaceId(), binding.getWorkspaceGeneration(), binding.getStorageId());
         if (rows.size() != 1 || !rows.getFirst()) {
             return false;
@@ -82,8 +99,8 @@ public class JdbcManagedWorkspaceRegistry
                 && properties.getRuntimeBroker().getExternalProviderId().equals(registered.providerId());
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    void configureSsh(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties) {
+    @Autowired(required = false)
+    void configureSsh(ManagedAgentSettings properties) {
         this.ssh = properties.getRuntimeBroker().getSsh();
     }
 
@@ -136,7 +153,7 @@ public class JdbcManagedWorkspaceRegistry
         } catch (IllegalArgumentException error) {
             return WorkspaceAccess.NONE;
         }
-        java.util.Set<String> visited = new java.util.HashSet<>();
+        Set<String> visited = new HashSet<>();
         while (true) {
             if (!visited.add(workspaceId)) {
                 return WorkspaceAccess.NONE;
@@ -211,16 +228,16 @@ public class JdbcManagedWorkspaceRegistry
      * creator-submit gate from this one read instead of a per-row
      * bindingCurrent.
      */
-    public java.util.Map<String, ReadableGrant> findReadable(
+    public Map<String, ReadableGrant> findReadable(
             String tenantId, String actorId,
-            java.util.Collection<String> workspaceIds) {
+            Collection<String> workspaceIds) {
         if (workspaceIds.isEmpty()) {
-            return java.util.Map.of();
+            return Map.of();
         }
         ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
-        String plain = String.join(", ", java.util.Collections.nCopies(
+        String plain = String.join(", ", Collections.nCopies(
                 workspaceIds.size(), "?"));
-        List<Object> arguments = new java.util.ArrayList<>(
+        List<Object> arguments = new ArrayList<>(
                 workspaceIds.size() + 2);
         arguments.add(tenantId);
         arguments.addAll(workspaceIds);
@@ -264,13 +281,13 @@ public class JdbcManagedWorkspaceRegistry
         if (keys.isEmpty()) {
             return items;
         }
-        List<Object> arguments = new java.util.ArrayList<>();
+        List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
         arguments.addAll(keys);
         Map<String, String> defaults = new HashMap<>();
         jdbc.query("SELECT receipt_key, result_json FROM ma_request_receipt WHERE tenant_id = ?"
                         + " AND namespace = 'WORKSPACE_CREATE' AND state = 'COMPLETED' AND receipt_key IN ("
-                        + String.join(",", java.util.Collections.nCopies(keys.size(), "?")) + ")",
+                        + String.join(",", Collections.nCopies(keys.size(), "?")) + ")",
                 row -> {
                     var details = WorkspaceCreationRoots.details(row.getString("result_json"), row.getString("receipt_key"));
                     defaults.put(details.workspaceId(), details.cwdRelative() == null ? "." : details.cwdRelative());
@@ -283,7 +300,7 @@ public class JdbcManagedWorkspaceRegistry
     private List<WorkspaceSummary> summarize(String tenantId,
             List<WorkspaceRow> rows) {
         boolean[] external = externalEligibility(tenantId, rows);
-        return java.util.stream.IntStream.range(0, rows.size()).mapToObj(index -> {
+        return IntStream.range(0, rows.size()).mapToObj(index -> {
             WorkspaceRow row = rows.get(index);
             return new WorkspaceSummary(row.workspaceId(),
                     row.displayName(), row.state(),
@@ -313,10 +330,10 @@ public class JdbcManagedWorkspaceRegistry
         return withDefaults(tenantId, List.of(summary)).getFirst();
     }
 
-    private java.util.Map<String, ReadableGrant> readableGrants(String tenantId,
+    private Map<String, ReadableGrant> readableGrants(String tenantId,
             List<WorkspaceRow> rows) {
         boolean[] external = externalEligibility(tenantId, rows);
-        java.util.Map<String, ReadableGrant> result = new java.util.HashMap<>(rows.size() * 2);
+        Map<String, ReadableGrant> result = new HashMap<>(rows.size() * 2);
         for (int index = 0; index < rows.size(); index++) {
             WorkspaceRow row = rows.get(index);
             result.put(row.workspaceId(), new ReadableGrant(row.workspaceId(),
@@ -335,13 +352,13 @@ public class JdbcManagedWorkspaceRegistry
      */
     private boolean[] externalEligibility(String tenantId, List<WorkspaceRow> rows) {
         boolean[] result = new boolean[rows.size()];
-        var external = java.util.stream.IntStream.range(0, rows.size())
+        var external = IntStream.range(0, rows.size())
                 .filter(index -> managedExternal(rows.get(index).storageKind()))
                 .boxed().toList();
         if (external.isEmpty() || !externalFilesAvailable()) {
             return result;
         }
-        java.util.Map<String, ExternalStorageRegistrationStore.RegistrationState> states =
+        Map<String, ExternalStorageRegistrationStore.RegistrationState> states =
                 externalRegistrations.states(tenantId, external.stream()
                         .map(index -> rows.get(index).storageId()).toList());
         for (int index : external) {
@@ -349,7 +366,7 @@ public class JdbcManagedWorkspaceRegistry
             var state = states.get(row.storageId());
             result[index] = "ACTIVE".equals(row.state())
                     && "ROOT".equals(row.workspaceKind())
-                    && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF
+                    && WorkspaceExecutionProfile.CONTEXT_CONFIG_REF
                             .equals(descriptorRef(row.configRef(), row.policyRef()))
                     && state != null && state.current()
                     && row.workspaceId().equals(state.tenantWorkspaceId())
@@ -508,7 +525,7 @@ public class JdbcManagedWorkspaceRegistry
                 try {
                     String nodeId = JSON.readTree(remote.getFirst()).path("nodeId").asText();
                     allowed = ssh.getNodes().stream().anyMatch(node -> node.nodeId().equals(nodeId) && node.admits(tenantId, actorId));
-                } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+                } catch (JsonProcessingException error) {
                     throw new ManagedAgentException(409, "workspace_unavailable", "Workspace registration is invalid.");
                 }
             }

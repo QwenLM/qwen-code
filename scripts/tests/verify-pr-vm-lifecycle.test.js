@@ -28,6 +28,7 @@ import {
   writeExecutionRecordAndBoundary,
   writeOwnershipRecord,
 } from '../../scripts/verify-pr-vm-lifecycle.mjs';
+import { reapedPid } from './reaped-pid.js';
 
 const LIFECYCLE_SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-vm-lifecycle.mjs', import.meta.url),
@@ -113,8 +114,8 @@ function makeFirecrackerMeta(overrides = {}) {
     launchPolicyDigest: SHA('2'),
     kernelDigest: SHA('3'),
     rootfsDigest: SHA('4'),
-    supervisorPid: 999901,
-    workerPid: 999902,
+    supervisorPid: reapedPid(),
+    workerPid: reapedPid(),
     workerExe: '/firecracker-v1.18.0-aarch64',
     workerExitEvidence: 'absent',
     ...overrides,
@@ -429,7 +430,7 @@ describe('verify-pr-vm-lifecycle reap', () => {
         backend: 'firecracker',
         vmmUid: targetUid,
         expectedExeTokens: [exeName],
-        worker: { pid: 999999, expectedExeTokens: [exeName] },
+        worker: { pid: reapedPid(), expectedExeTokens: [exeName] },
       });
       const rep1 = reapOwnership(own1, { approvedRoots: [root], graceMs: 100 });
       expect(rep1.errors).toEqual([]);
@@ -464,7 +465,7 @@ describe('verify-pr-vm-lifecycle reap', () => {
         backend: 'firecracker',
         vmmUid: targetUid,
         expectedExeTokens: [exeName],
-        worker: { pid: 999998, expectedExeTokens: [exeName] },
+        worker: { pid: reapedPid(), expectedExeTokens: [exeName] },
       });
       const rep3 = reapOwnership(own3, { approvedRoots: [root], graceMs: 100 });
       expect(rep3.status).toBe('failed');
@@ -482,7 +483,7 @@ describe('verify-pr-vm-lifecycle reap', () => {
         backend: 'firecracker',
         vmmUid: targetUid,
         expectedExeTokens: [exeName],
-        worker: { pid: 999997, expectedExeTokens: [exeName] },
+        worker: { pid: reapedPid(), expectedExeTokens: [exeName] },
       });
       const rep4 = reapOwnership(own4, { approvedRoots: [root], graceMs: 100 });
       expect(rep4.status).toBe('reaped');
@@ -564,7 +565,7 @@ describe('verify-pr-vm-lifecycle finalize -> verify-pr-check end-to-end', () => 
         ],
         { encoding: 'utf8' },
       );
-      expect(fin.status).toBe(0);
+      expect(fin.status, fin.stderr || fin.stdout).toBe(0);
       const finOut = JSON.parse(fin.stdout);
       expect(finOut.ok).toBe(true);
       expect(finOut.boundary.mode).toBe(expectedMode);
@@ -587,7 +588,7 @@ describe('verify-pr-vm-lifecycle finalize -> verify-pr-check end-to-end', () => 
         ],
         { encoding: 'utf8' },
       );
-      expect(chk.status).toBe(0);
+      expect(chk.status, chk.stderr).toBe(0);
       expect(chk.stdout).toMatch(/ok: verdict=merge-ready/);
     }
   });

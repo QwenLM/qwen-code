@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
 import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
@@ -22,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 
@@ -36,6 +38,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1070,7 +1073,7 @@ public final class JdbcRuntimeBindingRepository
                                             + " recovery.operation_kind ="
                                             + " 'WORKSPACE_OPERATOR_RECOVERY' AND"
                                             + " recovery.target_id = "
-                                            + com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate
+                                            + ManagedSchemaJdbcTemplate
                                                     .binaryIdentity("ma_runtime_binding.binding_id", h2)
                                             + " AND recovery.target_revision ="
                                             + " ma_runtime_binding.runtime_generation AND"
@@ -1720,7 +1723,7 @@ public final class JdbcRuntimeBindingRepository
                         + "OR CAST(workspace_id AS BINARY(2048)) = CAST(? AS BINARY(2048))) LIMIT 1")) {
             JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 2, scope.getTenantId());
-            JdbcRepositorySupport.setIdentity(statement, 3, com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS);
+            JdbcRepositorySupport.setIdentity(statement, 3, RuntimeProviderKinds.LOCAL_PROCESS);
             JdbcRepositorySupport.setIdentity(statement, 4, request.getStorageId());
             JdbcRepositorySupport.setIdentity(statement, 5, scope.getCanonicalCwd());
             JdbcRepositorySupport.setIdentity(statement, 6, scope.getWorkspaceId());
@@ -1736,7 +1739,7 @@ public final class JdbcRuntimeBindingRepository
     private void insertBinding(Connection connection,
             RuntimeBindingRecord record) throws SQLException {
         String sql = "INSERT INTO ma_runtime_binding (" + BINDING_COLUMNS
-                + ") VALUES (" + String.join(", ", java.util.Collections.nCopies(37, "?")) + ")";
+                + ") VALUES (" + String.join(", ", Collections.nCopies(37, "?")) + ")";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             setBinding(statement, record);
             statement.executeUpdate();

@@ -4,12 +4,15 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -22,15 +25,15 @@ import java.util.Optional;
 public class CancelEvidence implements AcceptanceEvidence {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
-    private com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs;
+    private JdbcJournalPacks packs;
 
     public CancelEvidence(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.json = json;
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    void setJournalPacks(com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs) { this.packs = packs; }
+    @Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     @Override
     public String kind() {
@@ -43,7 +46,7 @@ public class CancelEvidence implements AcceptanceEvidence {
             return Optional.empty();
         }
         boolean h2 = Boolean.TRUE.equals(jdbc.execute(
-                (org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection ->
+                (ConnectionCallback<Boolean>) connection ->
                         "H2".equals(connection.getMetaData().getDatabaseProductName())));
         // The Turn id is VARCHAR while the operation target it mirrors stays
         // VARBINARY. The target is converted to text so the lookup keeps the

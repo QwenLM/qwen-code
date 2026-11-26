@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -119,9 +120,9 @@ public final class ManagedExtensionAgentLaunch {
         }
         String capability = capabilities.getFirst();
         String mode = owner.path("executionMode").asText();
-        if (!(com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST.equals(capability)
+        if (!(ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST.equals(capability)
                         && "linux-cgroup".equals(mode)
-                || com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST.equals(capability)
+                || ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST.equals(capability)
                         && "developer-process-group".equals(mode))) {
             throw refused();
         }

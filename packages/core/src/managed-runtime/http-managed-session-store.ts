@@ -199,6 +199,8 @@ export interface HttpManagedSessionStores {
   supportsBackgroundActionParking(): boolean;
   /** Whether a wake-started Turn's approval wait may park. */
   supportsWakeActionParking(): boolean;
+  /** Whether a clean wake-sealed suspension may release its placement. */
+  supportsSuspensionPlacementRelease(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -448,6 +450,8 @@ export function createHttpManagedSessionStores(
     supportsBackgroundActionParking: () =>
       client.supportsBackgroundActionParking(),
     supportsWakeActionParking: () => client.supportsWakeActionParking(),
+    supportsSuspensionPlacementRelease: () =>
+      client.supportsSuspensionPlacementRelease(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -1003,6 +1007,7 @@ interface WriterGrant {
   readonly actionParking: boolean;
   readonly backgroundActionParking: boolean;
   readonly wakeActionParking: boolean;
+  readonly suspensionPlacementRelease: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1088,6 +1093,11 @@ class ManagedSessionStoreHttpClient {
   supportsWakeActionParking(): boolean {
     return this.grant?.wakeActionParking === true;
   }
+
+  supportsSuspensionPlacementRelease(): boolean {
+    return this.grant?.suspensionPlacementRelease === true;
+  }
+
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
   private readonly writerId: string;
@@ -2921,7 +2931,12 @@ class ManagedSessionStoreHttpClient {
     )
       throw corrupt('ownership release does not match the writer.');
     if (!this.ownershipRelease) {
-      const grant = this.requireGrant();
+      const grant = this.grant;
+      if (grant === undefined || this.locallyStopped) {
+        throw new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is not active.',
+        );
+      }
       if (
         request.commitProof.lastCommitSequence !== grant.committedSequence ||
         request.commitProof.committedPrefixHash !== grant.lastCommitDigest
@@ -3166,6 +3181,7 @@ class ManagedSessionStoreHttpClient {
         actionParking: renewed.actionParking,
         backgroundActionParking: renewed.backgroundActionParking,
         wakeActionParking: renewed.wakeActionParking,
+        suspensionPlacementRelease: renewed.suspensionPlacementRelease,
       };
       this.scheduleRenewal();
     })();
@@ -3813,6 +3829,7 @@ function parseWriterGrant(value: unknown): WriterGrant {
     actionParking: record['actionParking'] === true,
     backgroundActionParking: record['backgroundActionParking'] === true,
     wakeActionParking: record['wakeActionParking'] === true,
+    suspensionPlacementRelease: record['suspensionPlacementRelease'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),

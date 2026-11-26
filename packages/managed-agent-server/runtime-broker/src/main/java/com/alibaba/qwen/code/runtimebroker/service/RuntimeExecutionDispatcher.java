@@ -650,7 +650,7 @@ final class RuntimeExecutionDispatcher {
                 // Shared workspace bindings carry no session isolation key; ownership
                 // there rests on belongsTo + bindingId + generation + scope above, the
                 // same shape acquireRecovery uses (#16023 R1-25).
-                || !com.alibaba.qwen.code.runtimebroker.HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                || !HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                         && !execution.getHarnessSessionId().equals(binding.getRequest().getIsolationKey())) {
             return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
         }

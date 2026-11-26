@@ -554,7 +554,6 @@ export default {
   'Screen Reader Mode': 'Mode de lector de pantalla',
   'Max Session Turns': 'Torns màxims de sessió',
   'Skip Next Speaker Check': 'Omet la comprovació del proper parlant',
-  'Skip Loop Detection': 'Omet la detecció de bucles',
   'Skip Startup Context': "Omet el context d'inici",
   'Enable OpenAI Logging': "Activa el registre d'OpenAI",
   'OpenAI Logging Directory': "Directori de registres d'OpenAI",
@@ -842,6 +841,8 @@ export default {
   'Manage Qwen Code hooks': 'Gestiona els hooks de Qwen Code',
   'List all configured hooks': 'Llista tots els hooks configurats',
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Un hook ha aturat el torn: {{reason}}',
   'Loading hooks...': 'Carregant hooks...',
   'Error loading hooks:': 'Error en carregar els hooks:',
   'Press Escape to close': 'Premeu Escape per tancar',

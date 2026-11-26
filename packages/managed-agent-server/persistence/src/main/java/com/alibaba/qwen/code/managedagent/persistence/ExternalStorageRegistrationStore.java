@@ -18,9 +18,16 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 @Component
 public final class ExternalStorageRegistrationStore implements ExternalStorageRegistry {
@@ -249,12 +256,12 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
      * this read only proves that the durable registration is present,
      * unambiguous, and self-consistent.
      */
-    java.util.Map<String, RegistrationState> states(String tenant,
-            java.util.Collection<String> tenantWorkspaceIds) {
+    Map<String, RegistrationState> states(String tenant,
+            Collection<String> tenantWorkspaceIds) {
         if (tenantWorkspaceIds.isEmpty()) {
-            return java.util.Map.of();
+            return Map.of();
         }
-        List<Object> arguments = new java.util.ArrayList<>(tenantWorkspaceIds.size() + 1);
+        List<Object> arguments = new ArrayList<>(tenantWorkspaceIds.size() + 1);
         arguments.add(tenant);
         tenantWorkspaceIds.forEach(id -> arguments.add(id));
         List<StoredRegistration> rows;
@@ -265,7 +272,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                             + " FROM ma_storage s JOIN ma_storage_owner o"
                             + " ON o.physical_id = s.physical_id"
                             + " WHERE s.tenant_id = ? AND s.storage_id IN ("
-                            + String.join(",", java.util.Collections.nCopies(
+                            + String.join(",", Collections.nCopies(
                                     tenantWorkspaceIds.size(), "?"))
                             + ") AND s.storage_kind IN ('EXTERNAL', 'EPHEMERAL')"
                             + " AND s.registration_state = 'REGISTERED'",
@@ -281,8 +288,8 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         } catch (RuntimeException failure) {
             throw unavailable();
         }
-        java.util.Map<String, RegistrationState> result = new java.util.HashMap<>();
-        java.util.Set<String> invalid = new java.util.HashSet<>();
+        Map<String, RegistrationState> result = new HashMap<>();
+        Set<String> invalid = new HashSet<>();
         for (StoredRegistration row : rows) {
             String storage = row.storageId();
             if (storage == null) {
@@ -332,7 +339,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
 
     private static String text(Object value) {
         return value instanceof byte[] bytes
-                ? new String(bytes, java.nio.charset.StandardCharsets.UTF_8) : (String) value;
+                ? new String(bytes, StandardCharsets.UTF_8) : (String) value;
     }
 
     private static RuntimeBrokerException registrationMismatch() {

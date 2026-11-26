@@ -101,7 +101,9 @@ export function useContextUsageControls({
     };
     try {
       onBeforeCompress();
-      const result = await actions.sendPrompt('/compress');
+      const result = await actions.sendPrompt('/compress', {
+        suppressInputHistory: true,
+      });
       if (!isCurrent()) return;
       if (!owner.isCurrent()) {
         settle({ kind: 'interrupted' });
