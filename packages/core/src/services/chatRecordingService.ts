@@ -760,6 +760,8 @@ export interface AgentRetryRecordPayload {
 export interface ChatCompressionRecordPayload {
   /** Compression metrics/status returned by the compression service */
   info: ChatCompressionInfo;
+  /** Image cost used to size this snapshot. Older checkpoints omitted it. */
+  imageTokenEstimate?: number;
   /** Estimated count for the persisted snapshot when its contents differ from live history. */
   resumePromptTokenCount?: number;
   /**

@@ -950,6 +950,7 @@ export class LlmClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     const restoreRuntime = this.config.getSessionRestoreRuntime?.();
+    let resumeTokenCounts = restoreRuntime?.resumeTokenCounts;
     if (restoreRuntime) {
       this.armTelemetrySwapUndo(sessionId);
       uiTelemetryService.resetSession(sessionId);
@@ -965,18 +966,14 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
-      if (restoreRuntime.resumeTokenCounts) {
-        const counts = restoreRuntime.resumeTokenCounts;
-        uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
-        chat.seedResumeTokenCounts(
-          counts.promptTokenCount,
-          counts.outputTokenCount,
-          counts.isEstimated,
+      if (resumeTokenCounts) {
+        uiTelemetryService.setLastPromptTokenCount(
+          resumeTokenCounts.promptTokenCount,
         );
       }
     } else if (resumedSessionData) {
       this.armTelemetrySwapUndo(sessionId);
-      const resumeTokenCounts = replayUiTelemetryFromConversation(
+      resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),
       );
@@ -995,13 +992,6 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restored.completedToolCallIds);
-      if (resumeTokenCounts) {
-        chat.seedResumeTokenCounts(
-          resumeTokenCounts.promptTokenCount,
-          resumeTokenCounts.outputTokenCount,
-          resumeTokenCounts.isEstimated,
-        );
-      }
 
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
@@ -1013,6 +1003,14 @@ export class LlmClient {
       }
     }
 
+    if (resumeTokenCounts) {
+      this.getChat().seedResumeTokenCounts(
+        resumeTokenCounts.promptTokenCount,
+        resumeTokenCounts.outputTokenCount,
+        resumeTokenCounts.isEstimated,
+        resumeTokenCounts.isProviderAdjusted,
+      );
+    }
     signal?.throwIfAborted();
     // Bind Wall Time only after a successful initialization; replay failure
     // restores the captured clock rather than keeping the incoming session's.

@@ -1295,6 +1295,7 @@ describe('LlmChat', async () => {
         );
 
         expect(prepared).toHaveBeenCalledOnce();
+        expect(prepared.mock.calls[0][1]).toBe(showNote);
         expect(JSON.stringify(prepared.mock.calls[0][0])).not.toContain(
           '<<HERE>>',
         );
@@ -1405,6 +1406,7 @@ describe('LlmChat', async () => {
             promptTokenCount: 5000 - noteLength / 4,
             outputTokenCount,
             isEstimated: noteLength > 0,
+            ...(noteLength && { isProviderAdjusted: true }),
           });
         },
       );
@@ -16900,6 +16902,7 @@ describe('LlmChat', async () => {
 
         expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
         const payload = recordChatCompression.mock.calls[0][0];
+        expect(payload.imageTokenEstimate).toBe(imageTokenEstimate);
         expect(JSON.stringify(payload.compressedHistory)).not.toContain(
           'r'.repeat(80),
         );
@@ -18430,6 +18433,39 @@ describe('LlmChat', async () => {
       expect(target.getLastPromptTokenCount()).toBe(6001);
       expect(target.getLastOutputTokenCount()).toBe(0);
       expect(promptMirror()).toHaveBeenCalledWith(6001);
+    });
+
+    it('preserves adjusted provider overhead for manual compression and output clamping after returning to the restored route', async () => {
+      mockGeneratorConfig({ model: 'test-model', contextWindowSize: 32_000 });
+      const target = newChat({
+        history: [userText('question'), modelText('done')],
+      });
+      target.seedResumeTokenCounts(16_000, 5, true, true);
+      switchRoute('other-model@route');
+      expect(target.getLastPromptTokenCount()).toBe(0);
+      switchRoute('gemini-pro@test0001');
+      expect(target.isLastPromptTokenCountEstimated()).toBe(true);
+
+      const compress = mockCompress(noop(16_000));
+      const info = await target.tryCompress('manual-after-resume', true);
+      expect(info.originalTokenCountIsEstimated).toBe(true);
+      expect(compress.mock.calls[0][1]).toMatchObject({
+        originalTokenCount: 16_000,
+        unaccountedOutputTokens: 5,
+      });
+
+      mockStream(textStream('next reply'));
+      await drain(
+        await target.sendMessageStream(
+          'test-model',
+          {
+            message: 'next',
+            config: { maxOutputTokens: 4096 },
+          },
+          'next-after-resume',
+        ),
+      );
+      expect(requestAt(0).config?.maxOutputTokens).toBe(4096);
     });
 
     it('invalidates seeded resume counts after a later route change', () => {

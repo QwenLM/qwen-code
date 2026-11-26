@@ -244,12 +244,13 @@ describe('message group deletion', () => {
   });
 
   it.each([
-    { override: 120, reported: 20, expected: 94 },
-    { override: undefined, reported: 120, expected: 94 },
-    { override: undefined, reported: 2, expected: 2 },
+    { savedImageCost: 25, override: 120, reported: 20, expected: 94 },
+    { savedImageCost: 25, override: undefined, reported: 120, expected: 94 },
+    { savedImageCost: 25, override: undefined, reported: 2, expected: 2 },
+    { savedImageCost: undefined, override: 120, reported: 20, expected: 119 },
   ])(
-    'prunes a checkpoint and restores its adjusted count (override $override, reported $reported)',
-    ({ override, reported, expected }) => {
+    'prunes at the saved image cost $savedImageCost (override $override, reported $reported)',
+    ({ savedImageCost, override, reported, expected }) => {
       const summary: Content = {
         role: 'user',
         parts: [{ text: 'unchanged summary remembers u1' }],
@@ -270,6 +271,9 @@ describe('message group deletion', () => {
             newTokenCount: reported,
             compressionStatus: CompressionStatus.COMPRESSED,
           },
+          ...(savedImageCost === undefined
+            ? {}
+            : { imageTokenEstimate: savedImageCost }),
           ...(override === undefined
             ? {}
             : { resumePromptTokenCount: override }),
@@ -297,13 +301,14 @@ describe('message group deletion', () => {
         records,
         ['u1', 'u3'],
         anchor,
-        25,
+        5000,
       );
       const payload = kept.find(
         (item) => item.uuid === 'compressed',
       )!.systemPayload;
       expect(payload).toEqual({
         ...compression.systemPayload,
+        imageTokenEstimate: savedImageCost ?? 0,
         resumePromptTokenCount: expected,
         compressedHistory: [summary, ack, u2.message, a2.message],
         promptIds: [null, null, 'api-u2', null],

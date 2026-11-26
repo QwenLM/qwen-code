@@ -854,6 +854,8 @@ export const userContentPushSnapshotKey = Symbol(
   'LlmChat.userContentPushSnapshot',
 );
 
+type PromptTokenCountSource = 'provider' | 'adjusted-provider' | 'estimate';
+
 interface TryCompressOptions {
   /**
    * Explicit original token count for this attempt, with its provenance.
@@ -2601,7 +2603,7 @@ export class LlmChat {
   private memorySnapshotsVisible: boolean | undefined;
   private unaccountedMemorySnapshots = new WeakSet<Part>();
   private lastPromptTokenCount = 0;
-  private lastPromptTokenCountIsEstimated = false;
+  private lastPromptTokenCountSource: PromptTokenCountSource = 'provider';
   /**
    * This chat's last successful usage report, kept only to size the next
    * send's tool results (#2566): the route it came from, its prompt+output
@@ -2664,7 +2666,7 @@ export class LlmChat {
     string,
     {
       promptTokenCount: number;
-      promptTokenCountIsEstimated: boolean;
+      promptTokenCountSource: PromptTokenCountSource;
       outputTokenCount: number;
       cachedContentTokenCount: number;
     }
@@ -2752,20 +2754,16 @@ export class LlmChat {
   private persistedPromptTokenDelta(
     persisted: Content[],
     dispatched: Content[],
-    pending?: Content,
+    imageTokenEstimate?: number,
   ): number {
-    if (persisted === dispatched && !pending) return 0;
-    const imageTokens = resolveSlimmingConfig(
-      this.config.getChatCompression?.(),
-    ).imageTokenEstimate;
-    const historyDelta =
-      persisted === dispatched
-        ? 0
-        : estimateContentTokens(persisted, imageTokens) -
-          estimateContentTokens(dispatched, imageTokens);
+    if (persisted === dispatched) return 0;
+    const imageTokens =
+      imageTokenEstimate ??
+      resolveSlimmingConfig(this.config.getChatCompression?.())
+        .imageTokenEstimate;
     return (
-      historyDelta +
-      (pending ? estimateContentTokens([pending], imageTokens) : 0)
+      estimateContentTokens(persisted, imageTokens) -
+      estimateContentTokens(dispatched, imageTokens)
     );
   }
 
@@ -2780,8 +2778,12 @@ export class LlmChat {
     const compressedHistory = pending
       ? [...persisted, pending]
       : [...persisted];
+    const { imageTokenEstimate } = resolveSlimmingConfig(
+      this.config.getChatCompression?.(),
+    );
     const payload: ChatCompressionRecordPayload = {
       info,
+      imageTokenEstimate,
       compressedHistory,
       summaryPrefixLength,
       completedToolCallIds: this.completedToolCallIds,
@@ -2791,7 +2793,12 @@ export class LlmChat {
       payload.resumePromptTokenCount = Math.max(
         0,
         info.newTokenCount +
-          this.persistedPromptTokenDelta(persisted, dispatched, pending),
+          this.persistedPromptTokenDelta(
+            persisted,
+            dispatched,
+            imageTokenEstimate,
+          ) +
+          (pending ? estimateContentTokens([pending], imageTokenEstimate) : 0),
       );
     }
     return payload;
@@ -2998,7 +3005,7 @@ export class LlmChat {
       // replaced by the next usage report, whereas discarding the anchor falls
       // back to a walk that under-counts by the full system/tool overhead.
       this.lastPromptTokenCount = 0;
-      this.lastPromptTokenCountIsEstimated = false;
+      this.lastPromptTokenCountSource = 'provider';
       this.lastOutputTokenCount = 0;
       this.lastCachedContentTokenCount = 0;
       this.tokenCountsByRouteKey.clear();
@@ -3029,8 +3036,7 @@ export class LlmChat {
         `[token-counts] restoring retained counts for route ${targetRouteKey}`,
       );
       this.lastPromptTokenCount = retained.promptTokenCount;
-      this.lastPromptTokenCountIsEstimated =
-        retained.promptTokenCountIsEstimated;
+      this.lastPromptTokenCountSource = retained.promptTokenCountSource;
       this.lastOutputTokenCount = retained.outputTokenCount;
       this.lastCachedContentTokenCount = retained.cachedContentTokenCount;
       this.tokenCountsRouteKey = targetRouteKey;
@@ -3052,7 +3058,7 @@ export class LlmChat {
     // target) — a colliding key would make the next keyed read for the
     // retained route early-return the zero slot without consulting the map.
     this.lastPromptTokenCount = 0;
-    this.lastPromptTokenCountIsEstimated = false;
+    this.lastPromptTokenCountSource = 'provider';
     this.lastOutputTokenCount = 0;
     this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = targetRouteKey;
@@ -3085,7 +3091,7 @@ export class LlmChat {
     }
     this.tokenCountsByRouteKey.set(this.tokenCountsRouteKey, {
       promptTokenCount: this.lastPromptTokenCount,
-      promptTokenCountIsEstimated: this.lastPromptTokenCountIsEstimated,
+      promptTokenCountSource: this.lastPromptTokenCountSource,
       outputTokenCount: this.lastOutputTokenCount,
       cachedContentTokenCount: this.lastCachedContentTokenCount,
     });
@@ -3243,7 +3249,7 @@ export class LlmChat {
     this.unaccountedMemorySnapshots = new WeakSet<Part>();
     this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
     this.lastPromptTokenCount = count;
-    this.lastPromptTokenCountIsEstimated = isEstimated;
+    this.lastPromptTokenCountSource = isEstimated ? 'estimate' : 'provider';
     this.lastOutputTokenCount = 0;
     this.lastCachedContentTokenCount = 0;
     this.telemetryService?.setLastCachedContentTokenCount(0);
@@ -3257,25 +3263,34 @@ export class LlmChat {
 
   isLastPromptTokenCountEstimated(): boolean {
     this.adoptTokenCountsForRoute();
-    return this.lastPromptTokenCountIsEstimated;
+    return this.lastPromptTokenCountSource !== 'provider';
   }
 
   private promptCountIsEstimateDerived(): boolean {
     return (
-      this.lastPromptTokenCount === 0 || this.lastPromptTokenCountIsEstimated
+      this.lastPromptTokenCount === 0 ||
+      this.lastPromptTokenCountSource !== 'provider'
+    );
+  }
+
+  private needsPromptOverheadEstimate(): boolean {
+    return (
+      this.lastPromptTokenCount === 0 ||
+      this.lastPromptTokenCountSource === 'estimate'
     );
   }
 
   /**
    * Seed the restored prompt and previous-response output token counts in one
    * step. Resume restores chat history plus both counters and their provenance
-   * from the same checkpoint, so callers must avoid the normal
-   * setLastPromptTokenCount() clearing behavior.
+   * from the same checkpoint. An adjusted provider count still includes its
+   * system/tool overhead even though the visible input was estimated on save.
    */
   seedResumeTokenCounts(
     promptTokenCount: number,
     outputTokenCount: number,
     isEstimated = false,
+    isProviderAdjusted = false,
   ): void {
     this.toolBudgetUsageAnchor = undefined;
     this.unaccountedMemorySnapshots = new WeakSet<Part>();
@@ -3284,6 +3299,7 @@ export class LlmChat {
     this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
     // Older pruned checkpoints saved zero. Size the restored history with
     // this session's media settings before the first session-limit check.
+    const hasProviderBaseline = isProviderAdjusted && promptTokenCount > 0;
     if (isEstimated && promptTokenCount === 0) {
       promptTokenCount = estimateContentTokens(
         this.getHistoryShallow(true),
@@ -3296,7 +3312,11 @@ export class LlmChat {
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
-    this.lastPromptTokenCountIsEstimated = isEstimated;
+    this.lastPromptTokenCountSource = hasProviderBaseline
+      ? 'adjusted-provider'
+      : isEstimated
+        ? 'estimate'
+        : 'provider';
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
@@ -3341,7 +3361,7 @@ export class LlmChat {
       this.promptCountIsEstimateDerived();
     const originalTokenCount =
       originalTokenCountOverride?.count ??
-      (originalTokenCountIsEstimated
+      (this.needsPromptOverheadEstimate()
         ? estimateModelContentTokens(
             this.getHistoryShallow(true),
             resolveSlimmingConfig(this.config.getChatCompression())
@@ -3361,7 +3381,7 @@ export class LlmChat {
       consecutiveFailures: this.consecutiveFailures,
       originalTokenCount,
       unaccountedOutputTokens:
-        !originalTokenCountIsEstimated &&
+        !this.needsPromptOverheadEstimate() &&
         originalTokenCountOverride === undefined
           ? this.lastOutputTokenCount
           : 0,
@@ -3569,7 +3589,7 @@ export class LlmChat {
     );
     this.setHistory(newHistory, this.completedToolCallIds);
     this.lastPromptTokenCount = adjustedTokenCount;
-    this.lastPromptTokenCountIsEstimated = true;
+    this.lastPromptTokenCountSource = 'estimate';
     this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = this.currentRouteKey();
     // Fast compression rewrote the shared history every retained entry
@@ -4250,8 +4270,8 @@ export class LlmChat {
           ) ?? [],
         );
         const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
-        const lastPromptTokenCountWasEstimatedBeforeHardRescue =
-          this.lastPromptTokenCountIsEstimated;
+        const lastPromptTokenCountSourceBeforeHardRescue =
+          this.lastPromptTokenCountSource;
         // The rescue's COMPRESSED stamp clears response metadata (via
         // setLastPromptTokenCount), so rollback must restore both counts.
         const lastOutputTokenCountBeforeHardRescue = this.lastOutputTokenCount;
@@ -4373,8 +4393,8 @@ export class LlmChat {
             this.unaccountedMemorySnapshots =
               unaccountedMemorySnapshotsBeforeHardRescue;
             this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
-            this.lastPromptTokenCountIsEstimated =
-              lastPromptTokenCountWasEstimatedBeforeHardRescue;
+            this.lastPromptTokenCountSource =
+              lastPromptTokenCountSourceBeforeHardRescue;
             this.lastOutputTokenCount = lastOutputTokenCountBeforeHardRescue;
             this.lastCachedContentTokenCount =
               lastCachedContentTokenCountBeforeHardRescue;
@@ -4528,8 +4548,10 @@ export class LlmChat {
         // overhead, but conservatively double-counting it is safe and
         // self-corrects when provider usage arrives. An under-count is the ONE
         // way `prompt + max_tokens` can still overflow the window, so keep the
-        // pad until provider usage replaces the estimate.
-        if (this.promptCountIsEstimateDerived()) {
+        // pad until provider usage replaces the estimate. An ordinary assistant
+        // record adjusts only the provider's count of private text absent on
+        // resume, so its system/tool overhead is already included.
+        if (this.needsPromptOverheadEstimate()) {
           promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
           debugLogger.debug(
             `[clamp] estimate-derived prompt count; padded by ` +
@@ -6482,6 +6504,7 @@ export class LlmChat {
     const actualConfig =
       overrides?.contentGeneratorConfig ??
       this.config.getContentGeneratorConfig();
+    const contents = withModelToolErrorNotes(requestContents);
     if (onPreparedRequest) {
       const {
         abortSignal: _signal,
@@ -6508,7 +6531,8 @@ export class LlmChat {
               onPreparedRequest.maxSnapshotBytes);
         await onPreparedRequest(
           overBudget ? prepared : structuredClone(prepared),
-          continuationInFlight ||
+          contents !== requestContents ||
+            continuationInFlight ||
             transportContinuationPrefix !== undefined ||
             hasImagePayloadReferences(this.history),
         );
@@ -6523,7 +6547,6 @@ export class LlmChat {
       // successful response may anchor the next send.
       this.toolBudgetUsageAnchor = undefined;
       params.config?.abortSignal?.throwIfAborted();
-      const contents = withModelToolErrorNotes(requestContents);
       if (this.chatRecordingService) {
         resumePromptTokenDelta = this.persistedPromptTokenDelta(
           withoutCompactionTranscriptHint(requestContents),
@@ -7762,7 +7785,7 @@ export class LlmChat {
             }
             this.unaccountedMemorySnapshots = new WeakSet<Part>();
             this.lastPromptTokenCount = lastPromptTokenCount;
-            this.lastPromptTokenCountIsEstimated = false;
+            this.lastPromptTokenCountSource = 'provider';
             this.lastOutputTokenCount = hasUsablePromptTokenCount
               ? getUsageOutputTokenCountForPromptEstimate({
                   promptTokenCount,

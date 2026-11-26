@@ -14,6 +14,8 @@ export interface ResumeTokenCounts {
   promptTokenCount: number;
   outputTokenCount: number;
   isEstimated: boolean;
+  /** The persisted input count adjusts provider usage that already includes system and tools. */
+  isProviderAdjusted?: boolean;
 }
 
 function assistantPromptTokenCount(record: ChatRecord): number | undefined {
@@ -38,6 +40,10 @@ export class ResumeTokenCountsAccumulator {
             ? getUsageOutputTokenCountForPromptEstimate(usage)
             : 0,
           isEstimated: record.resumePromptTokenCount !== undefined,
+          ...(record.resumePromptTokenCount !== undefined &&
+            (usage?.promptTokenCount || usage?.totalTokenCount) && {
+              isProviderAdjusted: true,
+            }),
         };
       }
       return;

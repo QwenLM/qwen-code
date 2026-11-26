@@ -3064,6 +3064,7 @@ describe('SessionTranscriptReader', () => {
       promptTokenCount: 17,
       outputTokenCount: 3,
       isEstimated: true,
+      isProviderAdjusted: true,
     });
   });
 

@@ -543,7 +543,8 @@ function describeBrokenJsonString(
   // Other failures may mean the string is valid for a different branch.
   let instancePath: string | undefined;
   const types = new Set<string>();
-  const inactive = inactiveTaggedUnionErrors(errors, data, validate);
+  const schemaAt = diagnosticSchemaLookup(validate);
+  const inactive = inactiveTaggedUnionErrors(errors, data, schemaAt);
   if (!inactive) return '';
   for (const error of errors) {
     if (
@@ -562,6 +563,13 @@ function describeBrokenJsonString(
       if (instancePath.startsWith(`${path}/`)) continue;
       return '';
     }
+    const source = error.schemaPath.startsWith('#/')
+      ? schemaAt(error.schemaPath.slice(1, -'/type'.length))
+      : undefined;
+    // Ajv omits OpenAPI's implicit null from its type error. An unresolved
+    // schema location cannot rule that alternative out either.
+    if (!source || (source as DiagnosticSchema).nullable === true)
+      types.add('null');
     const expected: unknown = error.params['type'];
     for (const type of Array.isArray(expected) ? expected : [expected]) {
       if (typeof type === 'string') types.add(type);
@@ -618,6 +626,7 @@ function describeBrokenJsonString(
 
 type DiagnosticSchema = Record<string, unknown> & {
   $ref?: string;
+  nullable?: boolean;
   const?: unknown;
   properties?: Record<string, DiagnosticSchema>;
   allOf?: DiagnosticSchema[];
@@ -650,27 +659,12 @@ function diagnosticConjuncts(
   return undefined;
 }
 
-// Ajv also reports errors for the other alternatives of a tagged union. A
-// sibling's required or const failure says nothing about the selected payload.
-function inactiveTaggedUnionErrors(
-  errors: ErrorObject[],
-  data: Record<string, unknown>,
+function diagnosticSchemaLookup(
   validate: ValidateFunction,
-): Set<ErrorObject> | undefined {
-  const inactive = new Set<ErrorObject>();
-  const unions = errors.filter(
-    (e) =>
-      (e.keyword === 'anyOf' || e.keyword === 'oneOf') &&
-      e.schemaPath.startsWith('#/'),
-  );
-  // Dynamic references can report pointers relative to their runtime target,
-  // which is absent from Ajv's static reference table.
-  if (
-    !unions.length ||
-    Object.keys(validate.schemaEnv.root.dynamicAnchors).length
-  ) {
-    return inactive;
-  }
+): (pointer: string) => unknown {
+  // Dynamic references report pointers relative to their runtime target.
+  if (Object.keys(validate.schemaEnv.root.dynamicAnchors).length)
+    return () => undefined;
   // A separately compiled reference reports paths from its own root; an
   // inlined one prefixes them with its reference fragment. Index both once.
   const compiledRoots = new Set<unknown>();
@@ -715,19 +709,26 @@ function inactiveTaggedUnionErrors(
     }
     return source;
   }
-  const typeErrorPaths = new Set<string>();
-  const errorIndexes = new Map<unknown, number[]>();
-  for (const [index, error] of errors.entries()) {
-    if (error.keyword === 'type') typeErrorPaths.add(error.instancePath);
-    if (!error.schemaPath.startsWith('#/')) continue;
-    const source = schemaAt(
-      error.schemaPath.slice(1, error.schemaPath.lastIndexOf('/')),
-    );
-    if (source === undefined) continue;
-    const indexes = errorIndexes.get(source);
-    if (indexes) indexes.push(index);
-    else errorIndexes.set(source, [index]);
-  }
+  return schemaAt;
+}
+
+// Ajv also reports errors for the other alternatives of a tagged union. A
+// sibling's required or const failure says nothing about the selected payload.
+function inactiveTaggedUnionErrors(
+  errors: ErrorObject[],
+  data: Record<string, unknown>,
+  schemaAt: (pointer: string) => unknown,
+): Set<ErrorObject> | undefined {
+  const inactive = new Set<ErrorObject>();
+  const unions = errors.filter(
+    (e) =>
+      (e.keyword === 'anyOf' ||
+        (e.keyword === 'oneOf' && e.params['passingSchemas'] === null)) &&
+      e.schemaPath.startsWith('#/'),
+  );
+  const typeErrorPaths = new Set(
+    errors.filter((e) => e.keyword === 'type').map((e) => e.instancePath),
+  );
   for (const error of unions) {
     const branches = schemaAt(error.schemaPath.slice(1));
     const input = valueAtPointer(data, error.instancePath);
@@ -741,9 +742,6 @@ function inactiveTaggedUnionErrors(
         hasViableBranch = true;
         continue;
       }
-      const owners = new Map<string, Set<DiagnosticSchema>>([
-        [error.instancePath, new Set(conjuncts)],
-      ]);
       let excluded = false;
       for (const node of conjuncts) {
         for (const [key, property] of Object.entries(node.properties ?? {})) {
@@ -752,8 +750,6 @@ function inactiveTaggedUnionErrors(
           if (!constraints) continue;
           const pointerKey = key.replaceAll('~', '~0').replaceAll('/', '~1');
           const path = `${error.instancePath}/${pointerKey}`;
-          const atPath = owners.get(path) ?? new Set<DiagnosticSchema>();
-          owners.set(path, atPath);
           const value = fields[key];
           // A literal on the malformed field may be a valid string alternative.
           const text = typeof value === 'string' ? value.trimStart() : '';
@@ -761,7 +757,6 @@ function inactiveTaggedUnionErrors(
             typeErrorPaths.has(path) &&
             (text.startsWith('[') || text.startsWith('{'));
           for (const constraint of constraints) {
-            atPath.add(constraint);
             if (candidate) continue;
             const allowed = constraint.enum;
             const literal = constraint.const;
@@ -784,34 +779,13 @@ function inactiveTaggedUnionErrors(
         hasViableBranch = true;
         continue;
       }
-      // Ajv reports a referenced constraint at its definition. Match both
-      // schema and instance so a sibling can reuse that definition elsewhere.
-      const indexes: number[] = [];
-      for (const [path, schemas] of owners) {
-        for (const schema of schemas) {
-          for (const index of errorIndexes.get(schema) ?? []) {
-            const candidate = errors[index];
-            if (candidate.instancePath === path && !inactive.has(candidate)) {
-              indexes.push(index);
-            }
-          }
-        }
-      }
-      const candidates = indexes.sort((a, b) => a - b).map((i) => errors[i]);
-      const branchPath = branch.$ref ?? `${error.schemaPath}/${index}`;
-      const failure =
-        candidates.find((e) => e.schemaPath.startsWith(`${branchPath}/`)) ??
-        (candidates.length === 1 ? candidates[0] : undefined);
-      // A composite may contribute several errors. Leave the original message
-      // alone unless the rejected branch's failure is unambiguous.
-      if (
-        !failure ||
-        failure.keyword === 'anyOf' ||
-        failure.keyword === 'oneOf'
-      ) {
+      // Ajv visits branches in schema order. Each failing branch contributes
+      // at least one error before the union error. Only this exact count
+      // proves which error belongs to which branch, even across shared $refs.
+      if (errors.at(-1) !== error || errors.length !== branches.length + 1) {
         return undefined;
       }
-      inactive.add(failure);
+      inactive.add(errors[index]);
     }
     if (!hasViableBranch) return undefined;
   }

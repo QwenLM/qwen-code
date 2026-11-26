@@ -20,7 +20,10 @@ import {
 } from './transcript-records.js';
 
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
-import { estimateContentTokens } from './content-token-estimate.js';
+import {
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  estimateContentTokens,
+} from './content-token-estimate.js';
 import { removeFileHistorySnapshots } from './file-history-snapshots.js';
 
 export interface MessageGroup {
@@ -301,7 +304,7 @@ function pruneCompression(
   removedPromptIds: ReadonlySet<string>,
   earlierPromptIds: ReadonlySet<string>,
   removedToolCalls: ReadonlySet<string>,
-  imageTokenEstimate: number | undefined,
+  currentImageTokenEstimate: number,
 ): ChatRecord {
   if (record.subtype !== 'chat_compression') return record;
   const payload = record.systemPayload as ChatCompressionRecordPayload;
@@ -422,6 +425,11 @@ function pruneCompression(
   );
   const previous =
     payload.resumePromptTokenCount ?? payload.info?.newTokenCount ?? 0;
+  // An old positive seed includes images at an unknown price. Only deduct
+  // their known text cost. An old zero seed can be sized from scratch.
+  const imageTokenEstimate =
+    payload.imageTokenEstimate ??
+    (previous > 0 ? 0 : currentImageTokenEstimate);
   const visibleBefore = estimateContentTokens(
     payload.compressedHistory,
     imageTokenEstimate,
@@ -439,6 +447,7 @@ function pruneCompression(
     ...record,
     systemPayload: {
       ...payload,
+      imageTokenEstimate,
       resumePromptTokenCount,
       compressedHistory,
       promptIds: retained.map((index) => payload.promptIds![index]!),
@@ -459,7 +468,7 @@ export function deleteTranscriptMessageGroups(
   records: ChatRecord[],
   groupIds: string[],
   anchor: ChatRecord,
-  imageTokenEstimate?: number,
+  imageTokenEstimate = DEFAULT_IMAGE_TOKEN_ESTIMATE,
 ): { records: ChatRecord[]; result: DeleteMessageGroupsResult } {
   const groups = getTranscriptMessageGroups(records);
   const ids = new Set(groupIds);

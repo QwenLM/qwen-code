@@ -724,6 +724,58 @@ describe('SchemaValidator', () => {
       }
     });
 
+    it.each(['anyOf', 'oneOf'])(
+      'keeps the active shared reference when an excluded %s branch fails a different constraint',
+      (keyword) => {
+        const variant = (kind: string) =>
+          obj({
+            items: { $ref: '#/$defs/Items' },
+            kind: { const: kind },
+          });
+        const schema = {
+          $schema: DRAFT_2020,
+          $defs: { Items: { type: 'array' } },
+          [keyword]: [
+            variant('docs'),
+            {
+              allOf: [
+                {
+                  dependentSchemas: {
+                    metadata: obj({ items: { type: 'object' } }),
+                  },
+                },
+                variant('file'),
+              ],
+            },
+          ],
+        };
+        const input = { kind: 'docs', metadata: true, items: '[1,]' };
+        const { report } = validateWithNote(schema, input);
+        expect(report).toHaveBeenCalledExactlyOnceWith(
+          expect.any(String),
+          expect.stringContaining('send it as a JSON array'),
+        );
+        valid(schema, { ...input, items: [] });
+        invalid(schema, { ...input, items: {} });
+      },
+    );
+
+    it('recognizes implicit null in an OpenAPI nullable type error', () => {
+      const schema = {
+        $defs: { OptionalList: { type: 'array', nullable: true } },
+        ...obj({ items: { $ref: '#/$defs/OptionalList', const: null } }),
+      };
+      const { report } = validateWithNote(schema, { items: '[1,]' });
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.stringContaining(
+          'resend this field with the type required by its schema',
+        ),
+      );
+      valid(schema, { items: null });
+      invalid(schema, { items: [] });
+    });
+
     it('keeps a known payload type with encoded refs and unrelated property constraints', () => {
       const schema = {
         $defs: {

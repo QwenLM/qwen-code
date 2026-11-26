@@ -1361,7 +1361,12 @@ describe('Gemini Client (client.ts)', () => {
       // Projected history is replayed, so it must not reach the live counters
       // that cross-session usage persists.
       expect(addReplayedEvent).toHaveBeenCalledWith(uiEvent, 'test-session-id');
-      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(
+        321,
+        45,
+        false,
+        undefined,
+      );
       expect(skill.restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(
         apiHistory,
       );
@@ -1392,11 +1397,12 @@ describe('Gemini Client (client.ts)', () => {
       },
     );
 
-    it('seeds resumed chat with previous response output token count', async () => {
+    it('seeds resumed chat with adjusted provider usage and the previous output count', async () => {
       const seedResumeTokenCountsSpy = spySeedResumeTokenCounts();
       const resumedClient = await resumeWith(
         transcriptRecord('assistant-1', 'assistant', {
           message: modelText('done'),
+          resumePromptTokenCount: 190,
           usageMetadata: {
             promptTokenCount: 200,
             candidatesTokenCount: 60,
@@ -1406,8 +1412,13 @@ describe('Gemini Client (client.ts)', () => {
         }),
       );
 
-      expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
-      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80, false);
+      expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(190);
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(
+        190,
+        80,
+        true,
+        true,
+      );
     });
 
     it('restores estimated provenance from a compression checkpoint', async () => {
@@ -1425,7 +1436,12 @@ describe('Gemini Client (client.ts)', () => {
         }),
       );
 
-      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 0, true);
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(
+        200,
+        0,
+        true,
+        undefined,
+      );
       expect(resumedClient.getChat().isLastPromptTokenCountEstimated()).toBe(
         true,
       );
