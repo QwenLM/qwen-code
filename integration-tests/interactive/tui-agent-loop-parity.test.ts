@@ -152,9 +152,12 @@ interface Run {
 
 /**
  * The root config's `retry: 2` would rerun both TUI sessions after a stall,
- * tripling its cost in the required gate.
+ * tripling its cost in the required gate. A starved shared host stretches
+ * every mocked turn several-fold — the teammate case measured ~395s under
+ * contention (#18119) — so the ceiling leaves room for three arms of the
+ * later-turns chain below.
  */
-const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
+const PARITY_CASE_OPTIONS = { retry: 0, timeout: 600_000 };
 
 /**
  * The helper gate's ceiling: hardening for a slow-but-live leader, not a fix
@@ -170,6 +173,14 @@ const HELPER_GATE_BUDGET = 90_000;
 
 /** Above the gate, under the SDK's 120 s request timeout (DEFAULT_TIMEOUT). */
 const TURN_BUDGET = HELPER_GATE_BUDGET + 15_000;
+
+/**
+ * A session's own later turns — a teammate report reaching the leader, a
+ * notification, a cron fire — start after the prompt's turn settled, so this
+ * wait carries their whole chain on a starved host (#18119). It runs once per
+ * arm; the case ceiling above covers three of them.
+ */
+const LATER_TURN_BUDGET = 150_000;
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
@@ -910,7 +921,7 @@ describeTui(SUITE, () => {
           (scenario.sideRequests === undefined ||
             sideCount() >= scenario.sideRequests),
         'the session starts its later turns',
-        TURN_BUDGET,
+        LATER_TURN_BUDGET,
         () => session!.viewport(),
       );
       await turnEnds(scenario.requests);
@@ -1535,6 +1546,13 @@ describeTui(SUITE, () => {
   it('gives the helper gate the cross-turn budget', async () => {
     expect(HELPER_GATE_BUDGET).toBe(90_000);
     expect(TURN_BUDGET).toBeGreaterThan(HELPER_GATE_BUDGET);
+    // The later-turns wait runs once per arm, and the case ceiling has to
+    // cover all three arms plus the rest of the case.
+    expect(LATER_TURN_BUDGET).toBe(150_000);
+    expect(PARITY_CASE_OPTIONS.timeout).toBe(600_000);
+    expect(PARITY_CASE_OPTIONS.timeout).toBeGreaterThanOrEqual(
+      3 * LATER_TURN_BUDGET,
+    );
     const scenario = allScenarios.find(
       (candidate) =>
         candidate.name === 'a teammate report that starts a teammate turn',
