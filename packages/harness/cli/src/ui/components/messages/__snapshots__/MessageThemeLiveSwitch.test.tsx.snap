@@ -1,0 +1,57 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`cached message theme colors > re-highlights a cached expanded CodeMode script 1`] = `
+" ▪ CodeMode · Unchanged description · Completed
+   └ JavaScript
+     const answer = 42;
+"
+`;
+
+exports[`cached message theme colors > recolors dense file diff summary and nested stats 1`] = `
+" ▪ RetainedTool(Unchanged description)
+   └ Accepted retained.ts (+1, -1)   (Ctrl+O to expand)
+"
+`;
+
+exports[`cached message theme colors > recolors dense payload text cached by the success builder 1`] = `
+" ▪ RetainedTool(Unchanged description)
+   └ Retained summary
+
+     Retained payload
+"
+`;
+
+exports[`cached message theme colors > recolors stored 'hook_blocking_error' content without rebuilding it 1`] = `
+"⎿  PreToolUse:Bash hook returned blocking error
+⎿  Retained blocking body
+"
+`;
+
+exports[`cached message theme colors > recolors stored 'hook_non_blocking_error' content without rebuilding it 1`] = `
+"⎿  PreToolUse:Bash hook error
+⎿  Retained error body
+"
+`;
+
+exports[`cached message theme colors > recolors stored 'hook_stopped_continuation' content without rebuilding it 1`] = `
+"⎿  PreToolUse:Bash hook stopped continuation: Retained stop reason
+"
+`;
+
+exports[`cached message theme colors > recolors the dense cancelled summary 1`] = `
+" - RetainedTool(Unchanged description)
+   └ Retained summary
+"
+`;
+
+exports[`cached message theme colors > recolors the dense error summary 1`] = `
+" x RetainedTool(Unchanged description)
+   └ Retained summary
+"
+`;
+
+exports[`cached message theme colors > recolors the dense success summary 1`] = `
+" ▪ RetainedTool(Unchanged description)
+   └ Retained summary
+"
+`;

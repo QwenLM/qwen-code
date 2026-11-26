@@ -5395,7 +5395,11 @@ describe('AppContainer State Management', () => {
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: mockPopAllMessages,
-        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        drainQueue: vi
+          .fn()
+          .mockReturnValue([
+            { text: 'queued follow-up', key: 'queued', deferUntilIdle: false },
+          ]),
         popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
         removeGoalTurns: vi.fn().mockReturnValue([]),
       });
@@ -5515,7 +5519,11 @@ describe('AppContainer State Management', () => {
         clearQueue: mockClearQueue,
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: mockPopAllMessages,
-        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        drainQueue: vi
+          .fn()
+          .mockReturnValue([
+            { text: 'queued follow-up', key: 'queued', deferUntilIdle: false },
+          ]),
         popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
       });
 
@@ -6980,7 +6988,11 @@ describe('AppContainer State Management', () => {
         popAllMessages: vi
           .fn()
           .mockReturnValue({ modelText: 'queued follow-up' }),
-        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        drainQueue: vi
+          .fn()
+          .mockReturnValue([
+            { text: 'queued follow-up', key: 'queued', deferUntilIdle: false },
+          ]),
         popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
       });
 

@@ -947,7 +947,7 @@ describe('TUI product evidence', () => {
   });
 
   it('budgets cold setup and all three serial product acceptance legs', () => {
-    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(60);
   });
 
   it('treats unhandled errors as acceptance failures on every runner', () => {
@@ -2098,7 +2098,7 @@ describe('installed npm acceptance workflow', () => {
     expect(workflow.jobs.changes.if).toBeUndefined();
   });
   it('keeps installed setup independent of the original source parity budget', () => {
-    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(60);
     expect(job['timeout-minutes']).toBe(60);
     expect(
       job.steps.some((step) => step.uses?.startsWith('oven-sh/setup-bun')),

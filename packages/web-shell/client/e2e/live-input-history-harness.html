@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live multi-client input-history harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { WebShellWithProviders } from '../index.tsx';
+      import '../styles/standalone.css';
+
+      const params = new URLSearchParams(location.search);
+      const baseUrl = params.get('daemon');
+      const token = params.get('token');
+      const sessionId = params.get('sessionId');
+      const clientId = params.get('clientId');
+      const workspaceCwd = params.get('cwd');
+      const workspaceId = params.get('workspaceId');
+      if (!baseUrl || !token || !sessionId || !clientId || !workspaceCwd) {
+        throw new Error(
+          'The harness requires an explicit daemon, token, session, client and workspace',
+        );
+      }
+      createRoot(document.getElementById('root')).render(
+        React.createElement(WebShellWithProviders, {
+          baseUrl,
+          token,
+          sessionId,
+          clientId,
+          workspaceCwd,
+          sessionContext: { kind: 'workspace', cwd: workspaceCwd },
+          ...(workspaceId ? { workspaceId } : {}),
+          language: 'en',
+          theme: 'light',
+        }),
+      );
+    </script>
+  </body>
+</html>

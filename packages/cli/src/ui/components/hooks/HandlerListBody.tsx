@@ -7,7 +7,11 @@
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useDialogSize } from '../../contexts/DialogSizeContext.js';
-import { HookType } from '@qwen-code/qwen-code-core/hooks/types.js';
+import { hasUnsupportedCommandHookArgs } from '@qwen-code/qwen-code-core/hooks/hookRegistry.js';
+import {
+  HooksConfigSource,
+  HookType,
+} from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { HookConfigDisplayInfo } from './types.js';
 import { getConfigSourceDisplay } from './sourceLabels.js';
 import { t } from '../../../i18n/index.js';
@@ -38,6 +42,12 @@ export function HandlerListBody({
           : `${getConfigSourceDisplay(config)} · ${config.rejected ? t('disabled (rejected)') : t('disabled (not approved)')}`;
         const hookDisplay = describeHook(config);
         const typeDisplay = formatTypeDisplay(config);
+        const skippedLabel =
+          config.enabled &&
+          config.source !== HooksConfigSource.Session &&
+          hasUnsupportedCommandHookArgs({ ...config.config })
+            ? `${t('skipped (unsupported args)')} · `
+            : '';
 
         return (
           <Box key={index}>
@@ -54,7 +64,7 @@ export function HandlerListBody({
                 bold={isSelected}
                 wrap="wrap"
               >
-                {`${index + 1}. [${typeDisplay}] ${hookDisplay}`}
+                {`${index + 1}. [${typeDisplay}] ${skippedLabel}${hookDisplay}`}
               </Text>
             </Box>
             <Box width={2} />

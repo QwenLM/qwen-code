@@ -2168,8 +2168,6 @@ function isCancelledStatus(status: string): boolean {
   return status === 'cancelled' || status === 'canceled';
 }
 
-export { splitInsightSegments };
-
 /**
  * The visible assistant text of a block's text, with insight protocol frames
  * (`insight_progress` / `insight_ready` / `insight_error`) stripped exactly as
