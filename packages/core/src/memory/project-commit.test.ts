@@ -9,8 +9,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { getSandboxFileVersion } from '../sandbox/file-version.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import * as noFollowOpen from '../utils/no-follow-open.js';
+import { rebuildManagedAutoMemoryIndex } from './indexer.js';
 import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryMetadataPath,
@@ -178,6 +180,54 @@ it('repairs a topic write when the generated index could not be published', asyn
     'projectIndexRebuildPending',
   );
 });
+
+it('reads the published index when the project memory cursor is malformed', async () => {
+  await commitProjectMemoryWrite(
+    memory,
+    path.join(memory, 'kept.md'),
+    null,
+    topic('kept'),
+  );
+  const published = await readAutoMemoryIndex(project);
+  expect(published).toContain('[kept](kept.md)');
+
+  const cursor = getAutoMemoryExtractCursorPath(project);
+  await fs.writeFile(cursor, '{ invalid JSON');
+
+  await expect(readAutoMemoryIndex(project)).resolves.toBe(published);
+  await expect(fs.readFile(cursor, 'utf-8')).resolves.toBe('{ invalid JSON');
+});
+
+it.skipIf(!arePermissionBitsEnforced())(
+  'keeps the published index and retries repair after an unreadable topic becomes readable',
+  async () => {
+    const kept = path.join(memory, 'kept.md');
+    await commitProjectMemoryWrite(memory, kept, null, topic('kept'));
+    const published = await readAutoMemoryIndex(project);
+    expect(published).toContain('[kept](kept.md)');
+    await fs.writeFile(path.join(memory, 'new.md'), topic('new'));
+
+    await fs.chmod(kept, 0o000);
+    try {
+      await expect(rebuildManagedAutoMemoryIndex(project)).rejects.toThrow(
+        'a topic file could not be read',
+      );
+      await expect(readAutoMemoryIndex(project)).resolves.toBe(published);
+      await expect(readProjectMemoryCursor(memory)).resolves.toMatchObject({
+        projectIndexRebuildPending: true,
+      });
+    } finally {
+      await fs.chmod(kept, 0o600);
+    }
+
+    const repaired = await readAutoMemoryIndex(project);
+    expect(repaired).toContain('[kept](kept.md)');
+    expect(repaired).toContain('[new](new.md)');
+    await expect(readProjectMemoryCursor(memory)).resolves.not.toHaveProperty(
+      'projectIndexRebuildPending',
+    );
+  },
+);
 
 it.each([false, true])(
   'keeps the published catalog during a new write (repair before read: %s)',

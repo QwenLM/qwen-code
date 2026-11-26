@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import * as path from 'node:path';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { openNoFollow } from '../utils/no-follow-open.js';
 import {
   rebuildProjectMemoryIndexLocked,
@@ -30,6 +31,8 @@ import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
 } from './types.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_STORE');
 
 export function createDefaultAutoMemoryMetadata(
   now = new Date(),
@@ -174,7 +177,9 @@ export async function readAutoMemoryIndexWithStats(
 ): Promise<AutoMemoryIndexRead | null> {
   const root = getAutoMemoryRoot(projectRoot, owner);
   const anchor = getMemoryRootTrustedAnchor(root, owner);
-  await recoverProjectMemoryIndex(root, owner);
+  await recoverProjectMemoryIndex(root, owner).catch((error: unknown) => {
+    debugLogger.warn('Failed to repair the project memory index:', error);
+  });
   const trustedRoot = await resolveTrustedMemoryRoot(root, anchor);
   return trustedRoot
     ? readMemoryIndexWithStats(
