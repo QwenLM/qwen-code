@@ -118,6 +118,24 @@ To opt out, set the following in your Qwen Code settings:
 
 You can also set the `QWEN_USAGE_STATISTICS_ENABLED` environment variable to `false`. The environment variable takes precedence over the setting. See [Usage Statistics](../configuration/settings.md#usage-statistics) for the collected fields and configuration details.
 
+## Model Catalog Downloads (models.dev)
+
+Separately from usage statistics, Qwen Code may download the public model catalog from the third-party service [models.dev](https://models.dev) (`https://models.dev/api.json`). The catalog supplies model metadata such as context window sizes, output token limits, and supported input types.
+
+- **What is sent:** an unauthenticated download request for the public catalog file. When a previously downloaded copy exists, the request includes that copy's `ETag` so the server can reply that nothing has changed. No prompts, code, file contents, credentials, or usage statistics are included. As with any web request, models.dev receives your IP address and standard request metadata, governed by that service's own policies.
+- **How often:** in the background when Qwen Code starts. After a successful download the result is cached locally in `~/.qwen/model-registry.json`, and no new download is attempted for 24 hours. If a download fails (for example, because models.dev is blocked or you are offline), nothing is cached and the next start tries again.
+- **If it is blocked or disabled:** a catalog snapshot ships with each release, so Qwen Code works normally without contacting models.dev.
+
+The download is on by default. Any of the following stops it:
+
+- Opting out of usage statistics (see above) also stops the catalog download.
+- Set `model.catalogRefresh` to `false` in your user, system, or system defaults settings. Values in a project's workspace settings are ignored in both directions, so a repository cannot turn the download back on, and setting it there does not turn it off.
+- Set the `QWEN_CODE_MODELS_DEV_REFRESH` environment variable to `off`, or set `QWEN_CODE_MODELS_DEV` to `off` to stop using the catalog entirely. Set these in your shell environment: values in a project's `.env` file or in `settings.json` `env` are silently ignored.
+
+To keep the download but avoid contacting models.dev, set `QWEN_CODE_MODELS_DEV_URL` to a mirror of the catalog that you control. This changes where the catalog is downloaded from; it does not stop the download.
+
+See [Environment Variables](../configuration/settings.md#environment-variables-table) and the `model.catalogRefresh` entry in [Settings](../configuration/settings.md) for details on each option.
+
 ## Frequently Asked Questions (FAQ)
 
 ### 1. Is my code, including prompts and answers, used to train AI models?
