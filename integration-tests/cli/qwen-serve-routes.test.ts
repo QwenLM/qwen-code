@@ -20,10 +20,12 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   truncateSync,
   writeFileSync,
 } from 'node:fs';
@@ -1512,5 +1514,70 @@ describe('qwen serve — prompt clientId admission', () => {
     // asynchronously; cancel so nothing lingers past the test.
     await client.cancel(session.sessionId, reattached.clientId).catch(() => {});
     await client.closeSession(session.sessionId);
+  });
+});
+
+describe('qwen serve — archive coordinator over real HTTP', () => {
+  it('moves a no-sidecar batch through archive and unarchive without losing transcripts', async () => {
+    const firstId = randomUUID();
+    const secondId = randomUUID();
+    const activePaths = [firstId, secondId].map((sessionId) =>
+      writePersistedTranscript(sessionId, [
+        chatRecord(sessionId, 'u-1', null, 'archive me'),
+      ]),
+    );
+    const archivedPaths = activePaths.map((activePath) =>
+      path.join(path.dirname(activePath), 'archive', path.basename(activePath)),
+    );
+
+    const archived = await client.archiveSessionsData([firstId, secondId], {
+      requireIdle: false,
+    });
+    expect(archived.archived).toEqual([firstId, secondId]);
+    expect(archived.errors).toEqual([]);
+    for (const [index, activePath] of activePaths.entries()) {
+      expect(existsSync(activePath)).toBe(false);
+      expect(existsSync(archivedPaths[index]!)).toBe(true);
+    }
+
+    const unarchived = await client.unarchiveSessionsData([firstId, secondId]);
+    expect(unarchived.unarchived).toEqual([firstId, secondId]);
+    expect(unarchived.errors).toEqual([]);
+    for (const [index, activePath] of activePaths.entries()) {
+      expect(existsSync(activePath)).toBe(true);
+      expect(existsSync(archivedPaths[index]!)).toBe(false);
+    }
+    expect(
+      (await fetch(`${base}/health`)).status,
+      'daemon remains healthy after both batches',
+    ).toBe(200);
+  });
+
+  it('refuses a dangling sidecar symlink over real HTTP and leaves the transcript active', async () => {
+    const sessionId = randomUUID();
+    const activePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u-1', null, 'do not archive'),
+    ]);
+    const sidecarPath = activePath.replace(/\.jsonl$/, '.worktree.json');
+    symlinkSync(path.join(homeDir, 'missing-sidecar-target'), sidecarPath);
+    const archivedPath = path.join(
+      path.dirname(activePath),
+      'archive',
+      path.basename(activePath),
+    );
+
+    const result = await client.archiveSessionsData([sessionId], {
+      requireIdle: false,
+    });
+
+    expect(result.archived).toEqual([]);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        sessionId,
+        error: expect.stringContaining('unsafe sidecar file type'),
+      }),
+    ]);
+    expect(existsSync(activePath)).toBe(true);
+    expect(existsSync(archivedPath)).toBe(false);
   });
 });
