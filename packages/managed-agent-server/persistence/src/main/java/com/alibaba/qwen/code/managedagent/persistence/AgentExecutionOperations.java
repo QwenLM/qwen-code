@@ -463,7 +463,7 @@ final class AgentExecutionOperations {
         } else if (sessionPolicies.hasOpenOperation(tenantId, sessionId, operationId)
                 || sessionPolicies.hasActiveTurn(tenantId, sessionId)
                 || sessionPolicies.hasDecidableAction(session)
-                || sessionPolicies.hasRetainedRuntimeSession(tenantId, sessionId)) {
+                || sessionQueries.hasRetainedRuntimeSession(tenantId, sessionId)) {
             failure = "session_context_busy";
         } else if (!sessionQueries.hasExecutionRegistryFacts(session.tenantId(),
                 session.sessionId()) || !initiatorKeepsOperate(session,

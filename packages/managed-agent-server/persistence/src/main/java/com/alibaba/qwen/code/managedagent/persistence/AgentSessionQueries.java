@@ -120,6 +120,14 @@ final class AgentSessionQueries {
                 String.class, arguments.toArray()));
     }
 
+    // Hook owners can outlive their Turn with an immutable worker context.
+    // Only confirmed release permits changing that context's cwd/revision.
+    boolean hasRetainedRuntimeSession(String tenantId, String sessionId) {
+        return !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND harness_session_id = ?"
+                + " AND session_state <> 'RELEASED' LIMIT 1", tenantId, sessionId).isEmpty();
+    }
+
     // The Registry still backs the binding exactly, its state is ACTIVE and
     // the creation actor's grants survive — the passive-attachment subset
     // JdbcWorkspaceExecutionStore.authorizePassiveAttachment gates execution on;

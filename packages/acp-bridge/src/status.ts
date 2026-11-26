@@ -79,12 +79,19 @@ export class BridgeTimeoutError extends Error {
 export class SessionRestoreTimeoutError extends BridgeTimeoutError {
   readonly sessionId: string;
   readonly action: 'load' | 'resume';
+  readonly dispatched: boolean;
 
-  constructor(sessionId: string, action: 'load' | 'resume', timeoutMs: number) {
+  constructor(
+    sessionId: string,
+    action: 'load' | 'resume',
+    timeoutMs: number,
+    dispatched = true,
+  ) {
     super(`session/${action}`, timeoutMs);
     this.name = 'SessionRestoreTimeoutError';
     this.sessionId = sessionId;
     this.action = action;
+    this.dispatched = dispatched;
   }
 }
 

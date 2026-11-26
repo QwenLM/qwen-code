@@ -777,6 +777,15 @@ describe('build artifact — transcript entry (#11031)', () => {
     }
   });
 
+  it('keeps Channel events page messages in the interactive entry only', () => {
+    expect(readTranscriptBundle()).not.toMatch(/["'`]channelEvents\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('channelEvents.emptyDescription');
+    expect(interactive).toContain(
+      'Events appear as soon as a Channel polls, receives a message, or publishes a reply.',
+    );
+  });
+
   it('keeps Token Usage copy and lookups in the interactive entry only', () => {
     expect(readTranscriptBundle()).not.toMatch(/["'`]tokenUsage\./);
     const interactive = readPackageJavascript();

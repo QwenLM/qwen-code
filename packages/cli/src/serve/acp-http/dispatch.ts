@@ -1091,7 +1091,13 @@ export function toRpcError(err: unknown): {
           errorKind: 'restore_timeout',
           httpStatus: 504,
           retryable: true,
-          retryAfterSeconds: restoreRetryAfterSeconds(restoreError.timeoutMs),
+          ...(restoreError.dispatched
+            ? {
+                retryAfterSeconds: restoreRetryAfterSeconds(
+                  restoreError.timeoutMs,
+                ),
+              }
+            : { dispatched: false }),
           sessionId: restoreError.sessionId,
           action: restoreError.action,
           timeoutMs: restoreError.timeoutMs,

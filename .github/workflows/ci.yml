@@ -1362,6 +1362,19 @@ jobs:
             console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
           '
 
+      - name: 'Prepare terminal fonts for unit tests'
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        timeout-minutes: 3
+        env:
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+        run: |-
+          installer=.github/scripts/ecs-runner/install-qwen-font-baseline.sh
+          if ! grep -q -- '--user-terminal' "${installer}"; then
+            echo 'terminal fonts: skipped (installer in this checkout predates --user-terminal)'
+            exit 0
+          fi
+          bash "${installer}" --user-terminal
+
       # The disk floor above admits on bytes and inodes; this admits on CPU
       # contention: a backstop for a host no shard survived, not a predictor of
       # the RPC flake (the bands overlap; calibration in the script). It runs

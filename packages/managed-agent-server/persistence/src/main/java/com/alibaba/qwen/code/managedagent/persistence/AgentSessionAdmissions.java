@@ -130,7 +130,7 @@ final class AgentSessionAdmissions {
                 && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile())) {
             return pin.toolProfile();
         }
-        ResolvedBinding workspace = workspaces.resolveForCreation(
+        ResolvedBinding workspace = workspaces.resolveForRead(
                 tenantId, actorId, new WorkspaceSelection(workspaceId, "."));
         return workspaces.isExternal(workspace.binding()) ? null : pin.toolProfile();
     }
