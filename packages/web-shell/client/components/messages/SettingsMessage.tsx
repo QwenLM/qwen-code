@@ -111,6 +111,8 @@ interface SettingsMessageProps {
    * the Workspace scope tab; omitted when the daemon cannot manage them.
    */
   workspaceDirectoriesSection?: ReactNode;
+  /** Optional workspace switcher rendered beside the scope tabs. */
+  workspaceControl?: ReactNode;
   embedded?: boolean;
   /** Category to select on open (deep link, e.g. 'Daemon'). */
   initialCategory?: string;
@@ -736,6 +738,7 @@ export function SettingsMessage({
   connections,
   archivedSessions,
   workspaceDirectoriesSection,
+  workspaceControl,
   embedded = false,
   initialCategory,
   workspaceSettingsWritable = true,
@@ -1194,16 +1197,21 @@ export function SettingsMessage({
             </div>
           )}
         {activeGroup?.id !== 'Connections' && !showArchivedSessions && (
-          <div className="flex items-center justify-between gap-4 border-b border-border px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-3 py-2">
             <TabsList className="p-0">
               <TabsTrigger value="workspace">
                 {t('settings.scope.workspace')}
               </TabsTrigger>
               <TabsTrigger value="user">{t('settings.scope.user')}</TabsTrigger>
             </TabsList>
-            {restartPending && (
-              <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
-            )}
+            <div className="flex items-center gap-2">
+              {scope === 'workspace' ? workspaceControl : null}
+              {restartPending && (
+                <Badge variant="secondary">
+                  {t('settings.requiresRestart')}
+                </Badge>
+              )}
+            </div>
           </div>
         )}
 

@@ -4396,26 +4396,86 @@ describe('WebShellSidebar workspace removal', () => {
     expect(menuItemLabels()).toContain('Reload runtime');
   });
 
-  it('opens management pages for the primary workspace only', () => {
+  it('opens capability-gated management pages for trusted primary and secondary workspaces and offers Trust for untrusted workspaces', async () => {
     const onOpenWorkspaceManagement = vi.fn();
+    const grantWorkspaceTrust = vi.fn().mockResolvedValue({ ok: true });
+    const baseWorkspaceByCwd = workspace.client.workspaceByCwd;
+    workspace.client.workspaceByCwd = vi.fn((cwd: string) => ({
+      ...baseWorkspaceByCwd(cwd),
+      grantWorkspaceTrust,
+    }));
+    connection.capabilities = {
+      ...connection.capabilities,
+      features: [
+        ...(connection.capabilities.features ?? []),
+        'workspace_trust_grant',
+      ],
+    };
     renderSidebar({ onOpenWorkspaceManagement });
 
+    // Without workspace_skills_config_runtime or channel_management, a
+    // secondary trusted workspace exposes MCP, Extensions and Settings only.
     act(() => click(workspaceAction('/tmp/other')!));
-    expect(menuItemLabels()).not.toContain('MCP');
-    act(() => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-    });
-
-    act(() => click(workspaceAction('/tmp/project')!));
-    const mcp = Array.from(
+    expect(menuItemLabels()).toContain('MCP');
+    expect(menuItemLabels()).toContain('Extensions');
+    expect(menuItemLabels()).toContain('Settings');
+    expect(menuItemLabels()).not.toContain('Skills');
+    expect(menuItemLabels()).not.toContain('Channels');
+    const secondaryMcp = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
     ).find((element) => element.textContent?.startsWith('MCP'));
-    expect(mcp).toBeDefined();
-    act(() => click(mcp!));
+    expect(secondaryMcp).toBeDefined();
+    act(() => click(secondaryMcp!));
+    expect(onOpenWorkspaceManagement).toHaveBeenCalledWith('mcp', '/tmp/other');
+
+    // Primary still exposes its full management list.
+    act(() => click(workspaceAction('/tmp/project')!));
+    const primaryMcp = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent?.startsWith('MCP'));
+    expect(primaryMcp).toBeDefined();
+    act(() => click(primaryMcp!));
     expect(onOpenWorkspaceManagement).toHaveBeenCalledWith(
       'mcp',
       '/tmp/project',
     );
+
+    // Untrusted workspace exposes Trust instead of management entries.
+    act(() => click(workspaceAction('/tmp/danger')!));
+    expect(menuItemLabels()).not.toContain('MCP');
+    expect(menuItemLabels()).toContain('Trust workspace');
+    const trustItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent?.trim() === 'Trust workspace');
+    expect(trustItem).toBeDefined();
+    await act(async () => {
+      click(trustItem!);
+      await Promise.resolve();
+    });
+    expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/tmp/danger');
+    expect(grantWorkspaceTrust).toHaveBeenCalledTimes(1);
+
+    // Enabling split skills and channels surfaces both on secondary rows.
+    connection.capabilities = {
+      ...connection.capabilities,
+      features: [
+        ...(connection.capabilities.features ?? []),
+        'workspace_skills_config_runtime',
+        'channel_management',
+      ],
+    };
+    workspace.capabilities = {
+      ...workspace.capabilities,
+      features: [
+        ...(workspace.capabilities.features ?? []),
+        'workspace_skills_config_runtime',
+        'channel_management',
+      ],
+    };
+    renderSidebar({ onOpenWorkspaceManagement });
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).toContain('Skills');
+    expect(menuItemLabels()).toContain('Channels');
   });
 
   it('removes the selected workspace and falls back to primary', async () => {

@@ -816,7 +816,6 @@ export default {
   'Screen Reader Mode': '屏幕閱讀器模式',
   'Max Session Turns': '最大會話輪次',
   'Skip Next Speaker Check': '跳過下一個說話者檢查',
-  'Skip Loop Detection': '跳過循環檢測',
   'Skip Startup Context': '跳過啟動上下文',
   'Enable OpenAI Logging': '啟用 OpenAI 日誌',
   'OpenAI Logging Directory': 'OpenAI 日誌目錄',

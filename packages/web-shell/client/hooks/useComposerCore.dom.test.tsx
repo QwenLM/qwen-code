@@ -8,6 +8,7 @@ import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
 import {
   type ComposerSubmitCommit,
+  addInlineTagEffect,
   clearComposerDraftIfMatches,
   captureComposerDraftGuard,
   getInlineComposerTags,
@@ -357,6 +358,228 @@ describe('useComposerCore tooltip portal', () => {
     ).not.toBeNull();
     host.remove();
   });
+});
+
+describe('custom inline draft tags', () => {
+  const tag = {
+    id: 'orders',
+    value: 'Orders',
+    kind: 'custom-reference',
+    serialized: '<ref:orders>',
+  };
+  const parseUserMessageContent: UserMessageContentParser = (content) =>
+    content
+      .split(/(<ref:orders>)/)
+      .map((text) =>
+        text === tag.serialized ? { type: 'tag', tag } : { type: 'text', text },
+      );
+
+  it('restores only the inserted occurrence after saving, and preserves a literal-only draft', async () => {
+    const options = { sessionId: 'custom-inline', parseUserMessageContent };
+    await mount(options);
+    act(() => {
+      latest!.setText(`literal ${tag.serialized} and `);
+      latest!.addTags([{ ...tag, metadata: { unavailable: BigInt(1) } }], {
+        placement: 'inline',
+      });
+      latest!.insertText(' afterward');
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    const original = latest!.getText();
+    const storageKey = getSessionDraftKey(options.sessionId);
+    expect(localStorage.getItem(storageKey)).toContain(original);
+
+    act(() => root!.unmount());
+    container!.remove();
+    await mount(options);
+    expect(latest!.getText()).toBe(original);
+    const editor = container!.querySelector('.cm-content')!;
+    expect(editor.textContent).toContain(
+      `literal ${tag.serialized} and Orders`,
+    );
+    const remove = editor.querySelector<HTMLButtonElement>(
+      '[aria-label="Remove Orders"]',
+    )!;
+    act(() => {
+      remove.click();
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    const remaining = latest!.getText();
+    expect(remaining.split(tag.serialized)).toHaveLength(2);
+    act(() => root!.unmount());
+    container!.remove();
+    await mount(options);
+    expect(latest!.getText()).toBe(remaining);
+    expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
+  });
+
+  it('hydrates legacy drafts on mount and session switch without covering a saved file tag', async () => {
+    const before = `look at ${tag.serialized}`;
+    const after = `${tag.serialized} and ${tag.serialized}`;
+    localStorage.setItem(getSessionDraftKey('custom-legacy'), before);
+    localStorage.setItem(
+      getSessionDraftKey('mixed-legacy'),
+      '\0qwen-file-draft:1:' +
+        JSON.stringify({
+          text: after,
+          inlineTags: [
+            {
+              start: 0,
+              end: tag.serialized.length,
+              tag: { ...tag, kind: 'file' },
+            },
+          ],
+          tags: [],
+        }),
+    );
+    const mounted = await mount({
+      sessionId: 'custom-legacy',
+      parseUserMessageContent,
+      persistFileReferences: true,
+    });
+    expect(latest!.getText()).toBe(before);
+    expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([tag]);
+    mounted.switchSession('mixed-legacy', undefined);
+    expect(latest!.getText()).toBe(after);
+    expect(
+      getInlineComposerTags(latest!.viewRef.current!).map((item) => item.kind),
+    ).toEqual(['file', tag.kind]);
+  });
+
+  it('keeps a legacy draft editable when the parser changes the source', async () => {
+    const sessionId = 'custom-lossy-parser';
+    const text = `keep this ${tag.serialized}`;
+    localStorage.setItem(getSessionDraftKey(sessionId), text);
+    await mount({
+      sessionId,
+      parseUserMessageContent: () => [{ type: 'tag', tag }],
+    });
+    expect(latest!.getText()).toBe(text);
+    expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
+  });
+
+  it('restores large drafts after the first frame and decorates each reference once', async () => {
+    vi.useFakeTimers({
+      toFake: ['requestAnimationFrame', 'cancelAnimationFrame'],
+    });
+    const parser = vi.fn(parseUserMessageContent);
+    const text = `${tag.serialized} ${tag.serialized}\n${'draft\n'.repeat(12_000)}`;
+    localStorage.setItem(
+      getSessionDraftKey('large'),
+      '\0qwen-file-draft:1:' +
+        JSON.stringify({
+          text,
+          tags: [],
+          inlineTags: [
+            {
+              start: 0,
+              end: tag.serialized.length,
+              tag: { ...tag, kind: 'file' },
+            },
+          ],
+          customInlineRanges: [
+            {
+              start: tag.serialized.length + 1,
+              end: tag.serialized.length * 2 + 1,
+            },
+          ],
+        }),
+    );
+    const mounted = await mount({
+      sessionId: 'small',
+      parseUserMessageContent: parser,
+      persistFileReferences: true,
+    });
+    const view = latest!.viewRef.current!;
+    const update = vi.spyOn(view, 'update');
+    const addedKinds = () =>
+      update.mock.calls.flatMap(([transactions]) =>
+        transactions.flatMap((transaction) =>
+          transaction.effects.flatMap((effect) =>
+            effect.is(addInlineTagEffect) ? [effect.value.tag.kind] : [],
+          ),
+        ),
+      );
+
+    mounted.switchSession('large', undefined);
+    expect(latest!.getText()).toBe(text);
+    expect(view.state.selection.main.anchor).toBe(text.length);
+    expect(addedKinds()).toEqual(['file']);
+    act(() => {
+      vi.advanceTimersToNextFrame();
+    });
+    expect(parser).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersToNextFrame();
+    });
+    expect(parser).toHaveBeenCalledExactlyOnceWith(text);
+    expect(addedKinds()).toEqual(['file', tag.kind]);
+    expect(view.state.selection.main.anchor).toBe(text.length);
+    expect(latest!.getText()).toBe(text);
+    update.mockRestore();
+  });
+
+  it.each(['switch', 'unmount'])(
+    'preserves a pending chip range when editing immediately before %s',
+    async (action) => {
+      vi.useFakeTimers({
+        toFake: ['requestAnimationFrame', 'cancelAnimationFrame'],
+      });
+      const parser = vi.fn(parseUserMessageContent);
+      const sessionId = 'pending';
+      const text = `${tag.serialized} \n${'draft\n'.repeat(12_000)}`;
+      localStorage.setItem(
+        getSessionDraftKey(sessionId),
+        '\0qwen-file-draft:1:' +
+          JSON.stringify({
+            text,
+            tags: [],
+            inlineTags: [],
+            customInlineRanges: [{ start: 0, end: tag.serialized.length }],
+          }),
+      );
+      const mounted = await mount({
+        sessionId,
+        parseUserMessageContent: parser,
+      });
+      act(() => {
+        latest!.viewRef.current!.dispatch({
+          changes: { from: 0, insert: `literal ${tag.serialized} and ` },
+          userEvent: 'input.type',
+        });
+      });
+      const edited = latest!.getText();
+      if (action === 'switch') {
+        mounted.switchSession('other', undefined);
+        expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
+      } else {
+        act(() => root!.unmount());
+        container!.remove();
+      }
+      act(() => {
+        vi.advanceTimersToNextFrame();
+        vi.advanceTimersToNextFrame();
+      });
+      expect(parser).not.toHaveBeenCalled();
+
+      if (action === 'switch') {
+        mounted.switchSession(sessionId, undefined);
+      } else {
+        await mount({ sessionId, parseUserMessageContent: parser });
+      }
+      expect(latest!.getText()).toBe(edited);
+      act(() => {
+        vi.advanceTimersToNextFrame();
+        vi.advanceTimersToNextFrame();
+      });
+      expect(parser).toHaveBeenCalledExactlyOnceWith(edited);
+      expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([tag]);
+      expect(container!.querySelector('.cm-content')!.textContent).toContain(
+        `literal ${tag.serialized} and Orders`,
+      );
+    },
+  );
 });
 
 describe('useComposerCore history and drafts', () => {
