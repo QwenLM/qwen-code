@@ -300,6 +300,12 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
     }
 
     @Override
+    public CompletionStage<List<com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt>> drainHarnessReceipts(String tenantId,
+            String sessionId) {
+        return service.drainHarnessReceipts(tenantId, sessionId);
+    }
+
+    @Override
     public CompletionStage<Void> drainWorkspaceResources(String tenantId, String sessionId,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         return service.drainHarnessResources(tenantId, sessionId, authority, false);

@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
@@ -57,7 +58,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     private final ExternalRuntimeClient client;
     private final String providerId;
     private final Duration startupTimeout;
-    protected final HttpRuntimeTransport transport = new HttpRuntimeTransport();
+    protected final RuntimeTransport transport;
     private final ExecutorService executor = Executors.newThreadPerTaskExecutor(
             Thread.ofVirtual().name("runtime-external-", 0).factory());
     // Both maps are guarded by the placements monitor.
@@ -65,9 +66,16 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     private final Map<List<Object>, Placement> placementsByLease = new HashMap<>();
 
     public ExternalRuntimeProvisioner(ExternalRuntimeClient client, String providerId, Duration startupTimeout) {
-        if (client == null || startupTimeout == null || startupTimeout.isNegative() || startupTimeout.isZero()) {
-            throw new IllegalArgumentException("Client and positive startup timeout are required");
+        this(client, providerId, startupTimeout, new HttpRuntimeTransport());
+    }
+
+    public ExternalRuntimeProvisioner(ExternalRuntimeClient client, String providerId, Duration startupTimeout,
+            RuntimeTransport transport) {
+        if (client == null || transport == null || startupTimeout == null || startupTimeout.isNegative()
+                || startupTimeout.isZero()) {
+            throw new IllegalArgumentException("Client, transport and positive startup timeout are required");
         }
+        this.transport = transport;
         this.client = client;
         this.providerId = BrokerValues.requireId(providerId, "providerId");
         this.startupTimeout = startupTimeout;

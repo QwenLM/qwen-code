@@ -340,6 +340,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     }
 
     /** Attests and retires only the saved external worker; the private proof bytes are not fetched. */
+    @Override
     public CompletionStage<Void> stopExternalWorkspaceDrained(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
         requireExternalPublicationIdentity(lease, request, seed, registrationRevision);
@@ -358,6 +359,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
      * control plane, so this returns the worker-local channel the Broker reads
      * from; it never installs a control-plane grant on the worker.
      */
+    @Override
     public CompletionStage<String> externalPublicationBegin(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision,
             Map<String, Object> reference, Map<String, Object> capture, long expiresAt,
@@ -401,6 +403,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
      * empty sequence, so a stream is drained only once that sequence has been
      * acknowledged too.
      */
+    @Override
     public CompletionStage<Map<String, Object>> externalPublicationRead(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision,
             String channelId, String streamId, long sequence, long acknowledgedSequence) {
@@ -498,6 +501,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
      * transport, identity or protocol failure is absence of evidence, never
      * evidence that the worker is gone.
      */
+    @Override
     public CompletionStage<Boolean> externalPublicationReady(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
         try {
@@ -518,6 +522,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
      * Shell may run longer than one lease; a channel frozen at its opening
      * horizon would close mid-command and no drain could ever complete.
      */
+    @Override
     public CompletionStage<Void> externalPublicationRenew(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision,
             String channelId, long expiresAt) {

@@ -2,10 +2,12 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.external;
 
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
@@ -27,18 +29,19 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
     @Override
     public RuntimeProvisioner create(ManagedAgentSettings settings, RuntimeTransport transport,
             RuntimeProviderDependencies dependencies) {
-        validate(settings);
+        validate(settings, dependencies);
         var broker = settings.getRuntimeBroker();
         boolean workspace = ExternalRuntimeKinds.isWorkspace(broker.getProvisioner());
         ExternalStorageRegistry storage = workspace ? dependencies.externalStorage() : null;
-        ExternalHttpRuntimeClient client = new ExternalHttpRuntimeClient(
+        ExternalRuntimeClient client = dependencies.externalRuntime().orElseGet(() -> new ExternalHttpRuntimeClient(
                 URI.create(broker.getExternalProviderUrl()), broker.getExternalProviderToken(),
-                broker.getExternalRequestTimeout());
+                broker.getExternalRequestTimeout()));
+        var externalTransport = dependencies.externalRuntimeTransport().orElseGet(HttpRuntimeTransport::new);
         return workspace
                 ? new ExternalWorkspaceProvisioner(client, storage, broker.getExternalProviderId(),
-                        broker.getExternalStartupTimeout())
+                        broker.getExternalStartupTimeout(), externalTransport)
                 : new ExternalRuntimeProvisioner(client, broker.getExternalProviderId(),
-                        broker.getExternalStartupTimeout());
+                        broker.getExternalStartupTimeout(), externalTransport);
     }
 
     @Override
@@ -75,6 +78,11 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
 
     @Override
     public void validate(ManagedAgentSettings settings) {
+        validate(settings, RuntimeProviderDependencies.NONE);
+    }
+
+    @Override
+    public void validate(ManagedAgentSettings settings, RuntimeProviderDependencies dependencies) {
         var runtimeBroker = settings.getRuntimeBroker();
         var harness = settings.getHarness();
         String provisioner = runtimeBroker.getProvisioner();
@@ -128,28 +136,30 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
             throw new IllegalStateException("External Runtime requires"
                     + " QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false");
         }
-        URI provider;
-        try {
-            provider = URI.create(runtimeBroker.getExternalProviderUrl());
-        } catch (IllegalArgumentException | NullPointerException error) {
-            throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL");
-        }
-        if ((!"http".equals(provider.getScheme()) && !"https".equals(provider.getScheme()))
-                || provider.getHost() == null || provider.getUserInfo() != null
-                || provider.getQuery() != null || provider.getFragment() != null) {
-            throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL"
-                    + " without credentials, query or fragment");
-        }
-        String token = runtimeBroker.getExternalProviderToken();
-        if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
-            throw new IllegalStateException("External Runtime provider token must be 16-4096 safe characters");
-        }
-        // The shipped templates' placeholder satisfies the format rule, but
-        // anyone can read it in the distribution (preflight refuses the same
-        // shape for the Harness token).
-        if (token.startsWith("replace-")) {
-            throw new IllegalStateException("External Runtime provider token is still"
-                    + " the shipped template placeholder");
+        if (dependencies.externalRuntime().isEmpty()) {
+            URI provider;
+            try {
+                provider = URI.create(runtimeBroker.getExternalProviderUrl());
+            } catch (IllegalArgumentException | NullPointerException error) {
+                throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL");
+            }
+            if ((!"http".equals(provider.getScheme()) && !"https".equals(provider.getScheme()))
+                    || provider.getHost() == null || provider.getUserInfo() != null
+                    || provider.getQuery() != null || provider.getFragment() != null) {
+                throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL"
+                        + " without credentials, query or fragment");
+            }
+            String token = runtimeBroker.getExternalProviderToken();
+            if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
+                throw new IllegalStateException("External Runtime provider token must be 16-4096 safe characters");
+            }
+            // The shipped templates' placeholder satisfies the format rule, but
+            // anyone can read it in the distribution (preflight refuses the same
+            // shape for the Harness token).
+            if (token.startsWith("replace-")) {
+                throw new IllegalStateException("External Runtime provider token is still"
+                        + " the shipped template placeholder");
+            }
         }
         String digest = harness.getCapabilityDigest();
         if (StringUtils.isNotBlank(digest) && !digest.matches("sha256:[0-9a-f]{64}")) {

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 public interface RuntimeBrokerOperations {
@@ -16,6 +17,12 @@ public interface RuntimeBrokerOperations {
     public void requestHarnessDrain(String tenantId, String harnessSessionId);
 
     public CompletionStage<Void> drainHarnessSession(String tenantId, String harnessSessionId);
+
+    /** Read-only receipts of this session-isolated binding family, never a latest binding fallback. */
+    public default CompletionStage<List<RuntimeDrainReceipt>> drainHarnessReceipts(String tenantId, String harnessSessionId) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_drain_receipt_unsupported", "Drain receipts are unavailable", false));
+    }
 
     public CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,
             RuntimeLifecycleAuthority authority, boolean stoppedOnly);

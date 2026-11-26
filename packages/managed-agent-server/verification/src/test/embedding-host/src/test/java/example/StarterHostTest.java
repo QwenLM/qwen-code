@@ -78,9 +78,10 @@ class StarterHostTest {
 
     @Test
     void usesDeploymentManagedSchemaWithoutInitializingIt() {
-        try (var context = new SpringApplication(Host.class, Supplied.class)
-                .setWebApplicationType(WebApplicationType.NONE)
-                .run("--qwen.managed-agent.enabled=true", "--qwen.managed-agent.schema.initialize-enabled=false")) {
+        var application = new SpringApplication(Host.class, Supplied.class);
+        application.setWebApplicationType(WebApplicationType.NONE);
+        try (var context = application.run(
+                "--qwen.managed-agent.enabled=true", "--qwen.managed-agent.schema.initialize-enabled=false")) {
             assertNormalSessionRead(context);
             assertThat(ManagedSchema.schemaVersion(context.getBean("managedAgentDataSource", DataSource.class))).isEqualTo(1);
         }
@@ -102,7 +103,9 @@ class StarterHostTest {
         String[] enabled = new String[arguments.length + 1];
         enabled[0] = "--qwen.managed-agent.enabled=true";
         System.arraycopy(arguments, 0, enabled, 1, arguments.length);
-        return new SpringApplication(Host.class).setWebApplicationType(WebApplicationType.NONE).run(enabled);
+        var application = new SpringApplication(Host.class);
+        application.setWebApplicationType(WebApplicationType.NONE);
+        return application.run(enabled);
     }
 
     private static void assertNormalSessionRead(org.springframework.context.ApplicationContext context) {

@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
@@ -14,6 +15,8 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStor
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
+import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -33,13 +36,21 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -285,6 +296,57 @@ class SessionLifecycleServiceResumeTest {
                 .isEqualTo("CLOSED");
         assertThat(store.findOperation(TENANT, sessionId, readmitted.id())
                 .orElseThrow().state()).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void closeProofRequiresAuthorizedCompletedOperationAndMatchingReceipts() {
+        ManagedAgentStore store = workspaceStore(true);
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        String sessionId = transactions.execute(ignored -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(TENANT)
+                .actorId("owner")
+                .idempotencyKey("create")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build()).sessionId());
+        externalFiles(sessionId);
+        String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
+                OperationKind.CLOSE, "owner", "a".repeat(64), "close", "digest", true, 1)
+                .operation().operationId();
+        OperationRecord claimed = store.claimOperation(TENANT, sessionId, operationId,
+                "worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(lifecycle.recoverEffects(claimed).path("neverInitialized").asBoolean()).isTrue();
+        ManagedAgentService sessions = mock(ManagedAgentService.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        SessionLifecycleService service = new SessionLifecycleService(store, sessions,
+                new RequestDigests(), mock(SessionLifecycleCoordinator.class));
+        service.setRuntimeWarmer(runtimeWarmer);
+        SessionPrincipal principal = new SessionPrincipal(TENANT, "owner", null);
+
+        assertThat(service.getPublicCloseProof(principal, sessionId, operationId).drainReceipts()).isEmpty();
+        verify(runtimeWarmer, never()).drainHarnessReceipts(anyString(), anyString());
+
+        var denied = new ManagedAgentException(403, "workspace_forbidden", "Workspace cannot be read.");
+        doThrow(denied).when(sessions).requireReadGrant(any(), eq(new SessionPrincipal(TENANT, "other", null)));
+        assertThatThrownBy(() -> service.getPublicCloseProof(new SessionPrincipal(TENANT, "other", null), sessionId, operationId))
+                .isSameAs(denied);
+        verify(runtimeWarmer, never()).drainHarnessReceipts(anyString(), anyString());
+
+        var receipt = new RuntimeDrainReceipt("binding", 1, "provision",
+                new RuntimeResourceHandle("external-workspace", 1, Map.of("resource", "worker")), Instant.EPOCH);
+        when(runtimeWarmer.drainHarnessReceipts(anyString(), anyString()))
+                .thenReturn(CompletableFuture.completedFuture(List.of(receipt)))
+                .thenReturn(CompletableFuture.completedFuture(List.of()));
+        assertThat(store.completeOperation(TENANT, sessionId, operationId, "worker", claimed.claimGeneration(), true)).isTrue();
+
+        var proof = service.getPublicCloseProof(principal, sessionId, operationId);
+
+        assertThat(proof.operation().status()).isEqualTo("completed");
+        assertThat(proof.drainReceipts()).containsExactly(receipt);
+        assertThat(proof.operation().id()).isEqualTo(operationId);
+        verify(runtimeWarmer).drainHarnessReceipts(TENANT, sessionId);
+        assertThat(service.getPublicCloseProof(principal, sessionId, operationId).drainReceipts()).isEmpty();
     }
 
     // D3: ordinary files moved to lifecycle v2; external-files keeps v1, so

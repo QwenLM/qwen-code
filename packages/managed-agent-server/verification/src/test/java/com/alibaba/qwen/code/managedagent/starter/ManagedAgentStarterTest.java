@@ -49,15 +49,18 @@ class ManagedAgentStarterTest {
     }
 
     @Test
-    void validationOnlyRefusesAnEmptyCatalogWithoutCreatingTables() {
+    void validationOnlyDefersAnEmptyCatalogFailureWithoutCreatingTables() {
         String url = url();
         runner().withPropertyValues(
                 "qwen.managed-agent.enabled=true",
                 "qwen.managed-agent.schema.initialize-enabled=false",
                 "qwen.managed-agent.datasource.url=" + url)
                 .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure()).hasStackTraceContaining("Managed schema validation failed");
+                    assertThat(context).hasNotFailed();
+                    assertThatThrownBy(() -> context.getBean(ManagedAgentService.class).getPublicSession(
+                            new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "owner", null), "missing"))
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasStackTraceContaining("Managed schema validation failed");
                 });
         try (var connection = java.sql.DriverManager.getConnection(url, "", "");
                 var tables = connection.getMetaData().getTables(connection.getCatalog(), null, "ma_%", new String[] {"TABLE"})) {

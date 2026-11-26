@@ -35,7 +35,7 @@ class ModuleArchitectureTest {
             Set<String> permitted = switch (module) {
                 case "server" -> Set.of("server", "contracts", "control-plane", "runtime-broker", "persistence",
                         "adapters", "runtime-http", "runtime-host");
-                case "qwen-managed-agent-spring-boot-starter" -> Set.of("qwen-managed-agent-spring-boot-starter", "server");
+                case "qwen-managed-agent-spring-boot-starter" -> Set.of("qwen-managed-agent-spring-boot-starter", "server", "contracts", "control-plane");
                 case "contracts" -> Set.of("contracts");
                 case "adapters", "runtime-local", "runtime-ssh" -> Set.of(module, "contracts", "runtime-http", "runtime-host");
                 case "runtime-external" -> Set.of(module, "contracts", "runtime-http");

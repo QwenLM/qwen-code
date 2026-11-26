@@ -225,7 +225,7 @@ class ManagedDefinitionPreparationTest {
     @Test
     void preparesADefinitionWithoutAModel() throws Exception {
         var input = new ManagedAgentDefinitionSource.Definition(fixture.ref(), null, "Review.",
-                new ManagedAgentDefinitionSource.ToolPolicy("hosted-workspace-files/1", "default"),
+                new ManagedAgentDefinitionSource.ToolPolicy("hosted-workspace-files/1", null),
                 List.of(), List.of(), List.of());
         org.mockito.Mockito.doReturn(input).when(source).resolve(any(), eq(new Current("agent-1")));
 
@@ -233,8 +233,10 @@ class ManagedDefinitionPreparationTest {
         var replay = service.prepare(command("operation-1", new Current("agent-1")));
 
         assertThat(replay.definition()).isEqualTo(first.definition());
-        assertThat(json.readTree(jdbc.queryForObject("SELECT definition_json FROM ma_agent_definition",
-                String.class)).has("model")).isFalse();
+        var definition = json.readTree(jdbc.queryForObject("SELECT definition_json FROM ma_agent_definition",
+                String.class));
+        assertThat(definition.has("model")).isFalse();
+        assertThat(definition.at("/permission_policy/approval_mode").isMissingNode()).isTrue();
         verify(source, times(1)).resolve(any(), eq(new Current("agent-1")));
     }
 

@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeExtensionCommandVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
@@ -123,6 +124,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     private final RuntimeExecutionCancellation executionCancellation;
     private final RuntimeSessionRelease sessionRelease;
     private final RuntimeDrainCoordinator drainCoordinator;
+    private final RuntimeHarnessLifecycle harnessLifecycle;
     private final RuntimeHoldInventory holdInventory;
     private final RuntimeObservationCoordinator observationCoordinator;
 
@@ -299,6 +301,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 executionRepository, provisioner, transport, bindingProvisioning, executionRecovery,
                 executionDispatcher, sessionRelease, this.brokerOwnerId, this.operationLeaseDuration,
                 clock, closed, this::newBindingRenewal);
+        this.harnessLifecycle = new RuntimeHarnessLifecycle(provisioner, bindingRepository,
+                drainCoordinator, closed, harnessId -> resolveScope(harnessId, false, null),
+                (scope, harnessId) -> provisionRequest(scope, harnessId));
         this.observationCoordinator = new RuntimeObservationCoordinator(sessionResolver, bindingRegistry,
                 bindingProvisioning, bindingRepository, sessionRepository, provisioner, transport,
                 executionRecovery, this.brokerOwnerId, clock, closed);
@@ -325,40 +330,44 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 clock, closed, renewalScheduler);
     }
 
+    @Override
+    public CompletionStage<List<RuntimeDrainReceipt>> drainHarnessReceipts(String tenantId, String harnessSessionId) {
+        return harnessLifecycle.drainHarnessReceipts(tenantId, harnessSessionId);
+    }
+
     public boolean supportsDrainedStop() {
-        return provisioner.supportsDrainedStop();
+        return harnessLifecycle.supportsDrainedStop();
     }
 
     public boolean supportsDrainedStopKind(String kind) {
-        return provisioner.supportsDrainedStopKind(kind);
+        return harnessLifecycle.supportsDrainedStopKind(kind);
     }
 
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
-        return provisioner.supportsDrainedStop(binding);
+        return harnessLifecycle.supportsDrainedStop(binding);
     }
 
     public void requestHarnessDrain(String tenantId, String harnessSessionId) {
-        requireOpen(closed);
-        bindingRepository.requestHarnessDrain(tenantId, harnessSessionId);
+        harnessLifecycle.requestHarnessDrain(tenantId, harnessSessionId);
     }
 
     public CompletionStage<Void> drainHarnessSession(String tenantId, String harnessSessionId) {
-        return drainCoordinator.drainHarnessSession(tenantId, harnessSessionId);
+        return harnessLifecycle.drainHarnessSession(tenantId, harnessSessionId);
     }
 
     public CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,
             RuntimeLifecycleAuthority authority, boolean stoppedOnly) {
-        return drainCoordinator.drainHarnessResources(tenantId, harnessSessionId, authority, stoppedOnly);
+        return harnessLifecycle.drainHarnessResources(tenantId, harnessSessionId, authority, stoppedOnly);
     }
 
     public CompletionStage<Void> prepareHarnessResources(String tenantId, String harnessSessionId,
             RuntimeLifecycleAuthority authority) {
-        return drainCoordinator.prepareHarnessResources(tenantId, harnessSessionId, authority);
+        return harnessLifecycle.prepareHarnessResources(tenantId, harnessSessionId, authority);
     }
 
     public CompletionStage<Void> retireStorageBinding(String tenantId, String storageId,
             String operationId, String bindingId, long generation) {
-        return drainCoordinator.retireStorageBinding(tenantId, storageId, operationId, bindingId, generation);
+        return harnessLifecycle.retireStorageBinding(tenantId, storageId, operationId, bindingId, generation);
     }
 
     public CompletionStage<RuntimeBindingRecord> warm(
@@ -369,17 +378,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     /** 只读查询可信会话对应的当前 Workspace 绑定，不分配也不预热运行时。 */
     public CompletionStage<RuntimeBindingRecord> findBindingForHarnessSession(
             String tenantId, String harnessSessionId) {
-        requireOpen(closed);
-        String harnessId = BrokerValues.requireId(
-                harnessSessionId, "harnessSessionId");
-        return resolveScope(harnessId, false, null).thenApply(scope -> {
-            if (!scope.getTenantId().equals(tenantId)) {
-                throw conflict("runtime_session_conflict",
-                        "Harness Session belongs to another tenant");
-            }
-            return bindingRepository.findLatestForRequest(
-                    provisionRequest(scope, harnessId));
-        });
+        return harnessLifecycle.findBindingForHarnessSession(tenantId, harnessSessionId);
     }
 
     public CompletionStage<RuntimeScope> capabilities(

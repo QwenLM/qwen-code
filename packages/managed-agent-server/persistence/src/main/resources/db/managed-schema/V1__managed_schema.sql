@@ -827,6 +827,7 @@ CREATE TABLE ma_workspace (
     display_name VARCHAR(512) NOT NULL COMMENT 'User-visible Workspace name.',
     config_ref VARBINARY(2048) NOT NULL COMMENT 'Reference to the Workspace execution configuration.',
     policy_ref VARBINARY(2048) NOT NULL COMMENT 'Reference to the Workspace execution policy.',
+    materialization_receipt_key CHAR(64) COMMENT 'Receipt that created this Workspace through external materialization.',
     state VARCHAR(16) NOT NULL COMMENT 'Workspace lifecycle state: ACTIVE, DRAINING, or REMOVED.',
     CONSTRAINT uk_ma_workspace_business_key UNIQUE (tenant_id, workspace_id),
     CONSTRAINT ck_ma_workspace_generation CHECK (workspace_generation > 0),
