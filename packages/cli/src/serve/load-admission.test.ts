@@ -12,6 +12,8 @@ import {
   EVENT_LOOP_LAG_EXIT_MS,
   LOAD_ADMISSION_SAMPLE_MS,
   LOAD_ADMISSION_SUSTAIN_SAMPLES,
+  LOAD_CORROBORATION_ENTER_MS,
+  LOAD_CORROBORATION_EXIT_MS,
   LOAD_RATIO_ENTER,
   LOAD_RATIO_EXIT,
   type LoadAdmissionSignals,
@@ -55,7 +57,7 @@ describe('createLoadAdmissionMonitor', () => {
 
   it('engages the CPU signal only after sustained enter readings', () => {
     const monitor = makeMonitor();
-    signals = { loadRatio: LOAD_RATIO_ENTER, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_ENTER, eventLoopLagP99Ms: 300 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
     expect(monitor.snapshot().overloaded).toBe(false);
     tick(1);
@@ -69,11 +71,11 @@ describe('createLoadAdmissionMonitor', () => {
 
   it('resets the enter streak on a single low reading', () => {
     const monitor = makeMonitor();
-    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
-    signals = { loadRatio: 0.5, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: 0.5, eventLoopLagP99Ms: 300 };
     tick(1);
-    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
     expect(monitor.snapshot().overloaded).toBe(false);
     tick(1);
@@ -83,19 +85,19 @@ describe('createLoadAdmissionMonitor', () => {
 
   it('releases the CPU signal only below the exit threshold, sustained', () => {
     const monitor = makeMonitor();
-    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
     expect(monitor.snapshot().overloaded).toBe(true);
 
     // Inside the hysteresis band: stays overloaded.
     signals = {
       loadRatio: (LOAD_RATIO_ENTER + LOAD_RATIO_EXIT) / 2,
-      eventLoopLagP99Ms: 5,
+      eventLoopLagP99Ms: 300,
     };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 2);
     expect(monitor.snapshot().overloaded).toBe(true);
 
-    signals = { loadRatio: LOAD_RATIO_EXIT - 0.1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_EXIT - 0.1, eventLoopLagP99Ms: 300 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
     expect(monitor.snapshot().overloaded).toBe(true);
     tick(1);
@@ -195,21 +197,21 @@ describe('createLoadAdmissionMonitor', () => {
     const monitor = makeMonitor();
     // Engage, then release: leaves stale enter/exit streaks behind unless
     // each flip clears the opposite counter.
-    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
-    signals = { loadRatio: LOAD_RATIO_EXIT - 0.1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_EXIT - 0.1, eventLoopLagP99Ms: 300 };
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
     expect(monitor.snapshot().overloaded).toBe(false);
 
     // One high reading must not re-engage immediately (stale enter streak).
-    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
     tick(1);
     expect(monitor.snapshot().overloaded).toBe(false);
     tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
     expect(monitor.snapshot().overloaded).toBe(true);
 
     // One low reading must not release immediately (stale exit streak).
-    signals = { loadRatio: LOAD_RATIO_EXIT - 0.1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_EXIT - 0.1, eventLoopLagP99Ms: 300 };
     tick(1);
     expect(monitor.snapshot().overloaded).toBe(true);
     monitor.dispose();
@@ -220,7 +222,7 @@ describe('createLoadAdmissionMonitor', () => {
       readSignals: () => signals,
       sampleMs: 500,
     });
-    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
     vi.advanceTimersByTime(500 * (LOAD_ADMISSION_SUSTAIN_SAMPLES - 1));
     expect(monitor.snapshot().overloaded).toBe(false);
     vi.advanceTimersByTime(500);
@@ -255,6 +257,143 @@ describe('createLoadAdmissionMonitor', () => {
       eventLoopLagP99Ms: 0,
       sampledAtMs: 0,
     });
+  });
+
+  it('never engages on the 2026-11-26 Spotlight storm shape', () => {
+    // Incident replay: load ratio 10.8 with a healthy 25 ms loop must not
+    // refuse creations, no matter how long the storm lasts.
+    const monitor = makeMonitor();
+    signals = { loadRatio: 10.8, eventLoopLagP99Ms: 25 };
+    tick(30);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: false,
+      reason: null,
+      loadRatio: 10.8,
+    });
+    monitor.dispose();
+  });
+
+  it('engages only when the lag corroborates the high ratio', () => {
+    const monitor = makeMonitor();
+    signals = {
+      loadRatio: LOAD_RATIO_ENTER + 1,
+      eventLoopLagP99Ms: LOAD_CORROBORATION_ENTER_MS - 1,
+    };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 2);
+    expect(monitor.snapshot().overloaded).toBe(false);
+
+    signals = {
+      loadRatio: LOAD_RATIO_ENTER + 1,
+      eventLoopLagP99Ms: LOAD_CORROBORATION_ENTER_MS,
+    };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
+    expect(monitor.snapshot().overloaded).toBe(false);
+    tick(1);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: true,
+      reason: 'cpu_load',
+    });
+    monitor.dispose();
+  });
+
+  it('leaves the CPU signal inert below the ratio enter even with extreme lag', () => {
+    const monitor = makeMonitor();
+    signals = {
+      loadRatio: LOAD_RATIO_ENTER - 0.1,
+      eventLoopLagP99Ms: EVENT_LOOP_LAG_ENTER_MS,
+    };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: true,
+      reason: 'event_loop_lag',
+    });
+    monitor.dispose();
+  });
+
+  it('releases when the loop turns healthy even while host load stays high', () => {
+    const monitor = makeMonitor();
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().overloaded).toBe(true);
+
+    signals = {
+      loadRatio: LOAD_RATIO_ENTER + 1,
+      eventLoopLagP99Ms: LOAD_CORROBORATION_EXIT_MS - 1,
+    };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
+    expect(monitor.snapshot().overloaded).toBe(true);
+    tick(1);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: false,
+      reason: null,
+    });
+    monitor.dispose();
+  });
+
+  it('stays engaged while the lag hovers inside the corroboration band', () => {
+    const monitor = makeMonitor();
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().overloaded).toBe(true);
+
+    signals = {
+      loadRatio: LOAD_RATIO_ENTER + 1,
+      eventLoopLagP99Ms:
+        (LOAD_CORROBORATION_ENTER_MS + LOAD_CORROBORATION_EXIT_MS) / 2,
+    };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 2);
+    expect(monitor.snapshot().overloaded).toBe(true);
+    monitor.dispose();
+  });
+
+  it('debounces the corroboration: alternating healthy lag resets the streak', () => {
+    const monitor = makeMonitor();
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES * 2; i++) {
+      signals = {
+        loadRatio: LOAD_RATIO_ENTER + 1,
+        eventLoopLagP99Ms: i % 2 === 0 ? 300 : 5,
+      };
+      tick(1);
+      expect(monitor.snapshot().overloaded).toBe(false);
+    }
+    monitor.dispose();
+  });
+
+  it('holds at the exact corroboration exit boundary', () => {
+    const monitor = makeMonitor();
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().overloaded).toBe(true);
+
+    // Exactly LOAD_CORROBORATION_EXIT_MS is inside the hold band: the
+    // strict `<` matters, a `<=` here would release the gate early.
+    signals = {
+      loadRatio: LOAD_RATIO_ENTER + 1,
+      eventLoopLagP99Ms: LOAD_CORROBORATION_EXIT_MS,
+    };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 2);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: true,
+      reason: 'cpu_load',
+    });
+    monitor.dispose();
+  });
+
+  it('debounces the corroboration exit: a non-exit reading resets the streak', () => {
+    const monitor = makeMonitor();
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().overloaded).toBe(true);
+
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES * 2; i++) {
+      signals = {
+        loadRatio: LOAD_RATIO_ENTER + 1,
+        eventLoopLagP99Ms: i % 2 === 0 ? LOAD_CORROBORATION_EXIT_MS - 1 : 300,
+      };
+      tick(1);
+      expect(monitor.snapshot().overloaded).toBe(true);
+    }
+    monitor.dispose();
   });
 });
 
@@ -402,7 +541,7 @@ describe('load admission observation-gap latch', () => {
   it('keeps the gap latch while CPU load stays overloaded across timely ticks', () => {
     const monitor = makeMonitor();
     // Arm CPU overload first, then stall to also latch observation_gap.
-    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
     for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES; i++) {
       monoNow += LOAD_ADMISSION_SAMPLE_MS;
       vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
@@ -553,7 +692,7 @@ describe('load admission observation-gap latch', () => {
 
     // Overdue tick lands with high CPU: latches gap (streak 0) and starts
     // CPU enterStreak = 1.
-    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
     monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
     vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
     expect(monitor.snapshot().reason).toBe('observation_gap');

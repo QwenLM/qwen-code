@@ -4,6 +4,18 @@
 
 Status: implemented
 
+Revision 2026-11-26: the CPU signal now requires event-loop-lag corroboration
+to engage, and releases when the daemon loop is healthy again. A post-reboot
+Spotlight indexing storm engaged the raw ratio gate for ~13 minutes on a
+10-core Mac while CPUs were 63% idle and the daemon's p99 lag stayed at
+21–30 ms (load ratio peaked at 10.8); the gate also flapped open briefly
+in load troughs and re-closed. Files: `load-admission.ts`,
+`load-admission.test.ts`, this design doc pair, and the published contract
+docs (`docs/users/qwen-serve.md`, `docs/developers/qwen-serve-protocol.md`,
+`docs/developers/daemon/17-configuration.md`,
+`docs/developers/daemon/18-error-taxonomy.md`). See "Corroborated CPU
+signal" under design decisions.
+
 ## Problem
 
 When the host is already under heavy load, the daemon keeps admitting new
@@ -72,14 +84,24 @@ interface LoadAdmissionSnapshot {
 }
 ```
 
-Two signals, each with enter/exit thresholds (hysteresis), plus a monotonic
-observation-gap latch:
+Two signals with enter/exit thresholds (hysteresis), plus a monotonic
+observation-gap latch. The CPU signal is corroborated by the event-loop lag:
+it engages only when the daemon loop already feels the pressure, and
+releases once the loop is healthy again, even if host load stays elevated:
 
-| Signal / latch  | Source                                                                 | Enter         | Exit                   |
-| --------------- | ---------------------------------------------------------------------- | ------------- | ---------------------- |
-| CPU load        | `os.loadavg()[0] / os.cpus().length`                                   | ratio ≥ 2.0   | ratio < 1.0            |
-| Event-loop lag  | `monitorEventLoopDelay({ resolution: 20 })`, percentile(99) per window | p99 ≥ 1000 ms | p99 < 250 ms           |
-| Observation gap | monotonic age (`performance.now()`) since last tick                    | age > 3 ticks | 3 timely healthy ticks |
+| Signal / latch  | Source                                                                 | Enter                            | Exit                            |
+| --------------- | ---------------------------------------------------------------------- | -------------------------------- | ------------------------------- |
+| CPU load        | `os.loadavg()[0] / os.cpus().length`                                   | ratio ≥ 2.0 AND lag p99 ≥ 250 ms | ratio < 1.0 OR lag p99 < 100 ms |
+| Event-loop lag  | `monitorEventLoopDelay({ resolution: 20 })`, percentile(99) per window | p99 ≥ 1000 ms                    | p99 < 250 ms                    |
+| Observation gap | monotonic age (`performance.now()`) since last tick                    | age > 3 ticks                    | 3 timely healthy ticks          |
+
+The corroboration thresholds are exported constants
+(`LOAD_CORROBORATION_ENTER_MS = 250`, `LOAD_CORROBORATION_EXIT_MS = 100`),
+independent of the lag signal's own band so the two can be tuned separately.
+The enter side matches the lag signal's healthy-exit boundary (250 ms) by
+design: above it the daemon is no longer comfortably healthy. The exit side
+sits well below (100 ms) so a loop hovering in the 100–250 ms band neither
+engages nor releases the CPU signal on its own.
 
 A signal flips state only after the flip condition holds for 3 consecutive
 samples (6 seconds), with each signal maintaining its own sustain counters.
@@ -200,6 +222,21 @@ as today.
   including pressure from processes outside the daemon. Event-loop lag
   captures daemon starvation directly, and still works on Windows where
   `os.loadavg()` is always zero.
+- **Corroborated CPU signal.** Load average counts uninterruptible IO wait
+  on both Linux and macOS, so a raw ratio gate refuses creations during IO
+  storms while CPUs and the daemon loop are idle. On 2026-11-26 a
+  post-reboot Spotlight indexing storm held a 10-core Mac at load ratio
+  10.8 (peak) with CPU 63% idle, daemon p99 lag 21–30 ms, and zero swap;
+  the gate refused session loads for ~13 minutes and flapped open only in
+  brief load troughs. The CPU signal therefore engages only when the lag
+  corroborates it (p99 ≥ 250 ms) — the daemon is already feeling the
+  pressure — and releases when either the load drains below its exit ratio
+  or the loop is healthy again (p99 < 100 ms). Host busyness alone no longer
+  refuses a healthy daemon. Protection is preserved: the freeze this gate
+  guards against is daemon starvation by definition, which the corroborated
+  CPU signal catches earlier than the lag-alone signal (250 ms vs 1000 ms),
+  and the lag-alone signal plus the observation-gap latch still cover hard
+  stalls, Windows, and container starvation.
 - **Observation-gap latch.** A stalled event loop runs no ticks, so the cached verdict would stay healthy exactly when the lag signal matters. The monitor latches `observation_gap` when the monotonic age of the last tick exceeds three intervals and refuses through the same 503 family; the latch clears only after three timely healthy ticks, skipped intervals never count as healthy readings, and cold start (no tick yet) stays fail-open. The freshness clock is monotonic (`performance.now()`), not `Date.now()`, so NTP steps and suspends cannot fake a gap.
 - **Host scope on both sides of the ratio.** `/proc/loadavg` is not
   namespaced, while `os.availableParallelism()` honours cgroup quota and
@@ -231,12 +268,17 @@ as today.
 - **Windows:** `os.loadavg()` returns zeros, so the CPU signal is inert
   there; the lag signal remains active.
 - **cgroups:** load average is host-wide, not container-scoped. A container
-  with a CPU quota can see high host load while itself idle, producing false
-  refusals. The lag signal is daemon-local and unaffected; operators can
-  `--no-load-admission`. cgroup PSI pressure is a follow-up.
-- **Linux IO wait:** load average counts uninterruptible IO wait, so an
-  IO-heavy host can engage the CPU signal with idle CPUs. The conservative
-  threshold and the opt-out bound the impact.
+  with a CPU quota can see high host load while itself idle; since the
+  2026-11-26 revision that alone no longer engages the CPU signal (the idle
+  container's loop stays healthy). The lag signal is daemon-local and
+  unaffected; operators can still `--no-load-admission`. cgroup PSI pressure
+  is a follow-up.
+- **IO wait (Linux and macOS):** load average counts uninterruptible IO
+  wait, so an IO-heavy host shows high load with idle CPUs. Since the
+  2026-11-26 revision the CPU signal requires lag corroboration, so pure IO
+  storms (indexing, backups) no longer engage it while the daemon loop is
+  healthy; a storm that also starves the daemon still engages via the lag
+  signal.
 - **False positives block creation.** The refusal is visible (toast, status
   issue, daemon log) and reversible (opt-out, load subsiding). The gate never
   touches work already admitted.
@@ -246,7 +288,9 @@ as today.
 ## Validation plan
 
 - Unit tests (collocated): monitor enter/exit/debounce matrix per signal and
-  combined, dispose, zero-load inertness; controller overload refusal with
+  combined, including the CPU corroboration matrix and a replay of the
+  2026-11-26 incident (load ratio 10.8 with 25 ms lag must never engage),
+  dispose, zero-load inertness; controller overload refusal with
   reservation/release invariants and disabled pass-through; REST and RPC
   error mapping. A scheduled-task per-run refusal also preserves the overload
   fields, `Retry-After`, the bound parent session, the failed-run marker and
@@ -256,18 +300,28 @@ as today.
   admitted under load). Post-implementation groups against the local build:
   real CPU-burner load → `503 system_overloaded` on create while live-session
   prompt/cancel stay usable, recovery after load stops; `--no-load-admission`
-  admits under the same load; status reports the state.
+  admits under the same load; status reports the state. Corroboration A/B
+  (`.qwen/e2e-tests/load-admission-corroboration.md`): low-priority CPU
+  burners raise host load while the daemon loop stays healthy — the
+  pre-revision build refuses creation with `cpu_load`, the revised build
+  admits it and reports `overloaded: false`.
 - `npm run build && npm run typecheck`, focused vitest per changed package.
 
 ## Acceptance criteria
 
-- Under sustained saturation (load ratio ≥ 2.0 or event-loop p99 ≥ 1000 ms
-  for ≥ 6 seconds), creating a session returns `503 system_overloaded` with
-  `Retry-After`, and no child process is spawned.
+- Under sustained saturation (load ratio ≥ 2.0 with event-loop p99 ≥ 250 ms,
+  or event-loop p99 ≥ 1000 ms alone, for ≥ 6 seconds), creating a session
+  returns `503 system_overloaded` with `Retry-After`, and no child process
+  is spawned.
+- Sustained high host load never engages the CPU signal while the loop
+  stays below the corroboration enter (p99 < 250 ms); creations are
+  admitted. Once engaged, a loop hovering in the 100–250 ms band holds the
+  gate — release needs ratio < 1.0 or p99 < 100 ms.
 - During overload, prompts to live sessions, cancel, detach, status, and SSE
   keep working.
 - After every active signal stays below its exit threshold for ≥ 6 seconds
-  (3 consecutive samples), creations are admitted again — or, if the
+  (3 consecutive samples) — the CPU signal exits when the load ratio < 1.0
+  or the lag p99 < 100 ms — creations are admitted again; or, if the
   `observation_gap` latch also engaged during a stall, after 3 further
   timely healthy ticks once both signals are clear (~10 seconds total after
   the stall ends).
@@ -279,8 +333,10 @@ as today.
 
 ## Open questions
 
-- Threshold tuning (2.0/1.0 ratio, 1000/250 ms lag, 3 samples at 2 s) after
-  real-world observation; intentionally constants for now.
+- Threshold tuning (2.0/1.0 ratio, 1000/250 ms lag, 250/100 ms corroboration,
+  3 samples at 2 s) after real-world observation; intentionally constants
+  for now. The corroboration band was added 2026-11-26 after the Spotlight
+  storm incident; the ratio and lag bands are unchanged.
 - Memory-pressure signal and cgroup-aware CPU pressure: follow-up.
 - Dedicated Web Shell overload banner and create-button disabling from the
   status section: follow-up.

@@ -12,6 +12,8 @@ export const LOAD_RATIO_ENTER = 2.0;
 export const LOAD_RATIO_EXIT = 1.0;
 export const EVENT_LOOP_LAG_ENTER_MS = 1_000;
 export const EVENT_LOOP_LAG_EXIT_MS = 250;
+export const LOAD_CORROBORATION_ENTER_MS = 250;
+export const LOAD_CORROBORATION_EXIT_MS = 100;
 export const LOAD_ADMISSION_SUSTAIN_SAMPLES = 3;
 
 export type LoadAdmissionReason =
@@ -72,22 +74,28 @@ function freshSignalState(): SignalState {
 
 // Hysteresis + sustain: a flip needs LOAD_ADMISSION_SUSTAIN_SAMPLES
 // consecutive readings past the flip threshold, so a single heavy parse or
-// a momentary dip neither engages nor releases the gate.
+// a momentary dip neither engages nor releases the gate. An optional
+// corroboration couples the flip to a second signal: enter additionally
+// requires it, exit is satisfied by either the value draining or the
+// corroboration clearing.
 function advanceSignal(
   state: SignalState,
   value: number,
   enter: number,
   exit: number,
+  corroborate?: { enter: boolean; exit: boolean },
 ): void {
   if (!state.overloaded) {
-    state.enterStreak = value >= enter ? state.enterStreak + 1 : 0;
+    const enterOk = value >= enter && (corroborate?.enter ?? true);
+    state.enterStreak = enterOk ? state.enterStreak + 1 : 0;
     if (state.enterStreak >= LOAD_ADMISSION_SUSTAIN_SAMPLES) {
       state.overloaded = true;
       state.exitStreak = 0;
     }
     return;
   }
-  state.exitStreak = value < exit ? state.exitStreak + 1 : 0;
+  const exitOk = value < exit || (corroborate?.exit ?? false);
+  state.exitStreak = exitOk ? state.exitStreak + 1 : 0;
   if (state.exitStreak >= LOAD_ADMISSION_SUSTAIN_SAMPLES) {
     state.overloaded = false;
     state.enterStreak = 0;
@@ -153,7 +161,16 @@ export function createLoadAdmissionMonitor(
     lastTickMono = mono;
     latest = readSignals!();
     sampledAtMs = Date.now();
-    advanceSignal(cpu, latest.loadRatio, LOAD_RATIO_ENTER, LOAD_RATIO_EXIT);
+    // loadavg counts uninterruptible IO wait on Linux and macOS: an
+    // indexing storm otherwise refuses creations while CPUs and this loop
+    // are idle (2026-11-26: ratio 10.8, 63% idle CPU, p99 21–30 ms, ~13 min
+    // of false refusals). Engage only when the loop already feels the
+    // pressure; release once it is healthy again, even if host load stays
+    // high.
+    advanceSignal(cpu, latest.loadRatio, LOAD_RATIO_ENTER, LOAD_RATIO_EXIT, {
+      enter: latest.eventLoopLagP99Ms >= LOAD_CORROBORATION_ENTER_MS,
+      exit: latest.eventLoopLagP99Ms < LOAD_CORROBORATION_EXIT_MS,
+    });
     advanceSignal(
       lag,
       latest.eventLoopLagP99Ms,
