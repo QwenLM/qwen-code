@@ -23,6 +23,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -1518,7 +1519,7 @@ describe('qwen serve — prompt clientId admission', () => {
 });
 
 describe('qwen serve — archive coordinator over real HTTP', () => {
-  it('moves a no-sidecar batch through archive and unarchive without losing transcripts', async () => {
+  it('preserves original transcript records through real HTTP archive and unarchive', async () => {
     const firstId = randomUUID();
     const secondId = randomUUID();
     const activePaths = [firstId, secondId].map((sessionId) =>
@@ -1529,6 +1530,9 @@ describe('qwen serve — archive coordinator over real HTTP', () => {
     const archivedPaths = activePaths.map((activePath) =>
       path.join(path.dirname(activePath), 'archive', path.basename(activePath)),
     );
+    const transcriptBytes = activePaths.map((activePath) =>
+      readFileSync(activePath),
+    );
 
     const archived = await client.archiveSessionsData([firstId, secondId], {
       requireIdle: false,
@@ -1538,6 +1542,9 @@ describe('qwen serve — archive coordinator over real HTTP', () => {
     for (const [index, activePath] of activePaths.entries()) {
       expect(existsSync(activePath)).toBe(false);
       expect(existsSync(archivedPaths[index]!)).toBe(true);
+      expect(readFileSync(archivedPaths[index]!)).toEqual(
+        transcriptBytes[index],
+      );
     }
 
     const unarchived = await client.unarchiveSessionsData([firstId, secondId]);
@@ -1546,6 +1553,15 @@ describe('qwen serve — archive coordinator over real HTTP', () => {
     for (const [index, activePath] of activePaths.entries()) {
       expect(existsSync(activePath)).toBe(true);
       expect(existsSync(archivedPaths[index]!)).toBe(false);
+      const restoredLines = readFileSync(activePath, 'utf8').trim().split('\n');
+      expect(restoredLines[0]).toBe(
+        transcriptBytes[index]!.toString('utf8').trim(),
+      );
+      for (const line of restoredLines.slice(1)) {
+        const record = JSON.parse(line) as { type: string; sessionId: string };
+        expect(record.type).toBe('system');
+        expect(record.sessionId).toBe([firstId, secondId][index]);
+      }
     }
     expect(
       (await fetch(`${base}/health`)).status,
