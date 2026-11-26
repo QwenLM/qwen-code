@@ -8,8 +8,9 @@
 循环恢复健康后退出。一次重启后的 Spotlight 索引风暴曾让原始 ratio 闸门在
 一台 10 核 Mac 上持续拒绝约 13 分钟，而当时 CPU 63% 空闲、daemon p99 延迟
 仅 21–30 ms（load ratio 峰值 10.8）；闸门还在负荷波谷短暂打开后
-重新关闭。涉及文件：`load-admission.ts`、`load-admission.test.ts`、本设计
-文档对，以及已发布契约文档（`docs/users/qwen-serve.md`、
+重新关闭。涉及文件：`load-admission.ts`、`load-admission.test.ts`、CLI
+帮助与选项注释（`commands/serve.ts`、`serve/types.ts`）、本设计文档对，
+以及已发布契约文档（`docs/users/qwen-serve.md`、
 `docs/developers/qwen-serve-protocol.md`、
 `docs/developers/daemon/17-configuration.md`、
 `docs/developers/daemon/18-error-taxonomy.md`）。见设计决策中的

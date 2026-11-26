@@ -10,8 +10,10 @@ Spotlight indexing storm engaged the raw ratio gate for ~13 minutes on a
 10-core Mac while CPUs were 63% idle and the daemon's p99 lag stayed at
 21–30 ms (load ratio peaked at 10.8); the gate also flapped open briefly
 in load troughs and re-closed. Files: `load-admission.ts`,
-`load-admission.test.ts`, this design doc pair, and the published contract
-docs (`docs/users/qwen-serve.md`, `docs/developers/qwen-serve-protocol.md`,
+`load-admission.test.ts`, the CLI help and option comment
+(`commands/serve.ts`, `serve/types.ts`), this design doc pair, and the
+published contract docs (`docs/users/qwen-serve.md`,
+`docs/developers/qwen-serve-protocol.md`,
 `docs/developers/daemon/17-configuration.md`,
 `docs/developers/daemon/18-error-taxonomy.md`). See "Corroborated CPU
 signal" under design decisions.

@@ -524,6 +524,22 @@ describe('load admission observation-gap latch', () => {
       now: () => monoNow,
     });
 
+  it('stays fail-open before the first tick even at a large process uptime', () => {
+    // A runtime rebuild creates a fresh monitor in a long-lived daemon
+    // whose monotonic clock is already far past three intervals. The
+    // cold-start null guard must keep the pre-tick snapshot fail-open
+    // instead of latching observation_gap from (uptime - 0); fake-timer
+    // clocks start at 0 and cannot expose that, so inject a large epoch.
+    monoNow = 100_000;
+    const monitor = makeMonitor();
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: false,
+      reason: null,
+      sampledAtMs: 0,
+    });
+    monitor.dispose();
+  });
+
   it('latches a sampling blackout as non-admissible with its own reason', () => {
     const monitor = makeMonitor();
     monoNow += LOAD_ADMISSION_SAMPLE_MS;
