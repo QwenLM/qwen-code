@@ -153,7 +153,6 @@ describe('qwen pr review runner routing', () => {
     );
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.GITHUB_TOKEN');
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.CI_BOT_PAT');
-    expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.CI_BOT_PAT');
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain(
       "github.event.pull_request.head.repo.full_name != github.repository",
     );

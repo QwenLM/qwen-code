@@ -1243,7 +1243,7 @@ jobs:
           # GitHub Actions token rather than trusting repo-wide token defaults.
           SECURITY_GITHUB_TOKEN: "${{ (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository) && secrets.GITHUB_TOKEN || secrets.CI_BOT_PAT }}"
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
-          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GITHUB_TOKEN: "${{ (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository) && secrets.GITHUB_TOKEN || secrets.CI_BOT_PAT }}"
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           # Review model, plus the canary split that sends a PR-number slice
           # of reviews to a second model. All three arrive as variables so a
@@ -1414,9 +1414,6 @@ jobs:
           # (R30-1).
           trap '[ -z "${OPENAI_PROXY_CONTAINER:-}" ] || /usr/bin/docker rm -f "$OPENAI_PROXY_CONTAINER" >/dev/null 2>&1 || true; [ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
 
-          if [ -z "${GH_TOKEN:-}" ]; then
-            fail "The review GitHub credential is required."
-          fi
           if [ -z "${OPENAI_API_KEY:-}" ]; then
             fail "REVIEW_OPENAI_API_KEY secret is required for Qwen PR review."
           fi
