@@ -155,6 +155,7 @@ describe('merged session catalog pagination', () => {
         SessionService.prototype,
         'getGoalSessionPathForArchiveState',
       );
+      const ledger = vi.spyOn(SessionService.prototype, 'getPromptLedgerPath');
 
       const firstPage = await listWorkspaceSessionsForResponse(
         bridge,
@@ -168,6 +169,7 @@ describe('merged session catalog pagination', () => {
       for (const reader of [worktree, pr, artifact, goal]) {
         expect(reader.mock.calls).toEqual([[first.sessionId, 'active']]);
       }
+      expect(ledger.mock.calls).toEqual([[first.sessionId]]);
 
       const secondPage = await listWorkspaceSessionsForResponse(
         bridge,
@@ -214,6 +216,10 @@ describe('merged session catalog pagination', () => {
       expect(worktree.mock.calls).toEqual([
         ...persistedReads,
         [second.sessionId, 'active'],
+      ]);
+      expect(ledger.mock.calls).toEqual([
+        [first.sessionId],
+        [second.sessionId],
       ]);
     },
   );
@@ -1741,13 +1747,23 @@ describe('merged session catalog pagination', () => {
     it.each([
       ['organized', { view: 'organized' as const }],
       ['metadata-filtered', { sourceType: 'default' }],
-    ] as const)('enriches the %s list path', async (_label, options) => {
-      const session = summary(0);
-      await persist(session);
-      await writeLedger(session, [inFlight]);
-      const result = await listSessions([], options);
-      expect(result.sessions[0]?.needsContinuation).toBe(true);
-    });
+    ] as const)(
+      'enriches the %s list path and respects live state',
+      async (_label, options) => {
+        const session = summary(0);
+        await persist(session);
+        await writeLedger(session, [inFlight]);
+        const result = await listSessions([], options);
+        expect(result.sessions[0]?.needsContinuation).toBe(true);
+
+        const running = await listSessions(
+          [{ ...session, hasActivePrompt: true }],
+          options,
+        );
+        expect(running.sessions[0]?.sessionId).toBe(session.sessionId);
+        expect(running.sessions[0]?.needsContinuation).toBeUndefined();
+      },
+    );
   });
 });
 

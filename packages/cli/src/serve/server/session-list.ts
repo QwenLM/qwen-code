@@ -863,8 +863,7 @@ async function enrichPromptContinuation(
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
     // The ledger reads are synchronous; yield periodically so a large
-    // catalog scan does not stall the daemon's event loop (the async PR
-    // sidecar enrichment interleaves naturally).
+    // result does not stall the daemon's event loop.
     if (++scanned % 64 === 0) {
       await new Promise<void>((resolve) => setImmediate(resolve));
       signal?.throwIfAborted();
@@ -1164,6 +1163,7 @@ function readPersistedSidecars(
       const readSignal = controller.signal;
       readSignal.throwIfAborted();
       const rows = new Map([[session.sessionId, { ...session }]]);
+      await enrichPromptContinuation(rows, service, archiveState, readSignal);
       await enrichWorktreeSidecars(
         rows,
         service,
@@ -1300,6 +1300,8 @@ async function enrichCatalogPage(
     if (details.artifactCount !== undefined)
       session.artifactCount = details.artifactCount;
     if (details.goal !== undefined) session.goal = details.goal;
+    if (details.needsContinuation !== undefined)
+      session.needsContinuation = details.needsContinuation;
   }
 }
 
@@ -1348,12 +1350,6 @@ async function loadAllPersistedSummaries(
   } while (cursor !== undefined);
   const bySessionId = new Map(
     sessions.map((session) => [session.sessionId, session]),
-  );
-  await enrichPromptContinuation(
-    bySessionId,
-    sessionService,
-    archiveState,
-    signal,
   );
   signal.throwIfAborted();
   return {

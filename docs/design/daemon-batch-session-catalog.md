@@ -116,7 +116,9 @@ verified by the safe open helper, including symlinks.
 
 Once the page is selected, the daemon reads worktree, PR binding, artifact
 summary and Goal sidecars for its persisted rows and PR binding sidecars for its
-live-only rows. These fields do not affect page membership or the cursor.
+live-only rows. It also reads the prompt ledger for active persisted rows to
+detect interrupted prompts. Live work in progress takes precedence over the
+continuation hint. These fields do not affect page membership or the cursor.
 Persisted rows reuse completed sidecar reads and share in-progress reads for the
 lifetime of the same cached summary. Cancelling one request releases its wait
 without cancelling a read another request still needs. Sidecars for a row first
@@ -125,7 +127,7 @@ requested on a later page reflect the disk state at that row's first read.
 The persisted snapshot cache is shared with organized reads and expires after
 two seconds. In contrast, the legacy unfiltered GET reads only its bounded
 persisted page (up to 100 rows). Batching reduces HTTP round trips and limits the
-four deferred sidecar reads to page rows. The underlying summary scan still
+deferred sidecar reads to page rows. The underlying summary scan still
 covers the catalog. DAC uses the same catalog request and response; all source
 changes for these optimizations are confined to Qwen Code.
 
@@ -141,7 +143,7 @@ With primary and two secondary workspaces, one request returns independently
 owned pages and optional group catalogs. Test subset isolation, source/archive/
 organization filters, pagination, missing and removed entries, generation changes,
 trust behavior, internal exclusion, malformed requests, concurrency, size limits,
-and disconnect cancellation. Verify that only returned rows trigger the four
+and disconnect cancellation. Verify that only returned rows trigger the
 deferred sidecar reads and that a continuation page preserves sidecar fields,
 live field precedence, and cursor ordering. Compare baseline, Goal-only,
 transcript-only, and combined builds using the same DAC-shaped inputs, measuring
