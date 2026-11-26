@@ -109,7 +109,7 @@ export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 /**
  * WHY a probe was `inconclusive`, as the run knew it at the time.
  *
- * Seven different things arrive at the same verdict and they are not
+ * Eight different things arrive at the same verdict and they are not
  * interchangeable:
  *
  * - `control-failed` — the suite ran and read green, but the positive control
@@ -126,6 +126,7 @@ export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
  *   failed to match.
  * - `no-tests` — the file WAS in the results and collected zero assertions.
  * - `all-skipped` — it collected tests and executed none of them.
+ * - `non-assertion-failure` — it failed without a confirmed assertion failure.
  *
  * Anything downstream that explains an `inconclusive` has to pick between
  * these, and the prose `detail` is written for a human, not for that decision.
@@ -137,7 +138,8 @@ export type ProbeReason =
   | 'no-output'
   | 'not-in-results'
   | 'no-tests'
-  | 'all-skipped';
+  | 'all-skipped'
+  | 'non-assertion-failure';
 
 /**
  * A union, not an optional field: every `inconclusive` MUST say which way, and
@@ -1032,6 +1034,7 @@ const BASELINE_REASON = new Set<ProbeReason>([
   'not-in-results',
   'no-tests',
   'all-skipped',
+  'non-assertion-failure',
 ]);
 
 const REASON_PHRASE: Record<ProbeReason, string> = {
@@ -1060,6 +1063,8 @@ const REASON_PHRASE: Record<ProbeReason, string> = {
   'no-tests':
     'it collected no tests there — the shape a compile or import error in the probe tree takes',
   'all-skipped': 'it collected tests there but executed none of them',
+  'non-assertion-failure':
+    'it reported a suite or test failure there without a confirmed assertion failure',
 };
 
 /** No entry at all — the baseline never reported this probe. Absent is its own
@@ -1157,10 +1162,12 @@ export function fitsAnotherMutantRun(
 
 interface VitestAssertion {
   status?: string;
+  failureMessages?: string[];
 }
 interface VitestFileResult {
   /** Absolute path of the test file this result belongs to. */
   name?: string;
+  status?: string;
   assertionResults?: VitestAssertion[];
 }
 interface VitestJson {
@@ -1249,7 +1256,12 @@ export function classifyProbeRun(
       return name.endsWith(`/${probe}`) || name === probe;
     });
     const assertions = result?.assertionResults ?? [];
-    const failed = assertions.filter((a) => a.status === 'failed').length;
+    const failed = assertions.filter((a) => a.status === 'failed');
+    const assertionFailures = failed.filter((a) =>
+      a.failureMessages?.some((message) =>
+        /^AssertionError(?::| \[)/.test(message),
+      ),
+    ).length;
     const passed = assertions.filter((a) => a.status === 'passed').length;
 
     if (!result) {
@@ -1272,11 +1284,20 @@ export function classifyProbeRun(
         detail: `collected no tests with the source reverted (run exit ${exitCode}) — likely a compile or import error, which is not evidence either way`,
       };
     }
-    if (failed > 0) {
+    if (assertionFailures > 0) {
       return {
         file,
         verdict: 'gated' as const,
-        detail: `${failed} assertion(s) failed with the source reverted — this test catches the change`,
+        detail: `${assertionFailures} assertion(s) failed with the source reverted — this test catches the change`,
+      };
+    }
+    if (failed.length > 0 || result.status === 'failed') {
+      return {
+        file,
+        verdict: 'inconclusive' as const,
+        reason: 'non-assertion-failure' as const,
+        detail:
+          'suite or test failed without a confirmed assertion failure with the source reverted — not evidence either way',
       };
     }
     if (passed === 0) {
