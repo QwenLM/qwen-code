@@ -7,6 +7,51 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  user: '用户',
+  assistant: '助手',
+  thinking: '思考',
+  task: '任务',
+  compaction: '压缩',
+  info: '信息',
+  warning: '警告',
+  retry: '重试',
+  'stop-hook': '停止钩子',
+  'away-recap': '离开摘要',
+  'user-shell': '用户命令',
+  advisor: '顾问',
+  'arena-agent': '竞技场智能体',
+  'arena-session': '竞技场会话',
+  goal: '目标',
+  'Protected input': '受保护的输入',
+  'Focused input. Cursor: {{position}}': '输入已聚焦。光标：{{position}}',
+  'Unfocused input.': '输入未聚焦。',
+  'Focused Prompt: {{value}}': '已聚焦的提示输入：{{value}}',
+  'Prompt: {{value}}': '提示输入：{{value}}',
+  'Focused Input: {{value}}': '已聚焦的输入：{{value}}',
+  'Input: {{value}}': '输入：{{value}}',
+  'Placeholder: {{value}}': '占位提示：{{value}}',
+  'Cursor: {{position}}': '光标：{{position}}',
+  'Selected {{value}}': '已选择 {{value}}',
+  'Disabled {{value}}': '已禁用 {{value}}',
+  'Focused Toggle on: {{value}}': '已聚焦，开关已开启：{{value}}',
+  'Focused Toggle off: {{value}}': '已聚焦，开关已关闭：{{value}}',
+  'Toggle on: {{value}}': '开关已开启：{{value}}',
+  'Toggle off: {{value}}': '开关已关闭：{{value}}',
+  'Conversation cleared.': '对话已清空。',
+  '{{role}}: {{value}}': '{{role}}：{{value}}',
+  'Revision {{value}}': '修订 {{value}}',
+  Dialog: '对话框',
+  'Dialog closed. Focus: prompt.': '对话框已关闭。焦点：提示输入。',
+  'Dialog closed.': '对话框已关闭。',
+  'Waiting for confirmation': '等待确认',
+  'Working. Escape to cancel.': '处理中。按 Escape 取消。',
+  'History items {{start}}-{{end}} of {{total}}':
+    '历史记录 {{start}}-{{end}}，共 {{total}} 条。',
+  'Worktree: {{value}}': '工作树：{{value}}',
+  'Workflow mode: on': '工作流模式：已开启',
+  'Workflow mode: on (unavailable)': '工作流模式：已开启（不可用）',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    '按 Shift+上/下或 PageUp/PageDown 阅读历史；按 Ctrl+Home/End 跳到最早/最新。',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     '周额度已用完{{reset}}。您可以等待额度恢复，或运行 /upgrade 升级套餐以获取更多额度。',
   "You've used up your weekly credits.{{reset}} Please try again after the reset.":
@@ -778,8 +823,8 @@ export default {
   // ============================================================================
   'Code Mode Only (Experimental)': '仅代码模式（实验性）',
   'Mods (Experimental)': 'Mods（实验性）',
-  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
-    '在受信任的本地交互终端和无界面会话中加载已启用扩展的实验性 Mods。修改后需重启。',
+  'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
+    '在受信任的本地交互终端、无界面会话和 ACP 会话中加载已启用扩展的实验性 Mods。修改后需重启。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',
@@ -790,6 +835,7 @@ export default {
   'Debug Keystroke Logging': '调试按键记录',
   'Language: UI': '语言：界面',
   'Language: Model': '语言：模型',
+  'Language: Display Translation': '语言：显示翻译',
   'Output Format': '输出格式',
   'Hide Window Title': '隐藏窗口标题',
   'Show Status in Title': '在标题中显示状态',
@@ -808,7 +854,6 @@ export default {
   'Screen Reader Mode': '屏幕阅读器模式',
   'Max Session Turns': '最大会话轮次',
   'Skip Next Speaker Check': '跳过下一个说话者检查',
-  'Skip Loop Detection': '跳过循环检测',
   'Skip Startup Context': '跳过启动上下文',
   'Enable OpenAI Logging': '启用 OpenAI 日志',
   'OpenAI Logging Directory': 'OpenAI 日志目录',
@@ -1104,8 +1149,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
+  'No hooks were loaded.': '未加载任何 Hook。',
+  'skipped (unsupported args)': '已跳过（不支持 args）',
   // Hooks - Dialog
   Hooks: 'Hook',
+  'A hook stopped the turn: {{reason}}': 'Hook 已结束本轮对话：{{reason}}',
   'Loading hooks...': '正在加载 Hook...',
   'Error loading hooks:': '加载 Hook 出错：',
   'Press Escape to close': '按 Escape 关闭',
@@ -1663,6 +1711,8 @@ export default {
     '由于压缩摘要被截断，无法压缩聊天历史。',
   'Could not compress chat history due to an API error.':
     '由于 API 错误，无法压缩聊天历史。',
+  'Could not compress chat history because it is too large for the context window.':
+    '聊天历史过大，超出上下文窗口，无法压缩。',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1872,6 +1922,18 @@ export default {
     '当前语音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 设置语音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '当前视觉模型：{{visionModel}}\n使用 "/model --vision <model-id>" 设置视觉桥接模型。',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    '设置视觉桥接超时（秒，配合 --vision 使用）',
+  '--timeout can only be used with --vision.':
+    '--timeout 只能与 --vision 一起使用。',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    '无效的 --timeout 值 "{{value}}"。请使用正整数秒数，例如 60、60s 或 90000ms。',
+  'Vision bridge timeout: {{timeout}}': '视觉桥接超时：{{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    '已保存视觉桥接超时 {{timeout}}{{scope}}。更高优先级的设置使实际超时为 {{effectiveTimeout}}。',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    '视觉桥接超时：{{timeout}}\n使用 "/model --vision --timeout <seconds>" 修改。',
+  '{{timeout}} (default)': '{{timeout}}（默认）',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '当前图像模型：{{imageModel}}\n使用 "/model --image <model-id>" 设置图像生成模型。',
   'Compaction model override cleared': '压缩模型覆盖已清除',
@@ -2051,6 +2113,8 @@ export default {
     '对话太长？用 /compress 总结历史，释放上下文。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     '显示上下文窗口使用情况明细。使用 "/context detail" 查看逐项明细。',
+  'Save the context window for the current model.':
+    '保存当前模型的上下文窗口。',
 
   // ============================================================================
   // Exit Screen / Stats

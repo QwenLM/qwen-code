@@ -123,6 +123,7 @@ function makeFixture(
   const cdCalls: Array<{ sessionId: string; path: string }> = [];
   const setWorktreeCalls: unknown[][] = [];
   const clearWorktreeCalls: string[] = [];
+  const baseCommitCalls: unknown[][] = [];
   const resetPendingCalls: Array<[string, string]> = [];
   const gateOrder: string[] = [];
   // Model the bridge's admission fence: the handoff routes arm it and then
@@ -230,6 +231,9 @@ function makeFixture(
       const s = workspaceSessions.find((x) => x.sessionId === id);
       if (s) s.worktree = undefined;
     },
+    setSessionBaseCommit: (...args: unknown[]) => {
+      baseCommitCalls.push(args);
+    },
     setSessionResetPending: (id: string) => {
       resetPendingCalls.push(['set', id]);
       gateOrder.push(`arm:${id}`);
@@ -292,6 +296,7 @@ function makeFixture(
     cdCalls,
     setWorktreeCalls,
     clearWorktreeCalls,
+    baseCommitCalls,
     resetPendingCalls,
     gateOrder,
     summaries,
@@ -410,9 +415,16 @@ describe('POST /session/:id/worktree-handoff', () => {
     expect(res.status).toBe(200);
     expect(res.body.worktree.branch).toBe('');
     expect(res.body.currentCwd).toBe(res.body.worktree.path);
+    // The live worktree meta carries the start commit + base branch so the
+    // commit fallback keeps a boundary in the handoff-to-restart window (R5-1).
+    expect(res.body.worktree.baseCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(res.body.worktree.baseBranch).toBeTruthy();
     expect(fixture.cdCalls).toHaveLength(1);
     expect(fixture.cdCalls[0].path).toBe(res.body.worktree.path);
     expect(fixture.setWorktreeCalls).toHaveLength(1);
+    expect(
+      (fixture.setWorktreeCalls[0][1] as { baseCommit?: string }).baseCommit,
+    ).toBe(res.body.worktree.baseCommit);
     expect(
       await import('node:fs/promises').then((fs) =>
         fs.readFile(path.join(res.body.worktree.path, 'README.md'), 'utf8'),
@@ -471,6 +483,11 @@ describe('POST /session/:id/worktree-handoff', () => {
       ),
     ).toBe('dirty\n');
     expect(fixture.clearWorktreeCalls).toEqual([fixture.sessionId]);
+    // The worktree base is promoted into the plain start commit so the commit
+    // fallback keeps a boundary after the worktree meta is removed (R5-1).
+    expect(fixture.baseCommitCalls).toHaveLength(1);
+    expect(fixture.baseCommitCalls[0][0]).toBe(fixture.sessionId);
+    expect(fixture.baseCommitCalls[0][1]).toMatch(/^[0-9a-f]{40}$/);
     const sidecar = await fixture.readSidecar();
     expect(sidecar.state).toBe('missing');
   });
@@ -2015,6 +2032,10 @@ describe('POST /session/:id/worktree-handoff', () => {
     const rootHead = git(fixture.workspaceDir, 'rev-parse', 'HEAD');
     expect(git(siblingPath, 'rev-parse', 'HEAD')).not.toBe(rootHead);
     fixture.setEffectiveCwd(siblingPath);
+    writeFileSync(
+      path.join(siblingPath, 'session-carry.txt'),
+      'sibling-carry\n',
+    );
 
     const res = await request(fixture.app)
       .post(`/session/${fixture.sessionId}/worktree-handoff`)
@@ -2030,6 +2051,20 @@ describe('POST /session/:id/worktree-handoff', () => {
       // to=worktree bases the worktree at the workspace HEAD, so the
       // creation base equals the gate base here.
       expect(sidecar.session.worktreeBase).toBe(rootHead);
+      expect(sidecar.session.carriedFrom).toBe(realpathSync(siblingPath));
+      expect(sidecar.session.carriedEntries).toEqual([
+        {
+          path: 'session-carry.txt',
+          hash: git(
+            siblingPath,
+            'hash-object',
+            '--no-filters',
+            '--',
+            'session-carry.txt',
+          ),
+          executable: expect.any(Boolean),
+        },
+      ]);
     }
 
     // The return leg must succeed, not 409 local_head_moved.
@@ -2038,6 +2073,12 @@ describe('POST /session/:id/worktree-handoff', () => {
       .send({ to: 'local' });
     expect(back.status).toBe(200);
     expect(back.body.worktree).toBeNull();
+    expect(
+      readFileSync(
+        path.join(fixture.workspaceDir, 'session-carry.txt'),
+        'utf8',
+      ),
+    ).toBe('sibling-carry\n');
   });
 
   it('keeps the sidecar naming the auto branch when detach fails mid-promotion', async () => {
@@ -2251,6 +2292,38 @@ describe('POST /session/:id/worktree-handoff', () => {
     expect(
       existsSync(path.join(res.body.worktree.path, `bulk-0000-${filler}.txt`)),
     ).toBe(true);
+  });
+
+  it('persists carriedEntries in the sidecar after a carry handoff (R2-2)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    writeFileSync(
+      path.join(fixture.workspaceDir, 'README.md'),
+      'dirty-tracked\n',
+    );
+    git(fixture.workspaceDir, 'add', 'README.md');
+    writeFileSync(path.join(fixture.workspaceDir, 'note.txt'), 'untracked\n');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    expect(res.status).toBe(200);
+    // The R9-6 exemption depends on this persistence: removing the writer
+    // would leave the sidecar without the overlay and strand the checkout.
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('valid');
+    if (sidecar.state === 'valid') {
+      expect(sidecar.session.carriedFrom).toBe(fixture.workspaceDir);
+      const entries = sidecar.session.carriedEntries ?? [];
+      const paths = entries.map((e) => e.path);
+      expect(paths).toContain('README.md');
+      expect(paths).toContain('note.txt');
+      for (const e of entries) {
+        expect(typeof e.executable).toBe('boolean');
+        expect(e.hash === null || typeof e.hash === 'string').toBe(true);
+      }
+    }
   });
 
   it('refuses a conflicting snapshot with handoff_snapshot_conflict and restores the local checkout', async () => {

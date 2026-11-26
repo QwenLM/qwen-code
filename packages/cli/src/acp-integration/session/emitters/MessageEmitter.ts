@@ -100,6 +100,19 @@ export class MessageEmitter extends BaseEmitter {
     });
   }
 
+  async emitStopHookNotice(stopReason: string): Promise<void> {
+    // ACP clients concatenate agent content into the model's answer.
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        source: 'stop_hook_notice',
+        qwenDiscreteMessage: true,
+        stopReason,
+      },
+    });
+  }
+
   async emitGoalStatus(
     status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
     goalState?: unknown,

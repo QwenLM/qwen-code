@@ -474,7 +474,7 @@ public final class ApiModels {
     public record WebShellChangeModelRequest(@Size(max = 128) String requestId,
             @NotBlank @Size(max = 128) String sessionId,
             @NotBlank @Size(max = 128) String idempotencyKey,
-            @NotBlank @Size(max = 512) String modelId,
+            @NotBlank @Size(max = 128) String modelId,
             @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision) {}
 
     public record WebShellModelChangeResult(String sessionId,
@@ -996,6 +996,15 @@ public final class ApiModels {
 
     public record WebShellArtifactQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) { }
+
+    public record WebShellWorkspaceArtifactQueryRequest(@NotBlank String workspaceId,
+            String cursor, Integer limit) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException(
+                    "Unknown workspace artifact query request field: " + name);
+        }
+    }
 
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {

@@ -745,6 +745,65 @@ describe('BridgeClient — managed external tool guard', () => {
   });
 });
 
+describe('BridgeClient — Mod log lines', () => {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+  const client = (owns: boolean) => {
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId: 'session-1', events: { publish } };
+    return {
+      publish,
+      client: new BridgeClient(
+        ((id: string) => (id === 'session-1' ? entry : undefined)) as never,
+        (() => undefined) as never,
+        { request: noPermissionFlow } as never,
+        0,
+        Infinity,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => owns,
+      ),
+    };
+  };
+
+  it("forwards a Mod's log line to the session's stream", async () => {
+    const { client: bridge, publish } = client(true);
+    await bridge.extNotification('qwen/notify/session/mod-log', {
+      sessionId: 'session-1',
+      plugin: 'zh-display',
+      text: 'translated 3 blocks',
+    });
+    expect(publish).toHaveBeenCalledOnce();
+    expect(publish.mock.calls[0][0]).toMatchObject({
+      type: 'mod_log',
+      data: {
+        sessionId: 'session-1',
+        plugin: 'zh-display',
+        text: 'translated 3 blocks',
+      },
+    });
+  });
+
+  it('drops a malformed line and one for a session it does not own', async () => {
+    const owned = client(true);
+    await owned.client.extNotification('qwen/notify/session/mod-log', {
+      sessionId: 'session-1',
+      plugin: 'zh-display',
+    });
+    expect(owned.publish).not.toHaveBeenCalled();
+    const foreign = client(false);
+    await foreign.client.extNotification('qwen/notify/session/mod-log', {
+      sessionId: 'session-1',
+      plugin: 'zh-display',
+      text: 'hi',
+    });
+    expect(foreign.publish).not.toHaveBeenCalled();
+  });
+});
+
 describe('BridgeClient — recording degradation ownership', () => {
   it('keeps session-level recording degradation prompt-neutral', async () => {
     const sessionId = 'session-with-active-prompt';
@@ -1729,7 +1788,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     });
   });
 
-  it('forwards a target workspace and rejects an unusable one', async () => {
+  it('forwards a target workspace and its YOLO requirement', async () => {
     const onCreate = vi.fn(async () => ({
       sessionId: 'sub-11',
       workspaceCwd: '/repos/b',
@@ -1742,6 +1801,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
         completion: 'sent',
         workspace: 'workspace-id',
         workspaceGeneration,
+        requiresYolo: true,
         callerSessionId: 'caller-1',
       }),
     ).resolves.toEqual({ sessionId: 'sub-11', workspaceCwd: '/repos/b' });
@@ -1750,11 +1810,14 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       completion: 'sent',
       workspace: 'workspace-id',
       workspaceGeneration,
+      requiresYolo: true,
       callerSessionId: 'caller-1',
     });
     for (const extra of [
       { workspace: 'workspace-id' },
       { workspaceGeneration },
+      { requiresYolo: true },
+      { workspace: 'workspace-id', workspaceGeneration, requiresYolo: false },
       { workspace: 'workspace-id', workspaceGeneration: '' },
       { workspace: '' },
       { workspace: 7 },
@@ -1774,6 +1837,47 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
           ...extra,
         }),
       ).rejects.toThrow(/workspace/);
+    }
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards an automatic workspace approval requirement', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-auto' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const workspaceGeneration = '5103aa8c-9a6e-4ad6-9b3b-7c765cdcbee5';
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'go',
+        completion: 'first-turn',
+        workspace: 'workspace-id',
+        workspaceGeneration,
+        requiresAutoMode: true,
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-auto' });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'first-turn',
+      workspace: 'workspace-id',
+      workspaceGeneration,
+      requiresAutoMode: true,
+      callerSessionId: 'caller-1',
+    });
+    for (const requiresAutoMode of [
+      false,
+      'true',
+      { requiresAutoMode: true },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'go',
+          completion: 'first-turn',
+          workspace: 'workspace-id',
+          workspaceGeneration,
+          requiresAutoMode,
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow('requiresAutoMode');
     }
     expect(onCreate).toHaveBeenCalledTimes(1);
   });
@@ -4254,6 +4358,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           messageId: 'internal',
           displayText: '<realtime_delegation />',
           content: [{ type: 'text', text: '<realtime_delegation />' }],
+          queueOnly: true,
         },
         {
           messageId: 'anonymous-ui',
@@ -4830,6 +4935,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           messageId: 'internal',
           displayText: '<realtime_delegation />',
           content: [{ type: 'text', text: '<realtime_delegation />' }],
+          queueOnly: true,
         },
       ],
       hasQueuedPrompt: false,

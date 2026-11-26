@@ -306,6 +306,18 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should keep model availability tracking opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.modelAvailabilityTracking,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        category: 'Experimental',
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
     // requiresRestart is load-bearing, not decorative: the Workflow tool is
     // registered once while the tool registry is built, so a mid-session
     // toggle would leave the dialog claiming the feature is on while the
@@ -594,18 +606,6 @@ describe('SettingsSchema', () => {
 
       expect(model.maxSessionTurns.type).toBe('integer');
       expect(model.maxToolCallsPerTurn.type).toBe('integer');
-    });
-
-    it('should define model.loopProtection with warn as the default', () => {
-      const loopProtection =
-        getSettingsSchema().model.properties.loopProtection;
-
-      expect(loopProtection).toMatchObject({ type: 'enum', default: 'warn' });
-      expect(loopProtection.options?.map((option) => option.value)).toEqual([
-        'warn',
-        'stop',
-        'off',
-      ]);
     });
 
     it('should define streamIdleTimeoutMs as a bounded generation setting', () => {

@@ -1,9 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker.managedworkspace;
 
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+
 import java.util.regex.Pattern;
 
 public final class WorkspaceValues {
     public static final int MAXIMUM_TEXT_CODE_POINTS = 512;
+    private static final int MAXIMUM_ACTOR_UTF16_UNITS = 36;
 
     private static final Pattern IDENTIFIER = Pattern.compile(
             "[A-Za-z0-9._:-]{1,128}");
@@ -15,12 +18,39 @@ public final class WorkspaceValues {
         return value != null && IDENTIFIER.matcher(value).matches();
     }
 
+    public static boolean isTenantIdentifier(String value) {
+        return BrokerValues.isTenantId(value);
+    }
+
     public static String requireIdentifier(String value, String name) {
         if (!isIdentifier(value)) {
             throw new IllegalArgumentException(name
                     + " must match [A-Za-z0-9._:-]{1,128}");
         }
         return value;
+    }
+
+    static String requireTenantIdentifier(String value, String name) {
+        return BrokerValues.requireTenantId(value, name);
+    }
+
+    /**
+     * An actor identity stored in a VARCHAR(36) column. MySQL counts code
+     * points and H2 counts UTF-16 units, so the UTF-16 length bounds both.
+     * PAD SPACE collations fold trailing spaces, so two distinct actors would
+     * compare equal; the boundary refuses them rather than relying on the
+     * column to preserve exactness.
+     */
+    static String requireActor(String value, String name) {
+        String actor = requireText(value, name);
+        if (actor.length() > MAXIMUM_ACTOR_UTF16_UNITS
+                || Character.isWhitespace(
+                        actor.codePointBefore(actor.length()))) {
+            throw new IllegalArgumentException(name + " must be 1 to "
+                    + MAXIMUM_ACTOR_UTF16_UNITS
+                    + " characters without trailing spaces");
+        }
+        return actor;
     }
 
     public static String requirePrintableAscii(String value, String name,

@@ -46,6 +46,12 @@ import {
 import { beginRetryWait } from '../utils/retry-wait.js';
 import { movePromptContextAheadOfUserText } from './prompt-context-order.js';
 import {
+  appendPermissionContext,
+  findLatestPermissionContext,
+  getPermissionContextSnapshot,
+  PERMISSION_CONTEXT_METADATA,
+} from './permission-context.js';
+import {
   isQuotaExhaustedError,
   formatQuotaExhaustedMessage,
 } from '../utils/quotaErrorDetection.js';
@@ -104,6 +110,7 @@ import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
   appendAutoMemoryContext,
   appendAutoMemorySnapshot,
+  findLatestAutoMemorySnapshot,
   getAutoMemorySnapshot,
   withoutAutoMemorySnapshots,
 } from '../memory/request-context.js';
@@ -113,6 +120,10 @@ import {
   effectiveHistoryEnd,
 } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
@@ -125,6 +136,7 @@ import {
   type ChatRecordingService,
   type ChatCompressionRecordPayload,
 } from '../services/chatRecordingService.js';
+import { withoutCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
 import {
   ChatCompressionService,
   computeThresholds,
@@ -197,6 +209,7 @@ import {
   isRetryableStatuslessUpstreamError,
   isRetryableStreamTransportError,
 } from './stream-transport-retry.js';
+import { StreamInactivityTimeoutError } from './stream-guards.js';
 import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
@@ -274,6 +287,25 @@ function hasNonThoughtCandidateParts(
   return Boolean(
     response.candidates?.some((candidate) =>
       candidate.content?.parts?.some((part) => !part.thought),
+    ),
+  );
+}
+
+function hasVisibleNonToolCandidateParts(
+  response: GenerateContentResponse,
+): boolean {
+  return Boolean(
+    response.candidates?.some((candidate) =>
+      candidate.content?.parts?.some((part) => {
+        if (part.thought || part.functionCall) return false;
+        return Boolean(
+          (typeof part.text === 'string' && part.text.length > 0) ||
+            part.inlineData ||
+            part.fileData ||
+            part.executableCode ||
+            part.codeExecutionResult,
+        );
+      }),
     ),
   );
 }
@@ -739,6 +771,29 @@ export interface LlmChatSendOptions {
   preparedRequest?: LlmPreparedRequest;
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /**
+   * This send is an explicit user Retry. The model-availability ledger treats
+   * it as a turn boundary so a retry re-probes fallbacks the failed attempt
+   * consumed, instead of inheriting their skipped state.
+   */
+  isExplicitRetry?: boolean;
+  /**
+   * This send belongs to the session's interactive turn flow (a user question,
+   * an explicit Retry, or a continuation driven by `LlmClient`/`Turn`). Only
+   * such sends participate in the model-availability ledger. Background
+   * operations (subagents, forked queries, speculation, side queries,
+   * suggestions) share the session `Config` but leave this unset, so they
+   * neither rotate the live turn's key nor read or write its marks.
+   */
+  isSessionTurn?: boolean;
+  /**
+   * Stable turn key for the model-availability ledger, for surfaces whose
+   * per-send `prompt_id` is a continuation rewrite of the turn's identity
+   * (ACP mid-turn automatic-continuation suffixes). Defaults to the send's
+   * `prompt_id`. Only the ledger key is normalized; `prompt_id` keeps its
+   * load-bearing prompt identity.
+   */
+  ledgerTurnKey?: string;
   /** Internal identity for the user prompt added to model history. */
   promptId?: string;
   /**
@@ -750,6 +805,12 @@ export interface LlmChatSendOptions {
    * public transcript (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * The consumer buffers streamed `functionCall` parts until end-of-stream and
+   * discards them on `StreamEventType.RETRY`, so a cut that yielded only
+   * thinking and unexecuted tool calls (no visible output) can replay cleanly.
+   */
+  retractToolCallsOnRetry?: boolean;
   /**
    * A `UserPromptSubmit` block suppressed as already delivered. Compression
    * can drop the history entry holding its only copy inside this same send,
@@ -895,7 +956,24 @@ const STREAM_RETRY_CONFIG = {
    * the replay budget.
    */
   maxContinuationRetries: 3,
+  /**
+   * Shared budget for replays and continuations after an inactivity timeout
+   * that hit while a tool call's arguments were still open. Providers that
+   * withhold arguments until they are complete go silent for exactly that
+   * stretch, so the same request tends to stall the same way again; one retry
+   * covers a transient cut without spending every budget on a repeat.
+   */
+  maxToolArgumentStallRetries: 1,
 };
+
+function getToolArgumentStallRetryError(error: unknown) {
+  // Classify the local timeout code so the diagnostic tool name cannot be
+  // mistaken for a provider error.
+  return error instanceof StreamInactivityTimeoutError &&
+    error.openToolCallName !== undefined
+    ? { code: error.code }
+    : undefined;
+}
 
 /**
  * Pad added when sizing the output clamp from an estimate-derived prompt
@@ -1932,14 +2010,20 @@ function copyContentContainer(content: Content): Content {
 
 function copyPartContainer(part: Part): Part {
   const nested = getFunctionResponseParts(part);
-  if (!nested) return { ...part };
-  return {
-    ...part,
-    functionResponse: {
-      ...part.functionResponse,
-      parts: nested.map((inner) => ({ ...inner })),
-    },
-  };
+  const copy = nested
+    ? {
+        ...part,
+        functionResponse: {
+          ...part.functionResponse,
+          parts: nested.map((inner) => ({ ...inner })),
+        },
+      }
+    : { ...part };
+  const recovery = getToolOutputRecovery(part);
+  if (recovery) {
+    setToolOutputRecovery(copy, recovery);
+  }
+  return copy;
 }
 
 function stripThoughtPartsFromContent(content: Content): Content | null {
@@ -2490,6 +2574,19 @@ export class LlmChat {
     return this.historyReplacementRevision;
   }
 
+  /**
+   * The per-response output-token limit the send layer last used — clamp,
+   * escalation, or user override. `Turn` reads it when a `MAX_TOKENS` cut
+   * truncates a tool call so the scheduler's rejection can name the budget
+   * (#16417). One send stale is fine: the value is refreshed at every clamp
+   * and every escalation before the retry goes out.
+   */
+  private lastRequestMaxOutputTokens: number | undefined;
+
+  getLastRequestMaxOutputTokens(): number | undefined {
+    return this.lastRequestMaxOutputTokens;
+  }
+
   // A promise to represent the current state of the message being sent to the
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
@@ -2501,7 +2598,8 @@ export class LlmChat {
    * still make compaction decisions based on their *own* context size.
    */
   private memorySnapshotsVisible: boolean | undefined;
-  private unaccountedMemorySnapshots = new WeakSet<Part>();
+  private unaccountedContextSnapshots = new WeakSet<Part>();
+  private permissionContextEnabled = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountIsEstimated = false;
   /**
@@ -2655,7 +2753,9 @@ export class LlmChat {
     payload: ChatCompressionRecordPayload,
   ): Promise<void> {
     if (this.compressionObserver) {
-      const compressedHistory = [...payload.compressedHistory];
+      const compressedHistory = [
+        ...withoutCompactionTranscriptHint(payload.compressedHistory),
+      ];
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
@@ -2752,10 +2852,14 @@ export class LlmChat {
     private readonly chatRecordingService?: ChatRecordingService,
     private readonly telemetryService?: UiTelemetryService,
   ) {
-    validateHistory(history);
-    markCompressedHistory(history);
+    if (!chatRecordingService) {
+      this.history = withoutCompactionTranscriptHint(history);
+    }
+    validateHistory(this.history);
+    markCompressedHistory(this.history);
     this.redactApprovedPlansFromLoadedHistory();
     this.markToolResultsInjected(this.history);
+    this.permissionContextEnabled = !!findLatestPermissionContext(this.history);
   }
 
   /**
@@ -2778,6 +2882,10 @@ export class LlmChat {
     this.manualPlanExitNoticesEnabled = true;
   }
 
+  enablePermissionContext(): void {
+    this.permissionContextEnabled = true;
+  }
+
   /**
    * Identity of the currently active model route. Optional chaining keeps
    * partial Config test mocks (`{} as Config`) from throwing on count
@@ -2786,6 +2894,14 @@ export class LlmChat {
    */
   private currentRouteKey(): string {
     return this.config.getModelRouteIdentity?.() ?? '';
+  }
+
+  private memorySnapshotsBecameVisible(visible: boolean): boolean {
+    return (
+      this.memorySnapshotsVisible !== true &&
+      visible &&
+      findLatestAutoMemorySnapshot(this.history) !== undefined
+    );
   }
 
   /**
@@ -2823,15 +2939,7 @@ export class LlmChat {
     const memorySnapshotsVisible = Boolean(
       this.config.getAutoMemoryContext?.(),
     );
-    if (
-      this.memorySnapshotsVisible !== true &&
-      memorySnapshotsVisible &&
-      this.history.some((entry) =>
-        entry.parts?.some(
-          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
-        ),
-      )
-    ) {
+    if (this.memorySnapshotsBecameVisible(memorySnapshotsVisible)) {
       // A suppressed request cannot account for catalogs that are visible
       // again. Invalidate every route before adoption. The opposite flip
       // (visible -> suppressed) deliberately keeps the authoritative count:
@@ -2945,6 +3053,23 @@ export class LlmChat {
     return this.lastPromptTokenCount;
   }
 
+  /** Reads the active route's prompt count without mutating chat or telemetry state. */
+  peekLastPromptTokenCount(): number {
+    if (
+      (this.lastPromptTokenCount === 0 &&
+        this.tokenCountsByRouteKey.size === 0) ||
+      this.memorySnapshotsBecameVisible(
+        Boolean(this.config.getAutoMemoryContext?.()),
+      )
+    ) {
+      return 0;
+    }
+    const routeKey = this.currentRouteKey();
+    return routeKey === this.tokenCountsRouteKey
+      ? this.lastPromptTokenCount
+      : (this.tokenCountsByRouteKey.get(routeKey)?.promptTokenCount ?? 0);
+  }
+
   /** Previous model-response tokens used by the next prompt estimate. */
   getLastOutputTokenCount(): number {
     this.adoptTokenCountsForRoute();
@@ -3022,12 +3147,22 @@ export class LlmChat {
   ): Content[] {
     const catalog = this.config.getAutoMemoryContext?.() ?? '';
     const snapshot = getAutoMemorySnapshot(this.history, catalog);
+    const permissionSnapshot = this.permissionContextEnabled
+      ? getPermissionContextSnapshot(
+          this.history,
+          this.config.getApprovalMode(),
+        )
+      : undefined;
     // A request-only recovery catalog replaces, rather than follows, stale snapshots.
-    const history = !snapshot
+    let history = !snapshot
       ? this.history
       : retainMemorySnapshot
         ? [...this.history]
         : withoutAutoMemorySnapshots(this.history);
+    if (permissionSnapshot) {
+      if (history === this.history) history = [...history];
+      appendPermissionContext(history, permissionSnapshot);
+    }
     if (snapshot && retainMemorySnapshot) {
       appendAutoMemorySnapshot(history, snapshot);
     }
@@ -3035,10 +3170,17 @@ export class LlmChat {
       this.getRequestHistory(currentUserContent, history),
       supportedModalities,
     ).slimmedHistory;
+    if (permissionSnapshot && retainMemorySnapshot) {
+      this.history = history;
+      this.chatRecordingService?.recordPermissionContextSnapshot(
+        permissionSnapshot,
+      );
+      this.unaccountedContextSnapshots.add(permissionSnapshot);
+    }
     if (snapshot && retainMemorySnapshot) {
       this.history = history;
       this.chatRecordingService?.recordMemoryCatalogSnapshot(snapshot);
-      this.unaccountedMemorySnapshots.add(snapshot);
+      this.unaccountedContextSnapshots.add(snapshot);
     }
     // Recovery controls are removed after continuation and cannot own a durable snapshot.
     const withCatalog =
@@ -3065,7 +3207,7 @@ export class LlmChat {
    */
   setLastPromptTokenCount(count: number, isEstimated = false): void {
     this.toolBudgetUsageAnchor = undefined;
-    this.unaccountedMemorySnapshots = new WeakSet<Part>();
+    this.unaccountedContextSnapshots = new WeakSet<Part>();
     this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
     this.lastPromptTokenCount = count;
     this.lastPromptTokenCountIsEstimated = isEstimated;
@@ -3103,7 +3245,7 @@ export class LlmChat {
     isEstimated = false,
   ): void {
     this.toolBudgetUsageAnchor = undefined;
-    this.unaccountedMemorySnapshots = new WeakSet<Part>();
+    this.unaccountedContextSnapshots = new WeakSet<Part>();
     // Usage saved with legacy memory on already counts visible snapshots. The
     // rare suppressed-at-save resume relies on the pad and reactive recovery.
     this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
@@ -3205,6 +3347,10 @@ export class LlmChat {
       requestPayloadTooLarge: options?.requestPayloadTooLarge,
       signal,
       restoreRecentFiles: this.compressionObserverOptions?.restoreRecentFiles,
+      getExistingTranscriptPath:
+        this.chatRecordingService && !this.isForkedChat
+          ? async () => this.chatRecordingService?.getExistingTranscriptPath?.()
+          : undefined,
     });
     // The service owns the compression outcome; LlmChat owns the input
     // provenance. Expose it so UIs can mark estimated banner numbers
@@ -3538,6 +3684,9 @@ export class LlmChat {
         onPreparedRequest,
         retractDeliveredOutputOnRetry: true,
         disableModelFallbacks: true,
+        // A prepared resume continues the live session turn, so it belongs to
+        // the ledger's turn boundary like the interactive path.
+        isSessionTurn: true,
       },
     );
   }
@@ -3553,6 +3702,27 @@ export class LlmChat {
     // must not continue: it could repeat a call that already took effect.
     const managedSessionBlock = this.config.getManagedSessionBlock?.();
     if (managedSessionBlock) throw managedSessionBlock;
+    // Model health ledger (experimental, opt-in). The turn boundary runs once
+    // per request here — not inside the fallback branch — so an explicit Retry
+    // whose first request the primary serves still re-probes the fallbacks the
+    // failed attempt consumed. Only session-turn sends (`isSessionTurn`, set by
+    // `LlmClient`/`Turn`) participate: background operations (subagents, forked
+    // queries, speculation, side queries, suggestions) share this Config but
+    // leave the flag unset, so they neither rotate the live turn's key nor read
+    // or write its marks, and keep the gate-off fallback behaviour.
+    // Optional-chain the gate: partial Config mocks omit the new accessor, and
+    // an absent gate must read as "off".
+    const availability =
+      options?.isSessionTurn &&
+      this.config.isModelAvailabilityTrackingEnabled?.()
+        ? this.config.getModelAvailabilityService()
+        : undefined;
+    if (availability) {
+      availability.beginTurn(options?.ledgerTurnKey ?? prompt_id);
+      if (options?.isExplicitRetry) {
+        availability.resetTurn();
+      }
+    }
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
@@ -3736,12 +3906,23 @@ export class LlmChat {
             [...this.history, pending],
             catalog,
           );
-          const pendingContent = snapshot
+          let pendingContent = snapshot
             ? {
                 ...pending,
                 parts: [...(pending.parts ?? []), snapshot],
               }
             : pending;
+          const permissionSnapshot = this.permissionContextEnabled
+            ? getPermissionContextSnapshot(
+                [...this.history, pending],
+                this.config.getApprovalMode(),
+              )
+            : undefined;
+          if (permissionSnapshot) {
+            const preview = [pendingContent];
+            appendPermissionContext(preview, permissionSnapshot);
+            pendingContent = preview[0];
+          }
           const visiblePendingContent = catalog
             ? pendingContent
             : (withoutAutoMemorySnapshots([pendingContent])[0] ?? {
@@ -3749,10 +3930,13 @@ export class LlmChat {
                 parts: [],
               });
           const unaccountedSnapshots =
-            catalog && this.lastPromptTokenCount > 0
+            this.lastPromptTokenCount > 0
               ? this.history.flatMap((entry) =>
-                  (entry.parts ?? []).filter((part) =>
-                    this.unaccountedMemorySnapshots.has(part),
+                  (entry.parts ?? []).filter(
+                    (part) =>
+                      this.unaccountedContextSnapshots.has(part) &&
+                      (catalog ||
+                        part.partMetadata?.[PERMISSION_CONTEXT_METADATA]),
                   ),
                 )
               : [];
@@ -4018,10 +4202,10 @@ export class LlmChat {
           : undefined;
         const completedToolCallIdsBeforeHardRescue = this.completedToolCallIds;
         // The rollback history copies Part objects; preserve ownership on those copies.
-        const unaccountedMemorySnapshotsBeforeHardRescue = new WeakSet<Part>(
+        const unaccountedContextSnapshotsBeforeHardRescue = new WeakSet<Part>(
           historyBeforeHardRescue?.flatMap((entry, index) =>
             (entry.parts ?? []).filter((_, partIndex) =>
-              this.unaccountedMemorySnapshots.has(
+              this.unaccountedContextSnapshots.has(
                 this.history[index].parts![partIndex],
               ),
             ),
@@ -4144,8 +4328,8 @@ export class LlmChat {
             );
             // setHistory conservatively cleared loaded-skill tracking; the
             // restored bodies re-arm it on their next invoke.
-            this.unaccountedMemorySnapshots =
-              unaccountedMemorySnapshotsBeforeHardRescue;
+            this.unaccountedContextSnapshots =
+              unaccountedContextSnapshotsBeforeHardRescue;
             this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
             this.lastPromptTokenCountIsEstimated =
               lastPromptTokenCountWasEstimatedBeforeHardRescue;
@@ -4248,8 +4432,11 @@ export class LlmChat {
         this.history.push(userContent);
         // Interrupted-prompt replay can carry detached snapshot parts itself.
         for (const part of userContent.parts ?? []) {
-          if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true) {
-            this.unaccountedMemorySnapshots.add(part);
+          if (
+            part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true ||
+            typeof part.partMetadata?.[PERMISSION_CONTEXT_METADATA] === 'string'
+          ) {
+            this.unaccountedContextSnapshots.add(part);
           }
         }
         this.syncReviewedSchemasForContent(userContent);
@@ -4321,6 +4508,7 @@ export class LlmChat {
           contextWindowForClamp,
           promptTokensForClamp,
         );
+        this.lastRequestMaxOutputTokens = clampedMaxOutputTokens;
         params = {
           ...params,
           config: {
@@ -4403,6 +4591,7 @@ export class LlmChat {
           }
         };
         let streamReplayRetryCount = 0;
+        let toolArgumentStallRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
         // send has already handed to callers across all continuation attempts,
@@ -4551,6 +4740,7 @@ export class LlmChat {
           let streamEstablished = false;
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
+          let streamYieldedVisibleContent = false;
           // A cut that already delivered a `functionCall` cannot be continued
           // from — see the continuation gate below.
           let streamYieldedFunctionCall = false;
@@ -4637,6 +4827,9 @@ export class LlmChat {
               if (hasNonThoughtCandidateParts(chunk)) {
                 streamYieldedContentChunk = true;
               }
+              if (hasVisibleNonToolCandidateParts(chunk)) {
+                streamYieldedVisibleContent = true;
+              }
               // Mirror the visible text into the continuation buffer as it is
               // yielded. Reading it back off history is not an option on the
               // transport path: processStreamResponse deliberately does NOT
@@ -4678,13 +4871,16 @@ export class LlmChat {
             // boundary, which is the only place a replay can occur.
             foldTransportAttemptText();
 
+            const toolArgumentStall = getToolArgumentStallRetryError(error);
+            const retryError = toolArgumentStall ?? error;
+
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
             // Classify once per failed attempt; reused by the rate-limit
             // diagnostics below and the transport-retry decision further down.
-            const classification = classifyRetryError(error, {
+            const classification = classifyRetryError(retryError, {
               authType: cgConfig?.authType,
               extraRetryErrorCodes,
             });
@@ -4697,7 +4893,7 @@ export class LlmChat {
             // minute delay on an error that cannot succeed until the reset
             // time. Throws a plain Error (no .status) and skips model
             // fallback, matching the retryWithBackoff fast-fail.
-            if (isQuotaExhaustedError(error)) {
+            if (isQuotaExhaustedError(retryError)) {
               debugLogger.warn('Quota exhausted mid-stream, fast-failing', {
                 retryPath: 'stream',
                 retryDecision: 'fail-fast',
@@ -4715,7 +4911,10 @@ export class LlmChat {
             ) {
               throw error;
             }
-            const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
+            const isRateLimit = isRateLimitError(
+              retryError,
+              extraRetryErrorCodes,
+            );
             if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
               // The classifier is observation-only here; stream retry control
@@ -4787,8 +4986,9 @@ export class LlmChat {
             // endpoint can reject the serialized request with a bare HTTP 413
             // (no token wording) even below the token-based compaction
             // threshold; it recovers through the same one-shot path (#10380).
-            const contextOverflow = getContextLengthExceededInfo(error);
-            const requestPayloadOverflow = getRequestPayloadTooLargeInfo(error);
+            const contextOverflow = getContextLengthExceededInfo(retryError);
+            const requestPayloadOverflow =
+              getRequestPayloadTooLargeInfo(retryError);
 
             // HTTP establishment failures already exhausted retryWithBackoff;
             // only server errors raised while reading the stream join replay.
@@ -4820,6 +5020,10 @@ export class LlmChat {
             // ask the model to resume from.
             const isReplayableStreamError =
               isContinuableStreamCut || isServerStreamError;
+            const toolArgumentStallBudgetLeft =
+              !toolArgumentStall ||
+              toolArgumentStallRetryCount <
+                STREAM_RETRY_CONFIG.maxToolArgumentStallRetries;
 
             // Replay transient server errors and curated socket-level failures
             // before any content (non-thought output) has reached callers.
@@ -4839,23 +5043,30 @@ export class LlmChat {
             // (#13319). Such sends never take the continuation arm below.
             const replayAdmitsDeliveredContent =
               options?.retractDeliveredOutputOnRetry === true;
+            const replayAdmitsCutFunctionCalls =
+              options?.retractToolCallsOnRetry === true &&
+              !streamYieldedVisibleContent;
+            const canReplayAttempt =
+              replayAdmitsDeliveredContent ||
+              ((!streamYieldedContentChunk || replayAdmitsCutFunctionCalls) &&
+                // `streamYieldedContentChunk` is per-attempt, so on its own it
+                // cannot tell "nothing has been delivered" from "this attempt
+                // was cut while thinking, after earlier attempts already put
+                // text on screen". Only the first is replayable; replaying the
+                // second discards output the caller is watching. The
+                // accumulated buffer is what distinguishes them, and it must be
+                // consulted here because this branch is checked before the
+                // continuation one below.
+                transportContinuationText.trim().length === 0);
             if (
               isReplayableStreamError &&
-              (replayAdmitsDeliveredContent ||
-                (!streamYieldedContentChunk &&
-                  // `streamYieldedContentChunk` is per-attempt, so on its own it
-                  // cannot tell "nothing has been delivered" from "this attempt
-                  // was cut while thinking, after earlier attempts already put
-                  // text on screen". Only the first is replayable; replaying the
-                  // second discards output the caller is watching. The
-                  // accumulated buffer is what distinguishes them, and it must be
-                  // consulted here because this branch is checked before the
-                  // continuation one below.
-                  transportContinuationText.trim().length === 0)) &&
-              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
+              canReplayAttempt &&
+              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries &&
+              toolArgumentStallBudgetLeft
             ) {
               self.popPendingPartialAssistantTurn();
               streamReplayRetryCount++;
+              if (toolArgumentStall) toolArgumentStallRetryCount++;
               const delayMs =
                 STREAM_RETRY_CONFIG.initialDelayMs * streamReplayRetryCount;
               debugLogger.warn(
@@ -4950,10 +5161,12 @@ export class LlmChat {
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
-                STREAM_RETRY_CONFIG.maxContinuationRetries;
+                STREAM_RETRY_CONFIG.maxContinuationRetries &&
+              toolArgumentStallBudgetLeft;
             if (canContinueAfterTransportCut) {
               self.popPendingPartialAssistantTurn();
               transportContinuationCount++;
+              if (toolArgumentStall) toolArgumentStallRetryCount++;
               // Everything delivered so far — across earlier continuation
               // attempts too, since `transportContinuationText` accumulates
               // and is never reset while continuing. Each attempt's own text
@@ -5003,12 +5216,13 @@ export class LlmChat {
                   : 'Transport stream retry not taken',
                 {
                   retryPath: 'stream',
-                  retryDecision: attemptClosedWithOwnOutput
-                    ? 'skipped_terminal_finish_reason'
-                    : streamYieldedContentChunk ||
-                        transportContinuationText.trim().length > 0
-                      ? 'skipped_after_content'
-                      : 'exhausted',
+                  retryDecision: !toolArgumentStallBudgetLeft
+                    ? 'tool_argument_stall_exhausted'
+                    : canReplayAttempt
+                      ? 'exhausted'
+                      : attemptClosedWithOwnOutput
+                        ? 'skipped_terminal_finish_reason'
+                        : 'skipped_after_content',
                   attempts: streamReplayRetryCount,
                   maxRetries: STREAM_RETRY_CONFIG.maxRetries,
                   continuationAttempts: transportContinuationCount,
@@ -5581,6 +5795,7 @@ export class LlmChat {
           let recoveryParams: SendMessageParameters = params;
 
           if (shouldEscalateMaxOutputTokens) {
+            self.lastRequestMaxOutputTokens = escalatedLimit;
             debugLogger.info(
               `Output truncated at ${effectiveInitialMaxOutputTokens} tokens. ` +
                 `Escalating to ${escalatedLimit} tokens.`,
@@ -5724,15 +5939,21 @@ export class LlmChat {
             // defensive fallback that never fires in practice.
             const recoveryCeiling =
               recoveryParams.config?.maxOutputTokens ?? outputCeiling;
+            const iterationClampedMaxOutputTokens = clampOutputTokensToWindow(
+              recoveryCeiling,
+              contextWindowForClamp,
+              recoveryPromptEstimate,
+            );
+            // Refresh the per-response limit the Turn reads (#16417): a
+            // recovery iteration can end at MAX_TOKENS, and the rejection
+            // must name the limit *this* iteration used, not the one from
+            // before the recovery loop started.
+            self.lastRequestMaxOutputTokens = iterationClampedMaxOutputTokens;
             const iterationParams: SendMessageParameters = {
               ...recoveryParams,
               config: {
                 ...recoveryParams.config,
-                maxOutputTokens: clampOutputTokensToWindow(
-                  recoveryCeiling,
-                  contextWindowForClamp,
-                  recoveryPromptEstimate,
-                ),
+                maxOutputTokens: iterationClampedMaxOutputTokens,
               },
             };
 
@@ -5830,10 +6051,10 @@ export class LlmChat {
             !isUnattendedMode() &&
             !streamYieldedAnyChunk
           ) {
-            let currentErrorClassification = classifyRetryError(lastError, {
-              authType: cgConfig?.authType,
-              extraRetryErrorCodes,
-            });
+            let currentErrorClassification = classifyRetryError(
+              getToolArgumentStallRetryError(lastError) ?? lastError,
+              { authType: cgConfig?.authType, extraRetryErrorCodes },
+            );
 
             if (isFallbackEligible(currentErrorClassification)) {
               let fallbackSucceeded = false;
@@ -5842,6 +6063,9 @@ export class LlmChat {
               let currentResolvedModel = cgConfig?.model ?? model;
               let fallbackStreamYieldedAnyChunk = false;
 
+              // The health ledger (`availability`) is bound at the request entry
+              // above; here only fallback selection consults it. The primary is
+              // still attempted each request (it may have recovered).
               for (const fallbackModelId of fallbackModels) {
                 // Skip fallback models that match the current/primary model
                 if (
@@ -5893,6 +6117,29 @@ export class LlmChat {
                     `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
                       `resolved model "${resolvedFallbackModel}" matches ` +
                       `the current model.`,
+                  );
+                  continue;
+                }
+
+                // Key the ledger by the resolved provider route, not the bare
+                // model id: two fallbacks can resolve to the same model id on
+                // different routes (e.g. openai:shared vs anthropic:shared),
+                // and exhausting one route must not skip the other. Aliases of
+                // one route still share health (P2 resolved-route).
+                const fallbackRouteKey =
+                  self.config.getModelRouteIdentity?.(
+                    resolvedFallbackModel,
+                    fallbackConfig,
+                  ) ?? resolvedFallbackModel;
+
+                // Skip a fallback the health ledger already exhausted this turn.
+                if (
+                  availability &&
+                  !availability.snapshot(fallbackRouteKey).available
+                ) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `marked unavailable for this turn.`,
                   );
                   continue;
                 }
@@ -5973,6 +6220,7 @@ export class LlmChat {
                   // Fallback succeeded
                   lastError = null;
                   fallbackSucceeded = true;
+                  availability?.markHealthy(fallbackRouteKey);
                   debugLogger.info(
                     `[FALLBACK] Successfully completed request with ` +
                       `fallback model "${resolvedFallbackModel}".`,
@@ -5989,6 +6237,30 @@ export class LlmChat {
                   }
                   lastError = fallbackError;
 
+                  // Classify the fallback error to decide whether to continue
+                  // to the next fallback or give up
+                  const fallbackClassification = classifyRetryError(
+                    getToolArgumentStallRetryError(fallbackError) ??
+                      fallbackError,
+                    {
+                      authType: fallbackRetryAuthType,
+                      extraRetryErrorCodes: fallbackRetryErrorCodes,
+                    },
+                  );
+
+                  const canTryNextFallback = isFallbackEligible(
+                    fallbackClassification,
+                  );
+                  // Record the unhealthy fallback even when it emitted output
+                  // before failing: the chain stops below to avoid duplicating
+                  // output, but the model must still be skipped for the rest of
+                  // the turn. Gated on fallback-eligibility so a post-output
+                  // auth/client error is not recorded as turn-unavailable.
+                  if (availability && canTryNextFallback) {
+                    availability.markRetryOncePerTurn(fallbackRouteKey);
+                    availability.consumeStickyAttempt(fallbackRouteKey);
+                  }
+
                   if (currentFallbackYieldedAnyChunk) {
                     self.popPendingPartialAssistantTurn();
                     debugLogger.warn(
@@ -6000,19 +6272,6 @@ export class LlmChat {
                     break;
                   }
 
-                  // Classify the fallback error to decide whether to continue
-                  // to the next fallback or give up
-                  const fallbackClassification = classifyRetryError(
-                    fallbackError,
-                    {
-                      authType: fallbackRetryAuthType,
-                      extraRetryErrorCodes: fallbackRetryErrorCodes,
-                    },
-                  );
-
-                  const canTryNextFallback = isFallbackEligible(
-                    fallbackClassification,
-                  );
                   debugLogger.warn(
                     `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
                       `failed (reason: ${fallbackClassification.reason}, ` +
@@ -6487,8 +6746,8 @@ export class LlmChat {
       const copied = copyContentContainer(content);
       // Startup restoration and microcompaction reinstall these defensive copies.
       content.parts?.forEach((part, index) => {
-        if (this.unaccountedMemorySnapshots.has(part)) {
-          this.unaccountedMemorySnapshots.add(copied.parts![index]);
+        if (this.unaccountedContextSnapshots.has(part)) {
+          this.unaccountedContextSnapshots.add(copied.parts![index]);
         }
       });
       return copied;
@@ -6978,11 +7237,15 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    if (!this.chatRecordingService || this.isForkedChat) {
+      history = withoutCompactionTranscriptHint(history);
+    }
     this.toolBudgetUsageAnchor = undefined;
     this.toolBudgetFixedInputVersion++;
     this.historyReplacementRevision++;
     markCompressedHistory(history);
     this.history = history;
+    this.permissionContextEnabled ||= !!findLatestPermissionContext(history);
     this.markToolResultsInjected(this.history);
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
@@ -7458,7 +7721,7 @@ export class LlmChat {
             ) {
               this.retainCurrentTokenCounts();
             }
-            this.unaccountedMemorySnapshots = new WeakSet<Part>();
+            this.unaccountedContextSnapshots = new WeakSet<Part>();
             this.lastPromptTokenCount = lastPromptTokenCount;
             this.lastPromptTokenCountIsEstimated = false;
             this.lastOutputTokenCount = hasUsablePromptTokenCount
@@ -7712,7 +7975,7 @@ export class LlmChat {
       // status, so without that context it reads as a status-less upstream
       // frame — the one class this gate accepts.
       const trailingErrorClassification = classifyRetryError(
-        streamError,
+        getToolArgumentStallRetryError(streamError) ?? streamError,
         retryClassificationContext,
       );
       if (
@@ -8095,12 +8358,15 @@ export class LlmChat {
       throw streamError;
     }
 
-    // Charge newly retained catalogs only when the turn survives rollback.
-    // A provider usage report already covers them and clears this ownership.
-    if (this.config.getAutoMemoryContext?.() && this.lastPromptTokenCount > 0) {
+    // 只对仍可见且尚未被提供方 usage 覆盖的上下文快照计费。
+    if (this.lastPromptTokenCount > 0) {
+      const catalogVisible = !!this.config.getAutoMemoryContext?.();
       const snapshots = this.history.flatMap((entry) =>
-        (entry.parts ?? []).filter((part) =>
-          this.unaccountedMemorySnapshots.has(part),
+        (entry.parts ?? []).filter(
+          (part) =>
+            this.unaccountedContextSnapshots.has(part) &&
+            (catalogVisible ||
+              part.partMetadata?.[PERMISSION_CONTEXT_METADATA]),
         ),
       );
       if (snapshots.length > 0) {
@@ -8112,7 +8378,7 @@ export class LlmChat {
         );
       }
     }
-    this.unaccountedMemorySnapshots = new WeakSet<Part>();
+    this.unaccountedContextSnapshots = new WeakSet<Part>();
     this.history.push({
       role: 'model',
       parts: acceptedTurnParts,

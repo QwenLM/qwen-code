@@ -169,6 +169,9 @@ export function buildTrajectory(
         ? { startedAt: timing.startedAt }
         : {}),
       ...(timing.ttftMs !== undefined ? { ttftMs: timing.ttftMs } : {}),
+      ...(timing.firstVisibleOffsetMs !== undefined
+        ? { firstVisibleOffsetMs: timing.firstVisibleOffsetMs }
+        : {}),
     };
     const row: TrajectoryRequestRow = {
       kind: 'request',

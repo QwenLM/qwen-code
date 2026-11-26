@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHarnessReleaseRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
@@ -8,22 +7,22 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.apache.commons.codec.digest.DigestUtils;
-import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /** Durable ownership; an endpoint disappearing never authorizes another writer. */
 @Repository
@@ -32,6 +31,8 @@ public class JdbcHarnessPlacementStore
         implements HarnessPlacementStore {
     private static final String COLUMNS = "tenant_id, session_id, workspace_id, harness_instance_id, "
             + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state";
+    private static final String JOIN_COLUMNS = "m.tenant_id, m.session_id, m.workspace_id, m.harness_instance_id, "
+            + "m.harness_owner_boot_id, m.harness_placement_epoch, m.harness_placement_state";
     private final JdbcTemplate jdbc;
 
     public JdbcHarnessPlacementStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
@@ -54,13 +55,49 @@ public class JdbcHarnessPlacementStore
                 (row, index) -> row.getString(1), instance, boot).isEmpty();
     }
 
+    public List<Placement> findExpiredSuspensions(Set<String> excludedInstanceIds, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Reaper limit must be between 1 and 100");
+        }
+        Set<String> excluded = Set.copyOf(excludedInstanceIds);
+        List<String> owners = jdbc.query("SELECT DISTINCT harness_instance_id FROM ma_session"
+                + " WHERE harness_instance_id IS NOT NULL AND harness_placement_state IN ('ACTIVE', 'QUIESCING')"
+                + " AND status = 'ACTIVE' AND deleted_at IS NULL AND retired_at IS NULL"
+                + " AND is_resource_gc_completed = FALSE ORDER BY harness_instance_id",
+                (row, index) -> row.getString(1));
+        List<Placement> found = new ArrayList<>();
+        for (String owner : owners) {
+            if (excluded.contains(owner)) {
+                continue;
+            }
+            int remaining = limit - found.size();
+            found.addAll(jdbc.query("SELECT " + JOIN_COLUMNS + " FROM ma_session m JOIN ma_session_head h"
+                    + " ON h.tenant_id = m.tenant_id AND h.session_id = m.session_id"
+                    + " AND h.head_kind = 'MANAGED_SESSION'"
+                    + " WHERE m.harness_instance_id = ? AND m.harness_placement_state IN ('ACTIVE', 'QUIESCING')"
+                    + " AND m.harness_placement_epoch < ? AND m.status = 'ACTIVE'"
+                    + " AND m.deleted_at IS NULL AND m.retired_at IS NULL AND m.is_resource_gc_completed = FALSE"
+                    + " AND (m.session_kind = 'PUBLIC' OR m.workspace_id IS NOT NULL)"
+                    + " AND h.state = 'SEALED' AND h.recovery_status = 'READY'"
+                    + " AND h.writer_lease_until IS NOT NULL AND h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW
+                    + " AND h.activation_phase = 'released' AND h.activation_head_revision = h.journal_revision"
+                    + " AND h.wake_seal_revision = h.journal_revision"
+                    + " ORDER BY m.tenant_id, m.session_id LIMIT ?",
+                    (row, index) -> new Placement(row.getString(1), row.getString(2), row.getString(3),
+                            row.getString(4), row.getString(5), row.getLong(6), row.getString(7)),
+                    owner, ManagedSessionStoreModels.MAX_SAFE_COUNTER, remaining));
+            if (found.size() >= limit) {
+                break;
+            }
+        }
+        return List.copyOf(found);
+    }
+
     public Map<String, Object> releaseReceipt(String tenant, String session, long epoch, String operationId) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        String key = ManagedExtensionProjection.recordKey(session, RELEASE_DOMAIN, releaseId(epoch));
         var saved = jdbc.query("SELECT b.inline_bytes, b.sha256 FROM ma_session_record r JOIN ma_resource b"
-                + " ON b.session_scope_key = r.session_scope_key AND b.resource_id = r.record_resource_id"
+                + " ON b.resource_id = r.record_resource_id"
                 + " AND b.tenant_id = r.tenant_id AND b.workspace_id = r.workspace_id AND b.session_id = r.session_id"
-                + " WHERE r.session_scope_key = ? AND r.record_key = ? AND r.tenant_id = ? AND r.session_id = ?"
+                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.record_id = ?"
                 + " AND r.domain = 'hosted_harness_release' AND r.record_kind = 'DOMAIN'"
                 + " AND b.kind = ? AND b.schema_version = 1 AND b.state = 'REFERENCED'"
                 + " AND b.storage_kind = 'MYSQL_INLINE' AND b.byte_length BETWEEN 1 AND 16384 AND LENGTH(b.inline_bytes) = b.byte_length",
@@ -70,7 +107,7 @@ public class JdbcHarnessPlacementStore
                         throw blocked("harness_release_receipt_corrupt");
                     }
                     return ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
-                }, scope, key, tenant, session, "managed-hosted_harness_release");
+                }, tenant, session, releaseId(epoch), "managed-hosted_harness_release");
         if (saved.isEmpty()) {
             return null;
         }
@@ -102,7 +139,7 @@ public class JdbcHarnessPlacementStore
 
     private Placement assign(String tenant, String session, String instance, String boot, OperationRecord operation) {
         identity(instance);
-        identity(boot);
+        BrokerValues.requireShortId(boot, "harnessOwnerBootId");
         Placement current = lockEligible(tenant, session, operation);
         if (current.instanceId() != null) {
             return current;
@@ -143,20 +180,19 @@ public class JdbcHarnessPlacementStore
 
     private Placement takeover(String tenant, String session, Placement expected, String instance, String boot, OperationRecord operation) {
         identity(instance);
-        identity(boot);
+        BrokerValues.requireShortId(boot, "harnessOwnerBootId");
         Placement current = lockEligible(tenant, session, operation);
         if (!sameOwner(current, expected)) {
             throw blocked("harness_placement_changed");
         }
         var heads = jdbc.query("SELECT state, writer_lease_until, activation_phase, activation_expires_at,"
                 + " activation_head_revision, journal_revision, activation_epoch"
-                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                + " FROM ma_session_head WHERE tenant_id = ? AND"
+                + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 (row, index) -> new Object[] {row.getString(1), row.getObject(2, Long.class),
                         row.getString(3), row.getObject(4, Long.class), row.getObject(5, Long.class),
                         row.getLong(6), row.getLong(7)},
-                RuntimeAdmissionFences.harnessDrainKey(tenant),
-                RuntimeAdmissionFences.harnessDrainKey(session), tenant, session);
+                tenant, session);
         if (!heads.isEmpty()) {
             Object[] head = heads.getFirst();
             long now = now(jdbc);
@@ -168,6 +204,12 @@ public class JdbcHarnessPlacementStore
                             || "active".equals(head[2]) && head[3] != null && (Long) head[3] <= now);
             if (!released && !expired) {
                 throw blocked("harness_owner_still_live");
+            }
+            if (released) {
+                // A successor that never acquires a writer must not inherit the released writer's lease.
+                jdbc.update("UPDATE ma_session_head SET writer_lease_until = LEAST(writer_lease_until, ?)"
+                        + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                        now, tenant, session);
             }
         }
         if (current.epoch() >= ManagedSessionStoreModels.MAX_SAFE_COUNTER) {
@@ -210,11 +252,11 @@ public class JdbcHarnessPlacementStore
     }
 
     static boolean released(JdbcTemplate jdbc, String tenant, String session, long epoch) {
-        return !jdbc.query("SELECT record_id FROM ma_session_record WHERE session_scope_key = ?"
-                + " AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_kind = 'DOMAIN'",
-                (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session),
-                ManagedExtensionProjection.recordKey(session, RELEASE_DOMAIN, releaseId(epoch)),
-                tenant, session, RELEASE_DOMAIN).isEmpty();
+        return !jdbc.query("SELECT record_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
+                + " AND record_id = ? AND domain = ? AND record_kind = 'DOMAIN'",
+                (row, index) -> row.getString(1), tenant, session,
+                releaseId(epoch),
+                RELEASE_DOMAIN).isEmpty();
     }
 
     private Placement lockEligible(String tenant, String session, OperationRecord operation) {
@@ -251,12 +293,10 @@ public class JdbcHarnessPlacementStore
                 + " o.lifecycle_protocol_version, f.phase, f.operation_id FROM ma_operation o JOIN ma_session_head f"
                 + " ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id"
                 + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ? AND o.operation_kind = ?"
-                + " AND f.tenant_key = ? AND f.harness_key = ? FOR UPDATE",
+                + " FOR UPDATE",
                 (row, index) -> new Object[] {row.getLong(1), row.getLong(2), row.getString(3), row.getString(4),
                         row.getInt(5), row.getString(6), row.getString(7)},
-                operation.tenantId(), operation.sessionId(), operation.operationId(), operation.kind().name(),
-                RuntimeAdmissionFences.harnessDrainKey(operation.tenantId()),
-                RuntimeAdmissionFences.harnessDrainKey(operation.sessionId()));
+                operation.tenantId(), operation.sessionId(), operation.operationId(), operation.kind().name());
         if (rows.size() != 1) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
@@ -296,9 +336,9 @@ public class JdbcHarnessPlacementStore
     }
 
     private static void identity(String id) {
-        if (StringUtils.isBlank(id) || id.indexOf('\0') >= 0 || id.getBytes(StandardCharsets.UTF_8).length > 144) {
-            throw new IllegalArgumentException("Harness instance and boot identities must contain 1 to 144 UTF-8 bytes.");
-        }
+        // The VARCHAR(128) column admits only the pool endpoint charset; a
+        // PAD SPACE fold must never alias one instance's ownership to another.
+        BrokerValues.requireInstanceId(id, "harnessInstanceId");
     }
 
     static ManagedAgentException blocked(String code) {

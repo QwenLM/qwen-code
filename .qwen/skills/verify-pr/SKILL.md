@@ -23,8 +23,8 @@ Two entry paths share the contract below.
   before running the checker, and the checker treats an absent declaration
   as a warning while `$QWEN_VERIFY_CONTEXT` is set — so the round's own
   pre-finish self-check never fails on a file only the later job writes.
-- **Maintainer round on a workstation** — `/verify-pr <n>`, starting with the
-  full step-1 prepare block (the trusted copy
+- **Maintainer round on a workstation** — `/verify-pr <n>`, running the full
+  step-1 prepare block (the trusted copy
   `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
   redirected to `prepare.log`, plus the `sed` that captures the snapshot digest
   into `pr.sha256`; the PR clone only as its cwd — see the container recipe
@@ -258,14 +258,25 @@ toolchain install succeeded. The alternative is a JDK-equipped
 credential-free boundary you build yourself; the recorded waiver is the
 last resort, never a silent host fallback.
 
-Run the full step-1 prepare block on the host before anything else — the
+Run the full step-1 prepare block on the host before any work inside the
+boundary — the watch-state registration precedes it (R17-2), but prepare itself
+stays on the host because resolving metadata needs `gh`, which the boundary
+excludes. It is the
 `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
 command redirected to `prepare.log`, plus the `sed` that captures the snapshot
 digest into `pr.sha256` (step 7 binds the snapshot's bytes to it). It fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
 materialised checkout of the PR head (a wrong HEAD names the `git checkout`
-to run; uncommitted changes name the entries and a stash form that clears
-them; index flags that hide tracked state — a sparse checkout's
+to run — but if this round registered a head, the plain checkout is the remedy
+only when the named head **is** that head; a head that differs is the moved-head
+case below (release this round's marker; never check out the named head under
+it, which would file its evidence under the registered head's verdict). A round
+that registered nothing (a fresh `/verify-pr <n>`) has no marker of its own:
+read the state file's in-flight entry first — while another round's marker is
+live, let that round answer, never checking out under a live marker; if that
+round is dead, recover its marker per the dead-round recovery below, then check
+out; uncommitted changes name the entries and a stash
+form that clears them; index flags that hide tracked state — a sparse checkout's
 skip-worktree, assume-unchanged — are refused too; the script never stashes
 for you),
 creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
@@ -724,15 +735,60 @@ Build the task in this order and stop at the first failure:
    `recurring: true`, `durable: true`, `sessionMode: "current"`, and
    `gate: "node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <absolute qwen>"`
    (the gate is capped at 2048 characters). The prompt is the contract below.
+   The prompt is a **persisted snapshot** of that contract: a watch created
+   before the register-ahead change (R17-2) keeps the old prepare-then-register
+   order, and `--start --artifact-dir` is still accepted, so nothing forces the
+   upgrade. Re-creating it through the standard install does not work: step 3 is
+   blocked by the probe cursor as well as the claim, and `--release` clears only
+   the claim — so such a watch keeps the old order until it is manually migrated
+   (a residual tracked in #17371). Do not delete another session's live watch to
+   make room; the claim guard forbids it.
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
-Run prepare first (trusted host metadata), then register the round with
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`
-**before** the verification work starts, so a round that dies does not
-replay the same head; `<dir>` is the artifact directory prepare printed,
-and `<r>` is this round's number — pick the next integer and **repeat the
-same value in `--complete`**; the completion is matched by head and round.
+Register the round **first, ahead of prepare** (R17-2), with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>`
+— no `--artifact-dir`, because prepare has not printed the directory yet — so
+a round killed in the prepare window leaves a recoverable in-flight marker
+rather than a silently dropped head (the probe cursor already advanced past the
+delivered head). `<r>` is this round's number — pick the next integer and
+**repeat the same value in `--complete`**; the completion is matched by head and
+round. Then run prepare (trusted host metadata); it creates and prints the
+artifact directory `<dir>`, which you record at `--complete`. When prepare
+succeeds, compare the `head` line it printed (the trusted snapshot's
+`headRefOid`) with `<headSha>` before the battery: prepare checks the tree
+against the live PR head, not the registered one, so a force-push back to a
+head the tree already sits at prepares successfully while this round
+registered `<headSha>` — completing would file that head's evidence under
+`<headSha>`. A differing head is the moved-head case below: release this
+round's marker and run neither the battery nor `--complete`. If prepare
+refuses, compare the head it names (the "not PR head …" in its refusal) with
+`<headSha>` — a differing head is the moved-head case below, not a transient
+failure. If prepare fails after `--start`, recover with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`,
+then start the head again
+(`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`)
+and retry prepare — a release alone leaves the head unregistered (it files only
+a push-order hint, not a deferral) and no probe fire will deliver it again.
+A transient prepare failure (the round still runs) leaves the marker intact —
+prepare never reads the watch state — so retrying prepare against it and
+completing at the original round recovers the head with no release; the
+release + restart is for a round that died, and a kill between its two commands
+would re-open the silent drop. `--repo` is required on both: `--start` recorded
+it, and every verb refuses an omitted `--repo` once a repo is recorded. The
+restarted round's number (`<r+1>`) becomes this round's number — repeat that
+value in `--complete`. Do not recover with `--complete inconclusive` instead —
+only that verdict increments the retry counter whose cap is the terminal
+not-covered state, so two transient prepare failures would retire a head no
+round examined. If prepare refuses because the head it names is not the head
+this round registered — moved forward or force-pushed; prepare tests exact
+equality and states no ordering — the registered head can never prepare:
+`--release --head <headSha> --round <r> --repo <owner>/<repo>` it and do not
+restart it — the live head is delivered by the next fire (the gate cursor
+tracks the live head), or is already in the deferred list the release prints,
+which you then start. The started head is its own round — repeat its head and
+round in `--complete`, not the released head's. Do not `git checkout` the named
+head under the old marker.
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container
@@ -748,8 +804,16 @@ Exit 3 has several shapes, each with its own reaction:
   **recorded as deferred** and the fire is skipped — the probe's cursor
   advanced past it in the same call, so no second event will arrive. The
   round that owns the blocking head may have finished without `--complete`;
-  if it is no longer running, recover with `--release --head <blocking head>`
+  if it is no longer running, recover with
+  `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>`
   and then start the last deferred head, or the deferral is never delivered.
+  Here `<r>` is the dead round's number (the blocking marker's), not this
+  round's. Read it from the state file's in-flight entry and pass it (reading
+  the state is allowed; only hand-writing the JSON is forbidden): an omitted
+  `--round` skips the round match, so a retried release would delete a newer
+  round's live marker for the same head. Omit `--round` only for a legacy
+  marker whose entry records no round; a supplied `--round` that differs from
+  the marker's is refused.
 - The state lock is held by another invocation: retry shortly; if a killed
   invocation left the `.lock` file beside the state file, remove that lock
   file (never the state file) and retry. This applies to `--complete` too —
@@ -757,11 +821,26 @@ Exit 3 has several shapes, each with its own reaction:
 - The state belongs to another repository: a PR number is only unique
   within its repo; check `--repo` and the state root. This guard applies to
   `--complete` and `--release` too, and an omitted `--repo` does not disarm
-  it once the state records a repo.
+  it once the state records a repo. Because registration runs ahead of
+  prepare, a mistyped `--repo` is recorded at `--start` before prepare can
+  reject it, and every later verb then refuses the correct slug without naming
+  the file; the reset — only when no other round is live (the sole in-flight
+  marker is the mistyped one being reset), since deleting the file would strand
+  any other live round's marker — is to delete
+  the state file `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree
+  (this drops the PR's dedup history and any deferred heads, which no fire will
+  re-deliver) and then re-register the delivered head — and any deferred head
+  you still want covered — with the correct slug (`--start`); the probe cursor
+  already advanced past them, so no fire will deliver them again; check the
+  slug at `--start`.
 
 Record the finished round with the same script's completion form:
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>`
-— `--verdict` is one of `merge-ready | findings | blocked | inconclusive`,
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
+— `--artifact-dir <dir>` records the directory prepare printed (the `--start`
+registration ran before prepare and carried none); omit it on a replayed
+completion to inherit the directory already recorded for the head rather than
+overwriting it; `--verdict` is one of
+`merge-ready | findings | blocked | inconclusive`,
 verbatim; a completion without it exits 2 and leaves the head in flight
 forever. A completion whose `--round` differs from the in-flight marker, or
 from a round that already answered for the head, is refused (exit 3) rather
@@ -942,13 +1021,49 @@ ambiguous rather than verify a guessed PR. Then, in order:
    reviews and CI results that arrived since are data to fold into that
    answer, never a reason to re-verify — the same rule the watch gate
    applies.
-3. Register the round in the shared watch state before starting it, through
-   the helper that owns `.qwen/tmp/verify-pr-watch-<n>.json` — never hand-write
-   that JSON. Run it from the trusted clone (the state root defaults to its
-   main worktree, never the round's PR clone), after prepare has printed the
-   artifact directory — `<dir>` is that printed path:
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`.
-   `<r>` is this round's number; repeat the same value in `--complete`.
+3. Register the round in the shared watch state **ahead of prepare** (R17-2),
+   through the helper that owns `.qwen/tmp/verify-pr-watch-<n>.json` — never
+   hand-write that JSON. Run it from the trusted clone (the state root defaults
+   to its main worktree, never the round's PR clone), before prepare runs, so a
+   round killed in the prepare window leaves a recoverable in-flight marker:
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>`
+   — no `--artifact-dir`, because prepare has not printed the directory yet.
+   `<r>` is this round's number; repeat the same value in `--complete`. Then run
+   prepare; it creates and prints the artifact directory `<dir>`, which you
+   record at `--complete`. When prepare succeeds, compare the `head` line it
+   printed (the trusted snapshot's `headRefOid`) with `<H>` before the
+   battery: prepare checks the tree against the live PR head, not the
+   registered one, so a force-push back to a head the tree already sits at
+   prepares successfully while this round registered `<H>` — completing would
+   file that head's evidence under `<H>`. A differing head is the moved-head
+   case below: release this round's marker and run neither the battery nor
+   `--complete`. If prepare fails after `--start`, recover with
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`,
+   then start the head again
+   (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`)
+   and retry prepare — a release alone leaves the head unregistered and no
+   probe fire will deliver it again (`--repo` is required once `--start`
+   recorded it). A transient prepare failure (the round still runs) leaves the
+   marker intact — prepare never reads the watch state — so retrying prepare
+   against it and completing at the original round recovers `H` with no
+   release; the release + restart is for a round that died. The restarted
+   round's number (`<r+1>`) becomes this round's number — repeat that value in
+   `--complete`. Do not recover with `--complete
+inconclusive` instead: it increments the retry counter whose cap is the
+   terminal not-covered state. If prepare refuses because the head it names is
+   not the head this round registered — moved forward or force-pushed; prepare
+   tests exact equality and states no ordering — the registered head can never
+   prepare: `--release --head <H> --round <r> --repo <owner>/<repo>` it and do
+   not restart it. There is no watch fire here to deliver the live head, so re-resolve it
+   yourself (`gh pr view <n> --repo <owner>/<repo> --json headRefOid`), then
+   `--start --head <live> --round <next> --repo <owner>/<repo>` and run prepare
+   for it. The restarted round is now `<live>` at `<next>` — repeat those
+   values in `--complete`, not the original `<H>` and `<r>`. If that `--start`
+   is refused because `<live>` is already verified (a force-push can return to
+   an earlier, already-covered head), the head needs no new round. The follow-up
+   protocol below then classifies the delta and re-measures at `<live>` (the new
+   head), not the original `H`.
+   Do not `git checkout` the named head under the old marker.
    Exit 3 means the file already records `H` as verified or in flight, or
    another head's round is in flight (one round per PR): let that round
    answer instead of starting a duplicate. A cross-head refusal records `H`
@@ -975,7 +1090,9 @@ ambiguous rather than verify a guessed PR. Then, in order:
    **before** the round starts — the same write-before-start rule the watch
    prompt follows, so a watch fire during the manual round skips `H`. Once
    the round completes, record it with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>`.
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
+   (`<dir>` is the artifact directory prepare printed; omit it on a replayed
+   completion to inherit the directory already recorded for `H`).
    A completion whose `--round` differs from the marker, or from a round
    that already answered for `H`, is refused (exit 3).
    Measured case: two consecutive rounds skipped the hand-written completion
@@ -1898,8 +2015,7 @@ inconclusive.
   shipped auto-approve mode made every later tool turn in the Workspace
   wait once `approval-mode: default` was on. A scripted fake model must
   emit the product's real shapes: multi-line text, several tool calls with
-  distinct arguments (five consecutive identical calls trip the core loop
-  guard), and an answer only to the request under test.
+  distinct arguments, and an answer only to the request under test.
 - **Harness checks fail closed; verdicts come from the backend.** Assert
   input shape before comparing (a 64-character hash before an equality).
   Print the exit status next to every count, and confirm an absence with a
@@ -1907,10 +2023,11 @@ inconclusive.
   example: a readiness check sent no bearer token to a server that
   requires auth, so it never saw 200 and always ran to its timeout; that
   timeout was reported as a "~40 s restart" of a server that listens
-  within about a second. Decide "the model replied" or "the turn finished"
-  from backend events or usage records, never from page text that may
-  echo the prompt. Match wait conditions only against lines produced in
-  the current phase. Bound every call to the system under test in time
+  within about a second. Verify the model's reply from backend assistant
+  output, never from page text that may echo the prompt. Confirm turn
+  completion from the backend terminal state for the prompt. Per-round
+  usage can corroborate the model used. Match wait conditions only against
+  lines produced in the current phase. Bound every call to the system under test in time
   and record a timeout as "no answer within N s": one commit turned a
   refusal after 0.1 s into a start that never answered while the worker
   was polled for status 4,549 times, and a probe without a limit waited
@@ -2209,6 +2326,7 @@ or contract version too.
   finding. Probe the **default** path of manual dispatch/config combinations
   (what happens when an operator submits the pre-filled form as-is), not
   just the documented happy path.
+- **Web Shell**: read [the Web Shell verification recipes](references/web-shell.md) for daemon capability fallbacks, partial settings writes, channel sessions, and model turns.
 - **Native Android (`packages/mobile-shell/`)** and changes to the
   daemon-served Web Shell it renders (`packages/web-shell/` and the serve
   routes it calls): read

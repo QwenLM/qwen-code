@@ -113,6 +113,12 @@ export interface DiffFile {
    * whether they keyed the same change.
    */
   renameFrom?: string;
+  /**
+   * Security-relevant git file mode (`100755` executable, `120000` symlink,
+   * `160000` submodule) observed in the section's diff header — absent for
+   * ordinary `100644` files so non-special sections carry no extra field.
+   */
+  mode?: '100755' | '120000' | '160000';
   kind: PathKind;
   /** Range within the diff FILE, covering header + all hunks. */
   diffStart: number;
@@ -238,6 +244,24 @@ export const MAX_CHUNK_CHARS = 20_000;
 export const READ_FILE_CHAR_CAP = 25_000;
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+const SPECIAL_MODE_HEADER_RE =
+  /^(?:(?:new|deleted) file mode|(?:new|old) mode) (100755|120000|160000)$/;
+const SPECIAL_MODE_INDEX_RE =
+  /^index [0-9a-f]+\.\.[0-9a-f]+ (100755|120000|160000)$/i;
+const MODE_PRIORITY: Record<'100755' | '120000' | '160000', number> = {
+  '100755': 1,
+  '120000': 2,
+  '160000': 3,
+};
+
+function recordSpecialMode(
+  cur: DiffFile,
+  mode: '100755' | '120000' | '160000',
+): void {
+  if (!cur.mode || MODE_PRIORITY[mode] > MODE_PRIORITY[cur.mode]) {
+    cur.mode = mode;
+  }
+}
 
 /**
  * Unquote a diff path token.
@@ -438,6 +462,17 @@ export function parseDiff(diffText: string): {
     // Lua comments, for instance. Treating those as headers overwrites the
     // file's path and swallows the line from the add/remove counts.
     if (!curHunk) {
+      if (oldPath === '') {
+        const modeMatch =
+          SPECIAL_MODE_HEADER_RE.exec(line) ?? SPECIAL_MODE_INDEX_RE.exec(line);
+        if (modeMatch) {
+          recordSpecialMode(
+            cur,
+            modeMatch[1] as '100755' | '120000' | '160000',
+          );
+          continue;
+        }
+      }
       if (line.startsWith('rename from ')) {
         cur.renameFrom = unquote(line.slice('rename from '.length));
         continue;

@@ -17,7 +17,7 @@ import { useI18n } from '../../i18n';
 import { useManagedRecoveryText } from './managed-recovery-messages';
 import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
-import type { Message } from '../../adapters/types';
+import type { Message, PermissionRequest } from '../../adapters/types';
 import {
   ToolDetailsContext,
   type ToolDetailsLoader,
@@ -38,6 +38,7 @@ import {
   getComposerDraftStorageKey,
 } from '../../hooks/useComposerCore';
 import { ToolApproval } from '../messages/ToolApproval';
+import { AskUserQuestion } from '../messages/AskUserQuestion';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Input } from '../ui/input';
@@ -65,7 +66,11 @@ import { useManagedRecovery } from './use-managed-recovery';
 import { useManagedTurnCancel } from './use-managed-turn-cancel';
 import { useManagedSessionRename } from './use-managed-session-rename';
 import { managedActionKey, useManagedActions } from './use-managed-actions';
-import { ManagedQuestionForm } from './ManagedQuestionForm';
+import { toManagedQuestionPermissionRequest } from './chat-controller';
+import {
+  exceedsManagedQuestionAnswerLimits,
+  managedQuestionAnswersFromDraft,
+} from './managed-question-response';
 import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
@@ -86,6 +91,8 @@ import {
 } from './ManagedArchivedSessions';
 import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
+import { ManagedArtifactLibraryPage } from './ManagedArtifactLibraryPage';
+import { ManagedSurfaceDecisionsDialog } from './ManagedSurfaceDecisionsDialog';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
@@ -99,6 +106,7 @@ import { getLatestSuccessfulTodos } from '../../utils/todos';
 import { getShadowAwareActiveElement } from '../../utils/dom';
 import type {
   ManagedAgentProvider,
+  ManagedAgentQuestionAnswer,
   ManagedAgentSessionSummary,
   ManagedAgentWorkspace,
   ManagedInputBlock,
@@ -291,50 +299,62 @@ export function ManagedSessionsPage({
   return <p role="status">{t('managed.unavailable')}</p>;
 }
 
-const FAILURE_MESSAGES: Record<string, readonly [string, string, string]> = {
+const FAILURE_MESSAGES: Record<
+  string,
+  readonly [string, string, string, string]
+> = {
   model_payment_required: [
     'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
     '模型接口要求支付（HTTP 402），可能是余额不足或计费受限。请检查供应商账户余额与计费状态后重试。',
+    '模型介面要求支付（HTTP 402），可能是餘額不足或計費受限。請檢查供應商帳戶餘額與計費狀態後重試。',
     'Требуется оплата API модели (HTTP 402). Перед повтором проверьте баланс и биллинг аккаунта поставщика.',
   ],
   model_authentication_failed: [
     'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
     '模型接口鉴权失败（HTTP 401）。请检查供应商凭据配置。',
+    '模型介面鑑權失敗（HTTP 401）。請檢查供應商憑證配置。',
     'Ошибка аутентификации API модели (HTTP 401). Проверьте настроенные учётные данные поставщика.',
   ],
   model_access_denied: [
     'Model API access denied (HTTP 403). Check the provider account and model permissions.',
     '模型接口拒绝访问（HTTP 403）。请检查供应商账户与模型访问权限。',
+    '模型介面拒絕訪問（HTTP 403）。請檢查供應商帳戶與模型訪問權限。',
     'Доступ к API модели запрещён (HTTP 403). Проверьте аккаунт поставщика и права на модель.',
   ],
   model_request_timeout: [
     'The model API request timed out. Try again later.',
     '模型接口请求超时，请稍后重试。',
+    '模型介面請求超時，請稍後重試。',
     'Запрос к API модели превысил время ожидания. Попробуйте позже.',
   ],
   model_rate_limited: [
     'Model API rate limit exceeded (HTTP 429). Wait and try again later.',
     '模型接口触发限流（HTTP 429），请稍后重试。',
+    '模型介面觸發限流（HTTP 429），請稍後重試。',
     'Превышен лимит запросов API модели (HTTP 429). Подождите и попробуйте позже.',
   ],
   model_request_rejected: [
     'The model API rejected the request. Check the model configuration and input.',
     '模型接口拒绝了请求，请检查模型配置与输入内容。',
+    '模型介面拒絕了請求，請檢查模型配置與輸入內容。',
     'API модели отклонил запрос. Проверьте конфигурацию модели и входные данные.',
   ],
   model_service_unavailable: [
     'The model API service is unavailable. Try again later.',
     '模型接口服务暂不可用，请稍后重试。',
+    '模型介面服務暫不可用，請稍後重試。',
     'Сервис API модели недоступен. Попробуйте позже.',
   ],
   model_request_failed: [
     'Model API request failed. Check the server logs for this session before retrying.',
     '模型接口请求失败，请根据当前会话检查服务日志后再重试。',
+    '模型介面請求失敗，請根據當前會話檢查服務日誌後再重試。',
     'Запрос к API модели не удался. Перед повтором проверьте журналы сервера для этой сессии.',
   ],
   hosted_turn_failed: [
     'The turn failed. Check the server logs for this session to identify the cause.',
     '本轮执行失败，请根据当前会话检查服务日志以定位具体原因。',
+    '本輪執行失敗，請根據當前會話檢查服務日誌以定位具體原因。',
     'Ход не удался. Проверьте журналы сервера для этой сессии, чтобы найти причину.',
   ],
 };
@@ -670,6 +690,13 @@ function ManagedSessionsContent({
     if (detail.summary && !detail.summary.capabilities.artifacts)
       setOutputTarget(undefined);
   }, [detail.summary]);
+  // The library belongs to the workspace, not the open session: it survives
+  // session selection and clears only when the provider identity changes.
+  const [artifactLibraryWorkspace, setArtifactLibraryWorkspace] = useState<{
+    workspaceId: string;
+    label: string;
+  }>();
+  useEffect(() => setArtifactLibraryWorkspace(undefined), [provider]);
   const loadToolDetails = useMemo<ToolDetailsLoader | undefined>(() => {
     const reader = provider.toolDetails;
     if (!sessionId || !reader) return undefined;
@@ -851,7 +878,13 @@ function ManagedSessionsContent({
   );
   const failureMessage = summary?.failure
     ? (FAILURE_MESSAGES[summary.failure.code]?.[
-        language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0
+        language === 'zh-TW'
+          ? 2
+          : language === 'zh-CN'
+            ? 1
+            : language === 'ru'
+              ? 3
+              : 0
       ] ?? summary.failure.message)
     : undefined;
   const recoveryError =
@@ -960,15 +993,60 @@ function ManagedSessionsContent({
       ),
     [approvals.actions, sessionId],
   );
+  const questionAction =
+    approvals.action?.kind === 'question' ? approvals.action : undefined;
+  const questionRequestCacheRef = useRef<{
+    signature: string;
+    request: PermissionRequest;
+  }>(undefined);
+  const pendingQuestionRequest = useMemo(() => {
+    if (!questionAction) return null;
+    const signature = JSON.stringify([
+      questionAction.actionId,
+      questionAction.sessionId,
+      questionAction.turnId,
+      questionAction.functionCallId,
+      questionAction.toolName,
+      questionAction.inputRevision,
+      questionAction.policyRevision,
+      questionAction.questions,
+    ]);
+    if (questionRequestCacheRef.current?.signature === signature) {
+      return questionRequestCacheRef.current.request;
+    }
+    const request = toManagedQuestionPermissionRequest(questionAction);
+    questionRequestCacheRef.current = { signature, request };
+    return request;
+  }, [questionAction]);
+  const questionExpiresAt = questionAction?.expiresAt;
+  const [expiredFor, setExpiredFor] = useState<number>();
+  const questionExpired =
+    questionExpiresAt !== undefined &&
+    (expiredFor === questionExpiresAt || Date.now() >= questionExpiresAt);
+  useEffect(() => {
+    if (questionExpiresAt === undefined) return;
+    const remaining = questionExpiresAt - Date.now();
+    if (remaining <= 0 || remaining > 2_147_483_647) return;
+    const timer = setTimeout(() => setExpiredFor(questionExpiresAt), remaining);
+    return () => clearTimeout(timer);
+  }, [questionExpiresAt]);
+  const questionTooLarge = useMemo(() => {
+    if (!questionAction) return false;
+    return exceedsManagedQuestionAnswerLimits(
+      managedQuestionAnswersFromDraft(questionAction, approvals.questionDraft),
+    );
+  }, [questionAction, approvals.questionDraft]);
   const pendingApproval = useMemo(
     () =>
       approvals.action
-        ? toManagedPermissionRequest(
-            approvals.action,
-            approvals.action.sessionId === sessionId ? messages : [],
-          )
+        ? approvals.action.kind === 'question'
+          ? pendingQuestionRequest
+          : toManagedPermissionRequest(
+              approvals.action,
+              approvals.action.sessionId === sessionId ? messages : [],
+            )
         : null,
-    [approvals.action, messages, sessionId],
+    [approvals.action, messages, pendingQuestionRequest, sessionId],
   );
   const modelChange = useManagedModelChange(
     provider,
@@ -1368,11 +1446,13 @@ function ManagedSessionsContent({
         !sideQueries.context
       ) {
         setError(
-          language === 'zh-CN'
-            ? '此会话暂不支持 BTW/回顾。'
-            : language === 'ru'
-              ? 'BTW/обзор недоступны для этой сессии.'
-              : 'BTW/recap is unavailable for this session.',
+          language === 'zh-TW'
+            ? '此會話暫不支援 BTW/回顧。'
+            : language === 'zh-CN'
+              ? '此会话暂不支持 BTW/回顾。'
+              : language === 'ru'
+                ? 'BTW/обзор недоступны для этой сессии.'
+                : 'BTW/recap is unavailable for this session.',
           true,
         );
         return;
@@ -1383,11 +1463,13 @@ function ManagedSessionsContent({
         (sideCommand.kind === 'recap' && sideCommand.argument)
       ) {
         setError(
-          language === 'zh-CN'
-            ? 'BTW 仅支持文本问题，/recap 不接受参数。'
-            : language === 'ru'
-              ? 'BTW принимает только текст; /recap не принимает аргументы.'
-              : 'BTW accepts text only; /recap accepts no arguments.',
+          language === 'zh-TW'
+            ? 'BTW 僅支援文字問題，/recap 不接受參數。'
+            : language === 'zh-CN'
+              ? 'BTW 仅支持文本问题，/recap 不接受参数。'
+              : language === 'ru'
+                ? 'BTW принимает только текст; /recap не принимает аргументы.'
+                : 'BTW accepts text only; /recap accepts no arguments.',
           true,
         );
         return;
@@ -1399,11 +1481,13 @@ function ManagedSessionsContent({
       }
       if (!sideQueries.available(sideCommand.kind)) {
         setError(
-          language === 'zh-CN'
-            ? '此会话暂不支持 BTW/回顾生成。'
-            : language === 'ru'
-              ? 'Генерация BTW/обзора недоступна для этой сессии.'
-              : 'BTW/recap generation is unavailable for this session.',
+          language === 'zh-TW'
+            ? '此會話暫不支援 BTW/回顧生成。'
+            : language === 'zh-CN'
+              ? '此会话暂不支持 BTW/回顾生成。'
+              : language === 'ru'
+                ? 'Генерация BTW/обзора недоступна для этой сессии.'
+                : 'BTW/recap generation is unavailable for this session.',
           true,
         );
         return;
@@ -1659,11 +1743,13 @@ function ManagedSessionsContent({
             size="sm"
             onClick={() => sideQueries.show('recap')}
           >
-            {language === 'zh-CN'
-              ? '回顾'
-              : language === 'ru'
-                ? 'Обзор'
-                : 'Recap'}
+            {language === 'zh-TW'
+              ? '回顧'
+              : language === 'zh-CN'
+                ? '回顾'
+                : language === 'ru'
+                  ? 'Обзор'
+                  : 'Recap'}
           </Button>
         )}
       </>
@@ -2048,6 +2134,12 @@ function ManagedSessionsContent({
           onSelectWorkspace={onSelectWorkspace}
           onSelectSession={openSession}
           onWorkspacesChange={onWorkspacesChange}
+          onOpenArtifactLibrary={
+            interactive
+              ? (workspaceId, label) =>
+                  setArtifactLibraryWorkspace({ workspaceId, label })
+              : undefined
+          }
         />
       ) : (
         sessions
@@ -2227,8 +2319,13 @@ function ManagedSessionsContent({
           onClose={rename.close}
         />
       )}
+      {home && (
+        <div className="flex justify-end">
+          <ManagedSurfaceDecisionsDialog />
+        </div>
+      )}
       {!home && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <Button
             variant="outline"
             onClick={() => {
@@ -2240,9 +2337,12 @@ function ManagedSessionsContent({
           >
             {t('managed.new')}
           </Button>
-          <Button variant="ghost" onClick={refresh}>
-            {t('managed.refresh')}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <ManagedSurfaceDecisionsDialog />
+            <Button variant="ghost" onClick={refresh}>
+              {t('managed.refresh')}
+            </Button>
+          </div>
         </div>
       )}
       {pendingRestoreFailed && (
@@ -2709,24 +2809,87 @@ function ManagedSessionsContent({
                   {approvals.action?.sessionId}
                 </p>
               )}
-              {approvals.action?.kind === 'question' ? (
-                <ManagedQuestionForm
-                  key={managedActionKey(approvals.action)}
-                  action={approvals.action}
-                  draft={approvals.questionDraft}
-                  onDraftChange={(draft) =>
-                    approvals.setQuestionDraft(approvals.action!, draft)
-                  }
-                  submitting={approvals.submitting}
-                  disabled={approvals.respondForbidden || compression.blocked}
-                  onSubmit={(response) => {
-                    if (compression.isBlocked())
-                      return Promise.reject(
-                        new Error('Context compression is pending'),
-                      );
-                    return approvals.respond(approvals.action!, response);
-                  }}
-                />
+              {approvals.action?.kind === 'question' &&
+              pendingQuestionRequest ? (
+                <>
+                  <AskUserQuestion
+                    key={managedActionKey(approvals.action)}
+                    request={pendingQuestionRequest}
+                    variant="floating"
+                    keyboardActive={false}
+                    customInputLabel={t('managed.question.other')}
+                    initialDraft={approvals.questionDraft}
+                    onDraftChange={(draft) => {
+                      if (approvals.action?.kind === 'question') {
+                        approvals.setQuestionDraft(approvals.action, draft);
+                      }
+                    }}
+                    disabled={
+                      approvals.respondForbidden ||
+                      approvals.submitting ||
+                      compression.blocked ||
+                      questionExpired
+                    }
+                    submitDisabled={questionTooLarge}
+                    onConfirm={async (
+                      actionId,
+                      _optionId,
+                      _answers,
+                      structuredAnswers,
+                    ) => {
+                      const activeAction = approvals.action;
+                      if (
+                        compression.isBlocked() ||
+                        !activeAction ||
+                        activeAction.kind !== 'question' ||
+                        activeAction.actionId !== actionId ||
+                        Date.now() >= activeAction.expiresAt
+                      ) {
+                        return false;
+                      }
+                      const answers: ManagedAgentQuestionAnswer[] = (
+                        structuredAnswers ?? []
+                      ).flatMap((entry) => {
+                        const optionIds = entry.optionIds ?? [];
+                        const text = entry.text;
+                        if (!optionIds.length && !text?.trim()) return [];
+                        return [
+                          {
+                            questionId: entry.questionId,
+                            ...(optionIds.length
+                              ? { optionIds: [...optionIds] }
+                              : {}),
+                            ...(text?.trim() ? { text } : {}),
+                          },
+                        ];
+                      });
+                      if (exceedsManagedQuestionAnswerLimits(answers)) {
+                        return false;
+                      }
+                      await approvals.respond(activeAction, {
+                        kind: 'question',
+                        answers,
+                      });
+                      return true;
+                    }}
+                    onError={() => {
+                      /* `useManagedActions.respond` records answer errors shown beside the card. */
+                    }}
+                  />
+                  {questionExpired && (
+                    <p
+                      role="status"
+                      className="mt-2 text-sm text-muted-foreground"
+                    >
+                      {t('managed.question.expired')}
+                    </p>
+                  )}
+                  {questionTooLarge && (
+                    <p role="alert" className="mt-2 text-sm text-destructive">
+                      {t('managed.question.tooLarge')}
+                    </p>
+                  )}
+                </>
               ) : (
                 <ToolApproval
                   key={approvals.action && managedActionKey(approvals.action)}
@@ -2884,11 +3047,13 @@ function ManagedSessionsContent({
                         {
                           name: 'btw',
                           description:
-                            language === 'zh-CN'
-                              ? '私下继续追问当前会话'
-                              : language === 'ru'
-                                ? 'Задать частный уточняющий вопрос'
-                                : 'Ask a private follow-up',
+                            language === 'zh-TW'
+                              ? '私下繼續追問當前會話'
+                              : language === 'zh-CN'
+                                ? '私下继续追问当前会话'
+                                : language === 'ru'
+                                  ? 'Задать частный уточняющий вопрос'
+                                  : 'Ask a private follow-up',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -2899,11 +3064,13 @@ function ManagedSessionsContent({
                         {
                           name: 'recap',
                           description:
-                            language === 'zh-CN'
-                              ? '回顾已完成的对话'
-                              : language === 'ru'
-                                ? 'Обзор завершённого разговора'
-                                : 'Recap the completed conversation',
+                            language === 'zh-TW'
+                              ? '回顧已完成的對話'
+                              : language === 'zh-CN'
+                                ? '回顾已完成的对话'
+                                : language === 'ru'
+                                  ? 'Обзор завершённого разговора'
+                                  : 'Recap the completed conversation',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -3373,6 +3540,21 @@ function ManagedSessionsContent({
                 clientId={clientId}
                 itemId={outputTarget.itemId}
                 onClose={() => setOutputTarget(undefined)}
+              />
+            )}
+          {interactive &&
+            artifactLibraryWorkspace &&
+            provider.workspaceArtifacts &&
+            provider.toolResults && (
+              <ManagedArtifactLibraryPage
+                key={`${provider.storageKey}:${artifactLibraryWorkspace.workspaceId}`}
+                library={provider.workspaceArtifacts}
+                reader={provider.toolResults}
+                workspaceId={artifactLibraryWorkspace.workspaceId}
+                workspaceLabel={artifactLibraryWorkspace.label}
+                clientId={clientId}
+                sessions={lifecycleSummaries}
+                onClose={() => setArtifactLibraryWorkspace(undefined)}
               />
             )}
         </section>

@@ -72,6 +72,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_sub_session_send: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_turn_status: { since: 'v1' },
+  // `POST /session/:id/feedback` records a per-turn satisfied/not-satisfied
+  // mark into the owning session's telemetry pipeline (`user_feedback`).
+  // Clients pre-flight this tag before offering the marks; older daemons
+  // keep the answer footer unchanged.
+  session_turn_feedback: { since: 'v1' },
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
@@ -86,9 +91,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // behavior. Client-generated message ids make retries idempotent.
   session_mid_turn_message_query: { since: 'v1' },
   // `POST /session/:id/mid-turn-messages/send-now` asks the agent to deliver
-  // the queued mid-turn messages now, cutting a streaming model response
-  // short instead of waiting for its next tool boundary, unless that response
-  // has started a tool call.
+  // the queued mid-turn messages now instead of at its next tool boundary:
+  // a streaming model response is cut short, and a turn whose response has
+  // started a tool call, or whose tools run, ends and the queued messages
+  // follow the prompt FIFO.
   session_mid_turn_send_now: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
@@ -241,6 +247,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `workspace_file_read`). The advertised upload byte cap is surfaced via
   // `limits.maxWorkspaceFileUploadBytes`.
   workspace_file_upload: { since: 'v1' },
+  turn_skill_file_snapshot: { since: 'v1' },
+  turn_skill_session_effects_check: { since: 'v1' },
+  turn_extension_store_lease: { since: 'v1' },
+  session_retire_if_idle: { since: 'v1' },
   // Qualified-only deletion of regular files in trusted local workspaces.
   workspace_file_delete: { since: 'v1' },
   workspace_directory_create: { since: 'v1' },
@@ -326,6 +336,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // than probing it optimistically; runtime `gh` availability is reported
   // per-request through `github_cli_unavailable` / `github_pr_files_failed`.
   workspace_github_pr_files: { since: 'v1' },
+  // `GET /workspaces/:workspace/git/log?exclude=<ref,ref>` excludes commits
+  // reachable from the listed single refs from the log window, so the change
+  // overview can drop commits already covered by a bound PR. A separate tag
+  // so a client does not pass `exclude` to a daemon that would ignore it and
+  // return unfiltered entries; an unsafe ref refuses the fetch
+  // (`available:false`) rather than running unscoped.
+  workspace_git_log_exclude_refs: { since: 'v1' },
   // `GET /workspaces/:workspace/git/worktrees` lists every worktree of the
   // workspace's repository, `GET .../git/worktrees/status?path=` reads one
   // listed worktree's working-tree counters, and
@@ -361,6 +378,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_git_worktrees: { since: 'v1' },
   // Read-only, bounded Git ignore classification for per-turn file summaries.
   workspace_git_check_ignore: { since: 'v1' },
+  // Workspace-scoped composer prompt and shell input history (`GET`/`POST`
+  // `/workspace/input-history` and `/workspaces/:workspace/input-history`),
+  // auto-recorded from admitted prompts, mid-turn messages, and shell runs so
+  // desktop and mobile Web Shell sessions share history per workspace.
+  workspace_input_history: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
@@ -381,6 +403,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // may be `null` for too-short histories or transient model failures
   // (best-effort, never throws). SDK helper: `DaemonClient.recapSession`.
   session_recap: { since: 'v1' },
+  // `POST /session/:id/mod-row` asks the session's Mods for a transcript row
+  // the client draws (Mod row sites on the `desktop` surface). Returns
+  // `{status:'unhooked'|'unanswered'}` or `{status:'answered', props?}`.
+  // SDK helper: `DaemonClient.askSessionModRow`.
+  session_mod_rows: { since: 'v1' },
   // `POST /session/:id/generate` streams a stateless, tool-free model call.
   // The ACP child prefers fastModel and falls back to the main session model.
   session_generation: { since: 'v1' },
@@ -588,6 +615,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Trusted, memory-only live-state snapshots for selected workspaces in one
   // request (`POST /sessions/live-state`).
   workspace_session_live_state_batch: { since: 'v1' },
+  // Restart recovery: `POST /sessions/recovery` lists sessions whose newest
+  // prompt ledger record did not settle, and `POST /sessions/recovery/continue`
+  // resumes a selected batch. The scan is read-only; continuation reuses the
+  // ordinary restore and live-session-owner continuation paths.
+  restart_recovery: { since: 'v1' },
   // Workspace-qualified metadata updates for active, inactive, and archived
   // persisted sessions.
   workspace_session_metadata: { since: 'v1' },
@@ -599,6 +631,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // restore surface reports the superseded / interrupted / missing-marker
   // classifications as typed 409s.
   session_worktree_reset_v1: { since: 'v1' },
+  // Restore an owned retained-chat worktree snapshot with workspace and
+  // owner validation before the ordinary session load/attestation phase.
+  session_worktree_restore_v1: { since: 'v1' },
   // "Create branch here": `POST /session/:id/worktree-branch` turns a
   // detached managed worktree into a named branch at its current HEAD.
   session_worktree_branch_v1: { since: 'v1' },

@@ -411,7 +411,7 @@ function workerIdFromEvent(event: BridgeEvent): string | undefined {
   const rawOutput = update['rawOutput'];
   if (typeof rawOutput !== 'string') return undefined;
   const match =
-    /^\[🧵 ([A-Za-z0-9._:-]{1,8})\]\(qwen-session:\/\/([A-Za-z0-9._:-]{1,128})\) (?:started|completed(?: \(stopReason: [A-Za-z0-9._:-]{1,64}\))?)$/.exec(
+    /^\[([A-Za-z0-9._:-]{1,8})\]\(qwen-session:\/\/([A-Za-z0-9._:-]{1,128})\) (?:started|completed(?: \(stopReason: [A-Za-z0-9._:-]{1,64}\))?)$/.exec(
       rawOutput,
     );
   if (!match?.[1] || !match[2] || match[1] !== match[2].slice(0, 8)) {

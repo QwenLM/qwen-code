@@ -40,13 +40,13 @@ import type {
 import {
   DaemonHttpError,
   parseDaemonBackgroundTurn,
-  DaemonPendingPromptLimitError,
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
   isDaemonTurnError,
   isStaleBranchPointError,
   type PromptResult,
 } from '@qwen-code/sdk/daemon';
+import { isDefinitelyRejectedPromptAdmission } from '../../utils/promptAdmission.js';
 import {
   extractHttpStatus,
   isInvalidClientIdError,
@@ -231,6 +231,28 @@ function clearPendingLoadTimeout(load: PendingSessionLoad): void {
   if (load.timeout !== undefined) clearTimeout(load.timeout);
 }
 
+export function takePendingRestoredSession(
+  load: PendingSessionLoad | undefined,
+): DaemonSessionClient | undefined {
+  if (!load) return undefined;
+  const restored = load.restoredSession;
+  load.restoredSession = undefined;
+  return restored;
+}
+
+export function detachPendingRestoredSession(
+  load: PendingSessionLoad | undefined,
+): void {
+  const restored = takePendingRestoredSession(load);
+  if (!restored) return;
+  void restored.detach().catch((error: unknown) => {
+    console.warn(
+      '[DaemonSessionActions] detach of an unconsumed worktree restore failed:',
+      error,
+    );
+  });
+}
+
 export interface CreateDaemonSessionActionsArgs {
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
@@ -276,7 +298,14 @@ export interface CreateDaemonSessionActionsArgs {
     >,
   ) => Promise<DaemonSessionClient>;
   createDetachedStandaloneSession: (
-    overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'modelServiceId'>,
+    overrides?: Pick<
+      CreateSessionRequest,
+      'approvalMode' | 'modelServiceId' | 'startupConfig'
+    >,
+  ) => Promise<DaemonSessionClient>;
+  restoreDetachedWorktreeSession: (
+    sessionId: string,
+    workspaceCwd: string,
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getClient?: () => DaemonClient | undefined;
@@ -404,6 +433,8 @@ export function getConnectionAfterSessionClear(
     delete next.goalState;
     delete next.restoredArtifacts;
     delete next.restoredArtifactsSessionId;
+    delete next.artifactCountHint;
+    delete next.artifactCountHintSessionId;
     delete next.backgroundTurn;
     delete next.finishedBackgroundTurnId;
     delete next.backgroundTurnObservedAt;
@@ -487,6 +518,7 @@ export function createDaemonSessionActions({
   getCreateSessionRequest,
   createDetachedSession,
   createDetachedStandaloneSession,
+  restoreDetachedWorktreeSession,
   getDefaultSessionContext,
   getClient,
   getConnection,
@@ -838,11 +870,28 @@ export function createDaemonSessionActions({
     );
   }
 
-  function isDefinitePromptAdmissionRejection(error: unknown): boolean {
-    return (
-      error instanceof DaemonHttpError ||
-      error instanceof DaemonPendingPromptLimitError
-    );
+  const PROMPT_ADMISSION_RETRY_DELAYS_MS = [400, 1200] as const;
+
+  function waitForAdmissionRetryDelay(
+    ms: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) {
+      return Promise.reject(
+        signal.reason ?? new DOMException('Aborted', 'AbortError'),
+      );
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   const registerAcceptedAttachmentSources = (
@@ -934,6 +983,7 @@ export function createDaemonSessionActions({
         skipNextCleanupDetachSessionRef.current = undefined;
       }
       clearPendingLoadTimeout(pendingSessionLoadRef.current);
+      detachPendingRestoredSession(pendingSessionLoadRef.current);
       pendingSessionLoadRef.current.reject(
         new DOMException('Session cleared', 'AbortError'),
       );
@@ -950,11 +1000,13 @@ export function createDaemonSessionActions({
     sessionContext?: DaemonProductSessionContext,
     signal?: AbortSignal,
     replaySource?: PendingSessionLoad['replaySource'],
+    restoredSession?: DaemonSessionClient,
   ): Promise<void> {
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
     if (pendingSessionLoadRef.current) {
       clearPendingLoadTimeout(pendingSessionLoadRef.current);
+      detachPendingRestoredSession(pendingSessionLoadRef.current);
       pendingSessionLoadRef.current.reject(
         new DOMException(
           `Session ${mode} superseded by a newer request`,
@@ -975,6 +1027,7 @@ export function createDaemonSessionActions({
           ? undefined
           : setTimeout(() => {
               if (pendingSessionLoadRef.current?.id === loadId) {
+                detachPendingRestoredSession(pendingSessionLoadRef.current);
                 pendingSessionLoadRef.current = undefined;
                 if (sessionRef.current?.sessionId !== sessionId) {
                   manualSessionClearRef.current = true;
@@ -1017,6 +1070,7 @@ export function createDaemonSessionActions({
         reject,
         ...(signal ? { signal } : {}),
         ...(replaySource ? { replaySource } : {}),
+        ...(restoredSession ? { restoredSession } : {}),
       };
     });
     return loadPromise;
@@ -1029,46 +1083,69 @@ export function createDaemonSessionActions({
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
       reconcilePromptActivity?: boolean;
+      artifactCountHint?: number;
+      restoredSession?: DaemonSessionClient;
     },
     signal?: AbortSignal,
     replaySource?: PendingSessionLoad['replaySource'],
   ): Promise<void> {
+    let restoredAdopted = false;
+    const detachUnadoptedRestored = () => {
+      if (!restoredAdopted && options?.restoredSession) {
+        void options.restoredSession.detach().catch(() => {});
+      }
+    };
     if (replaySource !== 'memory') {
       clearLiveJournalRepair();
     }
     if (signal?.aborted) {
+      detachUnadoptedRestored();
       return Promise.reject(
         new DOMException('Session load cancelled', 'AbortError'),
       );
     }
-    manualSessionClearRef.current = false;
-    const currentSession = sessionRef.current;
-    const currentSessionId = currentSession?.sessionId;
-    const currentConnection = getConnection();
-    const currentSessionContext =
-      currentConnection.sessionContext ??
-      (currentConnection.workspaceCwd
-        ? { kind: 'workspace' as const, cwd: currentConnection.workspaceCwd }
-        : daemonClientSessionContext(currentSession));
-    const fallbackContext = currentConnection.error
-      ? getDefaultSessionContext()
-      : (currentSessionContext ?? getDefaultSessionContext());
-    const targetSessionContext = resolveActionSessionContext(
-      options?.sessionContext,
-      options?.workspaceCwd,
-      fallbackContext,
-    );
-    const targetWorkspaceCwd =
-      targetSessionContext?.kind === 'workspace'
-        ? targetSessionContext.cwd
-        : undefined;
-    const loadPromise = startPendingSessionLoad(
-      sessionId,
-      mode,
-      targetSessionContext,
-      signal,
-      replaySource,
-    );
+    let targetSessionContext: DaemonProductSessionContext | undefined;
+    let targetWorkspaceCwd: string | undefined;
+    let currentSession: DaemonSessionClient | undefined;
+    let currentSessionId: string | undefined;
+    let currentConnection: ReturnType<typeof getConnection>;
+    let currentSessionContext: DaemonProductSessionContext | undefined;
+    let loadPromise: Promise<void>;
+    try {
+      manualSessionClearRef.current = false;
+      currentSession = sessionRef.current;
+      currentSessionId = currentSession?.sessionId;
+      currentConnection = getConnection();
+      currentSessionContext =
+        currentConnection.sessionContext ??
+        (currentConnection.workspaceCwd
+          ? { kind: 'workspace' as const, cwd: currentConnection.workspaceCwd }
+          : daemonClientSessionContext(currentSession));
+      const fallbackContext = currentConnection.error
+        ? getDefaultSessionContext()
+        : (currentSessionContext ?? getDefaultSessionContext());
+      targetSessionContext = resolveActionSessionContext(
+        options?.sessionContext,
+        options?.workspaceCwd,
+        fallbackContext,
+      );
+      targetWorkspaceCwd =
+        targetSessionContext?.kind === 'workspace'
+          ? targetSessionContext.cwd
+          : undefined;
+      loadPromise = startPendingSessionLoad(
+        sessionId,
+        mode,
+        targetSessionContext,
+        signal,
+        replaySource,
+        options?.restoredSession,
+      );
+      restoredAdopted = true;
+    } catch (error) {
+      detachUnadoptedRestored();
+      throw error;
+    }
     const pendingLoad = pendingSessionLoadRef.current;
     if (pendingLoad && options?.reconcilePromptActivity) {
       pendingLoad.reconcilePromptActivity = true;
@@ -1153,6 +1230,12 @@ export function createDaemonSessionActions({
           missingSession: false,
           loadingTranscript: true,
           catchingUp: undefined,
+          // Click-time artifact count from the list summary, keyed like the
+          // restored snapshot so the optimistic switch cannot leak it across
+          // sessions. Both fields move together; no hint clears any stale one.
+          artifactCountHint: options?.artifactCountHint,
+          artifactCountHintSessionId:
+            options?.artifactCountHint !== undefined ? sessionId : undefined,
         };
       });
     }
@@ -1204,6 +1287,11 @@ export function createDaemonSessionActions({
               : undefined,
           loadingTranscript: undefined,
           catchingUp: undefined,
+          // The failed target stays visible (sessionId + workspaceCwd
+          // above), but its click-time count must not outlive the load:
+          // no snapshot or cache entry will ever retire it on this path.
+          artifactCountHint: undefined,
+          artifactCountHintSessionId: undefined,
         }));
       }
       throw error;
@@ -1474,6 +1562,9 @@ export function createDaemonSessionActions({
           prompt: uploaded.content,
           eventDetailMode: getEventDetailMode(),
         };
+        if (options?.idempotencyKey) {
+          promptRequest['idempotencyKey'] = options.idempotencyKey;
+        }
         options?.onAdmissionStarted?.();
         if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
           promptRequest['_meta'] = {
@@ -1486,21 +1577,57 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
+        if (options?.suppressInputHistory) {
+          promptRequest['suppressInputHistory'] = true;
+        }
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
         try {
-          accepted = await session.submitPrompt(
-            promptRequest as Parameters<typeof session.submitPrompt>[0],
-            ctrl.signal,
-            ...(options?.beforeDispatch ? [options.beforeDispatch] : []),
-          );
+          const request = promptRequest as Parameters<
+            typeof session.submitPrompt
+          >[0];
+          for (let attempt = 0; ; attempt += 1) {
+            try {
+              accepted = options?.beforeDispatch
+                ? await session.submitPrompt(
+                    request,
+                    ctrl.signal,
+                    options.beforeDispatch,
+                  )
+                : await session.submitPrompt(request, ctrl.signal);
+              break;
+            } catch (error) {
+              const retryDelayMs = PROMPT_ADMISSION_RETRY_DELAYS_MS[attempt];
+              if (
+                !options?.idempotencyKey ||
+                retryDelayMs === undefined ||
+                ctrl.signal.aborted ||
+                sessionRef.current !== session ||
+                isAbortError(error) ||
+                isDefinitelyRejectedPromptAdmission(error)
+              ) {
+                throw error;
+              }
+              await waitForAdmissionRetryDelay(retryDelayMs, ctrl.signal);
+              if (sessionRef.current !== session) {
+                throw new DOMException(
+                  'Session changed before prompt retry',
+                  'AbortError',
+                );
+              }
+            }
+          }
         } catch (error) {
           admissionError = true;
           publishStandaloneWorkingDirectoryError(sessionId, error);
-          const definiteRejection = isDefinitePromptAdmissionRejection(error);
+          const definiteRejection = isDefinitelyRejectedPromptAdmission(error);
           if (definiteRejection) {
             await removeUploadedAttachments(session, uploaded.references);
           }
-          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+          if (
+            sessionRef.current === session &&
+            shouldAppendOptimisticMessage &&
+            !optimisticMessageAppended
+          ) {
             store.appendLocalUserMessage(
               text,
               displayedImages,
@@ -1828,6 +1955,9 @@ export function createDaemonSessionActions({
         prompt: uploaded.content,
         eventDetailMode: getEventDetailMode(),
       };
+      if (options?.idempotencyKey) {
+        promptRequest['idempotencyKey'] = options.idempotencyKey;
+      }
       if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
         promptRequest['_meta'] = {
           ...(typeof options?.submittedPrompt === 'string'
@@ -1839,6 +1969,9 @@ export function createDaemonSessionActions({
       if (options?.retry) {
         promptRequest['retry'] = true;
       }
+      if (options?.suppressInputHistory) {
+        promptRequest['suppressInputHistory'] = true;
+      }
       options?.onAdmissionStarted?.();
       let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
       try {
@@ -1848,7 +1981,7 @@ export function createDaemonSessionActions({
         accepted = await session.submitPrompt(request);
       } catch (error) {
         publishStandaloneWorkingDirectoryError(session.sessionId, error);
-        const definiteRejection = isDefinitePromptAdmissionRejection(error);
+        const definiteRejection = isDefinitelyRejectedPromptAdmission(error);
         if (definiteRejection) {
           await removeUploadedAttachments(session, uploaded.references);
         }
@@ -1966,6 +2099,9 @@ export function createDaemonSessionActions({
           prompt: uploaded.content,
           eventDetailMode: getEventDetailMode(),
         };
+        if (options?.idempotencyKey) {
+          promptRequest['idempotencyKey'] = options.idempotencyKey;
+        }
         if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
           promptRequest['_meta'] = {
             ...(typeof options?.submittedPrompt === 'string'
@@ -1977,6 +2113,9 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
+        if (options?.suppressInputHistory) {
+          promptRequest['suppressInputHistory'] = true;
+        }
         options?.onAdmissionStarted?.();
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
         try {
@@ -1984,7 +2123,7 @@ export function createDaemonSessionActions({
             promptRequest as Parameters<typeof session.submitPrompt>[0],
           );
         } catch (error) {
-          if (isDefinitePromptAdmissionRejection(error)) {
+          if (isDefinitelyRejectedPromptAdmission(error)) {
             await removeUploadedAttachments(session, uploaded.references);
           }
           throw error;
@@ -2650,6 +2789,10 @@ export function createDaemonSessionActions({
       return startSessionSwitch(sessionId, 'load', options);
     },
 
+    async restoreWorktreeSession(sessionId, options) {
+      return restoreDetachedWorktreeSession(sessionId, options.workspaceCwd);
+    },
+
     async reloadSession(signal, options) {
       const session = requireSessionForAction(
         addNotice,
@@ -2792,6 +2935,9 @@ export function createDaemonSessionActions({
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
                   : {}),
+                ...(options?.startupConfig
+                  ? { startupConfig: options.startupConfig }
+                  : {}),
               }),
               (created) => created.detach(),
             );
@@ -2829,6 +2975,9 @@ export function createDaemonSessionActions({
                   : {}),
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
+                  : {}),
+                ...(options?.startupConfig
+                  ? { startupConfig: options.startupConfig }
                   : {}),
               })
             : createDetachedSession(
@@ -3311,6 +3460,19 @@ export function createDaemonSessionActions({
           error,
           'recap_session',
         );
+      }
+    },
+
+    async rateAssistantTurn(promptId, rating) {
+      const session = sessionRef.current;
+      if (!session) return;
+      try {
+        await withActionTimeout(
+          session.rateSessionTurn(promptId, rating),
+          'Assistant feedback telemetry timed out',
+        );
+      } catch (error) {
+        console.warn('[web-shell] assistant feedback telemetry failed:', error);
       }
     },
 

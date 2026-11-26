@@ -39,6 +39,7 @@ import {
   type OssMediaReplacement,
 } from './reactive-degrade.js';
 import { OMNI_DISCLOSURE_TEXT_PREFIX } from './disclosure.js';
+import { withFixedPolicyHookStop } from './policy/fixed-policy-hook-stop.js';
 import { modelText } from '../test-utils/model-fixtures.js';
 
 // The ladder re-runs the REAL policy orchestrator (that wiring is what the
@@ -532,6 +533,22 @@ describe('degradeOmniMediaAfterServerReject memory wiring (S5)', () => {
 
   afterEach(async () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('keeps a provider retry from ending its enclosing agent tool', async () => {
+    const transcode = executeToolCallMock.getMockImplementation()!;
+    executeToolCallMock.mockImplementationOnce(async (...args) => ({
+      ...(await transcode(...args)),
+      hookStopReason: 'stop transcode',
+    }));
+    const parentStop = vi.fn(() => true);
+    const outcome = await withFixedPolicyHookStop(parentStop, () =>
+      degradeOmniMediaAfterServerReject(degradeConfig(), rejectedContents(), 1),
+    );
+    expect(executeToolCallMock).toHaveBeenCalledOnce();
+    expect(parentStop).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ replacedParts: 0, degradedResources: 0 });
+    expect(uploadFileMock).not.toHaveBeenCalled();
   });
 
   it('commits the re-derivation onto the binding found by content hash', async () => {

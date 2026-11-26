@@ -49,6 +49,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class HostedHarnessClientTest {
     private static final String BOOT_ID =
@@ -308,6 +309,56 @@ class HostedHarnessClientTest {
                         "sessionId", SESSION_ID, "hasActivePrompt", false))));
         try (HostedHarnessClient client = newClient()) {
             assertNull(client.getStatus(createSession(client), PROMPT_ID).getRecovery());
+        }
+    }
+
+    @Test
+    void readsUnattachedRecoveryEvidenceWithoutAClientId() {
+        server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
+            assertNull(exchange.getRequestHeaders().getFirst("X-Qwen-Client-Id"));
+            assertEquals("promptId=" + PROMPT_ID, exchange.getRequestURI().getRawQuery());
+            sendControlPlaneSessionJson(exchange, 200, JsonSupport.encode(Map.of(
+                    "sessionId", SESSION_ID, "hasActivePrompt", false,
+                    "recovery", Map.of("state", "cleanup_pending", "reasonCode", "runtime_cleanup_pending",
+                            "promptId", PROMPT_ID, "inputSettled", true,
+                            "continuationReady", true, "nextTurnAllowed", false))));
+        });
+        String notResident = java.util.UUID.randomUUID().toString();
+        server.createContext("/session/" + notResident + "/status", exchange ->
+                sendControlPlaneSessionJson(exchange, 404, JsonSupport.encode(Map.of(
+                        "error", "hosted_session_not_found", "code", "hosted_session_not_found"))));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessRecoveryStatus recovery = client.getUnattachedStatus(SESSION_ID, PROMPT_ID).getRecovery();
+            assertEquals("cleanup_pending", recovery.getState());
+            assertTrue(recovery.isInputSettled());
+            assertNull(client.getUnattachedStatus(notResident, null));
+        }
+    }
+
+    @Test
+    void unattachedStatusTimesOutWhileWaitingForTheResponseBody() {
+        CountDownLatch startedBody = new CountDownLatch(1);
+        CountDownLatch releaseBody = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
+            try {
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().write('{');
+                exchange.getResponseBody().flush();
+                startedBody.countDown();
+                releaseBody.await(8, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                exchange.close();
+            }
+        });
+        try (HostedHarnessClient client = newClient()) {
+            DaemonTransportException error = assertThrows(DaemonTransportException.class,
+                    () -> client.getUnattachedStatus(SESSION_ID, PROMPT_ID));
+            assertTrue(error.getCause() instanceof java.net.http.HttpTimeoutException);
+            assertEquals(0, startedBody.getCount());
+        } finally {
+            releaseBody.countDown();
         }
     }
 
@@ -589,6 +640,76 @@ class HostedHarnessClientTest {
                 .flatMap(status -> Stream.of(true, false).map(replacement -> Arguments.of(byId, status, replacement))));
     }
 
+    @ParameterizedTest
+    @MethodSource("residentLifecycleDetachResponses")
+    void lifecycleDetachKeepsResidentReplacementHeartbeat(boolean byId, int status)
+            throws Exception {
+        createSessionRoute();
+        CountDownLatch detaching = new CountDownLatch(1);
+        CountDownLatch reply = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            assertPrivateHeaders(exchange, !byId);
+            detaching.countDown();
+            try {
+                assertTrue(reply.await(5, TimeUnit.SECONDS));
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new IOException(error);
+            }
+            if (status == 204) {
+                sendSessionNoContent(exchange, !byId);
+            } else {
+                exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                sendJson(exchange, 404, "{\"code\":\"session_not_found\"}", false);
+            }
+        });
+        server.createContext("/session/" + SESSION_ID + "/load", exchange ->
+                sendSessionJson(exchange, 200, sessionJson()));
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMinutes(1))
+                .build()) {
+            HarnessSessionRef original = createSession(client);
+            ScheduledThreadPoolExecutor scheduler = client.scheduler();
+            ScheduledFuture<?> originalTask = (ScheduledFuture<?>) scheduler.getQueue().peek();
+            var authority = Map.<String, Object>of("operationId", "detach", "claimGeneration", 1);
+            Future<?> detach = caller.submit(() -> {
+                if (byId) client.detachLifecycle(SESSION_ID, authority);
+                else client.detachLifecycle(original, authority);
+            });
+            assertTrue(detaching.await(5, TimeUnit.SECONDS));
+            HarnessSessionRef replacement = client.loadSession(new LoadHarnessSession(SESSION_ID,
+                    ManagedSessionStoreConnection.builder().baseUri(URI.create("https://store.example/"))
+                            .tenantId("tenant").workspaceId("workspace").writerId(BOOT_ID)
+                            .leaseDuration(Duration.ofSeconds(45)).build()));
+            assertEquals(original.getHarnessClientId(), replacement.getHarnessClientId());
+            assertTrue(originalTask.isCancelled());
+            assertEquals(1, scheduler.getQueue().size());
+            ScheduledFuture<?> replacementTask = (ScheduledFuture<?>) scheduler.getQueue().peek();
+
+            reply.countDown();
+            detach.get(5, TimeUnit.SECONDS);
+            assertFalse(replacementTask.isCancelled());
+            assertTrue(scheduler.getQueue().contains(replacementTask));
+
+            if (byId) client.detachLifecycle(SESSION_ID, authority);
+            else client.detachLifecycle(replacement, authority);
+            assertTrue(replacementTask.isCancelled());
+            assertTrue(scheduler.getQueue().isEmpty());
+        } finally {
+            reply.countDown();
+            caller.shutdownNow();
+        }
+    }
+
+    static Stream<Arguments> residentLifecycleDetachResponses() {
+        return Stream.of(true, false).flatMap(byId -> Stream.of(204, 404)
+                .map(status -> Arguments.of(byId, status)));
+    }
+
     @Test
     void lifecycleSettlementRetainsAttachmentAndDetachCarriesTheNewClaim() {
         server.removeContext("/capabilities");
@@ -626,7 +747,9 @@ class HostedHarnessClientTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
     void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\",\"hosted-workspace-shell/3\",\"hosted-workspace-shell/4\"],"));
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":["
+                        + "\"hosted-workspace-shell/1\",\"hosted-workspace-shell/3\","
+                        + "\"hosted-workspace-shell/4\",\"hosted-workspace-files/1\"],"));
         createSessionRoute();
         AtomicInteger calls = new AtomicInteger();
         AtomicBoolean wrongPhase = new AtomicBoolean();
@@ -655,6 +778,9 @@ class HostedHarnessClientTest {
             var shell4 = new java.util.LinkedHashMap<>(request);
             shell4.put("toolProfile", "hosted-workspace-shell/4");
             assertEquals("close-2", client.settleLifecycle(session, shell4).get("operationId"));
+            var files = new java.util.LinkedHashMap<>(request);
+            files.put("toolProfile", "hosted-workspace-files/1");
+            assertEquals("close-2", client.settleLifecycle(session, files).get("operationId"));
             wrongPhase.set(true);
             // The Harness answered 200 with a mismatched receipt: a
             // post-answer failure, not a pre-send protocol refusal.
@@ -664,7 +790,7 @@ class HostedHarnessClientTest {
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
             unsupported.put("protocolVersion", 3);
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
-            assertEquals(4, calls.get());
+            assertEquals(5, calls.get());
         }
     }
 
@@ -676,6 +802,9 @@ class HostedHarnessClientTest {
             assertTrue(client.capabilities().getLifecycleV2Profiles().isEmpty());
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session,
                     Map.of("protocolVersion", 2, "toolProfile", "hosted-workspace-shell/1")));
+            var filesError = assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session,
+                    Map.of("protocolVersion", 2, "toolProfile", "hosted-workspace-files/1")));
+            assertEquals("Hosted lifecycle capability is required", filesError.getMessage());
         }
     }
 
@@ -1909,6 +2038,110 @@ class HostedHarnessClientTest {
         } finally {
             release.countDown();
             client.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void cancelsHeartbeatWhenDeletionRacesTaskPublication(boolean deleteBeforePublication)
+            throws Exception {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID, exchange -> {
+            assertEquals("DELETE", exchange.getRequestMethod());
+            sendSessionNoContent(exchange, false);
+        });
+        PublishingHeartbeatScheduler scheduler = new PublishingHeartbeatScheduler(deleteBeforePublication);
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMinutes(1))
+                .build()) {
+            assertTrue(client.scheduler().getRemoveOnCancelPolicy());
+            Field schedulerField = HostedHarnessClient.class.getDeclaredField("scheduler");
+            schedulerField.setAccessible(true);
+            client.scheduler().shutdownNow();
+            schedulerField.set(client, scheduler);
+
+            Future<HarnessSessionRef> creating = caller.submit(() -> createSession(client));
+            if (deleteBeforePublication) {
+                assertTrue(scheduler.entered.await(5, TimeUnit.SECONDS));
+                // The attachment is visible, but its scheduled future has not
+                // been published. Deletion must still retire the eventual task.
+                client.closeSession(SESSION_ID);
+                scheduler.release.countDown();
+                creating.get(5, TimeUnit.SECONDS);
+            } else {
+                creating.get(5, TimeUnit.SECONDS);
+                assertEquals(1, scheduler.getQueue().size());
+                client.closeSession(SESSION_ID);
+            }
+
+            assertTrue(scheduler.task.isCancelled());
+            assertTrue(scheduler.getQueue().isEmpty(),
+                    "A deleted attachment must not retain a periodic heartbeat task");
+        } finally {
+            scheduler.release.countDown();
+            caller.shutdownNow();
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void removesHeartbeatFromProductionSchedulerAfterDeletion() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID, exchange -> {
+            assertEquals("DELETE", exchange.getRequestMethod());
+            sendSessionNoContent(exchange, false);
+        });
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMinutes(1))
+                .build()) {
+            ScheduledThreadPoolExecutor scheduler = client.scheduler();
+            createSession(client);
+            assertEquals(1, scheduler.getQueue().size());
+            ScheduledFuture<?> task = (ScheduledFuture<?>) scheduler.getQueue().peek();
+
+            client.closeSession(SESSION_ID);
+
+            assertTrue(task.isCancelled());
+            assertTrue(scheduler.getQueue().isEmpty(),
+                    "The production scheduler must release the cancelled heartbeat before client close");
+        }
+    }
+
+    private static final class PublishingHeartbeatScheduler extends ScheduledThreadPoolExecutor {
+        private final CountDownLatch entered = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+        private final boolean pausePublication;
+        private volatile ScheduledFuture<?> task;
+
+        PublishingHeartbeatScheduler(boolean pausePublication) {
+            super(1);
+            this.pausePublication = pausePublication;
+            setRemoveOnCancelPolicy(true);
+        }
+
+        @Override
+        public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
+                long initialDelay, long delay, TimeUnit unit) {
+            if (pausePublication) {
+                entered.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Task publication was not released");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(e);
+                }
+            }
+            task = super.scheduleWithFixedDelay(command, initialDelay, delay, unit);
+            return task;
         }
     }
 
@@ -7639,7 +7872,7 @@ class HostedHarnessClientTest {
                 exchange -> sendJson(exchange, 200,
                         "{\"sessionId\":\"" + SESSION_ID
                                 + "\",\"hasActivePrompt\":false}",
-                        true, OTHER_BOOT_ID));
+                        true, OTHER_BOOT_ID, exchange.getRequestHeaders().containsKey("X-Qwen-Client-Id")));
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "status-generation");
 
@@ -7647,8 +7880,13 @@ class HostedHarnessClientTest {
             HarnessSessionRef session = createSession(client);
             assertNotNull(client.submitTurn(requestForSession(block,
                     session)));
+            List<HarnessSessionRef> retired = new CopyOnWriteArrayList<>();
+            client.onAttachmentRetirement(retired::add);
             assertThrows(HostedHarnessGenerationException.class,
-                    () -> client.getStatus(session));
+                    () -> client.getUnattachedStatus(SESSION_ID, null));
+            assertTrue(retired.isEmpty());
+            assertThrows(HostedHarnessGenerationException.class, () -> client.getStatus(session));
+            assertEquals(List.of(session), retired);
             PromptReceipt receipt = client.submitTurn(
                     SubmitHarnessTurn.builder()
                             .session(session)
@@ -10025,7 +10263,12 @@ class HostedHarnessClientTest {
      */
     private static void sendSessionNoContent(HttpExchange exchange)
             throws IOException {
-        assertPrivateHeaders(exchange);
+        sendSessionNoContent(exchange, true);
+    }
+
+    private static void sendSessionNoContent(HttpExchange exchange,
+            boolean requireClientId) throws IOException {
+        assertPrivateHeaders(exchange, requireClientId);
         exchange.getResponseHeaders().set(
                 HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
         exchange.getResponseHeaders().set("Connection", "close");

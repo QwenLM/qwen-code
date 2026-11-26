@@ -26,6 +26,10 @@ import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
 import type { DaemonLogger } from './daemon-logger.js';
+import {
+  DISABLED_LOAD_ADMISSION_SNAPSHOT,
+  type LoadAdmissionSnapshot,
+} from './load-admission.js';
 import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
 import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 
@@ -1154,6 +1158,74 @@ describe('buildDaemonStatusResponse', () => {
         expect.objectContaining({ code: 'total_session_capacity_high' }),
       ]),
     });
+  });
+
+  it('reports the load admission snapshot and warns while overloaded', async () => {
+    const snapshot: LoadAdmissionSnapshot = {
+      enabled: true,
+      overloaded: true,
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 120,
+      sampledAtMs: 1_000,
+    };
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ loadAdmissionSnapshot: snapshot }),
+    );
+
+    expect(response.runtime.loadAdmission).toEqual(snapshot);
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'system_overloaded',
+          severity: 'warning',
+        }),
+      ]),
+    });
+  });
+
+  it('reports a normal load admission snapshot without an issue', async () => {
+    const snapshot: LoadAdmissionSnapshot = {
+      enabled: true,
+      overloaded: false,
+      reason: null,
+      loadRatio: 0.3,
+      eventLoopLagP99Ms: 12,
+      sampledAtMs: 1_000,
+    };
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ loadAdmissionSnapshot: snapshot }),
+    );
+
+    expect(response.runtime.loadAdmission).toEqual(snapshot);
+    expect(
+      response.issues.filter((issue) => issue.code === 'system_overloaded'),
+    ).toHaveLength(0);
+  });
+
+  it('reports the disabled snapshot without an issue', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        loadAdmissionSnapshot: DISABLED_LOAD_ADMISSION_SNAPSHOT,
+      }),
+    );
+
+    expect(response.runtime.loadAdmission).toEqual(
+      DISABLED_LOAD_ADMISSION_SNAPSHOT,
+    );
+    expect(
+      response.issues.filter((issue) => issue.code === 'system_overloaded'),
+    ).toHaveLength(0);
+  });
+
+  it('omits the load admission section when no monitor is wired', async () => {
+    const response = await buildDaemonStatusResponse('summary', makeOptions());
+
+    expect(response.runtime.loadAdmission).toBeUndefined();
   });
 
   it('uses total admission live count for total session capacity warnings', async () => {
@@ -2443,6 +2515,7 @@ interface MakeOptionsInput {
   lastActivityAt?: number | null;
   totalAdmissionLiveCount?: number;
   totalAdmissionInFlight?: number;
+  loadAdmissionSnapshot?: LoadAdmissionSnapshot;
   daemonLog?: DaemonLogger;
   writerIdleTimeoutMs?: number;
 }
@@ -2532,6 +2605,19 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       ? { rateLimiter: makeRateLimiter(input.rateLimitHits) }
       : {}),
     getRestSseActive: () => 0,
+    getStreamOccupancy: () => ({
+      total: 0,
+      bySurface: {
+        restEvents: 0,
+        agentEvents: 0,
+        generation: 0,
+        artifactLibrary: 0,
+        hostedEvents: 0,
+        acpSse: 0,
+        acpWs: 0,
+      },
+      byListener: { primary: 0, 'local-control': 0, 'remote-access': 0 },
+    }),
     features: ['health', 'daemon_status'],
     protocolVersions: { current: 'v1', supported: ['v1'] },
     supportedDeviceFlowProviders: ['qwen-oauth'],
@@ -2553,6 +2639,9 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
             inFlight: input.totalAdmissionInFlight!,
           }),
         }),
+    ...(input.loadAdmissionSnapshot
+      ? { getLoadAdmissionSnapshot: () => input.loadAdmissionSnapshot! }
+      : {}),
   };
 }
 
