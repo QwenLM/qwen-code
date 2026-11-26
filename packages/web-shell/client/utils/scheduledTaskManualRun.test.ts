@@ -278,6 +278,43 @@ describe('runScheduledTaskManually owner matching', () => {
     },
   );
 
+  it.each([
+    ['sessionMode', makeTask({ sessionMode: 'per_run' })],
+    ['recurring', makeTask({ recurring: false })],
+  ])(
+    'rejects the old dispatch when %s changes during replay',
+    async (_change, changedTask) => {
+      const task = makeTask();
+      let controllerDispatches = 0;
+      const actions = {
+        listScheduledTasks: vi
+          .fn()
+          .mockResolvedValueOnce([task])
+          .mockResolvedValueOnce([changedTask]),
+        runScheduledTask: vi.fn(),
+        assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+      };
+      const onRunPrompt = vi.fn(async (...args: unknown[]) => {
+        const beforeDispatch = args[4] as
+          | (() => void | Promise<void>)
+          | undefined;
+        await beforeDispatch?.();
+        controllerDispatches++;
+      });
+      const onError = vi.fn();
+
+      await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+        reload: vi.fn(),
+        onError,
+        isStale: () => false,
+      });
+
+      expect(controllerDispatches).toBe(0);
+      expect(actions.runScheduledTask).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledOnce();
+    },
+  );
+
   it('does not re-list a consumed one-shot before prompt dispatch', async () => {
     const task = makeTask({ recurring: false });
     const actions = {

@@ -111,7 +111,13 @@ export async function runScheduledTaskManually(
               candidate.id === fresh.id &&
               (candidate.sessionId ?? null) === (fresh.sessionId ?? null),
           );
-          if (candidates.length !== 1 || !candidates[0].enabled) {
+          if (
+            candidates.length !== 1 ||
+            !candidates[0].enabled ||
+            candidates[0].recurring !== fresh.recurring ||
+            (candidates[0].sessionMode === 'per_run') !==
+              (fresh.sessionMode === 'per_run')
+          ) {
             throw new DOMException(
               t('scheduledTasks.error.runFailed'),
               'AbortError',

@@ -70,7 +70,7 @@ owner 匹配且支持此能力的 durable 快照不再包含已加载的任务�
 
 绑定会话的 recurring 任务手工运行遵循：fresh read → 共享 controller 接收 prompt → 写入运行记录。per-run 仍由 daemon 派发，不再向 controller 重复塞同一 prompt。一次性任务被消费后，如果无法再获得 admission，界面必须明确说明“已消费但未能运行”，不能声称 exactly-once，也不能吞掉这次执行机会。
 
-对于 recurring 任务，共享 controller 还会在每次 HTTP 准入 attempt 之前，重新核验原 workspace、任务 ID、session owner 与 enabled 状态，包括绑定会话回放和 detached client-id 恢复。SDK 先等待这个仅存在客户端的 guard，再发送每个请求。这样处理另一客户端在初次 fresh read 之后完成的删除，但不会把普通 prompt 变成常驻探测。任务缺失、歧义、停用或无法读取时，本次准入失败；不能据此制造本地已确认删除或已取消状态。已经被 `/run` 消费的一次性任务不做这次存在性复查。即使复查通过，也不能撤回已接纳的 prompt；独立的列表读取、prompt 准入和运行登记路由不构成分布式事务。
+对于 recurring 任务，共享 controller 还会在每次 HTTP 准入 attempt 之前，重新核验原 workspace、任务 ID、session owner、enabled 状态，以及 recurring/per-run 派发语义是否仍然匹配，包括绑定会话回放和 detached client-id 恢复。SDK 先等待这个仅存在客户端的 guard，再发送每个请求。这样处理另一客户端在初次 fresh read 之后完成的删除，但不会把普通 prompt 变成常驻探测。如果在派发前读到了派发语义变化，就拒绝旧 controller 路径，不能让它再与 per-run 的 fresh child 重复执行。任务缺失、歧义、停用、派发语义改变或无法读取时，本次准入失败；不能据此制造本地已确认删除或已取消状态。已经被 `/run` 消费的一次性任务不做这次存在性复查。即使复查通过，也不能撤回已接纳的 prompt；独立的列表读取、prompt 准入和运行登记路由不构成分布式事务。
 
 普通会话不会因为新增 UI 而开启常态快照探测。调度发现由真实 cron/loop 活动、专用定时会话或明确用户操作驱动。待执行调度使用有界的“请求完成后重试”读取；即使发生临时错误或快照不变，到期后仍继续读取。
 
