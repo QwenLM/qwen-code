@@ -13,6 +13,7 @@ import {
   PackageManager,
   resolveUpdateCommand,
 } from '../utils/installationInfo.js';
+import { resolveUpdateMode } from '../utils/update-mode.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
 import type { HistoryItemWithoutId } from './types.js';
 import { MessageType } from './types.js';
@@ -36,15 +37,20 @@ export async function handleAutoUpdate(
   settings: LoadedSettings,
   projectRoot: string,
   spawnFn: typeof spawn = spawnWrapper,
+  options?: { explicitRequest?: boolean },
 ): Promise<boolean | undefined> {
   if (!info) {
     return;
   }
 
-  // enableAutoUpdate is checked in llm.tsx before calling this function,
-  // so if we get here, auto-update is enabled (or undefined, which defaults to enabled).
+  // The install decision re-resolves the update mode from settings so an
+  // explicit 'notify' never reaches the spawn paths, regardless of how the
+  // caller gated the check. A relaunch that an explicit /update requested
+  // passes explicitRequest, so 'notify' still installs — the user asked
+  // (#14274).
   const isAutoUpdateEnabled =
-    settings.merged.general?.enableAutoUpdate !== false;
+    options?.explicitRequest === true ||
+    resolveUpdateMode(settings.merged.general) === 'auto';
 
   const installationInfo = getInstallationInfo(
     projectRoot,

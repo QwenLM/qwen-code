@@ -76,6 +76,28 @@ describe('updateBeforeRelaunch', () => {
     );
   });
 
+  it('passes the explicit-request flag so notify mode installs after a /update relaunch (#14274)', async () => {
+    const notifySettings = {
+      merged: { general: { updateMode: 'notify' } },
+    } as LoadedSettings;
+    handleAutoUpdate.mockResolvedValue(true);
+
+    await expect(
+      updateBeforeRelaunch(notifySettings, '/repo', true),
+    ).resolves.toBe(true);
+
+    expect(handleAutoUpdate).toHaveBeenCalledWith(
+      expect.anything(),
+      notifySettings,
+      '/repo',
+      undefined,
+      { explicitRequest: true },
+    );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Update successful! The new version will be used on your next run.',
+    );
+  });
+
   it.each([
     ['explicit update', true, true],
     ['background update-on-exit', false, false],

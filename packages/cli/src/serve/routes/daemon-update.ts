@@ -9,6 +9,7 @@ import type { Application, Request, RequestHandler } from 'express';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { singleTokenCredentials } from '../local-control/credentials.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { resolveUpdateMode } from '../../utils/update-mode.js';
 import { access, readFile, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -103,11 +104,17 @@ function createUpdateController(deps: UpdateRouteDeps) {
   const enabled = async () => {
     if (!deps.restartForUpdate || closed) return false;
     const { loadSettings } = await import('../../config/settings.js');
+    // The route's periodic check only stages a prepared update; activation
+    // happens solely on the explicit restart request, mirroring how an
+    // explicit /update installs in notify mode. So any mode other than 'off'
+    // keeps it enabled (#14274).
     return (
-      loadSettings(startupDirectory, {
-        skipLoadEnvironment: true,
-        skipWorkspaceSettings: true,
-      }).merged.general?.enableAutoUpdate !== false && !closed
+      resolveUpdateMode(
+        loadSettings(startupDirectory, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: true,
+        }).merged.general,
+      ) !== 'off' && !closed
     );
   };
   const unavailable = (): DaemonUpdateStatus => ({

@@ -324,13 +324,18 @@ function createSettingsPanelScenario(
 ): WebShellDaemonScenario {
   const descriptors: DaemonSettingDescriptor[] = [
     {
-      key: 'general.enableAutoUpdate',
-      type: 'boolean',
-      label: 'Auto-update',
+      key: 'general.updateMode',
+      type: 'enum',
+      label: 'Update Mode',
       category: 'General',
       requiresRestart: false,
-      default: true,
-      values: { effective: true },
+      default: 'auto',
+      options: [
+        { value: 'auto', label: 'Auto (check + install)' },
+        { value: 'notify', label: 'Notify only (check, never install)' },
+        { value: 'off', label: 'Off (no startup check)' },
+      ],
+      values: { effective: 'auto' },
     },
     {
       key: 'general.showSessionRecap',
@@ -3078,7 +3083,7 @@ for (const theme of THEMES) {
       // button and its surviving rows while the excluded row leaves.
       await nav.getByRole('button', { name: /^General/ }).click();
       await expect(
-        page.getByText('Auto-update', { exact: true }),
+        page.getByText('Update Mode', { exact: true }),
       ).toBeVisible();
       await expect(
         page.getByText('Show Timestamps', { exact: true }),
