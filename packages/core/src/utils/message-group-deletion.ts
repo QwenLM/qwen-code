@@ -419,6 +419,10 @@ function pruneCompression(
     ...record,
     systemPayload: {
       ...payload,
+      // A zero seed makes the next send estimate the pruned history.
+      ...(payload.resumePromptTokenCount !== undefined
+        ? { resumePromptTokenCount: 0 }
+        : {}),
       compressedHistory: retained.map(
         (index) => payload.compressedHistory[index]!,
       ),

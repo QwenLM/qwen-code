@@ -39,9 +39,12 @@ export class ResumeTokenCountsAccumulator {
         | undefined;
       if (payload?.info) {
         this.value = {
-          promptTokenCount: payload.info.newTokenCount,
+          promptTokenCount:
+            payload.resumePromptTokenCount ?? payload.info.newTokenCount,
           outputTokenCount: 0,
-          isEstimated: payload.info.newTokenCountIsEstimated ?? true,
+          isEstimated:
+            payload.resumePromptTokenCount !== undefined ||
+            (payload.info.newTokenCountIsEstimated ?? true),
         };
       }
     }

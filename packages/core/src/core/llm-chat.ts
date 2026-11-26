@@ -2750,18 +2750,47 @@ export class LlmChat {
   }
 
   private async recordCompression(
-    payload: ChatCompressionRecordPayload,
+    info: ChatCompressionInfo,
+    history: Content[],
+    pending?: Content,
   ): Promise<void> {
+    if (!this.compressionObserver && !this.chatRecordingService) return;
+    const persisted = withoutCompactionTranscriptHint(history);
+    const dispatched = withModelToolErrorNotes(history);
+    const compressedHistory = pending
+      ? [...persisted, pending]
+      : [...persisted];
+    const payload: ChatCompressionRecordPayload = {
+      info,
+      compressedHistory,
+      summaryPrefixLength: info.summaryPrefixLength ?? history.length,
+      completedToolCallIds: this.completedToolCallIds,
+    };
+    if (pending || persisted !== dispatched) {
+      // Resume includes the pending turn and drops model-only text from the
+      // committed history. Keep the system/tool overhead from the live count.
+      const imageTokens = resolveSlimmingConfig(
+        this.config.getChatCompression(),
+      ).imageTokenEstimate;
+      const persistedDelta =
+        persisted === dispatched
+          ? 0
+          : estimateContentTokens(persisted, imageTokens) -
+            estimateContentTokens(dispatched, imageTokens);
+      payload.resumePromptTokenCount = Math.max(
+        0,
+        info.newTokenCount +
+          persistedDelta +
+          (pending ? estimateContentTokens([pending], imageTokens) : 0),
+      );
+    }
     if (this.compressionObserver) {
-      const compressedHistory = [
-        ...withoutCompactionTranscriptHint(payload.compressedHistory),
-      ];
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
       await this.compressionObserver({
         ...payload,
-        compressedHistory,
+        compressedHistory: [...compressedHistory],
         contextPrefixLength: getStartupContextLength(compressedHistory, {
           includeCompressed: true,
         }),
@@ -3335,16 +3364,11 @@ export class LlmChat {
       // explicit authoritative `false`.
       info.newTokenCountIsEstimated ??= true;
       if (!options?.deferChatCompressionRecord) {
-        // Resume replaces history with this snapshot, so include the pending
-        // question and do not share the live array mutated later in the turn.
-        await this.recordCompression({
+        await this.recordCompression(
           info,
-          compressedHistory: options?.pendingUserMessage
-            ? [...newHistory, options.pendingUserMessage]
-            : newHistory,
-          summaryPrefixLength: info.summaryPrefixLength ?? newHistory.length,
-          completedToolCallIds: this.completedToolCallIds,
-        });
+          newHistory,
+          options?.pendingUserMessage,
+        );
       }
       this.setHistory(newHistory, this.completedToolCallIds);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
@@ -4348,15 +4372,11 @@ export class LlmChat {
           shouldForceFromHard &&
           compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
         ) {
-          // Keep the pending question with the compressed answer on resume.
-          await this.recordCompression({
-            info: compressionInfo,
-            compressedHistory: [...this.getHistoryShallow(), userContent],
-            summaryPrefixLength:
-              compressionInfo.summaryPrefixLength ??
-              this.getHistoryShallow().length,
-            completedToolCallIds: this.completedToolCallIds,
-          });
+          await this.recordCompression(
+            compressionInfo,
+            this.getHistoryShallow(),
+            userContent,
+          );
         }
 
         if (this.manualPlanExitNoticesEnabled) {

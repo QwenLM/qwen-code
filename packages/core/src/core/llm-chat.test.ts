@@ -79,6 +79,7 @@ import {
   getApiHistoryPromptId,
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { getResumeTokenCounts } from '../services/session-resume-token-counts.js';
 import { buildCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
 import { postProcessSummary } from '../services/postCompactAttachments.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
@@ -5008,6 +5009,72 @@ describe('LlmChat', async () => {
       expect(generateText).toHaveBeenCalled();
       expect(coldSpy).not.toHaveBeenCalled();
     });
+
+    it.each([
+      [172_000, false],
+      [179_000, true],
+    ] as const)(
+      'seeds resume with the persisted tool results after compaction (initial count: %i)',
+      async (initialCount, force) => {
+        mockGeneratorConfig({ contextWindowSize: 200_000 });
+        const retained = fnResponse('lookup', { error: 'invalid' }, 'call-1');
+        setModelToolErrorNote(retained, 'r'.repeat(80));
+        const history = [
+          userText('summary'),
+          content('model', fnCall('lookup', {}, 'call-1')),
+          content('user', retained),
+          content('model', fnCall('lookup', {}, 'call-2')),
+        ];
+        const pending = fnResponse(
+          'lookup',
+          { error: 'invalid again' + 'x'.repeat(400) },
+          'call-2',
+        );
+        setModelToolErrorNote(pending, 'p'.repeat(160));
+        const recordChatCompression = vi.fn();
+        const target = newChat({
+          history,
+          recorder: { recordAssistantTurn: vi.fn(), recordChatCompression },
+        });
+        target.setLastPromptTokenCount(initialCount);
+        const compress = mockCompressOnce(
+          compressResult(
+            CompressionStatus.COMPRESSED,
+            history,
+            initialCount,
+            40_020,
+            false,
+          ),
+        );
+        mockStream(textStream('done'));
+
+        const events = await sendCollect(
+          [pending],
+          'resume-after-compact',
+          target,
+        );
+        expect(compress.mock.calls[0][1].force).toBe(force);
+        expect(infoOf(compressedEvent(events)).newTokenCount).toBe(40_020);
+        expect(recordChatCompression).toHaveBeenCalledOnce();
+        const saved = JSON.parse(
+          JSON.stringify(recordChatCompression.mock.calls[0][0]),
+        );
+        expect(saved.compressedHistory.at(-1)).toEqual(
+          content('user', pending),
+        );
+        const record = {
+          type: 'system',
+          subtype: 'chat_compression',
+          systemPayload: saved,
+        } as ChatRecord;
+        expect(getResumeTokenCounts({ messages: [record] })).toEqual({
+          promptTokenCount:
+            40_000 + estimateContentTokens([content('user', pending)]),
+          outputTokenCount: 0,
+          isEstimated: true,
+        });
+      },
+    );
 
     it('counts a pending validation note once across automatic cold compaction', async () => {
       mockGeneratorConfig({ enableCacheControl: false });

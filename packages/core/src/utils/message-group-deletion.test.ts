@@ -12,6 +12,7 @@ import { SessionFileHistoryAccumulator } from '../services/session-file-history-
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
+import { getResumeTokenCounts } from '../services/session-resume-token-counts.js';
 import {
   prepareTranscriptRecords,
   selectActiveGeneratedUiStateRecordUuids,
@@ -260,6 +261,7 @@ describe('message group deletion', () => {
           newTokenCount: 20,
           compressionStatus: CompressionStatus.COMPRESSED,
         },
+        resumePromptTokenCount: 120,
         compressedHistory: [
           summary,
           ack,
@@ -290,9 +292,11 @@ describe('message group deletion', () => {
     )!.systemPayload;
     expect(payload).toEqual({
       ...compression.systemPayload,
+      resumePromptTokenCount: 0,
       compressedHistory: [summary, ack, u2.message, a2.message],
       promptIds: [null, null, 'api-u2', null],
     });
+    expect(getResumeTokenCounts({ messages: kept })?.promptTokenCount).toBe(0);
     expect(
       buildApiHistoryFromConversation({ messages: kept }).map(
         (content) => content.parts?.[0]?.text,
@@ -312,6 +316,7 @@ describe('message group deletion', () => {
         compressedHistory: [
           { role: 'user', parts: [{ text: 'summary remembers u1' }] },
         ],
+        resumePromptTokenCount: 6,
         summaryPrefixLength: 1,
       },
     });

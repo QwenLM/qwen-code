@@ -518,7 +518,7 @@ function validateWithCoercion(
       });
       const report = validationReporters.get(data);
       if (report) {
-        const note = describeBrokenJsonString(validate.errors, data, anySchema);
+        const note = describeBrokenJsonString(validate.errors, data, validate);
         if (note) report(message, note);
       }
       return message;
@@ -537,13 +537,13 @@ function validateWithCoercion(
 function describeBrokenJsonString(
   errors: ErrorObject[],
   data: Record<string, unknown>,
-  schema: AnySchema,
+  validate: ValidateFunction,
 ): string {
   // Correcting a field cannot change the type of its enclosing container.
   // Other failures may mean the string is valid for a different branch.
   let instancePath: string | undefined;
   const types = new Set<string>();
-  const inactive = inactiveTaggedUnionErrors(errors, data, schema);
+  const inactive = inactiveTaggedUnionErrors(errors, data, validate);
   if (!inactive) return '';
   for (const error of errors) {
     if (
@@ -626,7 +626,7 @@ type DiagnosticSchema = Record<string, unknown> & {
 
 function diagnosticConjuncts(
   schema: DiagnosticSchema,
-  root: Record<string, unknown>,
+  schemaAt: (pointer: string) => unknown,
   allowAllOf = true,
 ): DiagnosticSchema[] | undefined {
   const parts: DiagnosticSchema[] = [];
@@ -635,15 +635,17 @@ function diagnosticConjuncts(
     parts.push(schema);
     for (const member of schema.allOf ?? []) {
       if (!allowAllOf) return undefined;
-      const conjuncts = diagnosticConjuncts(member, root, false);
+      const conjuncts = diagnosticConjuncts(member, schemaAt, false);
       if (!conjuncts) return undefined;
       parts.push(...conjuncts);
     }
     if (!schema.$ref) return parts;
     if (!schema.$ref.startsWith('#/')) return undefined;
-    const target = resolveRef(decodeURIComponent(schema.$ref), root);
-    if (!target) return undefined;
-    schema = target;
+    const target = schemaAt(schema.$ref.slice(1));
+    if (!target || typeof target !== 'object' || Array.isArray(target)) {
+      return undefined;
+    }
+    schema = target as DiagnosticSchema;
   }
   return undefined;
 }
@@ -653,27 +655,54 @@ function diagnosticConjuncts(
 function inactiveTaggedUnionErrors(
   errors: ErrorObject[],
   data: Record<string, unknown>,
-  schema: AnySchema,
+  validate: ValidateFunction,
 ): Set<ErrorObject> | undefined {
   const inactive = new Set<ErrorObject>();
+  const unions = errors.filter(
+    (e) =>
+      (e.keyword === 'anyOf' || e.keyword === 'oneOf') &&
+      e.schemaPath.startsWith('#/'),
+  );
+  if (!unions.length) return inactive;
+  const refs = Object.entries(validate.schemaEnv.root.refs);
+  // An inlined reference prefixes its errors with the reference fragment.
+  // A separately compiled reference reports paths from its own schema root.
+  // Use a document pointer only if those possible locations agree.
+  function schemaAt(pointer: string): unknown {
+    const path = decodeURIComponent(pointer);
+    const source = valueAtPointer(validate.schema, path);
+    if (source === undefined) return undefined;
+    for (const [id, ref] of refs) {
+      const compiled =
+        typeof ref === 'object' &&
+        typeof ref.validate === 'function' &&
+        ref.validate.schemaEnv === ref;
+      const target = compiled ? ref.schema : ref;
+      if (compiled) {
+        const local = valueAtPointer(target, path);
+        if (local !== undefined && local !== source) return undefined;
+      }
+      const fragment = id.split('#')[1];
+      if (!fragment) continue;
+      const prefix = decodeURIComponent(fragment);
+      if (path !== prefix && !path.startsWith(`${prefix}/`)) continue;
+      const local = valueAtPointer(target, path.slice(prefix.length));
+      if (local !== undefined && local !== source) return undefined;
+    }
+    return source;
+  }
   const typeErrorPaths = new Set(
     errors.filter((e) => e.keyword === 'type').map((e) => e.instancePath),
   );
-  for (const error of errors) {
-    if (error.keyword !== 'anyOf' && error.keyword !== 'oneOf') continue;
-    if (!error.schemaPath.startsWith('#/')) continue;
-    const branches = valueAtPointer(
-      schema,
-      decodeURIComponent(error.schemaPath.slice(1)),
-    );
+  for (const error of unions) {
+    const branches = schemaAt(error.schemaPath.slice(1));
     const input = valueAtPointer(data, error.instancePath);
     if (!Array.isArray(branches) || typeof input !== 'object' || !input)
       continue;
-    const root = schema as Record<string, unknown>;
     const fields = input as Record<string, unknown>;
     let hasViableBranch = false;
     for (const [index, branch] of branches.entries()) {
-      const conjuncts = diagnosticConjuncts(branch, root);
+      const conjuncts = diagnosticConjuncts(branch, schemaAt);
       if (!conjuncts) {
         hasViableBranch = true;
         continue;
@@ -685,7 +714,7 @@ function inactiveTaggedUnionErrors(
       for (const node of conjuncts) {
         for (const [key, property] of Object.entries(node.properties ?? {})) {
           if (!Object.hasOwn(fields, key)) continue;
-          const constraints = diagnosticConjuncts(property, root);
+          const constraints = diagnosticConjuncts(property, schemaAt);
           if (!constraints) continue;
           const pointerKey = key.replaceAll('~', '~0').replaceAll('/', '~1');
           const path = `${error.instancePath}/${pointerKey}`;
@@ -726,7 +755,7 @@ function inactiveTaggedUnionErrors(
       const candidates = errors.filter((e) => {
         if (inactive.has(e) || !e.schemaPath.startsWith('#/')) return false;
         const path = e.schemaPath.slice(1, e.schemaPath.lastIndexOf('/'));
-        const source = valueAtPointer(schema, decodeURIComponent(path));
+        const source = schemaAt(path);
         return owners.get(e.instancePath)?.has(source as DiagnosticSchema);
       });
       const branchPath = branch.$ref ?? `${error.schemaPath}/${index}`;

@@ -514,6 +514,98 @@ describe('SchemaValidator', () => {
       },
     );
 
+    it.each([
+      ['docs', '{"x":,}', [], {}],
+      ['file', '[1,]', {}, []],
+    ] as const)(
+      'does not resolve a nested resource tag %s against the outer definitions',
+      (kind, items, accepted, rejected) => {
+        const schema = {
+          $schema: DRAFT_2020,
+          $defs: { A: { const: 'file' }, B: { const: 'docs' } },
+          ...obj({
+            item: {
+              $id: `https://example.test/${probe('item')}`,
+              $defs: { A: { const: 'docs' }, B: { const: 'file' } },
+              anyOf: [
+                obj({ items: { type: 'array' }, kind: { $ref: '#/$defs/A' } }),
+                obj({ items: { type: 'object' }, kind: { $ref: '#/$defs/B' } }),
+              ],
+            },
+          }),
+        };
+        const { report } = validateWithNote(schema, { item: { kind, items } });
+        expect(report).toHaveBeenCalledExactlyOnceWith(
+          expect.any(String),
+          expect.stringContaining(
+            'resend this field with the type required by its schema',
+          ),
+        );
+        valid(schema, { item: { kind, items: accepted } });
+        invalid(schema, { item: { kind, items: rejected } });
+      },
+    );
+
+    it('does not mistake a separately compiled union for the outer union', () => {
+      const variant = (shape: string, kind: object) =>
+        obj({ items: { type: shape }, kind });
+      const schema = {
+        $schema: DRAFT_2020,
+        anyOf: [
+          variant('array', { const: 'file' }),
+          variant('object', { const: 'docs' }),
+        ],
+        $defs: {
+          Item: {
+            $id: `https://example.test/${probe('entry')}`,
+            $defs: { Kind: { const: 'docs' } },
+            anyOf: [
+              variant('array', { $ref: '#/$defs/Kind' }),
+              variant('object', { const: 'file' }),
+            ],
+          },
+        },
+        ...obj({ item: { $ref: '#/$defs/Item' } }),
+      };
+      const item = { kind: 'docs', items: '{"key":,}' };
+      const { report } = validateWithNote(schema, { item });
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.stringContaining(
+          'resend this field with the type required by its schema',
+        ),
+      );
+      valid(schema, { item: { ...item, items: [] } });
+      invalid(schema, { item: { ...item, items: {} } });
+    });
+
+    it('keeps the selected tag when unrelated definitions and examples have ids', () => {
+      const schema = {
+        $schema: DRAFT_2020,
+        $defs: {
+          Tag: { const: 'docs' },
+          Other: {
+            $id: `https://example.test/${probe('other')}`,
+            type: 'string',
+          },
+        },
+        examples: [{ $id: 'data' }],
+        ...obj({ other: { $ref: '#/$defs/Other' } }),
+        anyOf: [
+          obj({ items: strings(), kind: { $ref: '#/$defs/Tag' } }),
+          obj({ items: { type: 'object' }, kind: { const: 'file' } }),
+        ],
+      };
+      const { report } = validateWithNote(schema, {
+        kind: 'docs',
+        items: '{"key":,}',
+      });
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.stringContaining('send it as a JSON array'),
+      );
+    });
+
     it.each([DRAFT_2020, 'http://json-schema.org/draft-07/schema#'])(
       'honors tag constraints beside a direct or chained $ref (%s)',
       ($schema) => {

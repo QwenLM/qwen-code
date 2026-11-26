@@ -757,6 +757,8 @@ export interface AgentRetryRecordPayload {
 export interface ChatCompressionRecordPayload {
   /** Compression metrics/status returned by the compression service */
   info: ChatCompressionInfo;
+  /** Estimated count for the persisted snapshot when its contents differ from live history. */
+  resumePromptTokenCount?: number;
   /**
    * Snapshot of the new history contents that the model should see after
    * compression (summary turns + retained tail). Stored as Content[] for
