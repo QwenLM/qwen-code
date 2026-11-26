@@ -51,7 +51,11 @@ class JdbcRuntimeBrokerMySqlIT {
     @Test
     void repositoriesPreserveTheirContractsOnMySql() throws Exception {
         // The database outlives the run, so each run needs its own prefix.
-        JdbcRepositoryContract.verify(dataSource(), "mysql-" + UUID.randomUUID());
+        // The contract derives tenants up to prefix + 28 chars
+        // ("-recovery-history-ids-tenant"), which must fit the raw
+        // VARCHAR(36) tenant column, so the prefix stays at 8 characters.
+        JdbcRepositoryContract.verify(dataSource(),
+                "m-" + UUID.randomUUID().toString().replace("-", "").substring(0, 6));
     }
 
     @Test
@@ -63,8 +67,14 @@ class JdbcRuntimeBrokerMySqlIT {
             com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
             RuntimeMaintenanceRecoveryTest.verifyBatches(new JdbcRuntimeBindingRepository(source,
                     new AesGcmSecretProtector("maintenance", new byte[32])), new JdbcRuntimeSessionRepository(source),
-                    new JdbcToolExecutionRepository(source), "mysql-maintenance-" + java.util.UUID.randomUUID());
+                    new JdbcToolExecutionRepository(source),
+                    "mysql-maint-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12));
         });
+    }
+
+    @Test
+    void recoveryCandidatesSkipHistoryAndPreserveGlobalBinaryCursors() throws Exception {
+        inIsolatedSchema("broker_candidates_", RuntimeMaintenanceRecoveryTest::verifyRecoveryCandidates);
     }
 
     @Test
@@ -90,7 +100,7 @@ class JdbcRuntimeBrokerMySqlIT {
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("close", new byte[32]));
         var sessions = new JdbcRuntimeSessionRepository(source);
         var executions = new JdbcToolExecutionRepository(source);
-        var prefix = "mysql-close-" + UUID.randomUUID();
+        var prefix = UUID.randomUUID().toString();
         var scope = new RuntimeScope(prefix, "workspace", "1", "/workspace",
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
         var request = new RuntimeProvisionRequest(scope, "harness", "local-process", "storage");
@@ -118,12 +128,10 @@ class JdbcRuntimeBrokerMySqlIT {
                     assertThrows(TimeoutException.class, () -> pending.get(100, TimeUnit.MILLISECONDS));
                 }
                 try (var insert = lock.prepareStatement("INSERT INTO ma_session_head"
-                        + " (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")")) {
-                    insert.setString(1, RuntimeAdmissionFences.harnessDrainKey(prefix));
-                    insert.setString(2, RuntimeAdmissionFences.harnessDrainKey("harness"));
-                    insert.setString(3, prefix);
-                    insert.setString(4, "harness");
-                    insert.setString(5, "harness");
+                        + " (tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")")) {
+                    insert.setString(1, prefix);
+                    insert.setString(2, "harness");
+                    insert.setString(3, "harness");
                     assertEquals(1, insert.executeUpdate());
                 }
             } finally {
@@ -189,7 +197,7 @@ class JdbcRuntimeBrokerMySqlIT {
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         var first = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("close", new byte[32]));
         var second = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("close", new byte[32]));
-        var tenant = "mysql-stop-" + UUID.randomUUID();
+        var tenant = UUID.randomUUID().toString();
         var request = new RuntimeProvisionRequest(new RuntimeScope(tenant, "workspace", "1", "/workspace",
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"), "harness", "local-process", "storage");
         var ready = ready(first, request);
@@ -230,7 +238,7 @@ class JdbcRuntimeBrokerMySqlIT {
         DataSource source = dataSource();
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("close-case", new byte[32]));
-        var tenant = "mysql-case-" + UUID.randomUUID();
+        var tenant = "mysql-case-" + UUID.randomUUID().toString().substring(0, 25);
         var otherTenant = tenant.replace("mysql", "MySQL");
         var original = ready(bindings, new RuntimeProvisionRequest(new RuntimeScope(tenant, "workspace", "1", "/workspace",
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"), "harness", "local-process", "storage"));

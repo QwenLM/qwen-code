@@ -163,6 +163,12 @@ describe('tokenLimit', () => {
   });
 
   describe('Google Gemini', () => {
+    it('should return 1M for Gemini 4.x and its aliases', () => {
+      expect(tokenLimit('gemini-4-neon')).toBe(1000000);
+      expect(tokenLimit('gemini-4-pro-preview-20261121')).toBe(1000000);
+      expect(tokenLimit('vertex_ai/gemini-4-flash')).toBe(1000000);
+    });
+
     it('should return 1M for Gemini 3.x (latest)', () => {
       expect(tokenLimit('gemini-3-pro-preview')).toBe(1000000);
       expect(tokenLimit('gemini-3-flash-preview')).toBe(1000000);
@@ -487,6 +493,13 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('gpt-5-mini', 'output')).toBe(131072);
     });
 
+    it('should return 64K output for Gemini 4.x and its aliases', () => {
+      expect(tokenLimit('gemini-4-neon', 'output')).toBe(65536);
+      expect(tokenLimit('gemini-4-pro-preview-20261121', 'output')).toBe(65536);
+      expect(tokenLimit('vertex_ai/gemini-4-flash', 'output')).toBe(65536);
+      expect(hasExplicitOutputLimit('gemini-4-neon')).toBe(true);
+    });
+
     it('should return correct output limits for Gemini 3.x', () => {
       expect(tokenLimit('gemini-3-pro-preview', 'output')).toBe(65536);
       expect(tokenLimit('gemini-3-flash-preview', 'output')).toBe(65536);
@@ -548,6 +561,28 @@ describe('tokenLimit with output type', () => {
       // Models without specific output limits fall back to Qwen default (32K)
       expect(tokenLimit('qwen3-max', 'output')).toBe(32768);
       expect(tokenLimit('qwen3-max-2026-01-23', 'output')).toBe(32768);
+    });
+
+    it('should size qwen4-max output for thinking + answer (262,144)', () => {
+      expect(tokenLimit('qwen4-max', 'output')).toBe(262144);
+      expect(tokenLimit('qwen4-max-2026-10-01', 'output')).toBe(262144);
+      expect(hasExplicitOutputLimit('qwen4-max')).toBe(true);
+    });
+
+    it('keeps other qwen4 routes on the shipped output fallback', () => {
+      // The combined thinking+answer cap is a qwen4-max contract, not a
+      // whole-generation one; other qwen4* ids keep the 32K Qwen fallback.
+      expect(tokenLimit('qwen4-plus', 'output')).toBe(32768);
+      expect(tokenLimit('qwen4.5-max', 'output')).toBe(32768);
+    });
+
+    it('should exempt qwen4-max from the flat auto output ceiling', () => {
+      // max_tokens caps CoT + answer together, so the 64K auto ceiling would
+      // be consumed by thinking alone.
+      expect(defaultOutputCeiling('qwen4-max')).toBe(262144);
+      // qwen3.8-max keeps the flat auto ceiling (its max_tokens excludes CoT).
+      expect(defaultOutputCeiling('qwen3.8-max')).toBe(64000);
+      expect(defaultOutputCeiling('qwen4-plus')).toBe(32768);
     });
   });
 

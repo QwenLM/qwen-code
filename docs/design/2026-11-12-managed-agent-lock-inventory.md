@@ -66,7 +66,7 @@ The copy is not required by lock order, so it is removable. Keep it for now. Rem
 
 ### Guard rows and entry points
 
-`ma_tenant_guard` holds one row per `(tenant_key, guard_domain)`. It is acquired with `INSERT … ON DUPLICATE KEY UPDATE` followed by `SELECT … FOR UPDATE`. There are two domains:
+`ma_tenant_guard` holds one row per `(tenant_id, guard_domain)`. It is acquired with `INSERT … ON DUPLICATE KEY UPDATE` followed by `SELECT … FOR UPDATE`. There are two domains:
 
 - `runtime_placement` (placement). The primitive is `JdbcRuntimeBindingRepository.lockPlacementDomain`. It is wrapped by `JdbcWorkspaceLifecycleStore.lockPlacement`, `JournalFencing.lockPlacementBounded`, `WorkspaceMigrationAdmission.lockTenant` and `WorkspaceStorageKindGuard.lockDomain`. The `lockTenant` name says "tenant" but the method takes the placement row. Operator storage registration also uses this domain under a sentinel key (`external-storage-registration/1`) as a deliberate cross-tenant lock, and `LocalStorageOwners` locks under a per-host sentinel (`local-storage-host/<hostId>`).
 - `output_publication` (publication). The primitive is `ToolPublicationRetentionStore.lockTenant`, with local bounded wrappers in `ToolPublicationStore` and `ToolPublicationAdmissionStore`. The CSI retention root (`JdbcCsiFilesRetirementGuard.lockRetentionRoot` and `initializeRetentionRoot`) locks the same row.

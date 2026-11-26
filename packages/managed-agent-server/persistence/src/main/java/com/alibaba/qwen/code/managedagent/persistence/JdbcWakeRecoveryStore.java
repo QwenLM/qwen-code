@@ -2,11 +2,12 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WakeRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -21,36 +22,37 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.LongSupplier;
 
 /** Discovers committed wake inputs independently of their source relay or MQ notice. */
 @Repository
 public class JdbcWakeRecoveryStore
         implements WakeRecoveryStore {
     private static final Set<String> SOURCES = Set.of("monitor", "channel", "child_agent",
-            "workflow", "automation", "session_message", "loop");
+            "workflow", "automation", "session_message", "loop", "pr_event");
     private static final int JOURNAL_PAGE = 1;
     private static final int PROOF_PAGES = 32;
-    private static final long RETRY_MS = 30_000;
+    static final long RETRY_MS = 30_000;
     private static final String UNOWNED = " (h.state = 'SEALED' OR (h.state = 'ACTIVE'"
             + " AND (h.writer_lease_until IS NULL OR h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW + ")))";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final LinkedHashMap<Candidate, Proof> pendingProofs = new LinkedHashMap<>(128, 0.75f, true);
     private JdbcJournalPacks packs;
-    private java.util.function.LongSupplier nowMillis = System::currentTimeMillis;
+    private LongSupplier nowMillis = System::currentTimeMillis;
 
     public JdbcWakeRecoveryStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         transactions = new TransactionTemplate(new DataSourceTransactionManager(Objects.requireNonNull(jdbc.getDataSource())));
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) {
         this.packs = packs;
     }
 
     /** Test hook: the clock the not-yet-due loop exemption compares against. */
-    void setNowMillis(java.util.function.LongSupplier nowMillis) {
+    void setNowMillis(LongSupplier nowMillis) {
         this.nowMillis = nowMillis;
     }
 
@@ -91,7 +93,7 @@ public class JdbcWakeRecoveryStore
     private List<Candidate> findPending(String defaultWorkspace, int limit, boolean hinted) {
         return jdbc.query("SELECT h.tenant_id, h.workspace_id, h.session_id, h.journal_revision,"
                         + " h.committed_sequence, h.compacted_through_revision, s.parent_session_id,"
-                        + " s.parent_child_run_id FROM ma_session_head h JOIN ma_session s ON"
+                        + " s.parent_child_run_id, h.wake_seal_revision FROM ma_session_head h JOIN ma_session s ON"
                         + " s.tenant_id = h.tenant_id AND s.session_id = h.session_id WHERE"
                         + " h.head_kind = 'MANAGED_SESSION' AND h.is_wake_scan_pending = TRUE"
                         + " AND h.compacted_through_revision = 0"
@@ -99,11 +101,13 @@ public class JdbcWakeRecoveryStore
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
                         + " AND s.retired_at IS NULL"
                         + " AND h.workspace_id = COALESCE(s.workspace_id, ?)"
-                        + " ORDER BY h.wake_retry_at, h.tenant_key, h.harness_key LIMIT ?",
+                        + " ORDER BY h.wake_retry_at, h.tenant_id, h.harness_session_id LIMIT ?",
                 (row, index) -> new Candidate(row.getString("tenant_id"), row.getString("workspace_id"),
                         row.getString("session_id"), row.getLong("journal_revision"),
                         row.getLong("committed_sequence"), row.getLong("compacted_through_revision"),
-                        row.getString("parent_session_id"), row.getString("parent_child_run_id")),
+                        row.getString("parent_session_id"), row.getString("parent_child_run_id"),
+                        Long.valueOf(row.getLong("journal_revision"))
+                                .equals(row.getObject("wake_seal_revision", Long.class))),
                 hinted, defaultWorkspace, limit);
     }
 
@@ -121,19 +125,22 @@ public class JdbcWakeRecoveryStore
                 return false;
             }
             return jdbc.update("UPDATE ma_session_head h SET wake_retry_at = " + ManagedSchemaTime.SQL_NOW + " + " + RETRY_MS + " WHERE"
-                        + " h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id = ?"
-                        + " AND h.session_id = ? AND h.workspace_id = ?"
+                        + " h.tenant_id = ? AND"
+                        + " h.harness_session_id = ? AND h.workspace_id = ?"
                         + " AND h.head_kind = 'MANAGED_SESSION' AND h.journal_revision = ?"
                         + " AND h.compacted_through_revision = 0"
                         + " AND h.is_wake_scan_pending = TRUE AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED,
-                ManagedSchemaKeys.key(candidate.tenantId()),
-                ManagedSchemaKeys.key(candidate.sessionId()), candidate.tenantId(), candidate.sessionId(),
+                candidate.tenantId(), candidate.sessionId(),
                 candidate.workspaceId(), candidate.journalRevision()) == 1;
         }));
     }
 
     /** An empty result yields a partial proof without certifying consumption. */
     public synchronized Optional<Boolean> hasPendingInput(Candidate candidate) {
+        if (JdbcRuntimeStageStore.hasWakeWorthyRow(
+                jdbc, ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()))) {
+            return Optional.of(true);
+        }
         if (candidate.compactedThroughRevision() != 0) {
             throw corrupt();
         }
@@ -296,26 +303,35 @@ public class JdbcWakeRecoveryStore
     private boolean canResume(Candidate candidate) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head h JOIN ma_session s ON"
                         + " s.tenant_id = h.tenant_id AND s.session_id = h.session_id"
-                        + " WHERE h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id = ?"
-                        + " AND h.session_id = ? AND h.workspace_id = ? AND h.head_kind = 'MANAGED_SESSION'"
+                        + " WHERE h.tenant_id = ? AND"
+                        + " h.harness_session_id = ? AND h.workspace_id = ? AND h.head_kind = 'MANAGED_SESSION'"
                         + " AND h.journal_revision = ? AND h.committed_sequence = ?"
                         + " AND h.compacted_through_revision = 0 AND h.is_wake_scan_pending = TRUE AND" + UNOWNED
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
                         + " AND s.retired_at IS NULL"
                         + " AND (s.workspace_id IS NULL OR s.workspace_id = ?)",
-                Long.class, ManagedSchemaKeys.key(candidate.tenantId()), ManagedSchemaKeys.key(candidate.sessionId()),
-                candidate.tenantId(), candidate.sessionId(), candidate.workspaceId(), candidate.journalRevision(),
+                Long.class, candidate.tenantId(), candidate.sessionId(), candidate.workspaceId(), candidate.journalRevision(),
                 candidate.committedSequence(), candidate.workspaceId()) == 1;
     }
 
     /** Only a full prefix at this exact revision may clear the hint. */
     public boolean recordPending(Candidate candidate, boolean pending) {
-        return jdbc.update("UPDATE ma_session_head SET is_wake_pending = ?, wake_head_revision = ?"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND workspace_id = ? AND journal_revision = ?"
+        if (!pending) {
+            String scopeKey = ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId());
+            return jdbc.update("UPDATE ma_session_head SET is_wake_pending = FALSE, wake_head_revision = ?"
+                            + " WHERE tenant_id = ? AND"
+                            + " harness_session_id = ? AND workspace_id = ? AND journal_revision = ?"
+                            + " AND compacted_through_revision = 0"
+                            + " AND NOT EXISTS (SELECT 1 FROM ma_runtime_stage"
+                            + " WHERE runtime_session_key = ? AND is_wake_worthy = 1)",
+                    candidate.journalRevision(), candidate.tenantId(), candidate.sessionId(),
+                    candidate.workspaceId(), candidate.journalRevision(), scopeKey) == 1;
+        }
+        return jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE, wake_head_revision = ?"
+                        + " WHERE tenant_id = ? AND"
+                        + " harness_session_id = ? AND workspace_id = ? AND journal_revision = ?"
                         + " AND compacted_through_revision = 0",
-                pending, candidate.journalRevision(), ManagedSchemaKeys.key(candidate.tenantId()),
-                ManagedSchemaKeys.key(candidate.sessionId()), candidate.tenantId(), candidate.sessionId(),
+                candidate.journalRevision(), candidate.tenantId(), candidate.sessionId(),
                 candidate.workspaceId(), candidate.journalRevision()) == 1;
     }
 

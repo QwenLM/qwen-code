@@ -701,6 +701,7 @@ export const handleSlashCommand = async (
       : uiTelemetryService.getMetrics(),
     lastPromptTokenCount: 0,
     promptCount: 1,
+    userPromptCount: 1,
   };
 
   const logger = new Logger(config?.getSessionId() || '', config?.storage);

@@ -1,0 +1,37 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`InfoMessage > matches SVG snapshot for cancellation notice presentation 1`] = `
+" - Request cancelled.
+"
+`;
+
+exports[`InfoMessage > matches SVG snapshot for default info presentation 1`] = `
+" ● Just so you know
+"
+`;
+
+exports[`InfoMessage > renders cancellation notices quietly 1`] = `
+" - Request cancelled.
+"
+`;
+
+exports[`InfoMessage > renders info messages with inline code 1`] = `
+" ● Use qwen init to continue
+"
+`;
+
+exports[`InfoMessage > renders multiline info messages 1`] = `
+" ● Info line 1
+   Info line 2
+"
+`;
+
+exports[`InfoMessage > renders with a custom icon 1`] = `
+" ★ Custom icon test
+"
+`;
+
+exports[`InfoMessage > renders with the correct default prefix and text 1`] = `
+" ● Just so you know
+"
+`;

@@ -101,6 +101,7 @@ import {
   type AgentToolResultEvent,
   type AgentToolOutputUpdateEvent,
 } from './agent-events.js';
+import { AgentTerminateMode } from './agent-types.js';
 
 vi.mock('../../core/agent-loop.js', async (importOriginal) => {
   const actual =
@@ -1232,6 +1233,82 @@ describe.each(LOOPS)(
         expect(schedule.mock.calls[0]?.[0]).toEqual([
           expect.objectContaining({ callId: 'lookup', name }),
         ]);
+      } finally {
+        schedule.mockRestore();
+      }
+    });
+
+    it.runIf(shared)('ends the run on a tool hook stop', async () => {
+      const { core } = buildCore(
+        'hook-stop',
+        { tools: ['*'] },
+        {
+          getSkipLoopDetection: () => true,
+          getMaxToolCallsPerTurn: () => 100,
+          isMaxToolCallsPerTurnExplicit: () => false,
+        },
+      );
+      const addHistory = vi.fn();
+      const sendMessageStream = vi.fn(async () =>
+        (async function* () {
+          yield {
+            type: 'chunk',
+            value: {
+              functionCalls: [{ id: 'stop-call', name: 'read_file', args: {} }],
+            },
+          };
+        })(),
+      );
+      const chat = {
+        sendMessageStream,
+        getHistoryToolCallFingerprints: () => new Map(),
+        addHistory,
+      } as unknown as LlmChat;
+      const part = {
+        functionResponse: {
+          id: 'stop-call',
+          name: 'read_file',
+          response: { output: 'read' },
+        },
+      };
+      const schedule = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler, requests) {
+          const [request] = Array.isArray(requests) ? requests : [requests];
+          await (this as unknown as Scheduler).onAllToolCallsComplete?.([
+            {
+              status: 'success',
+              request,
+              response: {
+                callId: request.callId,
+                responseParts: [part],
+                resultDisplay: 'read',
+                error: undefined,
+                errorType: undefined,
+                hookStopReason: 'halt',
+              },
+            } as unknown as ToolCall,
+          ]);
+        });
+      try {
+        const result = await core.runReasoningLoop(
+          chat,
+          [],
+          [{ name: 'read_file' }],
+          new AbortController(),
+          { maxTurns: 5 },
+        );
+        expect(result.terminateMode).toBe(AgentTerminateMode.HOOK_STOPPED);
+        expect(result.text).toBe('A hook stopped the agent: halt');
+        expect(sendMessageStream).toHaveBeenCalledOnce();
+        expect(addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'stop-call' }),
+            }),
+          ],
+        });
       } finally {
         schedule.mockRestore();
       }

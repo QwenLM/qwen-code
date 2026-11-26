@@ -100,6 +100,14 @@ jobs:
           CI_BEGIN="<!-- qwen-triage-ci sha=${HEAD_SHA} -->"
           CI_END='<!-- /qwen-triage-ci -->'
           APPROVE_MARKER="<!-- qwen-triage approve-on-green sha=${HEAD_SHA} -->"
+          # The approve marker is only honored in the triage skill's Stage 3
+          # reflection comment, whose first line the triage publisher enforces
+          # (`triage-publish.mjs` rejects a body that does not start with its
+          # marker). Bot-authored is not enough: other bot lanes (serve-ab,
+          # visuals) publish bodies a fork PR's own scripts generated, so a
+          # forged approve marker inside one of those comments must not read
+          # as an approval instruction.
+          STAGE3_MARKER='<!-- qwen-triage stage=3 -->'
           STATUS_MARKER='<!-- qwen-triage lifecycle -->'
           LEGACY_STATUS_MARKER='<!-- qwen-triage stage=status -->'
 
@@ -374,10 +382,12 @@ jobs:
               echo "PR #$PR: no bot CI region for $SHORT_SHA."
             fi
 
-            # 2. Deferred approval — marker must sit in a BOT-authored comment
-            # and bind this exact sha.
-            HAS_MARKER="$(jq -r --arg bot "$BOT_LOGIN" --arg m "$APPROVE_MARKER" \
-              '[.[] | select(.user.login == $bot) | select(.body | contains($m))] | length' \
+            # 2. Deferred approval — marker must sit in a BOT-authored Stage 3
+            # comment (first-line marker, publisher-enforced) and bind this
+            # exact sha. A marker quoted anywhere else — including another bot
+            # lane's PR-generated comment — is inert.
+            HAS_MARKER="$(jq -r --arg bot "$BOT_LOGIN" --arg m "$APPROVE_MARKER" --arg s3 "$STAGE3_MARKER" \
+              '[.[] | select(.user.login == $bot) | select(.body | startswith($s3)) | select(.body | contains($m))] | length' \
               "/tmp/comments-$PR.json")"
             [ "$HAS_MARKER" -gt 0 ] || continue
             # Head/state re-check comes BEFORE any red/deferred verdict: CI's

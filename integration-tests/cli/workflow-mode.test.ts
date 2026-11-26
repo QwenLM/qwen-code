@@ -11,6 +11,8 @@ import {
   TestRig,
   applyContainerSandboxNoProxy,
   fakeServerHostOptions,
+  headlessLoopPaths,
+  readDebugLogs,
   sharedLoopRoundCount,
 } from '../test-helper.js';
 import {
@@ -35,7 +37,7 @@ describe.each([
       'home/settings.json',
       JSON.stringify({
         tools: { workflowsEnabled: true },
-        experimental: { unifiedAgentLoop: shared },
+        experimental: { unifiedAgentLoop: shared, eventBusAgentLoop: false },
         security: { auth: { selectedType: 'openai' } },
         memory: {
           enableManagedAutoMemory: false,
@@ -61,6 +63,9 @@ describe.each([
     // Arm-dependent: an unconditional '0' would force the shared arm onto the
     // legacy loop now that the env override beats the setting.
     vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', shared ? '1' : '0');
+    // Both arms stay off the kernel, so the shared arm runs the shared loop's
+    // procedural path even where the kernel is on by default.
+    vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
     vi.stubEnv('QWEN_DEBUG_LOG_FILE', '1');
     server = await startFakeOpenAIServer(
       () => ({ content: 'DW04_HEADLESS_DONE' }),
@@ -133,6 +138,11 @@ describe.each([
     expect(sharedLoopRoundCount(join(rig.testDir!, 'runtime')) > 0).toBe(
       shared,
     );
+    expect([
+      ...new Set(
+        headlessLoopPaths(readDebugLogs(join(rig.testDir!, 'runtime'))),
+      ),
+    ]).toEqual([shared ? 'shared' : 'legacy']);
   }, 150_000);
 
   it('leaves absent mode off without inventing keyword provenance', async () => {

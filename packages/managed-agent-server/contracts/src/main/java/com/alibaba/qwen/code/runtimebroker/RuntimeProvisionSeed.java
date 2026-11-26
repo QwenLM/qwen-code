@@ -46,7 +46,7 @@ public final class RuntimeProvisionSeed {
      */
     public static RuntimeProvisionSeed create(String bindingId,
             long generation) {
-        String id = BrokerValues.requireId(bindingId, "bindingId");
+        String id = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (generation <= 0) {
             throw new IllegalArgumentException("generation must be positive");
         }

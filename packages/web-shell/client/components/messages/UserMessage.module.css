@@ -54,6 +54,16 @@
 
 /* An agent's post in the session: named like an agent reply, but kept on the
    message's own side. */
+.sentFrom {
+  min-width: 0;
+  margin-bottom: 4px;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .author {
   display: flex;
   align-items: center;
@@ -208,42 +218,69 @@
   word-break: break-word;
 }
 
-.sendFailure {
+.automaticTriggerBubble {
+  width: min(560px, 100%);
+}
+
+.automaticTriggerHeader {
+  flex-wrap: nowrap;
+}
+
+.automaticTriggerHeader .automaticTriggerToggle {
+  margin-top: 0;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.automaticEchoSummary {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.chatMessageBodyRow {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 6px;
-  color: var(--destructive);
-  font-size: 12px;
-  line-height: 1;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
 }
 
-.retryButton {
+.chatMessageContentColumn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sendFailureIndicator {
   display: inline-flex;
+  width: 20px;
   height: 20px;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  padding: 0 4px;
+  padding: 0;
   border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
+  border-radius: 50%;
+  background: var(--destructive);
+  color: var(--destructive-foreground, #fff);
   cursor: pointer;
+  transition: opacity 0.15s ease;
 }
 
-.retryButton:hover {
-  background: color-mix(in srgb, var(--destructive) 12%, transparent);
+.sendFailureIndicator:hover {
+  opacity: 0.85;
 }
 
-.retryButton:focus-visible {
+.sendFailureIndicator:focus-visible {
   outline: 2px solid var(--ring);
-  outline-offset: 1px;
+  outline-offset: 2px;
 }
 
-.retryButton svg {
-  width: 14px;
-  height: 14px;
+.sendFailureIndicator svg {
+  width: 12px;
+  height: 12px;
 }
 
 .editArea {

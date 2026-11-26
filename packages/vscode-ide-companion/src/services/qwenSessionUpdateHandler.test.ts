@@ -87,6 +87,30 @@ describe('QwenSessionUpdateHandler', () => {
     });
   });
 
+  it('delivers a Stop hook reason separately from the assistant stream', () => {
+    handler.handleSessionUpdate({
+      sessionId: 'test-session',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'stop_hook_notice',
+          qwenDiscreteMessage: true,
+          stopReason: 'Build is red.',
+        },
+      },
+    });
+
+    expect(mockCallbacks.onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'Build is red.',
+        source: 'stop_hook_notice',
+        sessionId: 'test-session',
+      }),
+    );
+    expect(mockCallbacks.onStreamChunk).not.toHaveBeenCalled();
+  });
+
   describe('current_mode_update handling', () => {
     it('calls onModeChanged callback with mode id', () => {
       const modeUpdate: SessionNotification = {

@@ -2,6 +2,8 @@
 
 [English](2026-10-13-private-csi-hosted-text.md) | [简体中文](2026-10-13-private-csi-hosted-text.zh-CN.md)
 
+> **Archived.** The server-side private CSI backend was cold-archived by [#17415](https://github.com/QwenLM/qwen-code/pull/17415); [#17427](https://github.com/QwenLM/qwen-code/issues/17427) retired the TypeScript client described here (the `hosted-csi-*` session routes, tool turns, and batch recovery) and removed the `QWEN_HOSTED_CSI_SESSION_STORE_URL` attachment option. This document is preserved as the historical design record.
+
 ## Status and source
 
 This is an independently reviewable feature extraction from #13526. It now targets

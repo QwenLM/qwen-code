@@ -15,6 +15,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { useProjectHooksApproval } from './use-project-hooks-approval.js';
 import { ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
+import { MessageType } from '../types.js';
 import {
   HOOK_APPROVALS_FILENAME,
   getProjectHooksForApproval,
@@ -28,6 +29,7 @@ describe('useProjectHooksApproval', () => {
   let rejected: boolean;
   let reload: ReturnType<typeof vi.fn>;
   let gateAtReload: boolean[];
+  let configWarnings: string[];
   const hooks = {
     SessionStart: [{ hooks: [{ type: 'command', command: './setup.sh' }] }],
   };
@@ -45,7 +47,10 @@ describe('useProjectHooksApproval', () => {
         rejected = rej;
       },
       getWorkingDir: () => path.join(dir, 'elsewhere'),
-      getHookSystem: () => ({ reload }),
+      getHookSystem: () => ({
+        reload,
+        getConfigWarnings: () => configWarnings,
+      }),
     } as unknown as Config;
   };
   const makeSettings = (projectHooks: Record<string, unknown> | undefined) =>
@@ -67,6 +72,7 @@ describe('useProjectHooksApproval', () => {
     resetHookApprovalsForTesting();
     pending = true;
     rejected = false;
+    configWarnings = [];
   });
 
   afterEach(() => {
@@ -124,7 +130,10 @@ describe('useProjectHooksApproval', () => {
     await act(() => result.current.handleProjectHooksApprovalSelect(choice));
     expect(addInfo).toHaveBeenCalledTimes(notes ? 1 : 0);
     if (notes) {
-      expect(addInfo.mock.calls[0][0]).toContain('were not loaded');
+      expect(addInfo).toHaveBeenCalledWith({
+        type: MessageType.INFO,
+        text: expect.stringContaining('were not loaded'),
+      });
     }
   });
 
@@ -147,6 +156,29 @@ describe('useProjectHooksApproval', () => {
     expect(
       loadHookApprovals().getState(getProjectHooksForApproval(settings)!),
     ).toBe('approved');
+  });
+
+  it('shows newly loaded hook warnings after approval', async () => {
+    const addNotice = vi.fn();
+    const config = makeConfig();
+    const settings = makeSettings(hooks);
+    configWarnings = ['existing warning'];
+    reload.mockImplementationOnce(async () => {
+      configWarnings = [...configWarnings, 'project hook was skipped'];
+    });
+    const { result } = renderHook(() =>
+      useProjectHooksApproval(config, settings, addNotice),
+    );
+
+    await act(() =>
+      result.current.handleProjectHooksApprovalSelect(
+        ProjectHooksApprovalChoice.APPROVE,
+      ),
+    );
+    expect(addNotice).toHaveBeenCalledExactlyOnceWith({
+      type: MessageType.WARNING,
+      text: 'project hook was skipped',
+    });
   });
 
   it('reject persists the rejection, keeps the gate and closes', async () => {
@@ -185,19 +217,22 @@ describe('useProjectHooksApproval', () => {
     );
     expect(pending).toBe(true);
     expect(reload).not.toHaveBeenCalled();
-    expect(addInfo.mock.calls[0][0]).toContain('could not be saved');
+    expect(addInfo).toHaveBeenCalledWith({
+      type: MessageType.INFO,
+      text: expect.stringContaining('could not be saved'),
+    });
   });
 
-  it('keeps one select handler across a new addInfo', () => {
+  it('keeps one select handler across a new notice callback', () => {
     const config = makeConfig();
     const settings = makeSettings(hooks);
     const { result, rerender } = renderHook(
-      ({ addInfo }: { addInfo: (text: string) => void }) =>
-        useProjectHooksApproval(config, settings, addInfo),
-      { initialProps: { addInfo: vi.fn() } },
+      ({ addNotice }: { addNotice: ReturnType<typeof vi.fn> }) =>
+        useProjectHooksApproval(config, settings, addNotice),
+      { initialProps: { addNotice: vi.fn() } },
     );
     const before = result.current.handleProjectHooksApprovalSelect;
-    rerender({ addInfo: vi.fn() });
+    rerender({ addNotice: vi.fn() });
     expect(result.current.handleProjectHooksApprovalSelect).toBe(before);
   });
 

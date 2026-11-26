@@ -10,6 +10,7 @@ import {
   isBuiltInGeneratedUi,
   isBundledGeneratedUi,
   McpAppMessagesContext,
+  McpAppReadOnlyContext,
   McpAppSessionContext,
   McpAppToolsContext,
   McpAppModelContextContext,
@@ -26,9 +27,29 @@ import {
 } from '../../generated-ui/GeneratedUiRuntimeProvider';
 import { Button } from '../ui/button';
 import type { GeneratedUiInstance } from '../../generated-ui/instance-store';
+import {
+  generatedUiCardId,
+  VIEW_STATE_CAPABILITY,
+  VIEW_STATE_LOAD,
+  VIEW_STATE_SAVE,
+  ViewStateCoordinator,
+  type ViewStateStatus,
+} from '../../generated-ui/view-state';
+import {
+  COPY_CAPABILITY,
+  COPY_WRITE,
+  copyRequestText,
+  downloadRequestFile,
+  startDownload,
+  writeClipboard,
+  type EffectStatus,
+} from '../../generated-ui/effects';
 
 type SandboxResource = Parameters<AppBridge['sendSandboxResourceReady']>[0];
 type AppToolResult = Parameters<AppBridge['sendToolResult']>[0];
+type HostRequestResult = Awaited<
+  ReturnType<NonNullable<AppBridge['fallbackRequestHandler']>>
+>;
 
 export interface McpAppDisplay {
   type: 'mcp_app';
@@ -280,6 +301,18 @@ export function McpApp({
   const owner = useContext(McpAppGeneratedUiOwnerContext)?.source;
   const sessionId = useContext(McpAppSessionContext);
   const surfaceVisible = useContext(McpAppVisibilityContext);
+  const readOnly = useContext(McpAppReadOnlyContext);
+  if (readOnly) {
+    return (
+      <div className={styles.fallback}>
+        {isBundledGeneratedUi(display) ? (
+          <GeneratedUiSummary display={display} />
+        ) : (
+          display.fallbackText
+        )}
+      </div>
+    );
+  }
   if (
     import.meta.env.MODE !== 'transcript' &&
     allowed &&
@@ -328,6 +361,34 @@ export function McpAppRuntime({
       : messageHost?.requestMessage;
   const callTool =
     sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
+  // Only the bundled card keeps state, under the id its server minted.
+  const cardId =
+    builtInGeneratedUi && import.meta.env.MODE !== 'transcript'
+      ? generatedUiCardId(display.toolResult)
+      : undefined;
+  const viewStateHost =
+    cardId && sessionId && tools?.sessionId === sessionId
+      ? tools.viewState
+      : undefined;
+  const viewStateRef = useRef<ViewStateCoordinator | undefined>(undefined);
+  const [viewStateStatus, setViewStateStatus] = useState<ViewStateStatus>();
+  // A click's copy or download, performed here rather than by the card. The
+  // count makes a repeated outcome a new observation.
+  const effectsAllowed =
+    builtInGeneratedUi && import.meta.env.MODE !== 'transcript';
+  const [effectOutcome, setEffectOutcome] = useState<{
+    status: EffectStatus;
+    count: number;
+    filename?: string;
+  }>();
+  const effectCountRef = useRef(0);
+  // Text the browser refused to copy, kept for the bar's own Copy button.
+  const pendingCopyRef = useRef<string | undefined>(undefined);
+  const retryCopyRef = useRef<(() => void) | undefined>(undefined);
+  const reportEffect = (status: EffectStatus, filename?: string) =>
+    setEffectOutcome({ status, count: ++effectCountRef.current, filename });
+  const reportEffectRef = useRef(reportEffect);
+  reportEffectRef.current = reportEffect;
   const theme = useTheme();
   const languageRef = useRef(language);
   languageRef.current = language;
@@ -362,6 +423,10 @@ export function McpAppRuntime({
   useEffect(() => {
     setError(undefined);
     setAppReady(false);
+    setViewStateStatus(undefined);
+    setEffectOutcome(undefined);
+    pendingCopyRef.current = undefined;
+    viewStateRef.current = undefined;
     const iframe = iframeRef.current;
     if (!iframe || !sandboxUrl) return;
     const generation = ++mountGenerationRef.current;
@@ -369,6 +434,20 @@ export function McpAppRuntime({
     let active = true;
     let ready = false;
     const current = displayRef.current;
+    const viewState =
+      import.meta.env.MODE !== 'transcript' &&
+      viewStateHost &&
+      cardId &&
+      sessionId
+        ? new ViewStateCoordinator(
+            { sessionId, ...viewStateHost },
+            cardId,
+            (status) => {
+              if (active) setViewStateStatus(status);
+            },
+          )
+        : undefined;
+    viewStateRef.current = viewState;
     const bridge = new AppBridge(
       null,
       { name: 'qwen-code-web-shell', version: '0.0.1' },
@@ -378,6 +457,15 @@ export function McpAppRuntime({
         // Only the built-in card attaches its values to the next message.
         ...(builtInGeneratedUi && requestMessage
           ? { updateModelContext: { text: {} } }
+          : {}),
+        ...(effectsAllowed ? { downloadFile: {} } : {}),
+        ...(viewState || effectsAllowed
+          ? {
+              experimental: {
+                ...(viewState ? { [VIEW_STATE_CAPABILITY]: {} } : {}),
+                ...(effectsAllowed ? { [COPY_CAPABILITY]: {} } : {}),
+              },
+            }
           : {}),
         sandbox: {
           ...(current.csp ? { csp: current.csp } : {}),
@@ -463,6 +551,76 @@ export function McpAppRuntime({
         return {};
       };
     }
+    // One effect at a time, only for a card the user can see; the request is
+    // validated here whatever the App checked.
+    let effectBusy = false;
+    const admitEffect = () =>
+      active && !effectBusy && (!retained || retained.isVisible());
+    const report = (status: EffectStatus, filename?: string) => {
+      if (active) reportEffectRef.current(status, filename);
+    };
+    const copy = async (text: string, retry = false) => {
+      effectBusy = true;
+      try {
+        const copied = await writeClipboard(text);
+        if (!active || (retry && pendingCopyRef.current !== text)) return;
+        pendingCopyRef.current = copied ? undefined : text;
+        report(copied ? 'copied' : 'copy-pending');
+      } finally {
+        effectBusy = false;
+      }
+    };
+    if (effectsAllowed) {
+      retryCopyRef.current = () => {
+        const text = pendingCopyRef.current;
+        if (text !== undefined && admitEffect()) void copy(text, true);
+      };
+      bridge.ondownloadfile = async (params) => {
+        const file = admitEffect() ? downloadRequestFile(params) : undefined;
+        if (!effectBusy) pendingCopyRef.current = undefined;
+        if (!file) {
+          report('refused');
+          return { isError: true };
+        }
+        try {
+          startDownload(file);
+        } catch {
+          report('refused');
+          return { isError: true };
+        }
+        report('downloaded', file.filename);
+        return {};
+      };
+    }
+    if (viewState || effectsAllowed) {
+      // The App names no card: the host answers for the one it mounted.
+      bridge.fallbackRequestHandler = async (request, extra) => {
+        if (!active) throw new Error('The card was unmounted.');
+        if (effectsAllowed && request.method === COPY_WRITE) {
+          const text = admitEffect()
+            ? copyRequestText(request.params)
+            : undefined;
+          if (!effectBusy) pendingCopyRef.current = undefined;
+          if (text === undefined) {
+            report('refused');
+            throw new Error('The copy was refused.');
+          }
+          await copy(text);
+          return {} as HostRequestResult;
+        }
+        if (!viewState)
+          throw new Error(`Unsupported request: ${request.method}`);
+        if (request.method === VIEW_STATE_LOAD)
+          return {
+            value: await viewState.load(extra?.signal),
+          } as HostRequestResult;
+        if (request.method === VIEW_STATE_SAVE) {
+          viewState.save((request.params as { value?: unknown })?.value);
+          return {} as HostRequestResult;
+        }
+        throw new Error(`Unsupported request: ${request.method}`);
+      };
+    }
     if (callTool) {
       bridge.oncalltool = async (params, extra) => {
         const signal = AbortSignal.any([
@@ -519,6 +677,8 @@ export function McpAppRuntime({
       clearTimeout(readyTimeout);
       bridge.oncalltool = undefined;
       bridge.onmessage = undefined;
+      bridge.fallbackRequestHandler = undefined;
+      bridge.ondownloadfile = undefined;
       appAbort.abort();
       iframe.removeAttribute('src');
       bridgeRef.current = null;
@@ -591,6 +751,10 @@ export function McpAppRuntime({
       clearTimeout(readyTimeout);
       bridge.oncalltool = undefined;
       bridge.onmessage = undefined;
+      bridge.fallbackRequestHandler = undefined;
+      bridge.ondownloadfile = undefined;
+      retryCopyRef.current = undefined;
+      pendingCopyRef.current = undefined;
       appAbort.abort();
       bridgeRef.current = null;
       const unload = () => {
@@ -626,6 +790,9 @@ export function McpAppRuntime({
     toolResultKey,
     retained,
     maxHeight,
+    cardId,
+    viewStateHost,
+    effectsAllowed,
   ]);
 
   useEffect(() => {
@@ -646,20 +813,68 @@ export function McpAppRuntime({
   return (
     <div ref={cardRef} className={styles.card} data-testid="mcp-app">
       {builtInGeneratedUi ? (
-        // No MCP framing: one quiet row, only for the host's reset action.
-        retained && (
+        // No MCP framing: one quiet row for the host's own reset action and
+        // its save, copy and download outcomes, which the generated content
+        // cannot imitate.
+        import.meta.env.MODE !== 'transcript' &&
+        (retained || viewStateStatus || effectOutcome) && (
           <div className={styles.builtInBar}>
             <span>
-              {retained.reopened ? t('mcpApp.generatedUi.reopenNotice') : ''}
+              {retained?.reopened ? t('mcpApp.generatedUi.reopenNotice') : ''}
             </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              title={t('mcpApp.generatedUi.reopenNotice')}
-              onClick={retained.reset}
-            >
-              {t('mcpApp.generatedUi.reset')}
-            </Button>
+            {viewStateStatus && (
+              <span
+                role="status"
+                className={styles.saveStatus}
+                data-generated-ui-save={viewStateStatus}
+              >
+                {t(`mcpApp.generatedUi.state.${viewStateStatus}`)}
+              </span>
+            )}
+            {effectOutcome && (
+              <span
+                role="status"
+                className={styles.saveStatus}
+                data-generated-ui-effect={effectOutcome.status}
+                data-generated-ui-effect-count={effectOutcome.count}
+              >
+                {t(`mcpApp.generatedUi.effect.${effectOutcome.status}`, {
+                  name: effectOutcome.filename ?? '',
+                })}
+              </span>
+            )}
+            {effectOutcome?.status === 'copy-pending' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => retryCopyRef.current?.()}
+              >
+                {t('mcpApp.generatedUi.effect.copy')}
+              </Button>
+            )}
+            {retained && (
+              <Button
+                variant="ghost"
+                size="sm"
+                title={t(
+                  viewStateHost
+                    ? 'mcpApp.generatedUi.resetNotice'
+                    : 'mcpApp.generatedUi.reopenNotice',
+                )}
+                onClick={() => {
+                  pendingCopyRef.current = undefined;
+                  setEffectOutcome(undefined);
+                  const viewState = viewStateRef.current;
+                  // Reset also clears what the card saved; if that fails,
+                  // the card stays as it is and the bar says so.
+                  retained.reset(
+                    viewState ? () => viewState.clear() : undefined,
+                  );
+                }}
+              >
+                {t('mcpApp.generatedUi.reset')}
+              </Button>
+            )}
           </div>
         )
       ) : (
@@ -672,7 +887,7 @@ export function McpAppRuntime({
                 variant="ghost"
                 size="sm"
                 title={t('mcpApp.generatedUi.reopenNotice')}
-                onClick={retained.reset}
+                onClick={() => retained.reset()}
               >
                 {t('mcpApp.generatedUi.reset')}
               </Button>

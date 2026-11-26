@@ -50,7 +50,7 @@ public final class ManagedCsiProtocol {
     public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> storage) {
         var boot = Map.<String, Object>of("type", "boot", "version", 3, "managedCsi", PROTOCOL,
-                "context", ManagedContextProtocol.boot(request, seed), "storage", BrokerValues.immutableMap(storage));
+                "context", ManagedContextProtocol.boot(request, seed).toWire(), "storage", BrokerValues.immutableMap(storage));
         validateBoot(boot);
         return boot;
     }
