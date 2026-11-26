@@ -891,6 +891,33 @@ describe('web-shell ru locale', () => {
     expect(t('goal.blocked')).not.toBe(en('goal.blocked'));
   });
 
+  it.each([
+    ['ui.disableWorkflowKeywordTrigger', ['workflow', 'ultracode', 'SDK']],
+    ['privacy.usageStatisticsEnabled', ['обновление каталога models.dev']],
+    [
+      'policy.permissionStrategy',
+      ['анонимен', 'X-Qwen-Client-Id', 'outcome:"cancelled"'],
+    ],
+    [
+      'experimental.sessionWorkflow',
+      ['По умолчанию выключено', 'подтверждения'],
+    ],
+    [
+      'experimental.emitToolUseSummaries',
+      ['интерактивном CLI', 'QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0'],
+    ],
+    [
+      'tools.toolSearch.threshold',
+      ['tools.eager', 'CodeModeOnly', 'tools.visible'],
+    ],
+  ])('preserves settings schema details in Russian for %s', (key, details) => {
+    const t = getTranslator('ru');
+    const description = t(`settings.description.${key}`);
+    for (const detail of details) {
+      expect(description).toContain(detail);
+    }
+  });
+
   it('renders chrome from the ru catalog, not from EN', () => {
     const t = getTranslator('ru');
     const en = getTranslator('en');
