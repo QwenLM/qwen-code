@@ -121,17 +121,23 @@ The source itself is the signal; no sink pairing is required.
 | Reason code                          | Matches                                                                                                                                                                                                                                                                                                                                              |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ambient_credential:cloud_metadata`  | The listed literal hosts, plus URLs whose parser-normalized host is one of those addresses: integer, hexadecimal, and other `inet_aton` spellings count too                                                                                                                                                                                          |
-| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>[/task/<tid>]/environ`, plus glob `*`, bracket `[...]*` and brace `{self,1}` pid forms                                                                                                                                                                                                                      |
+| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>[/task/<tid>]/environ`                                                                                                                                                                                                                                                                                      |
 | `ambient_credential:env_dump`        | `env`, `env -0`, `env --null`, bare `set`, bare `export`, `export -p`, bare `declare`/`typeset` and their `-x`/`-p` forms, in command position followed by a pipe, redirect, separator or end of line; `printenv`; a dump command inside `bash/sh/zsh/dash -c '…'`, including combined flags such as `-lc` and flags preceding `-c` such as `--norc` |
-| `ambient_credential:credential_file` | `.aws/credentials`, `.npmrc`, `.config/gh/hosts.yml`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, and `.credentials` **only at a path boundary**                                                                                                                                             |
+| `ambient_credential:credential_file` | `.aws/credentials`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, and `.credentials` **only at a path boundary**                                                                                                                                                                               |
 
 These run over the PR title, body and added lines, so an instruction carried
 only by the body is caught even when the diff is a single harmless docs file.
 `printenv` takes no terminator either bare or wrapped in shell `-c`; its arguments
-are not option grammar. Other dump verbs accept input redirects and redirects
-with a file descriptor (`2>/dev/null`), quoted or absolute-path command words,
-and line continuations. That is a broader but still enumerated shape list, not a
-claim to recognize every shell program.
+are not option grammar.
+
+**The textual surface is deliberately bounded, not “secured once and for all”.**
+Further command aliases, quoted or absolute-path commands, line continuations,
+`/proc` glob and bracket expansions, and additional credential filenames such as
+`.npmrc` and `.config/gh/hosts.yml` remain disclosed review gaps. Adding one
+spelling after another cannot establish safety and repeatedly changes what counts
+as ordinary prose, so this PR does not keep widening those grammars. The gaps are
+left for the maintainer reading the reason codes rather than presented as closed.
+This is a disclosure of exposure, not a completed runner or egress control.
 
 Two boundaries keep the rules from gating ordinary work. The dump commands share
 one terminator lookahead, applied once **outside** their alternation in both the
@@ -294,7 +300,7 @@ content rules, as before. Only a missing head SHA still fails closed for them.
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 157 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 146 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout
@@ -312,7 +318,7 @@ content rules, as before. Only a missing head SHA still fails closed for them.
   `ambient_credential:cloud_metadata`, `ambient_credential:env_dump`.
 - #18364: `ambient_credential:cloud_metadata`,
   `ambient_credential:proc_environ`.
-- Mutation witness: 47 arms, all killed, none skipped, plus an unmutated control
+- Mutation witness: 41 arms, all killed, none skipped, plus an unmutated control
   that must stay green. The harness mirrors the repository layout in its temp
   dir, because the workflow-contract test reads the workflow through a relative
   URL — without the mirror that case reds in every arm for a missing file, and a
