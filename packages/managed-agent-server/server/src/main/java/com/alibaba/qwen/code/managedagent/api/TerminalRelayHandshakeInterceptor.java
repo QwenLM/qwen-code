@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.security.PublicSurface;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.ServerHttpRequest;
@@ -20,6 +23,8 @@ import java.util.regex.Pattern;
  * ticket endpoint and is carried here by a single-use ticket offered as the
  * bearer subprotocol. The upgrade only consumes the ticket and re-checks that
  * it names this URL's Session and terminal; it never re-reads a principal.
+ * The ticket names its binding without the lease, so the upgrade re-reads the
+ * binding and refuses one that changed since admission.
  */
 public final class TerminalRelayHandshakeInterceptor implements HandshakeInterceptor {
     public static final String BINDING_ATTRIBUTE =
@@ -36,9 +41,12 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
     private static final Pattern PATH_SAFE = Pattern.compile("[A-Za-z0-9._-]{1,256}");
 
     private final TerminalTicketStore tickets;
+    private final WorkspaceTerminalRelayService relay;
 
-    public TerminalRelayHandshakeInterceptor(TerminalTicketStore tickets) {
+    public TerminalRelayHandshakeInterceptor(TerminalTicketStore tickets,
+            WorkspaceTerminalRelayService relay) {
         this.tickets = tickets;
+        this.relay = relay;
     }
 
     @Override
@@ -74,7 +82,19 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
             response.setStatusCode(HttpStatus.UNAUTHORIZED);
             return false;
         }
-        attributes.put(BINDING_ATTRIBUTE, admission.binding());
+        RuntimeBindingRecord binding;
+        try {
+            binding = relay.terminalBinding(admission.tenantId(), sessionId);
+        } catch (ManagedAgentException refused) {
+            response.setStatusCode(HttpStatus.valueOf(refused.getStatus()));
+            return false;
+        }
+        if (!binding.getBindingId().equals(admission.bindingId())
+                || binding.getGeneration() != admission.bindingGeneration()) {
+            response.setStatusCode(HttpStatus.CONFLICT);
+            return false;
+        }
+        attributes.put(BINDING_ATTRIBUTE, binding);
         attributes.put(SESSION_ATTRIBUTE, sessionId);
         attributes.put(TERMINAL_ATTRIBUTE, terminalId);
         return true;

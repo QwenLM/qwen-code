@@ -323,6 +323,28 @@ class QwenHostedHarnessConnectorTest {
         verifyNoInteractions(execution);
     }
 
+    @Test
+    void residentExternalRecoveryReadDoesNotAttach() {
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, "ACTIVE",
+                null, null, 0, 0, 1, 1, null, 1);
+        var execution = mock(WorkspaceExecutionStore.class);
+        var client = mock(HostedHarnessClient.class);
+        var connector = new QwenHostedHarnessConnector(properties(), sessions(), execution);
+        ReflectionTestUtils.setField(connector, "client", client);
+        assertThat(connector.inspectUnattachedRecovery(session, SUBMIT_PROMPT_ID)).isNull();
+        verifyNoInteractions(client);
+
+        when(execution.isExternal(session.workspace())).thenReturn(true);
+        var status = mock(HarnessSessionStatus.class);
+        var evidence = mock(HarnessRecoveryStatus.class);
+        when(client.getUnattachedStatus(SESSION_ID, SUBMIT_PROMPT_ID)).thenReturn(status);
+        when(status.getRecovery()).thenReturn(evidence);
+        when(evidence.getPromptId()).thenReturn(SUBMIT_PROMPT_ID);
+        assertThat(connector.inspectUnattachedRecovery(session, SUBMIT_PROMPT_ID).promptId()).isEqualTo(SUBMIT_PROMPT_ID);
+        assertThat(connector.cachedRecoveryAttachment("tenant-a", SESSION_ID)).isNull();
+        verify(client, never()).loadSession(any());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void coldRecoveryLoadsOnlyCleanupAndExplicitNewWorkPromotesTheAttachment(boolean publicChildren) throws Exception {
@@ -3565,6 +3587,7 @@ class QwenHostedHarnessConnectorTest {
                 (QwenHostedHarnessConnector) fixture[0];
         HostedHarnessClient dead = (HostedHarnessClient) fixture[1];
         HostedHarnessClient alive = (HostedHarnessClient) fixture[2];
+        HarnessSessionRef ref = (HarnessSessionRef) fixture[3];
         doThrow(new IllegalStateException("HostedHarnessClient is closed"))
                 .when(dead).resolveAction(any(), any(), any(), anyLong(),
                         any());
@@ -3573,7 +3596,11 @@ class QwenHostedHarnessConnectorTest {
                 new ObjectMapper().readTree("{\"optionId\":\"o\","
                         + "\"inputRevision\":1,\"policyRevision\":\"p\"}"));
 
-        verify(alive).resolveAction(any(), any(), any(), anyLong(), any());
+        var load = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(dead).loadSession(load.capture());
+        Map<String, Object> request = ReflectionTestUtils.invokeMethod(load.getValue(), "toJson");
+        assertThat(request).containsEntry("passiveManagedRuntimeRecovery", true);
+        verify(alive).resolveAction(ref, "action-1", "o", 1L, "p");
     }
 
     @Test

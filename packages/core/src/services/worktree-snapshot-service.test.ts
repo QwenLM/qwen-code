@@ -11,13 +11,17 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import * as tar from 'tar';
 import {
   captureWorktreeSnapshot,
   readWorktreeSnapshotMeta,
   restoreWorktreeSnapshot,
+  selectWorktreeSnapshot,
+  verifyRestoredWorktreeSnapshot,
   buildWorktreeSnapshotMeta,
   WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+  type WorktreeSnapshotMeta,
 } from './worktree-snapshot-service.js';
 import {
   WORKTREE_SESSION_FILE,
@@ -131,7 +135,7 @@ function git(cwd: string, ...args: string[]): string {
 
 function rawTarMember(
   name: string,
-  type: '0' | '1' | '2' = '0',
+  type: '0' | '1' | '2' | '5' = '0',
   linkpath = '',
   contents?: Buffer,
 ): Buffer[] {
@@ -251,6 +255,412 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       fs.access(path.join(restored, WORKTREE_SESSION_FILE)),
     ).rejects.toThrow();
     await expect(fs.access(metaPath)).resolves.toBeUndefined();
+  });
+
+  it.skipIf(process.platform === 'win32').each([
+    { committedMode: 0o644, capturedMode: 0o755 },
+    { committedMode: 0o755, capturedMode: 0o644 },
+  ])(
+    'restores the captured mode when the committed file is $committedMode and the captured file is $capturedMode',
+    async ({ committedMode, capturedMode }) => {
+      const tracked = path.join(worktree, 'committed.txt');
+      await fs.chmod(tracked, committedMode);
+      git(
+        worktree,
+        'update-index',
+        `--chmod=${committedMode === 0o755 ? '+x' : '-x'}`,
+        'committed.txt',
+      );
+      git(
+        worktree,
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'initial mode',
+        '--no-verify',
+      );
+
+      await fs.writeFile(tracked, 'captured mode\n');
+      await fs.chmod(tracked, capturedMode);
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-mode',
+      );
+      expect(
+        (await fs.stat(path.join(restored, 'committed.txt'))).mode & 0o777,
+      ).toBe(capturedMode);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'verifies force-added ignored bytes without adopting ignored extra files',
+    async () => {
+      await fs.writeFile(
+        path.join(worktree, '.gitignore'),
+        'dist/\ncoverage/\n',
+      );
+      await fs.mkdir(path.join(worktree, 'dist'));
+      await fs.writeFile(
+        path.join(worktree, 'dist', 'forced.txt'),
+        'captured ignored bytes\n',
+      );
+      git(worktree, 'add', '-f', 'dist/forced.txt');
+      await fs.mkdir(path.join(worktree, 'coverage'));
+      await fs.writeFile(
+        path.join(worktree, 'coverage', 'extra.txt'),
+        'not captured\n',
+      );
+
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-ignored',
+      );
+      const verificationMeta = {
+        ...(await readWorktreeSnapshotMeta(metaPath)),
+        branch: git(restored, 'branch', '--show-current'),
+      };
+      await expect(
+        fs.readFile(path.join(restored, 'dist', 'forced.txt'), 'utf8'),
+      ).resolves.toBe('captured ignored bytes\n');
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: verificationMeta,
+        }),
+      ).resolves.toBe(true);
+
+      execFileSync('mkfifo', [path.join(restored, 'dist', 'late-pipe')]);
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: verificationMeta,
+        }),
+      ).rejects.toThrow('non-regular filesystem entry');
+      await fs.rm(path.join(restored, 'dist', 'late-pipe'));
+
+      await fs.rm(path.join(restored, 'coverage'), {
+        recursive: true,
+        force: true,
+      });
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: verificationMeta,
+        }),
+      ).resolves.toBe(true);
+      await fs.writeFile(
+        path.join(restored, 'dist', 'forced.txt'),
+        'late change\n',
+      );
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: verificationMeta,
+        }),
+      ).resolves.toBe(false);
+    },
+  );
+
+  it('verifies missing and newly added empty directories', async () => {
+    await fs.mkdir(path.join(worktree, 'empty', 'nested'), {
+      recursive: true,
+    });
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-empty-dirs',
+    );
+    const verificationMeta = {
+      ...(await readWorktreeSnapshotMeta(metaPath)),
+      branch: git(restored, 'branch', '--show-current'),
+    };
+    const verify = () =>
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: verificationMeta,
+      });
+
+    await expect(verify()).resolves.toBe(true);
+    await fs.rmdir(path.join(restored, 'empty', 'nested'));
+    await expect(verify()).resolves.toBe(false);
+    await fs.mkdir(path.join(restored, 'empty', 'nested'));
+    await expect(verify()).resolves.toBe(true);
+    await fs.mkdir(path.join(restored, 'late-empty'));
+    await expect(verify()).resolves.toBe(false);
+    await fs.rmdir(path.join(restored, 'late-empty'));
+    await expect(verify()).resolves.toBe(true);
+  });
+
+  it('selects the newest pair by header time, mtime, then full path', async () => {
+    const writePair = async (
+      stem: string,
+      createdAt: number,
+      overrides: Record<string, unknown> = {},
+    ) => {
+      await fs.mkdir(snapshotDir, { recursive: true });
+      const snapshotPath = path.join(
+        snapshotDir,
+        `session-snap.${stem}.worktree-snapshot.tar.gz`,
+      );
+      const metaPath = path.join(
+        snapshotDir,
+        `session-snap.${stem}.worktree-snapshot.json`,
+      );
+      await fs.writeFile(snapshotPath, 'selector-test-bytes');
+      await fs.writeFile(
+        metaPath,
+        JSON.stringify({
+          ...meta(),
+          version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+          baseCommit: 'a'.repeat(40),
+          headCommit: 'b'.repeat(40),
+          createdAt,
+          ...overrides,
+        }),
+      );
+      return { snapshotPath, metaPath };
+    };
+    const older = await writePair('older', 1);
+    const newer = await writePair('newer', 2);
+    await fs.utimes(newer.snapshotPath, 1, 1);
+    await fs.utimes(older.snapshotPath, 2, 2);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).resolves.toMatchObject({ snapshotPath: newer.snapshotPath });
+
+    const tiedA = await writePair('a', 3);
+    const tiedB = await writePair('b', 3);
+    await fs.utimes(tiedA.snapshotPath, 1, 1);
+    await fs.utimes(tiedB.snapshotPath, 2, 2);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).resolves.toMatchObject({ snapshotPath: tiedB.snapshotPath });
+    await fs.utimes(tiedB.snapshotPath, 1, 1);
+    const tied = await selectWorktreeSnapshot({
+      directory: snapshotDir,
+      sessionId: 'session-snap',
+      slug: 'snap',
+    });
+    expect(tied?.snapshotPath).toBe(tiedA.snapshotPath);
+    expect(typeof tied?.mtimeNs).toBe('bigint');
+
+    await writePair('bad', 4, {
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION + 1,
+    });
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).rejects.toThrow(/Unsupported worktree snapshot version/);
+  });
+
+  it('selects only the exact archive key and rejects missing or foreign pairs', async () => {
+    for (let index = 0; index < 2; index++) {
+      await fs.writeFile(path.join(worktree, 'committed.txt'), `edit-${index}`);
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: { ...meta(), dirty: { tracked: 1, untracked: 1, deleted: [] } },
+      });
+    }
+    const files = (await fs.readdir(snapshotDir))
+      .filter((file) => file.endsWith('.tar.gz'))
+      .sort();
+    expect(files).toHaveLength(2);
+    const first = files[0]!;
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: first,
+      }),
+    ).resolves.toMatchObject({
+      snapshotPath: path.join(snapshotDir, first!),
+    });
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: '../escape.worktree-snapshot.tar.gz',
+      }),
+    ).rejects.toThrow(/archive key/);
+    await fs.writeFile(
+      path.join(snapshotDir, 'session-snap.alone.worktree-snapshot.json'),
+      '{}',
+    );
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).rejects.toThrow(/ENOENT/);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: first,
+      }),
+    ).resolves.toMatchObject({
+      snapshotPath: path.join(snapshotDir, first),
+    });
+    await fs.rm(
+      path.join(snapshotDir, 'session-snap.alone.worktree-snapshot.json'),
+    );
+    const malformed = path.join(
+      snapshotDir,
+      'session-snap.000-malformed.worktree-snapshot',
+    );
+    await fs.writeFile(`${malformed}.tar.gz`, 'unrelated-bytes');
+    await fs.writeFile(`${malformed}.json`, '{not-json');
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: first,
+      }),
+    ).resolves.toMatchObject({
+      snapshotPath: path.join(snapshotDir, first),
+    });
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).rejects.toThrow();
+    await fs.rm(`${malformed}.tar.gz`);
+    await fs.rm(`${malformed}.json`);
+    const wrongSlug = path.join(
+      snapshotDir,
+      'session-snap.wrong.worktree-snapshot',
+    );
+    await fs.copyFile(path.join(snapshotDir, first), `${wrongSlug}.tar.gz`);
+    const header = JSON.parse(
+      await fs.readFile(
+        path.join(snapshotDir, first.replace(/\.tar\.gz$/, '.json')),
+        'utf8',
+      ),
+    );
+    header.slug = 'another-slug';
+    await fs.writeFile(`${wrongSlug}.json`, JSON.stringify(header));
+    const otherOwnedPair = files.find((file) => file !== first)!;
+    await fs.rm(path.join(snapshotDir, otherOwnedPair));
+    await fs.rm(
+      path.join(snapshotDir, otherOwnedPair.replace(/\.tar\.gz$/, '.json')),
+    );
+    const key = path.basename(`${wrongSlug}.tar.gz`);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: key,
+      }),
+    ).rejects.toThrow(/identity mismatch/);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).resolves.toMatchObject({
+      snapshotPath: path.join(snapshotDir, first),
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects linked snapshot pair inputs',
+    async () => {
+      await fs.mkdir(snapshotDir, { recursive: true });
+      const archive = path.join(
+        snapshotDir,
+        'session-snap.linked.worktree-snapshot.tar.gz',
+      );
+      const metaPath = path.join(
+        snapshotDir,
+        'session-snap.linked.worktree-snapshot.json',
+      );
+      const outside = path.join(root, 'outside.json');
+      await fs.writeFile(archive, 'bytes');
+      await fs.writeFile(outside, '{}');
+      await fs.symlink(outside, metaPath);
+      await expect(
+        selectWorktreeSnapshot({
+          directory: snapshotDir,
+          sessionId: 'session-snap',
+          slug: 'snap',
+        }),
+      ).rejects.toThrow(/owned regular file/);
+    },
+  );
+
+  it('verifies restored content and accepts an intentional detached branch', async () => {
+    await fs.writeFile(path.join(worktree, 'committed.txt'), 'draft\n');
+    await fs.writeFile(path.join(worktree, 'untracked.txt'), 'new.txt\n');
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    const header = await readWorktreeSnapshotMeta(metaPath);
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-verification',
+    );
+    expect(
+      await verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: { ...header, branch: '' },
+      }),
+    ).toBe(true);
+    await fs.writeFile(path.join(restored, 'committed.txt'), 'late-edit\n');
+    expect(
+      await verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: { ...header, branch: '' },
+      }),
+    ).toBe(false);
   });
 
   it('captures and restores hardlinked file pairs correctly', async () => {
@@ -375,6 +785,117 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     expect(await fs.readlink(alias)).toBe('alternate.txt');
     expect(changed.checkoutMatchesCapture).toBe(false);
   });
+
+  it.each(['1', '2'] as const)(
+    'does not treat a type-%s link with a directory suffix as a directory',
+    async (type) => {
+      await fs.mkdir(path.join(worktree, 'ghost'));
+      await fs.mkdir(snapshotDir, { recursive: true });
+      const archive = path.join(snapshotDir, 'link-geometry.tar.gz');
+      await fs.writeFile(
+        archive,
+        gzipSync(
+          Buffer.concat([
+            ...rawTarMember('committed.txt', '0', '', Buffer.from('base\n')),
+            ...rawTarMember('ghost/', type, 'committed.txt'),
+            Buffer.alloc(1024),
+          ]),
+        ),
+      );
+
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath: archive,
+          meta: meta(),
+        }),
+      ).resolves.toBe(false);
+    },
+  );
+
+  it('does not let a directory alias hide a link with the same logical path', async () => {
+    await fs.mkdir(path.join(worktree, 'ghost'));
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const archive = path.join(snapshotDir, 'link-directory-alias.tar.gz');
+    const base = rawTarMember('committed.txt', '0', '', Buffer.from('base\n'));
+    await fs.writeFile(
+      archive,
+      gzipSync(
+        Buffer.concat([
+          ...base,
+          ...rawTarMember('ghost/', '2', 'committed.txt'),
+          ...rawTarMember('ghost', '5'),
+          Buffer.alloc(1024),
+        ]),
+      ),
+    );
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotPath: archive,
+        meta: meta(),
+      }),
+    ).resolves.toBe(false);
+
+    await fs.writeFile(
+      archive,
+      gzipSync(
+        Buffer.concat([
+          ...base,
+          ...rawTarMember('ghost/', '5'),
+          Buffer.alloc(1024),
+        ]),
+      ),
+    );
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotPath: archive,
+        meta: meta(),
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a non-UTF-8 symlink target before archiving',
+    async () => {
+      const alias = path.join(worktree, 'alias.txt');
+      const rawTarget = Buffer.from('outside-\u00FF', 'latin1');
+      await fs.symlink(rawTarget, alias);
+
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        }),
+      ).rejects.toThrow('symlink target cannot be preserved byte-for-byte');
+      await expect(fs.readlink(alias, { encoding: 'buffer' })).resolves.toEqual(
+        rawTarget,
+      );
+      await expect(fs.readdir(snapshotDir)).rejects.toThrow();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a non-UTF-8 symlink target introduced after capture',
+    async () => {
+      const alias = path.join(worktree, 'late-alias.txt');
+      captureTiming.afterCreate = async () => {
+        await fs.symlink(Buffer.from('outside-\u00FF', 'latin1'), alias);
+      };
+
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        }),
+      ).rejects.toThrow('symlink target cannot be preserved byte-for-byte');
+      await expect(fs.readlink(alias)).resolves.toBe('outside-\uFFFD');
+      await expect(fs.readdir(snapshotDir)).resolves.toEqual([]);
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'does not certify a changed owner-exec bit',
@@ -509,20 +1030,105 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     expect(result.checkoutMatchesCapture).toBe(false);
   });
 
-  it('accepts a large, highly compressible stable checkout', async () => {
+  it('does not return an archive that exceeds the bounded restore ratio', async () => {
     await fs.writeFile(
       path.join(worktree, 'zeros.bin'),
       Buffer.alloc(20 * 1024 * 1024),
     );
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      }),
+    ).rejects.toThrow(/ratio|decompress/i);
+    await expect(fs.readdir(snapshotDir)).resolves.toEqual([]);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('captures and restores a large file within bounded decompression limits', async () => {
+    const payload = randomBytes(20 * 1024 * 1024);
+    await fs.writeFile(path.join(worktree, 'large.bin'), payload);
     const result = await captureWorktreeSnapshot({
       worktreePath: worktree,
       snapshotDir,
       meta: meta(),
     });
     expect(result.checkoutMatchesCapture).toBe(true);
-    expect((await fs.stat(result.snapshotPath)).size * 1000).toBeLessThan(
-      20 * 1024 * 1024,
+    const restored = await restoreOverHead(
+      result.snapshotPath,
+      result.metaPath,
+      'restored-large-bounded',
     );
+    expect(
+      (await fs.readFile(path.join(restored, 'large.bin'))).equals(payload),
+    ).toBe(true);
+    const header = await readWorktreeSnapshotMeta(result.metaPath);
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath: result.snapshotPath,
+        meta: { ...header, branch: '' },
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it('rejects oversized metadata before creating an archive', async () => {
+    const files = Array.from(
+      { length: 900 },
+      (_, index) =>
+        `vendor/${'p'.repeat(64)}/component-${index.toString().padStart(3, '0')}.txt`,
+    );
+    for (const relativePath of files) {
+      const file = path.join(worktree, relativePath);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'delete me\n');
+    }
+    git(worktree, 'add', '--', 'vendor');
+    git(worktree, 'commit', '-qm', 'mass-delete', '--no-verify');
+    for (const relativePath of files) {
+      await fs.unlink(path.join(worktree, relativePath));
+    }
+    const capturedMeta = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'large-deletion-set',
+      slug: 'large-deletion-set',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(capturedMeta.dirty.deleted).toHaveLength(900);
+    await fs.mkdir(snapshotDir, { recursive: true });
+
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: capturedMeta,
+      }),
+    ).rejects.toThrow('Worktree snapshot metadata exceeds 64 KiB');
+    await expect(fs.readdir(snapshotDir)).resolves.toEqual([]);
+    await expect(
+      fs.readFile(path.join(worktree, 'committed.txt'), 'utf8'),
+    ).resolves.toBe('base\n');
+  });
+
+  it('returns undefined for an explicitly requested missing pair', async () => {
+    const archiveKey = 'session-snap.1.1.worktree-snapshot.tar.gz';
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const select = () =>
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey,
+      });
+    await expect(select()).resolves.toBeUndefined();
+    await fs.writeFile(path.join(snapshotDir, archiveKey), '', 'utf-8');
+    await expect(select()).resolves.toBeUndefined();
   });
 
   it('matches an unchanged sha256 repository', async () => {
@@ -856,6 +1462,62 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     ).resolves.toBe('kept\n');
   });
 
+  it('removes only empty, unarchived ancestors of tracked deletions on restore', async () => {
+    await fs.mkdir(path.join(worktree, 'deletion-dir', 'nested'), {
+      recursive: true,
+    });
+    await fs.mkdir(path.join(worktree, 'preserved-empty'));
+    await fs.mkdir(path.join(worktree, 'keep-dir'));
+    await fs.writeFile(
+      path.join(worktree, 'deletion-dir', 'nested', 'to-delete.txt'),
+      'deleted\n',
+    );
+    await fs.writeFile(path.join(worktree, 'keep-dir', 'keep.txt'), 'keep\n');
+    git(worktree, 'add', '.');
+    git(worktree, 'commit', '-qm', 'deleted parent fixture', '--no-verify');
+    await fs.rm(path.join(worktree, 'deletion-dir'), {
+      recursive: true,
+      force: true,
+    });
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-delete-parent',
+      slug: 'delete-parent',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(m.dirty.deleted).toEqual(['deletion-dir/nested/to-delete.txt']);
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-delete-parent',
+    );
+
+    await expect(
+      fs.access(path.join(restored, 'deletion-dir')),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(path.join(restored, 'preserved-empty')),
+    ).resolves.toBe(undefined);
+    await expect(
+      fs.readFile(path.join(restored, 'keep-dir', 'keep.txt'), 'utf8'),
+    ).resolves.toBe('keep\n');
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: {
+          ...(await readWorktreeSnapshotMeta(metaPath)),
+          branch: git(restored, 'branch', '--show-current'),
+        },
+      }),
+    ).resolves.toBe(true);
+  });
+
   it('records a staged tracked deletion on restore', async () => {
     await fs.rm(path.join(worktree, 'committed.txt'));
     git(worktree, 'add', 'committed.txt');
@@ -997,6 +1659,173 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     );
   });
 
+  it('restores a file that replaced a nested tracked directory (deep dir→file)', async () => {
+    await fs.mkdir(path.join(worktree, 'deep', 'nested'), { recursive: true });
+    await fs.writeFile(
+      path.join(worktree, 'deep', 'nested', 'leaf.txt'),
+      'base\n',
+    );
+    git(worktree, 'add', 'deep/nested/leaf.txt');
+    git(worktree, 'commit', '-qm', 'add nested dir', '--no-verify');
+    await fs.rm(path.join(worktree, 'deep'), { recursive: true, force: true });
+    await fs.writeFile(path.join(worktree, 'deep'), 'replaced-with-file\n');
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-deep-dirfile',
+      slug: 'deep-dirfile',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(m.dirty.deleted).toEqual(['deep/nested/leaf.txt']);
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-deep-dirfile',
+    );
+    await expect(
+      fs.readFile(path.join(restored, 'deep'), 'utf8'),
+    ).resolves.toBe('replaced-with-file\n');
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: {
+          ...(await readWorktreeSnapshotMeta(metaPath)),
+          branch: git(restored, 'branch', '--show-current'),
+        },
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'restores a symlink replacing a nested tracked directory without pruning target subdirectories',
+    async () => {
+      await fs.mkdir(path.join(worktree, 'deep', 'nested'), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(worktree, 'deep', 'nested', 'leaf.txt'),
+        'base\n',
+      );
+      git(worktree, 'add', 'deep/nested/leaf.txt');
+      git(worktree, 'commit', '-qm', 'add nested dir for link', '--no-verify');
+      await fs.rm(path.join(worktree, 'deep'), {
+        recursive: true,
+        force: true,
+      });
+      await fs.mkdir(path.join(worktree, 'other', 'nested'), {
+        recursive: true,
+      });
+      await fs.symlink('other', path.join(worktree, 'deep'));
+      const m = await buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-deep-dirlink',
+        slug: 'deep-dirlink',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      });
+      expect(m.dirty.deleted).toEqual(['deep/nested/leaf.txt']);
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: m,
+      });
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-deep-dirlink',
+      );
+      await expect(fs.readlink(path.join(restored, 'deep'))).resolves.toBe(
+        'other',
+      );
+      expect(
+        (await fs.lstat(path.join(restored, 'other', 'nested'))).isDirectory(),
+      ).toBe(true);
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: {
+            ...(await readWorktreeSnapshotMeta(metaPath)),
+            branch: git(restored, 'branch', '--show-current'),
+          },
+        }),
+      ).resolves.toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'restores a directory that replaced an in-root committed symlink (file target and directory target)',
+    async () => {
+      await fs.mkdir(path.join(worktree, 'target-dir', 'sub'), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(worktree, 'target-dir', 'sub', 'keep.txt'),
+        'inside-target-intact\n',
+      );
+      await fs.symlink('committed.txt', path.join(worktree, 'link-file'));
+      await fs.symlink('target-dir', path.join(worktree, 'link-dir'));
+      git(worktree, 'add', 'target-dir/sub/keep.txt', 'link-file', 'link-dir');
+      git(worktree, 'commit', '-qm', 'add committed symlinks', '--no-verify');
+
+      for (const name of ['link-file', 'link-dir']) {
+        await fs.unlink(path.join(worktree, name));
+        await fs.mkdir(path.join(worktree, name, 'sub'), { recursive: true });
+        await fs.writeFile(
+          path.join(worktree, name, 'sub', 'note.txt'),
+          `replaced-${name}\n`,
+        );
+      }
+
+      const m = await buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-symlink-to-dir',
+        slug: 'symlink-to-dir',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      });
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: m,
+      });
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-symlink-to-dir',
+      );
+
+      for (const name of ['link-file', 'link-dir']) {
+        expect((await fs.lstat(path.join(restored, name))).isDirectory()).toBe(
+          true,
+        );
+        await expect(
+          fs.readFile(path.join(restored, name, 'sub', 'note.txt'), 'utf8'),
+        ).resolves.toBe(`replaced-${name}\n`);
+      }
+      // The in-repo target directory was not traversed or modified.
+      await expect(
+        fs.readFile(
+          path.join(restored, 'target-dir', 'sub', 'keep.txt'),
+          'utf8',
+        ),
+      ).resolves.toBe('inside-target-intact\n');
+      await expect(
+        fs.access(path.join(restored, 'target-dir', 'sub', 'note.txt')),
+      ).rejects.toThrow();
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: {
+            ...(await readWorktreeSnapshotMeta(metaPath)),
+            branch: git(restored, 'branch', '--show-current'),
+          },
+        }),
+      ).resolves.toBe(true);
+    },
+  );
+
   it.skipIf(process.platform === 'win32')(
     'restores a directory that replaced a recursive symlink alias',
     async () => {
@@ -1096,6 +1925,88 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       ).toBe(true);
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a file archive member or tracked deletion that targets .git through a committed symlink',
+    async () => {
+      await fs.symlink('.', path.join(worktree, 'link'));
+      git(worktree, 'add', 'link');
+      git(worktree, 'commit', '-qm', 'add root alias symlink', '--no-verify');
+      const restored = path.join(root, 'restored-symlink-git-bypass');
+      git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+      const originalGitfile = await fs.readFile(
+        path.join(restored, '.git'),
+        'utf8',
+      );
+      const headCommit = git(restored, 'rev-parse', 'HEAD');
+      const baseMeta: WorktreeSnapshotMeta = {
+        version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+        createdAt: Date.now(),
+        sessionId: 'session-symlink-git-bypass',
+        slug: 'symlink-git-bypass',
+        baseCommit: headCommit,
+        branch: '',
+        headCommit,
+        dirty: { tracked: 0, untracked: 0, deleted: [] },
+      };
+
+      // 1) A crafted archive containing a regular File member at link/.git.
+      await fs.mkdir(snapshotDir, { recursive: true });
+      const staging = path.join(root, 'staging-symlink-git-bypass');
+      await fs.mkdir(path.join(staging, 'link'), { recursive: true });
+      await fs.writeFile(path.join(staging, 'link', '.git'), 'pwned-gitfile\n');
+      const fileTar = path.join(snapshotDir, 'crafted-link-git-file.tar.gz');
+      await tar.c({ file: fileTar, cwd: staging, gzip: true }, ['link/.git']);
+      await expect(
+        restoreWorktreeSnapshot(fileTar, restored, baseMeta),
+      ).rejects.toThrow(/protected path/);
+      await expect(
+        fs.readFile(path.join(restored, '.git'), 'utf8'),
+      ).resolves.toBe(originalGitfile);
+
+      // 2) A clean archive whose meta.dirty.deleted names link/.git.
+      const emptyStaging = path.join(root, 'staging-empty-bypass');
+      await fs.mkdir(emptyStaging, { recursive: true });
+      const emptyTar = path.join(snapshotDir, 'crafted-link-git-delete.tar.gz');
+      await tar.c({ file: emptyTar, cwd: emptyStaging, gzip: true }, ['.']);
+      await expect(
+        restoreWorktreeSnapshot(emptyTar, restored, {
+          ...baseMeta,
+          dirty: { tracked: 0, untracked: 0, deleted: ['link/.git'] },
+        }),
+      ).rejects.toThrow(/protected path/);
+      await expect(
+        fs.readFile(path.join(restored, '.git'), 'utf8'),
+      ).resolves.toBe(originalGitfile);
+    },
+  );
+
+  it('refuses a crafted archive with an absolute root "/" directory entry before extraction', async () => {
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const restored = path.join(root, 'restored-root-slash-entry');
+    git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+    const craftedTar = path.join(snapshotDir, 'crafted-root-slash.tar.gz');
+    const payload = Buffer.concat([
+      ...rawTarMember('/', '5'),
+      Buffer.alloc(1024),
+    ]);
+    await fs.writeFile(craftedTar, gzipSync(payload));
+    const headCommit = git(restored, 'rev-parse', 'HEAD');
+    const baseMeta: WorktreeSnapshotMeta = {
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+      createdAt: Date.now(),
+      sessionId: 'session-root-slash',
+      slug: 'root-slash',
+      baseCommit: headCommit,
+      branch: '',
+      headCommit,
+      dirty: { tracked: 0, untracked: 0, deleted: [] },
+    };
+
+    await expect(
+      restoreWorktreeSnapshot(craftedTar, restored, baseMeta),
+    ).rejects.toThrow(/Unsafe path in snapshot archive/);
+  });
 
   it.skipIf(process.platform === 'win32')(
     'refuses capture when a deleted path is not valid UTF-8',
@@ -1947,5 +2858,155 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
     });
     await expect(fs.access(canary)).rejects.toThrow();
+  });
+
+  it('refuses an archive member nested under the protected session marker path', async () => {
+    const stage = path.join(root, 'marker-subdir-stage');
+    await fs.mkdir(path.join(stage, WORKTREE_SESSION_FILE), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(stage, WORKTREE_SESSION_FILE, 'evil.txt'),
+      'nope\n',
+    );
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const archivePath = path.join(snapshotDir, 'marker-subdir.tar.gz');
+    await tar.create({ gzip: true, cwd: stage, file: archivePath }, [
+      `${WORKTREE_SESSION_FILE}/evil.txt`,
+    ]);
+    const meta: WorktreeSnapshotMeta = {
+      version: 1,
+      createdAt: Date.now(),
+      sessionId: 'session-marker-subdir',
+      slug: 'marker-subdir',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      headCommit: git(worktree, 'rev-parse', 'HEAD'),
+      branch: '',
+      dirty: { tracked: 0, untracked: 1, deleted: [] },
+    };
+
+    await expect(
+      restoreWorktreeSnapshot(archivePath, worktree, meta),
+    ).rejects.toThrow(/protected/i);
+    await expect(
+      fs.lstat(path.join(worktree, WORKTREE_SESSION_FILE)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses tar Link entries targeting committed relative symlinks or non-archived files', async () => {
+    await fs.mkdir(path.join(worktree, 'a', 'b', 'c'), { recursive: true });
+    await fs.symlink('../../..', path.join(worktree, 'a', 'b', 'c', 'rel'));
+    await fs.mkdir(path.join(worktree, 'sub'), { recursive: true });
+    await fs.symlink('.', path.join(worktree, 'sub', 'self'));
+    git(worktree, 'add', 'a/b/c/rel', 'sub/self');
+    git(worktree, 'commit', '-qm', 'add relative symlinks', '--no-verify');
+
+    const head = git(worktree, 'rev-parse', 'HEAD');
+    const meta: WorktreeSnapshotMeta = {
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+      createdAt: Date.now(),
+      sessionId: 'session-hardlink-symlink-escape',
+      slug: 'hardlink-symlink-escape',
+      baseCommit: head,
+      headCommit: head,
+      branch: '',
+      dirty: { tracked: 0, untracked: 2, deleted: [] },
+    };
+
+    const escapeTar = path.join(root, 'hardlink-escape-rel.tar');
+    await fs.writeFile(
+      escapeTar,
+      Buffer.concat([
+        ...rawTarMember('escape', '1', 'a/b/c/rel'),
+        ...rawTarMember('escape/pwned.txt', '0', '', Buffer.from('OWNED\n')),
+        Buffer.alloc(1024),
+      ]),
+    );
+    await expect(
+      restoreWorktreeSnapshot(escapeTar, worktree, meta),
+    ).rejects.toThrow(/not an archived regular file/i);
+    await expect(
+      fs.lstat(path.join(path.dirname(worktree), 'pwned.txt')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const gitOverwriteTar = path.join(root, 'hardlink-overwrite-git.tar');
+    await fs.writeFile(
+      gitOverwriteTar,
+      Buffer.concat([
+        ...rawTarMember('escape', '1', 'sub/self'),
+        ...rawTarMember(
+          `escape/${WORKTREE_SESSION_FILE}`,
+          '0',
+          '',
+          Buffer.from('hijacked-session\n'),
+        ),
+        Buffer.alloc(1024),
+      ]),
+    );
+    await expect(
+      restoreWorktreeSnapshot(gitOverwriteTar, worktree, meta),
+    ).rejects.toThrow(/not an archived regular file/i);
+    await expect(
+      fs.lstat(path.join(worktree, WORKTREE_SESSION_FILE)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await fs.lstat(path.join(worktree, '.git'))).isDirectory()).toBe(
+      true,
+    );
+  });
+
+  it('refuses archive members containing internal dot segments', async () => {
+    const head = git(worktree, 'rev-parse', 'HEAD');
+    const meta: WorktreeSnapshotMeta = {
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+      createdAt: Date.now(),
+      sessionId: 'session-dot-segment',
+      slug: 'dot-segment',
+      baseCommit: head,
+      headCommit: head,
+      branch: '',
+      dirty: { tracked: 0, untracked: 1, deleted: [] },
+    };
+    const dotTar = path.join(root, 'internal-dot.tar');
+    await fs.writeFile(
+      dotTar,
+      Buffer.concat([
+        ...rawTarMember('sub/file.txt', '0', '', Buffer.from('first\n')),
+        ...rawTarMember('sub/./file.txt', '0', '', Buffer.from('second\n')),
+        Buffer.alloc(1024),
+      ]),
+    );
+    await expect(
+      restoreWorktreeSnapshot(dotTar, worktree, meta),
+    ).rejects.toThrow(/Unsafe path/i);
+  });
+
+  it('rejects invalid or empty baseCommit before writing any snapshot files', async () => {
+    await expect(
+      buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-empty-base',
+        slug: 'empty-base',
+        baseCommit: '',
+      }),
+    ).rejects.toThrow(/invalid baseCommit/i);
+
+    const head = git(worktree, 'rev-parse', 'HEAD');
+    const emptySnapDir = path.join(root, 'empty-commit-snaps');
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir: emptySnapDir,
+        meta: {
+          sessionId: 'session-empty-base',
+          slug: 'empty-base',
+          baseCommit: '',
+          headCommit: head,
+          branch: '',
+          dirty: { tracked: 0, untracked: 0, deleted: [] },
+        },
+      }),
+    ).rejects.toThrow(/invalid commit id/i);
+    await expect(fs.lstat(emptySnapDir)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 });
