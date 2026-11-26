@@ -82,6 +82,14 @@ type ServerMode =
   | 'secret200'
   | 'secretCode200'
   | 'econnrefused200'
+  | 'bigBody513'
+  | 'bigBody4k'
+  | 'bigBody12k'
+  | 'arrayBody'
+  | 'scalarBody'
+  | 'status201'
+  | 'status202'
+  | 'status206'
   | 'jsonrpc-ok'
   | 'jsonrpc-error'
   | 'oauth401';
@@ -142,6 +150,58 @@ describe('non-JSON-RPC 200 response error surface', () => {
         if (mode === 'econnrefused200') {
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(UPSTREAM_200_BODY);
+          return;
+        }
+        if (
+          mode === 'bigBody513' ||
+          mode === 'bigBody4k' ||
+          mode === 'bigBody12k'
+        ) {
+          // F2: a gateway body with a trace id and a nested error wrapper. The
+          // padding is inert filler, never a credential, and the assertion is on
+          // which message the user sees, never on this text.
+          const padding =
+            mode === 'bigBody513' ? 600 : mode === 'bigBody4k' ? 4_000 : 12_000;
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              code: 502,
+              msg: 'token expired or incorrect',
+              success: false,
+              trace: 'x'.repeat(padding),
+            }),
+          );
+          return;
+        }
+        if (mode === 'arrayBody') {
+          // F3: an error envelope wrapped in an array, with no jsonrpc key anywhere.
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify([
+              { code: 401, msg: 'token expired or incorrect' },
+              { code: 401, msg: 'token expired or incorrect' },
+            ]),
+          );
+          return;
+        }
+        if (mode === 'scalarBody') {
+          // F4: a JSON scalar body.
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify('token expired or incorrect'));
+          return;
+        }
+        if (
+          mode === 'status201' ||
+          mode === 'status202' ||
+          mode === 'status206'
+        ) {
+          // F5: the capture gate is 2xx, not exactly 200.
+          const status =
+            mode === 'status201' ? 201 : mode === 'status202' ? 202 : 206;
+          res.writeHead(status, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({ code: 503, msg: 'unavailable', success: false }),
+          );
           return;
         }
         if (mode === 'oauth401') {
@@ -426,5 +486,151 @@ describe('non-JSON-RPC 200 response error surface', () => {
     expect(surfaced).toBeInstanceOf(Error);
     expect((surfaced as Error).message).toContain('code=401');
     expect((surfaced as Error).cause).toBe(wrapped);
+  });
+
+  it('F2: a 513-byte body still surfaces safe metadata, never the dump', async () => {
+    mode = 'bigBody513';
+    const client = new Client({ name: 'error-surface-test', version: '0.0.1' });
+    let caught: unknown;
+    try {
+      await client.connect(transport(), { timeout: 10_000 });
+    } catch (error) {
+      caught = error;
+    }
+    const message = (
+      improveMcpNonJsonRpcError(serverName, caught, config()) as Error
+    ).message;
+    expect(message).toContain('non-JSON-RPC response');
+    expect(message).toContain('HTTP 200');
+    expect(message).toContain('application/json');
+    expect(message).toContain('code=502');
+    expect(message).not.toContain('invalid_union');
+    expect(message).not.toContain('token expired or incorrect');
+  });
+
+  it('F2: a 4 KiB nested error body keeps its safe response code', async () => {
+    mode = 'bigBody4k';
+    const client = new Client({ name: 'error-surface-test', version: '0.0.1' });
+    let caught: unknown;
+    try {
+      await client.connect(transport(), { timeout: 10_000 });
+    } catch (error) {
+      caught = error;
+    }
+    const message = (
+      improveMcpNonJsonRpcError(serverName, caught, config()) as Error
+    ).message;
+    expect(message).toContain('HTTP 200');
+    expect(message).toContain('code=502');
+    expect(message).not.toContain('invalid_union');
+  });
+
+  it('F2: a body past the classification bound is labelled truncated, not dropped', async () => {
+    mode = 'bigBody12k';
+    const client = new Client({ name: 'error-surface-test', version: '0.0.1' });
+    let caught: unknown;
+    try {
+      await client.connect(transport(), { timeout: 10_000 });
+    } catch (error) {
+      caught = error;
+    }
+    const message = (
+      improveMcpNonJsonRpcError(serverName, caught, config()) as Error
+    ).message;
+    expect(message).toContain('non-JSON-RPC response');
+    expect(message).toContain('HTTP 200');
+    expect(message).toContain('body truncated');
+    expect(message).not.toContain('invalid_union');
+    expect(message).not.toContain('x'.repeat(600));
+  });
+
+  it('F3: an array body with no jsonrpc key is captured with its item count', async () => {
+    mode = 'arrayBody';
+    const client = new Client({ name: 'error-surface-test', version: '0.0.1' });
+    let caught: unknown;
+    try {
+      await client.connect(transport(), { timeout: 10_000 });
+    } catch (error) {
+      caught = error;
+    }
+    const message = (
+      improveMcpNonJsonRpcError(serverName, caught, config()) as Error
+    ).message;
+    expect(message).toContain('non-JSON-RPC response');
+    expect(message).toContain('items=2');
+    expect(message).not.toContain('invalid_union');
+    expect(message).not.toContain('token expired or incorrect');
+  });
+
+  it('F4: a scalar body is captured with status and media type', async () => {
+    mode = 'scalarBody';
+    const client = new Client({ name: 'error-surface-test', version: '0.0.1' });
+    let caught: unknown;
+    try {
+      await client.connect(transport(), { timeout: 10_000 });
+    } catch (error) {
+      caught = error;
+    }
+    const message = (
+      improveMcpNonJsonRpcError(serverName, caught, config()) as Error
+    ).message;
+    expect(message).toContain('non-JSON-RPC response');
+    expect(message).toContain('HTTP 200');
+    expect(message).toContain('application/json');
+    expect(message).not.toContain('invalid_union');
+    expect(message).not.toContain('token expired or incorrect');
+  });
+
+  for (const [label, status] of [
+    ['201', 201],
+    ['206', 206],
+    // 202 is deliberately absent: the SDK's transport never completes an
+    // initialize handshake on 202 (it waits for a body that 202 does not carry),
+    // so there is no parse failure for the capture to improve. The gate is 2xx,
+    // proven here by two non-200 statuses.
+  ] as const) {
+    it(`F5: a ${label} response with a JSON error body is captured too`, async () => {
+      mode = `status${label}`;
+      const client = new Client({
+        name: 'error-surface-test',
+        version: '0.0.1',
+      });
+      let caught: unknown;
+      try {
+        await client.connect(transport(), { timeout: 10_000 });
+      } catch (error) {
+        caught = error;
+      }
+      const message = (
+        improveMcpNonJsonRpcError(serverName, caught, config()) as Error
+      ).message;
+      expect(message).toContain(`HTTP ${status}`);
+      expect(message).toContain('code=503');
+      expect(message).not.toContain('invalid_union');
+    });
+  }
+
+  it('F1: the recorded lastError for an improved failure contains no invalid_union', async () => {
+    const workspaceContext = {
+      getDirectories: () => [],
+      onDirectoriesChanged: () => () => {},
+    } as unknown as WorkspaceContext;
+    const client = new McpClient(
+      serverName,
+      config(),
+      {} as ToolRegistry,
+      {} as PromptRegistry,
+      workspaceContext,
+      false,
+    );
+    try {
+      await client.connect();
+    } catch {
+      // expected: the gateway rejection, improved by this PR
+    }
+    const lastError = getMCPServerLastError(serverName);
+    expect(lastError).toBeDefined();
+    expect(lastError).toContain('non-JSON-RPC response');
+    expect(lastError).not.toContain('invalid_union');
   });
 });

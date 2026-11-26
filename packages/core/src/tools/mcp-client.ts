@@ -138,7 +138,12 @@ function bindInvocationContextPolicy(
 }
 
 const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 404, 422, 501]);
-const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
+// F2 (review): the excerpt bound is for TEXT, not for deciding whether to
+// capture at all. Real gateway bodies carry trace ids and nested error objects,
+// so 512 B was a cliff back to the opaque Zod dump at 513 B. Classification gets
+// a larger, still-bounded budget, and an unparseable or over-budget body still
+// yields status + normalized media type instead of the dump.
+const NON_JSON_RPC_CLASSIFICATION_BODY_LIMIT = 8_192;
 // The MCP undici dispatcher runs with headersTimeout: 0, bodyTimeout: 0
 // (see getOrCreateMcpDispatcher in runtimeFetchOptions.ts), and every caller
 // of the optional GET/SSE probe is fire-and-forget, so nothing above this
@@ -185,31 +190,36 @@ function getSseOAuth401Message(
   );
 }
 
-async function readResponseBodyExcerpt(
+/**
+ * Read at most NON_JSON_RPC_CLASSIFICATION_BODY_LIMIT bytes for the capture.
+ * The flag matters: a truncated body cannot be parsed, and the caller must not
+ * mistake that for "this was not a JSON-RPC response". The text is used only for
+ * classification and is never surfaced to the user.
+ */
+async function readResponseBodyForClassification(
   response: Response,
-): Promise<string | undefined> {
+): Promise<{ text: string; truncated: boolean } | undefined> {
   const reader = response.clone().body?.getReader();
   if (!reader) {
     return undefined;
   }
+  const limit = NON_JSON_RPC_CLASSIFICATION_BODY_LIMIT;
 
-  const readLoop = async (): Promise<string | undefined> => {
+  const readLoop = async (): Promise<{ text: string; truncated: boolean }> => {
     const decoder = new TextDecoder();
     let body = '';
     let bytesRead = 0;
     let truncated = false;
-    while (bytesRead < STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT) {
+    while (bytesRead < limit) {
       const { done, value } = await reader.read();
       if (done) {
         body += decoder.decode();
         break;
       }
 
-      const remaining = STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT - bytesRead;
+      const remaining = limit - bytesRead;
       if (value.byteLength > remaining) {
-        body += decoder.decode(value.subarray(0, remaining), {
-          stream: true,
-        });
+        body += decoder.decode(value.subarray(0, remaining), { stream: true });
         bytesRead += remaining;
         truncated = true;
         reader.cancel().catch(() => {
@@ -222,7 +232,7 @@ async function readResponseBodyExcerpt(
       bytesRead += value.byteLength;
     }
 
-    if (bytesRead >= STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT && !truncated) {
+    if (bytesRead >= limit && !truncated) {
       const { done } = await reader.read();
       if (!done) {
         truncated = true;
@@ -233,14 +243,7 @@ async function readResponseBodyExcerpt(
     }
 
     body += decoder.decode();
-    const excerpt = body.trim();
-    if (!excerpt) {
-      return undefined;
-    }
-    return truncated ||
-      excerpt.length > STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT
-      ? `${excerpt.slice(0, STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT)}...`
-      : excerpt;
+    return { text: body.trim(), truncated };
   };
 
   try {
@@ -250,15 +253,12 @@ async function readResponseBodyExcerpt(
       'Streamable HTTP GET SSE fallback body excerpt',
     );
   } catch {
-    // Timed out (or the read failed): drop the diagnostics and cancel this
-    // clone's tee branch so the abandoned read settles instead of dangling.
-    // Cancelling one branch alone does not run the underlying source's
-    // cancel algorithm — it's the caller's response.body?.cancel() below
-    // that cancels the sibling branch and actually releases the connection.
+    // Timed out or the read failed: we still know the status and the media type,
+    // so report the body as unclassified rather than dropping to the Zod dump.
     reader.cancel().catch(() => {
       // Best-effort cleanup; the caller still returns the 405 sentinel.
     });
-    return undefined;
+    return { text: '', truncated: true };
   }
 }
 
@@ -295,6 +295,10 @@ interface NonJsonRpcResponseCapture {
   status: number;
   contentType: string;
   code?: string;
+  /** The body was cut off at the classification bound, so no code was read. */
+  truncated?: boolean;
+  /** A JSON array body carried no `jsonrpc` key anywhere; its length is metadata. */
+  items?: number;
 }
 
 const nonJsonRpcResponseCaptures = new Map<string, NonJsonRpcResponseCapture>();
@@ -358,9 +362,12 @@ export function improveMcpNonJsonRpcError<T>(
   for (let depth = 0; depth < 4 && current != null; depth++) {
     if (isZodParseError(current)) {
       const code = capture.code === undefined ? '' : `, code=${capture.code}`;
+      const truncated = capture.truncated ? ', body truncated' : '';
+      const items =
+        capture.items === undefined ? '' : `, items=${capture.items}`;
       return new Error(
         `MCP server '${serverName}' returned a non-JSON-RPC response ` +
-          `(HTTP ${capture.status}, ${capture.contentType}${code}) — ` +
+          `(HTTP ${capture.status}, ${capture.contentType}${code}${items}${truncated}) — ` +
           `the endpoint or its gateway rejected the request; check ` +
           `credentials or retry later.`,
         { cause: error },
@@ -388,36 +395,62 @@ async function captureNonJsonRpcResponse(
   if (contentType.split(';')[0].trim().toLowerCase() !== 'application/json') {
     return;
   }
-  const excerpt = await readResponseBodyExcerpt(response);
-  if (!excerpt) return;
+  const body = await readResponseBodyForClassification(response);
+  if (!body) return;
+  // A valid JSON-RPC response is never captured: the SDK's own parse path owns
+  // it. Checking the marker before parsing also keeps a truncated batch from
+  // being mislabelled as an error envelope.
+  if (body.text.includes('"jsonrpc"')) return;
+  const key = nonJsonRpcCaptureKey(serverName, serverConfig);
+  const store = (capture: NonJsonRpcResponseCapture) => {
+    if (
+      nonJsonRpcResponseCaptures.size >= NON_JSON_RPC_CAPTURE_MAX_ENTRIES &&
+      !nonJsonRpcResponseCaptures.has(key)
+    ) {
+      const oldest = nonJsonRpcResponseCaptures.keys().next().value;
+      if (oldest !== undefined) nonJsonRpcResponseCaptures.delete(oldest);
+    }
+    nonJsonRpcResponseCaptures.set(key, capture);
+  };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(excerpt);
+    parsed = JSON.parse(body.text);
   } catch {
-    // Not JSON at all (or truncated past the excerpt bound) — the SDK's own
-    // error path names it; nothing to attribute here.
+    // F2: unparseable — most often because the body ran past the classification
+    // bound. Capture the safe metadata instead of dropping to the Zod dump, and
+    // say the body was truncated rather than pretending it was complete.
+    store({
+      status: response.status,
+      contentType: 'application/json',
+      truncated: true,
+    });
     return;
   }
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    Array.isArray(parsed) ||
-    'jsonrpc' in parsed
-  ) {
+  if (typeof parsed !== 'object' || parsed === null) {
+    // F4: a scalar body is still a non-JSON-RPC 200 body.
+    store({ status: response.status, contentType: 'application/json' });
     return;
   }
-  const key = nonJsonRpcCaptureKey(serverName, serverConfig);
-  if (
-    nonJsonRpcResponseCaptures.size >= NON_JSON_RPC_CAPTURE_MAX_ENTRIES &&
-    !nonJsonRpcResponseCaptures.has(key)
-  ) {
-    const oldest = nonJsonRpcResponseCaptures.keys().next().value;
-    if (oldest !== undefined) nonJsonRpcResponseCaptures.delete(oldest);
+  if (Array.isArray(parsed)) {
+    // F3: an array whose elements are all plain objects with no `jsonrpc` key is
+    // an error envelope, not a JSON-RPC batch. Its length is metadata, not content.
+    const hasJsonRpc = parsed.some(
+      (item) => typeof item === 'object' && item !== null && 'jsonrpc' in item,
+    );
+    if (hasJsonRpc) return;
+    store({
+      status: response.status,
+      contentType: 'application/json',
+      items: parsed.length,
+    });
+    return;
   }
-  nonJsonRpcResponseCaptures.set(key, {
+  if ('jsonrpc' in parsed) return;
+  store({
     status: response.status,
     contentType: 'application/json',
     code: safeNonJsonRpcCode((parsed as { code?: unknown }).code),
+    truncated: body.truncated || undefined,
   });
 }
 
@@ -844,9 +877,15 @@ export class McpClient {
         this.serverConfig,
       );
       if (!this.isDisconnecting) {
+        // F1 (review): the recorded lastError must not carry the Zod dump. The
+        // improved error keeps the original as `cause` for debugging, but the
+        // recorded message is the improved text alone; unrelated failures keep
+        // the full cause chain.
         recordMCPServerLastError(
           this.serverName,
-          getErrorMessage(surfacedError),
+          surfacedError === error || !(surfacedError instanceof Error)
+            ? getErrorMessage(surfacedError)
+            : surfacedError.message,
         );
       }
       throw surfacedError;
@@ -1017,9 +1056,15 @@ export class McpClient {
         this.serverConfig,
       );
       if (!this.isDisconnecting) {
+        // F1 (review): the recorded lastError must not carry the Zod dump. The
+        // improved error keeps the original as `cause` for debugging, but the
+        // recorded message is the improved text alone; unrelated failures keep
+        // the full cause chain.
         recordMCPServerLastError(
           this.serverName,
-          getErrorMessage(surfacedError),
+          surfacedError === error || !(surfacedError instanceof Error)
+            ? getErrorMessage(surfacedError)
+            : surfacedError.message,
         );
       }
       throw surfacedError;
