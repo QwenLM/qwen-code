@@ -474,6 +474,8 @@ BODY
         '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
         <<< "${existing_issue}" >/dev/null; then
         echo "::warning::Release failed but existing ${issue_url} has an autofix exclusion label; no autofix dispatched."
+        gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
+          || echo "::warning::Failed to comment on ${issue_url}."
         exit 0
       else
         gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
@@ -536,9 +538,9 @@ BODY
     existing_issues="$(
       gh issue list --repo "${GH_REPO}" \
         --state open \
-        --search "\"${title_prefix}${release_version}\" in:title" \
+        --search "\"${title_prefix}${release_version}\" in:title -linked:pr" \
         --limit 30 \
-        --json number,url,labels,author,title \
+        --json number,url,labels,author,title,assignees \
       | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
         '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "app/github-actions") ]'
     )"
@@ -550,6 +552,12 @@ BODY
       [[ -z "${existing_issue}" ]] && continue
       issue_number="$(jq -r '.number' <<< "${existing_issue}")"
       issue_url="$(jq -r '.url' <<< "${existing_issue}")"
+      if (( $(jq -r '.assignees | length' <<< "${existing_issue}") > 0 )) || jq -e \
+        '(.labels // []) | map(.name) | any(. == "status/need-information" or . == "status/need-retesting")' \
+        <<< "${existing_issue}" >/dev/null; then
+        echo "::warning::${issue_url} looks maintainer-owned; leaving it open."
+        continue
+      fi
       body_file="$(mktemp)"
       cat > "${body_file}" <<BODY
 The release completed successfully on a later attempt of this run, so the failure this issue reported is no longer current.
@@ -567,7 +575,9 @@ BODY
       for label in 'status/ready-for-agent' 'autofix/approved' 'autofix/in-progress'; do
         gh issue edit "${issue_number}" --repo "${GH_REPO}" --remove-label "${label}" || true
       done
-      gh issue close "${issue_number}" --repo "${GH_REPO}" --reason 'not planned'
+      gh issue close "${issue_number}" --repo "${GH_REPO}" --reason 'not planned' || {
+        echo "::warning::Failed to close ${issue_url}; continuing with the remaining matches."
+      }
     done < <(jq -c '.[]' <<< "${existing_issues}")
     ;;
 
