@@ -139,6 +139,74 @@ test('a short single row still enters history immediately @smoke', async ({
   await expect(editor).toHaveText('short draft');
 });
 
+test('settings can turn off arrow-key prompt history across reloads @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  const editor = await openSession(page, baseURL!);
+  const toggle = page.getByRole('switch', {
+    name: 'Recall history with arrow keys',
+    exact: true,
+  });
+  const openUiSettings = async () => {
+    await page.getByRole('button', { name: 'More', exact: true }).click();
+    await page
+      .getByRole('button', { name: 'Settings', exact: true })
+      .first()
+      .click();
+    await page
+      .getByRole('navigation', { name: 'Settings' })
+      .getByRole('button', { name: /^UI/ })
+      .click();
+  };
+  const back = page.getByTestId('panel-back');
+
+  await editor.fill('short draft');
+  await editor.press('ArrowUp');
+  await expectText(editor, history[1]!);
+
+  await openUiSettings();
+  await expect(toggle).toBeChecked();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await back.click();
+
+  await editor.press('ArrowDown');
+  await expectText(editor, history[1]!);
+  await editor.fill('short draft');
+  await editor.press('ArrowUp');
+  await expect(editor).toHaveText('short draft');
+  await editor.press('ArrowDown');
+  await expect(editor).toHaveText('short draft');
+
+  await editor.fill(paragraph);
+  await expectWrapped(editor);
+  await editor.press('ArrowUp');
+  expect(await caretOffset(editor)).toBeLessThan(paragraph.length);
+  await expectText(editor, paragraph);
+
+  await editor.press('Control+r');
+  const search = page.locator('[data-web-shell-composer-history-search]');
+  await search.fill('Older prompt:');
+  await search.press('Tab');
+  await expectText(editor, history[0]!);
+
+  await page.reload();
+  await editor.fill('short draft');
+  await editor.press('ArrowUp');
+  await expect(editor).toHaveText('short draft');
+  await openUiSettings();
+  await expect(toggle).not.toBeChecked();
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await back.click();
+
+  await editor.press('ArrowUp');
+  await expectText(editor, history[1]!);
+  await editor.press('ArrowDown');
+  await expect(editor).toHaveText('short draft');
+});
+
 for (const [name, draft, wrapped] of [
   ['short RTL', 'שלום עולם זה טקסט בעברית', false],
   ['mixed LTR/RTL', 'abc שלום', false],

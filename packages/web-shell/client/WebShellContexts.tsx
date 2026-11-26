@@ -4,10 +4,52 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createContext, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
 import type { TodoDetail, TodoSnapshotDiff } from './utils/todos';
 
 export const CompactModeContext = createContext(false);
+
+const ARROW_KEY_HISTORY_STORAGE_KEY = 'qwen-code-web-shell-arrow-key-history';
+
+export const ArrowKeyHistoryContext = createContext<{
+  enabled: boolean;
+  setEnabled: (enabled: boolean) => void;
+} | null>(null);
+
+export function ArrowKeyHistoryProvider({ children }: { children: ReactNode }) {
+  const [enabled, setEnabled] = useState(() => {
+    try {
+      return (
+        window.localStorage.getItem(ARROW_KEY_HISTORY_STORAGE_KEY) !== 'false'
+      );
+    } catch {
+      return true;
+    }
+  });
+  const updateEnabled = useCallback((next: boolean) => {
+    setEnabled(next);
+    try {
+      window.localStorage.setItem(ARROW_KEY_HISTORY_STORAGE_KEY, String(next));
+    } catch {
+      // The active Web Shell still gets the new preference if storage is unavailable.
+    }
+  }, []);
+  const preference = useMemo(
+    () => ({ enabled, setEnabled: updateEnabled }),
+    [enabled, updateEnabled],
+  );
+  return (
+    <ArrowKeyHistoryContext.Provider value={preference}>
+      {children}
+    </ArrowKeyHistoryContext.Provider>
+  );
+}
 
 /**
  * Per-snapshot status diffs (keyed by tool callId or plan message id), so a

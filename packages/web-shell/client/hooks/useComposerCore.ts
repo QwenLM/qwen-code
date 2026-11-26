@@ -1,5 +1,6 @@
 import {
   createElement,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -80,6 +81,7 @@ import {
   type AtMentionWorkspaceActions,
 } from './useAtMentionMenu';
 import { useI18n } from '../i18n';
+import { ArrowKeyHistoryContext } from '../WebShellContexts';
 import {
   inputHighlight,
   inputHighlightTheme,
@@ -1760,6 +1762,10 @@ export function useComposerCore(
   persistFileReferencesRef.current = persistFileReferences;
   const workspace = useOptionalComposerWorkspace();
   const { language, t } = useI18n();
+  const arrowKeyHistoryEnabled =
+    useContext(ArrowKeyHistoryContext)?.enabled ?? true;
+  const arrowKeyHistoryEnabledRef = useRef(arrowKeyHistoryEnabled);
+  arrowKeyHistoryEnabledRef.current = arrowKeyHistoryEnabled;
   const portalRoot = useWebShellPortalRoot();
   const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
   const storageScopeRef = useRef(storageScopeKey);
@@ -4393,10 +4399,13 @@ export function useComposerCore(
       {
         key: 'ArrowUp',
         run: (view) => {
+          const canRecallHistory =
+            shellModeRef.current || arrowKeyHistoryEnabledRef.current;
           const history = shellModeRef.current
             ? shellHistoryActionsRef.current
             : historyActionsRef.current;
-          const isBrowsingHistory = historyBrowseActiveRef.current;
+          const isBrowsingHistory =
+            canRecallHistory && historyBrowseActiveRef.current;
           // Not browsing history → arrows drive the slash menu / native
           // completion. While browsing → arrows keep walking history and any
           // auto-opened menu is closed. (Gate uses historyBrowseActiveRef, not
@@ -4438,6 +4447,7 @@ export function useComposerCore(
               return true;
             }
           }
+          if (!canRecallHistory) return false;
           const current = view.state.doc.toString();
           if (!isBrowsingHistory) {
             saveCurrentDraftRef.current();
@@ -4456,10 +4466,13 @@ export function useComposerCore(
       {
         key: 'ArrowDown',
         run: (view) => {
+          const canRecallHistory =
+            shellModeRef.current || arrowKeyHistoryEnabledRef.current;
           const history = shellModeRef.current
             ? shellHistoryActionsRef.current
             : historyActionsRef.current;
-          const isBrowsingHistory = historyBrowseActiveRef.current;
+          const isBrowsingHistory =
+            canRecallHistory && historyBrowseActiveRef.current;
           // Symmetric with ArrowUp: history navigation wins while browsing;
           // the slash menu and native completion only capture arrows once the
           // user is no longer paging through history.
@@ -4493,7 +4506,7 @@ export function useComposerCore(
             restoreHistoryEntry(view, next);
             return true;
           }
-          const next = history.navigateDown();
+          const next = canRecallHistory ? history.navigateDown() : null;
           if (next === null) {
             if (isBrowsingHistory) return true;
             return onFocusFooterRef.current?.() ?? false;

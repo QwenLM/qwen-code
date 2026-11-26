@@ -686,7 +686,11 @@ import {
 import { useAssistantTurnSettlementProjection } from './assistant-turn-settlement';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
-import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
+import {
+  ArrowKeyHistoryProvider,
+  CompactModeContext,
+  TodoContextsProvider,
+} from './WebShellContexts';
 import styles from './App.module.css';
 
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
@@ -24641,6 +24645,7 @@ export function App({
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
+          <ArrowKeyHistoryProvider>
         <div
           ref={appRootRef}
           className={appClassName}
@@ -28280,6 +28285,7 @@ export function App({
           </div>
           </GeneratedUiRuntimeProvider>
         </div>
+        </ArrowKeyHistoryProvider>
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
