@@ -19098,6 +19098,17 @@ export function App({
       const selectedWorkspace = workspacesRef.current.find(
         (entry) => entry.cwd === workspaceCwd,
       );
+      const boundRun = pendingBoundRunRef.current;
+      if (
+        boundRun &&
+        (boundRun.sessionId !== sessionId ||
+          boundRun.workspaceCwd !== workspaceCwd)
+      ) {
+        clearPendingBoundRun(boundRun.sessionId);
+        boundRun.reject(
+          createScheduledTaskCancellation('Bound run target was replaced'),
+        );
+      }
       navigationRef.current?.beginSessionNavigation(
         sessionId,
         selectedWorkspace && !selectedWorkspace.primary
@@ -19154,6 +19165,7 @@ export function App({
       }
     },
     [
+      clearPendingBoundRun,
       closeMobileDrawer,
       closePanel,
       isKnownLiveWorkspaceCwd,
@@ -19660,26 +19672,12 @@ export function App({
   // rejects if the bound session can't be opened (archived/deleted), supersedes,
   // or times out — so the caller only records the run after it truly happened,
   // never on a failed session switch. Only one bound run waits at a time.
-  const boundRunTargetKey = getLogicalSessionKey(
-    connection.sessionId,
-    connection.workspaceCwd,
-  );
-  const boundRunTargetRef = useRef({
-    key: boundRunTargetKey,
-    generation: 0,
-  });
-  if (boundRunTargetRef.current.key !== boundRunTargetKey) {
-    boundRunTargetRef.current = {
-      key: boundRunTargetKey,
-      generation: boundRunTargetRef.current.generation + 1,
-    };
-  }
   const boundRunRuntimeClientRef = useRef(workspace.client);
   boundRunRuntimeClientRef.current = workspace.client;
   const pendingBoundRunRef = useRef<{
     sessionId: string;
     logicalSessionKey?: string;
-    targetGeneration?: number;
+    workspaceCwd?: string;
     runtimeClient: typeof workspace.client;
     prompt: string;
     resolve: () => void;
@@ -19696,6 +19694,23 @@ export function App({
       pendingBoundRunRef.current = null;
     }
   }, []);
+  useEffect(() => {
+    const pending = pendingBoundRunRef.current;
+    if (pending?.logicalSessionKey === undefined) return;
+    const currentLogicalSessionKey = getLogicalSessionKey(
+      connection.sessionId,
+      connection.workspaceCwd,
+    );
+    if (
+      currentLogicalSessionKey !== undefined &&
+      currentLogicalSessionKey !== pending.logicalSessionKey
+    ) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        createScheduledTaskCancellation('Bound run target was replaced'),
+      );
+    }
+  }, [clearPendingBoundRun, connection.sessionId, connection.workspaceCwd]);
   // Enqueue a manual-run prompt in the CURRENT session, resolving as soon as the
   // daemon ADMITS it — not when the whole turn finishes. sendPrompt resolves via
   // waitForAcceptedPromptCompletion (turn end), which is too late: a long or
@@ -19721,7 +19736,6 @@ export function App({
       scheduledScope?: {
         runtimeClient: typeof workspace.client;
         logicalSessionKey?: string;
-        targetGeneration?: number;
       },
     ): Promise<void> =>
       new Promise<void>((resolve, reject) => {
@@ -19731,13 +19745,10 @@ export function App({
           taskRuntimeClient === boundRunRuntimeClientRef.current &&
           (!scheduledScope ||
             (scheduledScope.logicalSessionKey !== undefined &&
-              scheduledScope.targetGeneration !== undefined &&
               getLogicalSessionKey(
                 connectionRef.current.sessionId,
                 connectionRef.current.workspaceCwd,
-              ) === scheduledScope.logicalSessionKey &&
-              boundRunTargetRef.current.generation ===
-                scheduledScope.targetGeneration));
+              ) === scheduledScope.logicalSessionKey));
         const assertRunnable = () => {
           if (!scheduledScopeIsCurrent()) {
             throw createScheduledTaskCancellation(
@@ -19832,16 +19843,14 @@ export function App({
     }
     if (
       pending.owner === undefined ||
-      pending.logicalSessionKey === undefined ||
-      pending.targetGeneration === undefined
+      pending.logicalSessionKey === undefined
     ) {
       return;
     }
     if (
       conn.sessionId !== pending.sessionId ||
       getLogicalSessionKey(conn.sessionId, conn.workspaceCwd) !==
-        pending.logicalSessionKey ||
-      boundRunTargetRef.current.generation !== pending.targetGeneration
+        pending.logicalSessionKey
     ) {
       clearPendingBoundRun(pending.sessionId);
       pending.reject(
@@ -19895,7 +19904,6 @@ export function App({
       {
         runtimeClient: pending.runtimeClient,
         logicalSessionKey: pending.logicalSessionKey,
-        targetGeneration: pending.targetGeneration,
       },
     ).then(
       () => pending.resolve(),
@@ -19926,9 +19934,13 @@ export function App({
         prev.reject(new Error('superseded by another run'));
       }
       return new Promise<void>((resolve, reject) => {
-        const requestedTargetGeneration = boundRunTargetRef.current.generation;
         const pending: NonNullable<typeof pendingBoundRunRef.current> = {
           sessionId,
+          workspaceCwd,
+          logicalSessionKey:
+            workspaceCwd === undefined
+              ? undefined
+              : getLogicalSessionKey(sessionId, workspaceCwd),
           runtimeClient: workspace.client,
           prompt,
           resolve,
@@ -19943,18 +19955,6 @@ export function App({
           // which case the effect picks it up.
           .then(() => {
             if (pendingBoundRunRef.current !== pending) return;
-            if (
-              boundRunTargetRef.current.generation >
-              requestedTargetGeneration + 1
-            ) {
-              clearPendingBoundRun(sessionId);
-              reject(
-                createScheduledTaskCancellation(
-                  'Bound run session was replaced',
-                ),
-              );
-              return;
-            }
             if (
               connectionRef.current.sessionId !== sessionId ||
               (workspaceCwd !== undefined &&
@@ -19976,7 +19976,6 @@ export function App({
               sessionId,
               connectionRef.current.workspaceCwd,
             );
-            pending.targetGeneration = boundRunTargetRef.current.generation;
             pending.timer = setTimeout(() => {
               if (pendingBoundRunRef.current !== pending) return;
               pendingBoundRunRef.current = null;
