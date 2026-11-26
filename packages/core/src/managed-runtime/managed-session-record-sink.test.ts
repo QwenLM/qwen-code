@@ -586,25 +586,34 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
-  it('round-trips marked memory snapshots through the managed projection', async () => {
-    const harness = await createHarness();
-    const snapshot = record({
-      type: 'system',
-      subtype: 'memory_catalog_snapshot',
-      message: {
-        role: 'user',
-        parts: [
-          {
-            text: 'full catalog',
-            partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
-          },
-        ],
-      },
-    });
-    await harness.sink.write(snapshot);
-    expect(await harness.sink.project()).toEqual([snapshot]);
-    await harness.close();
-  });
+  it.each(['memory_catalog_snapshot', 'permission_context_snapshot'] as const)(
+    'round-trips %s through the managed projection',
+    async (subtype) => {
+      const harness = await createHarness();
+      const snapshot = record({
+        type: 'system',
+        subtype,
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text:
+                subtype === 'memory_catalog_snapshot'
+                  ? 'full catalog'
+                  : 'effective permissions',
+              partMetadata:
+                subtype === 'memory_catalog_snapshot'
+                  ? { 'qwen-code:memory-catalog-snapshot': true }
+                  : { 'qwen-code:permission-context': 'default' },
+            },
+          ],
+        },
+      });
+      await harness.sink.write(snapshot);
+      expect(await harness.sink.project()).toEqual([snapshot]);
+      await harness.close();
+    },
+  );
 
   it('carries the record shapes the projection can reproduce', async () => {
     const harness = await createHarness();

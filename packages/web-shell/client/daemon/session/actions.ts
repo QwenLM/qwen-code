@@ -238,7 +238,6 @@ function clearPendingLoadTimeout(load: PendingSessionLoad): void {
 export interface CreateDaemonSessionActionsArgs {
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
-  sessionAdapter?: WebShellSessionAdapter;
   getSessionAdapter?: () => WebShellSessionAdapter | undefined;
   activePromptsRef: RefBox<Map<string, ActivePrompt>>;
   settledPromptsRef: RefBox<Map<string, SettledPrompt>>;
@@ -282,7 +281,10 @@ export interface CreateDaemonSessionActionsArgs {
     >,
   ) => Promise<DaemonSessionClient>;
   createDetachedStandaloneSession: (
-    overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'modelServiceId'>,
+    overrides?: Pick<
+      CreateSessionRequest,
+      'approvalMode' | 'modelServiceId' | 'startupConfig'
+    >,
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getClient?: () => DaemonClient | undefined;
@@ -479,7 +481,6 @@ export function advanceSessionRecoveryGeneration(
 export function createDaemonSessionActions({
   store,
   sessionRef,
-  sessionAdapter,
   getSessionAdapter,
   activePromptsRef,
   settledPromptsRef,
@@ -533,7 +534,7 @@ export function createDaemonSessionActions({
   let attachmentClientId = sessionRef.current?.clientId;
 
   const adapterFor = (session: DaemonSessionClient) => {
-    const adapter = getSessionAdapter ? getSessionAdapter() : sessionAdapter;
+    const adapter = getSessionAdapter?.();
     return adapter && session.restoreStrategy?.kind === 'standalone'
       ? adapter
       : undefined;
@@ -1561,6 +1562,9 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
+        if (options?.suppressInputHistory) {
+          promptRequest['suppressInputHistory'] = true;
+        }
         let accepted: PromptAdmission;
         try {
           const request = promptRequest as PromptRequest;
@@ -1975,6 +1979,9 @@ export function createDaemonSessionActions({
       if (options?.retry) {
         promptRequest['retry'] = true;
       }
+      if (options?.suppressInputHistory) {
+        promptRequest['suppressInputHistory'] = true;
+      }
       options?.onAdmissionStarted?.();
       let accepted: PromptAdmission;
       try {
@@ -2124,6 +2131,9 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
+        if (options?.suppressInputHistory) {
+          promptRequest['suppressInputHistory'] = true;
+        }
         options?.onAdmissionStarted?.();
         let accepted: PromptAdmission;
         try {
@@ -2138,7 +2148,14 @@ export function createDaemonSessionActions({
           throw error;
         }
         options?.onAdmitted?.({ promptId: accepted.promptId });
-        await accepted.completion;
+        void accepted.completion?.catch((error: unknown) => {
+          if (!isAbortError(error)) {
+            console.warn(
+              '[DaemonSessionActions] detached prompt failed:',
+              error,
+            );
+          }
+        });
         return { promptId: accepted.promptId };
       } finally {
         await session.detach().catch((error: unknown) => {
@@ -2943,6 +2960,9 @@ export function createDaemonSessionActions({
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
                   : {}),
+                ...(options?.startupConfig
+                  ? { startupConfig: options.startupConfig }
+                  : {}),
               }),
               (created) => created.detach(),
             );
@@ -2980,6 +3000,9 @@ export function createDaemonSessionActions({
                   : {}),
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
+                  : {}),
+                ...(options?.startupConfig
+                  ? { startupConfig: options.startupConfig }
                   : {}),
               })
             : createDetachedSession(

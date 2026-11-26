@@ -4992,18 +4992,6 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(standalone.restoreStrategy).toEqual({ kind: 'standalone' });
     expect(standalone.workspaceCwd).toBe('');
     expect(standalone.session.workspaceCwd).toBe('');
-
-    expect(
-      () =>
-        new DaemonSessionClient({
-          client,
-          session: {
-            sessionId: 'ws-missing',
-            attached: false,
-            workspaceCwd: undefined as unknown as string,
-          },
-        }),
-    ).toThrow(TypeError);
   });
 
   it('waits for accepted event stream readiness and resets when the stream closes', async () => {

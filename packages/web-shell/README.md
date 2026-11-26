@@ -449,6 +449,11 @@ export function QwenCodePanel() {
 }
 ```
 
+嵌入宿主可以通过 `sessionAdapter` 接管独立会话的创建、恢复和常规 prompt 提交。
+适配器通过实时事件和恢复历史提供用户消息，由 WebShell 渲染。导航离开后的提交在
+宿主受理时解除客户端附着，宿主仍可继续运行该轮。继续会话等操作直接使用适配器
+返回的会话客户端。工作区会话使用默认 daemon 路由。
+
 ### 2. 共享 Provider 接入（纯消费者）
 
 适合同一个 React 应用中多个视图共享同一个 daemon session 的场景（如

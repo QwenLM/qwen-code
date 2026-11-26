@@ -19,12 +19,17 @@ import type {
  * The client returned by `createClient` should invoke
  * `opts.onSseStreamAccepted?.(streamId)` once its live event stream is ready
  * so `DaemonSessionClient.waitForEventStream()` unblocks immediately.
+ *
+ * The host supplies user messages through its live events and restored history.
+ * WebShell does not insert an optimistic copy for adapter submissions.
+ * Continuations and other actions use the returned session client directly.
  */
 export interface WebShellSessionAdapter {
   createClient(
     options: DaemonClientOptions,
     Client: typeof DaemonClient,
   ): DaemonClient;
+  /** Apply and verify any startup configuration before returning the client. */
   create(
     client: DaemonClient,
     options: CreateStandaloneSessionOptions,

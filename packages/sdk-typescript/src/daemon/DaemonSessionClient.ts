@@ -355,26 +355,14 @@ export class DaemonSessionClient {
 
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
-    if (
+    const workspaceCwd = opts.session.workspaceCwd ?? '';
+    this.restoreStrategy =
       opts.session.sourceType === 'standalone' &&
       'context' in opts.session &&
       opts.session.context?.kind === 'standalone'
-    ) {
-      this.restoreStrategy = { kind: 'standalone' };
-    } else if (opts.session.workspaceCwd !== undefined) {
-      this.restoreStrategy = {
-        kind: 'workspace',
-        workspaceCwd: opts.session.workspaceCwd,
-      };
-    } else {
-      throw new TypeError(
-        'The session did not identify its workspace or standalone context',
-      );
-    }
-    this.session = {
-      ...opts.session,
-      workspaceCwd: opts.session.workspaceCwd ?? '',
-    };
+        ? { kind: 'standalone' }
+        : { kind: 'workspace', workspaceCwd };
+    this.session = { ...opts.session, workspaceCwd };
     this.updateGeneratedUi(this.session.generatedUi);
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;

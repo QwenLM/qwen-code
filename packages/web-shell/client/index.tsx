@@ -247,8 +247,6 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
 /** Alias for consumers who prefer a standalone naming style. */
 export const StandaloneWebShell = WebShellWithProviders;
 
-export const supportsSessionAdapter = true;
-
 export type {
   WebShellApi,
   WebShellComposerPlaceholders,

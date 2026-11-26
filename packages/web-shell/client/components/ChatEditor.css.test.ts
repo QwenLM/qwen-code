@@ -268,3 +268,34 @@ describe('Model sheet touch floor', () => {
     }
   });
 });
+
+describe('Compact git badge visibility', () => {
+  it('hides .gitBranchBadgeDot by default and shows it in compact chips', () => {
+    expect(entries((selector) => selector === '.gitBranchBadgeDot')).toEqual([
+      {
+        at: '',
+        selectors: ['.gitBranchBadgeDot'],
+        decls: expect.arrayContaining(['display: none']),
+      },
+    ]);
+
+    expect(
+      entries(
+        (selector) =>
+          selector === ".gitBranchBadgeDot[data-compact='true']" ||
+          selector === ".gitBranchBadgeDot[data-details-collapsed='true']" ||
+          selector === '.gitBranchChipCompact .gitBranchBadgeDot',
+      ),
+    ).toEqual([
+      {
+        at: '',
+        selectors: [
+          ".gitBranchBadgeDot[data-compact='true']",
+          ".gitBranchBadgeDot[data-details-collapsed='true']",
+          '.gitBranchChipCompact .gitBranchBadgeDot',
+        ],
+        decls: ['display: block'],
+      },
+    ]);
+  });
+});

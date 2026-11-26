@@ -829,6 +829,27 @@ describe('getConnectionAfterSessionClear', () => {
     },
   );
 
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'forwards the input-history opt-out through %s',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const { actions } = createActionsHarness({ session });
+      const pending = actions[method]('host command', {
+        suppressInputHistory: true,
+      });
+      await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+      expect(session.submitPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [{ type: 'text', text: 'host command' }],
+          suppressInputHistory: true,
+        }),
+        ...(method === 'sendPrompt' ? [expect.any(AbortSignal)] : []),
+      );
+      if (method === 'sendPrompt') await actions.cancel();
+      await pending;
+    },
+  );
+
   it('does not promote reviewed Generated UI data to declared human input', async () => {
     const session = createMockSession('session-a');
     const { actions } = createActionsHarness({ session });
@@ -2333,14 +2354,20 @@ describe('createDaemonSessionActions', () => {
       createDetachedStandaloneSession,
     });
 
+    const startupConfig = {
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      reasoningEffort: 'none' as const,
+    };
     await expect(
       actions.createSession({
         sessionContext: { kind: 'standalone' },
         approvalMode: 'yolo',
+        startupConfig,
       }),
     ).resolves.toBe(standaloneRecord);
     expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
       approvalMode: 'yolo',
+      startupConfig,
     });
     expect(activeSession.client.createOrAttachSession).not.toHaveBeenCalled();
     expect(getConnection()).toEqual(connection);
@@ -3473,7 +3500,11 @@ describe('createDaemonSessionActions', () => {
     const result = await actions.sendDetachedPrompt(
       session as unknown as DaemonSessionClient,
       'background prompt',
-      { submittedPrompt: 'background prompt', onAdmitted },
+      {
+        submittedPrompt: 'background prompt',
+        suppressInputHistory: true,
+        onAdmitted,
+      },
     );
 
     expect(result).toEqual({ promptId: 'prompt-1' });
@@ -3489,6 +3520,7 @@ describe('createDaemonSessionActions', () => {
     expect(request._meta).toEqual({
       'qwen.submittedPrompt': 'background prompt',
     });
+    expect(request).toMatchObject({ suppressInputHistory: true });
     expect(onAdmitted).toHaveBeenCalledWith({ promptId: 'prompt-1' });
     expect(session.detach).toHaveBeenCalledOnce();
     expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
@@ -7881,7 +7913,7 @@ function createActionsHarness(
     settleRestoredActivePrompt?: ReturnType<typeof vi.fn>;
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
-    sessionAdapter?: WebShellSessionAdapter;
+    getSessionAdapter?: () => WebShellSessionAdapter | undefined;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreSessionContext?: ReturnType<typeof vi.fn>;
@@ -7932,7 +7964,7 @@ function createActionsHarness(
   const actions = createDaemonSessionActions({
     store: store as never,
     sessionRef,
-    sessionAdapter: opts.sessionAdapter,
+    getSessionAdapter: opts.getSessionAdapter,
     activePromptsRef,
     settledPromptsRef,
     pendingSessionLoadRef,
@@ -9771,7 +9803,7 @@ describe('sendPrompt idempotent admission auto-retry', () => {
     const addNotice = vi.fn();
     const { actions, activePromptsRef, store } = createActionsHarness({
       session,
-      sessionAdapter,
+      getSessionAdapter: () => sessionAdapter,
       addNotice,
       connection: {
         status: 'connected',
@@ -9816,5 +9848,37 @@ describe('sendPrompt idempotent admission auto-retry', () => {
     await expect(okTurn).resolves.toEqual({ stopReason: 'end_turn' });
     hanging.reject(new Error('late close'));
     await Promise.resolve();
+  });
+
+  it('detaches an adapter session at admission while its turn is still pending', async () => {
+    const session = Object.assign(createMockSession('sa-detached'), {
+      restoreStrategy: { kind: 'standalone' as const },
+    });
+    const completion = createDeferred<void>();
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      addNotice,
+      getSessionAdapter: () => ({
+        createClient: () => session.client as unknown as DaemonClient,
+        create: async () => session as unknown as DaemonSessionClient,
+        load: async () => session as unknown as DaemonSessionClient,
+        submitPrompt: async () => ({
+          promptId: 'p-detached',
+          completion: completion.promise,
+        }),
+      }),
+    });
+
+    const result = actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      'continue after navigation',
+    );
+    try {
+      await vi.waitFor(() => expect(session.detach).toHaveBeenCalledOnce());
+      await expect(result).resolves.toEqual({ promptId: 'p-detached' });
+      expect(addNotice).not.toHaveBeenCalled();
+    } finally {
+      completion.resolve(undefined);
+    }
   });
 });

@@ -469,6 +469,8 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   /** Original text declared at the user submission boundary, before host preparation. */
   submittedPrompt?: string;
+  /** Keep host-initiated commands out of the user's cross-device input history. */
+  suppressInputHistory?: boolean;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   /**
@@ -613,6 +615,7 @@ export interface DaemonSessionActions {
     options?: Pick<
       SendPromptOptions,
       | 'submittedPrompt'
+      | 'suppressInputHistory'
       | 'images'
       | 'files'
       | 'inputAnnotations'
