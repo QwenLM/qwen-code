@@ -169,7 +169,7 @@ does not.
 | Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files                        |
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                                   |
-| Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                                            |
+| Commands   | Register during `session.start` using name, description, optional argumentHint and aliases; intercept registered Mod commands across plugins; return `{text}` or `{}`                                   |
 | Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                                               |
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                                             |
@@ -195,6 +195,24 @@ A conflict with a Qwen built-in command still uses Qwen's command conflict polic
 the extension command is renamed to `extensionName.commandName`. Disabled slash
 command names are matched against the resulting name.
 
+A command specification may also carry Claude Code's other fields:
+
+- `aliases`: up to eight more names, spelled as `name` may be. Typing one runs
+  the command, and `command.run` still receives its `name`. An alias that another
+  Mod command already holds as a name or alias, in any case, rejects the whole
+  registration. A primary name wins over an alias, so an alias that matches a
+  built-in or another extension's command name does not run the Mod command.
+- `isTerminalOnly: true`: a headless run does not list the command, and typing
+  it fails with `The command "/<name>" is not supported in this mode.` instead
+  of sending the line to the model.
+- `immediate`, `isHidden` and `isWorkspaceFree`: accepted as `true` and
+  ignored. A Mod command typed during a turn waits for the turn; the command is
+  listed as any other, because a hidden command cannot be typed in Qwen Code;
+  and Qwen Code has no remote-attached terminal for `isWorkspaceFree` to change.
+
+A `command.run` answer may carry `isTextDisplayOnly: true`. A Mod command's text
+never enters a model request, so the flag is accepted and dropped.
+
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
@@ -203,7 +221,7 @@ Patterns select among the engine events `session.start`, `session.end`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
-Claude Code 2.1.318 also defines events that Qwen Code does not run yet, such as
+Claude Code 2.1.332 also defines events that Qwen Code does not run yet, such as
 `prompt.fill` or `classic.Stop`. `ui.render` runs only where a host draws it. A registration for one of them,
 or for a prefix such as `classic.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
@@ -457,7 +475,7 @@ supports:
 {
   "version": "0.26.0",
   "qwen": {
-    "claudeCode": "2.1.318",
+    "claudeCode": "2.1.332",
     "events": [
       "clock.now",
       "clock.sleep",
@@ -566,7 +584,7 @@ Mod discovery. Mod manifests must be relative paths inside the extension.
 directory, the one that holds `qwen-extension.json` or
 `.claude-plugin/plugin.json`. They are plain properties.
 
-The other methods are API events that resolve to the shapes Claude Code 2.1.318
+The other methods are API events that resolve to the shapes Claude Code 2.1.332
 declares:
 
 | Method                                | Resolves to                                                                             |
@@ -796,8 +814,10 @@ receives:
 | `isAnswerTruncated` | `true` when `answer` was cut to fit; absent otherwise                                                                                  |
 
 The fields of both events are pinned. `next(e)` resolves to `{text: e.answer}`,
-with `usage` when the turn has it. Return a different, non-blank `text` to show
-it beneath the answer, up to 4,096 characters:
+with `usage` when the turn has it. An answer may carry `by`, a list of plugin
+names that Claude Code fills in itself; Qwen Code drops it, since each line
+already names its plugins. Return a different, non-blank `text` to show it
+beneath the answer, up to 4,096 characters:
 
 - in a terminal, as the transcript line `[Mod <plugins>] <text>`;
 - in headless text mode, as the same line on stderr after the answer;
@@ -1014,11 +1034,12 @@ These differ from Claude Code:
 ## Elements
 
 `$.ui.resolve(e)` returns the element table of the event's surface: a frozen
-object with no prototype. The terminal's holds Claude Code's eleven terminal
+object with no prototype. The terminal's holds Claude Code's twelve terminal
 constructors, `Box`, `Text`, `Button`, `Input`, `Select`, `Link`, `Code`,
-`Markdown`, `Client`, `Raster` and `Image`. A Web Shell session also hands out
-the desktop's ten, `Box`, `Text`, `Button`, `Input`, `Select`, `Svg`, `Link`,
-`Code`, `Markdown` and `Client`, for its `desktop` events. It reads the table
+`Markdown`, `Progress`, `Client`, `Raster` and `Image`. A Web Shell session also
+hands out the desktop's twelve, `Box`, `Text`, `Button`, `Input`, `Select`,
+`Svg`, `Link`, `Code`, `Markdown`, `Progress`, `Client` and `Shader`, for its
+`desktop` events. It reads the table
 without a dispatch. `e` is a `ui.render` event; any argument whose `surface`
 names no table the session hands out throws.
 
@@ -1032,13 +1053,15 @@ its props and its children flattened into an array, and throws for a string tag 
 JSX in a `.tsx` or `.jsx` file compiles to these calls, as described in
 [TypeScript, JSX and relative imports](#typescript-jsx-and-relative-imports).
 
-A tree a hook returns is judged with Claude Code 2.1.318's rules for `Box` and
-`Text`, and any other element refuses it with
-`<Element> is not drawn by Qwen Code yet`.
+A tree a hook returns is judged with Claude Code 2.1.332's rules for `Box`,
+`Text` and `Progress`, and any other element refuses it with
+`<Element> is not drawn by Qwen Code yet`. `anchor` is refused, as Claude Code
+refuses it outside the `BesidePrompt` site, which Qwen Code does not draw.
 
 `$.ui.invalidate("ui.render")` returns at once and asks for a redraw of the
 sites the plugin's `ui.render` hooks may draw. The cached-answer events
-Claude Code also accepts, such as `prompt.section`, do nothing in Qwen Code.
+Claude Code also accepts, such as `prompt.section` or `tool.offer`, do nothing
+in Qwen Code.
 Any other name throws. Both methods work in every host, so a `turn.complete`
 hook that asks for a redraw does not fail where nothing is drawn.
 
@@ -1089,7 +1112,18 @@ The band is drawn with these conversions:
 
 - A string inside a `Box` is drawn as a `Text`.
 - Text wrap values `end` and `middle` become `truncate-end` and
-  `truncate-middle`.
+  `truncate-middle`, and `clip` becomes `truncate-end`.
+- A Text with `maxLines: 1` and no wrap that cuts draws as `truncate-end`. A
+  larger `maxLines` clips the Text to that many rows, with no mark on the last.
+- In a Box with `overflowX: "scroll"`, each Text is cut at the Box's edge as
+  `truncate-end` unless its own wrap already cuts, and `maxLines` has no effect,
+  since a terminal cannot scroll sideways. A Box inside it with its own `width`
+  keeps what it holds as written. A Box's `mono` is dropped, and a Box that
+  sets it may not hold the engine's own node.
+- A `Progress` draws its `label`, a ten-cell bar in its `color` (the theme's
+  accent by default) and its `valueText`, or the whole percent without one. A
+  Progress with no finite `value`, or a `max` of zero or less, draws its label
+  and a dim `…`, or its `valueText` when set.
 - Spacing steps become cells: `xs` and `sm` are 1 across and 0 down, `md` 2 and
   1, `lg` 3 and 1, `xl` 4 and 2.
 - `weight: "semibold"` or `"bold"` draws bold. `size`, `mono`, `tabular` and
@@ -1111,6 +1145,11 @@ afresh. The debug log records each refused tree and adjustment, such as
 
 These differ from Claude Code:
 
+- The band is one tree from one chain, as in Claude Code before 2.1.332. Claude
+  Code now asks `AbovePrompt` once per plugin, with `e.plugin`, and stacks the
+  rows with `AbovePromptList`; Qwen Code does neither, so a hook that answers
+  without `next(e)` hides the rows of the plugins after it, and `isCollapsed` is
+  absent. A Box's `blur` is refused.
 - The band has no collapse mark, focus, scrolling or `n more` row. A tree
   taller than `maxRows` is clipped. `maxRows` is a third of the terminal's rows,
   where Claude Code gives the bottom slot's remaining rows on the alternate
@@ -1555,6 +1594,6 @@ Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
 A hook answer whose getter throws while Qwen Code reads it fails as a whole;
 Claude Code 2.1.299 drops only that key.
 
-The author API follows the Claude Code 2.1.318 declarations, event names
+The author API follows the Claude Code 2.1.332 declarations, event names
 included, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).

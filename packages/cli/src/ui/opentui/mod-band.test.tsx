@@ -352,6 +352,55 @@ describe('OpenTuiModBand', () => {
     expect(text({ color: 'grey' })['fg']).toBe('#808080');
   });
 
+  it('cuts clip, one-row maxLines and a sideways scroller, and clips taller maxLines', () => {
+    const text = (props: Record<string, string | number | boolean>) =>
+      drawn({ type: 'Text', props, children: ['x'] });
+    expect(text({ wrap: 'clip' }).props).toMatchObject({ wrapMode: 'none' });
+    expect(text({ maxLines: 1 }).props).toMatchObject({ wrapMode: 'none' });
+    const clipped = text({ maxLines: 3 });
+    expect(clipped.props).toMatchObject({
+      tag: 'box',
+      maxHeight: 3,
+      overflow: 'hidden',
+    });
+    expect((children(clipped)[0] as Drawn).props.tag).toBe('text');
+    const scroller = drawn({
+      type: 'Box',
+      props: { overflowX: 'scroll', mono: true },
+      children: [
+        { type: 'Text', props: { maxLines: 3 }, children: ['x'] },
+        'y',
+      ],
+    });
+    expect(scroller.props).not.toHaveProperty('overflowX');
+    expect(scroller.props).not.toHaveProperty('mono');
+    const [inner, loose] = children(scroller) as Drawn[];
+    expect(inner.props).toMatchObject({ tag: 'text', wrapMode: 'none' });
+    expect(loose.props).toMatchObject({ tag: 'text', wrapMode: 'none' });
+  });
+
+  it('draws a Progress bar, its figure, and a task with no known end', () => {
+    const progress = (props: Record<string, string | number | boolean>) => {
+      const { container } = render(
+        <OpenTuiModBand
+          maxRows={4}
+          band={band({ type: 'Box', children: [{ type: 'Progress', props }] })}
+        />,
+      );
+      return hosts(container).find((host) => host.tag === 'text')!;
+    };
+    expect(progress({ label: 'Indexing', value: 3, max: 10 }).text).toBe(
+      'Indexing ███░░░░░░░ 30%',
+    );
+    const done = progress({ label: 'Indexing', value: 1, color: 'success' });
+    expect(done.text).toBe('Indexing ██████████ 100%');
+    expect(done.props).toMatchObject({ wrapMode: 'none' });
+    expect(progress({ label: 'Indexing', valueText: 'waiting' }).text).toBe(
+      'Indexing waiting',
+    );
+    expect(progress({ label: 'Indexing' }).text).toBe('Indexing …');
+  });
+
   it('sanitizes the text it draws and keys boxes once each', () => {
     const root = drawn({
       type: 'Box',

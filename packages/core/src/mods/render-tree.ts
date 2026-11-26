@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// The trees a `ui.render` hook draws, judged by Claude Code 2.1.318's rules.
+// The trees a `ui.render` hook draws, judged by Claude Code 2.1.332's rules.
 // The worker checks each hook's answer and the host the tree the chain settles
 // on, so a tree Qwen Code accepts is one Claude Code accepts.
 
@@ -37,6 +37,7 @@ export const TERMINAL_ELEMENTS = [
   'Link',
   'Code',
   'Markdown',
+  'Progress',
   'Client',
   'Raster',
   'Image',
@@ -52,9 +53,11 @@ export const DESKTOP_ELEMENTS = [
   'Link',
   'Code',
   'Markdown',
+  'Progress',
   'Client',
+  'Shader',
 ] as const;
-const DRAWN = new Set(['Box', 'Text']);
+const DRAWN = new Set(['Box', 'Text', 'Progress']);
 
 /** The events `$.ui.invalidate` names. */
 export const INVALIDATABLE_EVENTS = [
@@ -65,6 +68,9 @@ export const INVALIDATABLE_EVENTS = [
   'tool.describe',
   'command.describe',
   'config.describe',
+  'tool.list',
+  'tool.offer',
+  'ui.offer',
 ] as const;
 
 export type ModRenderProps = Record<string, string | number | boolean>;
@@ -76,6 +82,7 @@ export type ModRenderElement =
       hover?: ModRenderProps;
       children?: ModRenderNode[];
     }
+  | { type: 'Progress'; props: ModRenderProps }
   | { type: 'engine'; ref: number };
 
 /** What `next(e)` resolves to: the engine's own drawing, nothing at the band. */
@@ -262,6 +269,8 @@ const BOX_PROPS: Record<string, Rule> = {
   borderDimColor: flag,
   backgroundColor: color,
   overflow: oneOf('visible', 'hidden'),
+  overflowX: oneOf('visible', 'scroll'),
+  mono: flag,
   display: oneOf('flex', 'none'),
   position: oneOf('relative', 'absolute'),
   ...Object.fromEntries(OFFSETS.map((name) => [name, offset])),
@@ -288,7 +297,25 @@ const TEXT_PROPS: Record<string, Rule> = {
     'truncate-start',
     'truncate-middle',
     'truncate-end',
+    'clip',
   ),
+  maxLines: (value) =>
+    Number.isSafeInteger(value) && (value as number) >= 1
+      ? undefined
+      : 'must be a whole number from 1',
+};
+const shown: Rule = (value) =>
+  typeof value === 'string' ? invalidRenderText(value) : 'must be a string';
+const PROGRESS_PROPS: Record<string, Rule> = {
+  label: (value) =>
+    typeof value === 'string' && !value.trim()
+      ? 'must not be blank'
+      : shown(value),
+  value: (value) =>
+    typeof value === 'number' ? undefined : 'must be a number',
+  max: (value) => (typeof value === 'number' ? undefined : 'must be a number'),
+  valueText: shown,
+  color,
 };
 const HOVER_PROPS: Record<'Box' | 'Text', Record<string, Rule>> = {
   Box: {
@@ -315,6 +342,7 @@ const HOVER_PROPS: Record<'Box' | 'Text', Record<string, Rule>> = {
 // A Box that sets one of these may not hold the engine's own node.
 const ENGINE_BLOCKERS = [
   'display',
+  'mono',
   'overflow',
   'position',
   'width',
@@ -334,7 +362,7 @@ const kind = (value: unknown) =>
   value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value;
 
 function checkProps(
-  type: 'Box' | 'Text',
+  type: 'Box' | 'Text' | 'Progress',
   props: unknown,
   rules: Record<string, Rule>,
   label: string,
@@ -388,6 +416,16 @@ export function validateRenderTree(tree: unknown): void {
       if ((TERMINAL_ELEMENTS as readonly string[]).includes(type))
         throw new Error(`${type} is not drawn by Qwen Code yet`);
       throw new Error(`${type} is not an element of the terminal`);
+    }
+    if (type === 'Progress') {
+      if (Object.keys(node).some((key) => key !== 'type' && key !== 'props'))
+        throw new Error('Progress holds fields other than props');
+      if (inline) throw new Error('Progress inside an inline element');
+      const props = node['props'];
+      checkProps('Progress', props, PROGRESS_PROPS, 'props');
+      if (!('label' in (props as ModRenderProps)))
+        throw new Error('Progress prop "label" is missing');
+      return;
     }
     const tag = type as 'Box' | 'Text';
     if (
@@ -472,7 +510,7 @@ export function adjustRenderTree(
   };
   const walk = (node: ModRenderNode): ModRenderNode => {
     if (typeof node === 'string') return text(node);
-    if (node.type === 'engine') return node;
+    if (node.type === 'engine' || node.type === 'Progress') return node;
     let props = node.props;
     let hover = node.hover;
     if (node.type === 'Box' && props) {

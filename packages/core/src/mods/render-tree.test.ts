@@ -37,6 +37,27 @@ describe('validateRenderTree', () => {
     ).not.toThrow();
   });
 
+  it('accepts the props and elements Claude Code 2.1.332 added', () => {
+    expect(() =>
+      validateRenderTree(
+        box({ overflowX: 'scroll', mono: true }, [
+          text(['a\nb\nc'], { maxLines: 2, wrap: 'clip' }),
+          {
+            type: 'Progress',
+            props: {
+              label: 'Indexing',
+              value: 3,
+              max: 10,
+              valueText: '3 of 10',
+              color: 'success',
+            },
+          },
+          { type: 'Progress', props: { label: 'Bytes', value: 4e5, max: 1e7 } },
+        ]),
+      ),
+    ).not.toThrow();
+  });
+
   it.each([
     ['a root string', 'hello', 'the root must be an element'],
     ['a root array', [box()], 'the root must be an element'],
@@ -130,6 +151,39 @@ describe('validateRenderTree', () => {
       'fields beside props and children',
       { type: 'Box', press: { plugin: 'x', handle: 1 } },
       'Box holds fields other than props and children',
+    ],
+    [
+      'an anchor outside BesidePrompt',
+      box({ position: 'absolute', anchor: 'above' }),
+      'Box prop "anchor" is not allowed',
+    ],
+    ['maxLines below one', text(['x'], { maxLines: 0 }), 'from 1'],
+    // Its rules for where a blurred Box may sit are not checked yet.
+    ['a blur', box({ blur: 1 }), 'Box prop "blur" is not allowed'],
+    [
+      'the engine node under a mono Box',
+      box({ mono: false }, [ENGINE_NODE]),
+      'engine node under a Box with prop "mono"',
+    ],
+    [
+      'a Progress with a blank label',
+      box({}, [{ type: 'Progress', props: { label: ' ' } }]),
+      'Progress prop "label" must not be blank',
+    ],
+    [
+      'a Progress with no label',
+      box({}, [{ type: 'Progress', props: { value: 1 } }]),
+      'Progress prop "label" is missing',
+    ],
+    [
+      'a Progress with children',
+      box({}, [{ type: 'Progress', props: { label: 'x' }, children: ['y'] }]),
+      'Progress holds fields other than props',
+    ],
+    [
+      'a Progress inside a Text',
+      text([{ type: 'Progress', props: { label: 'x' } }]),
+      'Progress inside an inline element',
     ],
   ])('refuses %s', (_case, tree, reason) => {
     expect(() => validateRenderTree(tree)).toThrow(reason);
