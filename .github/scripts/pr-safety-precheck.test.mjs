@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { assessPullRequestSafety } from './pr-safety-precheck.mjs';
 
@@ -500,6 +505,31 @@ for (const [label, payload, code] of [
     'ambient_credential:credential_file',
   ],
   [
+    'double-quoted relative credential file',
+    'cat ".credentials"',
+    'ambient_credential:credential_file',
+  ],
+  [
+    'single-quoted relative credential file',
+    "cat '.credentials'",
+    'ambient_credential:credential_file',
+  ],
+  [
+    'env behind a long shell flag',
+    'bash --norc -c "env"',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'set behind short shell flags',
+    'bash -eu -c "set"',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'per-task process environment',
+    'cat /proc/self/task/9/environ',
+    'ambient_credential:proc_environ',
+  ],
+  [
     'aws credential file',
     'cat ~/.aws/credentials',
     'ambient_credential:credential_file',
@@ -534,9 +564,18 @@ for (const [label, payload] of [
   ['declare that assigns one variable', 'declare -x FOO=bar'],
   ['shell -c running an ordinary command', 'bash -c "npm test"'],
   ['property access named credentials', 'const x = obj.credentials;'],
+  ['optional chaining named credentials', 'const x = a?.credentials;'],
+  [
+    'parenthesized property access named credentials',
+    'const z = (await client).credentials;',
+  ],
   ['export that assigns one variable', 'export FOO=bar'],
   ['declare with a non-printing flag', 'declare -i n=5'],
   ['typeset with a non-printing flag', 'typeset -i n=5'],
+  ['shell -c wrapping an option string', 'sh -c "set -euo pipefail; make"'],
+  ['shell -c wrapping an export', 'bash -c "export FOO=bar; make"'],
+  ['shell -c wrapping a declare', 'bash -c "declare -A m=(); run"'],
+  ['shell -c wrapping an env prefix', 'bash -c "env FOO=bar npm test"'],
 ]) {
   test(`does not gate an ordinary form: ${label}`, () => {
     const result = assessPullRequestSafety({
@@ -636,4 +675,127 @@ test('leaves a truncated diff to trusted authors', () => {
 
   assert.equal(result.decision, 'allow_triage');
   assert.deepEqual(result.reason_codes, []);
+});
+
+// The cases above call the assessor directly, so they cannot see a flag whose
+// spelling drifted between the workflow and the CLI: renaming either flag left
+// the whole suite green while silently disabling a fail-closed arm. These drive
+// the real CLI, so the argument names are part of the contract under test.
+const cliPath = fileURLToPath(
+  new URL('./pr-safety-precheck.mjs', import.meta.url),
+);
+
+function runCli(flags) {
+  const dir = mkdtempSync(join(tmpdir(), 'precheck-cli-'));
+  try {
+    const prPath = join(dir, 'pr.json');
+    const diffPath = join(dir, 'pr.diff');
+    writeFileSync(
+      prPath,
+      JSON.stringify({ headRefOid: 'abc123', title: 'docs: n', body: '' }),
+    );
+    writeFileSync(diffPath, diffFor('docs/note.md', 'Some prose.'));
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        cliPath,
+        '--pr',
+        prPath,
+        '--diff',
+        diffPath,
+        '--output',
+        join(dir, 'gh-output'),
+        ...flags,
+      ],
+      { encoding: 'utf8' },
+    );
+    return JSON.parse(stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('CLI honours --diff-truncated', () => {
+  const result = runCli([
+    '--trusted-author',
+    'false',
+    '--diff-truncated',
+    'true',
+  ]);
+
+  assert.equal(result.decision, 'manual_required');
+  assert.deepEqual(result.reason_codes, ['input:diff_truncated']);
+});
+
+test('CLI honours --metadata-unavailable', () => {
+  const result = runCli([
+    '--trusted-author',
+    'false',
+    '--metadata-unavailable',
+    'true',
+  ]);
+
+  assert.equal(result.decision, 'manual_required');
+  assert.deepEqual(result.reason_codes, ['input:metadata_unavailable']);
+});
+
+test('CLI admits an ordinary PR when both fail-closed flags are false', () => {
+  const result = runCli([
+    '--trusted-author',
+    'false',
+    '--diff-truncated',
+    'false',
+    '--metadata-unavailable',
+    'false',
+  ]);
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
+});
+
+test('CLI keeps the trusted-author short circuit ahead of both flags', () => {
+  const result = runCli([
+    '--trusted-author',
+    'true',
+    '--diff-truncated',
+    'true',
+    '--metadata-unavailable',
+    'true',
+  ]);
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
+});
+
+// Pinning the CLI alone is half a contract: renaming the flag in the workflow
+// would pass an argument the CLI ignores, and the fail-closed arm would go dark
+// with every suite green. Derive the names from the CLI source and require the
+// workflow to pass each one from the collect step's matching output.
+test('workflow passes every fail-closed flag the CLI reads', () => {
+  const cliSource = readFileSync(cliPath, 'utf8');
+  const workflow = readFileSync(
+    fileURLToPath(
+      new URL('../workflows/qwen-pr-safety-precheck.yml', import.meta.url),
+    ),
+    'utf8',
+  );
+  const flags = [...cliSource.matchAll(/args\['([\w-]+)'\]/g)].map((m) => m[1]);
+
+  assert.ok(flags.includes('diff-truncated'));
+  assert.ok(flags.includes('metadata-unavailable'));
+
+  for (const flag of flags) {
+    // The author permission comes from its own step, not from collect.
+    if (flag === 'trusted-author') continue;
+    const output = flag.replace(/-/g, '_');
+    assert.ok(workflow.includes(`--${flag} "`), `workflow must pass --${flag}`);
+    assert.ok(
+      workflow.includes(`steps.collect.outputs.${output}`),
+      `workflow must read --${flag} from steps.collect.outputs.${output}`,
+    );
+    assert.ok(
+      workflow.includes(`echo "${output}=`),
+      `collect step must write the ${output} output`,
+    );
+  }
 });

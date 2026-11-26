@@ -62,25 +62,28 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   ],
   [
     'ambient_credential:proc_environ',
-    /\/proc\/(?:self|thread-self|\d+|\$\$|\$\{?\w+\}?)\/environ/,
+    /\/proc\/(?:self|thread-self|\d+|\$\$|\$\{?\w+\}?)(?:\/task\/(?:\d+|\$\$|\$\{?\w+\}?))?\/environ/,
   ],
   // Every shape that prints the whole environment, not just `env`. `set`,
   // `declare -x` and `env -0` dump the same variables, and a shell `-c` wrapper
-  // hides the command from the command-position anchor. Each dump form keeps
-  // the terminator lookahead so an option-taking prefix (`set -euo pipefail`,
-  // `env FOO=bar cmd`, `declare -x FOO=bar`) stays ungated.
+  // hides the command from the command-position anchor. BOTH branches carry the
+  // same terminator lookahead — the wrapper counts its closing quote as a
+  // terminator — so an option-taking prefix (`set -euo pipefail`,
+  // `env FOO=bar cmd`, `declare -x FOO=bar`) stays ungated either way, including
+  // inside `sh -c "set -euo pipefail; make"`. Flags may precede `-c`.
   [
     'ambient_credential:env_dump',
-    /(?:^|[;&|(`]|\$\()\s*(?:env(?:\s+(?:-0|--null))?(?=\s*(?:\||;|&|>|$))|printenv\b|export(?:\s+-p)?(?=\s*(?:\||;|&|>|$))|set(?=\s*(?:\||;|&|>|$))|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?(?=\s*(?:\||;|&|>|$)))|\b(?:bash|sh|zsh|dash)\s+-[a-z]*c[a-z]*\s*["']\s*(?:env|printenv|set|export|declare|typeset)\b/m,
+    /(?:^|[;&|(`]|\$\()\s*(?:env(?:\s+(?:-0|--null))?(?=\s*(?:\||;|&|>|$))|printenv\b|export(?:\s+-p)?(?=\s*(?:\||;|&|>|$))|set(?=\s*(?:\||;|&|>|$))|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?(?=\s*(?:\||;|&|>|$)))|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*\s+)*-[a-z]*c[a-z]*\s*["']\s*(?:env(?:\s+(?:-0|--null))?|printenv\b|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$))/m,
   ],
-  // `.credentials` needs a boundary that still admits a bare relative read
-  // (`cat .credentials`): whitespace counts, a preceding dot does not. Without
-  // any boundary the pattern also matches the object spread
-  // `{ ...credentials }`, which copies an in-memory object and appears in
-  // ordinary product code.
+  // `.credentials` needs a boundary that admits every spelling of a file read
+  // — bare, quoted, or after a separator — while refusing property access. The
+  // allowed set is enumerated rather than negated: a negated class also admits
+  // `?` and `)`, which gated ordinary TypeScript such as `a?.credentials` and
+  // `(await client).credentials`. A dot is excluded so `{ ...credentials }`
+  // stays ungated.
   [
     'ambient_credential:credential_file',
-    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s])\.credentials\b/,
+    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'])\.credentials\b/,
   ],
 ];
 

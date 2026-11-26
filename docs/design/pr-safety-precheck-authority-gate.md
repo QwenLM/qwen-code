@@ -117,24 +117,33 @@ added as `.github/workflows/evil<TAB>.yml` returned `allow_triage`.
 
 The source itself is the signal; no sink pairing is required.
 
-| Reason code                          | Matches                                                                                                                                                                                                                                                                                                    |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ambient_credential:cloud_metadata`  | `100.100.100.200`, `169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.goog`                                                                                                                                                                                        |
-| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>/environ`                                                                                                                                                                                                                                                         |
-| `ambient_credential:env_dump`        | `env`, `env -0`, `env --null`, bare `set`, bare `export`, `export -p`, bare `declare`/`typeset` and their `-x`/`-p` forms, in command position followed by a pipe, redirect, separator or end of line; `printenv`; a dump command inside `bash/sh/zsh/dash -c '…'`, including combined flags such as `-lc` |
-| `ambient_credential:credential_file` | `.aws/credentials`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, and `.credentials` **only at a path boundary**                                                                                                                                     |
+| Reason code                          | Matches                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ambient_credential:cloud_metadata`  | `100.100.100.200`, `169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.goog`                                                                                                                                                                                                                                  |
+| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>[/task/<tid>]/environ`                                                                                                                                                                                                                                                                                      |
+| `ambient_credential:env_dump`        | `env`, `env -0`, `env --null`, bare `set`, bare `export`, `export -p`, bare `declare`/`typeset` and their `-x`/`-p` forms, in command position followed by a pipe, redirect, separator or end of line; `printenv`; a dump command inside `bash/sh/zsh/dash -c '…'`, including combined flags such as `-lc` and flags preceding `-c` such as `--norc` |
+| `ambient_credential:credential_file` | `.aws/credentials`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, and `.credentials` **only at a path boundary**                                                                                                                                                                               |
 
 These run over the PR title, body and added lines, so an instruction carried
 only by the body is caught even when the diff is a single harmless docs file.
 
 Two boundaries keep the rules from gating ordinary work. Every dump form keeps
-the terminator lookahead, so an option-taking prefix — `set -euo pipefail`,
-`env FOO=bar cmd`, `env -i FOO=bar node x.mjs`, `declare -x FOO=bar` — stays
-ungated. And `.credentials` requires a preceding path separator or line start:
-without that boundary the pattern also matched the object spread
-`{ ...credentials }`, which copies an in-memory object and appears in ordinary
-product code (`packages/channels/msteams/src/ingress.ts`). Both were measured as
-real false positives before the fix.
+the terminator lookahead **in both branches** — the bare command-position branch
+and the shell `-c` wrapper, which counts its closing quote as a terminator — so
+an option-taking prefix stays ungated either way: `set -euo pipefail`,
+`env FOO=bar cmd`, `env -i FOO=bar node x.mjs`, `declare -x FOO=bar`, and the same
+forms wrapped as `sh -c "set -euo pipefail; make"`. An earlier revision gave the
+wrapper no terminator test, which gated every one of those wrapped forms; that
+is closed.
+
+And `.credentials` requires a preceding path separator, whitespace, quote, or
+line start. The allowed set is **enumerated, not negated**: a negated class such
+as `[^.\w]` also admits `?` and `)`, which gated ordinary TypeScript like
+`a?.credentials` and `(await client).credentials`. Without any boundary the
+pattern also matched the object spread `{ ...credentials }`, which copies an
+in-memory object and appears in ordinary product code
+(`packages/channels/msteams/src/ingress.ts`). Each of these was measured as a
+real false positive before its fix.
 
 ### 3. Truncation fails closed
 
@@ -260,15 +269,19 @@ content rules, as before. Only a missing head SHA still fails closed for them.
 
 ## Verified results (2026-11-26)
 
-- Unit suite: 91 passed, 0 failed.
+- Unit suite: 107 passed, 0 failed. Four cases drive the real CLI so the flag
+  spellings are under test, and one derives the flag names from the CLI source
+  and requires the workflow to pass each one from the collect step's matching
+  output. Renaming a flag on either side now reds the suite; before these cases
+  it stayed green while a fail-closed arm went dark.
 - #18362: `protected_path:authority_surface`,
   `ambient_credential:cloud_metadata`, `ambient_credential:env_dump`.
 - #18364: `ambient_credential:cloud_metadata`,
   `ambient_credential:proc_environ`.
-- Mutation witness: 21 arms, all killed, none skipped. Five arms widen or
+- Mutation witness: 28 arms, all killed, none skipped. Nine arms widen or
   narrow a rule instead of removing it, so both the false-positive and the
-  false-negative direction are pinned; two arms revert the whole file, to the
-  first hardening round and to the pre-PR module.
+  false-negative direction are pinned; two arms rename a CLI flag; two arms
+  revert the whole file, to the first hardening round and to the pre-PR module.
 - Workflow end-to-end table: 9 cases passed. It executes the real collect and
   assess `run:` blocks under their own bash contract with a stubbed `gh`, and
   asserts the final decision rather than an intermediate flag. Covers
@@ -300,6 +313,20 @@ accepted false positive rather than narrowed. A further sibling sweep closed
 bare `export`, bare `declare`/`typeset` and their `-p` form, and
 `/proc/thread-self/environ`, each of which dumps the same environment as a form
 already covered.
+
+A third round followed review of the second commit and closed five more items:
+the quoted relative `.credentials` read that the second round's boundary had
+dropped; the shell `-c` wrapper's missing terminator test, which gated ordinary
+`sh -c "set -euo pipefail; make"`; flags preceding `-c` such as `--norc`;
+`/proc/self/task/<tid>/environ`; and the unpinned CLI flags, now covered by
+committed CLI cases plus a two-sided workflow contract case. An adversarial pass
+over that round found one more problem in its own fix: expressing the
+`.credentials` boundary as a negated class `[^.\w]` admitted `?` and `)`, gating
+ordinary TypeScript optional chaining and parenthesized property access. The
+allowed set is now enumerated, and both false-positive shapes are pinned.
+
+One enumerated-list gap is disclosed rather than closed: a shell flag that takes
+a separate argument, as in `bash -o posix -c printenv`, is still admitted.
 
 ## Open questions
 

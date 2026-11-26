@@ -66,16 +66,18 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 **源本身就是信号**，不需要与 sink 配对。
 
-| Reason code                          | 匹配                                                                                                                                                                                                                                               |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ambient_credential:cloud_metadata`  | `100.100.100.200`、`169.254.169.254`、`169.254.170.2`、`fd00:ec2::254`、`metadata.google.internal`、`metadata.goog`                                                                                                                                |
-| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>/environ`                                                                                                                                                                                                 |
-| `ambient_credential:env_dump`        | 处于命令位置、后接管道／重定向／分隔符／行尾的 `env`、`env -0`、`env --null`、裸 `set`、裸 `export`、`export -p`、裸 `declare`/`typeset` 及其 `-x`/`-p` 形态；`printenv`；以及包在 `bash/sh/zsh/dash -c '…'` 里的导出命令（含 `-lc` 这类组合旗标） |
-| `ambient_credential:credential_file` | `.aws/credentials`、`.docker/config.json`、`.config/gcloud`、`.kube/config`、`.ssh/id_*`、`.netrc`、`.git-credentials`，以及**仅出现在路径边界处**的 `.credentials`                                                                                |
+| Reason code                          | 匹配                                                                                                                                                                                                                                                                                       |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ambient_credential:cloud_metadata`  | `100.100.100.200`、`169.254.169.254`、`169.254.170.2`、`fd00:ec2::254`、`metadata.google.internal`、`metadata.goog`                                                                                                                                                                        |
+| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>[/task/<tid>]/environ`                                                                                                                                                                                                                            |
+| `ambient_credential:env_dump`        | 处于命令位置、后接管道／重定向／分隔符／行尾的 `env`、`env -0`、`env --null`、裸 `set`、裸 `export`、`export -p`、裸 `declare`/`typeset` 及其 `-x`/`-p` 形态；`printenv`；以及包在 `bash/sh/zsh/dash -c '…'` 里的导出命令（含 `-lc` 这类组合旗标，以及 `--norc` 这类位于 `-c` 之前的旗标） |
+| `ambient_credential:credential_file` | `.aws/credentials`、`.docker/config.json`、`.config/gcloud`、`.kube/config`、`.ssh/id_*`、`.netrc`、`.git-credentials`，以及**仅出现在路径边界处**的 `.credentials`                                                                                                                        |
 
 这些规则作用于 PR 标题、正文与新增行，因此即使 diff 只是一个无害的 docs 文件，仅由正文承载的指令也会被抓到。
 
-两条边界防止规则误拦正常工作。每种导出形态都保留终止符前瞻，因此带选项的前缀——`set -euo pipefail`、`env FOO=bar cmd`、`env -i FOO=bar node x.mjs`、`declare -x FOO=bar`——不被扣住。而 `.credentials` 要求前面是路径分隔符或行首：没有该边界时，它也会命中对象展开 `{ ...credentials }`，那只是复制内存对象、且出现在普通产品代码里（`packages/channels/msteams/src/ingress.ts`）。两者在修复前都实测为真实误报。
+两条边界防止规则误拦正常工作。每种导出形态在**两个分支里都**保留终止符前瞻——裸的命令位置分支，以及 shell `-c` 包装分支（它把闭合引号也算作终止符）——因此带选项的前缀两种写法都不被扣住：`set -euo pipefail`、`env FOO=bar cmd`、`env -i FOO=bar node x.mjs`、`declare -x FOO=bar`，以及被包成 `sh -c "set -euo pipefail; make"` 的同样形态。早期版本没给包装分支终止符判据，导致上述每一种被包装后都被扣住；该问题已关闭。
+
+而 `.credentials` 要求前面是路径分隔符、空白、引号或行首。允许集合是**显式枚举而非取反**：像 `[^.\w]` 这样的否定类还会放进 `?` 与 `)`，从而扣住 `a?.credentials`、`(await client).credentials` 这类普通 TypeScript。完全没有边界时，它也会命中对象展开 `{ ...credentials }`，那只是复制内存对象、且出现在普通产品代码里（`packages/channels/msteams/src/ingress.ts`）。以上每一处在修复前都实测为真实误报。
 
 ### 3. 截断即 fail closed
 
@@ -133,10 +135,10 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 ## 已验证结果（2026-11-26）
 
-- 单元套件：91 通过、0 失败。
+- 单元套件：107 通过、0 失败。其中四条驱动**真实 CLI**，使旗标拼写进入被测契约；另有一条从 CLI 源码推导旗标名，并要求 workflow 逐个从 collect 步骤的对应 output 传入。现在任一侧改名都会让套件转红；在加这些用例之前，改名后套件仍全绿而一条 fail-closed 臂已失效。
 - #18362：`protected_path:authority_surface`、`ambient_credential:cloud_metadata`、`ambient_credential:env_dump`。
 - #18364：`ambient_credential:cloud_metadata`、`ambient_credential:proc_environ`。
-- 变异见证：21 个臂，全部击杀，无跳过。其中五个臂是把规则**放宽或收窄**而非移除，因此误报与漏报两个方向都被钉住；另有两个臂做整文件回退，分别回到第一轮加固与 PR 前的模块。
+- 变异见证：28 个臂，全部击杀，无跳过。其中九个臂是把规则**放宽或收窄**而非移除，因此误报与漏报两个方向都被钉住；两个臂改 CLI 旗标拼写；另有两个臂做整文件回退，分别回到第一轮加固与 PR 前的模块。
 - workflow 端到端决策表：9 个用例通过。它用打桩 `gh`、在步骤自身的 bash 契约下执行**真实的** collect 与 assess `run:` 块，断言最终决策而非中间旗标。覆盖恰好等于上限、上限加一、diff 调用失败、可信作者，以及「敌意正文 + 元数据调用成功／失败」两臂。
 - `prettier --check`、`eslint`、`actionlint`：干净。`eslint` 与 `actionlint` 均先用一个故意非法的输入证明过是活的。
 - `classify-profile.test.mjs`：27 通过、0 失败。
@@ -145,6 +147,10 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 三条既有用例原先断言「放行不可信作者对 `.github` 与 `scripts/` 的改动」。它们被**改靶**到新策略而非删除；另有一条夹具被修正为携带真实 diff 头，使其真正走到路径规则而不是空过。
 
 第一个提交经评审后进行了第二轮：关闭四条被报告的缺口（缺失的导出形态、无锚点的 `.credentials`、两个潜在指令槽、元数据 fail-open），并撤回上文那条被纠正的上下文加载理由。随后对该轮做对抗审计，又在**该轮自身的修复里**发现三个问题，现均已关闭并钉住：组合 shell 旗标（`bash -lc "env"`）仍被放行；新的 `.credentials` 边界引入了**回归**——不再匹配相对路径的 `cat .credentials`；以及非 shell 代码里单独的 `set` 标识符会被扣住，这一条记录为「接受的误报」而非去收窄。随后一轮同族清扫又关闭了裸 `export`、裸 `declare`/`typeset` 及其 `-p` 形态、以及 `/proc/thread-self/environ`——它们导出的环境与已覆盖形态完全相同。
+
+第二个提交经评审后进行了第三轮，又关闭五项：第二轮边界丢掉的**带引号相对路径** `.credentials` 读取；shell `-c` 包装分支缺终止符判据（它扣住了普通的 `sh -c "set -euo pipefail; make"`）；位于 `-c` 之前的旗标如 `--norc`；`/proc/self/task/<tid>/environ`；以及未被钉住的 CLI 旗标——现由已提交的 CLI 用例加一条双向 workflow 契约用例覆盖。对该轮的对抗审计又在**其自身修复里**发现一个问题：把 `.credentials` 边界写成否定类 `[^.\w]` 会放进 `?` 与 `)`，从而扣住普通 TypeScript 的可选链与带括号属性访问。允许集合现已改为显式枚举，两种误报形态都被钉住。
+
+有一处枚举清单的缺口选择披露而非关闭：带独立参数的 shell 旗标，如 `bash -o posix -c printenv`，仍被放行。
 
 ## 未决问题
 
