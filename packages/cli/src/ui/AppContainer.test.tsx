@@ -5345,7 +5345,11 @@ describe('AppContainer State Management', () => {
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: mockPopAllMessages,
-        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        drainQueue: vi
+          .fn()
+          .mockReturnValue([
+            { text: 'queued follow-up', key: 'queued', deferUntilIdle: false },
+          ]),
         popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
         removeGoalTurns: vi.fn().mockReturnValue([]),
       });
@@ -5465,7 +5469,11 @@ describe('AppContainer State Management', () => {
         clearQueue: mockClearQueue,
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: mockPopAllMessages,
-        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        drainQueue: vi
+          .fn()
+          .mockReturnValue([
+            { text: 'queued follow-up', key: 'queued', deferUntilIdle: false },
+          ]),
         popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
       });
 
@@ -6930,7 +6938,11 @@ describe('AppContainer State Management', () => {
         popAllMessages: vi
           .fn()
           .mockReturnValue({ modelText: 'queued follow-up' }),
-        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        drainQueue: vi
+          .fn()
+          .mockReturnValue([
+            { text: 'queued follow-up', key: 'queued', deferUntilIdle: false },
+          ]),
         popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
       });
 
@@ -10551,8 +10563,10 @@ describe('AppContainer State Management', () => {
 
       // Seed 4, not the record count 3: the next pre-increment mint is
       // then `${sessionId}########4`, above every id the transcript wears.
+      // The visible Prompts statistic seeds from the user-turn count (3), not
+      // the mint seed (S1).
       await vi.waitFor(() => {
-        expect(seedPromptCount).toHaveBeenCalledWith(4);
+        expect(seedPromptCount).toHaveBeenCalledWith(4, 3);
       });
     });
 

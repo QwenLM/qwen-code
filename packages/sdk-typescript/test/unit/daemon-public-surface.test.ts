@@ -117,11 +117,18 @@ import type {
   DaemonSessionLiveStateBatchSnapshot,
   DaemonSessionLiveStateBatchError,
   DaemonSessionLiveStateBatchResult,
+  DaemonRestartRecoveryBatchRequest,
+  DaemonRestartRecoveryBatchResult,
+  DaemonRestartRecoveryContinueRequest,
+  DaemonRestartRecoveryContinueResult,
   DaemonSessionTurnIndexEntry,
   DaemonSessionTurnIndexPage,
   DaemonSessionTurnIndexPageOptions,
   DaemonWorkspaceSessionLiveState,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
+  DaemonModLogEvent,
   DaemonSkillBatchToggleError,
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
@@ -516,6 +523,9 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // assertion a future barrel reshuffle could silently drop the
     // result type SDK consumers need to type `client.recapSession`.
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
+    expectTypeOf<DaemonModRow>().not.toBeNever();
+    expectTypeOf<DaemonModRowAnswer>().not.toBeNever();
+    expectTypeOf<DaemonModLogEvent>().not.toBeNever();
     expect(typeof Public.DaemonClient.prototype.setUserSkillsActivation).toBe(
       'function',
     );
@@ -839,6 +849,36 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     >();
   });
 
+  it('exposes the restart recovery batch surface', () => {
+    expect(typeof Public.DaemonClient.prototype.getRestartRecoveries).toBe(
+      'function',
+    );
+    expect(typeof Public.DaemonClient.prototype.continueRestartRecoveries).toBe(
+      'function',
+    );
+    expectTypeOf<DaemonRestartRecoveryBatchRequest>().toEqualTypeOf<{
+      workspaces: string[];
+      sinceMs?: number;
+    }>();
+    expectTypeOf<DaemonRestartRecoveryContinueRequest>().toEqualTypeOf<{
+      sessions: Array<{ workspace: string; sessionId: string }>;
+      confirmToolTurn?: boolean;
+    }>();
+    expectTypeOf<DaemonRestartRecoveryContinueResult['status']>().toEqualTypeOf<
+      | 'accepted'
+      | 'not_continuable'
+      | 'confirmation_required'
+      | 'rejected'
+      | 'error'
+    >();
+    expectTypeOf<DaemonClient['getRestartRecoveries']>().toEqualTypeOf<
+      (
+        request: DaemonRestartRecoveryBatchRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+      ) => Promise<DaemonRestartRecoveryBatchResult>
+    >();
+  });
+
   it('exposes the PR 21 auth device-flow surface at the public entry', () => {
     // PR #4255 fold-in 9 review thread #11: the auth surface had
     // been re-exported from `src/daemon/index.ts` but never from
@@ -1050,4 +1090,18 @@ describe('task executionMode guard public surface', () => {
     expect(isTaskExecutionMode(42)).toBe(false);
     expect(isTaskExecutionMode({})).toBe(false);
   });
+});
+
+it('mirrors runtime.loadAdmission as an additive optional member', () => {
+  expectTypeOf<DaemonStatusReport['runtime']['loadAdmission']>().toEqualTypeOf<
+    | {
+        enabled: boolean;
+        overloaded: boolean;
+        reason: string | null;
+        loadRatio: number;
+        eventLoopLagP99Ms: number;
+        sampledAtMs: number;
+      }
+    | undefined
+  >();
 });

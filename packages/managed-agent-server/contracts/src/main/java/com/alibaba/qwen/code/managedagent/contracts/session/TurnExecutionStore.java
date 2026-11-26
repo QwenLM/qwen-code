@@ -39,6 +39,8 @@ public interface TurnExecutionStore {
 
     String HARNESS_RECOVERY_BLOCKED = "hosted_harness_recovery_blocked";
 
+    String HARNESS_ACTION_PARKED = "hosted_action_parked";
+
     public List<DispatchTarget> findDispatchable(long now, int limit);
 
     /**
@@ -77,6 +79,14 @@ public interface TurnExecutionStore {
      */
     public boolean parkTurnForRuntimeRecovery(String tenantId, String sessionId,
             String turnId, String owner, String message, long retryAfter);
+
+    /**
+     * Parks a running Turn only against its current Harness seal certificate.
+     * The certificate and all admission guards are checked under the shared
+     * Session-root/head/Turn lock order; no retry budget is consumed.
+     */
+    public boolean parkTurnForAction(String tenantId, String sessionId,
+            String turnId, String owner);
 
     public boolean markTurnFailureRecovery(String tenantId, String sessionId,
             String turnId, String owner, String message);

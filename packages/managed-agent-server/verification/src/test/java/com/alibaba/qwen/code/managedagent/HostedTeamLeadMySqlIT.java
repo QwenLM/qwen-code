@@ -85,7 +85,7 @@ class HostedTeamLeadMySqlIT {
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
-    private final String tenant = "h4eb1-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     // WAIT replies after release; HOLD ends after cancellation without replying.
@@ -595,7 +595,7 @@ class HostedTeamLeadMySqlIT {
     private List<Map<String, Object>> rows(String session, String domain) {
         return jdbc.queryForList("SELECT r.record_id, r.revision, CAST(res.inline_bytes AS CHAR) AS body"
                 + " FROM ma_session_record r JOIN ma_resource res"
-                + " ON res.session_scope_key = r.session_scope_key AND res.resource_id = r.record_resource_id"
+                + " ON res.tenant_id = r.tenant_id AND res.session_id = r.session_id AND res.resource_id = r.record_resource_id"
                 + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.domain = ? ORDER BY r.record_id",
                 tenant, session, domain);
     }

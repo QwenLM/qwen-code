@@ -1,11 +1,14 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 
@@ -23,7 +26,20 @@ final class ManagedReceipts {
     }
 
     static String scope(String tenant, String scopeId) {
-        return ManagedSchemaKeys.key(tenant, scopeId);
+        return ManagedIdentityRefs.receiptScopeRef(tenant, scopeId);
+    }
+
+    /** Raw actor bytes bind into the VARCHAR actor column as text; empty means unattributed. */
+    private static String actorText(byte[] actor) {
+        if (actor == null) {
+            return null;
+        }
+        return actor.length == 0
+                ? "" : new String(actor, StandardCharsets.UTF_8);
+    }
+
+    private static byte[] actorBytes(String actor) {
+        return actor == null ? null : actor.getBytes(StandardCharsets.UTF_8);
     }
 
     static Receipt find(
@@ -38,8 +54,8 @@ final class ManagedReceipts {
                 jdbc.query(
                         "SELECT tenant_id, scope_id, idempotency_key, request_digest, session_id,"
                             + " turn_id, state, session_status_before, actor_id, is_workspace_bound, gmt_create,"
-                            + " gmt_modified, operation, result_json, result_operation_key FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
-                            + " AND tenant_key = ? AND scope_key = ?"
+                            + " gmt_modified, operation, result_json, result_operation_ref FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
+                            + " AND tenant_id = ? AND scope_ref = ?"
                                 + (lock ? " FOR UPDATE" : ""),
                         (row, index) -> new Receipt(
                                 ManagedSchemaRows.identity(row, "tenant_id"),
@@ -50,16 +66,16 @@ final class ManagedReceipts {
                                 ManagedSchemaRows.identity(row, "turn_id"),
                                 row.getString("state"),
                                 row.getString("session_status_before"),
-                                row.getBytes("actor_id"),
+                                actorBytes(row.getString("actor_id")),
                                 row.getObject("is_workspace_bound", Boolean.class),
                                 row.getLong("gmt_create"), row.getLong("gmt_modified"),
                                 row.getString("operation"), row.getString("result_json"),
-                                row.getString("result_operation_key")),
+                                ManagedSchemaRows.identity(row, "result_operation_ref")),
                         ManagedSchemaKeys.receiptKey(
                                 namespace, tenant, scopeKind, scopeId, idempotencyKey),
                         namespace.name(),
-                        ManagedSchemaKeys.key(tenant),
-                        scope(tenant, scopeId));
+                        tenant,
+                        ManagedSchemaKeys.identity(scope(tenant, scopeId)));
         if (rows.isEmpty()) {
             return null;
         }
@@ -88,25 +104,25 @@ final class ManagedReceipts {
             String previousStatus,
             Boolean workspaceBound,
             long now) {
+        BrokerValues.requireIdempotencyKey(key, "idempotencyKey");
         jdbc.update(
-                "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
-                    + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest,"
+                "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_id,"
+                    + " scope_kind, scope_ref, scope_id, idempotency_key, idempotency_digest,"
                     + " request_digest, operation, actor_id, session_id, turn_id, state,"
                     + " session_status_before, is_workspace_bound, gmt_create, gmt_modified) VALUES (?,"
-                    + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ManagedSchemaKeys.receiptKey(namespace, tenant, scopeKind, scopeId, key),
                 namespace.name(),
-                ManagedSchemaKeys.key(tenant),
-                ManagedSchemaKeys.identity(tenant),
+                tenant,
                 scopeKind.name(),
-                scope(tenant, scopeId),
+                ManagedSchemaKeys.identity(scope(tenant, scopeId)),
                 ManagedSchemaKeys.identity(scopeId),
-                ManagedSchemaKeys.identity(key),
+                key,
                 ManagedSchemaKeys.key(key),
                 digest,
                 operation,
-                actor,
-                session == null ? null : ManagedSchemaKeys.identity(session),
+                actorText(actor),
+                session,
                 turn == null ? null : ManagedSchemaKeys.identity(turn),
                 state,
                 previousStatus,
@@ -177,10 +193,10 @@ final class ManagedReceipts {
     // A Turn input or cancel command names its durable operation (D7-1), so
     // a replay of the key resolves to that original operation.
     static void linkCommandOperation(
-            JdbcTemplate jdbc, String tenant, String operation, String key, String operationKey) {
+            JdbcTemplate jdbc, String tenant, String operation, String key, String operationRef) {
         jdbc.update(
-                "UPDATE ma_request_receipt SET result_operation_key = ? WHERE receipt_key = ?",
-                operationKey,
+                "UPDATE ma_request_receipt SET result_operation_ref = ? WHERE receipt_key = ?",
+                ManagedSchemaKeys.identity(operationRef),
                 commandKey(tenant, operation, key));
     }
 

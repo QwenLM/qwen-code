@@ -161,9 +161,7 @@ When the user wants to modify their configuration:
 2. **Ask which config level** to modify if not specified: user (`~/.qwen/settings.json`) or project (`.qwen/settings.json`)
 3. **Use `read_file`** to check the current content of the target settings file
 4. **Use `edit_file`** to apply the change with correct JSON syntax
-5. **After every configuration change**, you MUST remind the user:
-
-> **Note: Most configuration changes require restarting Qwen Code (`/exit` then re-launch) to take effect.** Only a few settings (like `permissions`) are picked up dynamically.
+5. **After every configuration change**, explain when the documented setting takes effect. For `mcpServers`, a running interactive session picks up edits automatically. Check `docs/features/mcp.md` for project approval and mode restrictions. For settings that require a restart, tell the user to exit with `/exit` and relaunch Qwen Code.
 
 ### Important Notes
 

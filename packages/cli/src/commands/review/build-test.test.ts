@@ -748,6 +748,14 @@ describe('runBuildTest', () => {
         'No npm package here to scope (no workspaces, and the root has no build/test ' +
         'script). Fall back to the build/test precedence in your brief — installing ' +
         'dependencies first — and give each command a deadline it can actually meet.',
+      executionBoundary: {
+        policy: 'off',
+        prTrust: 'local-owner',
+        executionClass: 'trusted-shared-kernel',
+        backend: 'direct',
+        escalationReasons: [],
+        teardownStatus: 'not-applicable',
+      },
     });
   });
 
@@ -793,6 +801,14 @@ describe('runBuildTest', () => {
         'No supported npm project here to scope. Fall back to the ' +
         'build/test precedence in your brief — installing dependencies first — ' +
         'and give each command a deadline it can actually meet.',
+      executionBoundary: {
+        policy: 'off',
+        prTrust: 'local-owner',
+        executionClass: 'trusted-shared-kernel',
+        backend: 'direct',
+        escalationReasons: [],
+        teardownStatus: 'not-applicable',
+      },
     });
   });
 
@@ -4009,6 +4025,14 @@ describe('runBuildTest', () => {
         root,
         tree: { ino: st.ino, birth: Math.round(st.birthtimeMs) },
         plan: Math.round(statSync(planPath).mtimeMs),
+      },
+      executionBoundary: {
+        policy: 'off',
+        prTrust: 'local-owner',
+        executionClass: 'trusted-shared-kernel',
+        backend: 'direct',
+        escalationReasons: [],
+        teardownStatus: 'not-applicable',
       },
     });
     runSpy.mockRestore();

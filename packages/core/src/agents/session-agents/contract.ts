@@ -158,6 +158,18 @@ export interface AgentMentionRecordPayload {
   author?: SessionAgentAuthor;
   /** Why some addressed squads were not started (leader unavailable). */
   error?: string;
+  /**
+   * Set when the person sent this message to another session (`/send`)
+   * rather than to agents here: where it went.
+   */
+  sentTo?: SessionMessageTarget;
+}
+
+/** Another session a message in this one was sent to. */
+export interface SessionMessageTarget {
+  sessionId: string;
+  workspaceCwd: string;
+  title?: string;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -220,6 +232,8 @@ export interface QwenAgentMessageMeta {
   totalTokens?: number;
   mentionedAgentIds?: string[];
   mentionedSquadIds?: string[];
+  /** On an `agent_mention`: the other session the message was sent to. */
+  sentTo?: SessionMessageTarget;
   /** `no_action`: a squad leader's empty reply (a muted one-line row). */
   squadOutcome?: SessionSquadOutcome;
 }
