@@ -4414,6 +4414,78 @@ describe('ManagedSessionsPage', () => {
     ).toBeNull();
   });
 
+  it('disables an expired permission card with an expired status notice on mount and on live expiry', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    let currentPerm = {
+      ...pendingAction,
+      actionId: 'perm-expired-1',
+      sessionId: 's1',
+      expiresAt: Date.now() - 1,
+    };
+    const listPending = vi.fn(async () => [currentPerm]);
+    const respond = vi.fn(async () => undefined);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = () =>
+      container.querySelector('[data-testid="managed-approval"]')!;
+    const allowButton = () =>
+      [
+        ...card().querySelectorAll<HTMLButtonElement>(
+          '[data-testid="approval-overlay"] button',
+        ),
+      ].find((button) => button.textContent?.includes('Yes, allow once'))!;
+    expect(allowButton().disabled).toBe(true);
+    expect(
+      [...card().querySelectorAll('[role="status"]')].some((node) =>
+        node.textContent?.includes('Expired'),
+      ),
+    ).toBe(true);
+    await act(async () => {
+      allowButton().click();
+      await flush();
+    });
+    expect(respond).not.toHaveBeenCalled();
+
+    // Live expiry timer flips an open permission card to disabled + Expired status.
+    vi.useFakeTimers();
+    try {
+      currentPerm = {
+        ...pendingAction,
+        actionId: 'perm-live-expiring',
+        sessionId: 's2',
+        expiresAt: Date.now() + 250,
+      };
+      await render('s2');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(allowButton().disabled).toBe(false);
+      expect(
+        [...card().querySelectorAll('[role="status"]')].some((node) =>
+          node.textContent?.includes('Expired'),
+        ),
+      ).toBe(false);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(allowButton().disabled).toBe(true);
+      expect(
+        [...card().querySelectorAll('[role="status"]')].some((node) =>
+          node.textContent?.includes('Expired'),
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows a question without approval buttons and retains its answers until confirmed', async () => {
     vi.stubGlobal('crypto', webcrypto);
     mocks.client.getSession.mockImplementation(async (id: string) =>

@@ -1007,18 +1007,22 @@ function ManagedSessionsContent({
   );
   const questionAction =
     approvals.action?.kind === 'question' ? approvals.action : undefined;
-  const questionExpiresAt = questionAction?.expiresAt;
+  const activeActionExpiresAt = approvals.action?.expiresAt;
   const [expiredFor, setExpiredFor] = useState<number>();
-  const questionExpired =
-    questionExpiresAt !== undefined &&
-    (expiredFor === questionExpiresAt || Date.now() >= questionExpiresAt);
+  const actionExpired =
+    activeActionExpiresAt !== undefined &&
+    (expiredFor === activeActionExpiresAt ||
+      Date.now() >= activeActionExpiresAt);
   useEffect(() => {
-    if (questionExpiresAt === undefined) return;
-    const remaining = questionExpiresAt - Date.now();
+    if (activeActionExpiresAt === undefined) return;
+    const remaining = activeActionExpiresAt - Date.now();
     if (remaining <= 0 || remaining > 2_147_483_647) return;
-    const timer = setTimeout(() => setExpiredFor(questionExpiresAt), remaining);
+    const timer = setTimeout(
+      () => setExpiredFor(activeActionExpiresAt),
+      remaining,
+    );
     return () => clearTimeout(timer);
-  }, [questionExpiresAt]);
+  }, [activeActionExpiresAt]);
   const questionTooLarge = useMemo(() => {
     if (!questionAction) return false;
     return exceedsManagedQuestionAnswerLimits(
@@ -1060,10 +1064,6 @@ function ManagedSessionsContent({
         detail.summary?.phase ?? '',
       ),
   );
-  const activePendingActions = useMemo(
-    () => (approvals.action ? [approvals.action] : []),
-    [approvals.action],
-  );
   const chatController = useManagedChatControllerFromState({
     provider,
     clientId,
@@ -1073,7 +1073,7 @@ function ManagedSessionsContent({
     turnCancel,
     cancelObserverRef,
     messages,
-    pendingActions: activePendingActions,
+    selectedAction: approvals.action,
     retainExpiredActions: true,
     canRespondAction: () => !compression.isBlocked(),
     canCancel: cancellationEnabled && !busy,
@@ -2788,15 +2788,18 @@ function ManagedSessionsContent({
                 }
                 decisionFooter={
                   <>
-                    {approvals.action?.kind === 'question' &&
-                      questionExpired && (
-                        <p
-                          role="status"
-                          className="mt-2 text-sm text-muted-foreground"
-                        >
-                          {t('managed.question.expired')}
-                        </p>
-                      )}
+                    {actionExpired && (
+                      <p
+                        role="status"
+                        className="mt-2 text-sm text-muted-foreground"
+                      >
+                        {t(
+                          approvals.action?.kind === 'question'
+                            ? 'managed.question.expired'
+                            : 'managed.actions.expired',
+                        )}
+                      </p>
+                    )}
                     {approvals.action?.kind === 'question' &&
                       questionTooLarge && (
                         <p
@@ -2845,7 +2848,7 @@ function ManagedSessionsContent({
                   approvals.respondForbidden ||
                   approvals.submitting ||
                   compression.blocked ||
-                  (approvals.action?.kind === 'question' && questionExpired)
+                  actionExpired
                 }
                 approvalKeyboardActive={false}
                 approvalExtraDescriptionId={

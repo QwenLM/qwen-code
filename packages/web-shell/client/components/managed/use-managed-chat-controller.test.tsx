@@ -1231,13 +1231,21 @@ describe('useManagedChatControllerFromState', () => {
     const feed = stream();
     let blocked = false;
     let canCancel = true;
+    const activeEventSignals = new Set<AbortSignal>();
     const provider = {
       storageKey: 'fixture:shared',
       getSession: vi.fn(async (id: string) => summary(id)),
       getTranscript: vi.fn(async () => ({ events: [], lastEventId: 0 })),
       subscribeEvents: vi.fn(
-        (_sessionId: string, options: { signal: AbortSignal }) =>
-          feed.subscribe(options.signal),
+        (_sessionId: string, options: { signal: AbortSignal }) => {
+          activeEventSignals.add(options.signal);
+          options.signal.addEventListener(
+            'abort',
+            () => activeEventSignals.delete(options.signal),
+            { once: true },
+          );
+          return feed.subscribe(options.signal);
+        },
       ),
       submitPrompt: vi.fn(async (sessionId: string) => ({
         sessionId,
@@ -1305,10 +1313,6 @@ describe('useManagedChatControllerFromState', () => {
         detail.refreshSummary,
         observer,
       );
-      const activeActions = useMemo(
-        () => (approvals.action ? [approvals.action] : []),
-        [approvals.action],
-      );
       controller = useManagedChatControllerFromState({
         provider,
         clientId: 'client-1',
@@ -1318,7 +1322,7 @@ describe('useManagedChatControllerFromState', () => {
         turnCancel,
         cancelObserverRef,
         messages: [],
-        pendingActions: activeActions,
+        selectedAction: approvals.action,
         retainExpiredActions: true,
         canRespondAction: () => !blocked,
         canCancel,
@@ -1342,10 +1346,8 @@ describe('useManagedChatControllerFromState', () => {
       await flushReact();
 
       expect(controller).toBeDefined();
-      // Shared hooks mean exactly 1 session fetch per mount (no second hook stack).
-      expect(
-        vi.mocked(provider.getSession).mock.calls.length,
-      ).toBeLessThanOrEqual(2);
+      // Shared hooks keep exactly 1 live event subscription active (no second hook stack).
+      expect(activeEventSignals.size).toBe(1);
       expect(controller!.pendingQuestions.map((q) => q.id)).toEqual([
         'child-q-1',
       ]);

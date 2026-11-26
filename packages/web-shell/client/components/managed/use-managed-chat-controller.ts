@@ -56,7 +56,12 @@ export interface ManagedChatControllerFromStateOptions {
     current: ManagedTurnCancelObserver | undefined;
   };
   readonly messages: readonly Message[];
-  readonly pendingActions: readonly ManagedAgentPendingAction[];
+  /**
+   * The single pending action currently selected by the host (root or child
+   * session). Keeping this singular makes bare-`actionId` submission routing
+   * unambiguous even when multiple child sessions share an `actionId`.
+   */
+  readonly selectedAction: ManagedAgentPendingAction | undefined;
   readonly retainExpiredActions?: boolean;
   readonly canRespondAction?: () => boolean;
   readonly canCancel?: boolean;
@@ -595,7 +600,8 @@ interface SharedBindingFacts {
   readonly detail: ReturnType<typeof useManagedSession>;
   readonly pending: ReturnType<typeof useManagedActions>;
   readonly turnCancel: ReturnType<typeof useManagedTurnCancel>;
-  readonly pendingActions: readonly ManagedAgentPendingAction[];
+  readonly selectedAction: ManagedAgentPendingAction | undefined;
+  readonly selectedActions: readonly ManagedAgentPendingAction[];
   readonly messages: readonly Message[];
   readonly retainExpiredActions: boolean;
   readonly canRespondAction?: () => boolean;
@@ -616,7 +622,7 @@ export function useManagedChatControllerFromState({
   turnCancel,
   cancelObserverRef,
   messages,
-  pendingActions,
+  selectedAction,
   retainExpiredActions = false,
   canRespondAction,
   canCancel = true,
@@ -642,13 +648,18 @@ export function useManagedChatControllerFromState({
   );
   const summary =
     detail.summary?.sessionId === sessionId ? detail.summary : undefined;
+  const selectedActions = useMemo(
+    () => (selectedAction ? [selectedAction] : []),
+    [selectedAction],
+  );
   const factsRef = useRef(new WeakMap<BindingOwner, SharedBindingFacts>());
   factsRef.current.set(owner, {
     summary,
     detail,
     pending,
     turnCancel,
-    pendingActions,
+    selectedAction,
+    selectedActions,
     messages,
     retainExpiredActions,
     canRespondAction,
@@ -913,7 +924,7 @@ export function useManagedChatControllerFromState({
       },
       loadOlder: () => facts(owner).detail.loadOlder(),
       get pendingActions() {
-        return facts(owner).pendingActions;
+        return facts(owner).selectedActions;
       },
       get retainExpiredActions() {
         return facts(owner).retainExpiredActions;
@@ -988,19 +999,22 @@ export function useManagedChatControllerFromState({
       },
       cancelTurn: (turnId) => cancelTurn(owner, turnId),
       submitApproval: (actionId, optionId) => {
-        const action = facts(owner).pendingActions.find(
-          (candidate) =>
-            candidate.actionId === actionId && candidate.kind !== 'question',
-        );
-        if (!action) return Promise.resolve({ admission: 'rejected' });
+        const action = facts(owner).selectedAction;
+        if (
+          !action ||
+          action.actionId !== actionId ||
+          action.kind === 'question'
+        )
+          return Promise.resolve({ admission: 'rejected' });
         return sendManagedActionResponse(owner, action, optionId);
       },
       submitQuestion: (actionId, answers) => {
-        const action = facts(owner).pendingActions.find(
-          (candidate) =>
-            candidate.actionId === actionId && candidate.kind === 'question',
-        );
-        if (!action || action.kind !== 'question') {
+        const action = facts(owner).selectedAction;
+        if (
+          !action ||
+          action.actionId !== actionId ||
+          action.kind !== 'question'
+        ) {
           return Promise.resolve({ admission: 'rejected' });
         }
         return sendManagedActionResponse(owner, action, {

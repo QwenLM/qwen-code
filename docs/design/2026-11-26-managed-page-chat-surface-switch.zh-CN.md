@@ -60,10 +60,12 @@
     fail-closed 拒绝过期提交。
 - **`use-managed-chat-controller.ts`：**
   - 导出 `useManagedChatControllerFromState(options)`，接收调用方已持有的
-    `detail`、`pending`、`turnCancel` 与共享 `cancelObserverRef`（以及可选的
-    `messages`、`pendingActions`、`retainExpiredActions`、`canRespondAction`、
-    `canCancel`），让 `ManagedSessionsPage` 以零重复 SSE 流、零重复轮询绑定
-    实时 `SessionChatController`。
+    `detail`、`pending`、`turnCancel` 与共享 `cancelObserverRef`（以及
+    `messages`、宿主当前选中的单个 `selectedAction`、`retainExpiredActions`、
+    `canRespondAction`、`canCancel`），让 `ManagedSessionsPage` 以零重复
+    SSE 流、零重复轮询绑定实时 `SessionChatController`。将 `selectedAction`
+    限定为单个选中动作可从类型上杜绝多个子会话同 `actionId` 时的裸 ID 提交
+    歧义。
   - 审批与提问提交经由 `pending.respond(action, response, observer)` 单次派发，
     同步驱动 `useManagedActions` 状态（`submitting`、`answerError`、
     `respondForbidden`、草稿清理、已答过滤）与控制器的准入/结算观测，并对子会
@@ -114,8 +116,9 @@
      `onAccepted` 却正常 resolve 时，`useManagedChatControllerFromState` 将已
      完成调用视为已准入（仍绝不在缺少 `onSettlement` 时伪造 `established`），
      而独立 `useManagedChatController` 继续保持严格的 `unknown` 规则。
-3. **投影期按需保留过期动作（`retainExpiredActions: true`）同时提交期保持 fail-closed 拒绝。**
-   - 保留 Managed 在过期卡片上展示 `managed.question.expired` 与禁用态的体验，
+3. **投影期按需保留过期动作（`retainExpiredActions: true`），对权限与提问统一禁用展示且提交期保持 fail-closed 拒绝。**
+   - 保留 Managed 在过期卡片上的体验（经统一的 32 位安全定时器禁用控件，提问
+     展示 `managed.question.expired`，权限展示 `managed.actions.expired`），
      同时控制器提交入口的 `isActionExpired` 不变量（含时钟跳变保护）继续生效。
 4. **保留布局类名与 `onComposerSubmit` 缝隙。**
    - 透传 `shellStyles.content` 与 `shellStyles.footer` 保证

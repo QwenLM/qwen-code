@@ -69,9 +69,12 @@ session action isolation, or regressing Managed's durable outbox and layout:
 - **`use-managed-chat-controller.ts`:**
   - Export `useManagedChatControllerFromState(options)` accepting caller-owned
     `detail`, `pending`, `turnCancel`, and a shared `cancelObserverRef` (plus
-    optional `messages`, `pendingActions`, `retainExpiredActions`,
-    `canRespondAction`, `canCancel`), so `ManagedSessionsPage` binds a live
-    `SessionChatController` with zero duplicate SSE streams or polling.
+    `messages`, the single `selectedAction` currently shown by the host,
+    `retainExpiredActions`, `canRespondAction`, `canCancel`), so
+    `ManagedSessionsPage` binds a live `SessionChatController` with zero
+    duplicate SSE streams or polling. Keeping `selectedAction` singular makes
+    bare-`actionId` submission routing unambiguous by construction even when
+    multiple child sessions share an `actionId`.
   - Route approval and question submissions through `pending.respond(action,
 response, observer)` so `useManagedActions` state (`submitting`,
     `answerError`, `respondForbidden`, draft clearing, answered filtering) and
@@ -130,10 +133,12 @@ sessionId })` with identical public contract and strict admission semantics.
      `useManagedChatControllerFromState` treats the completed call as admitted
      (still never forging `established` without an `onSettlement` event), while
      standalone `useManagedChatController` preserves its strict `unknown` rule.
-3. **Retain expired actions in UI projection (`retainExpiredActions: true`) while rejecting submission fail-closed.**
-   - Preserves Managed's UX (showing `managed.question.expired` and disabled
-     controls on an expired card) while keeping the controller's submit-time
-     `isActionExpired` invariant intact (including wall-clock jump protection).
+3. **Retain expired actions in UI projection (`retainExpiredActions: true`) while disabling both permissions and questions and rejecting submission fail-closed.**
+   - Preserves Managed's UX (showing `managed.question.expired` for questions
+     and `managed.actions.expired` for permissions alongside disabled controls
+     backed by a shared 32-bit-safe expiry timer) while keeping the
+     controller's submit-time `isActionExpired` invariant intact (including
+     wall-clock jump protection).
 4. **Preserve layout classes and `onComposerSubmit` seam.**
    - Forwarding `shellStyles.content` and `shellStyles.footer` preserves the
      existing `[data-managed-home][data-managed-empty]` centering and

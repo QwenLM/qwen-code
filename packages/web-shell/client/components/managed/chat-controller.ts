@@ -442,6 +442,8 @@ interface TrackedOperation {
   state: OperationState;
   backendOperationId?: string;
   boundTurnId?: string;
+  // Action settlement events carry bare `actionId`; `boundActionKey` adds
+  // `sessionId` for live/in-flight isolation across child sessions.
   boundActionId?: string;
   boundActionKey?: string;
 }
