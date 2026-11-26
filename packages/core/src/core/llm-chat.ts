@@ -46,6 +46,12 @@ import {
 import { beginRetryWait } from '../utils/retry-wait.js';
 import { movePromptContextAheadOfUserText } from './prompt-context-order.js';
 import {
+  appendPermissionContext,
+  findLatestPermissionContext,
+  getPermissionContextSnapshot,
+  PERMISSION_CONTEXT_METADATA,
+} from './permission-context.js';
+import {
   isQuotaExhaustedError,
   formatQuotaExhaustedMessage,
 } from '../utils/quotaErrorDetection.js';
@@ -2592,7 +2598,8 @@ export class LlmChat {
    * still make compaction decisions based on their *own* context size.
    */
   private memorySnapshotsVisible: boolean | undefined;
-  private unaccountedMemorySnapshots = new WeakSet<Part>();
+  private unaccountedContextSnapshots = new WeakSet<Part>();
+  private permissionContextEnabled = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountIsEstimated = false;
   /**
@@ -2852,6 +2859,7 @@ export class LlmChat {
     markCompressedHistory(this.history);
     this.redactApprovedPlansFromLoadedHistory();
     this.markToolResultsInjected(this.history);
+    this.permissionContextEnabled = !!findLatestPermissionContext(this.history);
   }
 
   /**
@@ -2872,6 +2880,10 @@ export class LlmChat {
 
   enableManualPlanExitNotices(): void {
     this.manualPlanExitNoticesEnabled = true;
+  }
+
+  enablePermissionContext(): void {
+    this.permissionContextEnabled = true;
   }
 
   /**
@@ -3135,12 +3147,22 @@ export class LlmChat {
   ): Content[] {
     const catalog = this.config.getAutoMemoryContext?.() ?? '';
     const snapshot = getAutoMemorySnapshot(this.history, catalog);
+    const permissionSnapshot = this.permissionContextEnabled
+      ? getPermissionContextSnapshot(
+          this.history,
+          this.config.getApprovalMode(),
+        )
+      : undefined;
     // A request-only recovery catalog replaces, rather than follows, stale snapshots.
-    const history = !snapshot
+    let history = !snapshot
       ? this.history
       : retainMemorySnapshot
         ? [...this.history]
         : withoutAutoMemorySnapshots(this.history);
+    if (permissionSnapshot) {
+      if (history === this.history) history = [...history];
+      appendPermissionContext(history, permissionSnapshot);
+    }
     if (snapshot && retainMemorySnapshot) {
       appendAutoMemorySnapshot(history, snapshot);
     }
@@ -3148,10 +3170,17 @@ export class LlmChat {
       this.getRequestHistory(currentUserContent, history),
       supportedModalities,
     ).slimmedHistory;
+    if (permissionSnapshot && retainMemorySnapshot) {
+      this.history = history;
+      this.chatRecordingService?.recordPermissionContextSnapshot(
+        permissionSnapshot,
+      );
+      this.unaccountedContextSnapshots.add(permissionSnapshot);
+    }
     if (snapshot && retainMemorySnapshot) {
       this.history = history;
       this.chatRecordingService?.recordMemoryCatalogSnapshot(snapshot);
-      this.unaccountedMemorySnapshots.add(snapshot);
+      this.unaccountedContextSnapshots.add(snapshot);
     }
     // Recovery controls are removed after continuation and cannot own a durable snapshot.
     const withCatalog =
@@ -3178,7 +3207,7 @@ export class LlmChat {
    */
   setLastPromptTokenCount(count: number, isEstimated = false): void {
     this.toolBudgetUsageAnchor = undefined;
-    this.unaccountedMemorySnapshots = new WeakSet<Part>();
+    this.unaccountedContextSnapshots = new WeakSet<Part>();
     this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
     this.lastPromptTokenCount = count;
     this.lastPromptTokenCountIsEstimated = isEstimated;
@@ -3216,7 +3245,7 @@ export class LlmChat {
     isEstimated = false,
   ): void {
     this.toolBudgetUsageAnchor = undefined;
-    this.unaccountedMemorySnapshots = new WeakSet<Part>();
+    this.unaccountedContextSnapshots = new WeakSet<Part>();
     // Usage saved with legacy memory on already counts visible snapshots. The
     // rare suppressed-at-save resume relies on the pad and reactive recovery.
     this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
@@ -3877,12 +3906,23 @@ export class LlmChat {
             [...this.history, pending],
             catalog,
           );
-          const pendingContent = snapshot
+          let pendingContent = snapshot
             ? {
                 ...pending,
                 parts: [...(pending.parts ?? []), snapshot],
               }
             : pending;
+          const permissionSnapshot = this.permissionContextEnabled
+            ? getPermissionContextSnapshot(
+                [...this.history, pending],
+                this.config.getApprovalMode(),
+              )
+            : undefined;
+          if (permissionSnapshot) {
+            const preview = [pendingContent];
+            appendPermissionContext(preview, permissionSnapshot);
+            pendingContent = preview[0];
+          }
           const visiblePendingContent = catalog
             ? pendingContent
             : (withoutAutoMemorySnapshots([pendingContent])[0] ?? {
@@ -3890,10 +3930,13 @@ export class LlmChat {
                 parts: [],
               });
           const unaccountedSnapshots =
-            catalog && this.lastPromptTokenCount > 0
+            this.lastPromptTokenCount > 0
               ? this.history.flatMap((entry) =>
-                  (entry.parts ?? []).filter((part) =>
-                    this.unaccountedMemorySnapshots.has(part),
+                  (entry.parts ?? []).filter(
+                    (part) =>
+                      this.unaccountedContextSnapshots.has(part) &&
+                      (catalog ||
+                        part.partMetadata?.[PERMISSION_CONTEXT_METADATA]),
                   ),
                 )
               : [];
@@ -4159,10 +4202,10 @@ export class LlmChat {
           : undefined;
         const completedToolCallIdsBeforeHardRescue = this.completedToolCallIds;
         // The rollback history copies Part objects; preserve ownership on those copies.
-        const unaccountedMemorySnapshotsBeforeHardRescue = new WeakSet<Part>(
+        const unaccountedContextSnapshotsBeforeHardRescue = new WeakSet<Part>(
           historyBeforeHardRescue?.flatMap((entry, index) =>
             (entry.parts ?? []).filter((_, partIndex) =>
-              this.unaccountedMemorySnapshots.has(
+              this.unaccountedContextSnapshots.has(
                 this.history[index].parts![partIndex],
               ),
             ),
@@ -4285,8 +4328,8 @@ export class LlmChat {
             );
             // setHistory conservatively cleared loaded-skill tracking; the
             // restored bodies re-arm it on their next invoke.
-            this.unaccountedMemorySnapshots =
-              unaccountedMemorySnapshotsBeforeHardRescue;
+            this.unaccountedContextSnapshots =
+              unaccountedContextSnapshotsBeforeHardRescue;
             this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
             this.lastPromptTokenCountIsEstimated =
               lastPromptTokenCountWasEstimatedBeforeHardRescue;
@@ -4389,8 +4432,11 @@ export class LlmChat {
         this.history.push(userContent);
         // Interrupted-prompt replay can carry detached snapshot parts itself.
         for (const part of userContent.parts ?? []) {
-          if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true) {
-            this.unaccountedMemorySnapshots.add(part);
+          if (
+            part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true ||
+            typeof part.partMetadata?.[PERMISSION_CONTEXT_METADATA] === 'string'
+          ) {
+            this.unaccountedContextSnapshots.add(part);
           }
         }
         this.syncReviewedSchemasForContent(userContent);
@@ -6700,8 +6746,8 @@ export class LlmChat {
       const copied = copyContentContainer(content);
       // Startup restoration and microcompaction reinstall these defensive copies.
       content.parts?.forEach((part, index) => {
-        if (this.unaccountedMemorySnapshots.has(part)) {
-          this.unaccountedMemorySnapshots.add(copied.parts![index]);
+        if (this.unaccountedContextSnapshots.has(part)) {
+          this.unaccountedContextSnapshots.add(copied.parts![index]);
         }
       });
       return copied;
@@ -7199,6 +7245,7 @@ export class LlmChat {
     this.historyReplacementRevision++;
     markCompressedHistory(history);
     this.history = history;
+    this.permissionContextEnabled ||= !!findLatestPermissionContext(history);
     this.markToolResultsInjected(this.history);
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
@@ -7674,7 +7721,7 @@ export class LlmChat {
             ) {
               this.retainCurrentTokenCounts();
             }
-            this.unaccountedMemorySnapshots = new WeakSet<Part>();
+            this.unaccountedContextSnapshots = new WeakSet<Part>();
             this.lastPromptTokenCount = lastPromptTokenCount;
             this.lastPromptTokenCountIsEstimated = false;
             this.lastOutputTokenCount = hasUsablePromptTokenCount
@@ -8311,12 +8358,15 @@ export class LlmChat {
       throw streamError;
     }
 
-    // Charge newly retained catalogs only when the turn survives rollback.
-    // A provider usage report already covers them and clears this ownership.
-    if (this.config.getAutoMemoryContext?.() && this.lastPromptTokenCount > 0) {
+    // 只对仍可见且尚未被提供方 usage 覆盖的上下文快照计费。
+    if (this.lastPromptTokenCount > 0) {
+      const catalogVisible = !!this.config.getAutoMemoryContext?.();
       const snapshots = this.history.flatMap((entry) =>
-        (entry.parts ?? []).filter((part) =>
-          this.unaccountedMemorySnapshots.has(part),
+        (entry.parts ?? []).filter(
+          (part) =>
+            this.unaccountedContextSnapshots.has(part) &&
+            (catalogVisible ||
+              part.partMetadata?.[PERMISSION_CONTEXT_METADATA]),
         ),
       );
       if (snapshots.length > 0) {
@@ -8328,7 +8378,7 @@ export class LlmChat {
         );
       }
     }
-    this.unaccountedMemorySnapshots = new WeakSet<Part>();
+    this.unaccountedContextSnapshots = new WeakSet<Part>();
     this.history.push({
       role: 'model',
       parts: acceptedTurnParts,

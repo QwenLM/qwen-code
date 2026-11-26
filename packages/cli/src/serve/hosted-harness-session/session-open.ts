@@ -1409,7 +1409,12 @@ export function registerHostedSessionOpenRoutes({
             recoveryDeclined(res, 'public_child_recovery_unsupported');
             return;
           }
-          blockRecovery(resident, namedStoreFailure(cause));
+          // A failed read in this retry leaves the original Broker park owed.
+          if (
+            resident.runtimeRecoveryPromptId !== parked ||
+            resident.managed.authority.writesStopped
+          )
+            blockRecovery(resident, namedStoreFailure(cause));
           writeStderrLineSafe(
             'qwen serve: Hosted recovery redrive failed: ' + String(cause),
           );
@@ -1502,6 +1507,20 @@ export function registerHostedSessionOpenRoutes({
         error(res, 409, 'hosted_session_closing');
         return;
       }
+      if (
+        resident.runtimeRecoveryPromptId === parked &&
+        resident.recoveredTurn === parked &&
+        resident.active === undefined &&
+        !resident.managed.authority.writesStopped &&
+        !resident.cleanupBlocked &&
+        resident.recoveryCancelPromptId === undefined &&
+        unsettledPromptId(resident) === parked &&
+        recovery.phase === 'results_ready' &&
+        recovery.checkpointId ===
+          resident.managed.authority.latestCheckpoint?.checkpointId &&
+        recovery.activationId === resident.managed.activation.activationId
+      )
+        liftRecoveryBlock(resident);
       refusedAdoptions.delete(sessionId);
       sendAttachment(res, sessionId, resident, recovery);
       return;
@@ -2093,6 +2112,7 @@ export function registerHostedSessionOpenRoutes({
               shell: {
                 resources: stores.toolResultResources,
                 assertWritable: stores.assertWritable,
+                writerOwner: stores.publication.owner,
               },
             }
           : {}),
@@ -3325,11 +3345,13 @@ export function registerHostedSessionOpenRoutes({
           body?.['cancellationTakeover'] === true,
         );
       const deliveryRecoveryLane = session.backgroundLane ?? session.shell;
+      // A resumed approval can share its park with a background hold. Restore
+      // the publisher now so that hold can deliver its terminal to this resident.
       if (
         brokerOptions &&
         deliveryRecoveryLane &&
         session.stores?.publication &&
-        !unsettledPromptId(session)
+        (!unsettledPromptId(session) || resumeApproval !== undefined)
       ) {
         await reattachAndDrainBackgroundDeliveries({
           managed,

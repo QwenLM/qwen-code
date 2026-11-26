@@ -47,7 +47,7 @@ overrides:
   readdir-glob@1: 4.0.0
   openapi-typescript>supports-color: 7.2.0
 
-pnpmfileChecksum: sha256-b0V9SY1TSIiCxINsouSA6TYfHvvbUQE/zRG+CjPvEhA=
+pnpmfileChecksum: sha256-5LLct3yDghFpkfXUN1Z0hzLMwjbzp66/MIQd5sfPKvw=
 
 importers:
 
@@ -1909,6 +1909,25 @@ importers:
       vitest:
         specifier: ^3.1.1
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(jsdom@26.1.0(supports-color@7.2.0))(lightningcss@1.32.0)(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(supports-color@7.2.0)(tsx@4.20.3)(yaml@2.9.0)
+
+  packages/qwen:
+    dependencies:
+      '@commander-js/extra-typings':
+        specifier: ^14.0.0
+        version: 14.0.0(commander@14.0.3)
+      '@qwen-code/cli':
+        specifier: workspace:*
+        version: link:../harness/cli
+      '@qwen-code/resource':
+        specifier: workspace:*
+        version: link:../harness/resource
+    devDependencies:
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@20.19.1)(jiti@2.7.0)(jsdom@26.1.0(supports-color@7.2.0))(lightningcss@1.32.0)(msw@2.10.4(@types/node@20.19.1)(typescript@5.8.3))(supports-color@7.2.0)(tsx@4.20.3)(yaml@2.9.0)
 
   packages/qwen-live:
     dependencies:

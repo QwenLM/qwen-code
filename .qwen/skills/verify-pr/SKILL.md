@@ -2247,8 +2247,7 @@ inconclusive.
   shipped auto-approve mode made every later tool turn in the Workspace
   wait once `approval-mode: default` was on. A scripted fake model must
   emit the product's real shapes: multi-line text, several tool calls with
-  distinct arguments (five consecutive identical calls trip the core loop
-  guard), and an answer only to the request under test.
+  distinct arguments, and an answer only to the request under test.
 - **Harness checks fail closed; verdicts come from the backend.** Assert
   input shape before comparing (a 64-character hash before an equality).
   Print the exit status next to every count, and confirm an absence with a

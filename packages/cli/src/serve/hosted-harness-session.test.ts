@@ -2137,4 +2137,50 @@ describe('Hosted Harness no-tool session', () => {
     expect(state.model).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
+
+  it('answers committed recovery status to a control plane that did not load the Session', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'status from another instance' }];
+    const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest: digest })
+      .expect(202);
+    const statusPath = `/session/${SESSION_ID}/status?promptId=${PROMPT_ID}`;
+    await vi.waitFor(
+      async () => {
+        const owner = await headers(supertest(server).get(statusPath)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        );
+        expect(owner.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const owner = await headers(supertest(server).get(statusPath))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(200);
+    // Another control-plane instance holds no client id; it reads the same
+    // committed evidence without attaching.
+    const other = await headers(supertest(server).get(statusPath)).expect(200);
+    expect(other.body).toEqual(owner.body);
+    // A client id that is not this Session's attachment is still refused.
+    await headers(supertest(server).get(statusPath))
+      .set('X-Qwen-Client-Id', randomUUID())
+      .expect(404);
+    await headers(supertest(server).get(statusPath))
+      .set('X-Qwen-Client-Id', '')
+      .expect(404);
+    await headers(
+      supertest(server).get(`/session/${randomUUID()}/status`),
+    ).expect(404);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
 });

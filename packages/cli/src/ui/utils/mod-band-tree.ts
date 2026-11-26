@@ -78,13 +78,16 @@ const BOTH: Record<string, [string, string]> = {
   margin: ['marginX', 'marginY'],
   padding: ['paddingX', 'paddingY'],
 };
-// The props each renderer reads its own way.
+// The props each renderer reads its own way, and those a terminal ignores:
+// it is always monospaced, and cuts what would scroll sideways.
 const STYLED = new Set([
   'key',
   'borderStyle',
   'borderColor',
   'borderDimColor',
   'backgroundColor',
+  'overflowX',
+  'mono',
 ]);
 
 /** A Box's layout props, its spacing steps turned into cells. */
@@ -227,11 +230,84 @@ export function modBandBold(props: ModRenderProps): boolean {
   return props['bold'] === true || weight === 'semibold' || weight === 'bold';
 }
 
-/** A Text's wrap, its `end` and `middle` aliases spelled out. */
-export function modBandWrap(props: ModRenderProps): string | undefined {
+/**
+ * A Text's wrap, its `end` and `middle` aliases spelled out. `clip` draws an
+ * ellipsis here as at its end; so does a Text inside a Box that would scroll
+ * sideways, and a one-row `maxLines`, unless the Text already cuts.
+ */
+export function modBandWrap(
+  props: ModRenderProps,
+  inScroller: boolean,
+): string | undefined {
   const wrap = props['wrap'];
-  if (typeof wrap !== 'string') return undefined;
-  return wrap === 'end' || wrap === 'middle' ? `truncate-${wrap}` : wrap;
+  if (typeof wrap === 'string' && wrap !== 'wrap')
+    return wrap === 'end' || wrap === 'middle' || wrap === 'clip'
+      ? `truncate-${wrap === 'clip' ? 'end' : wrap}`
+      : wrap;
+  if (inScroller || props['maxLines'] === 1) return 'truncate-end';
+  return typeof wrap === 'string' ? wrap : undefined;
+}
+
+/** The rows a Text may take, or nothing where it takes what it needs. */
+export function modBandMaxLines(
+  props: ModRenderProps,
+  inScroller: boolean,
+): number | undefined {
+  const lines = props['maxLines'];
+  return !inScroller && typeof lines === 'number' && lines >= 1
+    ? lines
+    : undefined;
+}
+
+/**
+ * Whether a Box cuts its Texts at its edge instead of scrolling them: one that
+ * would scroll, or one inside it that keeps no width of its own.
+ */
+export function modBandScrolls(
+  props: ModRenderProps,
+  inScroller: boolean,
+): boolean {
+  return (
+    props['overflowX'] === 'scroll' ||
+    (inScroller && props['width'] === undefined)
+  );
+}
+
+const PROGRESS_CELLS = 10;
+
+/**
+ * A Progress as the band draws it: its label, a bar of cells filled to its
+ * fraction, and the figure after it; a task with no known end has no bar.
+ */
+export function modBandProgress(props: ModRenderProps): {
+  label: string;
+  bar?: { filled: number; empty: number };
+  figure?: string;
+} {
+  const label = cleanModBandText(String(props['label'] ?? ''));
+  const value = props['value'];
+  const max = props['max'] ?? 1;
+  const known =
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    typeof max === 'number' &&
+    Number.isFinite(max) &&
+    max > 0;
+  const fraction = known ? Math.min(1, Math.max(0, value / max)) : undefined;
+  const text = props['valueText'];
+  const figure =
+    typeof text === 'string'
+      ? cleanModBandText(text)
+      : fraction !== undefined
+        ? `${Math.round(fraction * 100)}%`
+        : undefined;
+  if (fraction === undefined) return { label, figure };
+  const filled = Math.round(fraction * PROGRESS_CELLS);
+  return {
+    label,
+    bar: { filled, empty: PROGRESS_CELLS - filled },
+    figure,
+  };
 }
 
 // Ink measures a tab as no columns while the terminal moves to the next
