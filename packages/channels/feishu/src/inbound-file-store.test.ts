@@ -36,6 +36,8 @@ vi.mock('node:os', async (importOriginal) => {
 describe('Feishu inbound file storage', () => {
   const systemTmpDir = tmpdir();
   const bytes = new Uint8Array([0, 1, 255]);
+  const resourceUrl =
+    'https://open.feishu.cn/open-apis/im/v1/messages/inbound-file/resources/file_1?type=file';
   let directory: string;
   let channel: FeishuChannel;
   let dispatch: MockInstance<FeishuChannel['handleInbound']>;
@@ -79,9 +81,7 @@ describe('Feishu inbound file storage', () => {
     });
     dispatch = vi.spyOn(channel, 'handleInbound').mockResolvedValue(undefined);
     vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
-      expect(String(input)).toBe(
-        'https://open.feishu.cn/open-apis/im/v1/messages/inbound-file/resources/file_1?type=file',
-      );
+      expect(String(input)).toBe(resourceUrl);
       return new Response(bytes, {
         headers: { 'Content-Type': 'application/pdf' },
       });
@@ -100,6 +100,7 @@ describe('Feishu inbound file storage', () => {
 
   function receive(
     message: {
+      message_id?: string;
       parent_id?: string;
       message_type?: string;
       content?: string;
@@ -124,25 +125,67 @@ describe('Feishu inbound file storage', () => {
     });
   }
 
-  it('keeps successful files until the existing cleanup grace period', async () => {
+  it.each([
+    { messageType: 'file', text: '(file: report.pdf)' },
+    { messageType: 'media', text: '(video)' },
+  ])(
+    'keeps successful $messageType files until the existing cleanup grace period',
+    async ({ messageType, text }) => {
+      receive({ message_type: messageType });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      const attachment = dispatch.mock.calls[0]![0].attachments?.[0];
+      expect(attachment).toEqual({
+        type: 'file',
+        filePath: expect.any(String),
+        mimeType: 'application/pdf',
+        fileName: 'report.pdf',
+      });
+      expect(readFileSync(attachment!.filePath!)).toEqual(Buffer.from(bytes));
+      expect(dispatch.mock.calls[0]![0]).toMatchObject({
+        text,
+        syntheticText: true,
+      });
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(existsSync(attachment!.filePath!)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+    },
+  );
+
+  it('stores and expires each message with the same filename independently', async () => {
+    const secondBytes = new Uint8Array([9, 8, 7, 6]);
+    const secondResource = resourceUrl.replace(
+      '/inbound-file/',
+      '/inbound-file-2/',
+    );
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (String(input) === resourceUrl) return new Response(bytes);
+      expect(String(input)).toBe(secondResource);
+      return new Response(secondBytes);
+    });
+
     receive();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(dispatch).toHaveBeenCalledTimes(1);
-    const attachment = dispatch.mock.calls[0]![0].attachments?.[0];
-    expect(attachment).toEqual({
-      type: 'file',
-      filePath: expect.any(String),
-      mimeType: 'application/pdf',
-      fileName: 'report.pdf',
-    });
-    expect(readFileSync(attachment!.filePath!)).toEqual(Buffer.from(bytes));
-    expect(dispatch.mock.calls[0]![0]).toMatchObject({
-      text: '(file: report.pdf)',
-      syntheticText: true,
-    });
-    await vi.advanceTimersByTimeAsync(59_999);
-    expect(existsSync(attachment!.filePath!)).toBe(true);
-    await vi.advanceTimersByTimeAsync(1);
+    receive({ message_id: 'inbound-file-2' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const firstPath = dispatch.mock.calls[0]![0].attachments![0]!.filePath!;
+    const secondPath = dispatch.mock.calls[1]![0].attachments![0]!.filePath!;
+    expect(dirname(firstPath)).not.toBe(dirname(secondPath));
+    expect(readdirSync(join(directory, 'channel-files'))).toHaveLength(2);
+    expect(firstPath).toBe(join(dirname(firstPath), 'report.pdf'));
+    expect(secondPath).toBe(join(dirname(secondPath), 'report.pdf'));
+    expect(readFileSync(firstPath)).toEqual(Buffer.from(bytes));
+    expect(readFileSync(secondPath)).toEqual(Buffer.from(secondBytes));
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(existsSync(firstPath)).toBe(false);
+    expect(readFileSync(secondPath)).toEqual(Buffer.from(secondBytes));
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
   });
 
