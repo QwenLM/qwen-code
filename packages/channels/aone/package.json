@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/channel-aone",
   "private": true,
-  "version": "0.28.6",
+  "version": "0.28.6-nightly.20261126.6b0cd79b",
   "description": "Aone Code polling channel adapter for Qwen Code (extension plugin)",
   "type": "module",
   "main": "dist/index.js",
@@ -22,7 +22,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.28.6",
+    "@qwen-code/channel-base": "0.28.6-nightly.20261126.6b0cd79b",
     "zod": "^4.6.6"
   },
   "devDependencies": {
