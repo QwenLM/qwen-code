@@ -146,6 +146,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   workspace_git_log_exclude_refs: [],
   workspace_git_worktrees: [],
   workspace_git_check_ignore: [],
+  workspace_input_history: [],
   workspace_mcp_restart: [],
   session_recap: [],
   session_mod_rows: [],
