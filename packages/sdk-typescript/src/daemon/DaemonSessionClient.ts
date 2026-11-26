@@ -783,8 +783,7 @@ export class DaemonSessionClient {
       if (beforeDispatch && signal) {
         let onAbort: (() => void) | undefined;
         const aborted = new Promise<never>((_, reject) => {
-          onAbort = () =>
-            reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+          onAbort = () => reject(signal.reason);
           if (signal.aborted) onAbort();
           else signal.addEventListener('abort', onAbort, { once: true });
         });
@@ -806,7 +805,7 @@ export class DaemonSessionClient {
         signal,
         this.clientId,
       );
-    });
+    }, signal);
     if (!isNonBlockingAccepted(accepted)) {
       throw new Error('Expected non-blocking prompt acceptance');
     }
@@ -901,11 +900,18 @@ export class DaemonSessionClient {
    * cannot double-execute. We re-register to obtain a fresh `clientId` and
    * retry the admission exactly once. Any other error (and a second
    * `invalid_client_id`) propagates.
+   *
+   * With an abort signal, caller cancellation takes precedence over this
+   * classification and preserves its exact reason.
    */
-  private async withClientIdSelfHeal<T>(fn: () => Promise<T>): Promise<T> {
+  private async withClientIdSelfHeal<T>(
+    fn: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     try {
       return await fn();
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       if (!isInvalidClientId(err)) throw err;
       await this.reattach();
       return await fn();

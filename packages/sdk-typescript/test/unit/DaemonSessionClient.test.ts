@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { DaemonAttachmentUploadError } from '../../src/daemon/DaemonAttachmentUploadError.js';
 import {
   DaemonClient,
+  DaemonHttpError,
   DaemonPendingPromptLimitError,
 } from '../../src/daemon/DaemonClient.js';
 import {
@@ -4351,65 +4352,146 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('waits for asynchronous revalidation before retrying admission', async () => {
-    let releaseResume!: (response: Response) => void;
-    const resume = new Promise<Response>((resolve) => {
-      releaseResume = resolve;
-    });
-    let releaseRevalidation!: () => void;
-    const revalidation = new Promise<void>((resolve) => {
-      releaseRevalidation = resolve;
-    });
-    let promptCalls = 0;
-    const { fetch, calls } = recordingFetch((req) => {
-      if (req.url.endsWith('/resume')) return resume;
-      if (req.url.endsWith('/prompt')) {
-        promptCalls++;
-        return promptCalls === 1
-          ? invalidClientIdResponse()
-          : jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
-      }
-      return jsonResponse(500, { error: `unexpected ${req.url}` });
-    });
-    const session = newSession(
-      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
-    );
-    const beforeDispatch = vi.fn(async (clientId: string | undefined) => {
-      if (clientId === 'client-2') await revalidation;
-    });
-    const pending = session.submitPrompt(
-      { prompt: [{ type: 'text', text: 'hi' }] },
-      undefined,
-      beforeDispatch,
-    );
+  it.each([
+    { label: 'default abort', reason: undefined },
+    {
+      label: 'invalid_client_id-shaped abort reason',
+      reason: new DaemonHttpError(
+        400,
+        { code: 'invalid_client_id' },
+        'caller stop',
+      ),
+    },
+    { label: 'null abort reason', reason: null },
+  ])(
+    'preserves cancellation before the first admission: $label',
+    async ({ reason }) => {
+      let releaseGuard!: () => void;
+      const guard = new Promise<void>((resolve) => {
+        releaseGuard = resolve;
+      });
+      let releaseResume!: (response: Response) => void;
+      const resume = new Promise<Response>((resolve) => {
+        releaseResume = resolve;
+      });
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/resume')) return resume;
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      const caller = new AbortController();
+      const beforeDispatch = vi.fn(async () => {
+        await guard;
+      });
+      const pending = session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        caller.signal,
+        beforeDispatch,
+      );
+      let settled = false;
+      const outcome = pending.then(
+        (value) => ({ kind: 'accepted', value }) as const,
+        (error: unknown) => ({ kind: 'error', error }) as const,
+      );
+      void outcome.then(() => {
+        settled = true;
+      });
 
-    await vi.waitFor(() =>
-      expect(calls.some((call) => call.url.endsWith('/resume'))).toBe(true),
-    );
-    releaseResume(
-      jsonResponse(200, {
-        sessionId: 's-1',
-        workspaceCwd: '/work/a',
-        attached: true,
-        clientId: 'client-2',
-        state: {},
-      }),
-    );
-    await vi.waitFor(() =>
-      expect(beforeDispatch).toHaveBeenCalledWith('client-2'),
-    );
-    expect(calls.filter((call) => call.url.endsWith('/prompt'))).toHaveLength(
-      1,
-    );
-    releaseRevalidation();
-    await expect(pending).resolves.toEqual({
-      promptId: 'p-1',
-      lastEventId: 0,
-    });
-    expect(calls.filter((call) => call.url.endsWith('/prompt'))).toHaveLength(
-      2,
-    );
-  });
+      await vi.waitFor(() =>
+        expect(beforeDispatch).toHaveBeenCalledWith('client-1'),
+      );
+      expect(calls).toHaveLength(0);
+      if (reason === undefined) caller.abort();
+      else caller.abort(reason);
+      try {
+        await vi.waitFor(() => expect(settled).toBe(true), {
+          timeout: 1000,
+          interval: 1,
+        });
+      } finally {
+        releaseGuard();
+        releaseResume(jsonResponse(500, { error: 'unused recovery' }));
+      }
+      expect(calls).toHaveLength(0);
+      const result = await outcome;
+      if (reason === undefined) {
+        expect(result).toMatchObject({
+          kind: 'error',
+          error: { name: 'AbortError' },
+        });
+      } else if (reason === null) {
+        expect(result).toEqual({ kind: 'error', error: null });
+      } else {
+        expect(result).toEqual({ kind: 'error', error: reason });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'waits for asynchronous revalidation before retrying admission (callerSignal=$withCallerSignal)',
+    async (withCallerSignal) => {
+      let releaseResume!: (response: Response) => void;
+      const resume = new Promise<Response>((resolve) => {
+        releaseResume = resolve;
+      });
+      let releaseRevalidation!: () => void;
+      const revalidation = new Promise<void>((resolve) => {
+        releaseRevalidation = resolve;
+      });
+      let promptCalls = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/resume')) return resume;
+        if (req.url.endsWith('/prompt')) {
+          promptCalls++;
+          return promptCalls === 1
+            ? invalidClientIdResponse()
+            : jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      const beforeDispatch = vi.fn(async (clientId: string | undefined) => {
+        if (clientId === 'client-2') await revalidation;
+      });
+      const caller = withCallerSignal ? new AbortController() : undefined;
+      const pending = session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        caller?.signal,
+        beforeDispatch,
+      );
+
+      await vi.waitFor(() =>
+        expect(calls.some((call) => call.url.endsWith('/resume'))).toBe(true),
+      );
+      releaseResume(
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(beforeDispatch).toHaveBeenCalledWith('client-2'),
+      );
+      expect(calls.filter((call) => call.url.endsWith('/prompt'))).toHaveLength(
+        1,
+      );
+      releaseRevalidation();
+      await expect(pending).resolves.toEqual({
+        promptId: 'p-1',
+        lastEventId: 0,
+      });
+      expect(calls.filter((call) => call.url.endsWith('/prompt'))).toHaveLength(
+        2,
+      );
+    },
+  );
 
   it('honors cancellation while asynchronous revalidation is pending', async () => {
     let releaseResume!: (response: Response) => void;
