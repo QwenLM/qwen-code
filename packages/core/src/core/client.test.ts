@@ -1396,6 +1396,8 @@ describe('Gemini Client (client.ts)', () => {
         45,
         false,
         undefined,
+        undefined,
+        undefined,
       );
       expect(skill.restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(
         apiHistory,
@@ -1448,6 +1450,8 @@ describe('Gemini Client (client.ts)', () => {
         80,
         true,
         true,
+        undefined,
+        undefined,
       );
     });
 
@@ -1461,6 +1465,7 @@ describe('Gemini Client (client.ts)', () => {
               ...compressionInfo(CompressionStatus.COMPRESSED, 1000, 200),
               newTokenCountIsEstimated: true,
             },
+            historyImageTokenEstimate: 512,
             compressedHistory: [],
           },
         }),
@@ -1470,6 +1475,8 @@ describe('Gemini Client (client.ts)', () => {
         200,
         0,
         true,
+        undefined,
+        512,
         undefined,
       );
       expect(resumedClient.getChat().isLastPromptTokenCountEstimated()).toBe(

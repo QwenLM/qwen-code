@@ -387,6 +387,34 @@ describe('SchemaValidator', () => {
       valid(schema, { reports: [report] });
     });
 
+    it('qualifies a top-level repair when a sibling selects the payload type', () => {
+      const schema = {
+        ...obj({}, 'mode', 'items'),
+        $defs: {
+          Payload: {
+            if: obj({ mode: { const: 'structured' } }, 'mode'),
+            then: obj({ items: { type: 'array' } }),
+            else: obj({ items: { type: 'string' } }),
+          },
+        },
+        allOf: [{ $ref: '#/$defs/Payload' }, obj({ mode: { const: 'raw' } })],
+      };
+      const items = '[1,]';
+      const { message, report } = validateWithNote(schema, {
+        mode: 'structured',
+        items,
+      });
+      expect(message).toBe('params/items must be array');
+      expect(report.mock.calls[0][1]).toContain(
+        'Check which schema branch applies to the other fields',
+      );
+      expect(report.mock.calls[0][1]).toContain(
+        'If the array requirement applies to this call, send it as a JSON array',
+      );
+      invalid(schema, { mode: 'structured', items: [1] });
+      valid(schema, { mode: 'raw', items });
+    });
+
     it('checks all enclosing values when a conditional hides an outer conflict', () => {
       const array = { type: 'array' };
       const schema = obj({

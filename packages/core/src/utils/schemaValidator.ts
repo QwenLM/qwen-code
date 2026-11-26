@@ -624,8 +624,20 @@ function describeBrokenJsonString(
       types.size === 1
         ? `send it as a JSON ${shapes[0]}, not as a string`
         : 'resend this field with the type required by its schema';
-    if (instancePath.includes('/', 1)) {
-      return `${diagnosis} Check the enclosing values against the schema. If their types match, ${retry}.`;
+    // A type from one branch can depend on siblings, even for a root property.
+    // Only an unconditional property declaration supports an unqualified fix.
+    const nested = instancePath.includes('/', 1);
+    const property = valueAtPointer(
+      validate.schema,
+      `/properties${instancePath}`,
+    ) as DiagnosticSchema | undefined;
+    if (nested || property?.['type'] !== shapes[0] || property.nullable) {
+      const check = nested
+        ? 'Check the enclosing values against the schema'
+        : 'Check which schema branch applies to the other fields';
+      return types.size === 1
+        ? `${diagnosis} ${check}. If the ${shapes[0]} requirement applies to this call, ${retry}.`
+        : `${diagnosis} ${check}, then ${retry}.`;
     }
     return `${diagnosis} ${fix} and ${retry}`;
   }

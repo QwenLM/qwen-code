@@ -17014,6 +17014,185 @@ describe('LlmChat', async () => {
       ).toBe(true);
     });
 
+    const imagePart = { inlineData: { mimeType: 'image/png', data: 'AA==' } };
+
+    it.each(['live', 'resume', 'zero-seed'])(
+      'retains local image and catalog pricing across two fast compressions (%s)',
+      (mode) => {
+        mockConfig.getAutoMemoryContext = () => '';
+        const idle = vi.mocked(mockConfig.getClearContextOnIdle);
+        idle.mockReturnValue({
+          toolResultsThresholdMinutes: 30,
+          toolResultsNumToKeep: 2,
+        });
+        const pricing = vi.mocked(mockConfig.getChatCompression);
+        pricing.mockReturnValue({ imageTokenEstimate: 1600 });
+        const recorder = { recordChatCompression: vi.fn() };
+        const history = ['first', 'second', 'third'].flatMap((name) => [
+          content('user', imagePart),
+          modelText(name),
+        ]);
+        const snapshot = getAutoMemorySnapshot(
+          [],
+          'saved catalog'.repeat(400),
+        )!;
+        history[4].parts!.push(snapshot);
+        let target = newChat({ history, recorder });
+        target.compressFast();
+        const first = recorder.recordChatCompression.mock.calls[0][0];
+        expect(first.historyImageTokenEstimate).toBe(1600);
+        if (mode !== 'live') {
+          target = newChat({ history: first.compressedHistory, recorder });
+          if (mode === 'zero-seed') target.seedResumeTokenCounts(0, 0, true);
+          else
+            target.seedResumeTokenCounts(
+              first.info.newTokenCount,
+              0,
+              true,
+              false,
+              first.historyImageTokenEstimate,
+            );
+        }
+        expect(target.getLastPromptTokenCount('another-route')).toBe(0);
+        expect(target.getLastPromptTokenCount()).toBe(first.info.newTokenCount);
+        pricing.mockReturnValue({ imageTokenEstimate: 6000 });
+        pinFastCompressionIdleClear();
+        const { info } = target.compressFast();
+        const last = recorder.recordChatCompression.mock.calls[1][0];
+        expect(info.historyImageTokenEstimate).toBe(1600);
+        expect(info.newTokenCount).toBe(
+          estimateContentTokens(target.getHistoryShallow(true), 1600),
+        );
+        expect(last.catalogSwitchChars).toEqual(first.catalogSwitchChars);
+        expect(last.catalogSwitchChars[4]).toBe(snapshot.text!.length);
+      },
+    );
+
+    it.each([true, false])(
+      'prices subsequent fast compression after a new catalog and a turn with usage=%s',
+      async (hasUsage) => {
+        mockConfig.getAutoMemoryContext = () => 'new catalog'.repeat(600);
+        pinFastCompressionIdleClear();
+        const target = newChat({
+          history: [content('user', imagePart), modelText('first')],
+        });
+        const overhead = 1200;
+        target.setLastPromptTokenCount(
+          estimateContentTokens(target.getHistoryShallow(true), 1600) +
+            overhead,
+          true,
+          1600,
+        );
+        mockStream(
+          textStream(
+            'reply',
+            hasUsage ? { promptTokenCount: 30_000 } : undefined,
+          ),
+        );
+        await sendDrain([imagePart], 'new-image', target);
+        expect(
+          target
+            .getHistoryShallow(true)
+            .flatMap((c) => c.parts ?? [])
+            .some((p) => p.partMetadata?.['qwen-code:memory-catalog-snapshot']),
+        ).toBe(true);
+        const { info } = target.compressFast();
+        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        expect(info.historyImageTokenEstimate).toBe(
+          hasUsage ? undefined : 1600,
+        );
+        expect(info.newTokenCount).toBe(
+          hasUsage
+            ? 30_000
+            : estimateContentTokens(target.getHistoryShallow(true), 1600) +
+                overhead,
+        );
+      },
+    );
+
+    it.each(['hidden', 'visible', 'replaced', 'usage'])(
+      'preserves only the separately charged checkpoint catalog (%s)',
+      async (mode) => {
+        pinFastCompressionIdleClear();
+        const snapshot = getAutoMemorySnapshot([], 'partial catalog')!;
+        const unknown = getAutoMemorySnapshot([], 'older catalog')!;
+        const catalogVisible = mode === 'visible';
+        mockConfig.getAutoMemoryContext = () =>
+          catalogVisible ? 'enabled' : '';
+        const recorder = {
+          recordChatCompression: vi.fn(),
+          recordAssistantTurn: vi.fn(),
+        };
+        const target = newChat({
+          history: [
+            content('user', unknown),
+            modelText('before'),
+            content('user', snapshot),
+            ...thoughtHistory(),
+          ],
+          recorder,
+        });
+        const charge = Math.ceil(snapshot.text!.length / 4) * 4;
+        target.seedResumeTokenCounts(30_000, 0, true, false, undefined, [
+          { snapshots: [unknown.text!], change: 0 },
+          {
+            snapshots: [
+              mode === 'replaced' ? 'different catalog' : snapshot.text!,
+            ],
+            change: -charge,
+          },
+        ]);
+        expect(target.getLastPromptTokenCount('another-route')).toBe(0);
+        expect(target.getLastPromptTokenCount()).toBe(30_000);
+        target.setHistory(target.getHistoryShallow());
+        if (mode === 'usage') {
+          mockStream(textStream('reply', { promptTokenCount: 31_000 }));
+          await sendDrain('next turn', 'new-usage', target);
+        }
+        const { info } = target.compressFast();
+        expect(info.historyImageTokenEstimate).toBeUndefined();
+        const payload = recorder.recordChatCompression.mock.calls.at(-1)![0];
+        expect(Math.abs(payload.catalogSwitchChars[0])).toBe(0);
+        expect(payload.catalogSwitchChars[2]).toBe(
+          mode === 'replaced' || mode === 'usage'
+            ? 0
+            : catalogVisible
+              ? -charge
+              : charge,
+        );
+      },
+    );
+
+    it.each([true, false])(
+      'only records a uniform history image price when pending input agrees (has image: %s)',
+      async (hasImage) => {
+        const recorder = { recordChatCompression: vi.fn() };
+        const target = newChat({ history: [userText('before')], recorder });
+        vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+          imageTokenEstimate: 6000,
+        });
+        const result = compressResult(
+          CompressionStatus.COMPRESSED,
+          [content('user', imagePart), modelText('ok')],
+          2000,
+          1601,
+          true,
+        );
+        result.info.historyImageTokenEstimate = 1600;
+        mockCompress(result);
+        await target.tryCompress('pending', true, undefined, {
+          pendingUserMessage: hasImage
+            ? content('user', imagePart)
+            : userText('pending'),
+        });
+        const payload = recorder.recordChatCompression.mock.calls[0][0];
+        expect(payload.info.historyImageTokenEstimate).toBe(1600);
+        expect(payload.historyImageTokenEstimate).toBe(
+          hasImage ? undefined : 1600,
+        );
+      },
+    );
+
     it('sizes a fast checkpoint from visible history when no provider count exists', () => {
       pinFastCompressionIdleClear();
       mockConfig.getAutoMemoryContext = () => '';

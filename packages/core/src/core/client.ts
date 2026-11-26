@@ -1019,6 +1019,8 @@ export class LlmClient {
         resumeTokenCounts.isEstimated ||
           promptTokenCount !== resumeTokenCounts.promptTokenCount,
         resumeTokenCounts.isProviderAdjusted,
+        resumeTokenCounts.historyImageTokenEstimate,
+        resumeTokenCounts.pricedCatalogEntries,
       );
     }
     signal?.throwIfAborted();
@@ -7017,6 +7019,7 @@ export class LlmClient {
       this.getChat().setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,
+        info.historyImageTokenEstimate,
       );
       this.resetManagedAutoMemoryAfterCompression();
       // Re-send a full IDE context blob on the next regular message

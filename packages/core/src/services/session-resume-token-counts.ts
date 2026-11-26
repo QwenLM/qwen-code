@@ -13,7 +13,13 @@ import {
   estimateContentChars,
   TOKEN_TO_CHAR_RATIO,
 } from '../utils/content-token-estimate.js';
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../utils/api-history-metadata.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
+
+export interface PricedCatalogEntry {
+  snapshots: string[];
+  change: number;
+}
 
 export interface ResumeTokenCounts {
   promptTokenCount: number;
@@ -21,8 +27,12 @@ export interface ResumeTokenCounts {
   isEstimated: boolean;
   /** The persisted input count adjusts provider usage that already includes system and tools. */
   isProviderAdjusted?: boolean;
+  /** Local image estimate shared by all entries in the restored token baseline. */
+  historyImageTokenEstimate?: number;
   /** Apply a positive delta when enabling memory catalogs, a negative one when disabling them. */
   catalogSwitchTokens?: number;
+  /** Saved per-entry adjustments when only part of the history was priced locally. */
+  pricedCatalogEntries?: PricedCatalogEntry[];
 }
 
 function assistantPromptTokenCount(record: ChatRecord): number | undefined {
@@ -33,18 +43,34 @@ function assistantPromptTokenCount(record: ChatRecord): number | undefined {
   );
 }
 
+function savedHistoryImageTokenEstimate(
+  payload: ChatCompressionRecordPayload,
+): number | undefined {
+  // Earlier fast checkpoints had no pending input and no summary prefix in
+  // info. Full compression also stamped an inherited tail with the local price.
+  const price =
+    payload.historyImageTokenEstimate ??
+    (payload.info.triggerReason === 'manual' &&
+    payload.info.summaryPrefixLength === undefined
+      ? payload.info.historyImageTokenEstimate
+      : undefined);
+  return price !== undefined && Number.isFinite(price) && price >= 1
+    ? price
+    : undefined;
+}
+
 // Previous checkpoints with per-entry sizes can identify a locally charged
 // snapshot even though they did not explicitly record the catalog adjustment.
 function legacyCatalogSwitchChars(
   payload: ChatCompressionRecordPayload,
   index: number,
   saved: number,
+  imageCost: number | undefined,
 ): number {
   const entry = payload.compressedHistory[index];
   if (!entry) return 0;
   const catalog = catalogSnapshotChars(entry);
   if (!catalog) return 0;
-  const imageCost = payload.info.historyImageTokenEstimate;
   const visible = estimateContentChars(entry, imageCost ?? 0);
   const hidden = visible - catalog;
   // Old writers rounded pending input separately. When its charge alone
@@ -71,33 +97,52 @@ function legacyCatalogSwitchChars(
   return saved === hidden ? catalog : 0;
 }
 
-function catalogSwitchTokens(payload: ChatCompressionRecordPayload): number {
+function resumeCatalogPricing(
+  payload: ChatCompressionRecordPayload,
+  imageCost: number | undefined,
+): Pick<ResumeTokenCounts, 'catalogSwitchTokens' | 'pricedCatalogEntries'> {
   const sizes = payload.pruneContentChars;
   if (
     !Array.isArray(sizes) ||
     sizes.length !== payload.compressedHistory?.length
   )
-    return 0;
+    return {};
+  const entries: PricedCatalogEntry[] = [];
   let saved = 0;
   let alternate = 0;
   for (const [index, chars] of sizes.entries()) {
     const change =
       payload.catalogSwitchChars?.[index] ??
-      legacyCatalogSwitchChars(payload, index, chars);
+      legacyCatalogSwitchChars(payload, index, chars, imageCost);
     if (
       !Number.isFinite(chars) ||
       !Number.isFinite(change) ||
       chars < 0 ||
       chars + change < 0
     )
-      return 0;
+      return {};
+    if (imageCost === undefined) {
+      const snapshots = payload.compressedHistory[index]?.parts?.flatMap(
+        (part) =>
+          part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true &&
+          typeof part.text === 'string'
+            ? [part.text]
+            : [],
+      );
+      if (snapshots?.length) entries.push({ snapshots, change });
+    }
     saved += chars;
     alternate += chars + change;
   }
-  return (
+  const delta =
     Math.ceil(alternate / TOKEN_TO_CHAR_RATIO) -
-    Math.ceil(saved / TOKEN_TO_CHAR_RATIO)
-  );
+    Math.ceil(saved / TOKEN_TO_CHAR_RATIO);
+  return {
+    ...(delta && { catalogSwitchTokens: delta }),
+    ...(entries.some((entry) => entry.change !== 0) && {
+      pricedCatalogEntries: entries,
+    }),
+  };
 }
 
 export class ResumeTokenCountsAccumulator {
@@ -128,9 +173,13 @@ export class ResumeTokenCountsAccumulator {
         | ChatCompressionRecordPayload
         | undefined;
       if (payload?.info) {
-        const delta = catalogSwitchTokens(payload);
+        const historyImageTokenEstimate =
+          savedHistoryImageTokenEstimate(payload);
         this.value = {
-          ...(delta && { catalogSwitchTokens: delta }),
+          ...(historyImageTokenEstimate !== undefined && {
+            historyImageTokenEstimate,
+          }),
+          ...resumeCatalogPricing(payload, historyImageTokenEstimate),
           promptTokenCount:
             payload.resumePromptTokenCount ?? payload.info.newTokenCount,
           outputTokenCount: 0,

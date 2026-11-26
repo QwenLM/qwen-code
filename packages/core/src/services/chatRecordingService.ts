@@ -762,6 +762,8 @@ export interface ChatCompressionRecordPayload {
   info: ChatCompressionInfo;
   /** Earlier writers stored the current image price without its provenance. */
   imageTokenEstimate?: number;
+  /** Local image estimate shared by the entire saved history, including pending input. */
+  historyImageTokenEstimate?: number;
   /** Per-entry size for deletions, excluding unpriced media and hidden memory. */
   pruneContentChars?: number[];
   /** Per-entry change to the saved estimate if memory catalogs are enabled (+) or disabled (−). */

@@ -3032,6 +3032,106 @@ describe('SessionTranscriptReader', () => {
     expect(uuids(live?.goalRecords)).toEqual(['visible-goal']);
   });
 
+  it.each([
+    { kind: 'legacy full', prefix: 2, local: false },
+    { kind: 'legacy fast', prefix: undefined, local: true },
+    { kind: 'current full', prefix: 2, local: true },
+  ])(
+    'restores only proven catalog and media prices for a $kind checkpoint',
+    async ({ kind, prefix, local }) => {
+      const snapshot = getAutoMemorySnapshot([], 'catalog '.repeat(100))!;
+      const chars = snapshot.text!.length;
+      const saved = local ? Math.ceil((9 + chars) / 4) : 36099;
+      const history = [
+        userText('summary'),
+        modelText('ok'),
+        content('user', snapshot),
+      ];
+      await writeRecords([
+        ...chain('question', 'answer'),
+        sys('checkpoint', 'a1', 'chat_compression', {
+          info: {
+            compressionStatus: CompressionStatus.COMPRESSED,
+            originalTokenCount: 40000,
+            newTokenCount: saved,
+            newTokenCountIsEstimated: true,
+            historyImageTokenEstimate: 100,
+            triggerReason: 'manual',
+            summaryPrefixLength: prefix,
+          },
+          summaryPrefixLength: 2,
+          compressedHistory: history,
+          pruneContentChars: [7, 2, chars],
+          ...(kind === 'current full' && {
+            historyImageTokenEstimate: 100,
+            catalogSwitchChars: [0, 0, -chars],
+          }),
+        }),
+      ]);
+      const [loaded, projection] = await loadAndRestore();
+      const expected = {
+        promptTokenCount: saved,
+        outputTokenCount: 0,
+        isEstimated: true,
+        ...(local && {
+          historyImageTokenEstimate: 100,
+          catalogSwitchTokens: Math.ceil(9 / 4) - Math.ceil((9 + chars) / 4),
+        }),
+      };
+      expect(getResumeTokenCounts(loaded!.conversation)).toEqual(expected);
+      expect(projection?.runtime.resumeTokenCounts).toEqual(expected);
+    },
+  );
+
+  it('restores separately priced pending catalogs beside provider-priced entries', async () => {
+    const old = getAutoMemorySnapshot([], 'old catalog')!;
+    const pending = getAutoMemorySnapshot([], 'new catalog')!;
+    const pendingChange = Math.ceil((pending.text!.length + 1) / 4) * 4 - 4;
+    const file = await writeRecords([
+      ...chain('question', 'answer'),
+      sys('checkpoint', 'a1', 'chat_compression', {
+        info: {
+          compressionStatus: CompressionStatus.COMPRESSED,
+          originalTokenCount: 40000,
+          newTokenCount: 36099,
+        },
+        compressedHistory: [
+          content('user', old),
+          content('user', { text: '?' }, pending),
+        ],
+        pruneContentChars: [0, 4],
+        catalogSwitchChars: [0, pendingChange],
+        resumePromptTokenCount: 36100,
+      }),
+    ]);
+    const [loaded, projection] = await loadAndRestore();
+    const expected = {
+      promptTokenCount: 36100,
+      outputTokenCount: 0,
+      isEstimated: true,
+      catalogSwitchTokens: pendingChange / 4,
+      pricedCatalogEntries: [
+        { snapshots: [old.text], change: 0 },
+        { snapshots: [pending.text], change: pendingChange },
+      ],
+    };
+    expect(getResumeTokenCounts(loaded!.conversation)).toEqual(expected);
+    expect(projection?.runtime.resumeTokenCounts).toEqual(expected);
+
+    await appendRecords(file, {
+      ...record('a2', 'checkpoint', 'latest answer'),
+      usageMetadata: { promptTokenCount: 400 },
+    });
+    const [updated, restored] = await loadAndRestore();
+    const provider = {
+      promptTokenCount: 400,
+      outputTokenCount: 0,
+      isEstimated: false,
+    };
+    expect(getResumeTokenCounts(updated!.conversation)).toEqual(provider);
+    expect(restored?.runtime.resumeTokenCounts).toEqual(provider);
+  });
+
   it('uses the aggregated final usage metadata when selecting resume tokens', async () => {
     await writeRecords([
       record('u1', null, 'first'),

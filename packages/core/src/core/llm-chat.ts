@@ -139,6 +139,7 @@ import {
   catalogSnapshotChars,
   estimateContentChars,
 } from '../utils/content-token-estimate.js';
+import type { PricedCatalogEntry } from '../services/session-resume-token-counts.js';
 import { withoutCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
 import {
   ChatCompressionService,
@@ -858,7 +859,11 @@ export const userContentPushSnapshotKey = Symbol(
   'LlmChat.userContentPushSnapshot',
 );
 
-type PromptTokenCountSource = 'provider' | 'adjusted-provider' | 'estimate';
+interface PromptTokenCountSource {
+  kind: 'provider' | 'adjusted-provider' | 'estimate';
+  localHistory?: { imageTokenEstimate: number; tokenOffset: number };
+  catalogChanges?: WeakMap<Part, number>;
+}
 
 interface TryCompressOptions {
   /**
@@ -2607,7 +2612,9 @@ export class LlmChat {
   private memorySnapshotsVisible: boolean | undefined;
   private unaccountedMemorySnapshots = new WeakSet<Part>();
   private lastPromptTokenCount = 0;
-  private lastPromptTokenCountSource: PromptTokenCountSource = 'provider';
+  private lastPromptTokenCountSource: PromptTokenCountSource = {
+    kind: 'provider',
+  };
   /**
    * This chat's last successful usage report, kept only to size the next
    * send's tool results (#2566): the route it came from, its prompt+output
@@ -2776,6 +2783,7 @@ export class LlmChat {
     history: Content[],
     summaryPrefixLength: number | undefined,
     pending?: Content,
+    knownCatalogChanges?: WeakMap<Part, number>,
   ): ChatCompressionRecordPayload {
     const persisted = withoutCompactionTranscriptHint(history);
     const dispatched = withModelToolErrorNotes(history);
@@ -2810,12 +2818,32 @@ export class LlmChat {
       // Reprice only entries that were sized locally for this checkpoint.
       const locallyPriced =
         isPending || info.historyImageTokenEstimate !== undefined;
-      const difference = locallyPriced ? visible - hidden : 0;
+      let difference = locallyPriced ? visible - hidden : 0;
+      if (!locallyPriced && knownCatalogChanges && visible !== hidden) {
+        // A previous checkpoint can price just its pending catalog. Preserve
+        // its separately rounded adjustment while its Part remains in history.
+        for (const part of entry.parts ?? []) {
+          const known = knownCatalogChanges.get(part) ?? 0;
+          if (catalogVisible ? known < 0 : known > 0) {
+            difference += Math.abs(known);
+          }
+        }
+        if (difference > 0) visible = hidden + difference;
+      }
       catalogSwitchChars.push(catalogVisible ? -difference : difference);
       pruneContentChars.push(catalogVisible ? visible : hidden);
     }
+    // A pending image is charged at the current setting, independently of
+    // the price used for already-committed history.
+    const historyImageTokenEstimate = info.historyImageTokenEstimate;
+    const uniformImagePrice =
+      historyImageTokenEstimate !== undefined &&
+      (historyImageTokenEstimate === imageTokenEstimate ||
+        !pending ||
+        estimateContentChars(pending, 0) === estimateContentChars(pending, 1));
     const payload: ChatCompressionRecordPayload = {
       info,
+      ...(uniformImagePrice && { historyImageTokenEstimate }),
       pruneContentChars,
       ...(hasCatalog && { catalogSwitchChars }),
       compressedHistory,
@@ -3039,7 +3067,7 @@ export class LlmChat {
       // replaced by the next usage report, whereas discarding the anchor falls
       // back to a walk that under-counts by the full system/tool overhead.
       this.lastPromptTokenCount = 0;
-      this.lastPromptTokenCountSource = 'provider';
+      this.lastPromptTokenCountSource = { kind: 'provider' };
       this.lastOutputTokenCount = 0;
       this.lastCachedContentTokenCount = 0;
       this.tokenCountsByRouteKey.clear();
@@ -3092,7 +3120,7 @@ export class LlmChat {
     // target) — a colliding key would make the next keyed read for the
     // retained route early-return the zero slot without consulting the map.
     this.lastPromptTokenCount = 0;
-    this.lastPromptTokenCountSource = 'provider';
+    this.lastPromptTokenCountSource = { kind: 'provider' };
     this.lastOutputTokenCount = 0;
     this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = targetRouteKey;
@@ -3276,12 +3304,18 @@ export class LlmChat {
    * seeded prompt count comes from a different chat instance and should not
    * inherit this chat's last response metadata.
    */
-  setLastPromptTokenCount(count: number, isEstimated = false): void {
+  setLastPromptTokenCount(
+    count: number,
+    isEstimated = false,
+    historyImageTokenEstimate?: number,
+  ): void {
     this.toolBudgetUsageAnchor = undefined;
     this.unaccountedMemorySnapshots = new WeakSet<Part>();
     this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
     this.lastPromptTokenCount = count;
-    this.lastPromptTokenCountSource = isEstimated ? 'estimate' : 'provider';
+    this.lastPromptTokenCountSource = isEstimated
+      ? this.estimatedCountSource(count, historyImageTokenEstimate)
+      : { kind: 'provider' };
     this.lastOutputTokenCount = 0;
     this.lastCachedContentTokenCount = 0;
     this.telemetryService?.setLastCachedContentTokenCount(0);
@@ -3295,20 +3329,72 @@ export class LlmChat {
 
   isLastPromptTokenCountEstimated(): boolean {
     this.adoptTokenCountsForRoute();
-    return this.lastPromptTokenCountSource !== 'provider';
+    return this.lastPromptTokenCountSource.kind !== 'provider';
   }
 
   private promptCountIsEstimateDerived(): boolean {
     return (
       this.lastPromptTokenCount === 0 ||
-      this.lastPromptTokenCountSource !== 'provider'
+      this.lastPromptTokenCountSource.kind !== 'provider'
     );
+  }
+
+  private estimatedCountSource(
+    count: number,
+    imagePrice: number | undefined,
+  ): PromptTokenCountSource {
+    if (
+      imagePrice === undefined ||
+      !Number.isFinite(imagePrice) ||
+      imagePrice < 1
+    ) {
+      return { kind: 'estimate' };
+    }
+    return {
+      kind: 'estimate',
+      localHistory: {
+        imageTokenEstimate: imagePrice,
+        tokenOffset:
+          count -
+          estimateModelContentTokens(this.curatedBaseHistory(), imagePrice),
+      },
+    };
+  }
+
+  private restoreCatalogChanges(entries: readonly PricedCatalogEntry[]): void {
+    const changes = new WeakMap<Part, number>();
+    let index = 0;
+    const catalogVisible = Boolean(this.config.getAutoMemoryContext?.());
+    for (const content of this.history) {
+      const parts = content.parts?.filter(
+        (part) =>
+          part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true &&
+          typeof part.text === 'string',
+      );
+      if (!parts?.length) continue;
+      const entry = entries[index++];
+      if (
+        entry.snapshots.length !== parts.length ||
+        parts.some((part, i) => part.text !== entry.snapshots[i])
+      )
+        return;
+      if (entry.change !== 0) {
+        changes.set(
+          parts[0],
+          Math.abs(entry.change) * (catalogVisible ? -1 : 1),
+        );
+      }
+      if (index === entries.length) {
+        this.lastPromptTokenCountSource.catalogChanges = changes;
+        return;
+      }
+    }
   }
 
   private needsPromptOverheadEstimate(): boolean {
     return (
       this.lastPromptTokenCount === 0 ||
-      this.lastPromptTokenCountSource === 'estimate'
+      this.lastPromptTokenCountSource.kind === 'estimate'
     );
   }
 
@@ -3323,6 +3409,8 @@ export class LlmChat {
     outputTokenCount: number,
     isEstimated = false,
     isProviderAdjusted = false,
+    historyImageTokenEstimate?: number,
+    pricedCatalogEntries?: readonly PricedCatalogEntry[],
   ): void {
     this.toolBudgetUsageAnchor = undefined;
     this.unaccountedMemorySnapshots = new WeakSet<Part>();
@@ -3333,10 +3421,12 @@ export class LlmChat {
     // this session's media settings before the first session-limit check.
     const hasProviderBaseline = isProviderAdjusted && promptTokenCount > 0;
     if (isEstimated && promptTokenCount === 0) {
+      historyImageTokenEstimate = resolveSlimmingConfig(
+        this.config.getChatCompression?.(),
+      ).imageTokenEstimate;
       promptTokenCount = estimateContentTokens(
         this.getHistoryShallow(true),
-        resolveSlimmingConfig(this.config.getChatCompression?.())
-          .imageTokenEstimate,
+        historyImageTokenEstimate,
       );
       outputTokenCount = 0; // The restored history includes the last response.
       this.telemetryService?.setLastPromptTokenCount(promptTokenCount);
@@ -3345,10 +3435,21 @@ export class LlmChat {
       ? Math.max(0, promptTokenCount)
       : 0;
     this.lastPromptTokenCountSource = hasProviderBaseline
-      ? 'adjusted-provider'
+      ? { kind: 'adjusted-provider' }
       : isEstimated
-        ? 'estimate'
-        : 'provider';
+        ? this.estimatedCountSource(
+            this.lastPromptTokenCount,
+            historyImageTokenEstimate,
+          )
+        : { kind: 'provider' };
+    if (
+      isEstimated &&
+      this.lastPromptTokenCount > 0 &&
+      historyImageTokenEstimate === undefined &&
+      pricedCatalogEntries?.length
+    ) {
+      this.restoreCatalogChanges(pricedCatalogEntries);
+    }
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
@@ -3481,6 +3582,7 @@ export class LlmChat {
       this.setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated,
+        info.historyImageTokenEstimate,
       );
       // setLastPromptTokenCount re-keyed the fresh count to the ACTIVE
       // route, but in-send callers compress for the REQUEST route: the
@@ -3540,9 +3642,11 @@ export class LlmChat {
     // Use the same estimator on both sides so the NOOP gate compares
     // apples to apples. The API-authoritative lastPromptTokenCount is
     // then adjusted by the estimated delta — never replaced wholesale.
-    const { imageTokenEstimate } = resolveSlimmingConfig(
-      this.config.getChatCompression?.(),
-    );
+    const localSource = this.lastPromptTokenCountSource.localHistory;
+    const imageTokenEstimate =
+      localSource?.imageTokenEstimate ??
+      resolveSlimmingConfig(this.config.getChatCompression?.())
+        .imageTokenEstimate;
     const beforeHistory = this.curatedBaseHistory();
     const beforeEstimate = estimateModelContentTokens(
       beforeHistory,
@@ -3588,15 +3692,21 @@ export class LlmChat {
     }
 
     // The size gate above can clear media even when its provider charge is
-    // unknown. Only deduct text savings from an existing usage anchor.
-    const reduction = this.lastPromptTokenCount
+    // unknown. Only deduct text savings from an unpriced usage anchor.
+    // Usage-less turns may add visible content (including catalogs that were
+    // separately charged). Reusing the original offset counts it only once.
+    const apiBaseline = localSource
+      ? Math.max(0, beforeEstimate + localSource.tokenOffset)
+      : this.lastPromptTokenCount || beforeEstimate;
+    const locallyPriced =
+      !this.lastPromptTokenCount || localSource !== undefined;
+    const reduction = !locallyPriced
       ? Math.max(
           0,
           estimateModelContentTokens(beforeHistory, 0) -
             estimateModelContentTokens(afterHistory, 0),
         )
       : beforeEstimate - afterEstimate;
-    const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
     const baselineIsEstimated = this.promptCountIsEstimateDerived();
     const adjustedTokenCount = Math.max(0, apiBaseline - reduction);
 
@@ -3608,9 +3718,7 @@ export class LlmChat {
     const info: ChatCompressionInfo = {
       originalTokenCount: apiBaseline,
       newTokenCount: adjustedTokenCount,
-      ...(!this.lastPromptTokenCount && {
-        historyImageTokenEstimate: imageTokenEstimate,
-      }),
+      ...(locallyPriced && { historyImageTokenEstimate: imageTokenEstimate }),
       originalTokenCountIsEstimated: baselineIsEstimated,
       newTokenCountIsEstimated: true,
       compressionStatus: CompressionStatus.COMPRESSED,
@@ -3623,6 +3731,8 @@ export class LlmChat {
         newHistory,
         getStartupContextLength(newHistory, { includeCompressed: true }) ||
           undefined,
+        undefined,
+        this.lastPromptTokenCountSource.catalogChanges,
       ),
     );
     logChatCompression(
@@ -3634,7 +3744,17 @@ export class LlmChat {
     );
     this.setHistory(newHistory, this.completedToolCallIds);
     this.lastPromptTokenCount = adjustedTokenCount;
-    this.lastPromptTokenCountSource = 'estimate';
+    this.lastPromptTokenCountSource = {
+      kind: 'estimate',
+      ...(locallyPriced
+        ? {
+            localHistory: {
+              imageTokenEstimate,
+              tokenOffset: adjustedTokenCount - afterEstimate,
+            },
+          }
+        : { catalogChanges: this.lastPromptTokenCountSource.catalogChanges }),
+    };
     this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = this.currentRouteKey();
     // Fast compression rewrote the shared history every retained entry
@@ -6857,10 +6977,14 @@ export class LlmChat {
     const history = curated
       ? extractCuratedHistory(this.curatedBaseHistory())
       : this.history;
+    const catalogChanges = this.lastPromptTokenCountSource.catalogChanges;
     return history.map((content) => {
       const copied = copyContentContainer(content);
       // Startup restoration and microcompaction reinstall these defensive copies.
       content.parts?.forEach((part, index) => {
+        const change = catalogChanges?.get(part);
+        if (change !== undefined)
+          catalogChanges!.set(copied.parts![index], change);
         if (this.unaccountedMemorySnapshots.has(part)) {
           this.unaccountedMemorySnapshots.add(copied.parts![index]);
         }
@@ -7830,7 +7954,7 @@ export class LlmChat {
             }
             this.unaccountedMemorySnapshots = new WeakSet<Part>();
             this.lastPromptTokenCount = lastPromptTokenCount;
-            this.lastPromptTokenCountSource = 'provider';
+            this.lastPromptTokenCountSource = { kind: 'provider' };
             this.lastOutputTokenCount = hasUsablePromptTokenCount
               ? getUsageOutputTokenCountForPromptEstimate({
                   promptTokenCount,
@@ -8472,9 +8596,30 @@ export class LlmChat {
         ),
       );
       if (snapshots.length > 0) {
-        this.lastPromptTokenCount += estimateContentTokens([
+        const chargedTokens = estimateContentTokens([
           { role: 'user', parts: snapshots },
         ]);
+        // On a provider-derived baseline only these additions have a known
+        // price. A new usage report replaces the entire source above.
+        const source = this.lastPromptTokenCountSource;
+        if (!source.localHistory) {
+          const changes = source.catalogChanges ?? new WeakMap<Part, number>();
+          let remaining = chargedTokens * TOKEN_TO_CHAR_RATIO;
+          snapshots.forEach((snapshot, index) => {
+            const chars =
+              index === snapshots.length - 1
+                ? remaining
+                : catalogSnapshotChars({ parts: [snapshot] });
+            changes.set(snapshot, -chars);
+            remaining -= chars;
+          });
+          this.lastPromptTokenCountSource = {
+            catalogChanges: changes,
+            kind:
+              source.kind === 'provider' ? 'adjusted-provider' : source.kind,
+          };
+        }
+        this.lastPromptTokenCount += chargedTokens;
         this.telemetryService?.setLastPromptTokenCount(
           this.lastPromptTokenCount,
         );
