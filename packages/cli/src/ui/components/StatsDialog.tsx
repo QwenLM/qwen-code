@@ -10,7 +10,11 @@ import { useState, useEffect, useCallback } from 'react';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { loadStatsData, type StatsData } from '../utils/statsDataService.js';
-import { metricsToUsageRecord } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
+import {
+  hasRunActivity,
+  metricsToRunUsageRecord,
+} from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 import type { TimeRange } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -89,21 +93,19 @@ const RangeIndicator: React.FC<{ range: TimeRange }> = ({ range }) => (
   </Box>
 );
 
-function buildCurrentSessionRecord(
+export function buildCurrentSessionRecord(
   sessionId: string,
   startTime: Date,
   project: string,
   metrics: import('@qwen-code/qwen-code-core').SessionMetrics,
 ) {
-  const hasActivity = Object.values(metrics.models).some(
-    (m) => m.api.totalRequests > 0,
-  );
-  if (!hasActivity) return undefined;
-  return metricsToUsageRecord(
+  if (!hasRunActivity(metrics)) return undefined;
+  const startMs = startTime.getTime();
+  return metricsToRunUsageRecord(
     sessionId,
     project,
-    startTime.getTime(),
-    Date.now(),
+    startMs,
+    Math.max(startMs, Date.now()),
     metrics,
   );
 }
@@ -148,11 +150,11 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
     setLoading(true);
     const liveRecord = buildCurrentSessionRecord(
       stats.sessionId,
-      stats.sessionStartTime,
+      uiTelemetryService.getRunStartTime(),
       config.getProjectRoot(),
-      stats.metrics,
+      uiTelemetryService.getLiveMetrics(),
     );
-    loadStatsData(range, liveRecord)
+    loadStatsData(range, liveRecord, stats.sessionId, config.getProjectRoot())
       .then((d) => {
         if (!stale) {
           setData(d);

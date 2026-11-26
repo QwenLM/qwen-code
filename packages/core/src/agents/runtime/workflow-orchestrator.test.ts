@@ -2151,6 +2151,22 @@ describe('createProductionDispatch', () => {
     expect(isWorkflowAgentFailedError(caught)).toBe(false);
   });
 
+  it('reports the hook stop reason while settling the workflow agent to null', async () => {
+    nextTerminateMode.value = 'HOOK_STOPPED';
+    nextFinalText.value = 'A hook stopped the agent: budget spent';
+    const agentCompleted = vi.fn();
+    const outcome = await runWf({
+      dispatch: createProductionDispatch(fakeConfig()),
+      script: "return await agent('read');",
+      emitter: { agentCompleted },
+    });
+    expect(outcome.result).toBeNull();
+    expect(agentCompleted).toHaveBeenCalledWith(
+      undefined,
+      expect.stringContaining('A hook stopped the agent: budget spent'),
+    );
+  });
+
   // ── R1 (#1 + #3): token reporting across all terminate modes ──────────
 
   beforeEach(() => {
@@ -5048,6 +5064,19 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
         ),
       );
+    },
+  );
+
+  it.each([{ model: 'other-model' }, { schema: { type: 'object' } }])(
+    'reports the hook stop reason with dispatch overrides %o',
+    async (opts) => {
+      const reason = 'A hook stopped the agent: budget spent';
+      const { result } = dispatchVia(
+        { onCreate: ends(reason, 'HOOK_STOPPED') },
+        'read',
+        opts,
+      );
+      await expect(result).rejects.toThrow(reason);
     },
   );
 

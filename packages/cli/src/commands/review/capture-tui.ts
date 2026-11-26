@@ -1813,24 +1813,23 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // and removing the listeners before that pipe is read swallows it — the
   // process then exits 0 as if nothing happened (measured on the bundled
   // runtime: SIGTERM during a fake render → exit 0, handler never ran).
-  // TWO turns, and neither may be a 0ms timer. libuv delivers signals by
-  // writing to a pipe the POLL phase reads; the JS handler runs from there.
-  // A timer resolves in the timers phase, which precedes poll — it can
-  // release with the byte unread. setImmediate resolves in the check phase,
-  // which follows poll WITHIN THE SAME ITERATION: scheduled from a
-  // poll-phase continuation (where this tail resumes after the render's
-  // blocking spawnSync) its poll has ALREADY run, so one turn releases with
-  // the byte still queued and the signal is dropped when uv_signal_stop
-  // takes the watcher away. A second turn cannot land before the next
-  // iteration's poll, so a full poll phase — the one that dispatches the
-  // handler, which reaps and re-raises — always runs first. Measured on
-  // Linux/Node 22 through the real command: one turn swallowed the SIGTERM
-  // every time (exit 0, success JSON, handler never entered, kernel showing
-  // the signal delivered and no longer pending); two turns died 143.
+  // The drain must span one FULL event-loop iteration from ANY phase this
+  // tail can resume in: a signal the kernel accepted while spawnSync
+  // blocked the loop is dispatched from a LATER poll phase, and each
+  // primitive alone can miss it — a 0ms timer resolves in the timers
+  // phase, which precedes poll when the tail resumed inside timers; a
+  // setImmediate resolves in check, which precedes the NEXT poll when the
+  // tail resumed inside poll. Chaining timer → immediate → immediate
+  // guarantees at least one poll phase (the one that dispatches the
+  // queued handler, which reaps and re-raises) runs before release on
+  // every resume point. Measured on CI: the previous two-setImmediate
+  // drain still occasionally released before the delivery poll on a
+  // loaded runner and the teardown swallowed a SIGTERM the kernel had
+  // accepted — the run exited 0 with a success JSON.
   const drainSignalsThenRelease = async (): Promise<void> => {
-    for (let turn = 0; turn < 2; turn++) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     releaseSignals();
   };
   function onSignal(sig: NodeJS.Signals): void {
@@ -1848,7 +1847,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     releaseSignals();
     process.kill(process.pid, sig);
   }
-  for (const s of REAP_SIGNALS) process.on(s, onSignal);
+  // Capture's cleanup and re-raise must precede hooks like signal-exit.
+  for (const s of REAP_SIGNALS) process.prependListener(s, onSignal);
 
   let ansText = '';
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';

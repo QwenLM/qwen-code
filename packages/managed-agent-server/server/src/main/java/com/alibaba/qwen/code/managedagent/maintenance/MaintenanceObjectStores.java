@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.maintenance;
 
+import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -22,14 +23,14 @@ final class MaintenanceObjectStores {
     }
 
     /** K2 CSI operators read the same tool-publication OSS environment as the worker ACK command. */
-    static com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient k2Oss() throws Exception {
+    static AliyunObjectStoreClient k2Oss() throws Exception {
         return regional("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_ENDPOINT",
                 "QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_REGION",
                 "QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_BUCKET");
     }
 
     /** W1 offline operators read the recovery OSS environment. */
-    static com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient w1Oss() throws Exception {
+    static AliyunObjectStoreClient w1Oss() throws Exception {
         return regional("W1_OSS_ENDPOINT", "W1_OSS_REGION", "W1_OSS_BUCKET");
     }
 
@@ -37,7 +38,7 @@ final class MaintenanceObjectStores {
      * Spring-context maintenance commands already bind {@link ManagedAgentSettings}; build the store
      * exactly as the auto-configuration does, gated on tool-publication being enabled and configured.
      */
-    static com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient settingsOss(
+    static AliyunObjectStoreClient settingsOss(
             ManagedAgentSettings settings) throws Exception {
         ManagedAgentSettings.ToolPublication publication = settings.getToolPublication();
         if (publication == null || !publication.isEnabled()
@@ -46,7 +47,7 @@ final class MaintenanceObjectStores {
                 || StringUtils.isBlank(publication.getOssBucket())) {
             return null;
         }
-        return com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient.environment(settings);
+        return AliyunObjectStoreClient.environment(settings);
     }
 
     /**
@@ -58,7 +59,7 @@ final class MaintenanceObjectStores {
         return objects == null ? null : new JdbcJournalPacks(jdbc, objects, null);
     }
 
-    private static com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient regional(
+    private static AliyunObjectStoreClient regional(
             String endpointKey, String regionKey, String bucketKey) throws Exception {
         if (System.getenv(endpointKey) == null && System.getenv(regionKey) == null
                 && System.getenv(bucketKey) == null) {
@@ -73,7 +74,7 @@ final class MaintenanceObjectStores {
                 || !endpoint.getHost().equals("oss-" + region + ".aliyuncs.com")) {
             throw new IllegalArgumentException("Private regional OSS endpoint is required");
         }
-        return com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient.regional(endpoint, region);
+        return AliyunObjectStoreClient.regional(endpoint, region);
     }
 
     private static String required(String name) {

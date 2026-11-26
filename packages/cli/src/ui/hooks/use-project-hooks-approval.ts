@@ -18,6 +18,12 @@ import {
 import { ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { MessageType } from '../types.js';
+
+type ApprovalNotice = {
+  type: MessageType.INFO | MessageType.WARNING;
+  text: string;
+};
 
 export interface PendingProjectHooks {
   approval: ProjectHooksApproval;
@@ -33,17 +39,17 @@ export interface PendingProjectHooks {
  * hash-bound decision, un-gates the hooks for this session and reloads the
  * registry; rejecting persists the rejection; dismissing (Esc) leaves the
  * decision open until the next start or until the block changes, and says so
- * via `addInfo`.
+ * via `addNotice`.
  */
 export const useProjectHooksApproval = (
   config: Config,
   settings: LoadedSettings,
-  addInfo?: (text: string) => void,
+  addNotice?: (notice: ApprovalNotice) => void,
 ) => {
   const [pending, setPending] = useState<PendingProjectHooks | undefined>();
   // Latest caller callback without making the select handler unstable.
-  const addInfoRef = useRef(addInfo);
-  addInfoRef.current = addInfo;
+  const addNoticeRef = useRef(addNotice);
+  addNoticeRef.current = addNotice;
   // A dismissed block stays dismissed this session, so `/hooks` can show it.
   const dismissedHashRef = useRef<string | undefined>(undefined);
 
@@ -88,9 +94,10 @@ export const useProjectHooksApproval = (
       setPending(undefined);
       if (choice === ProjectHooksApprovalChoice.DISMISS) {
         dismissedHashRef.current = hashProjectHooks(pending.approval);
-        addInfoRef.current?.(
-          'Project hooks in .qwen/settings.json were not loaded. Restart Qwen Code to decide in the approval dialog; /hooks shows them as not approved.',
-        );
+        addNoticeRef.current?.({
+          type: MessageType.INFO,
+          text: 'Project hooks in .qwen/settings.json were not loaded. Restart Qwen Code to decide in the approval dialog; /hooks shows them as not approved.',
+        });
         return;
       }
       const approve = choice === ProjectHooksApprovalChoice.APPROVE;
@@ -101,14 +108,27 @@ export const useProjectHooksApproval = (
         );
       } catch (error) {
         // Nothing was saved: keep the hooks withheld and say so.
-        addInfoRef.current?.(
-          `Project hooks were not loaded: the decision could not be saved (${getErrorMessage(error)}).`,
-        );
+        addNoticeRef.current?.({
+          type: MessageType.INFO,
+          text: `Project hooks were not loaded: the decision could not be saved (${getErrorMessage(error)}).`,
+        });
         return;
       }
       if (approve) {
         config.setProjectHooksPendingApproval(false);
-        await config.getHookSystem()?.reload();
+        const hookSystem = config.getHookSystem();
+        if (hookSystem) {
+          const previousWarnings = new Set(hookSystem.getConfigWarnings());
+          await hookSystem.reload();
+          for (const warning of hookSystem.getConfigWarnings()) {
+            if (!previousWarnings.has(warning)) {
+              addNoticeRef.current?.({
+                type: MessageType.WARNING,
+                text: warning,
+              });
+            }
+          }
+        }
       } else {
         config.setProjectHooksPendingApproval(true, true);
       }

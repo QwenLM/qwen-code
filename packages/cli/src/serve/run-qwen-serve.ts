@@ -5441,6 +5441,12 @@ async function runQwenServeImpl(
     // serialized disable runs on the next microtask and wins before further IO;
     // ACP disposal below also removes the upgrade listeners while the daemon
     // mount is being torn down.
+    // Contract: pairing teardown is fire-and-forget from the drain's point of
+    // view. Both services' close() destroys tracked survivors (including
+    // upgraded sockets closeAllConnections() cannot reach), so dispose settles
+    // promptly even over a non-answering paired peer; awaiting it here would
+    // let a future wedged dispose hang the whole drain, while process exit
+    // remains the final backstop for any socket that outlives it.
     const remoteAccessService = app.locals?.['remoteAccessService'] as
       | RemoteAccessService
       | undefined;

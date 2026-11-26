@@ -81,11 +81,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_create: { standing: 'managed', evidence: 'surface:SESSION_CREATE' },
   hosted_harness_private_v1: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence: 'docs:packages/cli/src/serve/hosted-harness-contract.ts',
   },
   managed_session_journal_delta_v1: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence:
+      'docs:packages/cli/src/serve/hosted-harness-session/observation-routes.ts',
   },
   session_startup_config: LEGACY_ONLY(
     'a client startup config, not a Managed input',
@@ -180,7 +181,8 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   typed_event_schema: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence:
+      'docs:packages/cli/src/serve/hosted-harness-session/observation-routes.ts',
   },
   session_set_model: {
     standing: 'managed',
@@ -430,6 +432,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
     'no Managed Git ignore query route',
+  ),
+  workspace_input_history: NO_MANAGED_EQUIVALENT(
+    'no Managed input history route',
   ),
   workspace_mcp_restart: {
     standing: 'managed',

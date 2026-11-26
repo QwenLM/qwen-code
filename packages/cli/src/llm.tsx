@@ -27,12 +27,10 @@ import {
   SessionService,
   setStartupEventSink,
   createDebugLogger,
-  persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   resolveUsageStatisticsEnabled,
-  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
@@ -91,6 +89,7 @@ import {
   registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
+import { persistRunUsageOnExit } from './utils/usage-persistence.js';
 import { AppEvent, appEvents } from './utils/events.js';
 import { readStdin } from './utils/readStdin.js';
 import {
@@ -437,6 +436,8 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
     process.removeListener('SIGHUP', handleSighup);
   };
 }
+
+export { persistRunUsageOnExit };
 
 export async function main() {
   profileCheckpoint('main_entry');
@@ -1280,26 +1281,7 @@ export async function main() {
 
     // Persist session usage for cross-session reports (must run before
     // config.shutdown() which clears telemetry state).
-    // sessionStartTime is read from uiTelemetryService so it stays correct
-    // after /clear resets the session (reset() updates the internal timestamp).
-    registerCleanup(() => {
-      try {
-        const metrics = uiTelemetryService.getMetrics();
-        const hasActivity = Object.values(metrics.models).some(
-          (m) => m.api.totalRequests > 0,
-        );
-        if (!hasActivity) return;
-        persistSessionUsage({
-          sessionId: config.getSessionId(),
-          startTime: uiTelemetryService.getSessionStartTime(),
-          endTime: new Date(),
-          project: config.getProjectRoot(),
-          metrics,
-        });
-      } catch {
-        // Best-effort — don't block shutdown
-      }
-    });
+    registerCleanup(() => persistRunUsageOnExit(config));
 
     registerCleanup(() => config.shutdownExecutionEnvironments(), {
       first: true,

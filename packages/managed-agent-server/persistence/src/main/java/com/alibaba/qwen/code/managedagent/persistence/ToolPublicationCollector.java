@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
@@ -48,7 +49,7 @@ public final class ToolPublicationCollector {
             ManagedAgentSettings properties) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
-        this.transactions.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        this.transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.retention = retention;
         this.objects = objects;
         this.properties = properties;
@@ -122,7 +123,7 @@ public final class ToolPublicationCollector {
                 "PUBLICATION", scope, publication, operationId(scope, publication));
     }
 
-    private static JsonNode progress(java.util.Map<String, Object> row) {
+    private static JsonNode progress(Map<String, Object> row) {
         return row.get("result_json") == null ? JSON.createObjectNode()
                 : JdbcManagedToolResultStore.parse((String) row.get("result_json"));
     }
