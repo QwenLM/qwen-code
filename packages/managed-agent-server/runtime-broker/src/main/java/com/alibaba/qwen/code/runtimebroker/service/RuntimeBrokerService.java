@@ -51,6 +51,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -1213,7 +1214,10 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                         && current.getDispatchOwner() != null
                                         && !brokerOwnerId.equals(current.getDispatchOwner())) {
                                     return executionReconciler.reconcileInContext(context, current, true, true)
-                                            .thenApply(ExecutionReconciliation::getRecord);
+                                            .thenApply(ExecutionReconciliation::getRecord)
+                                            .toCompletableFuture()
+                                            // Bound this poll without abandoning the shared Worker lookup.
+                                            .completeOnTimeout(current, 2, TimeUnit.SECONDS);
                                 }
                                 return CompletableFuture.completedFuture(current);
                             }),

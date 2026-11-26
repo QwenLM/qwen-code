@@ -1409,7 +1409,12 @@ export function registerHostedSessionOpenRoutes({
             recoveryDeclined(res, 'public_child_recovery_unsupported');
             return;
           }
-          blockRecovery(resident, namedStoreFailure(cause));
+          // A failed read in this retry leaves the original Broker park owed.
+          if (
+            resident.runtimeRecoveryPromptId !== parked ||
+            resident.managed.authority.writesStopped
+          )
+            blockRecovery(resident, namedStoreFailure(cause));
           writeStderrLineSafe(
             'qwen serve: Hosted recovery redrive failed: ' + String(cause),
           );

@@ -99,7 +99,6 @@ import {
 } from '../hosted-workflow-turn.js';
 import {
   HostedWorkspaceBroker,
-  HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from '../hosted-workspace-broker.js';
 import {
@@ -117,6 +116,7 @@ import { extensionAgentsOf } from './configuration-routes.js';
 import { childAgentsOf, stopPublicChildSource } from './interaction-routes.js';
 import { compressionBusy, noteSessionActivity } from './lifecycle-routes.js';
 import {
+  blockOnTurnRecovery,
   blockRecovery,
   type HostedRuntimeOwnership,
   liftRecoveryBlock,
@@ -1755,17 +1755,8 @@ export function registerHostedPromptRoute({
         settled = true;
       } catch (cause) {
         if (monitorWakeNeedsRecovery(cause)) {
-          if (admitted) {
-            if (
-              !session.blocked &&
-              cause instanceof HostedToolRecoveryRequiredError &&
-              cause.cause instanceof HostedWorkspaceBrokerRejection &&
-              (cause.cause.code === 'runtime_session_not_found' ||
-                cause.cause.code === 'runtime_reconciliation_required')
-            )
-              session.runtimeRecoveryPromptId = promptId;
-            session.blocked = true;
-          } else if (!res.headersSent)
+          if (admitted) blockOnTurnRecovery(session, promptId, cause);
+          else if (!res.headersSent)
             error(res, 503, 'hosted_mcp_recovery_required');
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
