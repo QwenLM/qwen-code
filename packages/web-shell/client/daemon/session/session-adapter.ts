@@ -16,12 +16,12 @@ import type {
 /**
  * Standalone session integration for an embedded WebShell.
  *
- * The client returned by `createClient` should invoke
- * `opts.onSseStreamAccepted?.(streamId)` once its live event stream is ready
- * so `DaemonSessionClient.waitForEventStream()` unblocks immediately.
+ * The client returned by `createClient` supplies capabilities and branding.
+ * Custom subscriptions should call `opts.onEventStreamReady?.()` once ready
+ * to deliver session events so the first prompt can be submitted on an idle stream.
  *
- * The host supplies user messages through its live events and restored history.
- * WebShell does not insert an optimistic copy for adapter submissions.
+ * The host supplies admitted user messages through live events and restored
+ * history. WebShell records local submission failures for recovery.
  * Continuations and other actions use the returned session client directly.
  */
 export interface WebShellSessionAdapter {
@@ -42,7 +42,7 @@ export interface WebShellSessionAdapter {
     clientId: string | undefined,
     SessionClient: typeof DaemonSessionClient,
   ): Promise<DaemonSessionClient>;
-  /** Resolve once the prompt is identified and report native stream failure through completion. */
+  /** Return the admitted prompt ID. Settle `completion` after the final transcript events or on stream failure. */
   submitPrompt(
     session: DaemonSessionClient,
     request: PromptRequest,

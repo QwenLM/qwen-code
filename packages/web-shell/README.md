@@ -450,9 +450,10 @@ export function QwenCodePanel() {
 ```
 
 嵌入宿主可以通过 `sessionAdapter` 接管独立会话的创建、恢复和常规 prompt 提交。
-适配器通过实时事件和恢复历史提供用户消息，由 WebShell 渲染。导航离开后的提交在
-宿主受理时解除客户端附着，宿主仍可继续运行该轮。继续会话等操作直接使用适配器
-返回的会话客户端。工作区会话使用默认 daemon 路由。
+适配器客户端必须提供 `capabilities()`，可按需提供品牌。宿主通过实时事件和恢复历史
+提供已受理的用户消息，并在最后一批会话事件发出后结束 `completion`。导航离开后的
+提交在受理时解除客户端附着。继续会话等操作直接使用会话客户端，工作区会话沿用
+daemon 路由。详见[独立会话适配器设计](../../docs/design/web-shell-session-adapter.zh-CN.md)。
 
 ### 2. 共享 Provider 接入（纯消费者）
 

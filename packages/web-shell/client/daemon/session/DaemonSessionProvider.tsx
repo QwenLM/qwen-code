@@ -5862,6 +5862,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current = undefined;
         },
         onGeneratedUiInvalidated: invalidateGeneratedUi,
+        onPromptSettled: publishPromptSettlement,
         onPromptAdmitted: (owner, admission) => {
           bindPrompt(
             locallyBoundPromptIdsRef.current,
@@ -5920,6 +5921,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       invalidateGeneratedUi,
       clientId,
       resolvedBaseUrl,
+      publishPromptSettlement,
       resolvedToken,
       resolveSessionClient,
       restartEventStreamOnPrompt,

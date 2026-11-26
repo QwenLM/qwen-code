@@ -18,6 +18,7 @@ import { DaemonWorkspaceProvider } from '../workspace/DaemonWorkspaceProvider.js
 import {
   DaemonSessionProvider,
   useDaemonSession,
+  useDaemonPromptSettled,
 } from './DaemonSessionProvider.js';
 import type { WebShellSessionAdapter } from './session-adapter.js';
 import type { DaemonSessionContextValue } from './types.js';
@@ -26,6 +27,7 @@ class FakeAdapterClient extends DaemonClient {
   readonly detachMock = vi.fn(async () => undefined);
   readonly disposeMock = vi.fn();
   readonly promptEvents = Promise.withResolvers<DaemonEvent[]>();
+  readonly streamReady = Promise.withResolvers<void>();
 
   override async capabilities() {
     return {
@@ -49,11 +51,13 @@ class FakeAdapterClient extends DaemonClient {
     _sessionId: string,
     opts: Parameters<DaemonClient['subscribeEvents']>[1],
   ): AsyncGenerator<DaemonEvent> {
-    opts.onSseStreamAccepted?.('adapter-stream-1');
     const { promise: aborted, resolve: onAbort } =
       Promise.withResolvers<void>();
     if (opts.signal?.aborted) onAbort();
     else opts.signal?.addEventListener('abort', onAbort, { once: true });
+    await Promise.race([this.streamReady.promise, aborted]);
+    if (opts.signal?.aborted) return;
+    opts.onEventStreamReady?.();
     const events = await Promise.race([this.promptEvents.promise, aborted]);
     if (events) yield* events;
     await aborted;
@@ -78,7 +82,7 @@ describe('WebShellSessionAdapter provider lifecycle', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders host prompt events, keeps the adapter client across renders, and detaches on unmount', async () => {
+  it('renders and finishes adapter turns without a terminal event, reuses the client, and detaches on unmount', async () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response(JSON.stringify({}), { status: 404 }));
@@ -101,6 +105,7 @@ describe('WebShellSessionAdapter provider lifecycle', () => {
           },
         }),
     );
+    const completion = Promise.withResolvers<void>();
     const buildAdapter = (): WebShellSessionAdapter => ({
       createClient,
       create: async (client) => load(client, 'sa-created'),
@@ -130,12 +135,14 @@ describe('WebShellSessionAdapter provider lifecycle', () => {
             },
           },
         ]);
-        return { promptId: 'p-1', completion: Promise.resolve() };
+        return { promptId: 'p-1', completion: completion.promise };
       },
     });
     let session: DaemonSessionContextValue | undefined;
+    const onSettled = vi.fn();
     function Harness() {
       session = useDaemonSession();
+      useDaemonPromptSettled(onSettled);
       return null;
     }
     const renderTree = () => (
@@ -168,14 +175,33 @@ describe('WebShellSessionAdapter provider lifecycle', () => {
     expect(load).toHaveBeenCalledTimes(1);
     expect(clients[0]!.disposeMock).not.toHaveBeenCalled();
 
+    const onAdmitted = vi.fn();
+    const turn = Promise.withResolvers<void>();
     await act(async () => {
-      await session!.actions.submitPrompt('Host-owned prompt');
+      void session!.actions
+        .sendPrompt('Host-owned prompt', { onAdmitted })
+        .then(() => turn.resolve(), turn.reject);
     });
+    expect(onAdmitted).not.toHaveBeenCalled();
+    await act(async () => clients[0]!.streamReady.resolve());
     await vi.waitFor(() => {
       expect(session!.store.getSnapshot().blocks).toMatchObject([
         { kind: 'user', text: 'Host-owned prompt' },
-        { kind: 'assistant', text: 'Host reply' },
+        { kind: 'assistant', text: 'Host reply', streaming: true },
       ]);
+    });
+    await act(async () => completion.resolve());
+    await expect(turn.promise).resolves.toBeUndefined();
+    expect(session!.promptStatus).toBe('idle');
+    expect(session!.store.getSnapshot().blocks.at(-1)).toMatchObject({
+      kind: 'assistant',
+      streaming: false,
+    });
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith({
+      sessionId: 'sa-42',
+      promptId: 'p-1',
+      outcome: 'completed',
+      stopReason: 'end_turn',
     });
 
     await act(async () => root!.unmount());

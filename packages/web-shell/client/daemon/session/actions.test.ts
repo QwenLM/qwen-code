@@ -9788,7 +9788,7 @@ describe('sendPrompt idempotent admission auto-retry', () => {
     }
   });
 
-  it('sessionAdapter sendPrompt surfaces stream failure without retrying and settles on turn completion', async () => {
+  it('retains a failed adapter submission without replaying it and separates admission from turn settlement', async () => {
     const session = Object.assign(createMockSession('sa-prompt'), {
       restoreStrategy: { kind: 'standalone' as const },
       waitForEventStream: vi.fn().mockResolvedValue(undefined),
@@ -9811,6 +9811,26 @@ describe('sendPrompt idempotent admission auto-retry', () => {
         sessionContext: { kind: 'standalone' },
       },
     });
+
+    const onAdmissionStarted = vi.fn();
+    submitPrompt.mockRejectedValueOnce(new Error('Failed to fetch'));
+    await expect(
+      actions.sendPrompt('keep this prompt', {
+        idempotencyKey: 'idem-adapter-admission',
+        onAdmissionStarted,
+      }),
+    ).rejects.toThrow('Failed to fetch');
+    expect(onAdmissionStarted).toHaveBeenCalledOnce();
+    expect(submitPrompt).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      'keep this prompt',
+      [],
+      undefined,
+      [],
+    );
+    submitPrompt.mockClear();
+    store.appendLocalUserMessage.mockClear();
+    addNotice.mockClear();
 
     const failing = createDeferred<void>();
     submitPrompt.mockResolvedValueOnce({

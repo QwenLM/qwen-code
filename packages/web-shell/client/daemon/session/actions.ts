@@ -105,6 +105,7 @@ import type {
   DaemonConnectionState,
   DaemonNoticeOperation,
   DaemonPromptFile,
+  DaemonPromptSettledEvent,
   DaemonPromptStatus,
   DaemonSessionActions,
   SettledPrompt,
@@ -319,6 +320,7 @@ export interface CreateDaemonSessionActionsArgs {
       blockId?: string;
     },
   ) => void;
+  onPromptSettled?: (event: DaemonPromptSettledEvent) => void;
   onContinuationAdmitted?: (
     owner: DaemonSessionClient,
     promptId: string,
@@ -518,6 +520,7 @@ export function createDaemonSessionActions({
   clearLiveJournalRepair = () => undefined,
   onGeneratedUiInvalidated,
   onPromptAdmitted,
+  onPromptSettled,
   onContinuationAdmitted,
   onPromptRemoved,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
@@ -1490,8 +1493,10 @@ export function createDaemonSessionActions({
           options?.inputAnnotations && options.inputAnnotations.length > 0
             ? options.inputAnnotations
             : undefined;
+        const shouldRecordUserMessage =
+          options?.optimisticUserMessage !== false;
         const shouldAppendOptimisticMessage =
-          !adapter && options?.optimisticUserMessage !== false;
+          !adapter && shouldRecordUserMessage;
         const optimisticMessageAppended =
           shouldAppendOptimisticMessage &&
           displayedImages.length === 0 &&
@@ -1521,7 +1526,11 @@ export function createDaemonSessionActions({
             ctrl.signal,
           );
         } catch (error) {
-          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+          if (
+            sessionRef.current === session &&
+            shouldRecordUserMessage &&
+            !optimisticMessageAppended
+          ) {
             store.appendLocalUserMessage(
               text,
               displayedImages,
@@ -1533,7 +1542,11 @@ export function createDaemonSessionActions({
         }
         if (ctrl.signal.aborted) {
           await removeUploadedAttachments(session, uploaded.references);
-          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+          if (
+            sessionRef.current === session &&
+            shouldRecordUserMessage &&
+            !optimisticMessageAppended
+          ) {
             store.appendLocalUserMessage(
               text,
               displayedImages,
@@ -1608,7 +1621,7 @@ export function createDaemonSessionActions({
           }
           if (
             sessionRef.current === session &&
-            shouldAppendOptimisticMessage &&
+            shouldRecordUserMessage &&
             !optimisticMessageAppended
           ) {
             store.appendLocalUserMessage(
@@ -1677,23 +1690,28 @@ export function createDaemonSessionActions({
           ctrl,
           accepted.promptId,
         );
-        if (!accepted.completion) return await turnResult;
-        let turnSettled = false;
-        const settledTurn = turnResult.finally(() => {
-          turnSettled = true;
-        });
-        const completionFailure = new Promise<never>((_, reject) => {
-          accepted.completion!.then(
-            () => {},
-            (error: unknown) => {
-              if (turnSettled) return;
-              const pending = activePromptsRef.current.get(sessionId);
-              if (pending?.controller === ctrl) pending.reject?.(error);
-              reject(error);
-            },
-          );
-        });
-        return await Promise.race([settledTurn, completionFailure]);
+        void accepted.completion
+          ?.then(() => {
+            const active = activePromptsRef.current.get(sessionId);
+            if (active?.controller !== ctrl || !active.resolve) return;
+            if (sessionRef.current === session) {
+              flushTranscript();
+              clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+              store.dispatch({ type: 'assistant.done', reason: 'end_turn' });
+            }
+            active.resolve({ stopReason: 'end_turn' });
+            onPromptSettled?.({
+              sessionId,
+              promptId: accepted.promptId,
+              outcome: 'completed',
+              stopReason: 'end_turn',
+            });
+          })
+          .catch((error: unknown) => {
+            const active = activePromptsRef.current.get(sessionId);
+            if (active?.controller === ctrl) active.reject?.(error);
+          });
+        return await turnResult;
       } catch (error) {
         if (isAbortError(error)) {
           if (sessionRef.current?.sessionId === sessionId) {
@@ -1913,8 +1931,8 @@ export function createDaemonSessionActions({
         options?.inputAnnotations && options.inputAnnotations.length > 0
           ? options.inputAnnotations
           : undefined;
-      const shouldAppendOptimisticMessage =
-        !adapter && options?.optimisticUserMessage !== false;
+      const shouldRecordUserMessage = options?.optimisticUserMessage !== false;
+      const shouldAppendOptimisticMessage = !adapter && shouldRecordUserMessage;
       const optimisticMessageAppended =
         shouldAppendOptimisticMessage &&
         displayedImages.length === 0 &&
@@ -1951,7 +1969,11 @@ export function createDaemonSessionActions({
           options.signal.throwIfAborted();
         }
       } catch (error) {
-        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+        if (
+          sessionRef.current === session &&
+          shouldRecordUserMessage &&
+          !optimisticMessageAppended
+        ) {
           store.appendLocalUserMessage(
             text,
             displayedImages,
@@ -1997,7 +2019,11 @@ export function createDaemonSessionActions({
         if (definiteRejection) {
           await removeUploadedAttachments(session, uploaded.references);
         }
-        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+        if (
+          sessionRef.current === session &&
+          shouldRecordUserMessage &&
+          !optimisticMessageAppended
+        ) {
           store.appendLocalUserMessage(
             text,
             displayedImages,

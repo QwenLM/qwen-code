@@ -1661,6 +1661,12 @@ export class DaemonSessionClient {
       const epoch =
         subscribeOpts.epoch ?? (resume ? this.lastSeenEpoch : undefined);
       const callerOnEpoch = subscribeOpts.onEpoch;
+      const markReady = () => {
+        if (!this.eventStreamReady) {
+          this.eventStreamReady = true;
+          this.eventStreamReadiness?.dispatchEvent(new Event('ready'));
+        }
+      };
       const restSubscription = this.client.transport.type === 'rest';
       if (!restSubscription) {
         this.hasAcceptedRestStream = false;
@@ -1683,8 +1689,11 @@ export class DaemonSessionClient {
         onSseStreamAccepted: (streamId: string | undefined) => {
           this.hasAcceptedRestStream = true;
           this.lastAcceptedRestStreamId = streamId;
-          this.eventStreamReady = true;
-          this.eventStreamReadiness?.dispatchEvent(new Event('ready'));
+          markReady();
+        },
+        onEventStreamReady: () => {
+          markReady();
+          subscribeOpts.onEventStreamReady?.();
         },
         ...(epoch !== undefined ? { epoch } : {}),
         onEpoch: (learned) => {
@@ -1692,10 +1701,7 @@ export class DaemonSessionClient {
           callerOnEpoch?.(learned);
         },
       })) {
-        if (!this.eventStreamReady) {
-          this.eventStreamReady = true;
-          this.eventStreamReadiness?.dispatchEvent(new Event('ready'));
-        }
+        markReady();
         const hydratedEvent = await this.hydrateEvent(event, opts.signal);
         this._dispatchTurnEvent(hydratedEvent);
         yield hydratedEvent;

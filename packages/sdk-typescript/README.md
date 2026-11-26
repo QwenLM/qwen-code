@@ -153,9 +153,9 @@ subscription by default. Pass `{ resume: false }` to start a fresh subscription
 without sending `Last-Event-ID`.
 
 An embedded host can construct a `DaemonSessionClient` with
-`StandaloneSessionMetadata` when its session has no local workspace. Set
-`sourceType` and `context.kind` to `standalone`. The `workspaceCwd` getter always
-returns a string and returns `''` when the standalone metadata omits it.
+`StandaloneSessionMetadata` from `@qwen-code/sdk/daemon` when its session has no
+local workspace. Set `sourceType` and `context.kind` to `standalone`. The
+`workspaceCwd` getter returns `''` when the standalone metadata omits it.
 
 When `createOrAttach()` is called with `modelServiceId`, the returned session
 client seeds its first event subscription with `Last-Event-ID: 0`. This replays
