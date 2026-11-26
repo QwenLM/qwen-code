@@ -116,6 +116,7 @@ import { extensionAgentsOf } from './configuration-routes.js';
 import { childAgentsOf, stopPublicChildSource } from './interaction-routes.js';
 import { compressionBusy, noteSessionActivity } from './lifecycle-routes.js';
 import {
+  blockOnTurnRecovery,
   blockRecovery,
   type HostedRuntimeOwnership,
   liftRecoveryBlock,
@@ -1180,6 +1181,7 @@ export async function executeHostedTurn(
   try {
     await running.finally(() => {
       void toolTurn?.close().catch((cause: unknown) => {
+        session.runtimeRecoveryPromptId = undefined;
         session.blocked = true;
         writeStderrLineSafe(
           'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
@@ -1753,7 +1755,7 @@ export function registerHostedPromptRoute({
         settled = true;
       } catch (cause) {
         if (monitorWakeNeedsRecovery(cause)) {
-          if (admitted) session.blocked = true;
+          if (admitted) blockOnTurnRecovery(session, promptId, cause);
           else if (!res.headersSent)
             error(res, 503, 'hosted_mcp_recovery_required');
           writeStderrLineSafe(
