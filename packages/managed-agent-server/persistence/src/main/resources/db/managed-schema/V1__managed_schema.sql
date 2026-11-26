@@ -1536,3 +1536,19 @@ CREATE TABLE ma_client_files_request (
 
 CREATE INDEX idx_ma_client_files_request_drain ON ma_client_files_request (tenant_id, session_id, state, id);
 CREATE INDEX idx_ma_client_files_request_expiry ON ma_client_files_request (state, expires_at);
+
+CREATE TABLE ma_terminal_ticket (
+    ticket_hash CHAR(64) NOT NULL COMMENT 'SHA-256 of the single-use terminal upgrade ticket, never the plaintext.',
+    tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) NOT NULL COMMENT 'Managed Session identity the ticket admits.',
+    terminal_id VARCHAR(256) NOT NULL COMMENT 'Terminal identity the ticket admits.',
+    binding_id VARCHAR(128) NOT NULL COMMENT 'Runtime binding identity admitted when the ticket was issued.',
+    binding_generation BIGINT UNSIGNED NOT NULL COMMENT 'Generation of the admitted Runtime binding.',
+    expires_at BIGINT UNSIGNED NOT NULL COMMENT 'Ticket deadline in Unix epoch milliseconds.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_terminal_ticket_business_key UNIQUE (ticket_hash),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_terminal_ticket_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Short-lived single-use terminal upgrade tickets, stored by hash only.';
+
+CREATE INDEX idx_ma_terminal_ticket_expiry ON ma_terminal_ticket (expires_at);
