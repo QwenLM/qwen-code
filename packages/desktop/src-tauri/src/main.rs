@@ -35,6 +35,8 @@ static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
 // packages/shared/src/config/storage.ts (PR 9085): ~/Documents/Qwen,
 // relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
 const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
+const DESKTOP_DOWNLOAD_URL: &str =
+    "https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest";
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 // Managed deployments pin the app version and apply updates themselves; this
 // is their hard off-switch for the startup update check (#12575).
@@ -113,6 +115,7 @@ struct BootstrapState {
     status: &'static str,
     workspace: Option<String>,
     error: Option<String>,
+    is_rosetta: bool,
 }
 
 // The wire names are the strings ZOOM_HOTKEY_SCRIPT sends.
@@ -159,6 +162,7 @@ struct ApplicationState {
     window_dirty: AtomicBool,
     start_generation: AtomicU64,
     starting: AtomicU64,
+    is_rosetta: bool,
 }
 
 fn main() {
@@ -173,6 +177,7 @@ fn main() {
             bootstrap_state,
             change_zoom,
             choose_workspace,
+            open_download_page,
             open_logs,
             restart_runtime,
             install_update,
@@ -351,6 +356,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         window_dirty: AtomicBool::new(false),
         start_generation: AtomicU64::new(0),
         starting: AtomicU64::new(0),
+        is_rosetta: is_running_under_rosetta(),
     });
 
     match initial_workspace(&handle) {
@@ -390,6 +396,7 @@ fn bootstrap_state(
         },
         workspace: workspace.map(|path| path.to_string_lossy().into_owned()),
         error: lock(&state.last_error).clone(),
+        is_rosetta: state.is_rosetta,
     })
 }
 
@@ -463,6 +470,13 @@ fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String>
     };
     start_runtime_async(app, workspace, create_if_missing);
     Ok(())
+}
+
+#[tauri::command]
+fn open_download_page(webview: WebviewWindow) -> Result<(), String> {
+    require_bootstrap_origin(&webview)?;
+    open::that_detached(DESKTOP_DOWNLOAD_URL)
+        .map_err(|error| format!("Failed to open download page: {error}"))
 }
 
 #[tauri::command]
@@ -908,6 +922,26 @@ fn is_safe_external_url(url: &Url) -> bool {
     matches!(url.scheme(), "https" | "http" | "mailto")
 }
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn is_running_under_rosetta() -> bool {
+    std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "sysctl.proc_translated"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| is_rosetta_sysctl_output(&output.stdout))
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn is_running_under_rosetta() -> bool {
+    false
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
+fn is_rosetta_sysctl_output(stdout: &[u8]) -> bool {
+    String::from_utf8_lossy(stdout).trim() == "1"
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -924,8 +958,9 @@ mod tests {
     };
     use super::{
         bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
-        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
-        is_same_origin, origin_of, updates_disabled_value, BOOTSTRAP_URL,
+        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_rosetta_sysctl_output,
+        is_safe_external_url, is_same_origin, origin_of, updates_disabled_value, BOOTSTRAP_URL,
+        DESKTOP_DOWNLOAD_URL,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -1226,5 +1261,23 @@ mod tests {
         assert!(!is_bootstrap_url(
             &Url::parse("about:srcdoc").expect("srcdoc")
         ));
+    }
+
+    #[test]
+    fn recognizes_rosetta_sysctl_translation_flag() {
+        assert!(is_rosetta_sysctl_output(b"1\n"));
+        assert!(is_rosetta_sysctl_output(b" 1 \r\n"));
+        assert!(!is_rosetta_sysctl_output(b"0\n"));
+        assert!(!is_rosetta_sysctl_output(b""));
+        assert!(!is_rosetta_sysctl_output(
+            b"sysctl: unknown oid 'sysctl.proc_translated'\n"
+        ));
+    }
+
+    #[test]
+    fn desktop_download_url_uses_https_release_page() {
+        let url = Url::parse(DESKTOP_DOWNLOAD_URL).expect("download URL");
+        assert_eq!(url.scheme(), "https");
+        assert!(is_safe_external_url(&url));
     }
 }

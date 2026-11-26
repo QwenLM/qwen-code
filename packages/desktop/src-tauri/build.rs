@@ -7,6 +7,7 @@ const COMMANDS: &[&str] = &[
     "change_zoom",
     "choose_workspace",
     "install_update",
+    "open_download_page",
     "open_logs",
     "restart_runtime",
 ];
