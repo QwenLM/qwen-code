@@ -4218,13 +4218,113 @@ describe('local container recipe pins', () => {
         }
         return false;
       };
+      const astShellListStarters = new Set([
+        'echo',
+        'printf',
+        'pwd',
+        'cd',
+        'cat',
+        'ls',
+        '[',
+        'touch',
+        'rm',
+        'cp',
+        'mv',
+        'mkdir',
+        'chmod',
+        'ln',
+        'tee',
+        'dd',
+        'mktemp',
+        'kill',
+        'umask',
+        'ulimit',
+      ]);
+      const astProseListVerbs = new Set([
+        'the',
+        'a',
+        'an',
+        'to',
+        'for',
+        'of',
+        'in',
+        'on',
+        'with',
+        'from',
+        'by',
+        'as',
+        'or',
+        'and',
+        'not',
+        'no',
+        'all',
+        'any',
+        'each',
+        'run',
+        'runs',
+        'pass',
+        'passing',
+        'passes',
+        'use',
+        'uses',
+        'using',
+        'see',
+        'set',
+        'sets',
+        'add',
+        'adds',
+        'keep',
+        'keeps',
+        'check',
+        'checks',
+        'if',
+        'when',
+        'while',
+        'after',
+        'before',
+        'without',
+        'under',
+        'into',
+        'onto',
+        'is',
+        'are',
+        'was',
+        'be',
+        'has',
+        'have',
+        'had',
+        'do',
+        'does',
+        'did',
+        'can',
+        'will',
+        'must',
+        'may',
+        'only',
+        'also',
+        'then',
+        'else',
+        'so',
+        'but',
+        'still',
+        'both',
+        'one',
+        'two',
+        'every',
+        'that',
+        'this',
+        'these',
+        'those',
+        'it',
+        'its',
+      ]);
       const hasDangerousShellAst = async (
         source,
         { rawLine = false, depth = 0 } = {},
       ) => {
         if (depth > 4) return true;
         if (
-          !/[;|&()$<>\\`{['"]|^!|(?:^|[\s;|&({])\.|\b(?:trap|case|coproc|select|for|if|while|until|gh|git|make|builtin|command|exec|eval|env|sudo|doas|nice|time|nohup|setsid|timeout|stdbuf|chrt|ionice|caffeinate|rlwrap|source|awk|find|xargs|node|alias|shopt|let|printf|declare|typeset|readonly|read|rm|mv|cp|chmod|chown|curl|wget|bash|sh|zsh|ksh|dash|python3?|ruby|perl|nc|dd|tee|truncate|kill|docker|qwen)\b/.test(
+          !/[;|&()$<>\\`{['"]|^!|(?:^|[\s;|&({])[.:](?=\s|$)|\b(?:trap|case|coproc|select|for|if|while|until|gh|git|make|builtin|command|exec|eval|env|sudo|doas|nice|time|nohup|setsid|timeout|stdbuf|chrt|ionice|caffeinate|rlwrap|source|awk|find|xargs|node|alias|shopt|let|printf|declare|typeset|readonly|read|rm|mv|cp|chmod|chown|curl|wget|bash|sh|zsh|ksh|dash|python3?|ruby|perl|nc|dd|tee|truncate|kill|docker|qwen)\b/.test(
             source,
           )
         ) {
@@ -4302,6 +4402,35 @@ describe('local container recipe pins', () => {
                 }
               }
             }
+            const hasSameLineSemiSibling = (target) => {
+              const prev = target.previousNamedSibling;
+              if (prev) {
+                const between = normalized.slice(
+                  prev.endIndex,
+                  target.startIndex,
+                );
+                if (
+                  (between.includes(';') || between.includes('&')) &&
+                  !between.includes('\n')
+                ) {
+                  return true;
+                }
+              }
+              const next = target.nextNamedSibling;
+              if (next) {
+                const between = normalized.slice(
+                  target.endIndex,
+                  next.startIndex,
+                );
+                if (
+                  (between.includes(';') || between.includes('&')) &&
+                  !between.includes('\n')
+                ) {
+                  return true;
+                }
+              }
+              return false;
+            };
             if (
               node.type === 'test_command' ||
               node.type === 'declaration_command' ||
@@ -4312,6 +4441,25 @@ describe('local container recipe pins', () => {
                 !rawLine ||
                 node.text.includes('[');
               if (astHasSplicedCmdSub(node.text, allowBt)) {
+                return remember(true);
+              }
+              const targetNode =
+                node.parent?.type === 'redirected_statement'
+                  ? node.parent
+                  : node;
+              if (
+                (node.type === 'unset_command' ||
+                  (node.type === 'test_command' &&
+                    /^(?:\[\s|\[\[)/.test(node.text))) &&
+                !(
+                  rawLine &&
+                  targetNode.parent?.parent?.type === 'command_substitution' &&
+                  targetNode.parent.parent.text.startsWith('`')
+                ) &&
+                (targetNode.parent?.type === 'list' ||
+                  targetNode.parent?.type === 'pipeline' ||
+                  hasSameLineSemiSibling(targetNode))
+              ) {
                 return remember(true);
               }
             }
@@ -4439,7 +4587,35 @@ describe('local container recipe pins', () => {
                   return remember(true);
                 }
               }
-              if (name === '.') {
+              const stmtNode =
+                node.parent?.type === 'redirected_statement'
+                  ? node.parent
+                  : node;
+              const stmtParentType = stmtNode.parent?.type ?? '';
+              const inListOrPipe =
+                stmtParentType === 'list' || stmtParentType === 'pipeline';
+              const inSameLineSemiList = hasSameLineSemiSibling(stmtNode);
+              if (name === ':') {
+                if (
+                  !(
+                    rawLine &&
+                    node.startIndex > 0 &&
+                    normalized[node.startIndex - 1] === '`'
+                  ) &&
+                  (hasRedir ||
+                    inControl ||
+                    !rawLine ||
+                    args.length > 0 ||
+                    inSameLineSemiList ||
+                    inListOrPipe)
+                ) {
+                  return remember(true);
+                }
+              } else if (name === 'true' || name === 'false') {
+                if (hasRedir || inListOrPipe || inSameLineSemiList) {
+                  return remember(true);
+                }
+              } else if (name === '.') {
                 if (
                   hasRedir ||
                   (args.length > 0 &&
@@ -4577,6 +4753,66 @@ describe('local container recipe pins', () => {
                       /^(?:is|are|was|were)$/i.test(args[0] ?? '')
                     ) &&
                     args.some((arg) => astRealWrapperArg(arg)))
+                ) {
+                  return remember(true);
+                }
+              } else if (
+                !(
+                  rawLine &&
+                  stmtNode.parent?.parent?.type === 'command_substitution' &&
+                  stmtNode.parent.parent.text.startsWith('`')
+                ) &&
+                (inListOrPipe || inSameLineSemiList)
+              ) {
+                const unqHead = astUnquoteArg(rawName);
+                const hasShellTargetArg =
+                  !(rawLine && args.length > 0 && args[0].endsWith(',')) &&
+                  args.some((a) =>
+                    /^(?:--?[A-Za-z0-9]|\/(?=\S)|~\/|\.\.?\/)/.test(
+                      astUnquoteArg(a),
+                    ),
+                  );
+                const isInlineTailBenignGrep =
+                  rawLine &&
+                  name === 'grep' &&
+                  !hasRedir &&
+                  stmtNode.previousNamedSibling &&
+                  normalized.includes('`') &&
+                  /^[A-Z]/.test(normalized.trimStart());
+                const hasListRedir = redirNodes.some(
+                  (r) =>
+                    !(
+                      r.text.startsWith('>') &&
+                      r.startIndex > 0 &&
+                      normalized[r.startIndex - 1] === '-'
+                    ) &&
+                    !(
+                      rawLine &&
+                      /^<[a-z-]+>(?![>&])/.test(
+                        normalized.slice(r.startIndex),
+                      ) &&
+                      !/[ \t]/.test(r.text)
+                    ) &&
+                    !(
+                      rawLine &&
+                      /^>[^>&\s]/.test(r.text) &&
+                      /<[a-z-]+>$/.test(
+                        normalized.slice(
+                          Math.max(0, r.startIndex - 20),
+                          r.startIndex + 1,
+                        ),
+                      )
+                    ),
+                );
+                if (
+                  !isInlineTailBenignGrep &&
+                  (hasListRedir ||
+                    (!(rawLine && rawName.startsWith('/`')) &&
+                      /^(?:\/|~\/|\.\.?\/)/.test(unqHead)) ||
+                    astShellListStarters.has(name) ||
+                    (hasShellTargetArg &&
+                      /^[a-z][a-z0-9_.-]*$/.test(name) &&
+                      !astProseListVerbs.has(name)))
                 ) {
                   return remember(true);
                 }
@@ -6031,15 +6267,21 @@ describe('local container recipe pins', () => {
               )
               .trim()
           : '';
+        const trailingForBoundary = trailingAfterLeadingCitation.startsWith(
+          ': ',
+        )
+          ? trailingAfterLeadingCitation.slice(2).trim()
+          : trailingAfterLeadingCitation;
         const leadingCitationHasExecutableBody =
           !!trailingAfterLeadingCitation &&
           !/^\*\*/.test(trailingAfterLeadingCitation) &&
           /^[A-Za-z0-9_./$!({[:'"\\<>`?*~-]/.test(
             trailingAfterLeadingCitation,
           ) &&
-          ((await executableBoundary(trailingAfterLeadingCitation, {
-            rawLine: true,
-          })) ||
+          ((!!trailingForBoundary &&
+            (await executableBoundary(trailingForBoundary, {
+              rawLine: true,
+            }))) ||
             (await hasDangerousShellAst(source, { rawLine: true })));
         const citationLineWithoutExecutableTrailer =
           leadingCitation &&
@@ -8159,6 +8401,44 @@ describe('local container recipe pins', () => {
         'fenced text comment bang newline case',
         '```text\n# ; !\ncase x\nin\nx) gh pr merge 1\nesac\n```',
       ],
+      ['bare null-builtin semicolon touch', ':; touch /tmp/should-not-write'],
+      [
+        'bare null-builtin semicolon cat credentials',
+        ':; cat ~/.qwen/oauth_creds.json',
+      ],
+      ['bare null-builtin and touch', ': && touch /tmp/should-not-write'],
+      ['bare null-builtin or touch', ': || touch /tmp/should-not-write'],
+      ['bare null-builtin pipe touch', ': | touch /tmp/should-not-write'],
+      ['bare true semicolon touch', 'true; touch /tmp/should-not-write'],
+      ['bare true semicolon whoami', 'true; whoami'],
+      ['bare echo semicolon touch', 'echo ok; touch /tmp/should-not-write'],
+      ['bare leading citation colon cmd sub', '`foo`: $(gh pr merge 1)'],
+      [
+        'bare leading citation colon proc sub',
+        '`foo`: <(cat ~/.qwen/oauth_creds.json)',
+      ],
+      [
+        'bare prose semicolon redirected touch',
+        'For example; touch /tmp/x > /tmp/y',
+      ],
+      [
+        'bare prose semicolon redirected grep',
+        'For example; grep a b > /tmp/evil',
+      ],
+      [
+        'bare prose semicolon grep secret file',
+        'For example; grep secret ~/.ssh/id_rsa',
+      ],
+      ['bare test command list whoami', '[ 1 ] && whoami'],
+      ['bare test command redirected semi whoami', '[ 1 ] 2>/dev/null; whoami'],
+      ['bare unset command semicolon whoami', 'unset PATH; whoami'],
+      ['bare null-builtin background touch', ': & touch /tmp/should-not-write'],
+      [
+        'bare leading citation colon bold cmd sub',
+        '`foo`: **bold** $(gh pr merge 1)',
+      ],
+      ['bare leading citation colon and gh', '`foo`: && gh pr merge 1'],
+      ['bare gh placeholder-shaped redirect', 'gh pr view 1 <x>pwn.txt'],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),

@@ -696,11 +696,17 @@ authority to certify the round.
    NOT declare `mode:"container"`, and do not hand-write a waiver. Keep the
    current head/round in-flight registration while changing modes, then re-run
    prepare with `--execution host|vm` and its applicable approval arguments
-   **before** the battery. Do not release it merely to change modes. After the
-   switch, this recipe's step 6–7 no longer apply: the battery runs on the
-   host/VM, so finish with the local checker command at the top of this section
-   and do not run step 7's cleanup/write, which would replace prepare's approval
-   with a container declaration.
+   **before** the battery. Do not release it merely to change modes. Still run
+   step 7's teardown (`docker rm -f qwen-verify-<n>`, kill the proxy from
+   `proxy.pid`, remove `proxy.json`/`proxy.err`/`proxy.pid`, and unset
+   `QWEN_VERIFY_PROXY_TOKEN QWEN_VERIFY_CREDENTIAL_FREE container`) so neither
+   the detached container nor the real-model-key proxy stays live. After the
+   switch, this recipe's step 6 and step 7's declaration clear/write and
+   in-container checker no longer apply: do not overwrite prepare's validated
+   `boundary.json` with a container declaration; run the battery on the
+   host/VM and finish with the local checker command under `## Start here`,
+   passing the re-run prepare's new `context-sha256` and `artifacts` directory
+   rather than the pre-switch container prepare's digest or artifact dir.
 
    The scan names credential-shaped ignored files (nested ones included, but
    not public keys; the private-key families cover RSA, Ed25519, ECDSA and

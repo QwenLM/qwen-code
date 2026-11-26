@@ -59,6 +59,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   readSync,
   realpathSync,
   renameSync,
@@ -1064,9 +1065,9 @@ export function gitStatusArgs(root) {
   ];
 }
 
-function runGit(args, root = null) {
+function runGit(args, root = null, options = {}) {
   const overrides = root ? localFilterOverrides(root) : localFilterOverrides();
-  return run('git', [...overrides, ...GIT_HARDENING, ...args]);
+  return run('git', [...overrides, ...GIT_HARDENING, ...args], options);
 }
 
 const MAX_INFO_EXCLUDE_BYTES = 1024 * 1024;
@@ -1079,10 +1080,11 @@ function singleLineOutput(result) {
 }
 
 /**
- * True when git's info/exclude carries active patterns. A fresh clone has
- * only the commented default there; patterns hide untracked files from the
- * clean-tree check, and unlike core.excludesFile no `-c` can neutralize this
- * file, so the gate refuses it instead of reading a steered status.
+ * Inspects git's info/exclude for active patterns and returns `{ path, hostile }`.
+ * A fresh clone has only the commented default there; active patterns hide
+ * untracked files from the clean-tree check, and unlike core.excludesFile no
+ * `-c` can neutralize this file, so the gate refuses it instead of reading a
+ * steered status.
  */
 export function inspectInfoExclude(root) {
   const resolved = runGit(
@@ -1148,6 +1150,213 @@ export function hasHostileInfoExclude(root) {
   return inspectInfoExclude(root).hostile;
 }
 
+const HUSKY_V9_HOOK_SHIMS = new Set([
+  'applypatch-msg',
+  'commit-msg',
+  'post-applypatch',
+  'post-checkout',
+  'post-commit',
+  'post-merge',
+  'post-rewrite',
+  'pre-applypatch',
+  'pre-auto-gc',
+  'pre-commit',
+  'pre-merge-commit',
+  'pre-push',
+  'pre-rebase',
+  'prepare-commit-msg',
+]);
+const HUSKY_V9_GENERATED_FILES = new Set([
+  '.gitignore',
+  'h',
+  'husky.sh',
+  ...HUSKY_V9_HOOK_SHIMS,
+]);
+const HUSKY_V9_SHIM_RE =
+  /^#!\/usr\/bin\/env sh\r?\n\. "\$\(dirname "\$0"\)\/h"\r?\n?$/;
+const HUSKY_V9_STATIC_SHA256 = {
+  h: new Set([
+    '70200b200ca709b0622784f93839a5b2872333a917a09afddefd7dc2d8cdc680',
+  ]),
+  'husky.sh': new Set([
+    '21122903fca7209a13c991e5be68780636e28f1b8f0ae7ea07ed0065dfe37268',
+  ]),
+};
+
+function splitNulBuffers(buf) {
+  const parts = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i += 1) {
+    if (buf[i] === 0) {
+      parts.push(buf.subarray(start, i));
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) parts.push(buf.subarray(start));
+  return parts;
+}
+
+function isBenignHuskyV9IgnoreDir(root) {
+  const trackedHusky = runGit(
+    ['-C', root, 'ls-files', '-z', '--', '.husky'],
+    root,
+  );
+  if (trackedHusky.status !== 0 || !(trackedHusky.stdout ?? '').trim()) {
+    return false;
+  }
+  const huskyDir = join(root, '.husky');
+  const underscoreDir = join(huskyDir, '_');
+  try {
+    if (!lstatSync(huskyDir).isDirectory()) return false;
+    if (!lstatSync(underscoreDir).isDirectory()) return false;
+    const entries = readdirSync(underscoreDir);
+    if (!entries.includes('.gitignore')) return false;
+    for (const name of entries) {
+      if (!HUSKY_V9_GENERATED_FILES.has(name)) return false;
+      const entryPath = join(underscoreDir, name);
+      const st = lstatSync(entryPath);
+      if (!st.isFile() || st.size > 2048) return false;
+      if (name === '.gitignore') {
+        if (readFileSync(entryPath, 'utf8').trim() !== '*') return false;
+      } else if (HUSKY_V9_HOOK_SHIMS.has(name)) {
+        if (!HUSKY_V9_SHIM_RE.test(readFileSync(entryPath, 'utf8'))) {
+          return false;
+        }
+      } else if (Object.hasOwn(HUSKY_V9_STATIC_SHA256, name)) {
+        const normalized = readFileSync(entryPath, 'utf8').replace(
+          /\r\n/g,
+          '\n',
+        );
+        const digest = createHash('sha256')
+          .update(normalized, 'utf8')
+          .digest('hex');
+        if (!HUSKY_V9_STATIC_SHA256[name].has(digest)) return false;
+      } else {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refuses untracked worktree ignore files (such as a self-hiding `.gitignore`
+ * containing `*`) that hide untracked entries from `git status` while still
+ * allowing directories ignored by tracked `.gitignore` files (e.g. `node_modules/`,
+ * `dist/`, `tmp/`) and Husky v9's exact generated `.husky/_/` shim directory.
+ */
+export function untrackedIgnoreSourceError(root) {
+  const ignoredStatus = runGit(
+    [
+      '-C',
+      root,
+      'status',
+      '--porcelain',
+      '--ignored=matching',
+      '--untracked-files=normal',
+      '--ignore-submodules=dirty',
+      '-z',
+    ],
+    root,
+    { encoding: null },
+  );
+  if (ignoredStatus.status !== 0) {
+    const detail =
+      (ignoredStatus.stderr?.toString('utf8') || '').trim() ||
+      `exit ${ignoredStatus.status}`;
+    return `could not inspect ignored worktree entries: ${detail}`;
+  }
+  const rawRecords = splitNulBuffers(ignoredStatus.stdout ?? Buffer.alloc(0));
+  const ignoredPathBuffers = [];
+  const utf8 = new TextDecoder('utf-8', { fatal: true });
+  for (const recordBuf of rawRecords) {
+    if (recordBuf.length === 0) continue;
+    if (
+      recordBuf.length < 4 ||
+      recordBuf[0] !== 0x21 ||
+      recordBuf[1] !== 0x21 ||
+      recordBuf[2] !== 0x20
+    ) {
+      let label;
+      try {
+        label = printable(utf8.decode(recordBuf));
+      } catch {
+        label = '<non-utf8>';
+      }
+      return `working tree has uncommitted changes (${label}) — re-clone or run \`git clean -xfd\`, then re-run prepare`;
+    }
+    ignoredPathBuffers.push(recordBuf.subarray(3));
+  }
+  if (ignoredPathBuffers.length === 0) return null;
+
+  // Prefix every path with `./` so leading `:` (e.g. `:tmp/.gitignore` or
+  // `:(top)foo/`) cannot trigger git check-ignore pathspec magic, and pass
+  // `-n` so every input path produces a 4-field record.
+  const dotSlash = Buffer.from('./');
+  const nulByte = Buffer.from([0]);
+  const checkInput = Buffer.concat(
+    ignoredPathBuffers.flatMap((p) => [dotSlash, p, nulByte]),
+  );
+  const attribution = runGit(
+    ['-C', root, 'check-ignore', '-v', '-n', '-z', '--stdin'],
+    root,
+    { encoding: null, input: checkInput },
+  );
+  if (attribution.status !== 0) {
+    const detail =
+      (attribution.stderr?.toString('utf8') || '').trim() ||
+      `exit ${attribution.status}`;
+    return `could not attribute ignored worktree entries to tracked ignore files: ${detail}`;
+  }
+  const rawFields = splitNulBuffers(attribution.stdout ?? Buffer.alloc(0));
+  if (rawFields.length !== ignoredPathBuffers.length * 4) {
+    return 'could not parse git check-ignore attribution for ignored worktree entries';
+  }
+  const sources = [];
+  const seenSources = new Set();
+  for (let i = 0; i < rawFields.length; i += 4) {
+    if (rawFields[i].length === 0) {
+      return 'ignored worktree entries have no tracked ignore source — re-clone or run `git clean -xfd`, then re-run prepare';
+    }
+    let source;
+    try {
+      source = utf8.decode(rawFields[i]);
+    } catch {
+      return 'untracked or non-UTF-8 ignore source hides worktree entries — re-clone or run `git clean -xfd`, then re-run prepare';
+    }
+    if (!seenSources.has(source)) {
+      seenSources.add(source);
+      sources.push(source);
+    }
+  }
+  const trackedRes = runGit(
+    ['--literal-pathspecs', '-C', root, 'ls-files', '-z', '--', ...sources],
+    root,
+  );
+  if (trackedRes.status !== 0) {
+    const detail =
+      (trackedRes.stderr || '').trim() || `exit ${trackedRes.status}`;
+    return `could not verify tracked status of ignore files: ${detail}`;
+  }
+  const trackedSet = new Set(
+    (trackedRes.stdout ?? '').split('\0').filter(Boolean),
+  );
+  const untracked = sources.filter((src) => {
+    if (trackedSet.has(src)) return false;
+    if (src === '.husky/_/.gitignore' && isBenignHuskyV9IgnoreDir(root)) {
+      return false;
+    }
+    return true;
+  });
+  if (untracked.length > 0) {
+    const shown = untracked.slice(0, 5).map(printable).join(', ');
+    return `untracked ignore files hide worktree entries (${shown}${untracked.length > 5 ? ', …' : ''}) — re-clone or run \`git clean -xfd\`, then re-run prepare`;
+  }
+  return null;
+}
+
 function exactCheckoutError(root, context) {
   const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD'], root);
   if (treeHead.status !== 0) return 'could not read HEAD in this clone';
@@ -1190,6 +1399,10 @@ function exactCheckoutError(root, context) {
     const shown = entries.slice(0, 5).map(printable).join(', ');
     return `working tree has uncommitted changes (${shown}${entries.length > 5 ? ', …' : ''}) — commit them, or run \`git stash push --include-untracked\` (a plain \`git stash\` leaves untracked files behind), or remove them, then re-run prepare; this script never stashes for you`;
   }
+  // An untracked worktree `.gitignore` (e.g. containing `*`) hides every
+  // untracked file including itself from `git status` and `info/exclude`.
+  const untrackedIgnore = untrackedIgnoreSourceError(root);
+  if (untrackedIgnore) return untrackedIgnore;
   // git status trusts the index: skip-worktree / assume-unchanged entries
   // (a sparse checkout sets them en masse) hide tracked divergence from it,
   // so refuse anything that is not a plain cached 'H' entry.

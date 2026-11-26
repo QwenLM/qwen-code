@@ -7242,7 +7242,16 @@ describe('qwen-triage verify hardening round 2', () => {
       'A non-comment container restart needs no marked approval',
     );
     expect(flat).toContain('Do not release it merely to change modes');
-    expect(flat).toContain("this recipe's step 6–7 no longer apply");
+    expect(flat).toContain("Still run step 7's teardown");
+    expect(flat).toContain(
+      "this recipe's step 6 and step 7's declaration clear/write and in-container checker no longer apply",
+    );
+    expect(flat).toContain(
+      'finish with the local checker command under `## Start here`',
+    );
+    expect(flat).toContain(
+      "passing the re-run prepare's new `context-sha256` and `artifacts` directory",
+    );
     expect(flat).toContain('`<trusted-dir>` is `<clone>`');
     expect(flat).toContain(
       "the trusted checkout whose main worktree is also the helper's default root",
