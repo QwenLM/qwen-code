@@ -64,7 +64,7 @@ pin 会再次下调。
 
 ## Harness 生命周期拆分（2026-11-26）
 
-将既有的 drained-stop 和 Harness 生命周期委托方法从 `RuntimeBrokerService` 移到包级私有的 `RuntimeHarnessLifecycle` 协作者，保持 public 方法签名以及 `RuntimeDrainCoordinator` 的原有语义归属不变。门面类的棘轮上限从 1977 下调至 1975。全局限额和其他类的 pin 不变。
+将既有的 drained-stop 和 Harness 生命周期委托方法从 `RuntimeBrokerService` 移到包级私有的 `RuntimeHarnessLifecycle` 协作者，保持 public 方法签名以及 `RuntimeDrainCoordinator` 的原有语义归属不变。门面类的棘轮上限从 1977 下调至 1976。全局限额和其他类的 pin 不变。
 
 ## 后续
 

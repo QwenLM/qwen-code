@@ -301,8 +301,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 executionRepository, provisioner, transport, bindingProvisioning, executionRecovery,
                 executionDispatcher, sessionRelease, this.brokerOwnerId, this.operationLeaseDuration,
                 clock, closed, this::newBindingRenewal);
-        this.harnessLifecycle = new RuntimeHarnessLifecycle(provisioner,
-                bindingRepository, drainCoordinator, closed, this::resolveScope, this::provisionRequest);
+        this.harnessLifecycle = new RuntimeHarnessLifecycle(provisioner, bindingRepository,
+                drainCoordinator, closed, harnessId -> resolveScope(harnessId, false, null),
+                (scope, harnessId) -> provisionRequest(scope, harnessId));
         this.observationCoordinator = new RuntimeObservationCoordinator(sessionResolver, bindingRegistry,
                 bindingProvisioning, bindingRepository, sessionRepository, provisioner, transport,
                 executionRecovery, this.brokerOwnerId, clock, closed);

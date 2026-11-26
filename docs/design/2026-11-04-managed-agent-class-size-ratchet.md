@@ -66,7 +66,7 @@ follow-up decomposition extracts the new surface.
 
 ## Harness lifecycle extraction (2026-11-26)
 
-The existing drained-stop and Harness lifecycle delegation methods move from `RuntimeBrokerService` to its package-private `RuntimeHarnessLifecycle` collaborator, keeping the same public methods and the original `RuntimeDrainCoordinator` ownership. The facade ceiling lowers from 1977 to 1975. The global ceiling and other class pins are unchanged.
+The existing drained-stop and Harness lifecycle delegation methods move from `RuntimeBrokerService` to its package-private `RuntimeHarnessLifecycle` collaborator, keeping the same public methods and the original `RuntimeDrainCoordinator` ownership. The facade ceiling lowers from 1977 to 1976. The global ceiling and other class pins are unchanged.
 
 ## Follow-up
 
