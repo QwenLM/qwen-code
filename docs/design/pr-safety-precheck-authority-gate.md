@@ -94,11 +94,13 @@ instructions, yields `protected_path:authority_surface`.
 
 Directory prefixes: `.github/`, `.agents/`, `scripts/`, `.qwen/skills/`,
 `.qwen/commands/`, `.qwen/agents/`, `.qwen/workflows/`, `.qwen/extensions/`,
-`.qwen/scripts/`, `.qwen/rules/`, `.qwen/hooks/`, `.qwen/fork-profiles/`.
+`.qwen/scripts/`, `.qwen/rules/`, `.qwen/hooks/`, `.qwen/fork-profiles/`,
+`patches/`, `eslint-rules/`.
 
 File names at any depth, because context files load hierarchically:
 `AGENTS.md`, `QWEN.md`, `QWEN.local.md`, `CLAUDE.md`, `package.json`,
-`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.mjs`,
+`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `eslint.config.js`,
+`esbuild.config.js`, `vitest.config.ts`, `.npmrc`, `.pnpmfile.mjs`,
 `.mcp.json`. Settings variants follow the repository's own self-modification
 glob at any depth: `.qwen/settings.json` and `.qwen/settings.<variant>.json`.
 Exact paths: `.qwen/output-language.md`.
@@ -128,7 +130,9 @@ The source itself is the signal; no sink pairing is required.
 These run over the PR title, body and added lines, so an instruction carried
 only by the body is caught even when the diff is a single harmless docs file.
 `printenv` takes no terminator either bare or wrapped in shell `-c`; its arguments
-are not option grammar.
+are not option grammar. List-item commands (`1. env`, `- env`) and an unquoted `-c`
+argument are also recognized. A file descriptor before a redirect is a legal dump
+terminator; this remains a list of supported forms, not exhaustive shell parsing.
 
 **The textual surface is deliberately bounded, not “secured once and for all”.**
 Further command aliases, quoted or absolute-path commands, line continuations,
@@ -313,7 +317,7 @@ changed at this head.
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 146 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 173 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout
@@ -331,13 +335,13 @@ changed at this head.
   `ambient_credential:cloud_metadata`, `ambient_credential:env_dump`.
 - #18364: `ambient_credential:cloud_metadata`,
   `ambient_credential:proc_environ`.
-- Mutation witness: 41 arms, all killed, none skipped, plus an unmutated control
+- Mutation witness: 56 arms, all killed, none skipped, plus an unmutated control
   that must stay green. The harness mirrors the repository layout in its temp
   dir, because the workflow-contract test reads the workflow through a relative
   URL — without the mirror that case reds in every arm for a missing file, and a
   missing file would have passed for a kill. The control is what makes the rest
   of the run worth reading.
-- Workflow end-to-end table: 9 cases passed. It executes the real collect and
+- Workflow end-to-end table: 11 cases passed. It executes the real collect and
   assess `run:` blocks under their own bash contract with a stubbed `gh`, and
   asserts the final decision rather than an intermediate flag. Covers
   exactly-cap, cap-plus-one, a failing diff call, a trusted author, and a

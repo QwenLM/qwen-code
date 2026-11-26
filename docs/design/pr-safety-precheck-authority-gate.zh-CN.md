@@ -52,9 +52,9 @@
 
 改动「决定 CI 执行什么」或「agent 把什么当指令读」的路径，产出 `protected_path:authority_surface`。
 
-目录前缀：`.github/`、`.agents/`、`scripts/`、`.qwen/skills/`、`.qwen/commands/`、`.qwen/agents/`、`.qwen/workflows/`、`.qwen/extensions/`、`.qwen/scripts/`、`.qwen/rules/`、`.qwen/hooks/`、`.qwen/fork-profiles/`。
+目录前缀：`.github/`、`.agents/`、`scripts/`、`.qwen/skills/`、`.qwen/commands/`、`.qwen/agents/`、`.qwen/workflows/`、`.qwen/extensions/`、`.qwen/scripts/`、`.qwen/rules/`、`.qwen/hooks/`、`.qwen/fork-profiles/`、`patches/`、`eslint-rules/`。
 
-任意深度的文件名（上下文文件按层级加载，嵌套副本同样能操纵 agent）：`AGENTS.md`、`QWEN.md`、`QWEN.local.md`、`CLAUDE.md`、`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`.npmrc`、`.pnpmfile.mjs`、`.mcp.json`。settings 变体按仓库自我修改判断所用的同一通配覆盖任意深度：`.qwen/settings.json` 与 `.qwen/settings.<variant>.json`。
+任意深度的文件名（上下文文件按层级加载，嵌套副本同样能操纵 agent）：`AGENTS.md`、`QWEN.md`、`QWEN.local.md`、`CLAUDE.md`、`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`eslint.config.js`、`esbuild.config.js`、`vitest.config.ts`、`.npmrc`、`.pnpmfile.mjs`、`.mcp.json`。settings 变体按仓库自我修改判断所用的同一通配覆盖任意深度：`.qwen/settings.json` 与 `.qwen/settings.<variant>.json`。
 精确路径：`.qwen/output-language.md`。
 
 路径从 diff 推导——这是 workflow 唯一提供的路径来源。`---` 与 `+++` 侧头**仅在 hunk 之外**识别，所以 diff 示例内容不会伪造出受保护路径；mode-only 与二进制变更根据 `--git` 头取路径，并要求某个分割点的归一化两半一致，即使路径本身含 ` b/` 也成立。
@@ -72,7 +72,7 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 | `ambient_credential:env_dump`        | 处于命令位置、后接管道／重定向／分隔符／行尾的 `env`、`env -0`、`env --null`、裸 `set`、裸 `export`、`export -p`、裸 `declare`/`typeset` 及其 `-x`/`-p` 形态；`printenv`；以及包在 `bash/sh/zsh/dash -c '…'` 里的导出命令（含 `-lc` 这类组合旗标，以及 `--norc` 这类位于 `-c` 之前的旗标） |
 | `ambient_credential:credential_file` | `.aws/credentials`、`.docker/config.json`、`.config/gcloud`、`.kube/config`、`.ssh/id_*`、`.netrc`、`.git-credentials`，以及**仅出现在路径边界处**的 `.credentials`                                                                                                                        |
 
-这些规则作用于 PR 标题、正文与新增行，因此即使 diff 只是一个无害的 docs 文件，仅由正文承载的指令也会被抓到。`printenv` 无论裸写还是包在 shell `-c` 中都无需终止符；其参数不属于选项文法。其他导出命令接受输入重定向和带文件描述符的重定向（`2>/dev/null`），也接受带引号或绝对路径的命令词与反斜杠续行。扩展后的清单仍然只是**已枚举形态**，未声称能识别任意 shell 程序。
+这些规则作用于 PR 标题、正文与新增行，因此即使 diff 只是一个无害的 docs 文件，仅由正文承载的指令也会被抓到。`printenv` 无论裸写还是包在 shell `-c` 中都无需终止符；其参数不属于选项文法。列表项命令（`1. env`、`- env`）和未加引号的 `-c` 参数同样纳入识别；重定向前带文件描述符也被视为一个有效的命令终止位置。这仍只是被支持形态的列表，不声称解析任意 shell 结构。其他导出命令接受输入重定向和带文件描述符的重定向（`2>/dev/null`），也接受带引号或绝对路径的命令词与反斜杠续行。扩展后的清单仍然只是**已枚举形态**，未声称能识别任意 shell 程序。
 
 两条边界防止规则误拦正常工作。所有导出命令**共享同一个**终止符前瞻，且在裸的命令位置分支与 shell `-c` 包装分支中都提到**候选之外**统一施加：操作符、右括号（因此 `$(env)` 与 `(env)` 也成立）、行尾，或者「闭合引号且其后是操作符或行尾」——最后这一种正是能覆盖 `-c` 串里第一条命令之后的导出（如 `bash -c "cd repo && env"`）的原因。因此带选项的前缀两种写法都不被扣住：`set -euo pipefail`、`env FOO=bar cmd`、`env -i FOO=bar node x.mjs`、`declare -x FOO=bar`，以及被包成 `sh -c "set -euo pipefail; make"` 的同样形态。早期有两个版本的问题均记录为已关闭：包装分支曾经完全没有终止符判据。
 
@@ -140,11 +140,11 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 ## 已验证结果（2026-11-26）
 
-- 单元与 workflow 套件：146 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
+- 单元与 workflow 套件：173 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
 - #18362：`protected_path:authority_surface`、`ambient_credential:cloud_metadata`、`ambient_credential:env_dump`。
 - #18364：`ambient_credential:cloud_metadata`、`ambient_credential:proc_environ`。
-- 变异见证：41 个臂，全部击杀，无跳过，另加一条**未变异对照**要求保持全绿。装置的临时目录**镜像仓库真实布局**——workflow 契约用例经相对 URL 读取 workflow；若不镜像，该用例在每个臂都会因文件缺失而红，而「文件缺失」会被误当成「变异击杀」。正是这条对照让整轮结果值得读。
-- workflow 端到端决策表：9 个用例通过。它用打桩 `gh`、在步骤自身的 bash 契约下执行**真实的** collect 与 assess `run:` 块，断言最终决策而非中间旗标。覆盖恰好等于上限、上限加一、diff 调用失败、可信作者，以及「敌意正文 + 元数据调用成功／失败」两臂。
+- 变异见证：56 个臂，全部击杀，无跳过，另加一条**未变异对照**要求保持全绿。装置的临时目录**镜像仓库真实布局**——workflow 契约用例经相对 URL 读取 workflow；若不镜像，该用例在每个臂都会因文件缺失而红，而「文件缺失」会被误当成「变异击杀」。正是这条对照让整轮结果值得读。
+- workflow 端到端决策表：11 个用例通过。它用打桩 `gh`、在步骤自身的 bash 契约下执行**真实的** collect 与 assess `run:` 块，断言最终决策而非中间旗标。覆盖恰好等于上限、上限加一、diff 调用失败、可信作者，以及「敌意正文 + 元数据调用成功／失败」两臂。
 - `prettier --check`、`eslint`、`actionlint`：干净。`eslint` 与 `actionlint` 均先用一个故意非法的输入证明过是活的。
 - `classify-profile.test.mjs`：27 通过、0 失败。
 - `scripts/tests/qwen-autofix-workflow.test.js`：57 失败、287 通过、13 跳过——把本次改动 stash 后计数相同，且 57 条失败用例名**集合完全一致**。每条失败都是该 harness 自己的临时 `typescript.cjs` 的 `ENOENT`，属 worktree 前置缺口，与本改动无关。

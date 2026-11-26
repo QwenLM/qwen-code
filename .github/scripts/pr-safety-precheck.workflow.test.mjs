@@ -67,13 +67,29 @@ function runWorkflow({
       benignDiff +
         'a'.repeat(Math.max(0, bytes - Buffer.byteLength(benignDiff))),
     );
+    const selectFields = join(dir, 'select-fields.mjs');
+    writeFileSync(
+      selectFields,
+      [
+        'import { readFileSync } from "node:fs";',
+        'const raw = JSON.parse(readFileSync(0, "utf8"));',
+        'const index = process.argv.indexOf("--json");',
+        'const fields = (index >= 0 ? process.argv[index + 1] : "").split(",").filter(Boolean);',
+        'const out = {};',
+        'for (const field of fields) {',
+        '  if (Object.hasOwn(raw, field)) out[field] = raw[field];',
+        '}',
+        'process.stdout.write(JSON.stringify(out));',
+        '',
+      ].join('\n'),
+    );
     const gh = join(bin, 'gh');
     writeFileSync(
       gh,
       [
         '#!/usr/bin/env bash',
         'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then',
-        `  cat ${JSON.stringify(viewJson)}`,
+        `  node ${JSON.stringify(selectFields)} "$@" < ${JSON.stringify(viewJson)}`,
         `  exit ${viewExit}`,
         'fi',
         'if [ "$1" = "pr" ] && [ "$2" = "diff" ]; then',
@@ -126,17 +142,24 @@ function runWorkflow({
     });
     const assessScript = join(dir, 'assess.sh');
     writeFileSync(assessScript, assess);
+    const assessOutput = join(dir, 'assess-output');
     const stdout = execFileSync(
       'bash',
       ['--noprofile', '--norc', assessScript],
       {
-        env: { ...env, GITHUB_OUTPUT: join(dir, 'assess-output') },
+        env: { ...env, GITHUB_OUTPUT: assessOutput },
         cwd: repo,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       },
     );
-    return { result: JSON.parse(stdout), outputs };
+    const result = JSON.parse(stdout);
+    assert.equal(
+      readFileSync(assessOutput, 'utf8').trim(),
+      `decision=${result.decision}`,
+      'decision= is the public output consumers read',
+    );
+    return { result, outputs };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -180,6 +203,22 @@ for (const hostile of [false, true]) {
     assert.deepEqual(result.reason_codes, ['input:metadata_unavailable']);
   });
 }
+
+test('a successful metadata read carries a hostile body to the assessor', () => {
+  const { result, outputs } = runWorkflow({ bytes: 1024, hostile: true });
+  assert.equal(outputs.metadata_unavailable, 'false');
+  assert.equal(result.decision, 'manual_required');
+  assert.deepEqual(result.reason_codes, ['ambient_credential:proc_environ']);
+});
+
+test('dropping body from the metadata field list silently bypasses it', () => {
+  const collect = collectBlock.replace(
+    '--json title,body,headRefOid',
+    '--json title,headRefOid',
+  );
+  const { result } = runWorkflow({ bytes: 1024, hostile: true, collect });
+  assert.equal(result.decision, 'allow_triage');
+});
 
 test('a trusted author bypasses the input fail-closed arms', () => {
   const { result } = runWorkflow({ bytes: CAP, trusted: 'true' });

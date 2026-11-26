@@ -40,6 +40,8 @@ const PROTECTED_DIR_PREFIXES = [
   '.qwen/rules/',
   '.qwen/hooks/',
   '.qwen/fork-profiles/',
+  'patches/',
+  'eslint-rules/',
 ];
 // Context files load hierarchically, so a nested copy steers the agent too.
 // QWEN.local.md is the project-local slot the memory loader appends; both it
@@ -56,6 +58,9 @@ const PROTECTED_FILE_NAMES = new Set([
   'package.json',
   'pnpm-lock.yaml',
   'pnpm-workspace.yaml',
+  'eslint.config.js',
+  'esbuild.config.js',
+  'vitest.config.ts',
   '.npmrc',
   '.pnpmfile.mjs',
   '.mcp.json',
@@ -89,7 +94,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   // signals documented in the design, not acceptance claims of this rule.
   [
     'ambient_credential:env_dump',
-    /(?:^|[;&|`]|\$\(|(?<![\w$])\()\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>)]|$)|["'](?=\s*(?:[|;&>)]|$)))|(?:^|[;&|`]|\$\(|(?<![\w$])\()\s*printenv\b|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*(?:=\S+)?\s+)*-[a-z]*c[a-z]*\s*["']\s*(?:printenv\b|(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$)))/m,
+    /(?:^[ \t]*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?|[;&|`]|\$\()\s*\(?\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&<>)]|\d*[<>]|$)|["'](?=\s*(?:[|;&<>)]|\d*[<>]|$)))|(?:^[ \t]*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?|[;&|`]|\$\()\s*\(?\s*printenv\b|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*(?:=\S+)?\s+)*-[a-z]*c[a-z]*\s*["']?\s*(?:printenv\b|(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$)))/m,
   ],
   // `.credentials` needs a boundary that admits every spelling of a file read
   // — bare, quoted (including a markdown code span's backtick), or after a
@@ -116,10 +121,21 @@ const METADATA_HOSTNAMES = new Set([
 // The URL parser already implements inet_aton: integer, hexadecimal and
 // short-form hostnames normalize to their dotted IPv4 form. Comparing the
 // normalized host avoids enumerating spellings separately.
+function normalizedHost(urlString) {
+  const hostname = new URL(urlString).hostname;
+  const mapped = /^\[::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/i.exec(hostname);
+  if (!mapped) return hostname;
+  const high = Number.parseInt(mapped[1], 16);
+  const low = Number.parseInt(mapped[2], 16);
+  return [high >> 8, high & 255, low >> 8, low & 255].join('.');
+}
+
 function hasCloudMetadataHost(text) {
-  for (const match of text.matchAll(/https?:\/\/[^\s"'`<>\])}]+/gi)) {
+  for (const match of text.matchAll(
+    /https?:\/\/(?:\[[a-f\d:.]+\](?::\d+)?|[^\s"'`<>\])}]+)[^\s"'`<>\])}]*/gi,
+  )) {
     try {
-      if (METADATA_HOSTNAMES.has(new URL(match[0]).hostname)) return true;
+      if (METADATA_HOSTNAMES.has(normalizedHost(match[0]))) return true;
     } catch {
       // A malformed URL is not a usable metadata host match.
     }
@@ -275,11 +291,17 @@ export function assessPullRequestSafety({
   if (!diffText) {
     addReason(reasons, 'input:diff_unavailable');
   } else {
-    addedText = diffText
-      .split('\n')
-      .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
-      .map((line) => line.slice(1))
-      .join('\n');
+    // `++` is possible content, not always a side header. Only outside hunks
+    // does `+++ ` belong to the file headers.
+    const hasHunkHeaders = /^@@ /m.test(diffText);
+    let inHunk = !hasHunkHeaders;
+    const addedLines = [];
+    for (const line of diffText.split('\n')) {
+      if (line.startsWith('diff --git ')) inHunk = !hasHunkHeaders;
+      else if (line.startsWith('@@ ')) inHunk = true;
+      else if (inHunk && line.startsWith('+')) addedLines.push(line.slice(1));
+    }
+    addedText = addedLines.join('\n');
     checkPatterns(addedText, SENSITIVE_DIFF_PATTERNS, reasons);
     if ([...changedPaths(diffText)].some(isProtectedPath)) {
       addReason(reasons, 'protected_path:authority_surface');

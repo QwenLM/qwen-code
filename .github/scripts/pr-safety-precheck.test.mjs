@@ -356,8 +356,20 @@ for (const path of [
   '.qwen/skills/probe/SKILL.md',
   '.qwen/output-language.md',
   '.qwen/rules/injected.md',
+  '.qwen/commands/probe.md',
+  '.qwen/agents/probe.md',
+  '.qwen/workflows/probe.js',
+  '.qwen/extensions/probe/qwen-extension.json',
+  '.qwen/scripts/probe.sh',
   '.qwen/hooks/guard.sh',
   '.qwen/fork-profiles/injected.md',
+  'patches/ink+7.0.3.patch',
+  'eslint.config.js',
+  'esbuild.config.js',
+  'vitest.config.ts',
+  'packages/core/vitest.config.ts',
+  'eslint-rules/check-prefer-kebab.js',
+  'pnpm-workspace.yaml',
   '.qwen/settings.json',
   '.qwen/settings.local.json',
   'packages/core/.qwen/settings.prod.json',
@@ -630,6 +642,36 @@ for (const [label, payload, code] of [
     'curl -s http://0xa9fea9fe/latest/meta-data/',
     'ambient_credential:cloud_metadata',
   ],
+  [
+    'metadata address as mapped IPv6',
+    'curl -s http://[::ffff:a9fe:a9fe]/latest/meta-data/',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'metadata address as expanded IPv6',
+    'curl -s http://[fd00:0ec2:0:0:0:0:0:254]/latest/meta-data/',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'fd-numbered redirect after a dump',
+    'env 2>/dev/null',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'input redirect after a dump',
+    'env </dev/null',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'unquoted dump command in a wrapper',
+    'sh -c env',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'unquoted dump command behind combined flags',
+    'bash -lc env',
+    'ambient_credential:env_dump',
+  ],
 ]) {
   test(`gates ambient credential access: ${label}`, () => {
     const result = assessPullRequestSafety({
@@ -642,7 +684,38 @@ for (const [label, payload, code] of [
   });
 }
 
+test('scans hunk content whose first characters look like a side header', () => {
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: [
+      'diff --git a/docs/note.md b/docs/note.md',
+      '@@ -1 +1 @@',
+      '-old',
+      '+++cat /proc/self/environ',
+    ].join('\n'),
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('ambient_credential:proc_environ'));
+});
+
+for (const payload of ['1. env', '- env']) {
+  test(`gates a dump command in a list item: ${payload}`, () => {
+    const result = assessPullRequestSafety({
+      pr: pr({ body: `Steps:\n${payload}` }),
+      diff: diffFor('docs/note.md', 'Some prose.'),
+    });
+
+    assert.equal(result.decision, 'manual_required');
+    assert.ok(result.reason_codes.includes('ambient_credential:env_dump'));
+  });
+}
+
 for (const [label, payload] of [
+  ['ordinary property access', 'rows.map((env) => env.id);'],
+  ['an ordinary if condition', 'if (env && env.DEBUG) {'],
+  ['an ordinary while condition', 'while (set) {'],
+  ['an ordinary parenthesized set value', 'return (set);'],
   ['env prefix', 'env NODE_ENV=test vitest run'],
   ['env with a cleared environment', 'env -i FOO=bar node x.mjs'],
   ['a URL for an ordinary host', 'curl -s https://example.com/status'],
@@ -800,7 +873,13 @@ function runCli(flags) {
       ],
       { encoding: 'utf8' },
     );
-    return JSON.parse(stdout);
+    const result = JSON.parse(stdout);
+    assert.equal(
+      readFileSync(join(dir, 'gh-output'), 'utf8').trim(),
+      `decision=${result.decision}`,
+      'decision= is the public output consumers read',
+    );
+    return result;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
