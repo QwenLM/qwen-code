@@ -1004,10 +1004,20 @@ export class LlmClient {
     }
 
     if (resumeTokenCounts) {
+      const delta = resumeTokenCounts.catalogSwitchTokens ?? 0;
+      let promptTokenCount = resumeTokenCounts.promptTokenCount;
+      const adjustment = this.config.getAutoMemoryContext?.()
+        ? Math.max(0, delta)
+        : Math.min(0, delta);
+      if (promptTokenCount > 0 && adjustment !== 0) {
+        promptTokenCount = Math.max(0, promptTokenCount + adjustment);
+        uiTelemetryService.setLastPromptTokenCount(promptTokenCount);
+      }
       this.getChat().seedResumeTokenCounts(
-        resumeTokenCounts.promptTokenCount,
+        promptTokenCount,
         resumeTokenCounts.outputTokenCount,
-        resumeTokenCounts.isEstimated,
+        resumeTokenCounts.isEstimated ||
+          promptTokenCount !== resumeTokenCounts.promptTokenCount,
         resumeTokenCounts.isProviderAdjusted,
       );
     }

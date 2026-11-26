@@ -5,6 +5,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from './api-history-metadata.js';
 
 export const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1600;
 export const TOKEN_TO_CHAR_RATIO = 4;
@@ -69,6 +70,16 @@ export function estimatePartChars(
 export function getFunctionResponseParts(part: Part): Part[] | undefined {
   const fr = part.functionResponse as { parts?: unknown } | undefined;
   return Array.isArray(fr?.parts) ? (fr.parts as Part[]) : undefined;
+}
+
+export function catalogSnapshotChars(content: Content): number {
+  let chars = 0;
+  for (const part of content.parts ?? []) {
+    if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true) {
+      chars += estimatePartChars(part, 0);
+    }
+  }
+  return chars;
 }
 
 export function estimateContentChars(

@@ -457,6 +457,11 @@ function pruneCompression(
     systemPayload: {
       ...payload,
       pruneContentChars,
+      ...(payload.catalogSwitchChars && {
+        catalogSwitchChars: retained.map(
+          (index) => payload.catalogSwitchChars![index]!,
+        ),
+      }),
       resumePromptTokenCount,
       compressedHistory,
       promptIds: retained.map((index) => payload.promptIds![index]!),

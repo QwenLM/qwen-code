@@ -135,7 +135,10 @@ import {
   type ChatRecordingService,
   type ChatCompressionRecordPayload,
 } from '../services/chatRecordingService.js';
-import { contentChars } from '../utils/content-token-estimate.js';
+import {
+  catalogSnapshotChars,
+  estimateContentChars,
+} from '../utils/content-token-estimate.js';
 import { withoutCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
 import {
   ChatCompressionService,
@@ -2783,24 +2786,38 @@ export class LlmChat {
       this.config.getChatCompression?.(),
     );
     const catalogVisible = Boolean(this.config.getAutoMemoryContext?.());
-    const visibleChars = (entry: Content, imageCost: number) =>
-      contentChars(
-        catalogVisible ? [entry] : withoutAutoMemorySnapshots([entry]),
-        imageCost,
-      );
-    // A provider anchor does not establish a local price for retained media.
-    const pruneContentChars = persisted.map((entry) =>
-      visibleChars(entry, info.historyImageTokenEstimate ?? 0),
-    );
-    const pendingTokens = pending
-      ? Math.ceil(
-          visibleChars(pending, imageTokenEstimate) / TOKEN_TO_CHAR_RATIO,
-        )
-      : 0;
-    if (pending) pruneContentChars.push(pendingTokens * TOKEN_TO_CHAR_RATIO);
+    const catalogSwitchChars: number[] = [];
+    let hasCatalog = false;
+    let pendingTokens = 0;
+    const pruneContentChars: number[] = [];
+    for (const [index, entry] of compressedHistory.entries()) {
+      const isPending = index === persisted.length;
+      const imageCost = isPending
+        ? imageTokenEstimate
+        : (info.historyImageTokenEstimate ?? 0);
+      let visible = estimateContentChars(entry, imageCost);
+      let hidden = visible - catalogSnapshotChars(entry);
+      if (visible !== hidden) hasCatalog = true;
+      if (isPending) {
+        // Pending input is added to the seed as a separately rounded count.
+        visible =
+          Math.ceil(visible / TOKEN_TO_CHAR_RATIO) * TOKEN_TO_CHAR_RATIO;
+        hidden = Math.ceil(hidden / TOKEN_TO_CHAR_RATIO) * TOKEN_TO_CHAR_RATIO;
+        pendingTokens =
+          (catalogVisible ? visible : hidden) / TOKEN_TO_CHAR_RATIO;
+      }
+      // An inherited provider count may already include a now-hidden catalog.
+      // Reprice only entries that were sized locally for this checkpoint.
+      const locallyPriced =
+        isPending || info.historyImageTokenEstimate !== undefined;
+      const difference = locallyPriced ? visible - hidden : 0;
+      catalogSwitchChars.push(catalogVisible ? -difference : difference);
+      pruneContentChars.push(catalogVisible ? visible : hidden);
+    }
     const payload: ChatCompressionRecordPayload = {
       info,
       pruneContentChars,
+      ...(hasCatalog && { catalogSwitchChars }),
       compressedHistory,
       summaryPrefixLength,
       completedToolCallIds: this.completedToolCallIds,
@@ -3526,8 +3543,9 @@ export class LlmChat {
     const { imageTokenEstimate } = resolveSlimmingConfig(
       this.config.getChatCompression?.(),
     );
+    const beforeHistory = this.curatedBaseHistory();
     const beforeEstimate = estimateModelContentTokens(
-      this.curatedBaseHistory(),
+      beforeHistory,
       imageTokenEstimate,
     );
     const projectRoot = this.config.getProjectRoot();
@@ -3551,8 +3569,9 @@ export class LlmChat {
       .map((c) => (c.role === 'model' ? stripThoughtPartsFromContent(c) : c))
       .filter((c): c is Content => c !== null);
 
+    const afterHistory = this.curatedBaseHistory(newHistory);
     const afterEstimate = estimateModelContentTokens(
-      this.curatedBaseHistory(newHistory),
+      afterHistory,
       imageTokenEstimate,
     );
 
@@ -3568,7 +3587,15 @@ export class LlmChat {
       };
     }
 
-    const reduction = beforeEstimate - afterEstimate;
+    // The size gate above can clear media even when its provider charge is
+    // unknown. Only deduct text savings from an existing usage anchor.
+    const reduction = this.lastPromptTokenCount
+      ? Math.max(
+          0,
+          estimateModelContentTokens(beforeHistory, 0) -
+            estimateModelContentTokens(afterHistory, 0),
+        )
+      : beforeEstimate - afterEstimate;
     const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
     const baselineIsEstimated = this.promptCountIsEstimateDerived();
     const adjustedTokenCount = Math.max(0, apiBaseline - reduction);

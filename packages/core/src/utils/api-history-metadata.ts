@@ -6,6 +6,9 @@
 
 import type { Content, Part } from '@google/genai';
 
+export const AUTO_MEMORY_SNAPSHOT_METADATA =
+  'qwen-code:memory-catalog-snapshot';
+
 const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
 const DIRECTORY_CONTEXT = Symbol('directoryContext');
 

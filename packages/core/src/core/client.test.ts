@@ -1331,6 +1331,36 @@ describe('Gemini Client (client.ts)', () => {
       expectToolBoundaryKept(resumedClient, result);
     });
 
+    it.each([
+      { enabled: true, delta: 5500, expected: 5600 },
+      { enabled: false, delta: 5500, expected: 100 },
+      { enabled: false, delta: -20, expected: 80 },
+      { enabled: true, delta: -20, expected: 100 },
+    ])(
+      'restores the catalog charge for the active memory setting ($enabled, $delta)',
+      async ({ enabled, delta, expected }) => {
+        vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue(
+          enabled ? 'catalog' : '',
+        );
+        restoreFromRuntime({
+          apiHistory: [userText('projected history')],
+          completedToolCallIds: [],
+          uiTelemetryEvents: [],
+          resumeTokenCounts: {
+            promptTokenCount: 100,
+            outputTokenCount: 0,
+            isEstimated: true,
+            catalogSwitchTokens: delta,
+          },
+        });
+        const client = await initializedClient();
+        expect(client.getChat().getLastPromptTokenCount()).toBe(expected);
+        expect(
+          uiTelemetryService.setLastPromptTokenCount,
+        ).toHaveBeenLastCalledWith(expected);
+      },
+    );
+
     it('initializes from the selective runtime projection without the full transcript', async () => {
       const skill = stubSkillRestore();
       const seedResumeTokenCountsSpy = spySeedResumeTokenCounts();

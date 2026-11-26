@@ -16695,6 +16695,20 @@ describe('LlmChat', async () => {
           info.newTokenCount + pendingTokens,
         );
         expect(payload.pruneContentChars.at(-1)).toBe(pendingTokens * 4);
+        const other = estimateContentTokens([
+          enabled ? userText('retry') : pending,
+        ]);
+        const record = {
+          type: 'system',
+          subtype: 'chat_compression',
+          systemPayload: payload,
+        } as ChatRecord;
+        for (const includeDelta of [true, false]) {
+          if (!includeDelta) delete payload.catalogSwitchChars; // Older checkpoint.
+          expect(
+            getResumeTokenCounts({ messages: [record] })?.catalogSwitchTokens,
+          ).toBe(other - pendingTokens);
+        }
       },
     );
 
@@ -16948,6 +16962,57 @@ describe('LlmChat', async () => {
         }
       },
     );
+
+    it.each([100, 6000])(
+      'clears old media without deducting its local price (%i) from provider usage',
+      (imageTokenEstimate) => {
+        pinFastCompressionIdleClear();
+        vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+          imageTokenEstimate,
+        });
+        const image = { inlineData: { mimeType: 'image/png', data: 'AA==' } };
+        const target = newChat({
+          history: [
+            content('user', image),
+            modelText('first answer'),
+            content('user', image),
+            modelText('second answer'),
+          ],
+        });
+        target.setLastPromptTokenCount(30_000);
+
+        const { info, microcompactMeta } = target.compressFast();
+        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        expect(microcompactMeta?.mediaCleared).toBe(1);
+        expect(target.getHistoryShallow()[0].parts?.[0].text).toContain(
+          'Old inline media cleared',
+        );
+        expect(info.newTokenCount).toBe(30_000);
+        expect(target.getLastPromptTokenCount()).toBe(info.newTokenCount);
+      },
+    );
+
+    it('keeps an inherited catalog charge when memory was hidden after the provider counted it', () => {
+      pinFastCompressionIdleClear();
+      const catalog = 'prior visible catalog'.repeat(500);
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const recordChatCompression = vi.fn();
+      const target = newChat({
+        history: [
+          content('user', getAutoMemorySnapshot([], catalog)!),
+          ...thoughtHistory(),
+        ],
+        recorder: { recordChatCompression },
+      });
+      target.setLastPromptTokenCount(30_000);
+      mockConfig.getAutoMemoryContext = () => '';
+      const { info } = target.compressFast();
+      expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      const payload = recordChatCompression.mock.calls[0][0];
+      expect(
+        payload.catalogSwitchChars.every((change: number) => change === 0),
+      ).toBe(true);
+    });
 
     it('sizes a fast checkpoint from visible history when no provider count exists', () => {
       pinFastCompressionIdleClear();

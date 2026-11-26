@@ -561,7 +561,9 @@ function describeBrokenJsonString(
       types.clear();
     } else if (path !== instancePath) {
       if (!instancePath.startsWith(`${path}/`)) return '';
-      enclosingPath = path;
+      if (enclosingPath === undefined || path.length < enclosingPath.length) {
+        enclosingPath = path;
+      }
       continue;
     }
     const source = error.schemaPath.startsWith('#/')
@@ -612,8 +614,8 @@ function describeBrokenJsonString(
     // JavaScriptCore can quote an entire long identifier in the parser error.
     const summary = reason.length > 100 ? `${reason.slice(0, 100)}…` : reason;
     const diagnosis = `; params${instancePath} arrived as a string whose text is not valid JSON (${summary}).${near}`;
-    // Changing the enclosing type can make this field's schema inapplicable.
-    if (enclosingPath !== undefined) {
+    // Ajv may stop at a nested failure before checking the outer container.
+    if (enclosingPath !== undefined && !enclosingPath.includes('/', 1)) {
       return `${diagnosis} Check the type required for params${enclosingPath} before changing this field.`;
     }
     const fix = hasPosition ? 'Fix the text there' : 'Fix the JSON syntax';
@@ -622,6 +624,9 @@ function describeBrokenJsonString(
       types.size === 1
         ? `send it as a JSON ${shapes[0]}, not as a string`
         : 'resend this field with the type required by its schema';
+    if (instancePath.includes('/', 1)) {
+      return `${diagnosis} Check the enclosing values against the schema. If their types match, ${retry}.`;
+    }
     return `${diagnosis} ${fix} and ${retry}`;
   }
   return '';

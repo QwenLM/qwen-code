@@ -7,7 +7,10 @@
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
+import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  getApiHistoryPromptId,
+} from '../utils/api-history-metadata.js';
 import type {
   DeferredToolSummary,
   ToolRegistry,
@@ -27,8 +30,7 @@ import {
 
 const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 
-export const AUTO_MEMORY_SNAPSHOT_METADATA =
-  'qwen-code:memory-catalog-snapshot';
+export { AUTO_MEMORY_SNAPSHOT_METADATA };
 
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';

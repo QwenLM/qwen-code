@@ -334,6 +334,80 @@ describe('SchemaValidator', () => {
       },
     );
 
+    it.each([false, true])(
+      'keeps the outermost failing container across nested alternatives (null first: %s)',
+      (nullFirst) => {
+        const containers = [
+          obj({ items: { type: 'array' } }),
+          { type: 'null' },
+        ];
+        if (nullFirst) containers.reverse();
+        const array = { type: 'array' };
+        const schema = obj({
+          reports: {
+            allOf: [
+              { anyOf: [array, obj({ settings: { anyOf: containers } })] },
+              array,
+            ],
+          },
+        });
+        const report = { settings: { items: '[1,]' } };
+        const note = validateWithNote(schema, { reports: report }).report.mock
+          .calls[0][1];
+        expect(note).toContain(
+          'Check the type required for params/reports before',
+        );
+        invalid(schema, { reports: { settings: null } });
+        valid(schema, { reports: [report] });
+      },
+    );
+
+    it('qualifies a nested repair when a conditional fails before the parent type is checked', () => {
+      const array = { type: 'array' };
+      const schema = obj({
+        reports: {
+          allOf: [
+            { if: { type: 'object' }, then: obj({ items: array }) },
+            array,
+          ],
+        },
+      });
+      const report = { items: '[1,]' };
+      const { message, report: diagnostic } = validateWithNote(schema, {
+        reports: report,
+      });
+      expect(message).toBe('params/reports/items must be array');
+      expect(diagnostic.mock.calls[0][1]).toContain(
+        'Check the enclosing values against the schema',
+      );
+      expect(diagnostic.mock.calls[0][1]).not.toContain(
+        'Fix the JSON syntax and send it',
+      );
+      invalid(schema, { reports: { items: [] } });
+      valid(schema, { reports: [report] });
+    });
+
+    it('checks all enclosing values when a conditional hides an outer conflict', () => {
+      const array = { type: 'array' };
+      const schema = obj({
+        reports: {
+          allOf: [
+            {
+              if: { type: 'object' },
+              then: obj({ settings: orNull(obj({ items: array })) }),
+            },
+            array,
+          ],
+        },
+      });
+      const report = { settings: { items: '[1,]' } };
+      const note = validateWithNote(schema, { reports: report }).report.mock
+        .calls[0][1];
+      expect(note).toContain('Check the enclosing values against the schema');
+      invalid(schema, { reports: { settings: null } });
+      valid(schema, { reports: [report] });
+    });
+
     it('preserves validation errors for schemas with non-UTF-8 URI fragments', () => {
       const schema = {
         $id: `https://example.test/${probe('fragment')}`,

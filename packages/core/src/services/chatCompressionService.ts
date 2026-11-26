@@ -1987,7 +1987,11 @@ export class ChatCompressionService {
           // a much smaller visible-history-only estimate.
           newTokenCount =
             estimatedNonVisibleTokenCount + estimatedNewVisibleTokenCount;
-          historyImageTokenEstimate = slimmingConfig.imageTokenEstimate;
+          // With an inherited remainder the unchanged tail cancels out of the
+          // delta. Its images still carry their original, unknown charge.
+          if (!retainedTail.length || estimatedNonVisibleTokenCount === 0) {
+            historyImageTokenEstimate = slimmingConfig.imageTokenEstimate;
+          }
           canCalculateNewTokenCount = true;
           config
             .getDebugLogger()

@@ -327,6 +327,46 @@ describe('message group deletion', () => {
     },
   );
 
+  it('keeps only retained entries when repricing a catalog after deletion', () => {
+    const u1 = user('u1', null);
+    const u2 = user('u2', 'u1');
+    for (const [prompt, text] of [
+      [u1, 'a'.repeat(20)],
+      [u2, 'b'.repeat(40)],
+    ] as const) {
+      prompt.message!.parts!.push({
+        text,
+        partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
+      });
+    }
+    const compression = record('compressed', 'u2', 'system', {
+      subtype: 'chat_compression',
+      systemPayload: {
+        info: {
+          compressionStatus: CompressionStatus.COMPRESSED,
+          originalTokenCount: 110,
+          newTokenCount: 100,
+        },
+        compressedHistory: [u1.message!, u2.message!],
+        promptIds: ['api-u1', 'api-u2'],
+        pruneContentChars: [2, 2],
+        catalogSwitchChars: [20, 40],
+      },
+    });
+    const records = [u1, u2, compression];
+    expect(
+      getResumeTokenCounts({ messages: records })?.catalogSwitchTokens,
+    ).toBe(15);
+    const { records: kept } = deleteTranscriptMessageGroups(
+      records,
+      ['u1'],
+      anchor,
+    );
+    expect(getResumeTokenCounts({ messages: kept })?.catalogSwitchTokens).toBe(
+      10,
+    );
+  });
+
   it('deletes compressed-away original history without changing model input', () => {
     const compression = record('compression', 'a1', 'system', {
       subtype: 'chat_compression',

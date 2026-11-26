@@ -966,7 +966,7 @@ describe('ChatCompressionService', () => {
 
     expectCompressed(result);
     expect(result.info.originalTokenCount).toBe(5_000);
-    expect(result.info.historyImageTokenEstimate).toBe(1600);
+    expect(result.info.historyImageTokenEstimate).toBeUndefined();
     expect(result.info.newTokenCount).toBe(
       1_000 + estimateContentTokens(result.newHistory!),
     );
@@ -3174,10 +3174,11 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
   // exactly as coreToolScheduler.convertToFunctionResponse emits it — NOT
   // a top-level sibling. (The earlier sibling shape masked the bug where
   // extractRecentImages restored zero screenshots.)
-  const screenshot = (data: string): Content =>
+  const screenshot = (data: string, id?: string): Content =>
     content('user', {
       functionResponse: {
         name: 'mcp__node-repl__node_repl',
+        ...(id && { id }),
         response: { output: 'ok' },
         parts: [{ inlineData: { mimeType: 'image/png', data } }],
       } as unknown as NonNullable<Content['parts']>[number]['functionResponse'],
@@ -3214,6 +3215,33 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
       );
       expect(result.info.newTokenCount).toBeLessThan(16_600);
       expect(result.newHistory).toHaveLength(pendingCall ? 4 : 5);
+    },
+  );
+
+  it.each([100, 6000])(
+    'marks a retained screenshot as locally priced only when usage is rebuilt locally (price %i)',
+    async (imageTokenEstimate) => {
+      const history = [
+        ...turns('x'.repeat(32_000), 'done', 'inspect image'),
+        content('model', fnCall('mcp__node-repl__node_repl', {}, 'image')),
+        screenshot('tail', 'image'),
+      ];
+      spySideQuery('S'.repeat(80), {});
+      const config = fakeConfig({
+        extra: { getChatCompression: () => ({ imageTokenEstimate }) },
+      });
+
+      for (const originalTokenCount of [40_000, 8_000]) {
+        const result = await compressWith(fakeChat(history), config, {
+          trigger: 'manual',
+          originalTokenCount,
+        });
+        expectCompressed(result);
+        expect(result.newHistory?.at(-1)).toEqual(history.at(-1));
+        expect(result.info.historyImageTokenEstimate).toBe(
+          originalTokenCount === 8_000 ? imageTokenEstimate : undefined,
+        );
+      }
     },
   );
 

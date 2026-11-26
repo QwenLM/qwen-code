@@ -764,6 +764,8 @@ export interface ChatCompressionRecordPayload {
   imageTokenEstimate?: number;
   /** Per-entry size for deletions, excluding unpriced media and hidden memory. */
   pruneContentChars?: number[];
+  /** Per-entry change to the saved estimate if memory catalogs are enabled (+) or disabled (−). */
+  catalogSwitchChars?: number[];
   /** Estimated count for the persisted snapshot when its contents differ from live history. */
   resumePromptTokenCount?: number;
   /**
