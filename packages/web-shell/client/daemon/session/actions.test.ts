@@ -828,6 +828,27 @@ describe('getConnectionAfterSessionClear', () => {
     },
   );
 
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'forwards the input-history opt-out through %s',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const { actions } = createActionsHarness({ session });
+      const pending = actions[method]('host command', {
+        suppressInputHistory: true,
+      });
+      await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+      expect(session.submitPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [{ type: 'text', text: 'host command' }],
+          suppressInputHistory: true,
+        }),
+        ...(method === 'sendPrompt' ? [expect.any(AbortSignal)] : []),
+      );
+      if (method === 'sendPrompt') await actions.cancel();
+      await pending;
+    },
+  );
+
   it('does not promote reviewed Generated UI data to declared human input', async () => {
     const session = createMockSession('session-a');
     const { actions } = createActionsHarness({ session });
@@ -2332,14 +2353,20 @@ describe('createDaemonSessionActions', () => {
       createDetachedStandaloneSession,
     });
 
+    const startupConfig = {
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      reasoningEffort: 'none' as const,
+    };
     await expect(
       actions.createSession({
         sessionContext: { kind: 'standalone' },
         approvalMode: 'yolo',
+        startupConfig,
       }),
     ).resolves.toBe(standaloneRecord);
     expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
       approvalMode: 'yolo',
+      startupConfig,
     });
     expect(activeSession.client.createOrAttachSession).not.toHaveBeenCalled();
     expect(getConnection()).toEqual(connection);
@@ -3472,7 +3499,11 @@ describe('createDaemonSessionActions', () => {
     const result = await actions.sendDetachedPrompt(
       session as unknown as DaemonSessionClient,
       'background prompt',
-      { submittedPrompt: 'background prompt', onAdmitted },
+      {
+        submittedPrompt: 'background prompt',
+        suppressInputHistory: true,
+        onAdmitted,
+      },
     );
 
     expect(result).toEqual({ promptId: 'prompt-1' });
@@ -3488,6 +3519,7 @@ describe('createDaemonSessionActions', () => {
     expect(request._meta).toEqual({
       'qwen.submittedPrompt': 'background prompt',
     });
+    expect(request).toMatchObject({ suppressInputHistory: true });
     expect(onAdmitted).toHaveBeenCalledWith({ promptId: 'prompt-1' });
     expect(session.detach).toHaveBeenCalledOnce();
     expect(store.appendLocalUserMessage).not.toHaveBeenCalled();

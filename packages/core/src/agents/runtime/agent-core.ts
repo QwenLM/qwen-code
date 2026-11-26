@@ -283,7 +283,10 @@ export function buildInheritedForkExecutionToolNames(
 export const EXTERNAL_MESSAGE_PREFIX = '[Message from parent agent]:';
 
 export interface ReasoningLoopResult {
-  /** The final model text response (empty if terminated by abort/limits). */
+  /**
+   * The final model text response (empty if terminated by abort/limits), or
+   * for HOOK_STOPPED the hook's reason, for the parent.
+   */
   text: string;
   /** Why the loop ended. null = normal text completion (no tool calls). */
   terminateMode: AgentTerminateMode | null;
@@ -301,6 +304,8 @@ export interface ReasoningLoopResult {
 interface ToolStepResult {
   messages: Content[];
   repeatedDuplicateProviderToolCall: boolean;
+  /** A tool hook returned `continue: false`: the run ends with this reason. */
+  hookStopReason?: string;
   /** Executed calls with their model-visible results, in call order.
    * Consumed by the loop detector for result-aware stateful-read guards
    * (issue #9450). */
@@ -1564,6 +1569,15 @@ export class AgentCore {
             terminateMode = AgentTerminateMode.LOOP_DETECTED;
             break;
           }
+          if (toolCallResult.hookStopReason !== undefined) {
+            // The results answer the calls, should the agent be resumed.
+            for (const message of toolCallResult.messages) {
+              chat.addHistory(message);
+            }
+            finalText = `A hook stopped the agent: ${toolCallResult.hookStopReason}`;
+            terminateMode = AgentTerminateMode.HOOK_STOPPED;
+            break;
+          }
           // Result-aware loop guards (issue #9450): stateful reads like
           // task_list may legitimately repeat with identical arguments while
           // the shared task board changes, so the detector must see each
@@ -2278,6 +2292,9 @@ export class AgentCore {
         return {
           messages: [{ role: 'user', parts: batch.parts ?? [] }],
           repeatedDuplicateProviderToolCall: false,
+          ...(batch.hookStopReason !== undefined
+            ? { hookStopReason: batch.hookStopReason }
+            : {}),
           results: responses.flatMap(({ callId, parts }) => {
             const request = requestByCallId.get(callId);
             return request

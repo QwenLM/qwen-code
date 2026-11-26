@@ -2093,6 +2093,7 @@ export function registerHostedSessionOpenRoutes({
               shell: {
                 resources: stores.toolResultResources,
                 assertWritable: stores.assertWritable,
+                writerOwner: stores.publication.owner,
               },
             }
           : {}),

@@ -844,33 +844,36 @@ describe('message group deletion', () => {
       deleteTranscriptMessageGroups([legacy, compression], ['legacy'], anchor),
     ).toThrow('legacy turn');
   });
-  it('deletes a turn together with the catalog snapshot it appended', () => {
-    // The snapshot is written during the turn whose durable request appended
-    // it to the model history. Keeping the record after the turn is gone
-    // would replay it onto an earlier turn on restore.
-    const records = [
-      user('u1', null),
-      record('a1', 'u1', 'assistant'),
-      snapshot('s1', 'a1', 'catalog A'),
-      user('u2', 's1'),
-      record('a2', 'u2', 'assistant'),
-    ];
-    const groups = getTranscriptMessageGroups(records);
-    expect(groups.find((group) => group.id === 'u1')!.recordIds).toContain(
-      's1',
-    );
+  it.each(['memory_catalog_snapshot', 'permission_context_snapshot'] as const)(
+    'deletes a turn together with its %s',
+    (subtype) => {
+      // The snapshot is written during the turn whose durable request appended
+      // it to the model history. Keeping the record after the turn is gone
+      // would replay it onto an earlier turn on restore.
+      const records = [
+        user('u1', null),
+        record('a1', 'u1', 'assistant'),
+        { ...snapshot('s1', 'a1', 'catalog A'), subtype },
+        user('u2', 's1'),
+        record('a2', 'u2', 'assistant'),
+      ];
+      const groups = getTranscriptMessageGroups(records);
+      expect(groups.find((group) => group.id === 'u1')!.recordIds).toContain(
+        's1',
+      );
 
-    const { records: kept } = deleteTranscriptMessageGroups(
-      records,
-      ['u1'],
-      anchor,
-    );
+      const { records: kept } = deleteTranscriptMessageGroups(
+        records,
+        ['u1'],
+        anchor,
+      );
 
-    expect(kept.map((item) => item.uuid)).toEqual(['u2', 'a2', 'anchor']);
-    expect(
-      JSON.stringify(buildApiHistoryFromConversation({ messages: kept })),
-    ).not.toContain('catalog A');
-  });
+      expect(kept.map((item) => item.uuid)).toEqual(['u2', 'a2', 'anchor']);
+      expect(
+        JSON.stringify(buildApiHistoryFromConversation({ messages: kept })),
+      ).not.toContain('catalog A');
+    },
+  );
 
   it('keeps an earlier turn’s catalog snapshot when a later turn is deleted', () => {
     const records = [

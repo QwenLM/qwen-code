@@ -461,6 +461,10 @@ import {
 import { modsWanted } from '../../services/display-translation-mod.js';
 import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
+import {
+  isRepetitiveToolCallsError,
+  REPETITIVE_TOOL_CALLS_HINT,
+} from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -830,6 +834,8 @@ type RunToolResult = {
    * boundary, such as Goal checkpoints and workspace-agent hand-offs.
    */
   terminateTurn?: boolean;
+  /** A tool hook returned `continue: false`: the turn ends, with this reason. */
+  hookStopReason?: string;
   /**
    * Hook additionalContext of a code-mode nested call. Its parts are a value
    * for the exec script, so the parent exec delivers this to the model.
@@ -1355,6 +1361,19 @@ function modelStreamError(error: StructuredError): unknown {
       ...(error.requestId ? { requestId: error.requestId } : {}),
     })
   );
+}
+
+function repetitiveToolCallsRequestError(
+  errorMessage: string,
+): RequestError | undefined {
+  if (!isRepetitiveToolCallsError(errorMessage)) return undefined;
+  const message = errorMessage.includes(REPETITIVE_TOOL_CALLS_HINT)
+    ? errorMessage
+    : errorMessage + REPETITIVE_TOOL_CALLS_HINT;
+  return new RequestError(-32603, message, {
+    errorKind: 'repetitive_tool_calls',
+    details: message,
+  });
 }
 
 function createLoopDetectedTurnError(
@@ -10031,7 +10050,8 @@ export class Session implements SessionContext {
         subscriptionQuota: quota,
       });
     }
-    throw error;
+
+    throw repetitiveToolCallsRequestError(errorMessage) ?? error;
   }
 
   async #handleStopHookLoop(
@@ -11058,7 +11078,7 @@ export class Session implements SessionContext {
         if (errorStatus === 429) {
           throw new RequestError(429, 'Rate limit exceeded. Try again later.');
         }
-        throw error;
+        throw repetitiveToolCallsRequestError(errorMessage) ?? error;
       } finally {
         this.mods?.settleModelText(
           modelTextAttempt,
@@ -12156,10 +12176,8 @@ export class Session implements SessionContext {
    * queued for the next continuation rather than drained into a turn that is
    * already over.
    *
-   * Channel turns and requested channel deliveries keep the loop alive for
-   * their final tool-free response; ending on the tool batch would return or
-   * submit an empty response because only a tool-free response is committed
-   * as the channel final.
+   * Channels normally need a final tool-free response for delivery. A hook
+   * stop ends the turn even when a channel is waiting for that response.
    */
   async #endTurnAfterToolRun(
     toolRun: RunToolResult,
@@ -12169,11 +12187,11 @@ export class Session implements SessionContext {
   ): Promise<boolean> {
     // Loop protection keeps its own stop path, with the telemetry and the
     // context message that go with it, so it wins a batch that trips both.
+    const hookStop = toolRun.hookStopReason;
     if (
-      toolRun.terminateTurn !== true ||
       toolRun.loopDetected ||
-      channelTurn ||
-      hasChannelDelivery
+      (hookStop === undefined &&
+        (toolRun.terminateTurn !== true || channelTurn || hasChannelDelivery))
     ) {
       return false;
     }
@@ -12186,6 +12204,15 @@ export class Session implements SessionContext {
       goalTurn.endingToolCallId = toolRun.parts.findLast(
         (part) => part.functionResponse?.id,
       )?.functionResponse?.id;
+    }
+    if (hookStop !== undefined) {
+      try {
+        await this.messageEmitter.emitStopHookNotice(hookStop);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to emit tool hook stop notice: ${this.#formatError(error)}`,
+        );
+      }
     }
     return true;
   }
@@ -16828,6 +16855,9 @@ export class Session implements SessionContext {
       stopAfterPermissionCancel: batch.stopAfterPermissionCancel,
       ...(toolLoopState.loopDetected ? { loopDetected: true } : {}),
       ...(batch.stop === 'tool_ended_turn' ? { terminateTurn: true } : {}),
+      ...(batch.hookStopReason !== undefined
+        ? { hookStopReason: batch.hookStopReason }
+        : {}),
       repeatedToolFailureBatch: {
         complete: batch.results.length === requests.length,
         observations,
@@ -20741,8 +20771,10 @@ export class Session implements SessionContext {
               );
             }
 
-            // If hook indicates to stop, return an error response
-            if (postHookResult.shouldStop) {
+            // If hook indicates to stop, return an error response. Calls run
+            // outside the shared batch keep that behavior for a
+            // `continue: false` too.
+            if (postHookResult.shouldStop || postHookResult.endsTurn) {
               this.#stopMovedShell(this.movableShells.get(callId));
               const stopMessage =
                 postHookResult.stopReason ||

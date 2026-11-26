@@ -485,6 +485,35 @@ describe('AgentInteractive', () => {
     },
   );
 
+  it('shows the hook stop reason in the warning and the Arena error', async () => {
+    const { core } = createMockCore({
+      loopResult: {
+        text: 'A hook stopped the agent: \x1b[31mbudget\nspent\x1b[0m',
+        terminateMode: AgentTerminateMode.HOOK_STOPPED,
+        turnsUsed: 1,
+      },
+    });
+    const agent = new AgentInteractive(
+      createConfig({ initialTask: 'go' }),
+      core,
+    );
+    await agent.start(context);
+    await waitForStatus(agent, AgentStatus.FAILED);
+
+    const reason = 'A hook stopped the agent: budget spent';
+    expect(agent.getLastRoundError()).toBe(
+      `Terminated: HOOK_STOPPED (${reason})`,
+    );
+    expect(agent.getMessages()).toContainEqual(
+      expect.objectContaining({
+        role: 'info',
+        content: reason,
+        metadata: { level: 'warning' },
+      }),
+    );
+    await agent.shutdown();
+  });
+
   it('should set status to failed when chat creation fails', async () => {
     const agent = await startAgent(createMockCore({ nullChat: true }).core);
 

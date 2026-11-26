@@ -166,6 +166,7 @@ import {
   parseSidechannelMidTurnInjected,
   publishSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
+import { publishSidechannelRemotePrompt } from '../remotePromptSidechannel.js';
 import {
   isPendingPromptEvent,
   publishPendingPromptEvent,
@@ -4213,6 +4214,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // Keep the sidechannel for queue dedupe, but still normalize the
                 // event below so chat UIs can render the inserted-message status.
                 publishSidechannelMidTurnInjected(midTurnInjected);
+                if (event.originatorClientId !== activeSession.clientId) {
+                  publishSidechannelRemotePrompt({
+                    sessionId: activeSession.sessionId,
+                    kind: 'prompt',
+                  });
+                }
                 if (sessionRef.current !== activeSession) break;
               }
               if (isPendingPromptEvent(event)) {
@@ -4267,6 +4274,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // A `/send` message is recorded here without a turn here, so it
               // never says this session is working.
               const turnEvents = uiEvents.filter((e) => !isSentMessageEvent(e));
+              if (
+                event.originatorClientId !== activeSession.clientId &&
+                uiEvents.some((item) => item.type === 'user.text.delta')
+              ) {
+                publishSidechannelRemotePrompt({
+                  sessionId: activeSession.sessionId,
+                  kind: 'prompt',
+                });
+              }
               if (
                 event.type === 'model_switched' &&
                 isRecord(event.data) &&
@@ -5750,8 +5766,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const modelServiceId =
             overrides?.modelServiceId ??
             createSessionRequestRef.current?.modelServiceId;
+          const startupConfig = overrides?.startupConfig;
           return DaemonSessionClient.createStandalone(client, {
-            ...(modelServiceId !== undefined ? { modelServiceId } : {}),
+            ...(startupConfig
+              ? { startupConfig }
+              : modelServiceId !== undefined
+                ? { modelServiceId }
+                : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
           }).then((owner) =>
             turnNotifications.remember(owner, { kind: 'standalone' }),

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import type { HostedHarnessReleaseReceipt } from '@qwen-code/qwen-code-core/managed-runtime/hosted-harness-release.js';
 import type { ManagedSessionWakeStamp } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import {
@@ -469,6 +470,8 @@ export function createHostedSessionSuspension({
       owners: false,
       lease: false,
       publishers: false,
+      quiesced: false,
+      sealed: false,
       writer: false,
     };
     // The background certificate is re-derived on every eligibility pass,
@@ -655,7 +658,11 @@ export function createHostedSessionSuspension({
             await session.backgroundLane?.publisher?.close();
             done.publishers = true;
           }
-          if (!done.writer) {
+          const placement =
+            session.stores?.supportsSuspensionPlacementRelease?.() === true
+              ? session.placement
+              : undefined;
+          if (!done.sealed) {
             // The writer lease's own renewal timer lives in the Store client,
             // not in the activation renewal below. End it before the release
             // and seal so a failure here leaves a lease that lapses instead of
@@ -664,6 +671,11 @@ export function createHostedSessionSuspension({
             // Outside the authority serial queue: the renewal runs inside
             // it, so waiting from within would deadlock.
             await session.managed.stopRenewal();
+            if (placement !== undefined && !done.quiesced) {
+              session.ownershipRelease ??= { operationId: randomUUID() };
+              await session.stores!.quiesceOwnership(placement);
+              done.quiesced = true;
+            }
             await session.managed.releaseActivation();
             // The memoized seal: a retry reconciles this same seal. The wake
             // stamp is what the pump would pick from the prefix this seal
@@ -704,8 +716,26 @@ export function createHostedSessionSuspension({
                     };
             }
             await session.managed.authority.close(wake);
-            done.writer = true;
+            done.sealed = true;
           }
+          if (placement !== undefined) {
+            const release = session.ownershipRelease!;
+            release.proof ??= session.managed.authority.commitProof;
+            try {
+              release.result ??= session.stores!.releaseOwnership({
+                ...placement,
+                operationId: release.operationId,
+                commitProof: release.proof,
+              });
+              await release.result;
+            } catch (cause) {
+              release.result = undefined;
+              throw cause;
+            }
+          }
+          // A confirmed seal makes placement release independently retryable;
+          // activation release and the seal must not run again for its retry.
+          done.writer = true;
           // Only after every step confirmed: stopLocal fences the seal
           // reconciliation requests too, so it must come last.
           await session.stores!.stopLocal();

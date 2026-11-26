@@ -3315,6 +3315,7 @@ export class LlmClient {
         this.getMainSessionSystemInstruction(model),
       );
       chat.enableManualPlanExitNotices();
+      chat.enablePermissionContext();
       chat.setCompressionObserver(
         this.compressionObserver,
         this.compressionObserverOptions,

@@ -128,6 +128,7 @@ const NON_CONVERSATION_RECORD_SUBTYPES = new Set([
 const KNOWN_RECORD_SUBTYPES = new Set([
   'chat_compression',
   'memory_catalog_snapshot',
+  'permission_context_snapshot',
   'slash_command',
   'ui_telemetry',
   'at_command',
