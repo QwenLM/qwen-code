@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.GetHarnessTranscript;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.daemon.HarnessSessionStatus;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.HostedHarnessPlacement;
@@ -2174,7 +2175,25 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (current == null || ref == null) {
             return null;
         }
-        var evidence = current.getStatus(ref, promptId).getRecovery();
+        return recoveryEvidence(current.getStatus(ref, promptId));
+    }
+
+    @Override
+    public RecoveryStatus inspectUnattachedRecovery(SessionRecord session, String promptId) {
+        if (attachments.containsKey(attachmentKey(session.tenantId(), session.sessionId()))
+                || workspaceExecution == null || !workspaceExecution.isExternal(session.workspace())) {
+            return null;
+        }
+        try {
+            return recoveryEvidence(client().getUnattachedStatus(session.sessionId(), promptId));
+        } catch (HostedHarnessGenerationException stale) {
+            adoptGeneration(stale);
+            throw stale;
+        }
+    }
+
+    private static RecoveryStatus recoveryEvidence(HarnessSessionStatus status) {
+        var evidence = status == null ? null : status.getRecovery();
         return evidence == null ? null : new RecoveryStatus(evidence.getState(), evidence.getReasonCode(),
                 evidence.getPromptId(), evidence.isInputSettled(), evidence.isContinuationReady(),
                 evidence.isNextTurnAllowed());

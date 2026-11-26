@@ -274,6 +274,11 @@ public interface HarnessConnector extends AutoCloseable {
         return null;
     }
 
+    /** Reads resident evidence for a Session view; does not supply replay identity. */
+    public default RecoveryStatus inspectUnattachedRecovery(StoreModels.SessionRecord session, String promptId) {
+        return null;
+    }
+
     /** Returns only cached replay identity, without loading or acquiring anything. */
     public default Attachment cachedRecoveryAttachment(String tenantId, String sessionId) {
         return null;

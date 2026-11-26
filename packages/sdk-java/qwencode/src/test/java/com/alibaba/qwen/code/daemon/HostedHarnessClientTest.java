@@ -313,6 +313,29 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void readsUnattachedRecoveryEvidenceWithoutAClientId() {
+        server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
+            assertNull(exchange.getRequestHeaders().getFirst("X-Qwen-Client-Id"));
+            assertEquals("promptId=" + PROMPT_ID, exchange.getRequestURI().getRawQuery());
+            sendControlPlaneSessionJson(exchange, 200, JsonSupport.encode(Map.of(
+                    "sessionId", SESSION_ID, "hasActivePrompt", false,
+                    "recovery", Map.of("state", "cleanup_pending", "reasonCode", "runtime_cleanup_pending",
+                            "promptId", PROMPT_ID, "inputSettled", true,
+                            "continuationReady", true, "nextTurnAllowed", false))));
+        });
+        String notResident = java.util.UUID.randomUUID().toString();
+        server.createContext("/session/" + notResident + "/status", exchange ->
+                sendControlPlaneSessionJson(exchange, 404, JsonSupport.encode(Map.of(
+                        "error", "hosted_session_not_found", "code", "hosted_session_not_found"))));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessRecoveryStatus recovery = client.getUnattachedStatus(SESSION_ID, PROMPT_ID).getRecovery();
+            assertEquals("cleanup_pending", recovery.getState());
+            assertTrue(recovery.isInputSettled());
+            assertNull(client.getUnattachedStatus(notResident, null));
+        }
+    }
+
+    @Test
     void refusesRecoveryEvidenceForAnotherInput() {
         createSessionRoute();
         server.createContext("/session/" + SESSION_ID + "/status", exchange ->
@@ -7822,7 +7845,7 @@ class HostedHarnessClientTest {
                 exchange -> sendJson(exchange, 200,
                         "{\"sessionId\":\"" + SESSION_ID
                                 + "\",\"hasActivePrompt\":false}",
-                        true, OTHER_BOOT_ID));
+                        true, OTHER_BOOT_ID, exchange.getRequestHeaders().containsKey("X-Qwen-Client-Id")));
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "status-generation");
 
@@ -7830,8 +7853,13 @@ class HostedHarnessClientTest {
             HarnessSessionRef session = createSession(client);
             assertNotNull(client.submitTurn(requestForSession(block,
                     session)));
+            List<HarnessSessionRef> retired = new CopyOnWriteArrayList<>();
+            client.onAttachmentRetirement(retired::add);
             assertThrows(HostedHarnessGenerationException.class,
-                    () -> client.getStatus(session));
+                    () -> client.getUnattachedStatus(SESSION_ID, null));
+            assertTrue(retired.isEmpty());
+            assertThrows(HostedHarnessGenerationException.class, () -> client.getStatus(session));
+            assertEquals(List.of(session), retired);
             PromptReceipt receipt = client.submitTurn(
                     SubmitHarnessTurn.builder()
                             .session(session)
