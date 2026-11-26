@@ -108,6 +108,14 @@ function makeFixture(
     primary?: boolean;
     internal?: boolean;
     ssh?: boolean;
+    getLoadAdmissionSnapshot?: () => {
+      enabled: boolean;
+      overloaded: boolean;
+      reason: 'cpu_load' | 'event_loop_lag' | 'observation_gap' | null;
+      loadRatio: number;
+      eventLoopLagP99Ms: number;
+      sampledAtMs: number;
+    };
   } = {},
 ) {
   const workspaceDir = realpathSync(mkdirTemp());
@@ -181,6 +189,9 @@ function makeFixture(
     sendBridgeError,
     sessionShellCommandEnabled: true,
     languageCodes: ['en'],
+    ...(options.getLoadAdmissionSnapshot
+      ? { getLoadAdmissionSnapshot: options.getLoadAdmissionSnapshot }
+      : {}),
   });
   const worktreeDir = path.join(workspaceDir, '.qwen', 'worktrees', 'task');
 
@@ -195,6 +206,9 @@ function makeFixture(
     worktreeDir,
     busy(): void {
       summary = { hasActivePrompt: true, pendingInteractionCount: 1 };
+    },
+    idleLive(): void {
+      summary = { hasActivePrompt: false, pendingInteractionCount: 0 };
     },
     record(sessionId: string, removed = true): WorktreeSession {
       const sidecar: WorktreeSession = {
@@ -640,5 +654,68 @@ describe('POST /session/:id/worktree-restore', () => {
     expect(response.body.code).toBe('session_retirement_fenced');
     expect(restoreMocks.restore).not.toHaveBeenCalled();
     expect(fixture.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses a cold worktree restore with 503 system_overloaded before mutating disk when overloaded', async () => {
+    const fixture = makeFixture({
+      primary: true,
+      getLoadAdmissionSnapshot: () => ({
+        enabled: true,
+        overloaded: true,
+        reason: 'cpu_load',
+        loadRatio: 2.9,
+        eventLoopLagP99Ms: 320,
+        sampledAtMs: Date.now(),
+      }),
+    });
+    const id = randomUUID();
+    const binding = await fixture.seed(id, false);
+    await fixture.markOwner(id);
+    restoreMocks.restore.mockResolvedValueOnce({
+      session: binding,
+      branch: '',
+      reconstructed: true,
+    });
+
+    const response = await request(fixture.app)
+      .post(`/session/${id}/worktree-restore`)
+      .send({});
+
+    expect(response.status).toBe(503);
+    expect(response.headers['retry-after']).toBe('15');
+    expect(response.body.code).toBe('system_overloaded');
+    expect(restoreMocks.restore).not.toHaveBeenCalled();
+    expect(fixture.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('allows an already-live warm session through worktree-restore while overloaded', async () => {
+    const fixture = makeFixture({
+      primary: true,
+      getLoadAdmissionSnapshot: () => ({
+        enabled: true,
+        overloaded: true,
+        reason: 'cpu_load',
+        loadRatio: 2.9,
+        eventLoopLagP99Ms: 320,
+        sampledAtMs: Date.now(),
+      }),
+    });
+    const id = randomUUID();
+    const binding = await fixture.seed(id, false);
+    await fixture.markOwner(id);
+    fixture.idleLive();
+    restoreMocks.restore.mockResolvedValueOnce({
+      session: binding,
+      branch: '',
+      reconstructed: false,
+    });
+
+    const response = await request(fixture.app)
+      .post(`/session/${id}/worktree-restore`)
+      .send({});
+
+    expect(response.status).toBe(200);
+    expect(restoreMocks.restore).toHaveBeenCalledTimes(1);
+    expect(fixture.loadSession).toHaveBeenCalledTimes(1);
   });
 });

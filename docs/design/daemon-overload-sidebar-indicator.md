@@ -20,8 +20,8 @@ The load-admission gate (see [load-based session admission](load-based-session-a
 - No new dashboard and no raw CPU/memory numbers in the sidebar; those stay in the Daemon Status dialog.
 - The indicator is a thin warning strip that only occupies space while overloaded; normal operation is visually unchanged.
 - Only fresh ACP child allocation is paused: creation entry points disable or guard allocation, and a first prompt in a fresh draft (which would allocate a session) is refused with the same warning. Prompts to existing sessions, cancel, navigation, and warm runtime reuse remain available. Managed mode is exempt: its home button creates no daemon session.
-- The daemon-side gate, its thresholds, and the status contract are unchanged by this slice.
-- **Inert at this commit, by design.** Nothing in this tree produces either pause source: the gate, the `runtime.loadAdmission` publication, the 503 `system_overloaded` path and the `load-based-session-admission` design docs this file links to all ship in #18052, which must merge first (or in the same batch). Until then the poll runs against daemons that omit the field and the strip can only appear via the reactive refusal hint, which older daemons never send. The SDK member stays optional for exactly this reason.
+- The daemon-side gate thresholds (including event-loop-lag corroboration from #18420), the `runtime.loadAdmission` status contract, and the `503 system_overloaded` shape ship on `main` (#18052 + #18420) and are live in this branch. On the daemon side, this PR only adds default-bridge `loadAdmissionMonitor` ownership cleanup in `createServeApp` (ordering unsafe-origin / managed-local-web validation before monitor creation and disposing on default-bridge construction failure) and extends the pre-disk-mutation overload pre-check to cold `POST /session/:id/worktree-restore` (#18009) while keeping already-live warm sessions unblocked.
+- Backwards-compatible with older daemons: `runtime.loadAdmission` stays optional on `DaemonStatusReport`; daemons that omit the field never trigger the poll pause, and `--no-load-admission` never triggers either source.
 
 ## Design
 
@@ -29,8 +29,8 @@ The load-admission gate (see [load-based session admission](load-based-session-a
 
 Two independent sources, OR-combined at render time:
 
-1. **Proactive poll.** Inside `useDaemonOverloadPause`, `useOptionalDaemonWorkspace()` supplies `actions.loadDaemonStatus('summary')` to `useDaemonResource` (`autoLoad: true`, gated on `enabled && actions !== undefined && visible`), reloaded on a 5-second interval while the daemon is available and the tab is visible (with in-flight tracking across mount and interval ticks). `report.runtime.loadAdmission.overloaded` (gated on `enabled && error === undefined`) drives the paused state; the tooltip text is composed from the snapshot's `reason`, `loadRatio`, and `eventLoopLagP99Ms` through i18n. The SDK's `DaemonStatusReport` runtime type gains an additive optional `loadAdmission` field, following the existing "older daemons omit this field" convention; daemons without the gate simply never report it.
-2. **Reactive refusal.** The existing notice effect that already handles `session_limit_exceeded` also handles `code === 'system_overloaded'` on `create_session`, `branch_session`, `fork_session`, `load_session`, and `resume_session`: it stores the notice message with an expiry of `Date.now() + 15_000` (the daemon's `Retry-After`), cleared by a timeout. This covers the window between polls and daemons whose status poll fails.
+1. **Proactive poll.** Inside `useDaemonOverloadPause`, `useOptionalDaemonWorkspace()` supplies `actions.loadDaemonStatus('summary')` to `useDaemonResource` (`autoLoad: true`, gated on `enabled && actions !== undefined && visible`), reloaded on a 5-second interval while the daemon is available and the tab is visible (with in-flight tracking across mount and interval ticks). `useDaemonResource` preserves the last settled poll error while a retry is in flight and clears it only on a fresh success, so a failed status poll cannot revive a stale `overloaded: true` payload during a pending retry. `report.runtime.loadAdmission.overloaded` (gated on `enabled && error === undefined`) drives the paused state; the tooltip text is composed from the snapshot's `reason`, `loadRatio`, and `eventLoopLagP99Ms` through i18n.
+2. **Reactive refusal.** The existing notice effect that already handles `session_limit_exceeded` also handles `code === 'system_overloaded'` on `create_session`, `branch_session`, `fork_session`, `load_session` (including `restoreWorktreeSession` 503 overload), and `resume_session`: it stores the notice message with an expiry of `Date.now() + 15_000` (the daemon's `Retry-After`), cleared by a timeout. `createScheduledTask` and `runScheduledTask` likewise preserve `DaemonHttpError` status/body so `App`'s `reportError` engages the same 15-second reactive pause and warning toast. This covers the window between polls and daemons whose status poll fails.
 
 `overloadPaused = pollOverloaded || reactiveUnexpired`. The tooltip prefers the poll's localized readings when the poll reports overload, otherwise the refusal message. No merged state machine: the poll side is derived from the resource each render, the reactive side is a single expiring state value.
 
@@ -109,29 +109,42 @@ New keys in all four shipped catalogs (`en`, `zh-CN`, `zh-TW`, `ru`): `sidebar.o
 
 ## Files affected
 
-| File                                                                                   | Change                                            |
-| -------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `packages/sdk-typescript/src/daemon/types.ts`                                          | Additive `runtime.loadAdmission` type             |
-| `packages/web-shell/client/App.tsx`                                                    | Poll + reactive state, root guards, notice        |
-| `packages/web-shell/client/App.test.tsx`                                               | App-level pause guard & reactive notice tests     |
-| `packages/web-shell/client/daemon/session/httpErrors.ts`                               | `isSystemOverloadedError` classifier              |
-| `packages/web-shell/client/daemon/session/httpErrors.test.ts`                          | Classifier shape & negative-control table         |
-| `packages/web-shell/client/daemon/session/actions.ts`                                  | Overload notice metadata and warnings             |
-| `packages/web-shell/client/daemon/session/actions.test.ts`                             | Overload operation/code tests                     |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | Strip, disabled predicate, warning callback       |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | Warning strip & disabled header-action styles     |
-| `packages/web-shell/client/components/sidebar/StandaloneRecents.tsx`                   | `newSessionDisabled` prop                         |
-| `packages/web-shell/client/components/workspace-agents/useAgentChatEntry.ts`           | `{ paused: true }` short-circuit for `@`-mentions |
-| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.tsx`                | Pre-consume/pre-dispatch manual-run guard         |
-| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.test.tsx`           | Cold-bound and per-run guard tests                |
-| `packages/web-shell/client/components/artifacts/ArtifactPanel.tsx`                     | `overloadPaused` disable on New side task         |
-| `packages/web-shell/client/i18n.tsx`                                                   | `en` overload keys                                |
-| `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` overload keys                             |
-| `packages/web-shell/client/i18n-zh-tw.ts`                                              | `zh-TW` overload keys                             |
-| `packages/web-shell/client/i18n-ru-part3.ts`                                           | `ru` overload keys                                |
-| `packages/web-shell/client/i18n.test.ts`                                               | Four-locale interpolation & parity test           |
-| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.ts`           | Poll + expiry + freshness + OR hook               |
-| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.test.ts`      | Poll/reactive/expiry/freshness tests              |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.overload-strip.test.tsx` | Strip/disabled/menu/standalone tests              |
-| `packages/web-shell/client/e2e/utils/mockDaemon.ts`                                    | Default healthy `GET /daemon/status` mock         |
-| `packages/web-templates/src/export-html/build.mjs`                                     | Merged-tree export-size budget re-track           |
+| File                                                                                   | Change                                                            |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `docs/design/daemon-overload-sidebar-indicator.md`                                     | English design doc                                                |
+| `docs/design/daemon-overload-sidebar-indicator.zh-CN.md`                               | Chinese design doc                                                |
+| `packages/cli/src/serve/routes/session.ts`                                             | Cold `worktree-restore` pre-disk overload check (warm unblocked)  |
+| `packages/cli/src/serve/routes/session-worktree-restore.test.ts`                       | Cold overload 503 & warm negative-control tests                   |
+| `packages/cli/src/serve/server.ts`                                                     | Default-bridge `loadAdmissionMonitor` ownership & disposal        |
+| `packages/cli/src/serve/server-default-bridge-wiring.test.ts`                          | Default-bridge monitor lifecycle & pre-validation tests           |
+| `packages/web-shell/client/App.tsx`                                                    | Poll + reactive state, root guards, branch completion & notices   |
+| `packages/web-shell/client/App.test.tsx`                                               | App-level pause guard, branch completion & reactive notice tests  |
+| `packages/web-shell/client/components/SessionOverviewPanel.tsx`                        | Detach selected standalone session before archiving               |
+| `packages/web-shell/client/components/SessionOverviewPanel.test.tsx`                   | Standalone archive detach regression tests                        |
+| `packages/web-shell/client/components/artifacts/ArtifactPanel.tsx`                     | `overloadPaused` disable on New side task                         |
+| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.tsx`                | Pre-consume/pre-dispatch manual-run guard                         |
+| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.test.tsx`           | Cold-bound and per-run guard tests                                |
+| `packages/web-shell/client/components/sidebar/StandaloneRecents.tsx`                   | `newSessionDisabled` prop                                         |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | Strip, compact rail icon, disabled predicate, warning callback    |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | Warning strip & disabled header-action styles                     |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.overload-strip.test.tsx` | Strip/rail/disabled/menu/standalone tests                         |
+| `packages/web-shell/client/components/workspace-agents/useAgentChatEntry.ts`           | `{ paused: true }` short-circuit for `@`-mentions                 |
+| `packages/web-shell/client/daemon/session/DaemonSessionProvider.test.tsx`              | Deferred switch & overload wiring tests                           |
+| `packages/web-shell/client/daemon/session/actions.ts`                                  | Overload notice metadata, `switchCompleted`, worktree-restore 503 |
+| `packages/web-shell/client/daemon/session/actions.test.ts`                             | Overload operation/code, deferred branch & worktree-restore tests |
+| `packages/web-shell/client/daemon/session/httpErrors.ts`                               | `isSystemOverloadedError` classifier                              |
+| `packages/web-shell/client/daemon/session/httpErrors.test.ts`                          | Classifier shape & negative-control table                         |
+| `packages/web-shell/client/daemon/session/types.ts`                                    | Optional `switchCompleted?: Promise<boolean>` contract            |
+| `packages/web-shell/client/daemon/workspace/actions.ts`                                | Preserve `DaemonHttpError` on scheduled-task create/run           |
+| `packages/web-shell/client/daemon/workspace/scheduledTasks.actions.test.ts`            | Scheduled-task 503 overload classification tests                  |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.ts`           | Poll + expiry + freshness + OR hook                               |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.test.ts`      | Poll/reactive/expiry/pending-retry freshness tests                |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonResource.ts`                | Retain settled poll error across pending retries                  |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonResource.test.tsx`          | Settled error retention across retry tests                        |
+| `packages/web-shell/client/e2e/utils/mockDaemon.ts`                                    | Default healthy `GET /daemon/status` mock                         |
+| `packages/web-shell/client/i18n.tsx`                                                   | `en` overload keys                                                |
+| `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` overload keys                                             |
+| `packages/web-shell/client/i18n-zh-tw.ts`                                              | `zh-TW` overload keys                                             |
+| `packages/web-shell/client/i18n-ru-part3.ts`                                           | `ru` overload keys                                                |
+| `packages/web-shell/client/i18n.test.ts`                                               | Four-locale interpolation & parity test                           |
+| `packages/web-templates/src/export-html/build.mjs`                                     | Merged-tree export-size budget re-track                           |

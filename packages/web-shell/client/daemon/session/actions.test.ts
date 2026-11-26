@@ -4133,6 +4133,64 @@ describe('createDaemonSessionActions', () => {
     await load;
   });
 
+  it('dispatches a system_overloaded notice when restoreWorktreeSession fails with 503 overload', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const error = new DaemonHttpError(
+      503,
+      {
+        error: 'System overloaded (cpu_load)',
+        code: 'system_overloaded',
+        reason: 'cpu_load',
+        loadRatio: 2.8,
+        eventLoopLagP99Ms: 310,
+      },
+      'System overloaded (cpu_load)',
+    );
+    const restoreDetachedWorktreeSession = vi.fn(async () => {
+      throw error;
+    });
+    const { actions } = createActionsHarness({
+      addNotice,
+      restoreDetachedWorktreeSession,
+    });
+
+    await expect(
+      actions.restoreWorktreeSession('session-b', { workspaceCwd: '/work/b' }),
+    ).rejects.toBe(error);
+    expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        operation: 'load_session',
+        code: 'system_overloaded',
+        severity: 'warning',
+        message:
+          'Restore worktree session failed: System overloaded (cpu_load)',
+        recoverable: true,
+      }),
+    );
+    expect(error).toMatchObject({ _alreadyDispatched: true });
+  });
+
+  it('does not dispatch a notice when restoreWorktreeSession fails with a non-overload error', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const error = new DaemonHttpError(
+      500,
+      { error: 'snapshot corrupt' },
+      'snapshot corrupt',
+    );
+    const restoreDetachedWorktreeSession = vi.fn(async () => {
+      throw error;
+    });
+    const { actions } = createActionsHarness({
+      addNotice,
+      restoreDetachedWorktreeSession,
+    });
+
+    await expect(
+      actions.restoreWorktreeSession('session-b', { workspaceCwd: '/work/b' }),
+    ).rejects.toBe(error);
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   it('detaches only an unconsumed restored client when navigation supersedes it', async () => {
     const first = createMockSession('session-a', 'restore-a');
     const second = createMockSession('session-b', 'restore-b');

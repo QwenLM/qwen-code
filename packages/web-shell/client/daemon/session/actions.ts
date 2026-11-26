@@ -2802,7 +2802,23 @@ export function createDaemonSessionActions({
     },
 
     async restoreWorktreeSession(sessionId, options) {
-      return restoreDetachedWorktreeSession(sessionId, options.workspaceCwd);
+      try {
+        return await restoreDetachedWorktreeSession(
+          sessionId,
+          options.workspaceCwd,
+        );
+      } catch (error) {
+        if (isSystemOverloadedError(error)) {
+          dispatchActionError(
+            addNotice,
+            'Restore worktree session failed',
+            error,
+            'load_session',
+            { code: 'system_overloaded' },
+          );
+        }
+        throw error;
+      }
     },
 
     async reloadSession(signal, options) {
