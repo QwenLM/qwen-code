@@ -41,6 +41,7 @@ import {
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  HistoryThoughtRequest,
   InputModalities,
 } from '../contentGenerator.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
@@ -181,8 +182,8 @@ const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
  * A decorator that wraps a ContentGenerator to add logging to API calls.
  */
 export class LoggingContentGenerator implements ContentGenerator {
-  replaysReasoningContent(model: string): boolean {
-    return this.wrapped.replaysReasoningContent?.(model) ?? true;
+  getHistoryThoughtProjection(request: HistoryThoughtRequest) {
+    return this.wrapped.getHistoryThoughtProjection?.(request);
   }
 
   private openaiLogger?: OpenAILogger;

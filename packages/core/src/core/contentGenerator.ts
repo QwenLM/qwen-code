@@ -9,6 +9,7 @@ import type {
   EmbedContentResponse,
   GenerateContentParameters,
   GenerateContentResponse,
+  Part,
 } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type {
@@ -34,12 +35,20 @@ import {
 } from '../utils/errors.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
+export type HistoryThoughtProjection = (thought: Part) => Part | undefined;
+export type HistoryThoughtRequest = Pick<
+  GenerateContentParameters,
+  'model' | 'config'
+>;
+
 /**
  * Interface abstracting the core content generation functionality.
  */
 export interface ContentGenerator {
-  /** Whether assistant reasoning text is sent again on the next request. */
-  replaysReasoningContent?(model: string): boolean;
+  /** Projects a stored assistant thought to the content replayed by this route. */
+  getHistoryThoughtProjection?(
+    request: HistoryThoughtRequest,
+  ): HistoryThoughtProjection | undefined;
 
   generateContent(
     request: GenerateContentParameters,
@@ -453,8 +462,8 @@ class LazyContentGenerator implements ContentGenerator {
   private preloadedOnly = false;
   private resolved?: ContentGenerator;
 
-  replaysReasoningContent(model: string): boolean {
-    return this.resolved?.replaysReasoningContent?.(model) ?? true;
+  getHistoryThoughtProjection(request: HistoryThoughtRequest) {
+    return this.resolved?.getHistoryThoughtProjection?.(request);
   }
 
   constructor(private readonly loader: () => Promise<ContentGenerator>) {}

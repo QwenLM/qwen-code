@@ -1489,6 +1489,7 @@ describe('Gemini Client (client.ts)', () => {
     it.each([
       [AuthType.USE_OPENAI, true, true, true],
       [AuthType.QWEN_SUBSCRIPTION, true, true, true],
+      [AuthType.USE_ANTHROPIC, true, true, true],
       [AuthType.USE_OPENAI_RESPONSES, true, true, false],
       [AuthType.USE_OPENAI, false, true, false],
       [AuthType.USE_OPENAI, true, false, false],
@@ -1496,7 +1497,8 @@ describe('Gemini Client (client.ts)', () => {
       'loads the %s reasoning adapter before seeding (local %s, thought %s)',
       async (authType, local, thought, shouldLoad) => {
         let resolved = false;
-        mockContentGenerator.replaysReasoningContent = () => !resolved;
+        mockContentGenerator.getHistoryThoughtProjection = () =>
+          resolved ? () => undefined : undefined;
         if (shouldLoad) {
           vi.mocked(preloadContentGenerator).mockImplementationOnce(
             async () => {

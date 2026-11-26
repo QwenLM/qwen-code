@@ -1,4 +1,7 @@
-import type { ContentGenerator } from '../contentGenerator.js';
+import type {
+  ContentGenerator,
+  HistoryThoughtRequest,
+} from '../contentGenerator.js';
 import { getRequestModel } from '../request-model.js';
 import type { Config } from '../../config/config.js';
 import { type OpenAICompatibleProvider } from './provider/index.js';
@@ -66,9 +69,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
     return false;
   }
 
-  replaysReasoningContent(model: string): boolean {
+  getHistoryThoughtProjection({ model }: HistoryThoughtRequest) {
     const requestModel = getRequestModel(this.contentGeneratorConfig, model);
-    return this.provider.replaysReasoningContent?.(requestModel) ?? true;
+    return this.provider.replaysReasoningContent?.(requestModel) === false
+      ? () => undefined
+      : undefined;
   }
 
   async generateContent(

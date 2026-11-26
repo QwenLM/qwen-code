@@ -163,6 +163,7 @@ import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
+  unsupportedMediaPlaceholder,
   TOKEN_TO_CHAR_RATIO,
 } from '../services/compactionInputSlimming.js';
 import {
@@ -876,7 +877,9 @@ export const userContentPushSnapshotKey = Symbol(
 
 interface LocalCountRoute {
   modalities?: InputModalities;
-  replaysReasoningContent?: boolean;
+  generator: ContentGenerator;
+  model: string;
+  config?: GenerateContentConfig;
 }
 
 interface LocalHistoryEstimate {
@@ -914,11 +917,24 @@ function countMedia(history: Content[]): Map<string, number> {
   return counts;
 }
 
+interface CheckpointMediaCost {
+  savedTokens: number;
+  liveChars: number;
+}
+
+// Pending input in a mixed checkpoint is rounded together with its other parts.
+function entryTokenDelta(beforeChars: number, afterChars: number): number {
+  return (
+    Math.ceil(afterChars / TOKEN_TO_CHAR_RATIO) -
+    Math.ceil(beforeChars / TOKEN_TO_CHAR_RATIO)
+  );
+}
+
 interface PromptTokenCountSource {
   kind: 'provider' | 'adjusted-provider' | 'estimate';
   localHistory?: LocalHistoryEstimate;
   catalogChanges?: WeakMap<Part, number>;
-  mediaCosts?: WeakMap<object, number>;
+  mediaCosts?: WeakMap<object, CheckpointMediaCost>;
   // A request may reattach only a subset of the priced images converted to references.
   referenceCosts?: { priced: Map<string, boolean>; reattached: number };
 }
@@ -926,7 +942,7 @@ interface PromptTokenCountSource {
 function copyHistoryMediaCosts(
   previous: Content[],
   next: Content[],
-  costs: WeakMap<object, number>,
+  costs: WeakMap<object, CheckpointMediaCost>,
 ): void {
   const byPrompt = new Map<string, Content | undefined>();
   for (const entry of previous) {
@@ -968,7 +984,7 @@ function copyHistoryMediaCosts(
 function estimateWithMediaCosts(
   history: Content[],
   fallback: number,
-  costs?: WeakMap<object, number>,
+  costs?: WeakMap<object, CheckpointMediaCost>,
 ): number {
   if (!costs) return estimateModelContentTokens(history, fallback);
   let chars = 0;
@@ -976,7 +992,7 @@ function estimateWithMediaCosts(
     chars += estimateContentChars(entry, fallback);
     for (const item of estimatedMedia(entry)) {
       const cost = costs.get(item);
-      if (cost !== undefined) chars += (cost - fallback) * TOKEN_TO_CHAR_RATIO;
+      if (cost) chars += cost.liveChars - fallback * TOKEN_TO_CHAR_RATIO;
     }
   }
   return Math.ceil(chars / TOKEN_TO_CHAR_RATIO);
@@ -988,22 +1004,23 @@ function imageReferenceTokenDelta(
 ): number {
   if (!source.mediaCosts || !changes.length) return 0;
   const refs = (source.referenceCosts ??= { priced: new Map(), reattached: 0 });
-  const added = new Map<Content, number>();
+  const changedChars = new Map<Content, number>();
   let delta = 0;
   for (const { content, media, id, chars } of changes) {
     const price = source.mediaCosts.get(media);
     // An unpriced duplicate may already be covered by the provider's count.
     refs.priced.set(id, price !== undefined && refs.priced.get(id) !== false);
     if (price === undefined) continue;
-    added.set(content, (added.get(content) ?? 0) + chars);
-    delta -= price;
+    changedChars.set(
+      content,
+      (changedChars.get(content) ?? 0) + chars - price.liveChars,
+    );
   }
-  // Pending input was rounded separately from its provider anchor.
-  for (const [entry, chars] of added) {
-    const now = estimateContentChars(entry, 0);
-    delta +=
-      Math.ceil(now / TOKEN_TO_CHAR_RATIO) -
-      Math.ceil((now - chars) / TOKEN_TO_CHAR_RATIO);
+  for (const [entry, chars] of changedChars) {
+    let now = estimateContentChars(entry, 0);
+    for (const item of estimatedMedia(entry))
+      now += source.mediaCosts.get(item)?.liveChars ?? 0;
+    delta += entryTokenDelta(now - chars, now);
   }
   return delta;
 }
@@ -2942,6 +2959,7 @@ export class LlmChat {
     const catalogSwitchChars: number[] = [];
     let hasCatalog = false;
     let pendingTokens = 0;
+    let savedMediaDelta = 0;
     const pruneContentChars: number[] = [];
     const historyImageTokenEstimate = info.historyImageTokenEstimate;
     const uniformImagePrice =
@@ -2956,16 +2974,27 @@ export class LlmChat {
         ? imageTokenEstimate
         : (info.historyImageTokenEstimate ?? 0);
       let visible = estimateContentChars(entry, imageCost);
+      let savedMediaChars = 0;
       if (!uniformImagePrice && (pending || source?.mediaCosts)) {
-        const costs = estimatedMedia(entry).map(
-          (item) => imageCost || source?.mediaCosts?.get(item) || 0,
-        );
+        const costs = estimatedMedia(entry).map((item) => {
+          if (imageCost) return imageCost;
+          const cost = source?.mediaCosts?.get(item);
+          if (!cost) return 0;
+          // Preserve the raw media price so another route can replay the file.
+          savedMediaChars +=
+            cost.savedTokens * TOKEN_TO_CHAR_RATIO - cost.liveChars;
+          return cost.savedTokens;
+        });
         mediaTokenCosts.push(costs);
         if (!imageCost) {
           for (const cost of costs) visible += cost * TOKEN_TO_CHAR_RATIO;
         }
       }
       let hidden = visible - catalogSnapshotChars(entry);
+      if (savedMediaChars) {
+        const saved = catalogVisible ? visible : hidden;
+        savedMediaDelta += entryTokenDelta(saved - savedMediaChars, saved);
+      }
       if (visible !== hidden) hasCatalog = true;
       if (isPending) {
         // Pending input is added to the seed as a separately rounded count.
@@ -3006,12 +3035,18 @@ export class LlmChat {
       summaryPrefixLength,
       completedToolCallIds: this.completedToolCallIds,
     };
-    if (pending || persisted !== dispatched || liveHistoryDelta) {
+    if (
+      pending ||
+      persisted !== dispatched ||
+      liveHistoryDelta ||
+      savedMediaDelta
+    ) {
       // Preserve the live system/tool overhead while sizing the history resume loads.
       payload.resumePromptTokenCount = Math.max(
         0,
         info.newTokenCount -
           liveHistoryDelta +
+          savedMediaDelta +
           this.persistedPromptTokenDelta(
             persisted,
             dispatched,
@@ -3670,24 +3705,34 @@ export class LlmChat {
     const modalities =
       route?.modalities ?? this.config.getEffectiveInputModalities?.();
     const { slimmedHistory } = slimCompactionInput(history, modalities);
-    const replay =
-      route?.replaysReasoningContent ??
-      this.config
-        .getContentGenerator?.({ allowUninitialized: true })
-        ?.replaysReasoningContent?.(this.config.getModel());
-    if (replay !== false) return slimmedHistory;
+    if (
+      !slimmedHistory.some(
+        (entry) =>
+          entry.role === 'model' &&
+          entry.parts?.some(
+            (part) => part.thought && typeof part.text === 'string',
+          ),
+      )
+    )
+      return slimmedHistory;
+    const generator =
+      route?.generator ??
+      this.config.getContentGenerator?.({ allowUninitialized: true });
+    const project = generator?.getHistoryThoughtProjection?.(
+      route ?? { model: this.config.getModel(), config: this.generationConfig },
+    );
+    if (!project) return slimmedHistory;
     return slimmedHistory.map((entry) =>
       entry.role === 'model' && entry.parts
         ? {
             ...entry,
-            parts: entry.parts.filter(
-              (part) =>
-                !(
-                  part.thought &&
-                  typeof part.text === 'string' &&
-                  !part.functionCall &&
-                  !part.functionResponse
-                ),
+            parts: entry.parts.flatMap((part) =>
+              part.thought &&
+              typeof part.text === 'string' &&
+              !part.functionCall &&
+              !part.functionResponse
+                ? (project(part) ?? [])
+                : part,
             ),
           }
         : entry,
@@ -3796,8 +3841,9 @@ export class LlmChat {
       isEstimated &&
       !hasProviderBaseline &&
       hasCheckpointCount &&
-      historyImageTokenEstimate !== undefined &&
-      resumeBoundary
+      resumeBoundary &&
+      (historyImageTokenEstimate !== undefined ||
+        resumeBoundary.mediaTokenCosts)
     ) {
       // The checkpoint may end inside a user message extended during replay.
       // Its fixed overhead excludes all parts and turns added since then.
@@ -3871,19 +3917,45 @@ export class LlmChat {
       resumeBoundary?.mediaTokenCosts
     ) {
       const prices = resumeBoundary.mediaTokenCosts;
-      const start =
-        replayed.length - resumeBoundary.trailingEntries - prices.length;
+      const start = coveredHistory.length - prices.length;
       if (start >= 0) {
-        const costs = new WeakMap<object, number>();
-        for (const [index, entry] of prices.entries()) {
-          if (!Array.isArray(entry) || !entry.length) continue;
-          const media = estimatedMedia(replayed[start + index]);
-          for (const [i, cost] of entry.entries()) {
-            if (media[i] && Number.isFinite(cost) && cost > 0)
-              costs.set(media[i], cost);
+        const costs = new WeakMap<object, CheckpointMediaCost>();
+        const modalities = this.config.getEffectiveInputModalities?.();
+        let delta = 0;
+        for (const [index, entryPrices] of prices.entries()) {
+          if (!Array.isArray(entryPrices) || !entryPrices.length) continue;
+          const entry = coveredHistory[start + index];
+          const media = estimatedMedia(entry);
+          let textChars = estimateContentChars(entry, 0);
+          if (!this.memorySnapshotsVisible)
+            textChars -= catalogSnapshotChars(entry);
+          let savedChars = textChars;
+          let projectedChars = textChars;
+          for (const [i, saved] of entryPrices.entries()) {
+            const item = media[i];
+            if (!item || !Number.isFinite(saved) || saved <= 0) continue;
+            const placeholder = unsupportedMediaPlaceholder(
+              item.mimeType,
+              modalities,
+            );
+            const rawChars = saved * TOKEN_TO_CHAR_RATIO;
+            const liveChars = placeholder?.text.length ?? rawChars;
+            costs.set(item, { savedTokens: saved, liveChars });
+            savedChars += rawChars;
+            projectedChars += liveChars;
           }
+          delta += entryTokenDelta(savedChars, projectedChars);
         }
         this.lastPromptTokenCountSource.mediaCosts = costs;
+        if (delta) {
+          this.lastPromptTokenCount = Math.max(
+            0,
+            this.lastPromptTokenCount + delta,
+          );
+          this.telemetryService?.setLastPromptTokenCount(
+            this.lastPromptTokenCount,
+          );
+        }
       }
     }
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
@@ -7374,8 +7446,9 @@ export class LlmChat {
       {
         resumePromptTokenDelta,
         modalities: actualConfig?.modalities,
-        replaysReasoningContent:
-          generator.replaysReasoningContent?.(model) ?? true,
+        generator,
+        model,
+        config: request.config,
         message: params.message,
       },
     );

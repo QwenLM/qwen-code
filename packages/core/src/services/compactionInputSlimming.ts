@@ -326,21 +326,12 @@ function transformPart(
   supportedModalities?: InputModalities,
   options?: SlimOptions,
 ): Part {
-  if (part.inlineData) {
-    if (
-      supportsMimeType(part.inlineData.mimeType, supportedModalities) === true
-    ) {
-      return part;
-    }
-    return mediaPlaceholderPart(part.inlineData.mimeType, stats);
-  }
-  if (part.fileData) {
-    if (
-      supportsMimeType(part.fileData.mimeType, supportedModalities) === true
-    ) {
-      return part;
-    }
-    return mediaPlaceholderPart(part.fileData.mimeType, stats);
+  const media = part.inlineData ?? part.fileData;
+  if (media) {
+    return (
+      unsupportedMediaPlaceholder(media.mimeType, supportedModalities, stats) ??
+      part
+    );
   }
   // Walk into functionResponse.parts (qwen-code's nested-media carrier
   // for tool results — see `coreToolScheduler.createFunctionResponsePart`).
@@ -654,16 +645,18 @@ function supportsMimeType(
   return false;
 }
 
-function mediaPlaceholderPart(
+export function unsupportedMediaPlaceholder(
   mimeType: string | undefined,
-  stats: SlimStats,
-): Part {
+  modalities: InputModalities | undefined,
+  stats?: SlimStats,
+): { text: string } | undefined {
+  if (supportsMimeType(mimeType, modalities) === true) return undefined;
   const mime = mimeType ?? DEFAULT_MIME;
   if (isNonImageMime(mime)) {
-    stats.documentsStripped++;
+    if (stats) stats.documentsStripped++;
     return { text: documentPlaceholder(mime) };
   }
-  stats.imagesStripped++;
+  if (stats) stats.imagesStripped++;
   return { text: imagePlaceholder(mime) };
 }
 

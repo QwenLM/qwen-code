@@ -25,6 +25,8 @@ import {
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  HistoryThoughtRequest,
+  HistoryThoughtProjection,
 } from '../contentGenerator.js';
 import {
   clampReasoningEffort,
@@ -36,7 +38,11 @@ type MessageCreateParamsNonStreaming =
 type MessageCreateParamsStreaming = Anthropic.MessageCreateParamsStreaming;
 type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
 type AnthropicFetch = NonNullable<ClientOptions['fetch']>;
-import { AnthropicContentConverter } from './converter.js';
+import {
+  AnthropicContentConverter,
+  hasThinkingSignature,
+  normalizeAnthropicHistoryThought,
+} from './converter.js';
 import { buildAnthropicUsageMetadata } from './usage.js';
 import {
   buildRuntimeFetchOptions,
@@ -762,9 +768,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return flags;
   }
 
-  private async buildRequest(
-    request: GenerateContentParameters,
-  ): Promise<MessageCreateParamsWithThinking> {
+  private getRequestThinking(request: GenerateContentParameters) {
     const sampling = this.buildSamplingParameters(request);
     // Normalize reasoning.effort once per request (clamps DeepSeek-only
     // 'max' to 'high' for stricter Anthropic backends and logs the
@@ -772,7 +776,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // consume the result so the wire shape stays internally consistent.
     const effectiveEffort = this.resolveEffectiveEffort(request);
     let thinking = this.buildThinkingConfig(request, effectiveEffort);
-    const outputConfig = this.buildOutputConfig(request, effectiveEffort);
 
     // Compute per-request: `Config.setModel()` mutates contentGeneratorConfig
     // in place, so a constructor-time cache could go stale on a runtime
@@ -846,6 +849,69 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const stripTrailingAssistantPrefill =
       this.modelSupportsAdaptiveThinking(true);
 
+    return {
+      sampling,
+      thinking,
+      effectiveEffort,
+      historyOptions: {
+        // DeepSeek normalization and injection run together. Proxy-hosted
+        // Claude is split two ways: non-4.6 models fill `signature: ''`
+        // (strict serde only requires the key to be present), while 4.6+
+        // adaptive models drop unsigned blocks, since an empty string
+        // cannot stand in for the native API's opaque signature. The two
+        // quadrants are disjoint by construction.
+        normalizeAssistantThinkingSignature: deepseekThinkingOn,
+        injectThinkingOnToolUseTurns: deepseekThinkingOn,
+        dropUnsignedAssistantThinking,
+        demoteForeignThoughtToText,
+        fillUnsignedThinkingSignature,
+        stripAssistantThinking,
+        stripTrailingAssistantPrefill,
+        // Manual (non-adaptive) extended thinking requires an assistant
+        // turn to begin with a thinking block whenever a tool_use remains
+        // in it; adaptive thinking relaxes this. Applied to every such turn
+        // in history, not just the latest -- see
+        // ensureLeadingAssistantThinking's doc in the converter.
+        ensureLeadingAssistantThinking: thinking?.type === 'enabled',
+      },
+    };
+  }
+
+  getHistoryThoughtProjection(
+    request: HistoryThoughtRequest,
+  ): HistoryThoughtProjection {
+    const { historyOptions } = this.getRequestThinking({
+      ...request,
+      contents: [],
+    });
+    return (part) => {
+      const thought = normalizeAnthropicHistoryThought(
+        part,
+        historyOptions.demoteForeignThoughtToText,
+      );
+      if (
+        thought?.thought &&
+        (historyOptions.stripAssistantThinking ||
+          (historyOptions.dropUnsignedAssistantThinking &&
+            !hasThinkingSignature(thought.thoughtSignature)))
+      )
+        return undefined;
+      return thought;
+    };
+  }
+
+  private async buildRequest(
+    request: GenerateContentParameters,
+  ): Promise<MessageCreateParamsWithThinking> {
+    const {
+      sampling,
+      thinking: requestThinking,
+      effectiveEffort,
+      historyOptions,
+    } = this.getRequestThinking(request);
+    let thinking = requestThinking;
+    const outputConfig = this.buildOutputConfig(request, effectiveEffort);
+
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
     // constructor-time value would otherwise diverge from the live value
@@ -872,25 +938,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const { system, messages } = this.converter.convertLlmRequestToAnthropic(
       request,
       {
-        // DeepSeek normalization and injection run together. Proxy-hosted
-        // Claude is split two ways: non-4.6 models fill `signature: ''`
-        // (strict serde only requires the key to be present), while 4.6+
-        // adaptive models drop unsigned blocks, since an empty string
-        // cannot stand in for the native API's opaque signature. The two
-        // quadrants are disjoint by construction.
-        normalizeAssistantThinkingSignature: deepseekThinkingOn,
-        injectThinkingOnToolUseTurns: deepseekThinkingOn,
-        dropUnsignedAssistantThinking,
-        demoteForeignThoughtToText,
-        fillUnsignedThinkingSignature,
-        stripAssistantThinking,
-        stripTrailingAssistantPrefill,
-        // Manual (non-adaptive) extended thinking requires an assistant
-        // turn to begin with a thinking block whenever a tool_use remains
-        // in it; adaptive thinking relaxes this. Applied to every such turn
-        // in history, not just the latest -- see
-        // ensureLeadingAssistantThinking's doc in the converter.
-        ensureLeadingAssistantThinking: thinking?.type === 'enabled',
+        ...historyOptions,
         enableCacheControl,
         useGlobalCacheScope,
         cacheRetention,

@@ -17457,7 +17457,8 @@ describe('LlmChat', async () => {
     it.each([true, false])(
       'budgets assistant thoughts according to transport replay (%s)',
       async (replay) => {
-        mockContentGenerator.replaysReasoningContent = () => replay;
+        mockContentGenerator.getHistoryThoughtProjection = () =>
+          replay ? undefined : () => undefined;
         const history = [userText('question'), modelText('ack')];
         const target = newChat({ history: structuredClone(history) });
         target.seedResumeTokenCounts(
@@ -17807,6 +17808,72 @@ describe('LlmChat', async () => {
       const saved = recorder.recordChatCompression.mock.lastCall![0];
       expect(saved.mediaTokenCosts).toEqual([[0], [], [], [100, 4200]]);
       expect(saved.pruneContentChars.at(-1)).toBe((100 + 4200) * 4);
+    });
+
+    it('restores only the locally priced part of a mixed media checkpoint for each route', () => {
+      const pdf = {
+        inlineData: { mimeType: 'application/pdf', data: 'JVBERg==' },
+      };
+      const owner = content('user', { text: 'inspect' }, pdf, {
+        fileData: { mimeType: 'application/pdf', fileUri: 'file:///one.pdf' },
+      });
+      const quoted = content(
+        'user',
+        { text: 'inspect' },
+        { text: '[document: application/pdf]' },
+        { text: '[document: application/pdf]' },
+      );
+      const thought = 'plan'.repeat(100);
+      const history = [
+        content('user', structuredClone(pdf)),
+        content('model', { text: thought, thought: true }, { text: 'ready' }),
+        owner,
+      ];
+      const provider = 30000;
+      const prices = [100, 4200];
+      const raw = provider + estimateContentTokens([owner], 0) + 100 + 4200;
+      const textOnly = provider + estimateContentTokens([quoted]);
+      const recorder = { recordChatCompression: vi.fn() };
+      const target = newChat({ history, recorder });
+      vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({});
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 5,
+      });
+      target.seedResumeTokenCounts(raw, 0, true, false, undefined, undefined, {
+        mediaTokenCosts: [[0], [], prices],
+        partCount: owner.parts!.length,
+        trailingEntries: 0,
+      });
+      expect(target.getLastPromptTokenCount()).toBe(textOnly);
+      const { info } = target.compressFast();
+      expect(info.newTokenCount).toBe(textOnly - thought.length / 4);
+      const [saved] = recorder.recordChatCompression.mock.lastCall!;
+      expect(saved.mediaTokenCosts).toEqual([[0], [], prices]);
+      expect(saved.resumePromptTokenCount).toBe(raw - thought.length / 4);
+      for (const supportsPdf of [false, true]) {
+        vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+          pdf: supportsPdf,
+        });
+        const restored = newChat({
+          history: structuredClone(saved.compressedHistory),
+        });
+        restored.seedResumeTokenCounts(
+          saved.resumePromptTokenCount,
+          0,
+          true,
+          false,
+          undefined,
+          undefined,
+          {
+            mediaTokenCosts: saved.mediaTokenCosts,
+            trailingEntries: 0,
+          },
+        );
+        expect(restored.getLastPromptTokenCount()).toBe(
+          (supportsPdf ? raw : textOnly) - thought.length / 4,
+        );
+      }
     });
 
     it.each(['retained', 'evicted', 'provider usage'])(

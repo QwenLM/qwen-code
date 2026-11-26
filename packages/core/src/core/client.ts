@@ -1024,7 +1024,8 @@ export class LlmClient {
           promptTokenCount === 0) &&
         (authType === AuthType.USE_OPENAI ||
           authType === AuthType.QWEN_OAUTH ||
-          authType === AuthType.QWEN_SUBSCRIPTION) &&
+          authType === AuthType.QWEN_SUBSCRIPTION ||
+          authType === AuthType.USE_ANTHROPIC) &&
         (resumeBoundary?.restoredHistory ?? chat.getHistoryShallow()).some(
           (entry) =>
             entry.role === 'model' &&

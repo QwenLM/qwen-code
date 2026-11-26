@@ -1718,6 +1718,57 @@ describe('AnthropicContentGenerator', () => {
       userText('Second'),
     ];
 
+    it.each([
+      [NATIVE, true],
+      ['https://proxy.example/anthropic', true],
+      ['https://proxy.example/anthropic', false],
+      ['https://api.deepseek.com/anthropic', false],
+    ] as const)(
+      'sizes only the thought text and signatures replayed by %s (thinking %s)',
+      async (baseUrl, includeThoughts) => {
+        const model = 'claude-opus-4-6';
+        const thoughts = [
+          { thought: true, text: 'unsigned' },
+          { thought: true, text: 'signed', thoughtSignature: 'signature' },
+          {
+            thought: true,
+            text: 'foreign',
+            thoughtSignature: '{"id":"rs_1","encrypted_content":"opaque"}',
+          },
+        ];
+        const config = { thinkingConfig: { includeThoughts } };
+        const { generator, req } = await send(nativeCfg(model, { baseUrl }), {
+          contents: [
+            userText('first'),
+            content('model', ...thoughts, { text: 'answer' }),
+            userText('second'),
+          ],
+          config,
+        });
+        const project = generator.getHistoryThoughtProjection({
+          model,
+          config,
+        });
+        const projected = thoughts.flatMap((thought) => project(thought) ?? []);
+        const replayed = (
+          req.messages[1].content as Array<{
+            type: string;
+            text?: string;
+            thinking?: string;
+            signature?: string;
+          }>
+        )
+          .filter((block) => block.text !== 'answer')
+          .map((block) => [
+            block.text ?? block.thinking,
+            block.signature || undefined,
+          ]);
+        expect(
+          projected.map((part) => [part.text, part.thoughtSignature]),
+        ).toEqual(replayed);
+      },
+    );
+
     const sendWithBaseUrl = async (
       baseUrl: string,
       contents: GenerateContentParameters['contents'] = unsignedThinkingConversation,

@@ -250,6 +250,22 @@ export interface ConvertLlmRequestToAnthropicOptions {
   cacheRetentionByBlock?: CacheRetentionByBlock;
 }
 
+export function hasThinkingSignature(signature: unknown): boolean {
+  return typeof signature === 'string' && signature.length > 0;
+}
+
+/** A Responses replay payload is never an Anthropic signature. Adaptive
+ * proxies may replay its visible summary as ordinary text (#9453). */
+export function normalizeAnthropicHistoryThought(
+  part: Part,
+  demoteForeignThoughtToText: boolean,
+): Part | undefined {
+  if (!isResponsesReasoningSignature(part.thoughtSignature)) return part;
+  if (demoteForeignThoughtToText)
+    return part.text ? { text: part.text } : undefined;
+  return { thought: true, text: part.text };
+}
+
 export class AnthropicContentConverter {
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
@@ -642,50 +658,26 @@ export class AnthropicContentConverter {
         continue;
       }
 
-      if ('text' in part && 'thought' in part && part.thought) {
-        if (role === 'assistant') {
-          const thinkingBlock: unknown = {
+      if (role === 'assistant' && 'text' in part && part.thought) {
+        const thought = normalizeAnthropicHistoryThought(
+          part,
+          demoteForeignThoughtToText,
+        );
+        if (thought !== part) {
+          debugLogger.debug(
+            'Dropping a Responses reasoning replay payload from thoughtSignature',
+          );
+        }
+        if (thought?.thought) {
+          contentBlocks.push({
             type: 'thinking',
-            thinking: part.text || '',
-          };
-          let dropThinkingBlock = false;
-          if (
-            'thoughtSignature' in part &&
-            typeof part.thoughtSignature === 'string'
-          ) {
-            // `thoughtSignature` carries no origin marker, so a Responses-API
-            // reasoning replay payload (`{"id":…,"encrypted_content":…}`)
-            // reaches here unchanged after a provider switch. It is not an
-            // Anthropic signature — forwarding it puts a foreign opaque blob
-            // on the wire as `thinking.signature`. Drop the payload instead,
-            // mirroring the fallback `responses-converter.ts` already applies
-            // in the other direction for an unreplayable signature.
-            // https://github.com/QwenLM/qwen-code/issues/9453
-            if (isResponsesReasoningSignature(part.thoughtSignature)) {
-              debugLogger.debug(
-                'Dropping a Responses reasoning replay payload from thoughtSignature',
-              );
-              // Adaptive proxies preserve the foreign summary as plain text
-              // when `demoteForeignThoughtToText` is enabled. Otherwise leave
-              // the block unsigned, without the foreign payload as its
-              // signature, so `stripThinkingFromAssistantMessages` removes it under
-              // `stripAssistantThinking` and `fillMissingThinkingSignatures`
-              // fills `signature: ''` under DeepSeek normalization or on
-              // non-4.6 proxy-hosted Claude, while native cleanup drops it.
-              if (demoteForeignThoughtToText) {
-                dropThinkingBlock = true;
-                if (part.text) {
-                  contentBlocks.push({ type: 'text', text: part.text });
-                }
-              }
-            } else {
-              (thinkingBlock as { signature?: string }).signature =
-                part.thoughtSignature;
-            }
-          }
-          if (!dropThinkingBlock) {
-            contentBlocks.push(thinkingBlock as AnthropicContentBlockParam);
-          }
+            thinking: thought.text || '',
+            ...(typeof thought.thoughtSignature === 'string' && {
+              signature: thought.thoughtSignature,
+            }),
+          } as unknown as AnthropicContentBlockParam);
+        } else if (thought?.text) {
+          contentBlocks.push({ type: 'text', text: thought.text });
         }
       }
 
@@ -1264,8 +1256,7 @@ export class AnthropicContentConverter {
     const isUnsignedThinking = (block: AnthropicContentBlockParam) => {
       const value = block as { type?: string; signature?: unknown };
       return (
-        value.type === 'thinking' &&
-        (typeof value.signature !== 'string' || value.signature.length === 0)
+        value.type === 'thinking' && !hasThinkingSignature(value.signature)
       );
     };
     const hasBlockType = (
