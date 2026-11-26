@@ -75,6 +75,12 @@ export interface ReviewTrustClassification {
   prTrust: ReviewPrTrust;
   executionClass: ReviewExecutionClass;
   escalationReasons: string[];
+  /**
+   * Non-empty when an operator opt-in downgraded an otherwise-escalated
+   * external PR to the shared-kernel tier because every changed path is
+   * provably non-executable content. Disclosed, never silent.
+   */
+  downgradeReasons?: string[];
 }
 
 export interface ReviewExecutionBoundary {
@@ -83,6 +89,7 @@ export interface ReviewExecutionBoundary {
   executionClass: ReviewBoundaryExecutionClass;
   backend: ReviewSandboxBackend;
   escalationReasons: string[];
+  downgradeReasons?: string[];
   teardownStatus?: ReviewTeardownStatus;
   note?: string;
 }
@@ -151,6 +158,43 @@ export function forceHardwareRequested(
 ): boolean {
   if (fileSourced('QWEN_REVIEW_FORCE_HARDWARE')) return false;
   const raw = env['QWEN_REVIEW_FORCE_HARDWARE']?.trim().toLowerCase();
+  return Boolean(raw && TRUTHY_ENV_VALUES.has(raw));
+}
+
+const CONTENT_ALLOWLIST_ROOT_FILES = new Set([
+  'readme.md',
+  'changelog.md',
+  'contributing.md',
+  'license.md',
+]);
+
+/**
+ * Narrow content allowlist for the operator opt-in that lets an external PR
+ * run in the hardened shared-kernel container: only Markdown under `docs/`
+ * and the four root prose files. Deliberately excludes data formats that a
+ * toolchain might parse or execute (json/yaml/svg/images) and anything with
+ * an executable or special git mode.
+ */
+export function isReviewContentAllowlistedPath(rawPath: string): boolean {
+  const p = normalizePath(rawPath).toLowerCase();
+  if (!p || hasPathTraversalSegment(p)) return false;
+  if (p.startsWith('docs/') && p.endsWith('.md')) return true;
+  return !p.includes('/') && CONTENT_ALLOWLIST_ROOT_FILES.has(p);
+}
+
+/**
+ * Operator opt-in (default off) permitting the external content-allowlist
+ * downgrade. File-sourced values from repository `.env` files are ignored so
+ * a reviewed repo cannot grant itself the shared-kernel tier.
+ */
+export function externalContentContainerRequested(
+  env: NodeJS.ProcessEnv = process.env,
+  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
+): boolean {
+  if (fileSourced('QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER')) return false;
+  const raw = env['QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER']
+    ?.trim()
+    .toLowerCase();
   return Boolean(raw && TRUTHY_ENV_VALUES.has(raw));
 }
 
@@ -256,6 +300,31 @@ export function classifyReviewTrust(
     );
   }
 
+  // Operator opt-in downgrade: an external PR whose complete diff touches
+  // only provably non-executable content may use the hardened shared-kernel
+  // container. Any mandatory escalation that still fires (e.g. a `scripts/`
+  // segment inside an allowlisted directory) keeps the PR hardware-isolated
+  // and suppresses the downgrade disclosure; the downgrade removes only the
+  // author-identity escalation and is disclosed separately.
+  const downgradeReasons: string[] = [];
+  if (
+    prTrust === 'external' &&
+    !forceHardware &&
+    input.partialFileList !== true &&
+    input.changedFiles !== undefined &&
+    externalContentContainerRequested(env, fileSourced) &&
+    detectReviewMandatoryEscalations(input.changedFiles).length === 0 &&
+    input.changedFiles.every(
+      (f) => !f.renameFrom && isReviewContentAllowlistedPath(f.path),
+    )
+  ) {
+    for (const reason of ['cross-repository-pr', 'external-author']) {
+      const idx = escalationReasons.indexOf(reason);
+      if (idx >= 0) escalationReasons.splice(idx, 1);
+    }
+    downgradeReasons.push('external-content-allowlist');
+  }
+
   const executionClass: ReviewExecutionClass =
     escalationReasons.length > 0
       ? 'hardware-isolated'
@@ -265,6 +334,7 @@ export function classifyReviewTrust(
     prTrust,
     executionClass,
     escalationReasons: [...new Set(escalationReasons)],
+    ...(downgradeReasons.length > 0 ? { downgradeReasons } : {}),
   };
 }
 

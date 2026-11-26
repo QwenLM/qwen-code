@@ -620,6 +620,9 @@ export function describeExecutionBoundary(opts: {
     executionClass,
     backend,
     escalationReasons: trust?.escalationReasons ?? [],
+    ...(trust?.downgradeReasons?.length
+      ? { downgradeReasons: trust.downgradeReasons }
+      : {}),
     ...(opts.teardownStatus !== undefined
       ? { teardownStatus: opts.teardownStatus }
       : {}),
