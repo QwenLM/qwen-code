@@ -9,7 +9,7 @@ import { constants, type Stats } from 'node:fs';
 import { open, stat, type FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { globSync } from 'glob';
-import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { writeUserFile } from '../utils/write-user-file.js';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
 import {
   readTextCursorWindowFromHandle,
@@ -544,9 +544,9 @@ export class StandardFileSystemService implements FileSystemService {
       _meta,
     );
     if (Buffer.isBuffer(prepared.data)) {
-      await atomicWriteFile(filePath, prepared.data);
+      await writeUserFile(filePath, prepared.data);
     } else {
-      await atomicWriteFile(filePath, prepared.data, {
+      await writeUserFile(filePath, prepared.data, {
         encoding: prepared.encoding ?? 'utf-8',
       });
     }
