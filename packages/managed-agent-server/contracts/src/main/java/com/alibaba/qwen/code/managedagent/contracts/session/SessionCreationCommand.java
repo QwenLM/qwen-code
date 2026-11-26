@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.contracts.session;
 
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
@@ -31,7 +32,7 @@ public record SessionCreationCommand(
         boolean planModeSupported, List<Map<String, Object>> skills,
         boolean publicChildrenSupported, boolean sessionSkillsSupported, String modelId,
         List<ManagedExtensionPackages.Pin> extensionPins,
-        com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.Selection extensionSelection,
+        ExtensionPackages.Selection extensionSelection,
         Set<String> extensionLifecycleProfiles,
         SessionWorktreeStore.Plan worktree, SessionModelConfig modelConfig, String memoryStoreId,
         String requestedToolProfile) {
@@ -60,7 +61,7 @@ public record SessionCreationCommand(
         private boolean sessionSkillsSupported;
         private String modelId;
         private List<ManagedExtensionPackages.Pin> extensionPins;
-        private com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.Selection extensionSelection;
+        private ExtensionPackages.Selection extensionSelection;
         private Set<String> extensionLifecycleProfiles = Set.of();
         private SessionWorktreeStore.Plan worktree;
         private SessionModelConfig modelConfig;
@@ -162,7 +163,7 @@ public record SessionCreationCommand(
             return this;
         }
 
-        public Builder extensionSelection(com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.Selection value) {
+        public Builder extensionSelection(ExtensionPackages.Selection value) {
             this.extensionSelection = value;
             return this;
         }

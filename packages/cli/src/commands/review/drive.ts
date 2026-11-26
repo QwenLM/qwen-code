@@ -57,6 +57,11 @@ import {
   writeStderrLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import {
+  describeExecutionBoundary,
+  refuseHostExecutionPhase,
+  type ReviewExecutionBoundary,
+} from './lib/sandboxed-exec.js';
 
 /** Why a drive stopped. Every value is a fact about the run, not a verdict. */
 export type DriveOutcome =
@@ -129,6 +134,8 @@ export interface DriveReport {
    */
   captured?: Record<string, string | null>;
   note: string;
+  /** Structured execution boundary metadata for this host tmux drive. */
+  executionBoundary?: ReviewExecutionBoundary;
 }
 
 export interface DriveArgs {
@@ -657,6 +664,15 @@ export function runDrive(args: DriveArgs): DriveReport {
     return notStartedReport(`${parsed.error} Nothing was started.`);
   }
   const captureSpecs = parsed.specs;
+  const sandboxRefusal = refuseHostExecutionPhase();
+  if (sandboxRefusal) {
+    return {
+      ...notStartedReport(sandboxRefusal),
+      executionBoundary: describeExecutionBoundary({
+        verdict: { kind: 'refused', reason: sandboxRefusal },
+      }),
+    };
+  }
   const tmux = (...a: string[]) => exec('tmux', ['-L', server, ...a]);
 
   if (exec('tmux', ['-V']).status !== 0) {
@@ -907,6 +923,7 @@ export function runDrive(args: DriveArgs): DriveReport {
     killedStale,
     ...(captured ? { captured } : {}),
     note: `${note}${trimScopeNote}${captureNote}`,
+    executionBoundary: describeExecutionBoundary({ backend: 'direct' }),
   };
 }
 

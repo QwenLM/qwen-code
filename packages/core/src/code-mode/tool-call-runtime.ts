@@ -79,15 +79,20 @@ export function getToolCallRuntime(): ToolCallRuntimeContext | undefined {
   return context.getStore();
 }
 
-const sourceStorage = new AsyncLocalStorage<{ kind: 'code_mode' }>();
+interface ToolCallSource {
+  kind: 'code_mode';
+  signal?: AbortSignal;
+}
+
+const sourceStorage = new AsyncLocalStorage<ToolCallSource>();
 
 export function runWithToolCallSource<T>(
-  source: { kind: 'code_mode' },
+  source: ToolCallSource,
   callback: () => T,
 ): T {
   return sourceStorage.run(source, callback);
 }
 
-export function getCurrentToolCallSource(): { kind: 'code_mode' } | undefined {
+export function getCurrentToolCallSource(): ToolCallSource | undefined {
   return sourceStorage.getStore();
 }

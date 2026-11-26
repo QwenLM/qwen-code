@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -29,6 +30,7 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedShellProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedTerminalProtocol;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -44,6 +46,8 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +58,8 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 /**
@@ -150,7 +156,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         return this;
     }
 
-    private Map<String, Object> contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+    private ManagedContextProtocol.Boot contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         String digest = request.getScope().getCapabilityDigest();
         return ManagedContextProtocol.boot(request, seed,
                 ManagedExtensionExecutionProfile.admits(digest)
@@ -248,13 +254,13 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                     "seed must bind the lease");
         }
         if (request.isManagedContext()) {
-            Map<String, Object> boot = contextBoot(request, seed);
-            Map<String, Object> body = ManagedContextProtocol.attestationRequest(boot);
+            ManagedContextProtocol.Boot boot = contextBoot(request, seed);
+            Map<String, Object> body = ManagedContextProtocol.attestationRequest(boot.toWire());
             String path = ManagedContextProtocol.ATTEST_PATH;
             byte[] encoded = encodeToolRequest(body, BODY_LIMIT_BYTES);
             long started = System.nanoTime();
-            var cancelled = new java.util.concurrent.atomic.AtomicBoolean();
-            var pending = new java.util.concurrent.atomic.AtomicReference<>(
+            var cancelled = new AtomicBoolean();
+            var pending = new AtomicReference<>(
                     post(lease, path, encoded, BODY_LIMIT_BYTES, null).toCompletableFuture());
             var attested = pending.get()
                     .exceptionallyCompose(error -> {
@@ -274,7 +280,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                     .thenApply(bytes -> {
                         var actual = ManagedContextProtocol.parse(bytes);
                         ManagedContextProtocol.verify(actual,
-                                ManagedContextProtocol.attestationResponse(boot));
+                                ManagedContextProtocol.attestationResponse(boot.toWire()));
                         return new RuntimeAttestation(seed.getProvisionalRuntimeId(),
                                 seed.getGatewayIncarnation(), seed.getLeaseId(),
                                 seed.getEpoch(), request.getScope(),
@@ -439,7 +445,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             Map<String, Object> receipt = (Map<String, Object>) raw;
             byte[] block;
             try {
-                block = java.util.Base64.getDecoder().decode(encoded);
+                block = Base64.getDecoder().decode(encoded);
             } catch (IllegalArgumentException invalid) {
                 throw protocol("External publication block is invalid.", invalid);
             }
@@ -452,7 +458,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                     || length == null || length != block.length || block.length > EXTERNAL_READ_BYTES
                     || !(receipt.get("digest") instanceof String digest)
                     || !digest.matches("[0-9a-f]{64}")
-                    || !org.apache.commons.codec.digest.DigestUtils.sha256Hex(block).equals(digest)
+                    || !DigestUtils.sha256Hex(block).equals(digest)
                     || !(receipt.get("eof") instanceof Boolean eof)
                     // The EOF is its own empty sequence: every earlier sequence
                     // carries bytes, and the EOF carries none.
@@ -465,7 +471,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             ready.put("eof", eof);
             ready.put("exitCode", exitCode(response.get("exitCode")));
             ready.put("signal", signal(response.get("signal")));
-            return java.util.Collections.unmodifiableMap(ready);
+            return Collections.unmodifiableMap(ready);
         });
     }
 
@@ -605,7 +611,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         }
         var attestation = pinned.attest(lease, request, seed, true)
                 .toCompletableFuture();
-        var active = new java.util.concurrent.atomic.AtomicReference<CompletableFuture<?>>(attestation);
+        var active = new AtomicReference<CompletableFuture<?>>(attestation);
         CompletableFuture<T> result = new CompletableFuture<>();
         result.orTimeout(requestTimeout.toMillis(), TimeUnit.MILLISECONDS);
         result.whenCompleteAsync((ignored, error) -> {
@@ -934,8 +940,8 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                         parseToolResponse(bytes, "cancel"), "cancel"));
     }
 
-    public CompletionStage<Void> installPublisherV3(RuntimeLease lease,
-            RuntimeSession session, Map<String, Object> publisher) {
+    public CompletionStage<Map<String, Object>> installPublisherV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher, Long writerGeneration) {
         requireV3Context(lease, session);
         requireClosed(publisher, Set.of("url", "token"), "publisher");
         if (!(publisher.get("url") instanceof String url)
@@ -945,15 +951,109 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                 || !token.matches("[A-Za-z0-9_-]{43}")) {
             throw new IllegalArgumentException("Output publisher descriptor is invalid");
         }
-        Map<String, Object> body = Map.of("protocolVersion", 3,
-                "toolResult", "managed-tool-result/1", "sessionId", session.getRuntimeSessionId(),
-                "publisher", publisher);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 3);
+        body.put("toolResult", "managed-tool-result/1");
+        body.put("sessionId", session.getRuntimeSessionId());
+        body.put("publisher", publisher);
+        if (writerGeneration != null) {
+            body.put("writerGeneration", writerGeneration);
+        }
         Map<String, Object> expected = Map.of("protocolVersion", 3,
                 "toolResult", "managed-tool-result/1", "sessionId", session.getRuntimeSessionId(),
                 "installed", true);
         return post(lease, "/internal/managed-runtime/v3/publisher",
                 encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
-                .thenAccept(bytes -> ManagedContextProtocol.verify(ManagedContextProtocol.parse(bytes), expected));
+                .thenApply(bytes -> {
+                    // Phase 3b: the worker may signal observation ownership;
+                    // it is optional, so verify the closed core without it.
+                    Map<String, Object> parsed =
+                            new LinkedHashMap<>(ManagedContextProtocol.parse(bytes));
+                    Object observation = parsed.remove("observation");
+                    Object observedRuns = parsed.remove("observedRuns");
+                    ManagedContextProtocol.verify(parsed, expected);
+                    Map<String, Object> extra = new LinkedHashMap<>();
+                    if (observation != null) {
+                        extra.put("observation", observation);
+                    }
+                    if (observedRuns instanceof Map<?, ?> runsMap) {
+                        extra.put("observedRuns", runsMap);
+                    }
+                    return extra.isEmpty() ? Map.<String, Object>of() : Map.copyOf(extra);
+                });
+    }
+
+    @Override
+    public CompletionStage<Void> detachPublisher(
+            RuntimeLease lease, RuntimeSession session, Long writerGeneration) {
+        return detachPublisherV3(lease, session, writerGeneration);
+    }
+
+    @Override
+    public CompletionStage<Void> detachPublisherV3(
+            RuntimeLease lease, RuntimeSession session, Long writerGeneration) {
+        requireV3Context(lease, session);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 3);
+        body.put("toolResult", "managed-tool-result/1");
+        body.put("sessionId", session.getRuntimeSessionId());
+        if (writerGeneration != null) {
+            if (writerGeneration < 1) {
+                throw new IllegalArgumentException("writerGeneration must be positive");
+            }
+            body.put("writerGeneration", writerGeneration);
+        }
+        Map<String, Object> expected = Map.of(
+                "protocolVersion", 3,
+                "toolResult", "managed-tool-result/1",
+                "sessionId", session.getRuntimeSessionId(),
+                "detached", true);
+        return post(lease, ManagedContextProtocol.PUBLISHER_DETACH_PATH,
+                encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenAccept(bytes -> ManagedContextProtocol.verify(
+                        ManagedContextProtocol.parse(bytes), expected));
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> pullObservations(
+            RuntimeLease lease, String executionCallId, long afterSeq,
+            long ackThrough, int waitMs, int maxEntries) {
+        return pullObservationsV3(lease, executionCallId, afterSeq, ackThrough, waitMs, maxEntries);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> pullObservationsV3(
+            RuntimeLease lease, String executionCallId, long afterSeq,
+            long ackThrough, int waitMs, int maxEntries) {
+        if (lease == null || executionCallId == null || executionCallId.isEmpty()
+                || afterSeq < 0 || ackThrough < 0 || waitMs < 0 || maxEntries < 1) {
+            throw new IllegalArgumentException("observation pull arguments are invalid");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 3);
+        body.put("toolResult", "managed-tool-result/1");
+        body.put("executionCallId", executionCallId);
+        body.put("afterSeq", afterSeq);
+        body.put("ackThrough", ackThrough);
+        body.put("waitMs", waitMs);
+        body.put("maxEntries", maxEntries);
+        Duration timeout = requestTimeout.plusMillis(Math.max(0, waitMs));
+        return post(lease, ManagedContextProtocol.OBSERVATION_PULL_PATH,
+                encodeToolRequest(body, BODY_LIMIT_BYTES),
+                16 * 1024 * 1024,
+                null,
+                timeout)
+                .thenApply(bytes -> {
+                    Map<String, Object> parsed = JsonCodec.parseObject(bytes, "observation pull response");
+                    if (!Integer.valueOf(3).equals(parsed.get("protocolVersion"))
+                            || !"managed-tool-result/1".equals(parsed.get("toolResult"))
+                            || !executionCallId.equals(parsed.get("executionCallId"))
+                            || !(parsed.get("status") instanceof String status)
+                            || !Set.of("held", "attached", "missing", "superseded").contains(status)) {
+                        throw protocol("Runtime observation pull response is invalid.");
+                    }
+                    return parsed;
+                });
     }
 
     /** Explicit Tool v3 call; selection belongs to the saved Broker reference. */
@@ -1087,7 +1187,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             Map<String, Object> reference,
             Map<String, Object> payload,
             Map<String, Object> capture) {
-        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.requireProfile(session);
+        RuntimeToolMeasurements.requireProfile(session);
         Map<String, Object> merged = new LinkedHashMap<>(reference);
         if (payload != null) {
             merged.putAll(payload);
@@ -1110,7 +1210,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                                 parseV4Response(
                                         bytes,
                                         "execute",
-                                        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements
+                                        RuntimeToolMeasurements
                                                 .executionProtocol(reference)));
     }
 
@@ -1120,7 +1220,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             RuntimeSession session,
             Map<String, Object> reference,
             long afterSequence) {
-        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.requireProfile(session);
+        RuntimeToolMeasurements.requireProfile(session);
         if (afterSequence < 0) {
             throw new IllegalArgumentException("Invalid sequence.");
         }
@@ -1136,14 +1236,14 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                                 parseV4Response(
                                         bytes,
                                         "status",
-                                        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements
+                                        RuntimeToolMeasurements
                                                 .executionProtocol(reference)));
     }
 
     @Override
     public CompletionStage<Map<String, Object>> cancelV4(
             RuntimeLease lease, RuntimeSession session, Map<String, Object> reference) {
-        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.requireProfile(session);
+        RuntimeToolMeasurements.requireProfile(session);
         return post(
                         lease,
                         "/internal/managed-runtime/v4/cancel",
@@ -1154,7 +1254,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                                 parseV4Response(
                                         bytes,
                                         "cancel",
-                                        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements
+                                        RuntimeToolMeasurements
                                                 .executionProtocol(reference)));
     }
 
@@ -1165,13 +1265,13 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             Map<String, Object> reference,
             Map<String, Object> result,
             Map<String, Object> receipt) {
-        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.requireProfile(session);
+        RuntimeToolMeasurements.requireProfile(session);
         Map<String, Object> body = v4Body(reference);
         body.put(
                 "resultDigest",
-                com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.metadata(result)
-                        .get("resultDigest"));
-        if (com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.executionProtocol(reference)
+                RuntimeToolMeasurements.metadata(result)
+                        .resultDigest());
+        if (RuntimeToolMeasurements.executionProtocol(reference)
                 == 3) {
             body.put("receipt", receipt);
         }
@@ -1186,8 +1286,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                                     parseV4Response(
                                             bytes,
                                             "acknowledge",
-                                            com.alibaba.qwen.code.runtimebroker
-                                                    .RuntimeToolMeasurements.executionProtocol(
+                                            RuntimeToolMeasurements.executionProtocol(
                                                     reference));
                             if (!Set.of("acknowledged", "settled", "unknown")
                                     .contains(answer.get("state"))) {
@@ -1199,7 +1298,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     }
 
     private static Map<String, Object> v4Body(Map<String, Object> reference) {
-        if (!com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.selected(reference)) {
+        if (!RuntimeToolMeasurements.selected(reference)) {
             throw new IllegalArgumentException(
                     "Measured protocol must be reserved before dispatch.");
         }
@@ -1207,7 +1306,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         body.put("protocolVersion", 4);
         body.put(
                 "executionProtocol",
-                com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.executionProtocol(
+                RuntimeToolMeasurements.executionProtocol(
                         reference));
         Map<String, Object> legacy = new LinkedHashMap<>(reference);
         legacy.remove("resultProtocol");
@@ -1274,7 +1373,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                 "state",
                 state,
                 "result",
-                com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.attach(
+                RuntimeToolMeasurements.attach(
                         executionProtocol,
                         result,
                         fields.get("measurements"),

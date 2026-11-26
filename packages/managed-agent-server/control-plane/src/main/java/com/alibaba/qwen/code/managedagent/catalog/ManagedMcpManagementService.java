@@ -10,10 +10,12 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpManagementCo
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
@@ -106,19 +108,9 @@ public class ManagedMcpManagementService {
         }
         Map<String, Object> request = new LinkedHashMap<>();
         try {
-            // A subjectless principal keeps the pre-ownership operation
-            // identity so recorded keys still replay; only an actual subject
-            // joins the identity (the commandKey rule).
-            java.util.List<String> identity = new java.util.ArrayList<>(java.util.List.of(
-                    "managed-mcp-command", tenantId, actorId));
-            if (principal != null && principal.actorPresent()) {
-                identity.add(principal.actorSubjectId());
-            }
-            identity.add(sessionId);
-            identity.add(idempotencyKey);
-            request.put("operationId", UUID.nameUUIDFromBytes(
-                    json.writeValueAsBytes(identity)).toString());
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            request.put("operationId", UUID.nameUUIDFromBytes(json.writeValueAsBytes(
+                    List.of("managed-mcp-command", tenantId, actorId, sessionId, idempotencyKey))).toString());
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException("Cannot encode MCP command identity", error);
         }
         SessionRecord session = store.requireMcpManagement(tenantId,
@@ -186,7 +178,7 @@ public class ManagedMcpManagementService {
             requireSnapshot(result);
             return result;
         } catch (HarnessHttpFailure refusal) {
-            org.springframework.http.HttpStatus status = org.springframework.http.HttpStatus.resolve(refusal.getStatusCode());
+            HttpStatus status = HttpStatus.resolve(refusal.getStatusCode());
             String code = refusal.getErrorCode();
             if (status == null || !status.is4xxClientError() || code == null || !code.matches("[a-z][a-z0-9_]{0,127}")) {
                 throw new ManagedAgentException(503, "managed_mcp_management_unavailable",

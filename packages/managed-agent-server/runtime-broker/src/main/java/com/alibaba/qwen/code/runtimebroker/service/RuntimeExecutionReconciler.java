@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.service;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.ExecutionReconciliation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeExecutionStatus;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
@@ -16,7 +17,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -28,9 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.evidenceUnavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.MAX_CAS_ATTEMPTS;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.RUNTIME_STATUS_STATES;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.immutableMap;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
@@ -82,9 +80,6 @@ final class RuntimeExecutionReconciler {
     void cancelPendingOperations() {
         reconciliations.values().forEach(future -> future.cancel(false));
     }
-
-    static final Set<String> RUNTIME_STATUS_FIELDS = Set.of(
-            "state", "result");
 
     CompletionStage<ToolExecutionRecord> measuredResult(ToolExecutionRecord original, int attempt) {
         if (!original.isSettled() || !RuntimeToolMeasurements.selected(original.getReference())
@@ -166,9 +161,9 @@ final class RuntimeExecutionReconciler {
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
@@ -189,9 +184,9 @@ final class RuntimeExecutionReconciler {
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
@@ -221,7 +216,7 @@ final class RuntimeExecutionReconciler {
             Map<String, Object> durable = publicationVerifier.finished(unknown);
             if (durable != null) {
                 return CompletableFuture.completedFuture(absorbRuntimeStatus(unknown,
-                        Map.of("state", "settled", "result", durable), false));
+                        requireRuntimeStatus(Map.of("state", "settled", "result", durable)), false));
             }
         }
         CompletableFuture<SessionContext> local = bindingRegistry.session(
@@ -296,7 +291,7 @@ final class RuntimeExecutionReconciler {
                 // envelope is the outcome, and it needs no worker: this arm
                 // runs precisely when the original worker may be gone.
                 return CompletableFuture.completedFuture(absorbRuntimeStatus(unknown,
-                        Map.of("state", "settled", "result", durable), takeover, false));
+                        requireRuntimeStatus(Map.of("state", "settled", "result", durable)), takeover, false));
             }
             bindingRegistry.requireLiveBinding(context.binding());
             return lookupOnce(context, unknown, takeover, cooled, true);
@@ -370,7 +365,7 @@ final class RuntimeExecutionReconciler {
                 throw new CompletionException(unwrap(error));
             }
             try {
-                return absorbRuntimeStatus(unknown, status, takeover, drainProofLane);
+                return absorbRuntimeStatus(unknown, requireRuntimeStatus(status), takeover);
             } catch (RuntimeBrokerException failure) {
                 if (takeover && "runtime_execution_status_invalid".equals(failure.getCode())) {
                     return new ExecutionReconciliation(unknown,
@@ -414,43 +409,23 @@ final class RuntimeExecutionReconciler {
                                 : ExecutionReconciliation.Outcome.IN_FLIGHT, runtimeState);
     }
 
-    ExecutionReconciliation absorbRuntimeStatus(
-            ToolExecutionRecord unknown, Map<String, Object> status, boolean takeover) {
+    static RuntimeExecutionStatus requireRuntimeStatus(Map<String, Object> status) {
+        try {
+            return RuntimeExecutionStatus.from(status);
+        } catch (IllegalArgumentException exception) {
+            throw invalidStatus(exception);
+        }
+    }
+
+    ExecutionReconciliation absorbRuntimeStatus(ToolExecutionRecord unknown,
+            RuntimeExecutionStatus status, boolean takeover) {
         return absorbRuntimeStatus(unknown, status, takeover, false);
     }
 
-    /**
-     * @param drainProofLane the external foreground-Shell lane with an
-     *     unfinished publication. Only the Broker moves that lane's bytes and
-     *     it does so before settling, so the worker's settled envelope names
-     *     its <em>local</em> manifest: absorbing it would settle a result whose
-     *     bytes never reached the control plane and let the close release
-     *     storage. Recovery of the original worker re-runs the idempotent begin
-     *     and the drain, and is the only exit for a started call. The one
-     *     exception is the worker's proof that no process ever started, which
-     *     owes no drain at all — see {@code externalShellNoStartAnswer}.
-     */
-    private ExecutionReconciliation absorbRuntimeStatus(
-            ToolExecutionRecord unknown, Map<String, Object> status, boolean takeover,
-            boolean drainProofLane) {
-        if (status == null) {
-            throw invalidStatus(null);
-        }
-        for (Object field : status.keySet()) {
-            if (!(field instanceof String)
-                    || !RUNTIME_STATUS_FIELDS.contains(field)) {
-                throw invalidStatus(null);
-            }
-        }
-        Object state = status.get("state");
-        if (!(state instanceof String)
-                || !RUNTIME_STATUS_STATES.contains(state)
-                || "settled".equals(state)
-                        != status.containsKey("result")) {
-            throw invalidStatus(null);
-        }
-        String runtimeState = (String) state;
-        if (!"settled".equals(runtimeState)) {
+    private ExecutionReconciliation absorbRuntimeStatus(ToolExecutionRecord unknown,
+            RuntimeExecutionStatus status, boolean takeover, boolean drainProofLane) {
+        String runtimeState = status.state().wireName();
+        if (status.state() != RuntimeExecutionStatus.State.SETTLED) {
             ToolExecutionRecord latest = executionRepository
                     .findByExecutionCallId(unknown.getExecutionCallId());
             ToolExecutionRecord current = latest == null ? unknown : latest;
@@ -460,13 +435,10 @@ final class RuntimeExecutionReconciler {
                             runtimeState)
                     : notUnknown(current, runtimeState);
         }
-        Map<String, Object> result;
+        Map<String, Object> result = status.result();
         try {
-            result = immutableMap(status.get("result"), "status result");
             if (drainProofLane && !externalShellNoStartAnswer(result)) {
                 if (takeover) {
-                    // The row stays UNKNOWN — exactly what the fence intends —
-                    // without wedging the acquire that recovery depends on.
                     return new ExecutionReconciliation(unknown,
                             ExecutionReconciliation.Outcome.UNRESOLVED, null);
                 }

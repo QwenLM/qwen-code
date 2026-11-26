@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
+import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.session.ContextCompressionService;
@@ -31,6 +32,8 @@ import com.alibaba.qwen.code.managedagent.session.SessionRecoveryService;
 import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import jakarta.validation.Valid;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -57,7 +60,7 @@ public class PublicAgentController {
     private final SessionRecoveryService recovery;
     private ContextCompressionService compressions;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     void setCompressions(ContextCompressionService compressions) {
         this.compressions = compressions;
     }
@@ -115,17 +118,14 @@ public class PublicAgentController {
                 ? service.createSession(tenant.requirePrincipal(),
                         idempotencyKey, request.agentId(),
                         request.agentRevision(), null, request.metadata(),
-                        request.input(), com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()),
+                        request.input(), SessionModelConfig.parse(request.modelConfig()),
                         request.memoryStoreId())
                 : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null, request.metadata(), request.input(),
                         selection, null, null, request.skills(), null, request.extensionPins(), worktree,
-                        com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()),
-                        request.memoryStoreId(), request.toolProfile());
-        PublicSession session = principal == null
-                ? service.getPublicSession(tenant.tenantId(),
-                        tenant.actorId(), admission.sessionId())
-                : service.getPublicSession(principal, admission.sessionId());
+                        SessionModelConfig.parse(request.modelConfig()), request.memoryStoreId());
+        PublicSession session = service.getPublicSession(tenant.tenantId(),
+                tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .header("X-Qwen-Idempotent-Replay",
                         Boolean.toString(admission.replayed()))
@@ -160,12 +160,8 @@ public class PublicAgentController {
     @GetMapping("/{sessionId}/recovery")
     public ResponseEntity<SessionRecovery> recovery(TenantContext tenant,
             @PathVariable String sessionId) {
-        SessionPrincipal principal = tenant.subjectPrincipal();
-        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
-                .body(principal == null
-                        ? recovery.query(tenant.tenantId(),
-                                tenant.actorId(), sessionId)
-                        : recovery.query(principal, sessionId));
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .body(recovery.query(tenant.tenantId(), tenant.actorId(), sessionId));
     }
 
     @PostMapping("/{sessionId}/recovery/recheck")

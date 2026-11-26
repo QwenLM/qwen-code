@@ -25,6 +25,7 @@ import {
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { getBuiltinDeepSeekReasoning } from '../deepseek-reasoning.js';
+import { getBuiltinKimiK3Reasoning } from '../kimi-reasoning.js';
 import { getRequestModel } from '../request-model.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
@@ -83,6 +84,8 @@ import {
 } from './provider/utils.js';
 import {
   getEffectiveReasoning,
+  hasOpenRouterReasoningEffortOverride,
+  resolveReasoningDeclaration,
   resolveReasoningForModel,
 } from '../reasoning-overrides.js';
 
@@ -1231,6 +1234,20 @@ export class ContentGenerationPipeline {
         error instanceof StreamLifetimeExceededError
       ) {
         const isLifetime = error instanceof StreamLifetimeExceededError;
+        const toolCallName =
+          !finishSeen && error instanceof StreamInactivityTimeoutError
+            ? context.toolCallParser?.getIncompleteToolCallName()
+            : undefined;
+        const timeoutError =
+          toolCallName !== undefined &&
+          error instanceof StreamInactivityTimeoutError
+            ? new StreamInactivityTimeoutError(
+                error.idleMs,
+                error.chunksReceived,
+                error.streamLifetimeMs,
+                toolCallName,
+              )
+            : error;
         debugLogger.warn(
           isLifetime
             ? 'OpenAI stream lifetime cap exceeded'
@@ -1246,9 +1263,13 @@ export class ContentGenerationPipeline {
                     .maxLifetimeMs,
                 }
               : { idleMs: (error as StreamInactivityTimeoutError).idleMs }),
+            ...(timeoutError instanceof StreamInactivityTimeoutError &&
+              timeoutError.openToolCallName !== undefined && {
+                openToolCallName: timeoutError.openToolCallName,
+              }),
           },
         );
-        throw redactProxyError(error);
+        throw redactProxyError(timeoutError);
       }
 
       if (
@@ -1433,10 +1454,23 @@ export class ContentGenerationPipeline {
       { ...this.contentGeneratorConfig, model: context.model },
       reasoningCapabilities,
     );
+    // An inferred nested default must not compete with an explicit flat tier.
+    // Undeclared DeepSeek still needs the default to emit its non-effort field;
+    // its profile flattener removes the temporary nested object.
     if (
       reasoningCapabilities &&
       !('reasoning' in baseRequest) &&
       effectiveReasoning &&
+      (!this.hasExplicitOpenRouterEffort(context.model) ||
+        (resolveReasoningDeclaration(
+          this.config.cliConfig,
+          this.contentGeneratorConfig,
+          context.model,
+        ) === undefined &&
+          getBuiltinDeepSeekReasoning({
+            ...this.contentGeneratorConfig,
+            model: context.model,
+          }) !== undefined)) &&
       request.config?.thinkingConfig?.includeThoughts !== false
     ) {
       baseRequest = {
@@ -1470,6 +1504,10 @@ export class ContentGenerationPipeline {
       baseRequest.tools = await OpenAIContentConverter.convertLlmToolsToOpenAI(
         request.config.tools,
         this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider({
+          ...this.contentGeneratorConfig,
+          baseUrl: this.client.baseURL,
+        }),
       );
 
       // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
@@ -1493,6 +1531,17 @@ export class ContentGenerationPipeline {
       userPromptId,
       trailingReattachPartCount(request.contents),
     );
+    if (
+      reasoningCapabilities?.profile === 'openai-reasoning' &&
+      getBuiltinKimiK3Reasoning({
+        ...this.contentGeneratorConfig,
+        model: context.model,
+      }) &&
+      'reasoning' in providerRequest &&
+      isReasoningEffortPlaceholder(providerRequest.reasoning_effort)
+    ) {
+      delete providerRequest.reasoning_effort;
+    }
     if (
       this.contentGeneratorConfig.enableCacheControl !== false &&
       isOfficialOpenAIEndpoint(this.contentGeneratorConfig)
@@ -1697,6 +1746,42 @@ export class ContentGenerationPipeline {
         isOpenRouterHostname(this.contentGeneratorConfig)
       ) {
         typed['reasoning'] = { enabled: false };
+      }
+    }
+
+    if (reasoningDisabled && !thinkingMandatory) {
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      // User `extra_body` can explicitly enable thinking on custom/non-Qwen
+      // gateways (e.g. `enable_thinking: true`). If an earlier branch already
+      // emitted a gateway-native disable switch, drop the contradicting opt-in
+      // instead of sending both; otherwise flip explicit opt-ins to false
+      // without inventing the field on endpoints that never declared it.
+      const hasNativeDisable =
+        typed['reasoning_effort'] === 'none' ||
+        asObject(typed['reasoning'])?.['enabled'] === false ||
+        asObject(typed['thinking'])?.['type'] === 'disabled';
+      if (typed['enable_thinking'] === true) {
+        if (hasNativeDisable) {
+          delete typed['enable_thinking'];
+        } else {
+          typed['enable_thinking'] = false;
+        }
+      }
+      const chatTemplateKwargs = asObject(typed['chat_template_kwargs']);
+      if (chatTemplateKwargs?.['enable_thinking'] === true) {
+        if (hasNativeDisable) {
+          const { enable_thinking: _dropped, ...rest } = chatTemplateKwargs;
+          if (Object.keys(rest).length === 0) {
+            delete typed['chat_template_kwargs'];
+          } else {
+            typed['chat_template_kwargs'] = rest;
+          }
+        } else {
+          typed['chat_template_kwargs'] = {
+            ...chatTemplateKwargs,
+            enable_thinking: false,
+          };
+        }
       }
     }
 
@@ -2018,6 +2103,14 @@ export class ContentGenerationPipeline {
     return params;
   }
 
+  private hasExplicitOpenRouterEffort(model?: string): boolean {
+    return hasOpenRouterReasoningEffortOverride(
+      this.config.cliConfig,
+      this.contentGeneratorConfig,
+      model || this.contentGeneratorConfig.model,
+    );
+  }
+
   private buildReasoningConfig(
     request: GenerateContentParameters,
   ): Record<string, unknown> {
@@ -2035,7 +2128,10 @@ export class ContentGenerationPipeline {
     // configured reasoning object when explicitly enabled. This keeps provider- and
     // model-specific semantics intact while honoring request-level opt-out.
 
-    if (request.config?.thinkingConfig?.includeThoughts === false) {
+    if (
+      request.config?.thinkingConfig?.includeThoughts === false ||
+      this.hasExplicitOpenRouterEffort(request.model)
+    ) {
       return {};
     }
 

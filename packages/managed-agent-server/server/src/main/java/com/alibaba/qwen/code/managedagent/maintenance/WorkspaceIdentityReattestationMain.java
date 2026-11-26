@@ -29,6 +29,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -58,9 +59,9 @@ public final class WorkspaceIdentityReattestationMain {
         }
         var source = new DriverManagerDataSource(required("W1_JDBC_URL"), required("W1_JDBC_USER"), present("W1_JDBC_PASSWORD"));
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        String hardware = MacOsHostIdentity.machineId().replace("-", "").toLowerCase(java.util.Locale.ROOT);
+        String hardware = MacOsHostIdentity.machineId().replace("-", "").toLowerCase(Locale.ROOT);
         for (String saved : jdbc.queryForList("SELECT b.resource_handle_json FROM ma_runtime_binding b"
-                + " JOIN ma_storage s ON s.alias_key = b.storage_alias_key WHERE s.physical_key = ?"
+                + " JOIN ma_storage s ON s.tenant_id = b.tenant_id AND s.storage_id = b.storage_id WHERE s.physical_id = ?"
                 + " AND b.is_provision_seeded = TRUE", String.class, request.path("physicalKey").asText())) {
             JsonNode handle = json.readTree(saved);
             if (!previous.equals(handle.path("bootId").asText()) || !hardware.equals(handle.path("hostId").asText())

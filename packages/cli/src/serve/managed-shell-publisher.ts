@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import { createHash } from 'node:crypto';
 import type { ShellExecutionResult } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
 import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import {
@@ -27,6 +28,10 @@ import type {
   ToolResultAcknowledgement,
 } from './managed-runtime-tool-executor.js';
 import { processGroupLiveness } from './managed-runtime-ledger.js';
+import {
+  BackgroundDeliveryRun,
+  WorkerBackgroundCaptureSink,
+} from './managed-background-delivery.js';
 
 export const HOSTED_SHELL_PUBLISHER_PATH =
   '/internal/hosted-shell-publisher/v1';
@@ -36,7 +41,25 @@ export const MANAGED_SHELL_PUBLISHER_ROUTE = Object.freeze({
   path: '/internal/managed-runtime/v3/publisher',
   protocolVersion: 3,
   requestBodyLimitBytes: 16 * 1024,
+  responseBodyLimitBytes: 64 * 1024,
+  cacheControl: 'no-store',
+} as const);
+export const MANAGED_SHELL_PUBLISHER_DETACH_ROUTE = Object.freeze({
+  key: 'publisherDetach',
+  method: 'POST',
+  path: '/internal/managed-runtime/v3/publisher/detach',
+  protocolVersion: 3,
+  requestBodyLimitBytes: 16 * 1024,
   responseBodyLimitBytes: 16 * 1024,
+  cacheControl: 'no-store',
+} as const);
+export const MANAGED_OBSERVATION_PULL_ROUTE = Object.freeze({
+  key: 'observationPull',
+  method: 'POST',
+  path: '/internal/managed-runtime/v3/observations/pull',
+  protocolVersion: 3,
+  requestBodyLimitBytes: 16 * 1024,
+  responseBodyLimitBytes: 16 * 1024 * 1024,
   cacheControl: 'no-store',
 } as const);
 const PREFIX = { protocolVersion: 3, toolResult: MANAGED_TOOL_RESULT_PROTOCOL };
@@ -383,10 +406,28 @@ export class ManagedShellPublisherRegistry
   implements ManagedShellCapturePublisher
 {
   private readonly sessions = new Map<string, ShellPublisherDescriptor>();
+  private readonly sessionGenerations = new Map<string, number>();
   private readonly executions = new Map<
     string,
     { descriptor: ShellPublisherDescriptor; sink: RemoteShellCapture }
   >();
+  /** Phase 3b: worker-owned background runs, keyed by executionCallId. */
+  private readonly workerRuns = new Map<
+    string,
+    {
+      sessionId: string;
+      run: BackgroundDeliveryRun;
+      sink: WorkerBackgroundCaptureSink;
+      accepted: boolean;
+    }
+  >();
+
+  constructor(
+    private readonly observation: {
+      readonly enabled: boolean;
+      readonly workspaceId?: string;
+    } = { enabled: false },
+  ) {}
 
   get hasInstalledPublication(): boolean {
     return this.sessions.size > 0 || this.executions.size > 0;
@@ -411,13 +452,22 @@ export class ManagedShellPublisherRegistry
       (req: Request, res: Response) => {
         let sessionId: string;
         let publisher: ShellPublisherDescriptor;
+        let writerGeneration: number | undefined;
         try {
-          const body = publisherFields(req.body, [
-            'protocolVersion',
-            'toolResult',
-            'sessionId',
-            'publisher',
-          ]);
+          const keys = Object.keys(req.body ?? {}).sort();
+          const withGeneration = keys.includes('writerGeneration');
+          const body = publisherFields(
+            req.body,
+            withGeneration
+              ? [
+                  'protocolVersion',
+                  'toolResult',
+                  'sessionId',
+                  'publisher',
+                  'writerGeneration',
+                ]
+              : ['protocolVersion', 'toolResult', 'sessionId', 'publisher'],
+          );
           if (
             body['protocolVersion'] !== 3 ||
             body['toolResult'] !== MANAGED_TOOL_RESULT_PROTOCOL ||
@@ -428,29 +478,269 @@ export class ManagedShellPublisherRegistry
             throw new Error('Invalid registration.');
           sessionId = body['sessionId'];
           publisher = parseShellPublisher(body['publisher']);
+          if (withGeneration) {
+            const generation = Number(body['writerGeneration']);
+            if (!Number.isSafeInteger(generation) || generation < 1) {
+              throw new Error('Invalid writer generation.');
+            }
+            writerGeneration = generation;
+          }
         } catch {
           res.status(400).json({ code: 'managed_runtime_attestation_invalid' });
           return;
         }
         const previous = this.sessions.get(sessionId);
+        const previousGeneration = this.sessionGenerations.get(sessionId) ?? 0;
+        if (!available(sessionId)) {
+          res.status(409).json({ code: 'managed_runtime_identity_conflict' });
+          return;
+        }
+        if (writerGeneration === undefined) {
+          // A legacy client can replay its descriptor, but only a fenced
+          // writer can install after a fenced detach cleared the publisher.
+          if (
+            previous
+              ? JSON.stringify(previous) !== JSON.stringify(publisher)
+              : previousGeneration > 0
+          ) {
+            res.status(409).json({ code: 'managed_runtime_identity_conflict' });
+            return;
+          }
+        } else if (
+          writerGeneration !== undefined &&
+          writerGeneration < previousGeneration
+        ) {
+          // A same-or-newer writer generation replaces the publisher;
+          // an older one is refused. The retained watermark fences even a
+          // registration after a detach cleared the installed publisher.
+          res.status(409).json({ code: 'managed_runtime_identity_conflict' });
+          return;
+        }
+        this.sessions.set(sessionId, publisher);
+        const observedRuns: Record<string, number> = {};
+        if (writerGeneration !== undefined) {
+          this.sessionGenerations.set(sessionId, writerGeneration);
+        }
+        if (this.observation.enabled) {
+          for (const {
+            sessionId: runSession,
+            run,
+          } of this.workerRuns.values()) {
+            if (runSession === sessionId) {
+              observedRuns[run.executionCallId] = run.lastApplied;
+              if (writerGeneration !== undefined) {
+                run.attach(publisher, writerGeneration);
+              }
+            }
+          }
+        }
+        res.json({
+          ...PREFIX,
+          sessionId,
+          installed: true,
+          // Phase 3b: tells the Harness this worker owns the background
+          // capture and Monitor policy, so it bypasses its own loop.
+          ...(this.observation.enabled
+            ? { observation: true, observedRuns }
+            : {}),
+        });
+      },
+      handleManagedRuntimeJsonError,
+    );
+
+    app.post(
+      MANAGED_SHELL_PUBLISHER_DETACH_ROUTE.path,
+      managedRuntimeNoStore,
+      authorizeManagedRuntime(identity),
+      managedRuntimeJsonBody(
+        MANAGED_SHELL_PUBLISHER_DETACH_ROUTE.requestBodyLimitBytes,
+      ),
+      (req: Request, res: Response) => {
+        let sessionId: string;
+        let writerGeneration: number | undefined;
+        try {
+          const keys = Object.keys(req.body ?? {});
+          const body = publisherFields(
+            req.body,
+            keys.includes('writerGeneration')
+              ? [
+                  'protocolVersion',
+                  'toolResult',
+                  'sessionId',
+                  'writerGeneration',
+                ]
+              : ['protocolVersion', 'toolResult', 'sessionId'],
+          );
+          if (
+            body['protocolVersion'] !== 3 ||
+            body['toolResult'] !== MANAGED_TOOL_RESULT_PROTOCOL ||
+            typeof body['sessionId'] !== 'string' ||
+            !body['sessionId'] ||
+            body['sessionId'].length > 512
+          ) {
+            throw new Error('Invalid detach.');
+          }
+          sessionId = body['sessionId'];
+          if ('writerGeneration' in body) {
+            const gen = Number(body['writerGeneration']);
+            if (!Number.isSafeInteger(gen) || gen < 1) {
+              throw new Error('Invalid writer generation.');
+            }
+            writerGeneration = gen;
+          }
+        } catch {
+          res.status(400).json({ code: 'managed_runtime_attestation_invalid' });
+          return;
+        }
         if (
           !available(sessionId) ||
-          (previous && JSON.stringify(previous) !== JSON.stringify(publisher))
+          !this.detachSession(sessionId, writerGeneration)
         ) {
           res.status(409).json({ code: 'managed_runtime_identity_conflict' });
           return;
         }
-        this.sessions.set(sessionId, previous ?? publisher);
-        res.json({ ...PREFIX, sessionId, installed: true });
+        res.json({
+          ...PREFIX,
+          sessionId,
+          detached: true,
+        });
       },
       handleManagedRuntimeJsonError,
     );
+
+    app.post(
+      MANAGED_OBSERVATION_PULL_ROUTE.path,
+      managedRuntimeNoStore,
+      authorizeManagedRuntime(identity),
+      managedRuntimeJsonBody(
+        MANAGED_OBSERVATION_PULL_ROUTE.requestBodyLimitBytes,
+      ),
+      (req: Request, res: Response) => {
+        let executionCallId: string;
+        let afterSeq: number;
+        let ackThrough = 0;
+        let waitMs = 0;
+        let maxEntries = 64;
+        try {
+          const raw = publisherObject(req.body);
+          for (const key of Object.keys(raw)) {
+            if (
+              ![
+                'protocolVersion',
+                'toolResult',
+                'executionCallId',
+                'afterSeq',
+                'ackThrough',
+                'waitMs',
+                'maxEntries',
+              ].includes(key)
+            ) {
+              throw new Error('Unexpected observation pull field.');
+            }
+          }
+          if (
+            raw['protocolVersion'] !== 3 ||
+            raw['toolResult'] !== MANAGED_TOOL_RESULT_PROTOCOL ||
+            typeof raw['executionCallId'] !== 'string' ||
+            !raw['executionCallId'] ||
+            raw['executionCallId'].length > 512
+          ) {
+            throw new Error('Invalid executionCallId.');
+          }
+          executionCallId = raw['executionCallId'];
+          afterSeq = Number(raw['afterSeq']);
+          if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) {
+            throw new Error('Invalid afterSeq.');
+          }
+          if (raw['ackThrough'] !== undefined) {
+            ackThrough = Number(raw['ackThrough']);
+            if (!Number.isSafeInteger(ackThrough) || ackThrough < 0) {
+              throw new Error('Invalid ackThrough.');
+            }
+          }
+          if (raw['waitMs'] !== undefined) {
+            waitMs = Number(raw['waitMs']);
+            if (
+              !Number.isSafeInteger(waitMs) ||
+              waitMs < 0 ||
+              waitMs > 30_000
+            ) {
+              throw new Error('Invalid waitMs.');
+            }
+          }
+          if (raw['maxEntries'] !== undefined) {
+            maxEntries = Number(raw['maxEntries']);
+            if (
+              !Number.isSafeInteger(maxEntries) ||
+              maxEntries < 1 ||
+              maxEntries > 256
+            ) {
+              throw new Error('Invalid maxEntries.');
+            }
+          }
+        } catch {
+          res.status(400).json({ code: 'managed_runtime_attestation_invalid' });
+          return;
+        }
+        const workerRun = this.workerRuns.get(executionCallId);
+        if (!workerRun) {
+          res.json({
+            ...PREFIX,
+            executionCallId,
+            status: 'missing',
+            ackedThrough: 0,
+            closed: true,
+            entries: [],
+          });
+          return;
+        }
+        void workerRun.run
+          .pullForStage({ afterSeq, ackThrough, waitMs, maxEntries })
+          .then((batch) => {
+            res.json({
+              ...PREFIX,
+              executionCallId,
+              status: batch.status,
+              ackedThrough: batch.ackedThrough,
+              closed: batch.closed,
+              entries: batch.entries,
+            });
+          });
+      },
+      handleManagedRuntimeJsonError,
+    );
+  }
+
+  detachSession(sessionId: string, writerGeneration?: number): boolean {
+    const previousGeneration = this.sessionGenerations.get(sessionId) ?? 0;
+    if ((writerGeneration ?? 0) < previousGeneration) {
+      return false;
+    }
+    if (writerGeneration !== undefined) {
+      this.sessionGenerations.set(sessionId, writerGeneration);
+    }
+    this.sessions.delete(sessionId);
+    for (const { sessionId: runSession, run } of this.workerRuns.values()) {
+      if (runSession === sessionId) {
+        run.detach(writerGeneration);
+      }
+    }
+    return true;
   }
 
   async prepare(request: LocalShellCaptureRequest): Promise<{
     identity: ToolResultExpectedIdentity;
     sink: ManagedShellCaptureSink;
   }> {
+    const background =
+      (request.capture as { background?: boolean }).background === true;
+    if (
+      background &&
+      this.observation.enabled &&
+      this.observation.workspaceId !== undefined
+    ) {
+      return this.prepareWorkerOwned(request);
+    }
     const descriptor = this.sessions.get(request.reference.sessionId);
     if (!descriptor) throw new Error('Shell publisher is not registered.');
     const identity = publisherObject(
@@ -477,10 +767,107 @@ export class ManagedShellPublisherRegistry
     return { identity, sink };
   }
 
+  /** Phase 3b: the worker owns the background capture. Identity is computed
+   * locally exactly as the Harness admission computes it, so the applier's
+   * deterministic captureId check matches without a prepare round trip. */
+  private prepareWorkerOwned(request: LocalShellCaptureRequest): {
+    identity: ToolResultExpectedIdentity;
+    sink: ManagedShellCaptureSink;
+  } {
+    const { reference, capture } = request;
+    const sessionKey = {
+      tenantId: capture.tenantId,
+      workspaceId: this.observation.workspaceId!,
+      sessionId: capture.sessionId,
+    };
+    const captureId = createHash('sha256')
+      .update(
+        JSON.stringify([
+          sessionKey,
+          capture.executionCallId,
+          capture.bindingGeneration,
+        ]),
+      )
+      .digest('hex')
+      .slice(0, 32);
+    const identity: ToolResultExpectedIdentity = {
+      tenantId: capture.tenantId,
+      sessionId: capture.sessionId,
+      turnId: capture.turnId,
+      executionCallId: capture.executionCallId,
+      callId: reference.callId,
+      invocationDigest: reference.argsDigest,
+      bindingGeneration: capture.bindingGeneration,
+      captureId,
+      revision: 1,
+    };
+    const existing = this.workerRuns.get(capture.executionCallId);
+    if (existing) return { identity, sink: existing.sink };
+    const monitoring =
+      (capture as { monitoring?: boolean }).monitoring === true;
+    const run = new BackgroundDeliveryRun(
+      capture.executionCallId,
+      capture.bindingGeneration,
+      monitoring ? 'monitor_run' : 'child_run',
+    );
+    const sink = new WorkerBackgroundCaptureSink(identity, run);
+    this.workerRuns.set(capture.executionCallId, {
+      sessionId: reference.sessionId,
+      run,
+      sink,
+      accepted: false,
+    });
+    run.onDrained = () => this.retire(capture.executionCallId);
+    const descriptor = this.sessions.get(reference.sessionId);
+    const generation = this.sessionGenerations.get(reference.sessionId) ?? 0;
+    if (descriptor && generation > 0) run.attach(descriptor, generation);
+    return { identity, sink };
+  }
+
+  /**
+   * A finished run leaves once a consumer acknowledged its terminal entry
+   * and its exit took the receipt, so neither the worker heap nor the
+   * `observedRuns` a registration reports grows with past runs.
+   */
+  private retire(executionCallId: string): void {
+    const workerRun = this.workerRuns.get(executionCallId);
+    if (
+      !workerRun?.accepted ||
+      !workerRun.run.isClosedOrTerminal ||
+      workerRun.run.pendingCount > 0
+    ) {
+      return;
+    }
+    this.workerRuns.delete(executionCallId);
+    void workerRun.sink.close();
+  }
+
+  /**
+   * A watch that never started produces no terminal to acknowledge, so the
+   * accepted-run retire path can never fire for it: drop the prepared run
+   * and close its sink (which disarms the Monitor policy) at the refusal.
+   */
+  discardWorkerRun(executionCallId: string): void {
+    const workerRun = this.workerRuns.get(executionCallId);
+    if (!workerRun || workerRun.accepted) return;
+    this.workerRuns.delete(executionCallId);
+    void workerRun.sink.close();
+  }
+
   async accept(
     identity: ToolResultExpectedIdentity,
     envelope: ToolResultEnvelope,
   ): Promise<ToolResultAcknowledgement> {
+    const workerRun = this.workerRuns.get(identity.executionCallId);
+    if (workerRun) {
+      const receipt = await workerRun.run.terminalAcknowledgement();
+      workerRun.accepted = true;
+      this.retire(identity.executionCallId);
+      return {
+        ...receipt,
+        manifest: receipt.manifest ?? envelope.capture?.manifest ?? null,
+      };
+    }
     const execution = this.executions.get(identity.executionCallId);
     if (!execution) throw new Error('Shell capture was not prepared.');
     const blocked = (): ToolResultAcknowledgement => ({

@@ -5,25 +5,38 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 
 import java.io.IOException;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.AccessMode;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 public final class WorkspaceRuntimeResolver {
     private final SessionQueryStore sessions;
     private final WorkspaceExecutionStore authority;
     private final SshWorkspaceService ssh;
-    private final com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalRegistrations;
+    private final ExternalStorageRegistry externalRegistrations;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
     private final String boundSessionIsolationClass;
     private final boolean local;
@@ -33,10 +46,10 @@ public final class WorkspaceRuntimeResolver {
     // Optional: when wired, the capability hint also requires the Session's
     // recorded binding to already carry the terminal digest, so it never
     // advertises a terminal the relay's admission would refuse.
-    private volatile com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindingRepository;
+    private volatile RuntimeBindingRepository bindingRepository;
 
     public void setBindingRepository(
-            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindingRepository) {
+            RuntimeBindingRepository bindingRepository) {
         this.bindingRepository = bindingRepository;
     }
 
@@ -52,7 +65,7 @@ public final class WorkspaceRuntimeResolver {
 
     public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties, SshWorkspaceService ssh,
-            com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalRegistrations) {
+            ExternalStorageRegistry externalRegistrations) {
         this.ssh = ssh;
         this.externalRegistrations = externalRegistrations;
         this.managedExtensions = properties.getManagedExtensions();
@@ -67,7 +80,7 @@ public final class WorkspaceRuntimeResolver {
         this.sessions = sessions;
         this.authority = authority;
         var broker = properties.getRuntimeBroker();
-        this.local = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner());
+        this.local = RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner());
         this.boundSessionIsolationClass = broker.getBoundSessionIsolationClass();
         if (WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
                         properties.getHarness().getCapabilityDigest())
@@ -80,7 +93,7 @@ public final class WorkspaceRuntimeResolver {
             throw new IllegalStateException("Workspace execution profile is reserved");
         }
         if (!broker.getWorkspaceMounts().isEmpty()
-                && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner())
+                && (!RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner())
                         || !"session".equals(boundSessionIsolationClass)
                                 && !"workspace".equals(boundSessionIsolationClass))) {
             throw new IllegalStateException("Workspace execution requires a local-process Broker"
@@ -114,15 +127,15 @@ public final class WorkspaceRuntimeResolver {
         return resolve(sessionId, null);
     }
 
-    public Resolved resolve(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle) {
+    public Resolved resolve(String sessionId, RuntimeLifecycleAuthority lifecycle) {
         return resolve(sessionId, lifecycle, false);
     }
 
-    public Resolved resolveHook(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle) {
+    public Resolved resolveHook(String sessionId, RuntimeLifecycleAuthority lifecycle) {
         return resolve(sessionId, lifecycle, true);
     }
 
-    private Resolved resolve(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle, boolean hook) {
+    private Resolved resolve(String sessionId, RuntimeLifecycleAuthority lifecycle, boolean hook) {
         SessionRecord session = sessions.findSessionById(sessionId)
                 .orElseThrow(WorkspaceExecutionStore::unavailable);
         if (authority.isExternal(session.workspace())) {
@@ -170,7 +183,7 @@ public final class WorkspaceRuntimeResolver {
             throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
-        String digest = extensionDigest(System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac") ? "darwin" : System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT));
+        String digest = extensionDigest(System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac") ? "darwin" : System.getProperty("os.name", "").toLowerCase(Locale.ROOT));
         if (webTerminal && WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(digest)) {
             digest = WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST;
         }
@@ -200,7 +213,7 @@ public final class WorkspaceRuntimeResolver {
             if (mount(binding) == null) {
                 return false;
             }
-        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException error) {
+        } catch (RuntimeBrokerException error) {
             // A capability hint must never turn the session list into a 409:
             // a non-local or unreadable placement is simply not terminal-capable.
             return false;
@@ -218,7 +231,7 @@ public final class WorkspaceRuntimeResolver {
             // repository caps a page at 100 rows, so a single page would hide
             // the newest READY binding of a long-lived Session and let the
             // hint drift from admission in both directions.
-            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord latest = null;
+            RuntimeBindingRecord latest = null;
             String after = null;
             for (;;) {
                 var page = repository.findByHarnessSession(
@@ -228,7 +241,7 @@ public final class WorkspaceRuntimeResolver {
                 }
                 for (var recorded : page) {
                     if (recorded.getState()
-                            == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY
+                            == RuntimeBindingRecord.State.READY
                             && (latest == null
                                     || recorded.getBindingId().compareTo(latest.getBindingId()) > 0)) {
                         latest = recorded;
@@ -268,15 +281,11 @@ public final class WorkspaceRuntimeResolver {
                     ? WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST
                     : WorkspaceExecutionProfile.CAPABILITY_DIGEST;
         }
-        if ("developer-process-group".equals(managedExtensions.getMode())
-                && java.util.Set.of("linux", "darwin").contains(platform)) {
-            return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST;
-        }
-        if ("linux".equals(platform) && "linux-cgroup".equals(managedExtensions.getMode())) {
-            return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST;
+        if ("linux".equals(platform)) {
+            return ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST;
         }
         if ("darwin".equals(platform) && "developer-process-group".equals(managedExtensions.getMode())) {
-            return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST;
+            return ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST;
         }
         throw new IllegalStateException("Native extension execution requires an explicit supported platform mode");
     }
@@ -288,7 +297,7 @@ public final class WorkspaceRuntimeResolver {
         // Existing ordinary leases retain their attested profile across a measurement
         // rollout and across the web-terminal opt-in, which substitutes the terminal
         // digest on the same local-mount measured path.
-        var ordinary = java.util.Set.of(WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+        var ordinary = Set.of(WorkspaceExecutionProfile.CAPABILITY_DIGEST,
                 WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST,
                 WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST);
         return ordinary.contains(resolved.getCapabilityDigest())
@@ -333,8 +342,7 @@ public final class WorkspaceRuntimeResolver {
                     WorkspaceRelativePath.normalize(targetCwdRelative),
                     binding.getContextConfigRef(),
                     binding.getContextRevision()));
-        } catch (com.alibaba.qwen.code.runtimebroker.managedworkspace
-                .WorkspaceException error) {
+        } catch (WorkspaceException error) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
@@ -344,7 +352,7 @@ public final class WorkspaceRuntimeResolver {
      * administrator mount of the binding's storage, held to the same
      * continuity check as an acquisition.
      */
-    public java.nio.file.Path storageRoot(ContextBinding binding) {
+    public Path storageRoot(ContextBinding binding) {
         Mount mount = mount(binding);
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
@@ -447,7 +455,7 @@ public final class WorkspaceRuntimeResolver {
             }
         // The mount root itself being gone is a permanent configuration
         // fact, not a momentary blip — only a genuine I/O hiccup retries.
-        } catch (java.nio.file.NoSuchFileException error) {
+        } catch (NoSuchFileException error) {
             throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
             throw WorkspaceExecutionStore.unavailableTransient(error);
@@ -501,10 +509,10 @@ public final class WorkspaceRuntimeResolver {
                 throw WorkspaceExecutionStore.unavailable();
             }
             directory.getFileSystem().provider().checkAccess(directory,
-                    java.nio.file.AccessMode.READ,
-                    java.nio.file.AccessMode.EXECUTE);
-        } catch (java.nio.file.NoSuchFileException
-                | java.nio.file.AccessDeniedException | SecurityException
+                    AccessMode.READ,
+                    AccessMode.EXECUTE);
+        } catch (NoSuchFileException
+                | AccessDeniedException | SecurityException
                 | IllegalArgumentException error) {
             throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {

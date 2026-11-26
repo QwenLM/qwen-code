@@ -19,7 +19,6 @@ import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedUserMessagePolicy;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
@@ -51,7 +50,7 @@ public class ManagedMemorySessionPrivacyTest {
     private JdbcManagedWorkspaceRegistry workspaces;
     private ManagedAgentService service;
     private HarnessConnector harness;
-    private final String tenant = "memory-privacy-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
 
     protected DataSource dataSource() {
         JdbcDataSource source = new JdbcDataSource();
@@ -205,7 +204,7 @@ public class ManagedMemorySessionPrivacyTest {
             after = last.sessionId();
         }
         assertThat(visible).containsExactlyInAnyOrder(personal, shared).doesNotContain(hidden);
-        assertThat(store.listSessions(tenant + "other", "owner", null, null, 10).sessions()).isEmpty();
+        assertThat(store.listSessions(tenant.substring(0, 31) + "other", "owner", null, null, 10).sessions()).isEmpty();
     }
 
     @Test
@@ -213,7 +212,7 @@ public class ManagedMemorySessionPrivacyTest {
         String memory = memory("owner");
         String parent = workspaceSession("owner", "workspace-a", memory);
         jdbc.update("UPDATE ma_session SET creator_actor_key=? WHERE tenant_id=? AND session_id=?",
-                actorKey("other"), tenant, parent);
+                "other", tenant, parent);
         String child = transaction.execute(status -> store.insertChildSessionCommand(tenant, parent,
                 "child", "child-digest", "child", List.of(), null,
                 new StoreModels.SessionLineage(parent, parent, "run-child", 1))).sessionId();
@@ -270,9 +269,9 @@ public class ManagedMemorySessionPrivacyTest {
 
     private String memory(String actor) {
         String id = "memstore_" + UUID.randomUUID();
-        jdbc.update("INSERT INTO ma_memory_store (owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create)"
-                        + " VALUES (?,?,?,?,?,1)", ManagedSchemaKeys.key(tenant, actor),
-                tenant, id, actorKey(actor), "memory-namespace-" + UUID.randomUUID());
+        jdbc.update("INSERT INTO ma_memory_store (tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create)"
+                        + " VALUES (?,?,?,?,1)",
+                tenant, id, actor, "memory-namespace-" + UUID.randomUUID());
         return id;
     }
 

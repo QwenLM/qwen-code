@@ -476,7 +476,7 @@ public final class ApiModels {
     public record WebShellChangeModelRequest(@Size(max = 128) String requestId,
             @NotBlank @Size(max = 128) String sessionId,
             @NotBlank @Size(max = 128) String idempotencyKey,
-            @NotBlank @Size(max = 512) String modelId,
+            @NotBlank @Size(max = 128) String modelId,
             @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision) {}
 
     public record WebShellModelChangeResult(String sessionId,

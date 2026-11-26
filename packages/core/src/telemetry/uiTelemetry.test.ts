@@ -6,11 +6,22 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  getRequestExecutionIds,
+  getSuccessfulRequestExecutionIds,
+  MAX_TRACKED_EXECUTION_IDS,
   UiTelemetryService,
   MAIN_SOURCE,
   MAX_FAILURE_SAMPLES,
   MAX_TIMING_SAMPLES,
 } from './uiTelemetry.js';
+import {
+  buildUsageDayTable,
+  localDateKey,
+} from '../services/usage-dashboard-service.js';
+import {
+  dedupBySessionId,
+  metricsToRunUsageRecord,
+} from '../services/usageHistoryService.js';
 import { ToolCallDecision } from './tool-call-decision.js';
 import type { ApiErrorEvent, ApiResponseEvent } from './types.js';
 import { ToolCallEvent } from './types.js';
@@ -189,9 +200,17 @@ const skillTotals = (
 const mainOnly = (
   [totalRequests, totalErrors, totalLatencyMs]: number[],
   [prompt, candidates, total, cached, thoughts]: number[],
+  errorLatencyMs?: number,
 ) => {
   const aggregate = {
-    api: { totalRequests, totalErrors, totalLatencyMs },
+    api: {
+      totalRequests,
+      totalErrors,
+      totalLatencyMs,
+      ...(errorLatencyMs === undefined
+        ? {}
+        : { totalErrorLatencyMs: errorLatencyMs }),
+    },
     tokens: { prompt, candidates, total, cached, thoughts },
   };
   return { ...aggregate, bySource: { [MAIN_SOURCE]: aggregate } };
@@ -705,7 +724,7 @@ describe('UiTelemetryService', () => {
       service.addEvent(apiError('gemini-2.5-pro', 300, 'Something went wrong'));
 
       expect(service.getMetrics().models['gemini-2.5-pro']).toEqual(
-        mainOnly([1, 1, 300], [0, 0, 0, 0, 0]),
+        mainOnly([1, 1, 300], [0, 0, 0, 0, 0], 300),
       );
     });
 
@@ -714,7 +733,7 @@ describe('UiTelemetryService', () => {
       service.addEvent(apiError('gemini-2.5-pro', 300, 'Something went wrong'));
 
       expect(service.getMetrics().models['gemini-2.5-pro']).toEqual(
-        mainOnly([2, 1, 800], [10, 20, 30, 5, 2]),
+        mainOnly([2, 1, 800], [10, 20, 30, 5, 2], 300),
       );
     });
   });
@@ -818,6 +837,43 @@ describe('UiTelemetryService', () => {
       expect(Object.getPrototypeOf(metrics.sourceMeta)).toBeNull();
       expect(Object.getPrototypeOf(metrics.statsModels)).toBeNull();
     });
+
+    it.each(['constructor', 'toString', 'hasOwnProperty', '__proto__'])(
+      'preserves model %s after cloning and replay restore',
+      (modelName) => {
+        const service = new UiTelemetryService();
+        const event = apiResponse(modelName, 10, [100, 20, 120, 0, 0]);
+        service.addEvent(event, 'session-a');
+        const snapshot = service.snapshotForReplay('session-a');
+        service.addEvent(event, 'session-a');
+
+        expect(
+          service.getMetricsForSession('session-a').models[modelName],
+        ).toMatchObject({
+          api: { totalRequests: 2 },
+          tokens: { prompt: 200, candidates: 40, total: 240 },
+        });
+        expect(Object.getPrototypeOf(snapshot.metrics.models)).toBeNull();
+
+        service.restoreFromReplaySnapshot(snapshot);
+        service.addEvent(event, 'session-a');
+
+        expect(
+          service.getMetricsForSession('session-a').models[modelName],
+        ).toMatchObject({
+          api: { totalRequests: 2 },
+          tokens: { prompt: 200, candidates: 40, total: 240 },
+        });
+        expect(
+          Object.getPrototypeOf(
+            service.getMetricsForSession('session-a').models,
+          ),
+        ).toBeNull();
+        expect(service.getLiveMetrics().models[modelName].tokens.total).toBe(
+          240,
+        );
+      },
+    );
 
     it('restores legacy invocation ids from session-scoped prompt ids', () => {
       const addResponse = (
@@ -1780,4 +1836,426 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
       expect(Object.hasOwn(saved['main'].bySource, source)).toBe(false);
     },
   );
+});
+
+describe('UiTelemetryService live usage accounting', () => {
+  let service: UiTelemetryService;
+  const requests = (m: ReturnType<UiTelemetryService['getMetrics']>) =>
+    Object.values(m.models).reduce((sum, x) => sum + x.api.totalRequests, 0);
+  const prompt = (m: ReturnType<UiTelemetryService['getMetrics']>) =>
+    Object.values(m.models).reduce((sum, x) => sum + x.tokens.prompt, 0);
+
+  beforeEach(() => {
+    service = new UiTelemetryService();
+  });
+
+  it('keeps replayed history in the display aggregate but out of live usage', () => {
+    service.addReplayedEvent(apiResponse('m', 10, [100, 10, 110, 0, 0]), 's');
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
+
+    expect(requests(service.getMetrics())).toBe(2);
+    expect(prompt(service.getMetrics())).toBe(105);
+    expect(requests(service.getLiveMetrics())).toBe(1);
+    expect(prompt(service.getLiveMetrics())).toBe(5);
+    // The session bucket still carries the whole conversation for /stats.
+    expect(requests(service.getMetricsForSession('s'))).toBe(2);
+  });
+
+  it('matches the display aggregate field-for-field when nothing was replayed', () => {
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
+    service.addEvent(apiError('m', 3, 'boom'), 's');
+    service.addEvent(toolEvent(fakeToolEvent('read_file', true, 100)), 's');
+    // Skills reach the metrics through their own entry point, not #record, and
+    // are never replayed — they must land in the persisted counters too.
+    service.recordSkillInvocation('review', true, 's');
+
+    expect(service.getLiveMetrics()).toEqual(service.getMetrics());
+    expect(service.getLiveMetrics().skills?.totalCalls).toBe(1);
+    expect(service.getLiveMetrics().skills?.byName['review']).toEqual({
+      count: 1,
+      success: 1,
+      fail: 0,
+    });
+  });
+
+  it('tracks live execution identities through replay snapshots and reset', () => {
+    service.addEvent(
+      apiResponse('m', 10, [5, 2, 7, 0, 0], { execution_id: 'live-call' }),
+      's',
+    );
+    service.addEvent(
+      apiError('m', 20, 'failed', { execution_id: 'failed-call' }),
+      's',
+    );
+    service.addReplayedEvent(
+      apiResponse('m', 10, [5, 2, 7, 0, 0], { execution_id: 'old-call' }),
+      's',
+    );
+    const snapshot = service.snapshotForReplay('other');
+
+    expect(getRequestExecutionIds(snapshot.liveMetrics)).toEqual(
+      new Set(['live-call', 'failed-call']),
+    );
+    expect(getSuccessfulRequestExecutionIds(snapshot.liveMetrics)).toEqual(
+      new Set(['live-call']),
+    );
+    expect(service.getLiveMetrics()).not.toHaveProperty('requestExecutionIds');
+    expect(
+      getRequestExecutionIds(service.getLiveMetrics())?.has('old-call'),
+    ).toBe(false);
+    service.addEvent(
+      apiResponse('m', 10, [0, 0, 0, 0, 0], {
+        execution_id: 'not-in-snapshot',
+      }),
+      's',
+    );
+    expect(
+      getRequestExecutionIds(snapshot.liveMetrics)?.has('not-in-snapshot'),
+    ).toBe(false);
+    service.resetLiveMetrics();
+    expect(getRequestExecutionIds(service.getLiveMetrics())?.size ?? 0).toBe(0);
+    expect(
+      getSuccessfulRequestExecutionIds(service.getLiveMetrics())?.size ?? 0,
+    ).toBe(0);
+
+    service.restoreFromReplaySnapshot(snapshot);
+    expect(getRequestExecutionIds(service.getLiveMetrics())).toEqual(
+      new Set(['live-call', 'failed-call']),
+    );
+    expect(getSuccessfulRequestExecutionIds(service.getLiveMetrics())).toEqual(
+      new Set(['live-call']),
+    );
+  });
+
+  it('changes the restored conversation clock without moving the run clock', () => {
+    const runStart = service.getRunStartTime().getTime();
+    service.setSessionStartTime(new Date('2019-01-02T03:04:05Z'));
+
+    expect(service.getSessionStartTime()).toEqual(
+      new Date('2019-01-02T03:04:05Z'),
+    );
+    expect(service.getRunStartTime().getTime()).toBe(runStart);
+  });
+
+  it('preserves a provider-supplied "__proto__" model key in a persisted run', () => {
+    const service = new UiTelemetryService();
+    service.addEvent(apiResponse('__proto__', 10, [100, 20, 120, 0, 0]), 's');
+
+    const record = metricsToRunUsageRecord(
+      's',
+      '/project',
+      1000,
+      2000,
+      service.getMetricsForSession('s'),
+    );
+
+    expect(
+      Object.prototype.hasOwnProperty.call(record.models, '__proto__'),
+    ).toBe(true);
+    expect(record.models['__proto__']).toMatchObject({
+      requests: 1,
+      totalTokens: 120,
+    });
+  });
+
+  it('keeps two independent failed runs by their execution identities', () => {
+    const firstService = new UiTelemetryService();
+    firstService.addEvent(
+      apiError('gemini', 40, 'limited', { execution_id: 'failure-a' }),
+    );
+    const secondService = new UiTelemetryService();
+    secondService.addEvent(
+      apiError('gemini', 60, 'limited', { execution_id: 'failure-b' }),
+    );
+    const first = metricsToRunUsageRecord(
+      'failed-run',
+      '/project',
+      1000,
+      2000,
+      firstService.getLiveMetrics(),
+    );
+    const second = metricsToRunUsageRecord(
+      'failed-run',
+      '/project',
+      1000,
+      2000,
+      secondService.getLiveMetrics(),
+    );
+
+    const records = dedupBySessionId([first, second]);
+
+    expect(first.requestExecutionIds).toEqual(['failure-a']);
+    expect(second.requestExecutionIds).toEqual(['failure-b']);
+    expect(records).toHaveLength(2);
+    expect(
+      records.reduce(
+        (sum, record) => sum + record.models['gemini']!.errorLatencyMs!,
+        0,
+      ),
+    ).toBe(100);
+  });
+
+  it('does not replace a failed run with a transcript replay missing that failure', () => {
+    const success = apiResponse('gemini', 50, [50, 0, 50, 0, 0], {
+      execution_id: 'shared-response',
+    });
+    service.addEvent(success);
+    service.addEvent(
+      apiError('gemini', 100, 'failed', { execution_id: 'shared-failure' }),
+    );
+    const live = metricsToRunUsageRecord(
+      'shared-run',
+      '/project',
+      1000,
+      2000,
+      service.getLiveMetrics(),
+    );
+    const partial = new UiTelemetryService();
+    partial.addReplayedEvent(success, 'shared-run');
+    const reconstructed = {
+      ...metricsToRunUsageRecord(
+        'shared-run',
+        '/project',
+        1000,
+        2000,
+        partial.getMetrics(),
+      ),
+      runScoped: false,
+      transcriptRebuild: true,
+    };
+    const reduced = dedupBySessionId([reconstructed, live]);
+    const day = localDateKey(live.timestamp);
+    const ledger = new Map([
+      [
+        day,
+        new Map([
+          [
+            'gemini',
+            {
+              requests: 1,
+              inputTokens: 50,
+              outputTokens: 0,
+              cachedTokens: 0,
+              thoughtsTokens: 0,
+              totalTokens: 50,
+              apiDurationMs: 50,
+            },
+          ],
+        ]),
+      ],
+    ]);
+
+    const table = buildUsageDayTable(reduced, ledger);
+
+    expect(reduced).toHaveLength(1);
+    expect(table.get(day)?.get('gemini')).toMatchObject({
+      requests: 2,
+      apiDurationMs: 150,
+      totalTokens: 50,
+    });
+  });
+
+  it('does not discard known tools and files when an identical API replay is incomplete', () => {
+    const response = apiResponse('gemini', 50, [50, 0, 50, 0, 0], {
+      execution_id: 'same-api-call',
+    });
+    service.addEvent(response);
+    const tool = new ToolCallEvent(createFakeCompletedToolCall('edit', true));
+    tool.metadata = {
+      model_added_lines: 7,
+      model_removed_lines: 3,
+    };
+    service.addEvent(toolEvent(tool));
+    const live = metricsToRunUsageRecord(
+      'tool-and-file-run',
+      '/project',
+      1000,
+      2000,
+      service.getLiveMetrics(),
+    );
+    const partial = new UiTelemetryService();
+    partial.addReplayedEvent(response, 'tool-and-file-run');
+    const reconstructed = {
+      ...metricsToRunUsageRecord(
+        'tool-and-file-run',
+        '/project',
+        1000,
+        2000,
+        partial.getMetrics(),
+      ),
+      runScoped: false,
+      transcriptRebuild: true,
+    };
+
+    const records = dedupBySessionId([reconstructed, live]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.tools.totalCalls).toBe(1);
+    expect(records[0]!.files.linesAdded).toBe(7);
+    expect(records[0]!.files.linesRemoved).toBe(3);
+  });
+
+  it('clears live usage on reset', () => {
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
+    service.reset();
+
+    expect(requests(service.getLiveMetrics())).toBe(0);
+    expect(requests(service.getMetrics())).toBe(0);
+  });
+
+  it('tags a restored clock with its owner and preserves legacy updates', () => {
+    const owners: Array<string | undefined> = [];
+    const capture = (event: { clockSessionId?: string }) => {
+      owners.push(event.clockSessionId);
+    };
+    service.on('update', capture);
+
+    service.setSessionStartTime(
+      new Date('2019-01-02T03:04:05.000Z'),
+      'target-session',
+    );
+    service.setSessionStartTime(new Date('2019-01-03T03:04:05.000Z'));
+
+    service.off('update', capture);
+    expect(owners).toEqual(['target-session', undefined]);
+    expect(service.getSessionStartTime()).toEqual(
+      new Date('2019-01-03T03:04:05.000Z'),
+    );
+  });
+
+  it('notifies a new clock owner at the same timestamp', () => {
+    const owners: Array<string | undefined> = [];
+    const capture = (event: { clockSessionId?: string }) => {
+      owners.push(event.clockSessionId);
+    };
+    service.on('update', capture);
+    const start = new Date('2020-01-01T00:00:00.000Z');
+    try {
+      service.setSessionStartTime(start, 'session-a');
+      service.setSessionStartTime(new Date(start), 'session-b');
+      expect(owners).toEqual(['session-a', 'session-b']);
+    } finally {
+      service.off('update', capture);
+    }
+  });
+
+  it('resets a completed run and its start time without clearing the display', () => {
+    service.addReplayedEvent(apiResponse('m', 10, [100, 10, 110, 0, 0]), 'b');
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 'b');
+    const previousStart = service.getSessionStartTime().getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(previousStart + 60_000);
+    try {
+      service.resetLiveMetrics();
+
+      expect(requests(service.getLiveMetrics())).toBe(0);
+      expect(requests(service.getMetrics())).toBe(2);
+      expect(prompt(service.getMetrics())).toBe(105);
+      expect(requests(service.getMetricsForSession('b'))).toBe(2);
+      expect(service.getSessionStartTime().getTime()).toBe(previousStart);
+      expect(service.getRunStartTime().getTime()).toBe(previousStart + 60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    vi.useFakeTimers();
+    vi.setSystemTime(previousStart + 120_000);
+    try {
+      service.reset();
+      expect(service.getSessionStartTime().getTime()).toBe(
+        previousStart + 120_000,
+      );
+      expect(service.getRunStartTime().getTime()).toBe(previousStart + 120_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores live usage when an abandoned swap is undone', () => {
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 'a');
+    const snapshot = service.snapshotForReplay('b', 'a');
+    vi.useFakeTimers();
+    vi.advanceTimersByTime(60_000);
+    service.resetLiveMetrics();
+    service.setSessionStartTime(
+      new Date(snapshot.sessionStartTime.getTime() + 60_000),
+    );
+    try {
+      // The abandoned swap replays history and accrues a live turn of its own.
+      service.addReplayedEvent(apiResponse('m', 10, [900, 9, 909, 0, 0]), 'b');
+      service.addEvent(apiResponse('m', 10, [7, 1, 8, 0, 0]), 'b');
+      expect(prompt(service.getLiveMetrics())).toBe(7);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(prompt(service.getLiveMetrics())).toBe(5);
+      expect(prompt(service.getMetrics())).toBe(5);
+      expect(service.getRunStartTime()).toEqual(snapshot.runStartTime);
+      expect(service.getRunStartTime()).not.toBe(snapshot.runStartTime);
+      expect(service.getSessionStartTime()).toEqual(snapshot.sessionStartTime);
+      expect(service.getSessionStartTime()).not.toBe(snapshot.sessionStartTime);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps tracked execution id sets at MAX_TRACKED_EXECUTION_IDS and preserves overflow across replay snapshots', () => {
+    for (let i = 0; i < MAX_TRACKED_EXECUTION_IDS; i++) {
+      service.addEvent(
+        apiResponse('m', 1, [1, 1, 2, 0, 0], { execution_id: `exec-${i}` }),
+        'long-session',
+      );
+    }
+    // Re-recording an already-tracked id does not trigger overflow.
+    service.addEvent(
+      apiResponse('m', 1, [1, 1, 2, 0, 0], { execution_id: 'exec-0' }),
+      'long-session',
+    );
+    expect(getRequestExecutionIds(service.getLiveMetrics())?.size).toBe(
+      MAX_TRACKED_EXECUTION_IDS,
+    );
+    expect(
+      getSuccessfulRequestExecutionIds(service.getLiveMetrics())?.size,
+    ).toBe(MAX_TRACKED_EXECUTION_IDS);
+
+    // One additional distinct id overflows and drops both sets cleanly.
+    service.addEvent(
+      apiResponse('m', 1, [1, 1, 2, 0, 0], { execution_id: 'exec-overflow' }),
+      'long-session',
+    );
+    expect(getRequestExecutionIds(service.getLiveMetrics())).toBeUndefined();
+    expect(
+      getSuccessfulRequestExecutionIds(service.getLiveMetrics()),
+    ).toBeUndefined();
+    expect(getRequestExecutionIds(service.getMetrics())).toBeUndefined();
+    expect(
+      getRequestExecutionIds(service.getMetricsForSession('long-session')),
+    ).toBeUndefined();
+
+    // Snapshot/restore preserves overflowed state so clones never resurrect a partial set.
+    const snapshot = service.snapshotForReplay('other', 'long-session');
+    service.restoreFromReplaySnapshot(snapshot);
+    service.addEvent(
+      apiResponse('m', 1, [1, 1, 2, 0, 0], {
+        execution_id: 'exec-after-restore',
+      }),
+      'long-session',
+    );
+    expect(getRequestExecutionIds(service.getLiveMetrics())).toBeUndefined();
+    expect(
+      getSuccessfulRequestExecutionIds(service.getLiveMetrics()),
+    ).toBeUndefined();
+
+    // Resetting live metrics starts a fresh bounded bucket.
+    service.resetLiveMetrics();
+    service.addEvent(
+      apiResponse('m', 1, [1, 1, 2, 0, 0], { execution_id: 'exec-fresh' }),
+      'long-session',
+    );
+    expect(getRequestExecutionIds(service.getLiveMetrics())).toEqual(
+      new Set(['exec-fresh']),
+    );
+    expect(getSuccessfulRequestExecutionIds(service.getLiveMetrics())).toEqual(
+      new Set(['exec-fresh']),
+    );
+  });
 });

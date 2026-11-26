@@ -156,14 +156,14 @@ class ManagedLoopSkillTest {
         // Definition owns a loop: the bundled caller import is dropped, no rival variant.
         var merged = new java.util.ArrayList<>(java.util.List.of(defLoop));
         var injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(bundledCallerLoop()),
-                WorkspaceToolProfiles.FILES_V4, true, List.of());
+                merged.size(), WorkspaceToolProfiles.FILES_V4, true, List.of());
         assertThat(injected).isNull();
         assertThat(merged).extracting(s -> s.get("name")).containsExactly("loop");
         assertThat((String) merged.get(0).get("body")).isEqualTo("DEFINITION_LOOP");
         // No definition loop: the bundled caller import is replaced by the server variant.
         var merged2 = new java.util.ArrayList<Map<String, Object>>();
         var injected2 = ManagedLoopSkill.mergeInto(merged2, java.util.List.of(bundledCallerLoop()),
-                WorkspaceToolProfiles.FILES_V4, true, List.of());
+                merged2.size(), WorkspaceToolProfiles.FILES_V4, true, List.of());
         assertThat(injected2).isNotNull();
         assertThat(merged2).hasSize(1);
         assertThat((String) merged2.get(0).get("body")).contains("CronCreate");
@@ -175,14 +175,14 @@ class ManagedLoopSkillTest {
         // Creator-bearing: the user's loop is kept and no server variant is injected.
         var merged = new java.util.ArrayList<Map<String, Object>>();
         var injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(userLoop),
-                WorkspaceToolProfiles.FILES_V4, true, List.of());
+                merged.size(), WorkspaceToolProfiles.FILES_V4, true, List.of());
         assertThat(injected).isNull();
         assertThat(merged).extracting(s -> s.get("name")).containsExactly("loop");
         assertThat((String) merged.get(0).get("body")).isEqualTo("MY_CUSTOM_LOOP");
         // Creator-less: only the bundled import is dropped; a user-authored loop stays.
         var merged2 = new java.util.ArrayList<Map<String, Object>>();
         var injected2 = ManagedLoopSkill.mergeInto(merged2, java.util.List.of(userLoop),
-                WorkspaceToolProfiles.FILES, true, List.of());
+                merged2.size(), WorkspaceToolProfiles.FILES, true, List.of());
         assertThat(injected2).isNull();
         assertThat((String) merged2.get(0).get("body")).isEqualTo("MY_CUSTOM_LOOP");
     }
@@ -197,7 +197,7 @@ class ManagedLoopSkillTest {
                 "body", ((String) bundledCallerLoop().get("body")).trim());
         var merged = new java.util.ArrayList<Map<String, Object>>();
         var injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(trimmed),
-                WorkspaceToolProfiles.FILES_V4, true, List.of());
+                merged.size(), WorkspaceToolProfiles.FILES_V4, true, List.of());
         assertThat(injected).isNotNull();
         assertThat((String) merged.get(0).get("body")).contains("CronCreate");
     }
@@ -210,13 +210,15 @@ class ManagedLoopSkillTest {
         var userLoop = Map.<String, Object>of("name", "loop", "description", "mine", "body", "MY_CUSTOM_LOOP");
         var merged = new java.util.ArrayList<Map<String, Object>>();
         var injected = ManagedLoopSkill.mergeInto(merged,
-                java.util.List.of(bundledCallerLoop(), userLoop), WorkspaceToolProfiles.FILES_V4, true, List.of());
+                java.util.List.of(bundledCallerLoop(), userLoop), merged.size(), WorkspaceToolProfiles.FILES_V4,
+                true, List.of());
         assertThat(injected).isNull();
         assertThat(merged).extracting(s -> s.get("body")).contains("MY_CUSTOM_LOOP");
         // Order-independent: the user-authored loop survives regardless of position.
         var merged2 = new java.util.ArrayList<Map<String, Object>>();
         var injected2 = ManagedLoopSkill.mergeInto(merged2,
-                java.util.List.of(userLoop, bundledCallerLoop()), WorkspaceToolProfiles.FILES_V4, true, List.of());
+                java.util.List.of(userLoop, bundledCallerLoop()), merged2.size(), WorkspaceToolProfiles.FILES_V4,
+                true, List.of());
         assertThat(injected2).isNull();
         assertThat(merged2).extracting(s -> s.get("body")).contains("MY_CUSTOM_LOOP");
     }
@@ -242,8 +244,8 @@ class ManagedLoopSkillTest {
         // and the catalog validation refuses the whole creation.
         var callerSkill = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
         var merged = new ArrayList<>(List.of(callerSkill));
-        var injected = ManagedLoopSkill.mergeInto(merged, List.of(callerSkill),
-                WorkspaceToolProfiles.EXTERNAL_FILES, true, List.of());
+        var injected = ManagedLoopSkill.mergeInto(merged, List.of(),
+                0, WorkspaceToolProfiles.EXTERNAL_FILES, true, List.of());
         assertThat(injected).isNull();
         assertThat(merged).containsExactly(callerSkill);
         assertThat(AgentDefinitionExtensions.sessionSkills(merged)).hasSize(1);
@@ -255,7 +257,7 @@ class ManagedLoopSkillTest {
         callerLoop.put("model_invocable", false);
         var merged = new java.util.ArrayList<Map<String, Object>>();
         var injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(callerLoop),
-                WorkspaceToolProfiles.FILES_V4, true, List.of());
+                merged.size(), WorkspaceToolProfiles.FILES_V4, true, List.of());
         assertThat(injected).isNotNull();
         assertThat(injected).hasSize(1);
         assertThat(injected.get(0).get("model_invocable")).isEqualTo(false);
@@ -269,7 +271,7 @@ class ManagedLoopSkillTest {
             caller.add(Map.of("name", "s" + i, "description", "d", "body", "b"));
         }
         var merged = new java.util.ArrayList<Map<String, Object>>();
-        var injected = ManagedLoopSkill.mergeInto(merged, caller, WorkspaceToolProfiles.FILES_V4, true, List.of());
+        var injected = ManagedLoopSkill.mergeInto(merged, caller, merged.size(), WorkspaceToolProfiles.FILES_V4, true, List.of());
         assertThat(injected).isNull();
         assertThat(merged).hasSize(256);
         assertThat(merged).extracting(s -> s.get("name")).doesNotContain("loop");
@@ -283,12 +285,12 @@ class ManagedLoopSkillTest {
         }
         var packages = List.of(new StandaloneSkill("pkg:review", "Review", true, 200));
         var merged = new ArrayList<Map<String, Object>>();
-        assertThat(ManagedLoopSkill.mergeInto(merged, caller, WorkspaceToolProfiles.SHELL_V4, true, packages)).isNull();
+        assertThat(ManagedLoopSkill.mergeInto(merged, caller, merged.size(), WorkspaceToolProfiles.SHELL_V4, true, packages)).isNull();
         assertThat(AgentDefinitionExtensions.sessionSkills(merged, packages)).isEqualTo(caller);
 
         merged.clear();
         caller.removeLast();
-        assertThat(ManagedLoopSkill.mergeInto(merged, caller, WorkspaceToolProfiles.SHELL_V4, true, packages))
+        assertThat(ManagedLoopSkill.mergeInto(merged, caller, merged.size(), WorkspaceToolProfiles.SHELL_V4, true, packages))
                 .extracting(skill -> skill.get("name")).contains("loop");
     }
 
@@ -301,7 +303,7 @@ class ManagedLoopSkillTest {
             packages.add(new StandaloneSkill("pkg:s" + i, "Skill", true, available / 4 + (i == 0 ? available % 4 : 0)));
         }
         var merged = new ArrayList<Map<String, Object>>();
-        assertThat(ManagedLoopSkill.mergeInto(merged, List.of(), WorkspaceToolProfiles.SHELL_V4, true, packages)).isNull();
+        assertThat(ManagedLoopSkill.mergeInto(merged, List.of(), merged.size(), WorkspaceToolProfiles.SHELL_V4, true, packages)).isNull();
         assertThat(AgentDefinitionExtensions.sessionSkills(merged, packages)).isEmpty();
     }
 
@@ -318,7 +320,7 @@ class ManagedLoopSkillTest {
         }
         caller.add(bundledCallerLoop());
         var merged = new java.util.ArrayList<>(java.util.List.of(defSkill));
-        var injected = ManagedLoopSkill.mergeInto(merged, caller, WorkspaceToolProfiles.FILES_V4, true, List.of());
+        var injected = ManagedLoopSkill.mergeInto(merged, caller, merged.size(), WorkspaceToolProfiles.FILES_V4, true, List.of());
         assertThat(injected).isNull();
         assertThat(merged).hasSize(256);
         assertThat(merged).extracting(s -> s.get("name")).doesNotContain("loop");
@@ -347,7 +349,6 @@ class ManagedLoopSkillTest {
         var command = SessionCreationCommand.builder()
                 .agentId("qwen-code")
                 .skills(skills)
-                .requestedToolProfile(WorkspaceToolProfiles.EXTERNAL_FILES)
                 .build();
         return ExternalWorkspaceSessionPolicies.creationPin(true, workspaces, binding,
                 new AgentSessionPolicies.AgentPin("1", null, "default",
@@ -357,19 +358,18 @@ class ManagedLoopSkillTest {
 
     @Test
     void externalCreationPinCarriesTheCallerCatalogExactlyOnceThroughAdmission() {
-        // The external creationPin is the only carrier of the caller catalog: the
-        // profile never appends caller skills again, so a pin that dropped them
-        // (or a merge that appended them twice) either loses the catalog or fails
-        // the name-uniqueness validation. Reverting the pin to List.of() reddens
-        // the first assertion; removing the external definitionCount reset reddens
-        // the exact-once assertion with a duplicate name.
+        // The external creationPin is the only carrier of the caller catalog, so
+        // the admission appends nothing and classifies the whole merged list as
+        // caller content (count 0). Reverting the pin to List.of() reddens the
+        // first assertion; appending the catalog again reddens the exact-once
+        // assertion with a duplicate name.
         var review = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
         var docs = Map.<String, Object>of("name", "docs", "description", "d", "body", "b");
         var caller = List.of(review, docs);
         var pin = externalCreationPin(caller);
         assertThat(pin.skills()).containsExactly(review, docs);
         var merged = new ArrayList<>(pin.skills());
-        var injected = ManagedLoopSkill.mergeInto(merged, caller, pin.toolProfile(), true, List.of());
+        var injected = ManagedLoopSkill.mergeInto(merged, List.of(), 0, pin.toolProfile(), true, List.of());
         assertThat(injected).isNull();
         assertThat(merged).containsExactly(review, docs);
         assertThat(AgentDefinitionExtensions.sessionSkills(merged)).hasSize(2);
@@ -379,13 +379,13 @@ class ManagedLoopSkillTest {
     void externalCreationDropsTheBundledLoopImportInsteadOfPublishingCreatorlessLoop() throws Exception {
         // The files lane publishes no loop creator, so a bundled caller import that
         // reached the pin must be dropped rather than served with a body naming
-        // creators the profile lacks. Keeping the loop in the caller slice (no
-        // definitionCount reset) leaves it in the catalog.
+        // creators the profile lacks. Classifying the pin slice as definition
+        // content (count merged.size()) leaves it in the catalog.
         var review = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
         var caller = List.of(review, bundledCallerLoop());
         var pin = externalCreationPin(caller);
         var merged = new ArrayList<>(pin.skills());
-        var injected = ManagedLoopSkill.mergeInto(merged, caller, pin.toolProfile(), true, List.of());
+        var injected = ManagedLoopSkill.mergeInto(merged, List.of(), 0, pin.toolProfile(), true, List.of());
         assertThat(injected).isNull();
         assertThat(merged).containsExactly(review);
     }

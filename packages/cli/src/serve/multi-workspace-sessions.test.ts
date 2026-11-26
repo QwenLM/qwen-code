@@ -16,7 +16,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import {
-  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
   SessionTranscriptChangedError,
   Storage,
@@ -26,7 +25,12 @@ import {
   setDebugLogSession,
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
+import { ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES } from './server/session-export.js';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
+import {
+  setSessionTranscriptIndexBuildCompleteHookForTest,
+  setSessionTranscriptIndexCacheMaxBytesForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
   InvalidRewindTargetError,
   SessionBusyError,
@@ -6005,6 +6009,53 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('reuses the cached transcript index across workspace requests', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440273';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'first page',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      const { app } = makeHarness({ secondaryTrusted: false });
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
+        if (builtPath === transcriptPath) builds++;
+      });
+      // A 1-byte shared budget lands the index in the oversized class, so
+      // the reuse pinned here is the oversized-class retention of #17889.
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      try {
+        await request(app)
+          .get(
+            `/workspaces/secondary-id/session/${sessionId}/transcript?limit=1`,
+          )
+          .set('Host', host())
+          .expect(200);
+        expect(builds).toBe(1);
+        const repeat = await request(app)
+          .get(
+            `/workspaces/secondary-id/session/${sessionId}/transcript?limit=1`,
+          )
+          .set('Host', host())
+          .expect(200);
+        // The second request hits the daemon-local index cache: no rebuild.
+        expect(builds).toBe(1);
+        expect(repeat.body.events).toHaveLength(1);
+      } finally {
+        setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      }
+    });
+  });
+
   it('rejects an oversized untrusted transcript record without starting the bridge', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440276';
@@ -7321,7 +7372,10 @@ describe('multi-workspace session dispatch', () => {
         'archive',
         `${sessionId}.jsonl`,
       );
-      await fsp.truncate(archivedPath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+      await fsp.truncate(
+        archivedPath,
+        ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES + 1,
+      );
       const { app } = makeHarness({ secondarySummaries: [] });
 
       const response = await request(app)
@@ -7332,8 +7386,8 @@ describe('multi-workspace session dispatch', () => {
       expect(response.body).toMatchObject({
         code: 'transcript_too_large',
         sessionId,
-        snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
-        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        snapshotSize: ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES + 1,
+        maxBytes: ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES,
       });
     });
   });

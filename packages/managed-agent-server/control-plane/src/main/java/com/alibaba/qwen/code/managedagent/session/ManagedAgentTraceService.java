@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionAdmissionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -80,7 +81,7 @@ public class ManagedAgentTraceService {
             item.set("settledAt", json.valueToTree(projection.settledAt()));
             Optional<TaskTarget> target;
             try {
-                target = records.findTaskTarget(tenant, sessionId, task.taskId());
+                target = records.findTaskTargetByRecord(tenant, sessionId, task.domain(), task.recordId());
             } catch (ManagedAgentException error) {
                 if (error.getStatus() != 409) {
                     throw error;
@@ -99,10 +100,10 @@ public class ManagedAgentTraceService {
             String predecessor = body.path("predecessorChildRunId").isTextual() ? body.path("predecessorChildRunId").asText() : null;
             item.putNull("predecessorTaskId");
             if (predecessor != null && !predecessor.equals(target.get().recordId())) {
-                String previousTask = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.taskId(
-                        com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", predecessor));
+                String previousTask = ManagedExtensionProjection.taskId(
+                        ManagedExtensionProjection.recordKey(sessionId, "child_run", predecessor));
                 try {
-                    var previous = records.findTaskTarget(tenant, sessionId, previousTask);
+                    var previous = records.findTaskTargetByRecord(tenant, sessionId, "child_run", predecessor);
                     if (previous.isPresent() && "child_agent".equals(previous.get().kind())) {
                         item.put("predecessorTaskId", previousTask);
                     }

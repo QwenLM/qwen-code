@@ -58,7 +58,7 @@ inside the 1800 s fork; see the CI section.
    `HostedMonitorRemoteExecutor.stop`, the routine/drain arm choice, and
    the `settleStopRequested` projection are all pinned in vitest today
    (`hosted-monitor-remote-executor.test.ts`,
-   `hosted-harness-session.test.ts`, `hosted-child-run-session.test.ts`).
+   `hosted-harness-session.runtime-cleanup.test.ts`, `hosted-child-run-session.test.ts`).
    What those tests structurally cannot pin — one physical process, zero OS
    effects, one journal row after a real dropped reply, a real transaction
    rollback — is exactly what every case here asserts through JDBC, the

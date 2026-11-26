@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityD
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskRow;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -15,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 
 @Service
 @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true, isolation = Isolation.REPEATABLE_READ)
@@ -110,14 +112,21 @@ public class ManagedSessionActivityService {
             result.withArray("coverageReasons").add("page_budget_exhausted");
         }
         var items = result.putArray("items");
+        List<String> taskIds = page.items().stream()
+                .map(saved -> saved.path("taskId"))
+                .filter(node -> !node.isNull())
+                .map(JsonNode::asText)
+                .toList();
+        Map<String, TaskRow> tasks = records.findTasks(tenant, session, taskIds);
         for (JsonNode saved : page.items()) {
             ObjectNode item = saved.deepCopy();
             item.remove(List.of("_measurementEvidenceDigest", "_measurementOutcomeKnown"));
             if (!saved.path("taskId").isNull()) {
-                records.findTask(tenant, session, saved.path("taskId").asText()).ifPresent(task -> {
+                TaskRow task = tasks.get(saved.path("taskId").asText());
+                if (task != null) {
                     item.put("taskState", task.projection().state());
                     item.put("taskRuntimeState", task.projection().runtimeState());
-                });
+                }
             }
             items.add(item);
         }

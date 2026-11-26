@@ -27,7 +27,7 @@ export { SUPPORTED_LANGUAGES, getLanguageNameFromLocale };
 
 // State
 let currentLanguage: SupportedLanguage = 'en';
-let translations: Record<string, string | string[]> = {};
+let translations: TranslationDict = {};
 
 const translationCache: Record<string, TranslationDict> = {};
 const loadingPromises: Record<string, Promise<TranslationDict>> = {};
@@ -276,7 +276,9 @@ export function t(key: string, params?: Record<string, string>): string {
   if (Array.isArray(translation)) {
     return key;
   }
-  return interpolate(translation, params);
+  const template =
+    typeof translation === 'function' ? translation(params ?? {}) : translation;
+  return interpolate(template, params);
 }
 
 /**

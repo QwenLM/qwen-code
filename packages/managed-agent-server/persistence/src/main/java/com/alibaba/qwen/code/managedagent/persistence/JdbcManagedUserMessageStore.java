@@ -2,20 +2,26 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.UserMessagePolicy;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,9 +33,9 @@ import java.util.UUID;
 @Qualifier("managedAgentTransactionManager")
 public class JdbcManagedUserMessageStore
         implements ManagedUserMessageStore {
-    private com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
-    @org.springframework.beans.factory.annotation.Autowired
-    public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
+    private WorktreeFiles worktreeFiles;
+    @Autowired
+    public void configureWorktreeFiles(WorktreeFiles value) { worktreeFiles = value; }
 
     private static final TypeReference<List<Map<String, Object>>> INPUT = new TypeReference<>() { };
     private final JdbcTemplate jdbc;
@@ -102,8 +108,10 @@ public class JdbcManagedUserMessageStore
         }
         String digest = digests.digest(command);
         var replay = jdbc.query("SELECT request_digest, result_json FROM ma_user_message_command"
-                        + " WHERE tenant_id = ? AND session_id = ? AND command_key = ?",
-                (row, index) -> Map.entry(row.getString(1), row.getString(2)), tenant, session, commandKey);
+                        + " WHERE tenant_id = ? AND session_id = ? AND actor_id = ? AND idempotency_key = ?",
+                (row, index) -> Map.entry(row.getString(1), row.getString(2)), tenant, session,
+                actor,
+                key);
         if (!replay.isEmpty()) {
             if (!digest.equals(replay.getFirst().getKey())) {
                 throw conflict("idempotency_conflict");
@@ -135,7 +143,7 @@ public class JdbcManagedUserMessageStore
                 jdbc.update("UPDATE ma_user_message_queue SET next_sequence = next_sequence + 1 WHERE tenant_id = ? AND session_id = ?",
                         tenant, session);
                 jdbc.update("UPDATE ma_session SET preview = ?, preview_revision = ?, gmt_modified = "
-                                + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW
+                                + ManagedSchemaTime.SQL_NOW
                                 + " WHERE tenant_id = ? AND session_id = ? AND preview_revision < ?",
                         previewOf(input), sequence, tenant, session, sequence);
                 bumpQueueRevision(tenant, session);
@@ -177,8 +185,10 @@ public class JdbcManagedUserMessageStore
             default -> throw refusal("invalid_request", "Unknown user message action.");
         }
         Snapshot result = snapshot(tenant, session);
-        jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, command_key, actor_id, request_digest, result_json)"
-                + " VALUES (?, ?, ?, ?, ?, ?)", tenant, session, commandKey, actor, digest, encode(result));
+        jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, idempotency_key, actor_id, request_digest, result_json)"
+                + " VALUES (?, ?, ?, ?, ?, ?)", tenant, session,
+                key,
+                actor, digest, encode(result));
         return result;
     }
 
@@ -232,7 +242,7 @@ public class JdbcManagedUserMessageStore
     @Transactional
     public void attempted(String tenant, String session) {
         jdbc.update("UPDATE ma_user_message_queue SET last_dispatch_at = "
-                + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW
+                + ManagedSchemaTime.SQL_NOW
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
     }
 
@@ -271,7 +281,7 @@ public class JdbcManagedUserMessageStore
                 return new InputBlock("input_text", (String) block.get("text"));
             }
             Map<?, ?> resource = (Map<?, ?>) block.get("resource");
-            String name = java.net.URLDecoder.decode(((String) resource.get("uri")).substring("managed-input:///".length()), StandardCharsets.UTF_8);
+            String name = URLDecoder.decode(((String) resource.get("uri")).substring("managed-input:///".length()), StandardCharsets.UTF_8);
             return new InputBlock("input_file", (String) resource.get("text"), (String) resource.get("mimeType"), null, name);
         }).toList();
         jdbc.update("UPDATE ma_user_message SET state = 'claimed' WHERE tenant_id = ? AND session_id = ? AND message_id = ? AND state = 'queued'", tenant, session, first.id());
@@ -504,21 +514,21 @@ public class JdbcManagedUserMessageStore
     private String encode(Object value) {
         try {
             return json.writeValueAsString(value);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(error);
         }
     }
     private <T> T decode(String value, Class<T> type) {
         try {
             return json.readValue(value, type);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(error);
         }
     }
     private List<Map<String, Object>> decodeInput(String value) {
         try {
             return json.readValue(value, INPUT);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(error);
         }
     }

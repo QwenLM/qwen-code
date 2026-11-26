@@ -1,6 +1,13 @@
 package com.alibaba.qwen.code.runtimebroker.spi;
 
+import com.alibaba.qwen.code.runtimebroker.JsonCodec;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Read-only view over the durable EXTERNAL storage registrations an operator
@@ -25,24 +32,13 @@ public interface ExternalStorageRegistry {
 
     /** Decodes the persisted identity/alias document, never provider-supplied evidence. */
     static RegisteredExternalStorage decodeRegistration(String encoded) {
-        var root = com.alibaba.qwen.code.runtimebroker.JsonCodec.parseObject(
-                encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8), "External registration");
-        if ("ephemeral".equals(root.get("kind"))) {
-            if (!root.keySet().equals(java.util.Set.of("kind", "tenantId", "providerId", "workspaceId",
-                    "mountRoot", "registrationRevision"))
-                    || !(root.get("registrationRevision") instanceof Number revision)
-                    || !(revision instanceof Long || revision instanceof Integer)) {
-                throw new IllegalArgumentException("Invalid ephemeral Workspace registration.");
-            }
-            return new RegisteredExternalStorage((String) root.get("providerId"), null,
-                    revision.longValue(), (String) root.get("workspaceId"), (String) root.get("mountRoot"),
-                    (String) root.get("mountRoot"), (String) root.get("tenantId"));
-        }
-        if (!root.keySet().equals(java.util.Set.of("identity", "alias"))
-                || !(root.get("identity") instanceof java.util.Map<?, ?> identity)
-                || !(root.get("alias") instanceof java.util.Map<?, ?> alias)
-                || !identity.keySet().equals(java.util.Set.of("providerId", "physicalKey", "registrationRevision"))
-                || !alias.keySet().equals(java.util.Set.of("tenantWorkspaceId", "aliasPath", "mountRoot"))
+        var root = JsonCodec.parseObject(
+                encoded.getBytes(StandardCharsets.UTF_8), "External registration");
+        if (!root.keySet().equals(Set.of("identity", "alias"))
+                || !(root.get("identity") instanceof Map<?, ?> identity)
+                || !(root.get("alias") instanceof Map<?, ?> alias)
+                || !identity.keySet().equals(Set.of("providerId", "physicalKey", "registrationRevision"))
+                || !alias.keySet().equals(Set.of("tenantWorkspaceId", "aliasPath", "mountRoot"))
                 || !(identity.get("registrationRevision") instanceof Number revision)
                 || !(revision instanceof Long || revision instanceof Integer)) {
             throw new IllegalArgumentException("Invalid external storage registration.");
@@ -104,17 +100,14 @@ public interface ExternalStorageRegistry {
         }
 
         public String ownerKey() {
-            if (ephemeral()) {
-                return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                        "ephemeral-workspace/1", providerId, ephemeralTenantId, tenantWorkspaceId);
-            }
-            return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+            return ManagedIdentityRefs.ref(
+                    ManagedIdentityRefs.PHYSICAL_REF_BYTES,
                     "external-storage/1", providerId, physicalKey);
         }
 
         private static boolean registeredPath(String value) {
             return value != null && value.length() <= 2048 && value.startsWith("/")
-                    && !value.equals("/") && java.util.Arrays.stream(value.substring(1).split("/", -1))
+                    && !value.equals("/") && Arrays.stream(value.substring(1).split("/", -1))
                             .allMatch(part -> part.matches("[A-Za-z0-9._-]+")
                                     && !part.equals(".") && !part.equals(".."));
         }

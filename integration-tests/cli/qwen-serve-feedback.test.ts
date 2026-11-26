@@ -14,7 +14,7 @@
  * `system/ui_telemetry` chat record `logUserFeedback` appends to the
  * session JSONL.
  */
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DaemonClient } from '@qwen-code/sdk';
@@ -74,6 +74,9 @@ async function startRig(opts: {
   }
   const spawned = await spawnDaemon({
     workspaceCwd: workspaceDir,
+    // Feedback, not host-load admission, is under test here. Do not let a
+    // shared runner's real load change this fixture's outcome.
+    extraArgs: ['--no-load-admission'],
     token: TOKEN,
     bootTimeoutMs: 30_000,
     // Hermetic rig: host-session leakage (QWEN_RUNTIME_DIR above all)
@@ -99,8 +102,16 @@ async function startRig(opts: {
     'Content-Type': 'application/json',
   };
 
-  const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, workspaceDir, () =>
-    new Storage(workspaceDir).getProjectDir(),
+  // The daemon canonicalizes the workspace by realpath (macOS `/var` →
+  // `/private/var`), so the session JSONL lands under the realpath'd project
+  // hash. Mirror that here, or the polls below read a directory nothing
+  // writes and never observe the record (same seam as the harness's
+  // mcpApprovals keying).
+  const canonicalWorkspaceDir = realpathSync(workspaceDir);
+  // Match the rig's explicit HOME without letting an inherited
+  // QWEN_RUNTIME_DIR redirect this observer to the host profile.
+  const projectDir = Storage.runWithResolvedRuntimeBaseDir(qwenHome, () =>
+    new Storage(canonicalWorkspaceDir).getProjectDir(),
   );
   const feedbackRecords = (sessionId: string): FeedbackRecord[] => {
     let raw: string;

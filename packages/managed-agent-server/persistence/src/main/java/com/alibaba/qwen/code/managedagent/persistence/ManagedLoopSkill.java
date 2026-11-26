@@ -108,11 +108,12 @@ final class ManagedLoopSkill {
      * catalog, returning the validated catalog when the variant was injected, or
      * null when it was not (so the caller validates {@code merged} itself). The
      * returned catalog is the single validated/serialized pass — the admission
-     * reuses it instead of re-validating. {@code merged} already holds the pinned
-     * definition's skills; on every profile but the external files lane the caller
-     * skills are appended after them. The external creation pin already carries the
-     * caller catalog, so there {@code merged} is the whole caller set and
-     * {@code callerSkills} is neither appended nor counted as definitions. The variant
+     * reuses it instead of re-validating. {@code merged} starts as the pinned
+     * definition's skills and {@code callerSkills} are appended after them;
+     * {@code definitionCount} says how many leading entries the definition owns.
+     * A lane whose creation pin already carries the caller catalog passes that
+     * catalog as the caller slice (count 0), so its bundled import is still the
+     * server's to replace or drop. The variant
      * replaces only the Web Shell's bundled {@code loop} import, carrying over
      * that entry's model_invocable / user_invocable flags; a user-authored or
      * definition-authored {@code loop} is preserved and suppresses the variant
@@ -127,17 +128,9 @@ final class ManagedLoopSkill {
      * admission class does not grow.
      */
     static List<Map<String, Object>> mergeInto(List<Map<String, Object>> merged,
-            List<Map<String, Object>> callerSkills, String profile,
+            List<Map<String, Object>> callerSkills, int definitionCount, String profile,
             boolean sessionSkillsSupported, List<StandaloneSkill> packageSkills) {
-        int definitionCount = merged.size();
-        if (WorkspaceToolProfiles.isExternal(profile)) {
-            // External creationPin already carried the caller skills into the pin;
-            // appending them again duplicates every name and the catalog validation
-            // refuses the creation. The pin slice is the whole caller catalog here.
-            definitionCount = 0;
-        } else {
-            merged.addAll(callerSkills);
-        }
+        merged.addAll(callerSkills);
         if (!sessionSkillsSupported) {
             return null;
         }

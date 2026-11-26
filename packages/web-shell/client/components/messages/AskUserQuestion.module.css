@@ -305,6 +305,16 @@
   outline: none;
 }
 
+.customTextarea {
+  height: auto;
+  min-height: 22px;
+  resize: vertical;
+}
+
+.customTriggerMultiline {
+  white-space: pre-wrap;
+}
+
 /* The "Other" row's clickable label when not editing — a real <button> so it's
    keyboard-reachable, styled to read like the option label it replaces. */
 .customTrigger {

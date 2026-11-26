@@ -324,6 +324,28 @@ class QwenHostedHarnessConnectorTest {
         verifyNoInteractions(execution);
     }
 
+    @Test
+    void residentExternalRecoveryReadDoesNotAttach() {
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, "ACTIVE",
+                null, null, 0, 0, 1, 1, null, 1);
+        var execution = mock(WorkspaceExecutionStore.class);
+        var client = mock(HostedHarnessClient.class);
+        var connector = new QwenHostedHarnessConnector(properties(), sessions(), execution);
+        ReflectionTestUtils.setField(connector, "client", client);
+        assertThat(connector.inspectUnattachedRecovery(session, SUBMIT_PROMPT_ID)).isNull();
+        verifyNoInteractions(client);
+
+        when(execution.isExternal(session.workspace())).thenReturn(true);
+        var status = mock(HarnessSessionStatus.class);
+        var evidence = mock(HarnessRecoveryStatus.class);
+        when(client.getUnattachedStatus(SESSION_ID, SUBMIT_PROMPT_ID)).thenReturn(status);
+        when(status.getRecovery()).thenReturn(evidence);
+        when(evidence.getPromptId()).thenReturn(SUBMIT_PROMPT_ID);
+        assertThat(connector.inspectUnattachedRecovery(session, SUBMIT_PROMPT_ID).promptId()).isEqualTo(SUBMIT_PROMPT_ID);
+        assertThat(connector.cachedRecoveryAttachment("tenant-a", SESSION_ID)).isNull();
+        verify(client, never()).loadSession(any());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void coldRecoveryLoadsOnlyCleanupAndExplicitNewWorkPromotesTheAttachment(boolean publicChildren) throws Exception {
@@ -1006,8 +1028,15 @@ class QwenHostedHarnessConnectorTest {
         connector.createOrLoad("tenant-a", SESSION_ID, false);
         ArgumentCaptor<CreateHarnessSession> create = ArgumentCaptor.forClass(CreateHarnessSession.class);
         verify(client).createSession(create.capture());
-        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(create.getValue(), "toJson"))
-                .containsKey("sessionSkillsRef");
+        var created = ReflectionTestUtils.<Map<String, Object>>invokeMethod(create.getValue(), "toJson");
+        @SuppressWarnings("unchecked")
+        var ref = (Map<String, Object>) created.get("sessionSkillsRef");
+        byte[] expected = com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions
+                .skillsBytes(pinned);
+        String digest = org.apache.commons.codec.digest.DigestUtils.sha256Hex(expected);
+        assertThat(ref).containsEntry("digest", digest)
+                .containsEntry("byteLength", expected.length)
+                .containsEntry("resourceId", "agent-skills-" + digest);
 
         when(skills.initialSelection("tenant-a", SESSION_ID))
                 .thenReturn(Map.of("skills", List.of("review")));
@@ -1016,7 +1045,7 @@ class QwenHostedHarnessConnectorTest {
         ReflectionTestUtils.setField(refused, "client", client);
         ReflectionTestUtils.setField(refused, "sessionSkills", skills);
         assertThatThrownBy(() -> refused.createOrLoad("tenant-a", SESSION_ID, false))
-                .hasMessage("External Workspace profile is unavailable");
+                .hasMessage("External Workspace files profile is unavailable");
     }
 
     @Test
@@ -3625,6 +3654,7 @@ class QwenHostedHarnessConnectorTest {
                 (QwenHostedHarnessConnector) fixture[0];
         HostedHarnessClient dead = (HostedHarnessClient) fixture[1];
         HostedHarnessClient alive = (HostedHarnessClient) fixture[2];
+        HarnessSessionRef ref = (HarnessSessionRef) fixture[3];
         doThrow(new IllegalStateException("HostedHarnessClient is closed"))
                 .when(dead).resolveAction(any(), any(), any(), anyLong(),
                         any());
@@ -3633,7 +3663,11 @@ class QwenHostedHarnessConnectorTest {
                 new ObjectMapper().readTree("{\"optionId\":\"o\","
                         + "\"inputRevision\":1,\"policyRevision\":\"p\"}"));
 
-        verify(alive).resolveAction(any(), any(), any(), anyLong(), any());
+        var load = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(dead).loadSession(load.capture());
+        Map<String, Object> request = ReflectionTestUtils.invokeMethod(load.getValue(), "toJson");
+        assertThat(request).containsEntry("passiveManagedRuntimeRecovery", true);
+        verify(alive).resolveAction(ref, "action-1", "o", 1L, "p");
     }
 
     @Test
@@ -5308,10 +5342,14 @@ class QwenHostedHarnessConnectorTest {
                 "default", "hosted-workspace-mcp/1", "a".repeat(64));
         List<Map<String, Object>> skills = List.of(Map.of("name", "review", "description", "Review", "body", "Read the diff."));
         JdbcManagedAgentDefinitionStore definitions = mock(JdbcManagedAgentDefinitionStore.class);
-        when(definitions.pinnedContent(session)).thenReturn(Map.of("skills", skills,
+        when(definitions.pinnedContent(session)).thenReturn(Map.of(
+                "model", Map.of("id", "configured"),
+                "instructions", "Review carefully.", "skills", skills,
                 "mcp_servers", List.of(Map.of("server_id", "docs", "server_revision", 1, "definition_digest", "b".repeat(64))),
                 "hook_catalog", Map.of("catalog_id", "review", "catalog_revision", 2, "definition_digest", "c".repeat(64))));
         JdbcManagedSessionStore resources = mock(JdbcManagedSessionStore.class);
+        when(resources.publishAgentInstructions("tenant-a", "workspace-a", SESSION_ID, "Review carefully."))
+                .thenReturn(new ToolResultResourceRef("instructions", "managed-agent-instructions", 1, 100, "e".repeat(64)));
         when(resources.publishAgentSkills("tenant-a", "workspace-a", SESSION_ID, skills))
                 .thenReturn(new ToolResultResourceRef("skills", "managed-agent-skills", 1, 100, "d".repeat(64)));
         JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
@@ -5340,7 +5378,13 @@ class QwenHostedHarnessConnectorTest {
                 .containsEntry("hookCatalog", created.get("hookCatalog"));
         assertThat(new ObjectMapper().valueToTree(created).at("/agentDefinition/skillsRef/kind").asText())
                 .isEqualTo("managed-agent-skills");
+        assertThat(new ObjectMapper().valueToTree(created).at("/agentDefinition/model/id").asText())
+                .isEqualTo("configured");
+        assertThat(new ObjectMapper().valueToTree(created).at("/agentDefinition/instructionsRef/kind").asText())
+                .isEqualTo("managed-agent-instructions");
+        verify(resources, times(1)).publishAgentInstructions("tenant-a", "workspace-a", SESSION_ID, "Review carefully.");
         verify(resources, times(1)).publishAgentSkills("tenant-a", "workspace-a", SESSION_ID, skills);
+        verify(definitions, times(2)).pinnedContent(session);
     }
 
     private static ManagedAgentProperties properties() {

@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceAcquisitionVerifier;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -44,8 +45,7 @@ import java.util.concurrent.CompletionStage;
  * reply or the boot document. Any disagreement is a permanent refusal.
  */
 public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvisioner
-        implements com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceAcquisitionVerifier,
-        com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoverySupport {
+        implements ExternalWorkspaceAcquisitionVerifier {
     public static final String KIND = "external-workspace";
     private static final List<String> CONTINUITY = List.of("confirms", "denies", "unknown");
     /**
@@ -288,7 +288,8 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     @Override
     protected Map<String, Object> bootDocument(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         ExternalStorageRegistry.RegisteredExternalStorage storage = binding(request);
-        Map<String, Object> boot = new LinkedHashMap<>(ManagedContextProtocol.boot(request, seed, extensionConfiguration(request)));
+        Map<String, Object> boot = new LinkedHashMap<>(ManagedContextProtocol.boot(request, seed,
+                extensionConfiguration(request)).toWire());
         boot.put("storage", storage.bootStorage(seed));
         return Map.copyOf(boot);
     }

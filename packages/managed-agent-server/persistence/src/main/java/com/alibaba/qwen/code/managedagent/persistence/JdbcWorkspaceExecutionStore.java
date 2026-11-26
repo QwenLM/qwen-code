@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
@@ -8,12 +9,16 @@ import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcExternalWorkspaceOwnership;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.ConnectionCallback;
@@ -22,9 +27,12 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable;
@@ -32,9 +40,9 @@ import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionSt
 @Repository
 public class JdbcWorkspaceExecutionStore
         implements WorkspaceExecutionStore {
-    private com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
-    @org.springframework.beans.factory.annotation.Autowired
-    public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
+    private WorktreeFiles worktreeFiles;
+    @Autowired
+    public void configureWorktreeFiles(WorktreeFiles value) { worktreeFiles = value; }
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
@@ -42,7 +50,7 @@ public class JdbcWorkspaceExecutionStore
     private final WorkspaceAttachmentAuthorizer authorizer;
     private volatile Consumer<String> maintenanceBusy = storageKey -> {};
 
-    com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles() { return worktreeFiles; }
+    WorktreeFiles worktreeFiles() { return worktreeFiles; }
 
     @Autowired
     public JdbcWorkspaceExecutionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
@@ -62,7 +70,7 @@ public class JdbcWorkspaceExecutionStore
         this.authorizer = new WorkspaceAttachmentAuthorizer(this, jdbc);
     }
 
-    public java.nio.file.Path createdStorageRoot(String tenantId, String storageId) {
+    public Path createdStorageRoot(String tenantId, String storageId) {
         return storageGuard == null ? null : storageGuard.createdStorageRoot(tenantId, storageId);
     }
 
@@ -70,7 +78,7 @@ public class JdbcWorkspaceExecutionStore
         return storageGuard != null && storageGuard.enabled();
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     private JdbcManagedWorkspaceRegistry externalAdmission;
 
     public void requireExternalExecution(ContextBinding binding) {
@@ -94,7 +102,7 @@ public class JdbcWorkspaceExecutionStore
         }
     }
 
-    public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+    public void authorizeLifecycle(SessionRecord session, RuntimeLifecycleAuthority authority) {
         try {
             JdbcWorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
         } catch (ManagedAgentException error) {
@@ -134,12 +142,12 @@ public class JdbcWorkspaceExecutionStore
     }
 
     private void authorizePassiveAttachment(SessionRecord session,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RuntimeLifecycleAuthority authority) {
         authorizer.authorizeAttachment(session, false, false, authority, false);
     }
 
     private void authorizePassiveAttachment(SessionRecord session,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority, boolean legacyClose) {
+            RuntimeLifecycleAuthority authority, boolean legacyClose) {
         authorizer.authorizeAttachment(session, false, false, authority, legacyClose);
     }
 
@@ -184,8 +192,8 @@ public class JdbcWorkspaceExecutionStore
     }
 
     public void authorizeExternal(SessionRecord session,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        if (!externalSession(session)
+            RuntimeLifecycleAuthority authority) {
+        if (!isExternal(session.workspace()) || !"hosted-workspace-external-files/1".equals(session.toolProfile())
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null) {
             throw unavailable();
         }
@@ -209,7 +217,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void claim(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             claim(context, session);
             return;
         }
@@ -223,7 +231,7 @@ public class JdbcWorkspaceExecutionStore
 
     public boolean isHeld(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             return isHeld(context, session);
         }
         return external(context, binding, repository,
@@ -235,7 +243,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void assertHeld(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             assertHeld(context, session);
             return;
         }
@@ -251,7 +259,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void release(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             release(context, session);
             return;
         }
@@ -287,20 +295,18 @@ public class JdbcWorkspaceExecutionStore
     }
 
     private <T> T external(ContextBinding context, RuntimeBindingRecord binding, RuntimeBindingRepository repository,
-            com.alibaba.qwen.code.runtimebroker.RuntimeScope scope,
-            String harnessSessionId, boolean acquiring, ExternalWork<T> work) {
+            RuntimeScope scope, String harnessSessionId, boolean acquiring, ExternalWork<T> work) {
         return external(context, binding, repository, scope, harnessSessionId, acquiring, false, work);
     }
 
     private <T> T external(ContextBinding context, RuntimeBindingRecord binding, RuntimeBindingRepository repository,
-            com.alibaba.qwen.code.runtimebroker.RuntimeScope scope,
-            String harnessSessionId, boolean acquiring, boolean claimDriftRetryable,
+            RuntimeScope scope, String harnessSessionId, boolean acquiring, boolean claimDriftRetryable,
             ExternalWork<T> work) {
         if (!(repository instanceof JdbcRuntimeBindingRepository original) || !original.usesDataSource(jdbc.getDataSource())) {
             throw unavailable();
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        return transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<T>) connection -> {
+        return transaction.execute(status -> jdbc.execute((ConnectionCallback<T>) connection -> {
             var owner = JdbcExternalWorkspaceOwnership.lockOwner(connection, binding);
             var saved = JdbcExternalWorkspaceOwnership.savedContext(
                     connection, binding, harnessSessionId, acquiring);
@@ -320,17 +326,17 @@ public class JdbcWorkspaceExecutionStore
 
     @FunctionalInterface
     private interface ExternalWork<T> {
-        T apply(java.sql.Connection connection, JdbcExternalWorkspaceOwnership.Owner owner,
-                RuntimeBindingRecord current) throws java.sql.SQLException;
+        T apply(Connection connection, JdbcExternalWorkspaceOwnership.Owner owner,
+                RuntimeBindingRecord current) throws SQLException;
     }
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session) {
         WorkspaceStorageKindGuard.requireFreshTransaction();
         WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         String key = storageKey(binding);
-        List<Long> revisions = jdbc.query("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = ?"
+        List<Long> revisions = jdbc.query("SELECT mount_revision FROM ma_storage_owner WHERE physical_id = ?"
                 + " AND mount_state = 'READY' AND storage_kind IN ('LOCAL', 'SSH_LOCAL')",
-                (row, index) -> row.getLong("mount_revision"), key);
+                (row, index) -> row.getLong("mount_revision"), ManagedSchemaKeys.identity(key));
         if (revisions.size() != 1) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -361,7 +367,7 @@ public class JdbcWorkspaceExecutionStore
             throw WorkspaceExecutionStore.unavailable();
         }
         List<String> held = jdbc.query("SELECT binding_id, runtime_generation, runtime_session_id,"
-                + " harness_session_id, session_state, execution_storage_key FROM ma_runtime_session"
+                + " harness_session_id, session_state, execution_storage_id FROM ma_runtime_session"
                 + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? FOR UPDATE",
                 (row, index) -> {
                     if (!session.getBindingId().equals(row.getString("binding_id"))
@@ -372,7 +378,7 @@ public class JdbcWorkspaceExecutionStore
                                     && !"READY".equals(row.getString("session_state")))) {
                         throw WorkspaceExecutionStore.unavailable();
                     }
-                    return row.getString("execution_storage_key");
+                    return row.getString("execution_storage_id");
                 },
                 session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId());
         if (held.size() != 1 || (held.getFirst() != null && !key.equals(held.getFirst()))) {
@@ -384,15 +390,15 @@ public class JdbcWorkspaceExecutionStore
         if (key.equals(held.getFirst())) {
             return;
         }
-        if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_key = ?"
+        if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE physical_id = ?"
                 + " AND mount_state = 'READY' AND mount_revision = ?",
-                key, mountRevision) != 1) {
+                ManagedSchemaKeys.identity(key), mountRevision) != 1) {
             throw busy();
         }
-        if (jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?"
+        if (jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = ? WHERE binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?"
-                + " AND session_state IN ('ACQUIRING', 'READY') AND execution_storage_key IS NULL",
-                key, session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId(),
+                + " AND session_state IN ('ACQUIRING', 'READY') AND execution_storage_id IS NULL",
+                ManagedSchemaKeys.identity(key), session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId(),
                 session.getSession().getHarnessSessionId()) != 1) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -406,8 +412,9 @@ public class JdbcWorkspaceExecutionStore
     }
 
     private boolean directoryAdmits(String key) {
-        return !jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?"
-                + " AND mount_state = 'READY' FOR UPDATE", String.class, key).isEmpty() && StorageOwnerMembership.membersAllowed(jdbc, key);
+        return !jdbc.queryForList("SELECT physical_id FROM ma_storage_owner WHERE physical_id = ?"
+                + " AND mount_state = 'READY' FOR UPDATE", String.class, ManagedSchemaKeys.identity(key)).isEmpty()
+                && StorageOwnerMembership.membersAllowed(jdbc, key);
     }
 
     public void beginRewind(ContextBinding binding, RuntimeSessionRecord session) {
@@ -421,9 +428,9 @@ public class JdbcWorkspaceExecutionStore
             }
             if (jdbc.update("UPDATE ma_runtime_session SET is_rewind_pending = TRUE WHERE binding_id = ?"
                     + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?"
-                    + " AND execution_storage_key = ? AND session_state = 'READY' AND is_rewind_pending = FALSE",
+                    + " AND execution_storage_id = ? AND session_state = 'READY' AND is_rewind_pending = FALSE",
                     session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId(),
-                    session.getSession().getHarnessSessionId(), key) != 1) {
+                    session.getSession().getHarnessSessionId(), ManagedSchemaKeys.identity(key)) != 1) {
                 if (hasPendingRewind(session)) {
                     throw new RuntimeBrokerException(409, "workspace_rewind_recovery_required",
                             "An earlier Workspace rewind has an unconfirmed outcome.", false);
@@ -437,16 +444,16 @@ public class JdbcWorkspaceExecutionStore
         transaction.executeWithoutResult(status -> {
             String key = storageKey(binding);
             jdbc.update("UPDATE ma_runtime_session SET is_rewind_pending = FALSE WHERE binding_id = ?"
-                    + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ? AND execution_storage_key = ?"
+                    + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ? AND execution_storage_id = ?"
                     + " AND is_rewind_pending = TRUE",
                     session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId(),
-                    session.getSession().getHarnessSessionId(), key);
+                    session.getSession().getHarnessSessionId(), ManagedSchemaKeys.identity(key));
         });
     }
 
     public boolean hasPendingRewind(RuntimeSessionRecord session) {
         return !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE binding_id = ?"
-                + " AND runtime_generation = ? AND runtime_session_id = ? AND execution_storage_key IS NOT NULL"
+                + " AND runtime_generation = ? AND runtime_session_id = ? AND execution_storage_id IS NOT NULL"
                 + " AND is_rewind_pending = TRUE", String.class, session.getBindingId(), session.getRuntimeGeneration(),
                 session.getRuntimeSessionId()).isEmpty();
     }
@@ -470,10 +477,10 @@ public class JdbcWorkspaceExecutionStore
         if (!StorageOwnerMembership.membersAllowed(jdbc, key)) {
             return false;
         }
-        return !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE execution_storage_key = ?"
+        return !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE execution_storage_id = ?"
                 + " AND binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
-                String.class, key, session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId(),
-                session.getSession().getHarnessSessionId()).isEmpty();
+                String.class, ManagedSchemaKeys.identity(key), session.getBindingId(), session.getRuntimeGeneration(),
+                session.getRuntimeSessionId(), session.getSession().getHarnessSessionId()).isEmpty();
     }
 
     public void release(ContextBinding binding, RuntimeSessionRecord session) {
@@ -505,15 +512,15 @@ public class JdbcWorkspaceExecutionStore
             }
             if (!stopped && !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
                     + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?"
-                    + " AND execution_storage_key = ? AND is_rewind_pending = TRUE FOR UPDATE",
+                    + " AND execution_storage_id = ? AND is_rewind_pending = TRUE FOR UPDATE",
                     String.class, session.getBindingId(), session.getRuntimeGeneration(),
-                    session.getRuntimeSessionId(), key).isEmpty()) {
+                    session.getRuntimeSessionId(), ManagedSchemaKeys.identity(key)).isEmpty()) {
                 throw new RuntimeBrokerException(409, "workspace_writer_unproven",
                         "A Workspace rewind must settle before its mount can be handed back.", false);
             }
-            int cleared = jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_rewind_pending = FALSE"
-                    + " WHERE execution_storage_key = ? AND binding_id = ? AND runtime_generation = ?"
-                    + " AND runtime_session_id = ? AND harness_session_id = ?", key, session.getBindingId(),
+            int cleared = jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL, is_rewind_pending = FALSE"
+                    + " WHERE execution_storage_id = ? AND binding_id = ? AND runtime_generation = ?"
+                    + " AND runtime_session_id = ? AND harness_session_id = ?", ManagedSchemaKeys.identity(key), session.getBindingId(),
                     session.getRuntimeGeneration(), session.getRuntimeSessionId(), session.getSession().getHarnessSessionId());
             releaseMembers(jdbc, key, cleared);
         });
@@ -540,8 +547,8 @@ public class JdbcWorkspaceExecutionStore
             String key = storageKey(binding);
             WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
             WorkspaceOperations.Kind kind = WorkspaceMaintenanceRecovery.kind(jdbc, binding, maintenanceId);
-            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ? AND operation_kind = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE",
-                    Long.class, WorkspaceOperations.key(kind, binding.getTenantId(), maintenanceId), kind.name());
+            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_ref = ? AND operation_kind = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE",
+                    Long.class, ManagedSchemaKeys.identity(WorkspaceOperations.key(kind, binding.getTenantId(), maintenanceId)), kind.name());
             if (generations.size() != 1 || generations.getFirst() != claimGeneration) {
                 throw WorkspaceExecutionStore.unavailable();
             }
@@ -550,11 +557,12 @@ public class JdbcWorkspaceExecutionStore
             }
             boolean preparing = Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
                     StorageOwnerMembership.isWorktreePreparation(connection, key, maintenanceId, claimGeneration)));
-            if (jdbc.update("UPDATE ma_storage_owner SET holder_key = ?,"
+            if (jdbc.update("UPDATE ma_storage_owner SET holder_id = ?,"
                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL,"
-                    + " maintenance_id = ?, maintenance_generation = ? WHERE storage_key = ? AND storage_kind = 'LOCAL'"
-                    + " AND (? OR member_count = 0) AND (holder_key IS NULL OR holder_key = ?)",
-                    holder, maintenanceId, claimGeneration, key, preparing, holder) != 1) {
+                    + " maintenance_id = ?, maintenance_generation = ? WHERE physical_id = ? AND storage_kind = 'LOCAL'"
+                    + " AND (? OR member_count = 0) AND (holder_id IS NULL OR holder_id = ?)",
+                    ManagedSchemaKeys.identity(holder), maintenanceId, claimGeneration, ManagedSchemaKeys.identity(key),
+                    preparing, ManagedSchemaKeys.identity(holder)) != 1) {
                 maintenanceBusy.accept(key);
                 throw busy();
             }
@@ -571,10 +579,11 @@ public class JdbcWorkspaceExecutionStore
             if (!WorkspaceMaintenanceRecovery.recordReturned(jdbc, binding, maintenanceId, claimGeneration, executionId)) {
                 return;
             }
-            int released = jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL,"
-                    + " maintenance_id = NULL, maintenance_generation = NULL WHERE storage_key = ? AND storage_kind = 'LOCAL'"
-                    + " AND holder_key = ? AND maintenance_id = ? AND maintenance_generation = ?", key,
-                    StorageOwnerMembership.maintenanceHolderKey(maintenanceId, claimGeneration), maintenanceId, claimGeneration);
+            int released = jdbc.update("UPDATE ma_storage_owner SET holder_id = NULL,"
+                    + " maintenance_id = NULL, maintenance_generation = NULL WHERE physical_id = ? AND storage_kind = 'LOCAL'"
+                    + " AND holder_id = ? AND maintenance_id = ? AND maintenance_generation = ?", ManagedSchemaKeys.identity(key),
+                    ManagedSchemaKeys.identity(StorageOwnerMembership.maintenanceHolderKey(maintenanceId, claimGeneration)),
+                    maintenanceId, claimGeneration);
             if (released != 1) {
                 status.setRollbackOnly();
             }
@@ -587,19 +596,19 @@ public class JdbcWorkspaceExecutionStore
     }
 
     public boolean hasHolder(RuntimeBindingRecord saved) {
-        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(saved.getRequest().getProvisionerKind())) {
+        if (RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(saved.getRequest().getProvisionerKind())) {
             WorkspaceStorageKindGuard.requireFreshTransaction();
-            return transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection ->
+            return transaction.execute(status -> jdbc.execute((ConnectionCallback<Boolean>) connection ->
                     JdbcExternalWorkspaceOwnership.hasHolder(connection,
                             JdbcExternalWorkspaceOwnership.lockOwner(connection, saved), saved)));
         }
         return !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
-                + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key IS NOT NULL LIMIT 1",
+                + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_id IS NOT NULL LIMIT 1",
                 String.class, saved.getBindingId(), saved.getGeneration()).isEmpty();
     }
 
     public boolean canStopExternalDrained(RuntimeBindingRecord saved, RuntimeBindingRepository repository) {
-        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(saved.getRequest())
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(saved.getRequest())
                 || saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.isDrainRequested()
                 || saved.getOperationOwner() == null) {
@@ -644,7 +653,7 @@ public class JdbcWorkspaceExecutionStore
     public boolean canStopDrained(RuntimeBindingRecord saved) {
         if ((saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST)
                 || !saved.isDrainRequested() || !saved.getRequest().isManagedContext() || saved.getOperationOwner() == null
-                || !java.util.Set.of(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS, com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS).contains(saved.getRequest().getProvisionerKind())
+                || !Set.of(RuntimeProviderKinds.LOCAL_PROCESS, RuntimeProviderKinds.SSH_PROCESS).contains(saved.getRequest().getProvisionerKind())
                 || !(WorkspaceExecutionProfile.admitsIsolationClass(saved.getRequest().getScope().getIsolationClass())
                         || HarnessOwnership.sharesRuntimeSessions(saved.getRequest()))) {
             return false;
@@ -657,7 +666,7 @@ public class JdbcWorkspaceExecutionStore
                         && saved.getOperationOwner().equals(row.getString("operation_owner"))
                         && saved.getOperationGeneration() == row.getLong("operation_generation")
                         && ManagedSchemaTime.timestamp(row, "operation_lease_until") != null
-                        && ManagedSchemaTime.timestamp(row, "operation_lease_until").toInstant().isAfter(java.time.Instant.ofEpochMilli(
+                        && ManagedSchemaTime.timestamp(row, "operation_lease_until").toInstant().isAfter(Instant.ofEpochMilli(
                                         row.getLong("db_seconds") * 1000 + row.getLong("db_micros") / 1000))
                         && saved.getRequest().getScope().getTenantId().equals(row.getString("tenant_id"))
                         && saved.getRequest().getStorageId().equals(row.getString("storage_id")),
@@ -669,9 +678,9 @@ public class JdbcWorkspaceExecutionStore
             return false;
         }
         String physical = storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId());
-        var members = jdbc.query("SELECT execution_storage_key, harness_session_id, tenant_id FROM ma_runtime_session"
-                + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key IS NOT NULL", (row, index) ->
-                        physical.equals(row.getString("execution_storage_key"))
+        var members = jdbc.query("SELECT execution_storage_id, harness_session_id, tenant_id FROM ma_runtime_session"
+                + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_id IS NOT NULL", (row, index) ->
+                        physical.equals(row.getString("execution_storage_id"))
                                 && saved.getRequest().getScope().getTenantId().equals(row.getString("tenant_id"))
                                 && (HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
                                         || saved.getRequest().getIsolationKey().equals(row.getString("harness_session_id"))),
@@ -683,7 +692,7 @@ public class JdbcWorkspaceExecutionStore
     }
 
     public void releaseLost(RuntimeBindingRecord saved) {
-        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(saved.getRequest().getProvisionerKind())) {
+        if (RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(saved.getRequest().getProvisionerKind())) {
             // LOST cannot bypass the persisted native receipt and DRAINING lifecycle gate.
             throw unavailable();
         }
@@ -710,7 +719,7 @@ public class JdbcWorkspaceExecutionStore
                             && saved.getOperationOwner().equals(row.getString("operation_owner"))
                             && saved.getOperationGeneration() == row.getLong("operation_generation")
                             && ManagedSchemaTime.timestamp(row, "operation_lease_until") != null
-                            && ManagedSchemaTime.timestamp(row, "operation_lease_until").toInstant().isAfter(java.time.Instant.ofEpochMilli(
+                            && ManagedSchemaTime.timestamp(row, "operation_lease_until").toInstant().isAfter(Instant.ofEpochMilli(
                                             row.getLong("db_seconds") * 1000 + row.getLong("db_micros") / 1000))
                             && row.getString("loss_evidence_json") != null && row.getString("stop_evidence_json") != null,
                     saved.getBindingId());
@@ -720,8 +729,8 @@ public class JdbcWorkspaceExecutionStore
                             Long.class, saved.getBindingId(), saved.getGeneration()) != 0) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            var memberKeys = jdbc.queryForList("SELECT execution_storage_key FROM ma_runtime_session"
-                    + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key IS NOT NULL FOR UPDATE",
+            var memberKeys = jdbc.queryForList("SELECT execution_storage_id FROM ma_runtime_session"
+                    + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_id IS NOT NULL FOR UPDATE",
                     String.class, saved.getBindingId(), saved.getGeneration());
             if (memberKeys.isEmpty()) {
                 return;
@@ -735,9 +744,9 @@ public class JdbcWorkspaceExecutionStore
                     saved.getGeneration(), saved.getOperationOwner(), saved.getOperationGeneration()) != 1) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            int cleared = jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_rewind_pending = FALSE"
-                    + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key = ?",
-                    saved.getBindingId(), saved.getGeneration(), key);
+            int cleared = jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL, is_rewind_pending = FALSE"
+                    + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_id = ?",
+                    saved.getBindingId(), saved.getGeneration(), ManagedSchemaKeys.identity(key));
             releaseMembers(jdbc, key, cleared);
         });
     }
@@ -762,7 +771,7 @@ public class JdbcWorkspaceExecutionStore
     }
 
     static void releaseMembers(JdbcTemplate jdbc, String storageKey, int count) {
-        if (count > 0 && jdbc.update(RELEASE_MEMBERS, count, storageKey, count) != 1) {
+        if (count > 0 && jdbc.update(RELEASE_MEMBERS, count, ManagedSchemaKeys.identity(storageKey), count) != 1) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
@@ -774,7 +783,7 @@ public class JdbcWorkspaceExecutionStore
         }
         try (var statement = connection.prepareStatement(RELEASE_MEMBERS)) {
             statement.setInt(1, count);
-            statement.setString(2, storageKey);
+            statement.setBytes(2, ManagedSchemaKeys.identity(storageKey));
             statement.setInt(3, count);
             if (statement.executeUpdate() != 1) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -797,5 +806,5 @@ public class JdbcWorkspaceExecutionStore
     }
 
     private static final String RELEASE_MEMBERS = "UPDATE ma_storage_owner SET member_count = member_count - ?"
-            + " WHERE storage_key = ? AND member_count >= ?";
+            + " WHERE physical_id = ? AND member_count >= ?";
 }

@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
 import java.util.Set;
@@ -27,10 +29,8 @@ final class ExternalWorkspaceSessionPolicies {
     static boolean externalProfileAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces,
             ContextBinding binding, String profile) {
         try {
-            return WorkspaceToolProfiles.isExternalShell(profile)
-                    ? workspaces.externalShellAllowed(binding)
-                    : workspaces.externalFilesAllowed(binding);
-        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException unreadable) {
+            return workspaces.externalFilesAllowed(binding);
+        } catch (RuntimeBrokerException unreadable) {
             return false;
         }
     }
@@ -65,17 +65,12 @@ final class ExternalWorkspaceSessionPolicies {
                     || command.input().stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
-            // The deployment's configured default reaches this path too, so
-            // the profile's own published modes decide, not just a selection.
-            if (!WorkspaceToolProfiles.admitsExternalApprovalMode(profile, resolvedPin.approvalMode())) {
-                throw AgentSessionPolicies.workspaceExecutionUnavailable();
-            }
             // Session skills are content declarations persisted into the immutable creation
             // receipt; the external Worker consumes them as installed files, so admission may
             // carry them. Extension pins stay refused: package execution requires the native
             // Shell/MCP lifecycle that external profiles never negotiate.
             effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
-                    profile, false, false, command.skills());
+                    WorkspaceToolProfiles.EXTERNAL_FILES, false, false, command.skills());
         }
         return selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
     }
@@ -89,7 +84,7 @@ final class ExternalWorkspaceSessionPolicies {
         if (!AgentSessionPolicies.availableApprovalModes(pin).contains(requested)
                 && !(supported && pin.digest() == null && "yolo".equals(requested)
                         && WorkspaceToolProfiles.isPublicShell(pin.toolProfile()))) {
-            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(400,
+            throw new ManagedAgentException(400,
                     "unsupported_approval_mode",
                     "The selected approval mode is not available for this Agent.");
         }

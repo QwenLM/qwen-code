@@ -603,7 +603,7 @@ class ExternalWorkspaceProvisionerTest {
                 return;
             }
             attestations.incrementAndGet();
-            byte[] bytes = JsonCodec.encode(ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed)));
+            byte[] bytes = JsonCodec.encode(ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed).toWire()));
             exchange.getResponseHeaders().set("Cache-Control", "no-store");
             exchange.getResponseHeaders().set("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, bytes.length);
@@ -862,7 +862,7 @@ class ExternalWorkspaceProvisionerTest {
         subject = provisioner(registration(PROVIDER, 1, MOUNT));
         AtomicInteger attestations = new AtomicInteger();
         AtomicReference<Map<String, Object>> attestation = new AtomicReference<>(
-                ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed)));
+                ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed).toWire()));
         HttpServer worker = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         worker.createContext(ManagedContextProtocol.ATTEST_PATH, exchange -> {
             exchange.getRequestBody().readAllBytes();

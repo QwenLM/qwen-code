@@ -192,6 +192,15 @@ export interface HttpManagedSessionStores {
   supportsExecutionDiagnostics(): boolean;
   /** Whether the control plane delivers a suspended Session's wake inputs. */
   supportsWakeDispatch(): boolean;
+  /** Whether this control plane lets a background Session suspend behind the pull. */
+  supportsRuntimeObservation(): boolean;
+  supportsActionParking(): boolean;
+  /** Whether a park certificate may share its seal with a background hold. */
+  supportsBackgroundActionParking(): boolean;
+  /** Whether a wake-started Turn's approval wait may park. */
+  supportsWakeActionParking(): boolean;
+  /** Whether a clean wake-sealed suspension may release its placement. */
+  supportsSuspensionPlacementRelease(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -436,6 +445,13 @@ export function createHttpManagedSessionStores(
     supportsModelDiagnostics: () => client.supportsModelDiagnostics(),
     supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
     supportsWakeDispatch: () => client.supportsWakeDispatch(),
+    supportsRuntimeObservation: () => client.supportsRuntimeObservation(),
+    supportsActionParking: () => client.supportsActionParking(),
+    supportsBackgroundActionParking: () =>
+      client.supportsBackgroundActionParking(),
+    supportsWakeActionParking: () => client.supportsWakeActionParking(),
+    supportsSuspensionPlacementRelease: () =>
+      client.supportsSuspensionPlacementRelease(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -638,6 +654,13 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       throw corrupt('snapshot resource is missing.');
     }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
+      // A pre-fix config_install edge may name a child that a later
+      // transaction committed. Ignore the stale edge; the child's own
+      // reference still registers it.
+      if (LEGACY_EXTENSION_CLOSURE_KINDS.has(ref.kind)) {
+        requireSameRef(stored.ref, ref);
+        continue;
+      }
       throw corrupt('snapshot dependency was not committed at its use.');
     }
     requireSameRef(stored.ref, ref);
@@ -806,12 +829,17 @@ const EXTENSION_RECORD_KINDS = new Set(
 );
 
 // Resources a pre-closure-edge snapshot may name without having staged them:
-// a bundle's contributions child and the contributions manifest's parts. The
-// inspection, native-page and commit walks degrade an absent one instead of
-// condemning the snapshot. One constant so the walks cannot drift (R7-1).
+// extension contribution children, plus the children a pre-fix config_install
+// record named. The inspection, native-page and commit walks degrade an absent
+// or later-committed one instead of condemning the snapshot. One constant so
+// the walks cannot drift (R7-1).
 const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
   'managed-extension-contributions',
   'managed-extension-contributions-part',
+  'managed-extension-config-bundle',
+  'managed-extension-root',
+  'managed-extension-stage-ack',
+  'managed-extension-enable-ack',
 ]);
 
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
@@ -828,12 +856,13 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   async publish(
     kind: string,
     source: Buffer,
+    resourceId?: string,
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
     const bytes = Buffer.from(source);
     const ref: ManagedSessionDurableRef = {
-      resourceId: randomUUID(),
+      resourceId: resourceId ?? randomUUID(),
       kind: safeKind,
       schemaVersion: 1,
       byteLength: bytes.byteLength,
@@ -974,6 +1003,11 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 interface WriterGrant {
   readonly activationLeaseRenewal: boolean;
   readonly wakeDispatch: boolean;
+  readonly runtimeObservation: boolean;
+  readonly actionParking: boolean;
+  readonly backgroundActionParking: boolean;
+  readonly wakeActionParking: boolean;
+  readonly suspensionPlacementRelease: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1043,6 +1077,27 @@ class ManagedSessionStoreHttpClient {
   supportsWakeDispatch(): boolean {
     return this.grant?.wakeDispatch === true;
   }
+
+  supportsRuntimeObservation(): boolean {
+    return this.grant?.runtimeObservation === true;
+  }
+
+  supportsActionParking(): boolean {
+    return this.grant?.actionParking === true;
+  }
+
+  supportsBackgroundActionParking(): boolean {
+    return this.grant?.backgroundActionParking === true;
+  }
+
+  supportsWakeActionParking(): boolean {
+    return this.grant?.wakeActionParking === true;
+  }
+
+  supportsSuspensionPlacementRelease(): boolean {
+    return this.grant?.suspensionPlacementRelease === true;
+  }
+
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
   private readonly writerId: string;
@@ -2876,7 +2931,12 @@ class ManagedSessionStoreHttpClient {
     )
       throw corrupt('ownership release does not match the writer.');
     if (!this.ownershipRelease) {
-      const grant = this.requireGrant();
+      const grant = this.grant;
+      if (grant === undefined || this.locallyStopped) {
+        throw new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is not active.',
+        );
+      }
       if (
         request.commitProof.lastCommitSequence !== grant.committedSequence ||
         request.commitProof.committedPrefixHash !== grant.lastCommitDigest
@@ -3117,6 +3177,11 @@ class ManagedSessionStoreHttpClient {
         ...this.requireGrant(),
         leaseUntil: renewed.leaseUntil,
         wakeDispatch: renewed.wakeDispatch,
+        runtimeObservation: renewed.runtimeObservation,
+        actionParking: renewed.actionParking,
+        backgroundActionParking: renewed.backgroundActionParking,
+        wakeActionParking: renewed.wakeActionParking,
+        suspensionPlacementRelease: renewed.suspensionPlacementRelease,
       };
       this.scheduleRenewal();
     })();
@@ -3760,6 +3825,11 @@ function parseWriterGrant(value: unknown): WriterGrant {
   return {
     activationLeaseRenewal: record['activationLeaseRenewal'] === true,
     wakeDispatch: record['wakeDispatch'] === true,
+    runtimeObservation: record['runtimeObservation'] === true,
+    actionParking: record['actionParking'] === true,
+    backgroundActionParking: record['backgroundActionParking'] === true,
+    wakeActionParking: record['wakeActionParking'] === true,
+    suspensionPlacementRelease: record['suspensionPlacementRelease'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
@@ -3964,14 +4034,13 @@ export function collectNestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     if (ref.kind === 'managed-config_install') {
-      // Exclude previousRecordRef: the predecessor was committed by its own
-      // transaction, so its children are already persisted. Re-closing the
-      // chain would grow linearly (R1-2) and break on pre-fix records whose
-      // children were never uploaded (R1-1).
-      const { previousRecordRef: _, ...ownEdges } = record as Record<
-        string,
-        unknown
-      >;
+      // Exclude previousRecordRef: it belongs to the predecessor's own
+      // transaction. Re-closing the chain would grow linearly (R1-2); pre-fix
+      // records can also name children that were never uploaded (R1-1).
+      const { previousRecordRef: _, ...ownEdges } = asRecord(
+        record,
+        'config install record',
+      );
       return collectRefs([ownEdges]);
     }
     return collectRefs([record]);
@@ -4025,6 +4094,10 @@ function isReferenceContainer(kind: string): boolean {
       'managed-hook-message-chunks',
       MANAGED_MESSAGE_CHUNKS_KIND,
       'managed-tool-outcome-chunks',
+      // Phase 3b: a draining Harness commits a manifest it never staged in
+      // memory, so the closure must walk its pages server-side exactly like
+      // the resident staged arm does, or the pages stay unreferenced.
+      MANAGED_TOOL_RESULT_KINDS.manifest,
     ].includes(kind)
   );
 }

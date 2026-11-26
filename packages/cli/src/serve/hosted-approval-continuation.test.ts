@@ -39,6 +39,7 @@ import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { hostedDurableMcpOwnerId } from './hosted-mcp-session.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -339,22 +340,105 @@ it.each([
   },
 );
 
-it('keeps accepting a public-child continuation on its own shell topology', async () => {
-  const fixture = nativeContinuationFixture(['run_shell_command'], {
-    toolProfile: 'hosted-workspace-shell/1',
-    publicChildAgentsVersion: 1,
+// S8a: the pinned definition, not the public-children pin, admits a Shell
+// call, and its captureBytes says which Shell lane the identity belongs to.
+function shellContinuationFixture(
+  lane: 'publication' | 'Shell',
+  publicChildren = false,
+  toolProfile = 'hosted-workspace-shell/1',
+  toolNames = ['run_shell_command'],
+) {
+  const fixture = nativeContinuationFixture(toolNames, {
+    toolProfile,
+    ...(publicChildren ? { publicChildAgentsVersion: 1 } : {}),
+    ...(lane === 'publication' ? { captureBytes: 1024 * 1024 } : {}),
   });
-  fixture.plan['publicChildModel'] = {
-    modelId: 'model-pin',
-    route: {
-      authType: 'openai',
-      endpointDigest: 'a'.repeat(64),
-      providerPin: 'b'.repeat(64),
-    },
-  };
-  await expect(fixture.read()).resolves.toMatchObject({
-    plan: { publicChildModel: { modelId: 'model-pin' } },
-  });
+  if (publicChildren)
+    fixture.plan['publicChildModel'] = {
+      modelId: 'model-pin',
+      route: {
+        authType: 'openai',
+        endpointDigest: 'a'.repeat(64),
+        providerPin: 'b'.repeat(64),
+      },
+    };
+  return fixture;
+}
+
+function shellCall(fixture: ReturnType<typeof nativeContinuationFixture>) {
+  return (fixture.plan['calls'] as Array<Record<string, unknown>>)[0];
+}
+
+it.each(
+  (['publication', 'Shell'] as const).flatMap((lane) =>
+    [false, true].map((publicChildren) => ({ lane, publicChildren })),
+  ),
+)(
+  'accepts a Shell continuation on the $lane lane (public children: $publicChildren)',
+  async ({ lane, publicChildren }) => {
+    const fixture = shellContinuationFixture(lane, publicChildren);
+    shellCall(fixture)['publicationId'] =
+      lane === 'publication' ? randomUUID() : null;
+    await expect(fixture.read()).resolves.toMatchObject({
+      plan: { calls: [{ call: { name: 'run_shell_command' } }] },
+    });
+  },
+);
+
+it.each([
+  'hosted-workspace-files/1',
+  'hosted-workspace-team-lead/1',
+  'hosted-workspace-team-lead/2',
+  'hosted-workspace-external-shell/1',
+])(
+  'rejects a Shell continuation whose definition names %s',
+  async (toolProfile) => {
+    const fixture = shellContinuationFixture('Shell', false, toolProfile);
+    shellCall(fixture)['publicationId'] = null;
+    await expect(fixture.read()).rejects.toThrow(
+      'Hosted approval continuation conflicts with the original Turn.',
+    );
+  },
+);
+
+it.each(
+  [false, true].flatMap((publicChildren) =>
+    (
+      [
+        { lane: 'publication', publicationId: null },
+        { lane: 'publication', publicationId: undefined },
+        { lane: 'publication', publicationId: 'publication' },
+        {
+          lane: 'Shell',
+          publicationId: '00000000-0000-4000-8000-000000000000',
+        },
+        { lane: 'Shell', publicationId: undefined },
+      ] as const
+    ).map((identity) => ({ ...identity, publicChildren })),
+  ),
+)(
+  'rejects a $lane-lane Shell call whose identity is $publicationId (public children: $publicChildren)',
+  async ({ lane, publicationId, publicChildren }) => {
+    const fixture = shellContinuationFixture(lane, publicChildren);
+    if (publicationId !== undefined)
+      shellCall(fixture)['publicationId'] = publicationId;
+    await expect(fixture.read()).rejects.toThrow(
+      'Invalid Hosted native batch member.',
+    );
+  },
+);
+
+it('rejects a Shell identity on a call that is not Shell', async () => {
+  const fixture = shellContinuationFixture(
+    'Shell',
+    false,
+    'hosted-workspace-shell/1',
+    ['write_file'],
+  );
+  shellCall(fixture)['publicationId'] = null;
+  await expect(fixture.read()).rejects.toThrow(
+    'Invalid Hosted native batch member.',
+  );
 });
 
 it.each(['ssh-process', 'external-workspace', 'static', '', null, true])(
@@ -495,7 +579,7 @@ it.each(
               engine: 'managed',
               toolProfile: profile,
               ...(profile === 'hosted-workspace-shell/1' && !planMode
-                ? { publicChildAgentsVersion: 1 }
+                ? { publicChildAgentsVersion: 1, captureBytes: 1024 * 1024 }
                 : {}),
             }),
           ),
@@ -937,22 +1021,43 @@ it.each([
     owner: 'hooks',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'none',
     extensionConfig: false,
     verdict: 'refuse',
   },
   {
-    owner: 'mcp',
+    owner: 'mcp with a plan saved on the Turn owner',
     hooks: false,
-    mcp: true,
+    mcp: 'durable',
+    planOwner: 'turn',
     commandStep: 'none',
     extensionConfig: false,
     verdict: 'refuse',
+  },
+  {
+    owner: 'mcp on an activation-scoped owner',
+    hooks: false,
+    mcp: 'activation',
+    planOwner: 'mcp',
+    commandStep: 'none',
+    extensionConfig: false,
+    verdict: 'refuse',
+  },
+  {
+    owner: 'mcp with a plan saved on its durable owner',
+    hooks: false,
+    mcp: 'durable',
+    planOwner: 'mcp',
+    commandStep: 'none',
+    extensionConfig: false,
+    verdict: 'pass',
   },
   {
     owner: 'hooks with a stale commandStep revision',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'stale',
     extensionConfig: true,
     verdict: 'refuse',
@@ -961,6 +1066,7 @@ it.each([
     owner: 'hooks with a matching commandStep revision',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'matching',
     extensionConfig: true,
     verdict: 'pass',
@@ -969,13 +1075,14 @@ it.each([
     owner: 'hooks with extensions and no commandStep',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'none',
     extensionConfig: true,
     verdict: 'refuse',
   },
 ])(
   'the saved-batch owner gate: $owner ($verdict)',
-  async ({ hooks, mcp, commandStep, extensionConfig, verdict }) => {
+  async ({ hooks, mcp, planOwner, commandStep, extensionConfig, verdict }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'g3-a6-owner-'));
     const sessionKey = {
       tenantId: 'tenant',
@@ -1014,6 +1121,11 @@ it.each([
     });
     try {
       const promptId = randomUUID();
+      // S6b: an MCP Session resumes a plan saved on its own durable owner.
+      const mcpOwner =
+        mcp === 'activation'
+          ? 'hooks-activation-a6'
+          : hostedDurableMcpOwnerId(sessionKey, undefined);
       const turn = new HostedWorkspaceToolTurn(
         { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
         session,
@@ -1038,6 +1150,14 @@ it.each([
           ...(mcp
             ? {
                 mcp: {
+                  broker: new HostedWorkspaceBroker(
+                    {
+                      baseUrl: 'http://127.0.0.1:1',
+                      token: 'fixture-no-traffic',
+                    },
+                    sessionKey,
+                    mcpOwner,
+                  ),
                   ensureReady: async () => undefined,
                 } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
               }
@@ -1063,7 +1183,10 @@ it.each([
             bindingId: 'binding-1',
             generation: '1',
             workspaceGeneration: '1',
-            runtimeSessionId: hostedRuntimeSessionId(promptId),
+            runtimeSessionId:
+              mcp && planOwner === 'mcp'
+                ? mcpOwner
+                : hostedRuntimeSessionId(promptId),
           },
         },
         parts: [],

@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parse } from 'yaml';
 import { afterAll, describe, expect, it } from 'vitest';
-import { touchesManagedAgent } from '../../.github/scripts/managed-agent-gate-scope.mjs';
+import { managedAgentCoverage } from '../../.github/scripts/managed-agent-gate-scope.mjs';
 
 const gate = parse(
   readFileSync('.github/workflows/managed-agent-gate.yml', 'utf8'),
@@ -66,8 +66,32 @@ describe('Managed Agent gate scope', () => {
   it.each([
     'packages/managed-agent-server/src/main/java/A.java',
     'packages/sdk-java/qwencode/pom.xml',
+    '.github/scripts/maven-cache-seed.sh',
+  ])('selects Java checks for %s', (path) => {
+    expect(managedAgentCoverage(['README.md', path])).toBe('java');
+  });
+
+  it.each([
+    'packages/acp-bridge/src/session-control-plane.ts',
     'packages/cli/src/serve/server.ts',
+    'packages/cli/src/commands/serve.ts',
     'packages/core/src/managed-runtime/runtime.ts',
+    'scripts/run-java-daemon-sdk-e2e.ts',
+  ])('selects daemon checks for %s', (path) => {
+    expect(managedAgentCoverage([path])).toBe('daemon');
+  });
+
+  it.each([
+    'packages/sdk-java/qwencode/src/main/java/com/alibaba/qwen/code/daemon/DaemonSessionClient.java',
+    '.github/workflows/sdk-java.yml',
+    '.github/workflows/managed-agent-gate.yml',
+    '.github/scripts/managed-agent-gate-scope.mjs',
+    '.github/scripts/managed-agent-gate-tier.sh',
+  ])('selects both checks for %s', (path) => {
+    expect(managedAgentCoverage([path])).toBe('both');
+  });
+
+  it.each([
     'integration-tests/helpers/hosted-harness-process.ts',
     'integration-tests/vitest.hosted.config.ts',
     'scripts/run-managed-agent-server-e2e.ts',
@@ -75,23 +99,23 @@ describe('Managed Agent gate scope', () => {
     'packages/channels/github/src/managed-github-adapter.ts',
     'packages/cli/src/commands/channel.ts',
     'packages/cli/src/commands/channel/managed-channel-client.ts',
-    '.github/workflows/sdk-java.yml',
-    '.github/workflows/managed-agent-gate.yml',
-    '.github/scripts/managed-agent-gate-scope.mjs',
-    '.github/scripts/managed-agent-gate-tier.sh',
-  ])('runs the suite for %s', (path) => {
-    expect(touchesManagedAgent(['README.md', path])).toBe(true);
+  ])('selects background coverage for %s', (path) => {
+    expect(managedAgentCoverage([path])).toBe('background');
   });
 
   it.each([
     'README.md',
+    'packages/sdk-java/README.md',
+    'packages/channels/github/src/GithubAdapter.ts',
+    'packages/channels/github/src/GithubAdapter.test.ts',
+    'packages/channels/base/src/types.ts',
     'packages/cli/src/ui/App.tsx',
     'packages/core/src/tools/shell.ts',
     'packages/web-shell/client/App.tsx',
     'integration-tests/cli/run.test.ts',
     '.github/workflows/ci.yml',
   ])('leaves %s to the nightly run', (path) => {
-    expect(touchesManagedAgent([path])).toBe(false);
+    expect(managedAgentCoverage([path])).toBe('none');
   });
 
   it('reads paths from stdin when run as a script', () => {
@@ -100,9 +124,12 @@ describe('Managed Agent gate scope', () => {
         input,
         encoding: 'utf8',
       }).stdout;
-    expect(run('docs/a.md\npackages/sdk-java/x\n')).toBe('true\n');
-    expect(run('docs/a.md\n')).toBe('false\n');
-    expect(run('')).toBe('false\n');
+    expect(run('docs/a.md\0packages/sdk-java/x\0')).toBe('java\n');
+    expect(run('packages/sdk-java/x\0packages/cli/src/serve/server.ts\0')).toBe(
+      'both\n',
+    );
+    expect(run('docs/a.md\0')).toBe('none\n');
+    expect(run('')).toBe('none\n');
   });
 });
 
@@ -201,8 +228,8 @@ describe('Managed Agent gate path matching', () => {
       return { base, head: commit(origin, 'cafe') };
     });
     expect(
-      runPaths(ws, { EVENT_NAME: 'push', PUSH_BEFORE: base }).touched,
-    ).toBe('true');
+      runPaths(ws, { EVENT_NAME: 'push', PUSH_BEFORE: base }).coverage,
+    ).toBe('java');
   });
 
   it("counts a rename's source path, not only its destination", () => {
@@ -213,11 +240,11 @@ describe('Managed Agent gate path matching', () => {
       return { base, head: commit(origin, 'move out') };
     });
     expect(
-      runPaths(ws, { EVENT_NAME: 'push', PUSH_BEFORE: base }).touched,
-    ).toBe('true');
+      runPaths(ws, { EVENT_NAME: 'push', PUSH_BEFORE: base }).coverage,
+    ).toBe('java');
   });
 
-  it('treats an all-zero before as touched without fetching', () => {
+  it('selects both checks for an all-zero before without fetching', () => {
     const { ws } = workspace('zero-base', (origin) => {
       write(origin, 'README.md', 'a');
       const base = commit(origin, 'base');
@@ -227,8 +254,8 @@ describe('Managed Agent gate path matching', () => {
       runPaths(ws, {
         EVENT_NAME: 'push',
         PUSH_BEFORE: '0000000000000000000000000000000000000000',
-      }).touched,
-    ).toBe('true');
+      }).coverage,
+    ).toBe('both');
   });
 });
 
@@ -250,6 +277,7 @@ describe('Managed Agent gate triggers', () => {
       with: {
         ref: '${{ needs.scope.outputs.sha }}',
         tier: '${{ needs.scope.outputs.tier }}',
+        coverage: '${{ needs.scope.outputs.coverage }}',
       },
     });
   });
@@ -298,7 +326,7 @@ describe('Managed Agent gate triggers', () => {
 });
 
 describe('Managed Agent gate required check', () => {
-  const name = (event, tier, touched) =>
+  const name = (event, tier, result) =>
     evaluate(gate.jobs.gate.name, {
       github: github(
         event,
@@ -309,33 +337,28 @@ describe('Managed Agent gate required check', () => {
             }
           : {},
       ),
-      needs: { scope: { outputs: { tier, touched } } },
+      needs: { scope: { result, outputs: { tier } } },
     });
 
   it.each([
-    ['pull_request', 'none', 'false', 'Managed Agent gate'],
-    ['pull_request', 'fast', 'true', 'Managed Agent gate'],
-    ['pull_request', 'none', 'true', 'Managed Agent review (no full run)'],
-    ['pull_request', '', 'true', 'Managed Agent gate'],
-    ['pull_request_review', 'full', 'true', 'Managed Agent gate'],
+    ['pull_request', 'none', 'success', 'Managed Agent gate'],
+    ['pull_request', 'fast', 'success', 'Managed Agent gate'],
+    ['pull_request', '', 'cancelled', 'Managed Agent gate'],
+    ['pull_request_review', 'full', 'success', 'Managed Agent full suite'],
     [
       'pull_request_review',
       'none',
-      'true',
+      'success',
       'Managed Agent review (no full run)',
     ],
-    ['pull_request_review', 'none', 'false', 'Managed Agent gate'],
-    ['pull_request_review', '', 'true', 'Managed Agent gate'],
-    ['push', 'fast', 'true', 'Managed Agent gate'],
-    ['merge_group', 'fast', 'true', 'Managed Agent gate'],
-    // A failed tier selection leaves the outputs empty and must still
-    // report, and fail, under the required name.
-    ['pull_request', '', '', 'Managed Agent gate'],
-    ['pull_request_review', '', '', 'Managed Agent gate'],
+    ['push', 'fast', 'success', 'Managed Agent gate'],
+    ['merge_group', 'fast', 'success', 'Managed Agent gate'],
+    ['pull_request', '', 'failure', 'Managed Agent gate'],
+    ['pull_request_review', '', 'failure', 'Managed Agent full suite'],
   ])(
-    '%s with tier %j, touched %j reports as %s',
-    (event, tier, touched, expected) => {
-      expect(name(event, tier, touched)).toBe(expected);
+    '%s with tier %j and scope %j reports as %s',
+    (event, tier, result, expected) => {
+      expect(name(event, tier, result)).toBe(expected);
     },
   );
 
@@ -442,23 +465,22 @@ describe('Managed Agent gate required check', () => {
   it.each([
     ['failure', '', '', 'skipped', 1],
     ['cancelled', '', '', 'skipped', 1],
-    ['success', 'none', 'false', 'skipped', 0],
-    ['success', 'none', 'true', 'skipped', 0],
-    ['success', 'fast', 'true', 'success', 0],
-    ['success', 'fast', 'true', 'failure', 1],
-    ['success', 'full', 'true', 'success', 0],
-    ['success', 'full', 'true', 'failure', 1],
-    ['success', 'full', 'true', 'cancelled', 1],
+    ['success', 'none', 'none', 'skipped', 0],
+    ['success', 'none', 'background', 'skipped', 0],
+    ['success', 'fast', 'java', 'success', 0],
+    ['success', 'fast', 'daemon', 'failure', 1],
+    ['success', 'full', 'both', 'success', 0],
+    ['success', 'full', 'both', 'failure', 1],
+    ['success', 'full', 'both', 'cancelled', 1],
   ])(
-    'scope %s, tier %j, touched %j, suite %s exits %i',
-    (scope, tier, touched, suite, code) => {
+    'scope %s, tier %j, coverage %j, suite %s exits %i',
+    (scope, tier, coverage, suite, code) => {
       const result = spawnSync('bash', ['-c', report], {
         env: {
           PATH: process.env.PATH,
-          EVENT_NAME: '',
           SCOPE_RESULT: scope,
           TIER: tier,
-          TOUCHED: touched,
+          COVERAGE: coverage,
           SUITE_RESULT: suite,
         },
       });
@@ -485,10 +507,9 @@ describe('Managed Agent gate required check', () => {
     const result = spawnSync('bash', ['-c', report], {
       env: {
         PATH: process.env.PATH,
-        EVENT_NAME: event,
         SCOPE_RESULT: 'success',
         TIER: tier,
-        TOUCHED: 'true',
+        COVERAGE: 'both',
         SUITE_RESULT: suite,
       },
     });
@@ -505,8 +526,7 @@ describe('Managed Agent gate tier selection', () => {
   );
   const dir = mkdtempSync(join(tmpdir(), 'managed-agent-gate-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
-  // A stand-in gh: check-runs prints FAKE_URLS (approval dedup) or
-  // FAKE_ALL_URLS (the pull_request scan); a run lookup prints event, pull
+  // A stand-in gh: check-runs prints FAKE_URLS; a run lookup prints event, pull
   // request numbers and head branch from FAKE_EVENTS ("id=event:prs:branch");
   // a direct PR lookup supplies the fork fallback's head sha (HEAD_SHA unless
   // FAKE_PR_HEAD_SHA) and head ref; a jobs lookup reports FAKE_FULL
@@ -517,8 +537,8 @@ describe('Managed Agent gate tier selection', () => {
       '#!/usr/bin/env bash',
       'if [[ -n "${FAKE_FAIL:-}" && "$2" == *"${FAKE_FAIL}"* ]]; then exit 22; fi',
       'case "$2" in',
-      '  */check-runs*filter=all*) printf "%s" "${FAKE_ALL_URLS}" ;;',
-      '  */check-runs*) printf "%s" "${FAKE_URLS}" ;;',
+      '  */check-runs*check_name=Managed%20Agent%20full%20suite*) printf "%s" "${FAKE_URLS}" ;;',
+      '  */check-runs*) exit 5 ;;',
       '  */pulls/*) printf \'%s\\t%s\\n\' "${FAKE_PR_HEAD_SHA:-${HEAD_SHA}}" "${FAKE_HEAD_REF:-feature}" ;;',
       '  */actions/runs/*/jobs*) id="${2%/jobs*}"; id="${id##*/}"; [[ " ${FAKE_FULL:-} " == *" ${id} "* ]] && echo true || echo false ;;',
       '  */actions/runs/*) id="${2##*/}"; for p in ${FAKE_EVENTS}; do if [[ "${p%%=*}" == "${id}" ]]; then rec="${p#*=}"; event="${rec%%:*}"; rest="${rec#*:}"; if [[ "${rest}" == *:* ]]; then prs="${rest%%:*}"; branch="${rest#*:}"; else prs="${rest}"; branch=""; fi; [[ -n "${prs}" ]] || prs=-; printf \'%s\\t%s\\t%s\\n\' "${event}" "${prs}" "${branch}"; fi; done ;;',
@@ -540,9 +560,8 @@ describe('Managed Agent gate tier selection', () => {
         BASE_REF: 'main',
         PR_NUMBER: '7',
         REVIEW_AUTHOR_ASSOCIATION: 'MEMBER',
-        TOUCHED: 'true',
+        COVERAGE: 'both',
         FAKE_URLS: '',
-        FAKE_ALL_URLS: '',
         FAKE_EVENTS: '',
         FAKE_FULL: '',
         ...env,
@@ -572,39 +591,30 @@ describe('Managed Agent gate tier selection', () => {
   });
 
   it.each(['pull_request', 'push', 'merge_group'])(
-    'runs the fast tier for a touched %s',
+    'runs only the selected fast tier for %s',
     (event) => {
-      expect(tier({ EVENT_NAME: event })).toBe('tier=fast');
-      expect(tier({ EVENT_NAME: event, TOUCHED: 'false' })).toBe('tier=none');
+      for (const coverage of ['java', 'daemon', 'both']) {
+        expect(
+          tier({
+            EVENT_NAME: event,
+            COVERAGE: coverage,
+            FAKE_FAIL: 'check-runs',
+          }),
+        ).toBe('tier=fast');
+      }
+      for (const coverage of ['none', 'background']) {
+        expect(tier({ EVENT_NAME: event, COVERAGE: coverage })).toBe(
+          'tier=none',
+        );
+      }
     },
   );
 
-  it('does not let a rerun fast tier overwrite a full result on the same head', () => {
-    expect(
-      tier({
-        EVENT_NAME: 'pull_request',
-        FAKE_ALL_URLS: url(42),
-        FAKE_EVENTS: '42=pull_request_review:7',
-        FAKE_FULL: '42',
-      }),
-    ).toBe('tier=none');
-  });
-
-  it('keeps a fork head full result when its run omits pull request numbers', () => {
-    expect(
-      tier({
-        EVENT_NAME: 'pull_request',
-        FAKE_ALL_URLS: url(42),
-        FAKE_EVENTS: '42=pull_request_review:',
-        FAKE_FULL: '42',
-      }),
-    ).toBe('tier=none');
-  });
-
   it('fails tier selection when a prior full-run lookup fails', () => {
     const { result } = runTier({
-      EVENT_NAME: 'pull_request',
-      FAKE_ALL_URLS: url(42),
+      EVENT_NAME: 'pull_request_review',
+      REVIEW_STATE: 'approved',
+      FAKE_URLS: url(42),
       FAKE_FAIL: 'actions/runs/42',
     });
     expect(result.status).not.toBe(0);
@@ -616,7 +626,8 @@ describe('Managed Agent gate tier selection', () => {
       REVIEW_STATE: 'approved',
     };
     expect(tier(approve)).toBe('tier=full');
-    expect(tier({ ...approve, TOUCHED: 'false' })).toBe('tier=none');
+    expect(tier({ ...approve, COVERAGE: 'background' })).toBe('tier=full');
+    expect(tier({ ...approve, COVERAGE: 'none' })).toBe('tier=none');
     expect(tier({ ...approve, REVIEW_STATE: 'commented' })).toBe('tier=none');
     expect(tier({ ...approve, BASE_REF: 'feature' })).toBe('tier=none');
   });
@@ -678,8 +689,7 @@ describe('Managed Agent gate tier selection', () => {
         FAKE_FULL: '42',
       }),
     ).toBe('tier=full');
-    // Fast-tier PR runs and untouched reviews now share the required name,
-    // but only an approval run with the full callee is coverage.
+    // A check with the right name still needs the full callee.
     expect(
       tier({
         ...approve,
@@ -740,20 +750,32 @@ describe('SDK Java fast tier', () => {
     ]);
   });
 
-  it('skips exactly the slow lanes on the fast tier', () => {
-    const skipped = Object.entries(sdkJava.jobs)
-      .filter(([, job]) => job.if === "${{ inputs.tier != 'fast' }}")
-      .map(([id]) => id)
-      .sort();
-    expect(skipped).toEqual([
-      'event-transport-broker',
-      'event-transport-multi-node',
-      'hosted-failover-e2e',
-      'hosted-harness-mysql',
-      'mysql-integration',
-    ]);
-    for (const id of ['test', 'flyway-migrations', 'daemon-e2e']) {
-      expect(sdkJava.jobs[id].if, id).toBeUndefined();
+  it.each([
+    ['java', ['test', 'flyway-migrations']],
+    ['daemon', ['daemon-e2e']],
+    ['both', ['test', 'flyway-migrations', 'daemon-e2e']],
+  ])('runs only the requested fast checks for %s', (coverage, expected) => {
+    const selected = Object.entries(sdkJava.jobs)
+      .filter(
+        ([, job]) =>
+          !job.if ||
+          evaluate(job.if, {
+            inputs: { tier: 'fast', coverage },
+          }),
+      )
+      .map(([id]) => id);
+    expect(selected).toEqual(expected);
+  });
+
+  it.each(['full', undefined])('keeps every background job for %j', (tier) => {
+    for (const [id, job] of Object.entries(sdkJava.jobs)) {
+      expect(
+        !job.if ||
+          evaluate(job.if, {
+            inputs: { tier, coverage: 'daemon' },
+          }),
+        id,
+      ).toBe(true);
     }
   });
 

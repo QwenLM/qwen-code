@@ -1,12 +1,14 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -35,7 +37,6 @@ public final class ExternalWorkspaceMaterializationStore {
 
     public Receipt materialize(String tenant, String registeredAliasId, String displayName,
             String ownerActorId, String idempotencyKey) {
-        byte[] owner;
         try {
             if (tenant == null || !tenant.matches("[A-Za-z0-9._:-]{1,128}")
                     || registeredAliasId == null || !registeredAliasId.matches("[A-Za-z0-9._-]{1,128}")
@@ -45,15 +46,15 @@ public final class ExternalWorkspaceMaterializationStore {
                     || idempotencyKey == null || !idempotencyKey.matches("[A-Za-z0-9._:-]{1,128}")) {
                 throw new IllegalArgumentException();
             }
-            // This key encodes the operator's grantee, not an authenticated request actor.
-            owner = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, ownerActorId);
+            // The grantee is the operator's actor, not an authenticated
+            // request actor; it passes the same identity admission.
+            ManagedWorkspaceRegistry.actorKey(tenant, ownerActorId);
         } catch (IllegalArgumentException error) {
             throw new RuntimeBrokerException(400, "invalid_external_workspace_materialization",
                     "Invalid external Workspace materialization.", false);
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
         String digest = ManagedSchemaKeys.key(registeredAliasId, displayName, ownerActorId);
-        String aliasKey = RuntimeAdmissionFences.storageAliasKey(tenant, registeredAliasId);
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenant, 10);
             var prior = ManagedReceipts.find(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT,
@@ -65,48 +66,45 @@ public final class ExternalWorkspaceMaterializationStore {
                 return decode(prior.resultJson(), Receipt.class);
             }
             var registrations = jdbc.queryForList("SELECT registration_json FROM ma_storage"
-                    + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?"
-                    + " AND storage_kind IN ('EXTERNAL', 'EPHEMERAL')"
-                    + " AND registration_state = 'REGISTERED' FOR UPDATE",
-                    String.class, aliasKey, tenant, registeredAliasId);
+                    + " WHERE tenant_id = ? AND storage_id = ?"
+                    + " AND storage_kind = 'EXTERNAL' AND registration_state = 'REGISTERED' FOR UPDATE",
+                    String.class, tenant, registeredAliasId);
             if (registrations.size() != 1) {
                 throw conflict("external_workspace_conflict");
             }
-            com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage registration;
+            // The shared strict decoder is the one every other reader of this
+            // column uses; a lenient scalar coercion here would commit an
+            // ACTIVE Workspace that every later consumer permanently refuses.
+            final ExternalStorageRegistry.RegisteredExternalStorage registration;
             try {
-                registration =
-                        com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.decodeRegistration(
-                                registrations.getFirst());
-            } catch (RuntimeException failure) {
-                // A stored registration this build cannot read is a permanent
-                // ownership refusal, not a malformed request: keep the 409 the
-                // sibling shape checks answer instead of a mapper 400.
-                throw conflict("external_workspace_conflict");
-            }
-            if (registration == null) {
+                registration = ExternalStorageRegistry
+                        .decodeRegistration(registrations.getFirst());
+            } catch (RuntimeException unreadable) {
                 throw conflict("external_workspace_conflict");
             }
             String physical = registration.ownerKey();
             long revision = registration.registrationRevision();
-            if (registration.ephemeral() && !tenant.equals(registration.ephemeralTenantId())
-                    || !registeredAliasId.equals(registration.tenantWorkspaceId())
-                    || jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ?"
-                            + " AND tenant_id = ? AND storage_id = ? AND physical_key = ?"
-                            + " AND registration_revision = ? AND storage_kind = ?",
-                            Long.class, aliasKey, tenant, registeredAliasId, physical,
-                            revision, registration.storageKind()) != 1
-                    || jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?"
-                            + " AND tenant_id = ? AND storage_id = ? AND storage_kind = ?"
+            if (!registeredAliasId.equals(registration.tenantWorkspaceId())
+                    || jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage"
+                            + " WHERE tenant_id = ? AND storage_id = ? AND physical_id = ? AND registration_revision = ?",
+                            Long.class, tenant, registeredAliasId,
+                            ManagedSchemaKeys.identity(physical), revision) != 1
+                    || jdbc.queryForList("SELECT physical_id FROM ma_storage_owner WHERE physical_id = ?"
+                            + " AND tenant_id = ? AND storage_id = ? AND storage_kind = 'EXTERNAL'"
                             + " AND mount_revision = ? AND mount_root = ? AND mount_state = 'UNVERIFIED'"
-                            + " AND holder_key IS NULL AND binding_id IS NULL AND runtime_generation IS NULL"
+                            + " AND holder_id IS NULL AND binding_id IS NULL AND runtime_generation IS NULL"
                             + " AND runtime_session_id IS NULL AND maintenance_id IS NULL AND maintenance_generation IS NULL FOR UPDATE",
-                            String.class, physical, tenant, registeredAliasId,
-                            registration.storageKind(), revision, registration.mountRoot()).size() != 1
+                            String.class, ManagedSchemaKeys.identity(physical), tenant,
+                            registeredAliasId, revision,
+                            registration.mountRoot()).size() != 1
                     || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ?"
-                            + " AND (workspace_id = ? OR storage_id = ?)", tenant, registeredAliasId, registeredAliasId).isEmpty()
-                    || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE storage_alias_key = ?"
+                            + " AND (workspace_id = ? OR storage_id = ?)", tenant,
+                            registeredAliasId, registeredAliasId).isEmpty()
+                    || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding"
+                            + " WHERE (tenant_id = ? AND storage_id = ?)"
                             + " OR (tenant_id = ? AND (workspace_id = ? OR storage_id = ?))",
-                            aliasKey, tenant, registeredAliasId, registeredAliasId).isEmpty()) {
+                            tenant, registeredAliasId, tenant,
+                            registeredAliasId, registeredAliasId).isEmpty()) {
                 throw conflict("external_workspace_conflict");
             }
             long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
@@ -119,7 +117,7 @@ public final class ExternalWorkspaceMaterializationStore {
                     registeredAliasId, registeredAliasId, displayName, WorkspaceExecutionProfile.CONFIG_REF,
                     WorkspaceExecutionProfile.POLICY_REF, now, now);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                    + " VALUES (?, ?, ?, 'OWNER')", tenant, registeredAliasId, owner);
+                    + " VALUES (?, ?, ?, 'OWNER')", tenant, registeredAliasId, ownerActorId);
             ManagedReceipts.insert(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant, idempotencyKey,
                     digest, "MATERIALIZE_EXTERNAL_WORKSPACE", null, null, null, "COMPLETED", null, null, now);
             jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", encode(receipt), receiptKey);
@@ -131,7 +129,7 @@ public final class ExternalWorkspaceMaterializationStore {
         try {
             return json.writeValueAsString(value);
         } catch (JsonProcessingException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore
+            throw WorkspaceExecutionStore
                     .unavailable();
         }
     }

@@ -302,7 +302,7 @@ Status: **implemented locally; verified by the local evidence listed under "Loca
 
 ### Boundary
 
-A new, separate profile — `hosted-workspace-external-shell/1` — declares `read_file`, `write_file`, `edit`, `glob` and a **foreground-only** `run_shell_command`, plus a content-only `skill` tool on a Turn whose Session pins a skill catalog. It is never a reinterpretation of `hosted-workspace-external-files/1`: that profile keeps rejecting every Shell call, and the two are distinguished by their capability digests and never share a part/handle version.
+A new, separate profile — `hosted-workspace-external-shell/1` — declares `read_file`, `write_file`, `edit`, `glob` and a **foreground-only** `run_shell_command`, plus a content-only `skill` tool on a Turn whose Session pins a skill catalog. It is never a reinterpretation of `hosted-workspace-external-files/1`: that profile keeps rejecting every Shell call, and the two are distinguished by their capability digests; they will not share a part/handle version once the Shell lane mints `EXTERNAL_SHELL_HANDLE_VERSION` (today both still mint version 1).
 
 Its capability is its own: `sha256("managed-workspace-execution/1;external-shell/1")`, derived from the canonical string exactly as the terminal capability is, and pinned as the same hex on both sides. Its resource-handle version is **2**, distinct from the files profile's **1**; startup recovery accepts either so a worker generation admitted before this slice is still recoverable, while a new provision always writes 2 and `validateHandle` compares it exactly.
 

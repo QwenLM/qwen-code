@@ -38,6 +38,7 @@ import { determineProvider } from './index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
+  DEFAULT_OPENAI_BASE_URL,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
   MAX_STREAM_GUARD_TIMEOUT_MS,
@@ -58,12 +59,15 @@ import {
   resolveBaseUrl,
 } from '../../providers/provider-config.js';
 import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
+import { getBuiltinDeepSeekReasoning } from '../deepseek-reasoning.js';
 import { fnCall } from '../../test-utils/model-fixtures.js';
+import { getErrorStatus } from '../../utils/errors.js';
 import { retryContext } from '../../utils/retryContext.js';
 
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
 const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+const mockPipelineWarn = vi.hoisted(() => vi.fn());
 /** Span attribute writes made through the attempt handle, keyed as recorded. */
 const mockSpanAttributes = vi.hoisted(() => new Map<string, unknown>());
 
@@ -83,6 +87,19 @@ vi.mock('./converter.js', async (importOriginal) => {
   };
 });
 vi.mock('openai');
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) => {
+      const logger = actual.createDebugLogger(tag);
+      return tag === 'OPENAI_PIPELINE'
+        ? { ...logger, warn: mockPipelineWarn }
+        : logger;
+    },
+  };
+});
 vi.mock('../../telemetry/loggers.js', () => ({
   logProtocolTagSanitized: vi.fn(),
 }));
@@ -282,6 +299,7 @@ describe('ContentGenerationPipeline', () => {
     mockReportOpenAiRequest.mockReturnValue(activeHandle);
 
     mockClient = {
+      baseURL: DEFAULT_OPENAI_BASE_URL,
       chat: {
         completions: {
           create: vi.fn(),
@@ -703,12 +721,36 @@ describe('ContentGenerationPipeline', () => {
       expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
         request.config!.tools,
         'auto',
+        false,
       );
       expect(createMock()).toHaveBeenCalledWith(
         expect.objectContaining({ tools: mockTools }),
         expect.objectContaining({ signal: undefined }),
       );
     });
+
+    it.each([
+      { baseUrl: DASHSCOPE_URL, clientUrl: DASHSCOPE_URL, enabled: true },
+      { baseUrl: undefined, clientUrl: DASHSCOPE_URL, enabled: true },
+      { baseUrl: '', clientUrl: DEFAULT_OPENAI_BASE_URL, enabled: false },
+    ])(
+      'sets schema opening to $enabled for SDK endpoint $clientUrl (configured: $baseUrl)',
+      async ({ baseUrl, clientUrl, enabled }) => {
+        const request = userRequest('qwen4-max', {
+          tools: [{ functionDeclarations: [{ name: 'test-function' }] }],
+        });
+        mockClient.baseURL = clientUrl;
+        (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([]);
+
+        await executeWith({ baseUrl }, request);
+
+        expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
+          request.config!.tools,
+          'auto',
+          enabled,
+        );
+      },
+    );
 
     it('should skip empty tools array in request', async () => {
       // tools: [] must NOT reach the API request
@@ -1401,6 +1443,196 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({ reasoning_effort: 'none' }),
         expect.objectContaining({ maxRetries: 0 }),
       );
+    });
+
+    it('flips explicit extra_body.enable_thinking to false on custom non-Qwen gateways when thoughts are disabled', async () => {
+      const model = 'custom-reasoning-model';
+      providerAdds({ enable_thinking: true });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://custom-gateway.example.com/v1',
+          model,
+          extra_body: { enable_thinking: true },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('flips explicit chat_template_kwargs.enable_thinking to false on custom non-Qwen gateways while preserving sibling keys', async () => {
+      const model = 'custom-reasoning-model';
+      providerAdds({
+        chat_template_kwargs: { enable_thinking: true, preserve_flag: 'yes' },
+      });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://custom-gateway.example.com/v1',
+          model,
+          extra_body: {
+            chat_template_kwargs: {
+              enable_thinking: true,
+              preserve_flag: 'yes',
+            },
+          },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.chat_template_kwargs).toEqual({
+        enable_thinking: false,
+        preserve_flag: 'yes',
+      });
+    });
+
+    it('does not invent enable_thinking on custom non-Qwen gateways that did not declare it', async () => {
+      const model = 'custom-plain-model';
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://custom-gateway.example.com/v1',
+          model,
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.chat_template_kwargs).toBeUndefined();
+    });
+
+    it('keeps explicit extra_body.enable_thinking true when thinkingMandatory is set on a custom gateway', async () => {
+      const model = 'custom-mandatory-model';
+      providerAdds({ enable_thinking: true });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://custom-gateway.example.com/v1',
+          model,
+          thinkingMandatory: true,
+          extra_body: { enable_thinking: true },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.enable_thinking).toBe(true);
+    });
+
+    it('learns required thinking and retries when a custom gateway rejects the flipped enable_thinking: false', async () => {
+      const model = 'custom-secretly-mandatory-model';
+      pipelineWith({
+        baseUrl: 'https://custom-gateway.example.com/v1',
+        model,
+        extra_body: { enable_thinking: true },
+      });
+      providerAdds({ enable_thinking: true });
+      mockCompletion();
+      createMock().mockRejectedValueOnce(
+        requiredThinkingError('enable_thinking must be true for this model'),
+      );
+
+      await pipeline.execute(sideQuery(model), 'side-query:chat-compression');
+
+      const calls = createMock().mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0][0].enable_thinking).toBe(false);
+      expect(calls[1][0].enable_thinking).toBe(true);
+    });
+
+    it('drops conflicting extra_body.enable_thinking when a gateway-native disable switch is already emitted', async () => {
+      const model = 'deepseek-chat';
+      providerAdds({
+        enable_thinking: true,
+        chat_template_kwargs: { enable_thinking: true },
+      });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://api.deepseek.com/v1',
+          model,
+          extra_body: {
+            enable_thinking: true,
+            chat_template_kwargs: { enable_thinking: true },
+          },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.thinking).toEqual({ type: 'disabled' });
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.chat_template_kwargs).toBeUndefined();
+    });
+
+    it('drops conflicting chat_template_kwargs.enable_thinking on OpenRouter while keeping sibling keys', async () => {
+      const model = 'anthropic/claude-sonnet-4';
+      providerAdds({
+        enable_thinking: true,
+        chat_template_kwargs: { enable_thinking: true, keep_me: 1 },
+      });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://openrouter.ai/api/v1',
+          model,
+          extra_body: {
+            enable_thinking: true,
+            chat_template_kwargs: { enable_thinking: true, keep_me: 1 },
+          },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.reasoning).toEqual({ enabled: false });
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.chat_template_kwargs).toEqual({ keep_me: 1 });
+    });
+
+    it('flips enable_thinking and retries on required-thinking error during executeStream', async () => {
+      const model = 'custom-stream-mandatory-model';
+      pipelineWith({
+        baseUrl: 'https://custom-gateway.example.com/v1',
+        model,
+        extra_body: { enable_thinking: true },
+      });
+      providerAdds({ enable_thinking: true });
+      convertChunksTo(finishOf([{ text: 'ok' }]));
+      createMock()
+        .mockRejectedValueOnce(
+          requiredThinkingError('enable_thinking must be true for this model'),
+        )
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              id: 'chatcmpl-stream-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: 'ok' },
+                  finish_reason: 'stop',
+                },
+              ],
+            };
+          })(),
+        );
+
+      const stream = await pipeline.executeStream(
+        sideQuery(model),
+        'side-query:chat-compression',
+      );
+      const chunks = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+
+      const calls = createMock().mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0][0].enable_thinking).toBe(false);
+      expect(calls[1][0].enable_thinking).toBe(true);
+      expect(chunks.length).toBeGreaterThan(0);
     });
 
     it.each([
@@ -2529,6 +2761,268 @@ describe('ContentGenerationPipeline', () => {
       expect(budget).toMatchObject({
         reasoning_effort: 'high',
         reasoning: { budget_tokens: 8192 },
+      });
+    });
+
+    it('uses nested reasoning for inferred Kimi K3 on OpenRouter', async () => {
+      const wire = await executeWithCapability(
+        undefined,
+        { baseUrl: OPENROUTER_URL },
+        'kimi-k3',
+      );
+      expectFields(wire, {
+        reasoning: { effort: 'max' },
+        reasoning_effort: undefined,
+      });
+    });
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'does not mix an explicit OpenRouter %s effort with a nested default',
+      async (source) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            [source]: { reasoning_effort: 'low' },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: undefined,
+          reasoning_effort: 'low',
+        });
+      },
+    );
+
+    it('does not mix extra_body effort with a default when samplingParams is unset', async () => {
+      routeThrough(DefaultOpenAICompatibleProvider);
+      const wire = await executeWithCapability(
+        undefined,
+        {
+          baseUrl: OPENROUTER_URL,
+          samplingParams: undefined,
+          extra_body: { reasoning_effort: 'low' },
+        },
+        'kimi-k3',
+      );
+      expectFields(wire, {
+        reasoning: undefined,
+        reasoning_effort: 'low',
+      });
+    });
+
+    it('keeps flat precedence over an explicit OpenRouter nested effort', async () => {
+      routeThrough(DefaultOpenAICompatibleProvider);
+      const wire = await executeWithCapability(
+        undefined,
+        {
+          baseUrl: OPENROUTER_URL,
+          reasoning: { effort: 'high' },
+          samplingParams: undefined,
+          extra_body: { reasoning_effort: 'low' },
+        },
+        'openai/gpt-5.4',
+      );
+      expectFields(wire, {
+        reasoning: undefined,
+        reasoning_effort: 'low',
+      });
+    });
+
+    it.each(
+      (['samplingParams', 'extra_body'] as const).flatMap((source) =>
+        [undefined, true].map(
+          (thinkingMandatory) => [source, thinkingMandatory] as const,
+        ),
+      ),
+    )(
+      'keeps inferred DeepSeek thinking beside an OpenRouter %s effort when mandatory=%s',
+      async (source, thinkingMandatory) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            thinkingMandatory,
+            ...(source === 'extra_body'
+              ? { samplingParams: { reasoning_effort: 'high' } }
+              : {}),
+            [source]: { reasoning_effort: 'low' },
+          },
+          'deepseek-v4.1-flash',
+        );
+        const disableField = getBuiltinDeepSeekReasoning(
+          mockContentGeneratorConfig,
+        )?.disableField;
+        expect(disableField).toBe('enable_thinking');
+        expect(wire[disableField!]).toBe(true);
+        expectFields(wire, {
+          reasoning: undefined,
+          reasoning_effort: 'low',
+        });
+      },
+    );
+
+    it.each(
+      (['samplingParams', 'extra_body'] as const).flatMap((source) =>
+        [null, ''].map((placeholder) => [source, placeholder] as const),
+      ),
+    )(
+      'treats an OpenRouter %s flat %j placeholder as unset for inferred K3',
+      async (source, placeholder) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            ...(source === 'extra_body' ? { samplingParams: undefined } : {}),
+            [source]: { reasoning_effort: placeholder },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: { effort: 'max' },
+          reasoning_effort: undefined,
+        });
+      },
+    );
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'does not mix a partial declaration with explicit OpenRouter %s effort',
+      async (source) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          { defaultEffort: 'high' },
+          {
+            baseUrl: OPENROUTER_URL,
+            ...(source === 'extra_body' ? { samplingParams: undefined } : {}),
+            [source]: { reasoning_effort: 'low' },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: undefined,
+          reasoning_effort: 'low',
+        });
+      },
+    );
+
+    it.each([null, ''] as const)(
+      'uses the inferred K3 default when extra_body %j replaces sampling effort',
+      async (placeholder) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            samplingParams: { reasoning_effort: 'low' },
+            extra_body: { reasoning_effort: placeholder },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: { effort: 'max' },
+          reasoning_effort: undefined,
+        });
+      },
+    );
+
+    it.each([null, ''] as const)(
+      'keeps final extra_body effort when a sampling %j placeholder is shadowed',
+      async (placeholder) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            samplingParams: { reasoning_effort: placeholder },
+            extra_body: { reasoning_effort: 'low' },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: undefined,
+          reasoning_effort: 'low',
+        });
+      },
+    );
+
+    it.each([null, ''] as const)(
+      'cleans a declared OpenRouter profile placeholder %j',
+      async (placeholder) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          {
+            profile: 'openai-reasoning',
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+          },
+          {
+            baseUrl: OPENROUTER_URL,
+            samplingParams: { reasoning_effort: placeholder },
+            extra_body: undefined,
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: { effort: 'high' },
+          reasoning_effort: undefined,
+        });
+      },
+    );
+
+    it.each([
+      [
+        'deepseek-openai',
+        {
+          thinking: { type: 'enabled' },
+          reasoning_effort: 'low',
+          reasoning: undefined,
+        },
+      ],
+      [
+        'openai-reasoning',
+        {
+          reasoning: { effort: 'high' },
+          reasoning_effort: 'low',
+          thinking: undefined,
+        },
+      ],
+    ] as const)(
+      'preserves a declared OpenRouter %s default beside an explicit flat tier',
+      async (profile, expected) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          {
+            profile,
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+          },
+          {
+            baseUrl: OPENROUTER_URL,
+            samplingParams: undefined,
+            extra_body: { reasoning_effort: 'low' },
+          },
+          'company-alias',
+        );
+        expectFields(wire, expected);
+      },
+    );
+
+    it('honors reasoning off for a derived-profile custom Kimi K3', async () => {
+      routeThrough(DefaultOpenAICompatibleProvider);
+      const wire = await executeWithCapability(
+        {
+          efforts: ['low', 'high', 'max'],
+          defaultEffort: 'low',
+        },
+        { reasoning: false },
+        'kimi-k3.1-pro',
+      );
+      expectFields(wire, {
+        reasoning_effort: 'none',
+        reasoning: undefined,
       });
     });
 
@@ -5537,6 +6031,102 @@ describe('ContentGenerationPipeline', () => {
         'modelProviders[providerId][].generationConfig.streamIdleTimeoutMs',
       );
       expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
+    });
+
+    it.each(
+      named({
+        'keeps a valid tool name': {
+          toolName: 'structured_output',
+          expectedName: 'structured_output',
+        },
+        'omits a status marker': {
+          toolName: 'example HTTP_STATUS/429',
+          expectedName: null,
+        },
+        'omits a multiline name': {
+          toolName: 'example\nname',
+          expectedName: null,
+        },
+        'omits an oversized name': {
+          toolName: 'x'.repeat(65),
+          expectedName: null,
+        },
+      }),
+    )(
+      '$name in tool argument timeout diagnostics',
+      async ({ toolName, expectedName }) => {
+        await withRealChunkConverter(async () => {
+          const { gated, run } = await drainGated(1000);
+          gated.push(
+            chunkOf({
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: toolName, arguments: '{"docs": [' },
+                },
+              ],
+            }),
+          );
+          await vi.advanceTimersByTimeAsync(1000);
+          const error = await run.done;
+          expect(error).toBeInstanceOf(StreamInactivityTimeoutError);
+          expect(getErrorStatus(error)).toBeUndefined();
+          expect(error).toMatchObject({
+            code: 'ETIMEDOUT',
+            idleMs: 1000,
+            chunksReceived: 1,
+            openToolCallName: expectedName,
+          });
+          const message = (error as Error).message;
+          const label = expectedName
+            ? `tool call "${expectedName}"`
+            : 'a tool call';
+          expect(message).toContain(
+            `the arguments of ${label} were still open`,
+          );
+          if (expectedName === null) {
+            expect(message).not.toContain(toolName);
+          }
+          expect(mockPipelineWarn).toHaveBeenCalledWith(
+            'OpenAI stream inactivity timeout',
+            expect.objectContaining({ openToolCallName: expectedName }),
+          );
+          expect(gated.wasReturned()).toBe(true);
+        });
+      },
+    );
+
+    it('keeps an idle timeout after a length finish generic', async () => {
+      await withRealChunkConverter(async () => {
+        const { gated, run } = await drainGated(1000);
+        gated.push(
+          chunkOf({
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'structured_output',
+                  arguments: '{"docs": [',
+                },
+              },
+            ],
+          }),
+        );
+        gated.push(chunkOf({}, 'length'));
+        await vi.advanceTimersByTimeAsync(1000);
+        const error = await run.done;
+        expect(error).toBeInstanceOf(StreamInactivityTimeoutError);
+        expect(error).toMatchObject({
+          code: 'ETIMEDOUT',
+          chunksReceived: 2,
+          openToolCallName: undefined,
+        });
+        expect((error as Error).message).not.toContain('structured_output');
+      });
     });
 
     it('uses the default stream idle timeout when no override is configured', async () => {

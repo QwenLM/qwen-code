@@ -1,5 +1,7 @@
 # Web Shell workspace overview
 
+**Languages:** English | [简体中文](./web-shell-workspace-overview.zh-CN.md)
+
 Issue: https://github.com/QwenLM/qwen-code/issues/10399
 
 ## Goal
@@ -54,14 +56,27 @@ no Git wiring keeps the plain-text summary the demand-loading pass left.
   says "unavailable on this daemon" rather than "not initialized yet". The
   chip row itself appears only once the first fetch round has landed, so a
   round still in flight never reads as a missing route.
-- Chips are read-only. Opening a management page is a menu action, so the
-  chips never take the button role and their accessible names cannot collide
-  with the navigation buttons that share the same words.
+- When the workspace is locally trusted and management wiring is available,
+  manageable facet rows render as `<button type="button">` rows with a
+  trailing chevron and a workspace-scoped accessible name (for example,
+  `Manage MCP for qwen-code: 1 of 3 connected, 1 failed, 1 disabled`) so they
+  never collide with the top-level sidebar navigation buttons. Clicking a
+  manageable facet closes the hover popover without stealing focus back to
+  the folder row and navigates directly to that workspace's management
+  surface (`PluginManagerPage` for MCP / Skills / Extensions,
+  `ChannelsManagerPage` for Channels, `MemoryMessage` for Context, and
+  `WorkspaceHooksDialog` for Hooks). Facets unsupported by the connected
+  daemon (or rendered without management wiring) stay read-only `<div>` rows.
 
 ### Workspace menu
 
 The hover `⋮` on a workspace row replaces the single-item removal menu:
 
+- Trust workspace (untrusted local non-SSH rows when the daemon advertises
+  `workspace_trust_grant` and the sidebar is not locked): calls
+  `grantWorkspaceTrust()` through the shared `useWorkspaceTrustGrant` hook,
+  disables the item while the runtime rebuilds, and clears once capabilities
+  report `trusted: true`.
 - Rename… (dynamic registration daemons, on registration-backed rows only —
   the daemon's bound workspace has no registration to persist a name in;
   opens a dialog; an empty name falls back to the folder name and control
@@ -77,12 +92,45 @@ The hover `⋮` on a workspace row replaces the single-item removal menu:
 - Reload runtime (`POST /workspaces/:w/reload`), then Remove workspace.
 
 Each entry appears only when the workspace's state allows it: untrusted rows
-that cannot be removed still show nothing, locked-workspace renderers still
-suppress the whole action area.
+that can neither be trusted nor removed still show nothing, locked-workspace
+renderers still suppress the whole action area.
 
-The Manage group is offered on the daemon's primary workspace only. The
-management pages read the connection's bound workspace, so a secondary row
-cannot open its own view yet; that is layer B1 of the issue.
+The Manage group is offered for every locally trusted non-SSH workspace
+(primary and secondary). On secondary workspaces, `Skills` is gated on
+`workspace_skills_config_runtime` and `Channels` is gated on
+`channel_management` so older daemons never misroute a secondary click to the
+primary workspace.
+
+### Layer B1 — per-workspace management routing
+
+- `onOpenWorkspaceManagement(target, workspaceCwd)` routes `mcp`, `skills`,
+  and `extensions` into `PluginManagerPage` with `initialTab`,
+  `initialWorkspaceCwd`, and a monotonically increasing `navigationRequest`
+  (also fixing `mcp` previously falling through when no slash-command
+  `mcpDialogMessage` existed). `ExtensionsManagerPage` accepts `workspaceCwd`
+  and `workspaceControl`, and `PluginManagerPage` exposes the workspace
+  switcher on the Extensions tab as well.
+- `channels` routes to `ChannelsManagerPage` with `initialWorkspaceCwd` and
+  `navigationRequest`, switching `managementWorkspaceCwd` and dismissing any
+  stale editor or delete confirmation dialog.
+- `settings` routes to `SettingsMessage` backed by
+  `useDaemonSettings({ workspaceCwd })`, reading and writing workspace-scoped
+  settings through `/workspaces/:workspace/settings` while keeping user-scoped
+  writes on `/workspace/settings`. `SettingsMessage` renders a workspace
+  switcher in the `Workspace` scope bar and binds
+  `WorkspaceDirectoriesSection` and workspace UI-language writes to the chosen
+  workspace without mutating global UI state for another workspace.
+- `context` opens `MemoryMessage` backed by
+  `useDaemonMemory({ workspaceCwd })`, reading via
+  `WorkspaceDaemonClient.workspaceMemory({ includeContent: true })`
+  (`/workspaces/:workspace/memory?content=true`) and routing workspace writes
+  to `/workspaces/:workspace/memory` while keeping global writes unscoped.
+- `hooks` opens `WorkspaceHooksDialog`, showing the workspace's hooks from
+  `/workspaces/:workspace/hooks` and hash-bound project-hook approval
+  controls.
+- If a targeted secondary workspace is removed or loses trust while a
+  management panel or dialog is open, panels fall back to the primary
+  workspace and workspace-scoped dialogs close cleanly.
 
 ## Data flow
 
@@ -139,19 +187,14 @@ workspace, whose sessions the sidebar lists itself, gets its counts passed in.
   from the composer picker is a no-op, and an intent set while a session
   already exists is cleared immediately.
 
-## Follow-ups (layers B and C in the issue)
+## Follow-ups (layer C in the issue)
 
-- A Trust… menu entry. `POST /workspaces/:w/trust/request` only records a
-  request that needs operator action and a daemon restart
-  (`accepted: false, requiresOperatorAction: true`), so an entry today would
-  promise a change it cannot make; it needs an "operator action required"
-  feedback surface first.
-- Bind the management pages to a chosen workspace so every row can open its
-  own MCP / Skills / Extensions view.
-- A Workspaces overview page with a table across workspaces.
 - `GET /workspaces/:w/overview` on the daemon to collapse the fan-out into one
   request, advertised as `workspace_overview`, once the workspace-runtime
   stack has landed.
+- Primary workspace rename persistence (once daemon registration metadata
+  supports the primary workspace) and cross-host / Managed workspace
+  management where their backends expose matching mutation routes.
 
 ## Layer B2 — the Workspaces panel
 

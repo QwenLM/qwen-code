@@ -74,6 +74,7 @@ interface MessageItemProps {
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   sendFailed?: boolean;
+  sendFailedStatus?: 'failed' | 'uncertain';
   onRetrySend?: () => void;
   /**
    * Open the in-place editor for this user message. Return `true` when a host
@@ -126,6 +127,7 @@ export const MessageItem = memo(function MessageItem({
   showRetryHint = false,
   onRetryClick,
   sendFailed = false,
+  sendFailedStatus,
   onRetrySend,
   onEditUserMessage,
   onDeleteMessage,
@@ -220,11 +222,13 @@ export const MessageItem = memo(function MessageItem({
         return (
           <UserMessage
             content={message.content}
+            source={message.source}
             images={message.images}
             files={message.files}
             inputAnnotations={message.inputAnnotations}
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
+            sendFailedStatus={sendFailedStatus}
             onRetrySend={onRetrySend}
             editing={editingUserMessage}
             submittingEdit={submittingUserMessageEdit}
@@ -517,6 +521,7 @@ function areMessageItemPropsEqual(
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
   if (prev.sendFailed !== next.sendFailed) return false;
+  if (prev.sendFailedStatus !== next.sendFailedStatus) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
   if (prev.onDeleteMessage !== next.onDeleteMessage) return false;
@@ -600,6 +605,25 @@ function agentMessagesEqual(
   );
 }
 
+function stableFilesEqual(
+  prev: Extract<Message, { role: 'user' }>['files'] | undefined,
+  next: Extract<Message, { role: 'user' }>['files'] | undefined,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next || prev.length !== next.length) return false;
+  return prev.every((file, index) => {
+    const other = next[index];
+    return (
+      other !== undefined &&
+      file.name === other.name &&
+      file.mimeType === other.mimeType &&
+      file.text === other.text &&
+      file.attachmentId === other.attachmentId &&
+      file.data === other.data
+    );
+  });
+}
+
 function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
@@ -615,7 +639,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         next.role === 'user' &&
         prev.content === next.content &&
         prev.source === next.source &&
-        stableImagesEqual(prev.images, next.images)
+        stableImagesEqual(prev.images, next.images) &&
+        stableFilesEqual(prev.files, next.files)
       );
     case 'assistant':
       return (
@@ -751,13 +776,28 @@ function areToolListsEqual(
 const jsonCache = new WeakMap<object, string>();
 
 function stableImagesEqual(
-  a: Array<{ data: string; mimeType: string }> | undefined,
-  b: Array<{ data: string; mimeType: string }> | undefined,
+  a:
+    | Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>
+    | undefined,
+  b:
+    | Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>
+    | undefined,
 ): boolean {
   if (a === b) return true;
   if (!a || !b || a.length !== b.length) return false;
   return a.every(
-    (img, i) => img.data === b[i].data && img.mimeType === b[i].mimeType,
+    (img, i) =>
+      img.data === b[i].data &&
+      img.mimeType === b[i].mimeType &&
+      img.attachmentId === b[i].attachmentId,
   );
 }
 

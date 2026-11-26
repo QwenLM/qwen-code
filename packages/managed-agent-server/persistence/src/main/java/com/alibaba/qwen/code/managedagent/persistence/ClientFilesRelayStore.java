@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModel
 import com.alibaba.qwen.code.managedagent.repository.ClientFilesRelay;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -15,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 
 @Repository
@@ -66,13 +68,13 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
                 jdbc.update("INSERT INTO ma_client_files_binding ("
                                 + BINDING_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                         ManagedSchemaKeys.identity(tenantId),
-                        ManagedSchemaKeys.identity(sessionId), ManagedSchemaKeys.identity(actorId),
+                        ManagedSchemaKeys.identity(sessionId), actorId,
                         1L, ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, connectionId,
                         expiresAt, now, now);
                 return new RegisterOutcome(new Binding(tenantId, sessionId, actorId, 1L,
                         ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, expiresAt, now, now,
                         connectionId), null);
-            } catch (org.springframework.dao.DuplicateKeyException raced) {
+            } catch (DuplicateKeyException raced) {
                 // A concurrent first registration won the insert; advance it.
                 previous = findForUpdate(tenantId, sessionId);
             }
@@ -81,7 +83,7 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         jdbc.update("UPDATE ma_client_files_binding SET actor_id=?,generation=?,state=?,"
                         + "server_id=?,token_hash=?,connection_id=?,expires_at=?,gmt_modified=?"
                         + " WHERE tenant_id=? AND session_id=?",
-                ManagedSchemaKeys.identity(actorId), generation, ClientFilesModels.STATE_ACTIVE,
+                actorId, generation, ClientFilesModels.STATE_ACTIVE,
                 serverId, tokenHash, connectionId, expiresAt, now, tenantId, sessionId);
         return new RegisterOutcome(new Binding(tenantId, sessionId, actorId, generation,
                 ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, expiresAt, previous.createdAt(),
@@ -108,7 +110,7 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         jdbc.update("UPDATE ma_client_files_binding SET actor_id=?,generation=?,state=?,"
                         + "server_id=?,token_hash=?,connection_id=?,expires_at=?,gmt_modified=?"
                         + " WHERE tenant_id=? AND session_id=?",
-                ManagedSchemaKeys.identity(previous.actorId()), previous.generation(),
+                previous.actorId(), previous.generation(),
                 ClientFilesModels.STATE_ACTIVE, previous.serverId(), previous.tokenHash(),
                 previous.connectionId(), previous.expiresAt(), now, tenantId, sessionId);
         return true;
@@ -259,7 +261,7 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         List<Binding> expired = jdbc.query("SELECT " + BINDING_COLUMNS
                         + " FROM ma_client_files_binding WHERE state=? AND expires_at<=? LIMIT ?",
                 BINDING_MAPPER, ClientFilesModels.STATE_ACTIVE, now, limit);
-        List<Binding> closed = new java.util.ArrayList<>();
+        List<Binding> closed = new ArrayList<>();
         for (Binding binding : expired) {
             // Fence on the generation so a concurrent re-registration that
             // already advanced it is not closed by this sweep.

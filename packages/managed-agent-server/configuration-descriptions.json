@@ -536,8 +536,8 @@
       "type": "duration"
     },
     "qwen.managed-agent.model-catalog": {
-      "en": "The models offered for Sessions of the built-in `qwen-code` agent, selectable at Session creation and changeable later by a Workspace operator. A list of objects with `model-id` (a model ID configured in the Harness; required, unique, at most 512 bytes) and `label` (display name, defaults to `model-id`, at most 512 characters); an invalid or duplicate entry is refused at startup. Set it in a YAML configuration file; there is no environment variable. Selection also needs `qwen.managed-agent.harness.workspace-files-enabled` and Harness support.",
-      "zh": "为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 512 字节）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。",
+      "en": "The models offered for Sessions of the built-in `qwen-code` agent, selectable at Session creation and changeable later by a Workspace operator. A list of objects with `model-id` (a model ID configured in the Harness; required, unique, at most 128 characters) and `label` (display name, defaults to `model-id`, at most 512 characters); an invalid or duplicate entry is refused at startup. Set it in a YAML configuration file; there is no environment variable. Selection also needs `qwen.managed-agent.harness.workspace-files-enabled` and Harness support.",
+      "zh": "为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 128 个字符）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。",
       "default": ""
     },
     "qwen.managed-agent.model-config-base-urls": {
@@ -711,12 +711,12 @@
       "zh": "static Runtime worker 租约的 epoch；Broker 在每个请求中携带它，worker 的证明（attestation）必须回报相同的值。为负数时启动时拒绝。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
     },
     "qwen.managed-agent.runtime-broker.static-lease-id": {
-      "en": "The lease ID of the static Runtime worker; the Broker sends it with each request and the worker's attestation must report the same value. A non-empty string of at most 512 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
-      "zh": "static Runtime worker 租约的 ID；Broker 在每个请求中携带它，worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 512 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
+      "en": "The lease ID of the static Runtime worker; the Broker sends it with each request and the worker's attestation must report the same value. A non-empty string of at most 128 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
+      "zh": "static Runtime worker 租约的 ID；Broker 在每个请求中携带它，worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 128 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
     },
     "qwen.managed-agent.runtime-broker.static-runtime-instance-id": {
-      "en": "The Runtime instance ID of the static Runtime worker's lease; the worker's attestation must report the same value. A non-empty string of at most 512 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
-      "zh": "static Runtime worker 租约中的 Runtime 实例 ID；worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 512 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
+      "en": "The Runtime instance ID of the static Runtime worker's lease; the worker's attestation must report the same value. A non-empty string of at most 128 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
+      "zh": "static Runtime worker 租约中的 Runtime 实例 ID；worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 128 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
     },
     "qwen.managed-agent.runtime-broker.static-token": {
       "en": "The bearer token the Broker presents to the static Runtime worker. A secret; saved bindings store it encrypted with the Runtime credential key (`qwen.managed-agent.runtime-broker.credential-key`). Required when `qwen.managed-agent.runtime-broker.provisioner` is `static`; at most 512 characters.",
@@ -762,6 +762,11 @@
       "en": "The administrator-mounted Workspace storage roots, set in a configuration file (YAML) as a list of entries with `tenant-id`, `storage-id` and `root`. Each `root` must be an existing canonical directory; roots must not overlap or alias each other, and each tenant and storage pair may appear once. Requires the `local-process` provisioner; startup refuses otherwise and with external provisioners. Every Broker sharing the database must use the same list.",
       "zh": "管理员挂载的 Workspace 存储根目录，在配置文件（YAML）中以列表设置，每项包含 `tenant-id`、`storage-id` 和 `root`。每个 `root` 必须是已存在的规范化目录；各根目录不得重叠或互为别名，同一租户与存储的组合只能出现一次。要求 `local-process` provisioner；否则或与外部 provisioner 同时使用时，启动时拒绝。共享同一数据库的所有 Broker 必须使用相同的列表。",
       "default": ""
+    },
+    "qwen.managed-agent.runtime-observation.enabled": {
+      "en": "Whether the Runtime Broker stages worker-owned background observations: it claims one puller per binding, pulls capture deliveries from the worker into `ma_runtime_stage`, settles background execution rows from the pulled terminal, and advertises `runtimeObservation` in writer grants so a Hosted Harness can certify suspension with live background work. Defaults off. Background Shell admission additionally requires `qwen.managed-agent.tool-publication.enabled` (the capture lane shares its object-store configuration), and stamping a suspension seal with a background hold additionally requires `qwen.managed-agent.wake-dispatch.enabled`. The worker process must separately inherit `QWEN_MANAGED_RUNTIME_OBSERVATION=1`: this Broker property alone does not enable the worker-owned capture lane, and without the worker switch publisher registrations never report `observation: true`, so suspension with live background work stays uncertified. With it off, background captures stay attached to the resident Harness and no staging rows are written.",
+      "zh": "Runtime Broker 是否暂存 worker 自有的后台观测：每个 binding 认领一个 puller，从 worker 拉取 capture 投递写入 `ma_runtime_stage`，由拉取到的 terminal 结算后台 execution 行，并在 writer grant 中公告 `runtimeObservation`，使 Hosted Harness 能够认证持活跃后台工作的挂起。默认关闭。后台 Shell 准入还要求 `qwen.managed-agent.tool-publication.enabled`（capture lane 复用其对象存储配置）；挂起 seal 盖后台持有戳还要求 `qwen.managed-agent.wake-dispatch.enabled`。worker 进程还须单独继承 `QWEN_MANAGED_RUNTIME_OBSERVATION=1`：仅凭该 Broker 属性不会启用 worker 自有 capture lane；缺少 worker 开关时，publisher 注册不会上报 `observation: true`，持活跃后台工作的挂起也就无法通过认证。关闭时后台 capture 保持附着在常驻 Harness 上，不写 staging 行。",
+      "type": "boolean"
     },
     "qwen.managed-agent.service-user": {
       "en": "The operating-system account the server runs as. Only the preflight check reads it: it confirms the account exists, checks that the configuration and credentials files are readable by that account rather than by the account running preflight, and requires an existing durable Runtime Broker state directory to be owned by it. Where the account running preflight cannot look at such a file, or cannot read one the check reads, the row fails and says to run the check as that account. Empty checks access as the account running preflight; a durable state directory owned by a different account warns because the Broker's launching account cannot be determined.",
@@ -871,6 +876,11 @@
     "qwen.managed-agent.trusted-actor-header": {
       "en": "The name of a request header (for example `X-Qwen-Actor-Id`) whose value is trusted as the caller's actor ID, together with `X-Qwen-Tenant-Id`, when no upstream principal is present. Used only in open authentication mode; combining it with signed mode is refused at startup. In open mode, `qwen.managed-agent.runtime-broker.local-directory-import-enabled` requires it. Never set it where untrusted clients can reach the server. Empty disables it.",
       "zh": "一个请求头名称（例如 `X-Qwen-Actor-Id`），在没有上游认证主体时，其值连同 `X-Qwen-Tenant-Id` 一起被信任为调用方的 actor ID。仅在 open 认证模式下使用；与 signed 模式同时配置时启动时拒绝。open 模式下开启 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 时必须设置本项。切勿在不可信客户端能访问服务端的环境中设置。为空时禁用。"
+    },
+    "qwen.managed-agent.action-parking.enabled": {
+      "en": "Lets a Hosted Harness suspend a Session while its only active Turn waits for a recoverable approval or question Action. The Session Store advertises the capability in writer grants, and the suspension seal carries the parked Turn certificate used by the control plane to release the dispatch lease until a decision, cancellation, approval-mode change, or expiry. Requires `qwen.managed-agent.wake-dispatch.enabled`; startup refuses Action parking without it. Defaults off. Disabling it stops new parks; already-parked Turns still resume through the existing dispatch scan.",
+      "zh": "允许 Hosted Harness 在 Session 唯一活跃的 Turn 正等待可恢复的审批或提问 Action 时挂起该 Session。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 携带停靠 Turn 证书，控制面据此释放派发租约，直到决定、取消、审批模式变更或到期。需要同时开启 `qwen.managed-agent.wake-dispatch.enabled`，只开启 Action parking 会在启动时拒绝。默认关闭。关闭后不再产生新的停靠；已停靠的 Turn 仍经现有派发扫描恢复。",
+      "type": "boolean"
     },
     "qwen.managed-agent.wake-dispatch.enabled": {
       "en": "Lets a Hosted Harness suspend an idle Session whose only pending inputs are deferred, unattempted wake inputs. The Session Store advertises the capability in its writer grants, the suspension seal stamps the head with the earliest due time, and the wake recovery scan loads the Session when that time arrives without replaying its journal. Defaults off. Disabling it stops new such suspensions; heads already stamped are still delivered when due.",

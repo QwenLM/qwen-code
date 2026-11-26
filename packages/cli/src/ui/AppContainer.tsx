@@ -585,6 +585,9 @@ export function useQueuedSubmissionDrain({
           userAdmission: { turnKey: submission.turnKey },
           displayText: submission.displayText,
           humanInput: submission.humanInput,
+          ...(submission.promptHook
+            ? { promptHook: submission.promptHook }
+            : {}),
           ...(submission.hasUnknownInput ? { hasUnknownInput: true } : {}),
           ...(submission.pasteExpansions?.size
             ? { pasteExpansions: submission.pasteExpansions }
@@ -599,10 +602,7 @@ export function useQueuedSubmissionDrain({
             : { shellMode: submission.shellMode }),
           onAdmissionFailed: () => {
             // Deferred until idle, the same recovery the direct /btw
-            // path uses: admission failed because a turn is active,
-            // and the mid-turn steer drain returns raw text only, which
-            // would steer an undeferred restore into that turn with its
-            // projection lost.
+            // path uses: admission failed because a turn is active.
             restoreMessages(
               [submission.modelText],
               submission.submittedPrompt,
@@ -610,11 +610,13 @@ export function useQueuedSubmissionDrain({
               submission.shellMode,
               ...(submission.displayText !== undefined ||
               submission.humanInput !== undefined ||
+              submission.promptHook !== undefined ||
               submission.pasteExpansions?.size
                 ? ([
                     {
                       displayText: submission.displayText,
                       humanInput: submission.humanInput,
+                      promptHook: submission.promptHook,
                       ...(submission.hasUnknownInput
                         ? { hasUnknownInput: true }
                         : {}),
@@ -2616,7 +2618,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const midTurnDrainRef = useRef<UseMessageQueueReturn['drainQueue'] | null>(
     null,
   );
-  const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
+  const midTurnRestoreRef = useRef<
+    UseMessageQueueReturn['restoreMessages'] | null
+  >(null);
   const goalQueueRef = useRef<
     | (Pick<
         UseMessageQueueReturn,
@@ -2655,7 +2659,6 @@ export const AppContainer = (props: AppContainerProps) => {
     retryLastPrompt,
     handleApprovalModeChange,
     activePtyId,
-    loopDetectionConfirmationRequest,
     pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
@@ -4199,7 +4202,6 @@ export const AppContainer = (props: AppContainerProps) => {
       !pendingLlmHistoryItems.some((item) => item.type === 'error') &&
       !shellConfirmationRequest &&
       !confirmationRequest &&
-      !loopDetectionConfirmationRequest &&
       !isPermissionsDialogOpen &&
       settingInputRequests.length === 0 &&
       config.getApprovalMode() !== ApprovalMode.PLAN
@@ -4288,7 +4290,6 @@ export const AppContainer = (props: AppContainerProps) => {
     followupSuggestionsEnabled,
     shellConfirmationRequest,
     confirmationRequest,
-    loopDetectionConfirmationRequest,
     isPermissionsDialogOpen,
     settingInputRequests,
   ]);
@@ -4395,8 +4396,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isProjectHooksApprovalDialogOpen,
     pendingProjectHooks,
     handleProjectHooksApprovalSelect,
-  } = useProjectHooksApproval(config, settings, (text) =>
-    addHistoryItem({ type: MessageType.INFO, text }, Date.now()),
+  } = useProjectHooksApproval(config, settings, (notice) =>
+    addHistoryItem(notice, Date.now()),
   );
   const {
     needsRestart: ideNeedsRestart,
@@ -4428,7 +4429,6 @@ export const AppContainer = (props: AppContainerProps) => {
     !!providerUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
-    !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
     isStatusLineDialogOpen ||
@@ -4910,7 +4910,6 @@ export const AppContainer = (props: AppContainerProps) => {
     turnCancelledRef,
     authPending: isAuthDialogOpen || isAuthenticating,
     shellConfirmationPending: !!shellConfirmationRequest,
-    loopDetectionPending: !!loopDetectionConfirmationRequest,
     startupApprovalPending:
       isFolderTrustDialogOpen ||
       isMcpApprovalDialogOpen ||
@@ -5472,7 +5471,6 @@ export const AppContainer = (props: AppContainerProps) => {
       providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
-      loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
       commandCancellationBlocked,
@@ -5625,7 +5623,6 @@ export const AppContainer = (props: AppContainerProps) => {
       providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
-      loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
       commandCancellationBlocked,

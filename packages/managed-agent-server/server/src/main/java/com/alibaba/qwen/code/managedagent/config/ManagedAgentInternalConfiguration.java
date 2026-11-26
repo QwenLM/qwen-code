@@ -8,6 +8,12 @@ import com.alibaba.qwen.code.managedagent.api.ManagedSideQueryStoreController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
+import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.security.PublicSurface;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 
@@ -17,20 +23,19 @@ import org.springframework.context.annotation.Import;
         ManagedAutomationSessionController.class, ToolPublicationController.class, TenantContextArgumentResolver.class,
         WebConfiguration.class, ManagedSessionJsonConfiguration.class, ApiExceptionHandler.class})
 public class ManagedAgentInternalConfiguration {
-    @org.springframework.context.annotation.Bean
+    @Bean
     TenantContextFilter tenantContextFilter(
-            @org.springframework.beans.factory.annotation.Qualifier("managedAgentObjectMapper") com.fasterxml.jackson.databind.ObjectMapper mapper) {
+            @Qualifier("managedAgentObjectMapper") ObjectMapper mapper) {
         return new TenantContextFilter(mapper) {
             @Override
-            protected boolean shouldNotFilter(jakarta.servlet.http.HttpServletRequest request) {
-                String path = com.alibaba.qwen.code.managedagent.security.PublicSurface.pathWithinApplication(request);
-                return !path.startsWith("/internal/managed-session-store/v1/")
-                        && !path.startsWith("/internal/managed-tool-publications/v1/");
+            protected boolean shouldNotFilter(HttpServletRequest request) {
+                return !PublicSurface.pathWithinApplication(request)
+                        .startsWith("/internal/managed-session-store/v1/");
             }
         };
     }
 
-    public ManagedAgentInternalConfiguration(com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy credentials) {
+    public ManagedAgentInternalConfiguration(WriterCredentialPolicy credentials) {
         if (!credentials.isBound()) {
             throw new IllegalStateException("Embedded callbacks require qwen.managed-agent.session-store.binding-key");
         }
