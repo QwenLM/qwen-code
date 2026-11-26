@@ -373,6 +373,23 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('renders unknown counts when the compaction payload is null', () => {
+      const map = createEventMapper({ getModelName: () => 'm' });
+      const out = map({
+        type: 'chat_compressed',
+        value: null,
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        { type: 'retry-countdown-clear' },
+        {
+          type: 'info',
+          text: expect.stringContaining(
+            'compressed from: unknown to unknown tokens',
+          ),
+        },
+      ]);
+    });
+
     it('labels image-overflow compaction triggers', () => {
       const map = createEventMapper({ getModelName: () => 'm' });
       const out = map({
@@ -472,6 +489,23 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       } as unknown as AnyEv);
       expect((out[1] as { text: string }).text).toContain('~300');
       expect((out[1] as { text: string }).text).not.toContain('~1200');
+    });
+
+    it('marks only the original count when only that count is estimated', () => {
+      const map = createEventMapper({ getModelName: () => 'm' });
+      const out = map({
+        type: 'chat_compressed',
+        value: {
+          originalTokenCount: 1200,
+          originalTokenCountIsEstimated: true,
+          newTokenCount: 300,
+          newTokenCountIsEstimated: false,
+        },
+      } as unknown as AnyEv);
+      expect(out[1]).toEqual({
+        type: 'info',
+        text: expect.stringContaining('compressed from: ~1200 to 300 tokens'),
+      });
     });
 
     it('maps model_fallback to a retry clear + info notice', () => {
