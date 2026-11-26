@@ -8144,6 +8144,27 @@ describe('task activity key', () => {
     );
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
 
+    // Non-AbortError constructed inside useSessionScheduledTasks / scheduledTaskManualRun
+    // must use App's real translator instead of leaking raw i18n keys.
+    onToast.mockClear();
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValueOnce([
+      { ...recurringTask, enabled: false },
+    ]);
+    await act(async () => {
+      findRow('Recurring toast')
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Run now"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith('error', 'Failed to record the run'),
+    );
+    expect(
+      onToast.mock.calls.some(([, msg]) =>
+        String(msg).includes('scheduledTasks.error.'),
+      ),
+    ).toBe(false);
+
     onToast.mockClear();
     testState.prompt = '/schedule';
     await clickSubmit(container);
@@ -60987,6 +61008,57 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     revalidation.resolve();
 
     await expect(guard).rejects.toSatisfy(isScheduledTaskCancellation);
+
+    // Even if beforeTaskDispatch itself throws a revalidation error (e.g.
+    // owner/candidate mismatch) after the user already switched away, the
+    // rejection must still be classified as a structured cancellation so no
+    // error toast leaks into the destination session.
+    const failedRevalidation = deferred<void>();
+    mockConnection.sessionId = 'session-a';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    const runAgain = await openRunHandler(container);
+    const secondOptions: Array<{
+      beforeDispatch?: () => void | Promise<void>;
+    }> = [];
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      (_prompt: string, options: unknown) => {
+        secondOptions.push(
+          options as { beforeDispatch?: () => void | Promise<void> },
+        );
+        return new Promise<void>(() => {});
+      },
+    );
+    let secondPending!: Promise<void>;
+    await act(async () => {
+      secondPending = runAgain(
+        'unbound scheduled task 2',
+        null,
+        undefined,
+        () => false,
+        async () => {
+          await failedRevalidation.promise;
+          throw new DOMException('Failed to record the run', 'AbortError');
+        },
+      );
+      secondPending.catch(() => {});
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(secondOptions[0]?.beforeDispatch).toBeDefined(),
+    );
+    const secondGuard = Promise.resolve(secondOptions[0]!.beforeDispatch!());
+    secondGuard.catch(() => {});
+    mockConnection.sessionId = 'session-b';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    failedRevalidation.resolve();
+    await expect(secondGuard).rejects.toSatisfy(isScheduledTaskCancellation);
   });
 
   it('does not apply the catch-up timeout while restore is pending', async () => {

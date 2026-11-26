@@ -189,6 +189,12 @@ export function useSessionScheduledTasks(options: {
   /** Actual bound-session prompt admission, not the record-only /run route. */
   onRunPrompt: ScheduledTaskRunPrompt;
   onError: ScheduledTaskActionErrorHandler;
+  /**
+   * App calls this hook above the `<I18nProvider>` it renders, where `useI18n()`
+   * falls back to key passthrough. Passing App's translator localizes errors
+   * constructed inside the hook and manual-run helper too.
+   */
+  translate?: (key: string) => string;
   refreshTrigger?: number;
 }): SessionScheduledTasksResult {
   const {
@@ -201,11 +207,13 @@ export function useSessionScheduledTasks(options: {
     durableSeeded = false,
     onRunPrompt,
     onError,
+    translate,
     refreshTrigger = 0,
   } = options;
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
-  const { t } = useI18n();
+  const { t: contextTranslate } = useI18n();
+  const t = translate ?? contextTranslate;
   const sessionActions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();

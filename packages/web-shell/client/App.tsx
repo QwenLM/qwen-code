@@ -9868,6 +9868,7 @@ export function App({
       ),
     onError: (error, fallback) =>
       reportScheduledTaskError(error, t(fallback), true),
+    translate: t,
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
   const matchesCurrentScheduledTaskScope = useCallback(
@@ -20034,8 +20035,15 @@ export function App({
             await beforeTaskDispatch?.();
             assertRunnable();
           } catch (error) {
-            guardFailure = error;
-            throw error;
+            const failure =
+              scheduledScope?.cancelledBeforeAdmission?.() ||
+              !scheduledScopeIsCurrent()
+                ? createScheduledTaskCancellation(
+                    'Bound run target or runtime was replaced',
+                  )
+                : error;
+            guardFailure = failure;
+            throw failure;
           }
         };
         try {
@@ -20103,7 +20111,20 @@ export function App({
             }
           },
           (error: unknown) => {
-            if (!admitted) reject(guardFailure ?? error);
+            if (!admitted) {
+              if (
+                !scheduledScopeIsCurrent() ||
+                scheduledScope?.cancelledBeforeAdmission?.()
+              ) {
+                reject(
+                  createScheduledTaskCancellation(
+                    'Run was cancelled before it started',
+                  ),
+                );
+                return;
+              }
+              reject(guardFailure ?? error);
+            }
           },
         );
       }),
