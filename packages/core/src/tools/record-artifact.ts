@@ -11,15 +11,12 @@ import type { Config } from '../config/config.js';
 import { isNodeError } from '../utils/errors.js';
 import { isWithinRoot } from '../utils/fileUtils.js';
 import { type Ignore, loadIgnoreRules } from '../utils/filesearch/ignore.js';
-import {
-  formatQwenIgnoreFileNames,
-  getQwenIgnoreFileNames,
-} from '../utils/qwenIgnoreParser.js';
+import { getQwenIgnoreFileNames } from '../utils/qwenIgnoreParser.js';
 import {
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   collectRecordableWorkspaceFiles,
   pathHasSkippedArtifactDirectoryAncestor,
-  pathHasSkippedDirectoryComponent,
+  pathIsOrSitsUnderSkippedArtifactDirectory,
 } from '../utils/workspace-artifact-directory.js';
 import {
   resolveBoundWorkspaceRoot,
@@ -192,15 +189,14 @@ class RecordArtifactInvocation extends BaseToolInvocation<
     locator: WorkspaceLocatorSuccess,
   ): Promise<ToolResult> {
     const cwd = await resolveExistingDir(this.config.getTargetDir());
-    const customIgnoreFiles =
-      this.config.getFileFilteringOptions().customIgnoreFiles;
+    const ruleOptions = readPanelIgnoreRuleOptions(this.config);
     const strippedLocator = stripWorktreePrefixForCwd(
       locator.workspacePath,
       cwd,
     );
     if (
       !isQwenReviewsPath(strippedLocator) &&
-      pathHasSkippedDirectoryComponent(strippedLocator)
+      pathIsOrSitsUnderSkippedArtifactDirectory(strippedLocator)
     ) {
       const message = [
         `Failed to record artifact: "${locator.workspacePath}" is a skipped directory and cannot be recorded.`,
@@ -229,7 +225,7 @@ class RecordArtifactInvocation extends BaseToolInvocation<
       // matches stored paths against (see fileHiddenFromArtifactsPanel).
       const hiddenRules = loadPanelIgnoreRules(
         resolveBoundWorkspaceRoot(path.resolve(cwd)),
-        customIgnoreFiles,
+        ruleOptions,
       );
       collected = await collectRecordableWorkspaceFiles(
         locator.resolvedPath,
@@ -243,7 +239,7 @@ class RecordArtifactInvocation extends BaseToolInvocation<
           !fileHiddenFromArtifactsPanel(
             workspaceRelativePath,
             cwd,
-            customIgnoreFiles,
+            ruleOptions,
             hiddenRules,
           ),
       );
@@ -333,7 +329,7 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
     super(
       RecordArtifactTool.Name,
       ToolDisplayNames.RECORD_ARTIFACT,
-      buildDescription(config.getFileFilteringOptions().customIgnoreFiles),
+      buildDescription(readPanelIgnoreRuleOptions(config).customIgnoreFiles),
       Kind.Other,
       {
         type: 'object',
@@ -827,7 +823,7 @@ function formatDirectoryExpansion(
   }
   if ((collected.skippedUnrecordable ?? 0) > 0) {
     lines.push(
-      `Skipped ${collected.skippedUnrecordable} files whose names cannot be recorded as artifact titles.`,
+      `Skipped ${collected.skippedUnrecordable} files the panel cannot surface or whose names cannot be recorded as artifact titles.`,
     );
   }
   return lines.join('\n');
@@ -966,7 +962,7 @@ async function resolveWorkspaceArtifactLocator(
   const root = await resolveExistingDir(resolveBoundWorkspaceRoot(cwd));
   // The panel's file browser loads these files (context.fileFiltering);
   // the gate must judge the path with the same rule set.
-  const customIgnoreFiles = config.getFileFilteringOptions().customIgnoreFiles;
+  const ruleOptions = readPanelIgnoreRuleOptions(config);
   const first = workspacePathCandidate(rawPath, cwd, root, true);
   if (!first.ok) {
     return first;
@@ -976,7 +972,7 @@ async function resolveWorkspaceArtifactLocator(
     rawPath,
     cwd,
     root,
-    customIgnoreFiles,
+    ruleOptions,
   );
   if (
     inspected.ok ||
@@ -995,7 +991,7 @@ async function resolveWorkspaceArtifactLocator(
     rawPath,
     cwd,
     root,
-    customIgnoreFiles,
+    ruleOptions,
   );
 }
 
@@ -1065,19 +1061,62 @@ function stripWorktreePrefixForCwd(workspacePath: string, cwd: string): string {
 }
 
 /**
+ * The session's file-filtering inputs for the Artifacts panel's ignore rule
+ * set — the same three answers the panel's factory
+ * (createWorkspaceFileSystemFactory) and the file tools (glob, ls, ripGrep)
+ * read from the session config. `Config.getFileFilteringOptions()` is
+ * optional on tool configs — `glob.ts` and `ripGrep.ts` call
+ * `this.config.getFileFilteringOptions?.()` — so a Config that does not
+ * answer it is "feature unconfigured" and yields the defaults the panel
+ * loader applies itself: respect both ignore-file families, no custom
+ * ignore files.
+ */
+export interface PanelIgnoreRuleOptions {
+  useGitignore: boolean;
+  useQwenignore: boolean;
+  customIgnoreFiles?: string[];
+}
+
+export function readPanelIgnoreRuleOptions(
+  config: Config,
+): PanelIgnoreRuleOptions {
+  const filtering = config.getFileFilteringOptions?.();
+  return {
+    useGitignore: filtering?.respectGitIgnore ?? true,
+    useQwenignore: filtering?.respectQwenIgnore ?? true,
+    customIgnoreFiles: filtering?.customIgnoreFiles,
+  };
+}
+
+/** The ignore files this rule set actually loads (for diagnostics). */
+function panelIgnoreFileNames(options: PanelIgnoreRuleOptions): string[] {
+  const names: string[] = [];
+  if (options.useGitignore) {
+    names.push('.gitignore');
+  }
+  if (options.useQwenignore) {
+    names.push(...getQwenIgnoreFileNames(options.customIgnoreFiles));
+  }
+  return names;
+}
+
+/**
  * The same rule set the serve createWorkspaceFileSystemFactory loads
  * (workspace-file-system.ts): one `loadIgnoreRules` per canonical workspace
- * root, with that root as `projectRoot`.
+ * root, with that root as `projectRoot`, and the session's file-filtering
+ * answers as the loader's inputs.
  */
 function loadPanelIgnoreRules(
   workspaceRoot: string,
-  customIgnoreFiles?: string[],
+  ruleOptions: PanelIgnoreRuleOptions,
 ): Ignore {
   return loadIgnoreRules({
     projectRoot: workspaceRoot,
-    useGitignore: true,
-    useQwenignore: true,
-    ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+    useGitignore: ruleOptions.useGitignore,
+    useQwenignore: ruleOptions.useQwenignore,
+    ...(ruleOptions.customIgnoreFiles !== undefined
+      ? { customIgnoreFiles: ruleOptions.customIgnoreFiles }
+      : {}),
     ignoreDirs: [],
   });
 }
@@ -1093,14 +1132,22 @@ function loadPanelIgnoreRules(
  *    file's own name does not count: a regular file named "dist" at the
  *    workspace root is a panel-visible file.
  * 2. Ignore rules: the workspace ignore rules the panel's file browser
- *    loads (.gitignore plus every qwen ignore file, and the .git default —
- *    the same `loadIgnoreRules` configuration createWorkspaceFileSystemFactory
- *    uses) match the file itself or any directory above it. The panel loads
- *    one rule set per canonical workspace root and matches stored
- *    bound-root-canonical paths, so the gate does the same: rules from the
- *    bound root (`resolveBoundWorkspaceRoot(cwd)`), matched against the
- *    stored path. For a root session that is the execution directory; for a
- *    worktree session it is the bound root behind the worktree.
+ *    loads (the .gitignore and the qwen ignore files, when the session's
+ *    fileFiltering settings respect them, and the .git default — the same
+ *    `loadIgnoreRules` configuration createWorkspaceFileSystemFactory
+ *    uses) match the file itself or any directory above it.
+ *
+ * Namespace: rules load from the bound workspace root
+ * (`resolveBoundWorkspaceRoot(cwd)`), and every probe runs on the
+ * worktree-stripped bound-root-relative path — the same namespace the
+ * panel resolves against (`path.relative(boundWorkspace, absolute)` in
+ * packages/cli/src/serve/fs/policy.ts). For a root session that is the
+ * execution directory; for a worktree session it is the bound root behind
+ * the `.qwen/worktrees/<slug>/` prefix, so a bound-root rule such as
+ * `.qwen/` never hides the worktree session's own files. The probes
+ * mirror `shouldIgnore` (policy.ts): the file is probed as a file, and
+ * each proper ancestor as a directory with a trailing slash so `foo/`
+ * patterns match.
  *
  * Two product locations stay recordable even when hidden, because the panel
  * serves them through dedicated artifact views instead of the file browser:
@@ -1114,7 +1161,7 @@ const ASK_DETAILS_WORKSPACE_PATH = '.qwen/tmp/ask-details.html';
 export function fileHiddenFromArtifactsPanel(
   workspacePath: string,
   cwd: string,
-  customIgnoreFiles?: string[],
+  ruleOptions: PanelIgnoreRuleOptions,
   preloadedRules?: Ignore,
 ): boolean {
   const stripped = stripWorktreePrefixForCwd(workspacePath, cwd);
@@ -1131,17 +1178,18 @@ export function fileHiddenFromArtifactsPanel(
     preloadedRules ??
     loadPanelIgnoreRules(
       resolveBoundWorkspaceRoot(path.resolve(cwd)),
-      customIgnoreFiles,
+      ruleOptions,
     );
   const fileFilter = rules.getFileFilter();
   const dirFilter = rules.getDirectoryFilter();
-  if (fileFilter(workspacePath) || dirFilter(workspacePath)) {
+  // shouldIgnore(kind='file') on the bound-root-relative path.
+  if (fileFilter(stripped) || dirFilter(stripped)) {
     return true;
   }
   // The browser cannot descend into an ignored directory, so the file is
-  // invisible when any ancestor is hidden; `shouldIgnore` probes directories
-  // with a trailing slash so `foo/` patterns match them.
-  const segments = workspacePath.split('/').filter(Boolean);
+  // invisible when any proper ancestor is hidden; shouldIgnore(kind=
+  // 'directory') probes with a trailing slash so `foo/` patterns match.
+  const segments = stripped.split('/').filter(Boolean);
   for (let depth = 1; depth < segments.length; depth++) {
     const ancestor = segments.slice(0, depth).join('/');
     if (dirFilter(`${ancestor}/`) || fileFilter(ancestor)) {
@@ -1156,7 +1204,7 @@ async function inspectWorkspaceCandidate(
   rawPath: string,
   cwd: string,
   root: string,
-  customIgnoreFiles?: string[],
+  ruleOptions: PanelIgnoreRuleOptions,
 ): Promise<WorkspaceLocatorResult> {
   if (pathHasRedirectorHop(candidate)) {
     return locatorFailure(
@@ -1235,12 +1283,12 @@ async function inspectWorkspaceCandidate(
   }
   if (
     !st.isDirectory() &&
-    fileHiddenFromArtifactsPanel(workspacePath, cwd, customIgnoreFiles)
+    fileHiddenFromArtifactsPanel(workspacePath, cwd, ruleOptions)
   ) {
     return locatorFailure(
       ToolErrorType.INVALID_TOOL_PARAMS,
       [
-        `Failed to record artifact: "${rawPath}" is hidden from the Artifacts panel: it sits under a skipped directory (node_modules, .git, __pycache__, dist, .qwen) or the workspace ignore rules (.gitignore, ${formatQwenIgnoreFileNames(customIgnoreFiles)} at the workspace root, plus the .git default) hide it from the panel's file browser, so the recording would not be visible to the user.`,
+        `Failed to record artifact: "${rawPath}" is hidden from the Artifacts panel: it sits under a skipped directory (node_modules, .git, __pycache__, dist, .qwen) or the workspace ignore rules (${panelIgnoreFileNames(ruleOptions).join(', ')} at the workspace root, plus the .git default) hide it from the panel's file browser, so the recording would not be visible to the user.`,
         'Record the file at a visible workspace path instead (for example copy it out of the skipped directory).',
       ].join('\n'),
     );

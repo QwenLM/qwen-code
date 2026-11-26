@@ -1452,6 +1452,35 @@ describe('workspace artifact metadata guard', () => {
     }
   });
 
+  it('auto-records worktree files when the bound root hides .qwen/', () => {
+    // The bound root's .gitignore hides .qwen/ (as `qwen /setup-github`
+    // writes), but a worktree session's own files are the panel's
+    // content: the gate judges the worktree-stripped path against the
+    // bound root's rules, so auto-record must keep recording them.
+    const worktreeDir = p('.qwen', 'worktrees', 'feature-x');
+    const notesDir = path.join(worktreeDir, 'notes');
+    const gitignore = p('.gitignore');
+    const filePath = path.join(notesDir, 'report.csv');
+    fs.mkdirSync(notesDir, { recursive: true });
+    fs.writeFileSync(gitignore, '.qwen/*\n');
+    fs.writeFileSync(filePath, 'a,b\n');
+    const originalGetTargetDir = mockConfigInternal.getTargetDir;
+    mockConfigInternal.getTargetDir = () => worktreeDir;
+    try {
+      expect(
+        buildWorkspaceArtifactMetadata(mockConfig, filePath),
+      ).toMatchObject({
+        title: 'report.csv',
+        kind: 'file',
+        workspacePath: '.qwen/worktrees/feature-x/notes/report.csv',
+      });
+    } finally {
+      mockConfigInternal.getTargetDir = originalGetTargetDir;
+      fs.rmSync(gitignore, { force: true });
+      fs.rmSync(worktreeDir, { recursive: true, force: true });
+    }
+  });
+
   it('skips artifacts whose workspace path contains a control character', () => {
     // The control character sits in a directory segment, not the basename:
     // the title is path.basename(filePath), so a control character in the

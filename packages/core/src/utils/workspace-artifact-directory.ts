@@ -94,6 +94,27 @@ export function pathHasSkippedArtifactDirectoryAncestor(
     .some((segment) => SKIP_DIRECTORY_ARTIFACT_NAMES.has(segment));
 }
 
+/**
+ * True when the Artifacts panel cannot surface the directory itself: the
+ * directory or a proper ancestor above it is named in the artifact skip
+ * list (node_modules, .git, __pycache__, dist, .qwen) — the same 5-name
+ * contract the direct-file gate applies, so a directory expansion refuses
+ * only directories the gate would refuse file by file. A dot-named
+ * directory such as `.github` that the panel actually lists is not
+ * flagged. Callers pass an already worktree-stripped path (see
+ * stripWorktreeArtifactPrefix).
+ */
+export function pathIsOrSitsUnderSkippedArtifactDirectory(
+  workspaceDirPath: string,
+): boolean {
+  const segments = workspaceDirPath.split('/').filter(Boolean);
+  const ownName = segments.at(-1);
+  return (
+    (ownName !== undefined && SKIP_DIRECTORY_ARTIFACT_NAMES.has(ownName)) ||
+    pathHasSkippedArtifactDirectoryAncestor(workspaceDirPath)
+  );
+}
+
 export async function collectRecordableWorkspaceFiles(
   absoluteDir: string,
   relativeDir: string,

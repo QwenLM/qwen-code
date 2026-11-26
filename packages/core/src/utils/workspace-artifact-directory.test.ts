@@ -21,6 +21,7 @@ import {
   collectRecordableWorkspaceFiles,
   pathHasSkippedArtifactDirectoryAncestor,
   pathHasSkippedDirectoryComponent,
+  pathIsOrSitsUnderSkippedArtifactDirectory,
 } from './workspace-artifact-directory.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
@@ -134,6 +135,29 @@ describe('collectRecordableWorkspaceFiles', () => {
     expect(
       pathHasSkippedArtifactDirectoryAncestor('.github/workflows/ci.yml'),
     ).toBe(false);
+  });
+
+  it('flags a directory locator the panel cannot surface (5-name contract)', () => {
+    // Worktree-stripped forms; the directory's own name counts here,
+    // unlike the direct-file gate where it is the file's own name.
+    expect(pathIsOrSitsUnderSkippedArtifactDirectory('node_modules')).toBe(
+      true,
+    );
+    expect(
+      pathIsOrSitsUnderSkippedArtifactDirectory('node_modules/react'),
+    ).toBe(true);
+    expect(pathIsOrSitsUnderSkippedArtifactDirectory('.qwen')).toBe(true);
+    expect(pathIsOrSitsUnderSkippedArtifactDirectory('dist')).toBe(true);
+    expect(pathIsOrSitsUnderSkippedArtifactDirectory('__pycache__')).toBe(true);
+    expect(pathIsOrSitsUnderSkippedArtifactDirectory('.git')).toBe(true);
+    // Dot directories outside the 5-name skip list stay expandable: the
+    // panel's file browser lists them, and the direct-file gate records
+    // their files.
+    expect(pathIsOrSitsUnderSkippedArtifactDirectory('.github')).toBe(false);
+    expect(pathIsOrSitsUnderSkippedArtifactDirectory('.github/workflows')).toBe(
+      false,
+    );
+    expect(pathIsOrSitsUnderSkippedArtifactDirectory('reports')).toBe(false);
   });
 
   it('records a regular file named after a skipped directory', async () => {
