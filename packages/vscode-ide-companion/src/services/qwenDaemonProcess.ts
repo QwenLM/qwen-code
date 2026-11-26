@@ -18,6 +18,11 @@ export interface QwenDaemonListenerHandle {
 
 const STARTUP_TIMEOUT_MS = 30_000;
 const LISTENING_URL = /qwen serve listening on (http:\/\/[^\s]+)/;
+// Channel the daemon reads to learn the full set of opened workspace
+// folders (JSON array). The daemon folds these into its trusted-root list
+// and forwards them to the shell guard, so a multi-root window can run
+// mutating Git in any opened folder, not only the bound one.
+const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
 
 export class QwenDaemonProcess {
   private child: ChildProcess | null = null;
@@ -47,6 +52,7 @@ export class QwenDaemonProcess {
   start(
     cliEntryPath: string,
     workspaceCwd: string,
+    additionalWorkspaces: readonly string[] = [],
   ): Promise<QwenDaemonRuntime> {
     // A daemon is bound to one workspace at spawn. Reusing it for a different
     // root — which a multi-root window hits as soon as a second chat opens
@@ -95,6 +101,12 @@ export class QwenDaemonProcess {
             ELECTRON_RUN_AS_NODE: '1',
             QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE: '1',
             QWEN_SERVER_TOKEN: token,
+            // Tell the daemon every opened folder so its shell guard trusts
+            // them all, not just the bound one (multi-root workspace).
+            [IDE_WORKSPACE_PATH_ENV_VAR]: JSON.stringify([
+              workspaceCwd,
+              ...additionalWorkspaces,
+            ]),
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         },
