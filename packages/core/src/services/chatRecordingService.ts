@@ -109,6 +109,7 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory,
 } from './session-turn-state.js';
+import { resolveSlimmingConfig } from './compactionInputSlimming.js';
 import {
   deleteTranscriptMessageGroups,
   getTranscriptMessageGroups,
@@ -568,6 +569,8 @@ export interface ChatRecord {
 
   /** Token usage statistics */
   usageMetadata?: GenerateContentResponseUsageMetadata;
+  /** Estimated input count after removing model-only text absent on resume. */
+  resumePromptTokenCount?: number;
   /** Model used for this response */
   model?: string;
   /** Hosted assistant batch synthesized from explicit user Skill invocations. */
@@ -2673,6 +2676,8 @@ export class ChatRecordingService {
             ...this.createBaseRecord('system'),
             promptId: `${this.getSessionId()}########${computeInitialTurnFromHistory(original, this.getSessionId())}`,
           },
+          resolveSlimmingConfig(this.config.getChatCompression?.())
+            .imageTokenEstimate,
         );
         const updated = `${records.map((record) => JSON.stringify(record)).join('\n')}\n`;
         await lease.replaceTranscript(
@@ -3519,6 +3524,7 @@ export class ChatRecordingService {
     model: string;
     message?: PartListUnion;
     tokens?: GenerateContentResponseUsageMetadata;
+    resumePromptTokenCount?: number;
     contextWindowSize?: number;
     goalContext?: GoalTurnPermit;
   }): void {
@@ -3537,6 +3543,9 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
+        if (data.resumePromptTokenCount !== undefined) {
+          record.resumePromptTokenCount = data.resumePromptTokenCount;
+        }
         if (data.goalContext) {
           this.accumulateGoalTurnTokens(data.goalContext.turnId, data.tokens);
         }

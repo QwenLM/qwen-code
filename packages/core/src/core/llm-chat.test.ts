@@ -1361,6 +1361,55 @@ describe('LlmChat', async () => {
       },
     );
 
+    describe.each([
+      [
+        {
+          promptTokenCount: 5000,
+          candidatesTokenCount: 10,
+          totalTokenCount: 5010,
+        },
+        10,
+      ],
+      [{ totalTokenCount: 5000 }, 0],
+      [{ promptTokenCount: 5000, candidatesTokenCount: 10 }, 10],
+    ] as const)('with provider usage %j', (usage, outputTokenCount) => {
+      it.each([0, 80])(
+        'keeps provider usage and restores the ordinary prompt without %i characters of model-only detail',
+        async (noteLength) => {
+          const failure = fnResponse('lookup', { error: 'invalid' }, 'call');
+          if (noteLength)
+            setModelToolErrorNote(failure, 'r'.repeat(noteLength));
+          const recordAssistantTurn = vi.fn();
+          const target = newChat({
+            history: [
+              userText('question'),
+              content('model', fnCall('lookup', {}, 'call')),
+              content('user', failure),
+              modelText('done'),
+            ],
+            recorder: { recordAssistantTurn },
+          });
+          mockStream(textStream('reply', usage));
+
+          await sendCollect('continue', 'ordinary-resume', target);
+
+          expect(target.getLastPromptTokenCount()).toBe(5000);
+          const recorded = recordAssistantTurn.mock.calls[0][0];
+          expect(JSON.parse(JSON.stringify(recorded.tokens))).toEqual(usage);
+          const record = {
+            type: 'assistant',
+            usageMetadata: recorded.tokens,
+            resumePromptTokenCount: recorded.resumePromptTokenCount,
+          } as ChatRecord;
+          expect(getResumeTokenCounts({ messages: [record] })).toEqual({
+            promptTokenCount: 5000 - noteLength / 4,
+            outputTokenCount,
+            isEstimated: noteLength > 0,
+          });
+        },
+      );
+    });
+
     it('awaits durability after normalization and before the first provider call', async () => {
       const dispatched = vi.fn();
       let release!: () => void;
@@ -4083,6 +4132,8 @@ describe('LlmChat', async () => {
     ])(
       'coerces hostile-provider %s promptTokenCount so the compaction gate is not poisoned',
       async (_label, badValue) => {
+        const recordAssistantTurn = vi.fn();
+        const target = chatWithRecorder(recordAssistantTurn);
         // Both hostile: both coerce to 0, so the per-chat counter stays 0 and
         // the `if (lastPromptTokenCount)` guard skips the global telemetry.
         mockStream(
@@ -4093,9 +4144,17 @@ describe('LlmChat', async () => {
           }),
         );
 
-        await sendDrain('hello', `prompt-id-hostile-${_label}`);
+        await sendDrain('hello', `prompt-id-hostile-${_label}`, target);
 
-        expect(chat.getLastPromptTokenCount()).toBe(0);
+        const recorded = recordAssistantTurn.mock.calls[0][0].tokens;
+        expect(recorded.promptTokenCount).toBe(
+          badValue === undefined ? undefined : 0,
+        );
+        expect(recorded.totalTokenCount).toBe(
+          badValue === undefined ? undefined : 0,
+        );
+
+        expect(target.getLastPromptTokenCount()).toBe(0);
         expect(
           uiTelemetryService.setLastPromptTokenCount,
         ).not.toHaveBeenCalled();
@@ -16812,6 +16871,51 @@ describe('LlmChat', async () => {
       expect(recordChatCompression).toHaveBeenCalledWith(checkpointWith(false));
     });
 
+    it.each([0, 5000])(
+      'restores fast compression without retained model-only detail (provider baseline %i)',
+      (priorCount) => {
+        pinFastCompressionIdleClear();
+        const imageTokenEstimate = 512;
+        vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+          imageTokenEstimate,
+        });
+        const retained = fnResponse('lookup', { error: 'invalid' }, 'call');
+        setModelToolErrorNote(retained, 'r'.repeat(80));
+        const recordChatCompression = vi.fn();
+        const target = newChat({
+          history: [
+            content(
+              'user',
+              { text: 'question' },
+              { inlineData: { mimeType: 'image/png', data: 'aA==' } },
+            ),
+            content('model', fnCall('lookup', {}, 'call')),
+            content('user', retained),
+            ...thoughtHistory(),
+          ],
+          recorder: { recordChatCompression },
+        });
+        target.setLastPromptTokenCount(priorCount);
+        const { info } = target.compressFast();
+
+        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        const payload = recordChatCompression.mock.calls[0][0];
+        expect(JSON.stringify(payload.compressedHistory)).not.toContain(
+          'r'.repeat(80),
+        );
+        expect(payload.resumePromptTokenCount).toBe(info.newTokenCount - 20);
+        expect(target.getLastPromptTokenCount()).toBe(info.newTokenCount);
+        if (!priorCount) {
+          expect(payload.resumePromptTokenCount).toBe(
+            estimateContentTokens(
+              payload.compressedHistory,
+              imageTokenEstimate,
+            ),
+          );
+        }
+      },
+    );
+
     it('marks and records the locally adjusted fast-compression count as estimated', () => {
       const recordChatCompression = vi.fn();
       const { fastChat, info } = compressFastChat(1000, {
@@ -18308,6 +18412,24 @@ describe('LlmChat', async () => {
       expect(chat.getLastPromptTokenCount()).toBe(321);
       expect(chat.getLastOutputTokenCount()).toBe(45);
       expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+    });
+
+    it('re-estimates an old zero-count checkpoint with the active image cost on resume', () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        imageTokenEstimate: 6000,
+      });
+      const target = newChat({
+        history: [
+          content('user', {
+            inlineData: { mimeType: 'image/png', data: 'AA==' },
+          }),
+          modelText('done'),
+        ],
+      });
+      target.seedResumeTokenCounts(0, 0, true);
+      expect(target.getLastPromptTokenCount()).toBe(6001);
+      expect(target.getLastOutputTokenCount()).toBe(0);
+      expect(promptMirror()).toHaveBeenCalledWith(6001);
     });
 
     it('invalidates seeded resume counts after a later route change', () => {

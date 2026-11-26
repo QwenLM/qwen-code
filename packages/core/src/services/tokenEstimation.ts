@@ -12,8 +12,11 @@ import { withModelToolErrorNotes } from '../tools/tool-error.js';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   TOKEN_TO_CHAR_RATIO,
-  estimateContentChars,
-} from './compactionInputSlimming.js';
+  contentChars,
+  estimateContentTokens,
+} from '../utils/content-token-estimate.js';
+
+export { estimateContentTokens };
 
 /**
  * Average characters-per-token for char-based token estimation. The inputs
@@ -45,35 +48,6 @@ export function estimateContextTextTokens(text: string): number {
   }
 
   return Math.ceil(asciiChars / 4 + nonAsciiChars * 1.5);
-}
-
-/**
- * Estimate the token count of a list of Content objects via char/4.
- *
- * Reuses `estimateContentChars` so that inlineData / functionCall /
- * functionResponse get the same treatment they receive when computing
- * compression size estimates — keeping the two estimators in sync prevents
- * the auto-compaction trigger and the compressor from disagreeing on size.
- *
- * Intended for the pre-send threshold gate only. char/4 is a conservative
- * lower bound (real tokenizers vary ±30%); using it to TRIGGER compaction
- * earlier is safe (false-positive), using it to SKIP compaction is not.
- */
-export function estimateContentTokens(
-  contents: Content[],
-  imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
-): number {
-  return Math.ceil(
-    contentChars(contents, imageTokenEstimate) / CHARS_PER_TOKEN,
-  );
-}
-
-function contentChars(contents: Content[], imageTokenEstimate: number): number {
-  let totalChars = 0;
-  for (const content of contents) {
-    totalChars += estimateContentChars(content, imageTokenEstimate);
-  }
-  return totalChars;
 }
 
 /** Includes private tool diagnostics only for contents sent to the main model. */

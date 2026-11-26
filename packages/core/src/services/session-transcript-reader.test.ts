@@ -3035,13 +3035,16 @@ describe('SessionTranscriptReader', () => {
   it('uses the aggregated final usage metadata when selecting resume tokens', async () => {
     await writeRecords([
       record('u1', null, 'first'),
+      record('a1', 'u1', 'earlier answer'),
       {
-        ...record('a1', 'u1', 'earlier answer'),
+        ...record('a1', 'u1', 'earlier tail'),
+        resumePromptTokenCount: 17,
         usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 3 },
       },
       record('u2', 'a1', 'second'),
       {
         ...record('a2', 'u2', 'latest answer'),
+        resumePromptTokenCount: 9,
         usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
       },
       {
@@ -3057,8 +3060,10 @@ describe('SessionTranscriptReader', () => {
     expect(projection?.runtime.resumeTokenCounts).toEqual(
       getResumeTokenCounts(loaded!.conversation),
     );
-    expect(projection?.runtime.resumeTokenCounts).toMatchObject({
-      promptTokenCount: 20,
+    expect(projection?.runtime.resumeTokenCounts).toEqual({
+      promptTokenCount: 17,
+      outputTokenCount: 3,
+      isEstimated: true,
     });
   });
 

@@ -16,18 +16,28 @@ export interface ResumeTokenCounts {
   isEstimated: boolean;
 }
 
+function assistantPromptTokenCount(record: ChatRecord): number | undefined {
+  const usage = record.usageMetadata;
+  return (
+    record.resumePromptTokenCount ??
+    ((usage?.promptTokenCount ?? usage?.totalTokenCount) || undefined)
+  );
+}
+
 export class ResumeTokenCountsAccumulator {
   private value: ResumeTokenCounts | undefined;
 
   add(record: ChatRecord): void {
     if (record.type === 'assistant') {
       const usage = record.usageMetadata;
-      const candidate = usage?.promptTokenCount ?? usage?.totalTokenCount;
-      if (candidate) {
+      const promptTokenCount = assistantPromptTokenCount(record);
+      if (promptTokenCount !== undefined) {
         this.value = {
-          promptTokenCount: candidate,
-          outputTokenCount: getUsageOutputTokenCountForPromptEstimate(usage),
-          isEstimated: false,
+          promptTokenCount,
+          outputTokenCount: usage?.promptTokenCount
+            ? getUsageOutputTokenCountForPromptEstimate(usage)
+            : 0,
+          isEstimated: record.resumePromptTokenCount !== undefined,
         };
       }
       return;
@@ -57,8 +67,7 @@ export class ResumeTokenCountsAccumulator {
 
 export function isResumeTokenCountsCandidate(record: ChatRecord): boolean {
   if (record.type === 'assistant') {
-    const usage = record.usageMetadata;
-    return Boolean(usage?.promptTokenCount ?? usage?.totalTokenCount);
+    return assistantPromptTokenCount(record) !== undefined;
   }
   if (record.type !== 'system' || record.subtype !== 'chat_compression') {
     return false;

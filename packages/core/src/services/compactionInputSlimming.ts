@@ -18,6 +18,18 @@ import {
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
   USER_PROMPT_SUBMIT_CONTEXT_OPEN,
 } from '../utils/transcript-records.js';
+import {
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  getFunctionResponseParts,
+} from '../utils/content-token-estimate.js';
+
+export {
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  TOKEN_TO_CHAR_RATIO,
+  estimateContentChars,
+  estimatePartChars,
+  getFunctionResponseParts,
+} from '../utils/content-token-estimate.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -30,15 +42,6 @@ import {
  * (or the identity-equal input when no changes were made).
  */
 
-export const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1600;
-
-/**
- * Generic char/token conversion factor (claude-code's canonical heuristic).
- * Exported so adjacent estimators (`tokenEstimation.ts`'s `CHARS_PER_TOKEN`)
- * stay programmatically linked — if this ever moves, both sites move
- * together rather than drifting silently.
- */
-export const TOKEN_TO_CHAR_RATIO = 4;
 const DEFAULT_MIME = 'application/octet-stream';
 
 /**
@@ -208,80 +211,6 @@ function resolveBoolean(
   if (envValue === '0' || envValue === 'false') return false;
   if (typeof settingsValue === 'boolean') return settingsValue;
   return defaultValue;
-}
-
-/**
- * Approximate char count for a single `Part`, used by
- * `estimateContentChars` and by the slimming module's own budget
- * accounting. Binary parts get a fixed budget (in chars) derived from
- * the configured token estimate; this keeps base64 payloads from
- * skewing compression size estimation or token-budget math.
- */
-export function estimatePartChars(
-  part: Part,
-  imageTokenEstimate: number,
-): number {
-  if (part.inlineData || part.fileData) {
-    return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
-  }
-  if (typeof part.text === 'string') {
-    // A thought's signature is replayed beside its text, so it takes room in
-    // the request too (#9455). Other parts reach `JSON.stringify` below,
-    // which already counts it.
-    return part.text.length + (part.thoughtSignature?.length ?? 0);
-  }
-  // Tool results in qwen-code carry media on `functionResponse.parts`
-  // (an extension to the @google/genai schema; see
-  // `coreToolScheduler.createFunctionResponsePart`). Walk into those
-  // nested parts so a base64 image attached to a `read_file` result
-  // isn't billed as ~350K chars by `JSON.stringify`.
-  if (part.functionResponse) {
-    let total = 0;
-    const output = part.functionResponse.response?.['output'];
-    const error = part.functionResponse.response?.['error'];
-    if (typeof output === 'string') {
-      total += output.length;
-    } else if (typeof error === 'string') {
-      total += error.length;
-    }
-    const nested = getFunctionResponseParts(part);
-    if (nested) {
-      for (const inner of nested) {
-        total += estimatePartChars(inner, imageTokenEstimate);
-      }
-    }
-    // Add a small fixed floor for the wrapper metadata (id, name) so a
-    // pure media-only response isn't reported as just the image budget.
-    return total + 64;
-  }
-  return JSON.stringify(part ?? {}).length;
-}
-
-/**
- * Returns the nested-parts array from a `functionResponse`, if present.
- * qwen-code attaches media here (see
- * `coreToolScheduler.createFunctionResponsePart`); the standard
- * `@google/genai` FunctionResponse type does not declare it.
- *
- * Exported so post-compact image extraction/counting walks the SAME
- * carrier the slimmer strips — otherwise the two disagree on where tool
- * media lives and screenshots silently vanish from restoration.
- */
-export function getFunctionResponseParts(part: Part): Part[] | undefined {
-  const fr = part.functionResponse as { parts?: unknown } | undefined;
-  return Array.isArray(fr?.parts) ? (fr.parts as Part[]) : undefined;
-}
-
-export function estimateContentChars(
-  content: Content,
-  imageTokenEstimate: number,
-): number {
-  if (!content.parts) return 0;
-  let total = 0;
-  for (const part of content.parts) {
-    total += estimatePartChars(part, imageTokenEstimate);
-  }
-  return total;
 }
 
 interface SlimResult {

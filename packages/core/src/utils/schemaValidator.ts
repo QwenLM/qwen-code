@@ -663,37 +663,71 @@ function inactiveTaggedUnionErrors(
       (e.keyword === 'anyOf' || e.keyword === 'oneOf') &&
       e.schemaPath.startsWith('#/'),
   );
-  if (!unions.length) return inactive;
-  const refs = Object.entries(validate.schemaEnv.root.refs);
-  // An inlined reference prefixes its errors with the reference fragment.
-  // A separately compiled reference reports paths from its own schema root.
-  // Use a document pointer only if those possible locations agree.
+  // Dynamic references can report pointers relative to their runtime target,
+  // which is absent from Ajv's static reference table.
+  if (
+    !unions.length ||
+    Object.keys(validate.schemaEnv.root.dynamicAnchors).length
+  ) {
+    return inactive;
+  }
+  // A separately compiled reference reports paths from its own root; an
+  // inlined one prefixes them with its reference fragment. Index both once.
+  const compiledRoots = new Set<unknown>();
+  const fragmentRoots = new Map<string, unknown[]>();
+  for (const [id, ref] of Object.entries(validate.schemaEnv.root.refs)) {
+    const compiled =
+      typeof ref === 'object' &&
+      typeof ref.validate === 'function' &&
+      ref.validate.schemaEnv === ref;
+    const root = compiled ? ref.schema : ref;
+    if (compiled) compiledRoots.add(root);
+    const fragment = id.split('#')[1];
+    if (!fragment) continue;
+    const prefix = decodeURIComponent(fragment);
+    const roots = fragmentRoots.get(prefix);
+    if (roots) roots.push(root);
+    else fragmentRoots.set(prefix, [root]);
+  }
+  const locations = new Map<string, unknown>();
   function schemaAt(pointer: string): unknown {
+    if (!locations.has(pointer))
+      locations.set(pointer, resolveLocation(pointer));
+    return locations.get(pointer);
+  }
+  function resolveLocation(pointer: string): unknown {
     const path = decodeURIComponent(pointer);
     const source = valueAtPointer(validate.schema, path);
     if (source === undefined) return undefined;
-    for (const [id, ref] of refs) {
-      const compiled =
-        typeof ref === 'object' &&
-        typeof ref.validate === 'function' &&
-        ref.validate.schemaEnv === ref;
-      const target = compiled ? ref.schema : ref;
-      if (compiled) {
-        const local = valueAtPointer(target, path);
+    for (const root of compiledRoots) {
+      const local = valueAtPointer(root, path);
+      if (local !== undefined && local !== source) return undefined;
+    }
+    for (
+      let prefix = path;
+      prefix;
+      prefix = prefix.slice(0, prefix.lastIndexOf('/'))
+    ) {
+      for (const root of fragmentRoots.get(prefix) ?? []) {
+        const local = valueAtPointer(root, path.slice(prefix.length));
         if (local !== undefined && local !== source) return undefined;
       }
-      const fragment = id.split('#')[1];
-      if (!fragment) continue;
-      const prefix = decodeURIComponent(fragment);
-      if (path !== prefix && !path.startsWith(`${prefix}/`)) continue;
-      const local = valueAtPointer(target, path.slice(prefix.length));
-      if (local !== undefined && local !== source) return undefined;
     }
     return source;
   }
-  const typeErrorPaths = new Set(
-    errors.filter((e) => e.keyword === 'type').map((e) => e.instancePath),
-  );
+  const typeErrorPaths = new Set<string>();
+  const errorIndexes = new Map<unknown, number[]>();
+  for (const [index, error] of errors.entries()) {
+    if (error.keyword === 'type') typeErrorPaths.add(error.instancePath);
+    if (!error.schemaPath.startsWith('#/')) continue;
+    const source = schemaAt(
+      error.schemaPath.slice(1, error.schemaPath.lastIndexOf('/')),
+    );
+    if (source === undefined) continue;
+    const indexes = errorIndexes.get(source);
+    if (indexes) indexes.push(index);
+    else errorIndexes.set(source, [index]);
+  }
   for (const error of unions) {
     const branches = schemaAt(error.schemaPath.slice(1));
     const input = valueAtPointer(data, error.instancePath);
@@ -752,12 +786,18 @@ function inactiveTaggedUnionErrors(
       }
       // Ajv reports a referenced constraint at its definition. Match both
       // schema and instance so a sibling can reuse that definition elsewhere.
-      const candidates = errors.filter((e) => {
-        if (inactive.has(e) || !e.schemaPath.startsWith('#/')) return false;
-        const path = e.schemaPath.slice(1, e.schemaPath.lastIndexOf('/'));
-        const source = schemaAt(path);
-        return owners.get(e.instancePath)?.has(source as DiagnosticSchema);
-      });
+      const indexes: number[] = [];
+      for (const [path, schemas] of owners) {
+        for (const schema of schemas) {
+          for (const index of errorIndexes.get(schema) ?? []) {
+            const candidate = errors[index];
+            if (candidate.instancePath === path && !inactive.has(candidate)) {
+              indexes.push(index);
+            }
+          }
+        }
+      }
+      const candidates = indexes.sort((a, b) => a - b).map((i) => errors[i]);
       const branchPath = branch.$ref ?? `${error.schemaPath}/${index}`;
       const failure =
         candidates.find((e) => e.schemaPath.startsWith(`${branchPath}/`)) ??

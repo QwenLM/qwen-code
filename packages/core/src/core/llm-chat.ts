@@ -2749,12 +2749,32 @@ export class LlmChat {
     this.compressionObserverOptions = options;
   }
 
-  private async recordCompression(
+  private persistedPromptTokenDelta(
+    persisted: Content[],
+    dispatched: Content[],
+    pending?: Content,
+  ): number {
+    if (persisted === dispatched && !pending) return 0;
+    const imageTokens = resolveSlimmingConfig(
+      this.config.getChatCompression?.(),
+    ).imageTokenEstimate;
+    const historyDelta =
+      persisted === dispatched
+        ? 0
+        : estimateContentTokens(persisted, imageTokens) -
+          estimateContentTokens(dispatched, imageTokens);
+    return (
+      historyDelta +
+      (pending ? estimateContentTokens([pending], imageTokens) : 0)
+    );
+  }
+
+  private compressionRecord(
     info: ChatCompressionInfo,
     history: Content[],
+    summaryPrefixLength: number | undefined,
     pending?: Content,
-  ): Promise<void> {
-    if (!this.compressionObserver && !this.chatRecordingService) return;
+  ): ChatCompressionRecordPayload {
     const persisted = withoutCompactionTranscriptHint(history);
     const dispatched = withModelToolErrorNotes(history);
     const compressedHistory = pending
@@ -2763,27 +2783,33 @@ export class LlmChat {
     const payload: ChatCompressionRecordPayload = {
       info,
       compressedHistory,
-      summaryPrefixLength: info.summaryPrefixLength ?? history.length,
+      summaryPrefixLength,
       completedToolCallIds: this.completedToolCallIds,
     };
     if (pending || persisted !== dispatched) {
-      // Resume includes the pending turn and drops model-only text from the
-      // committed history. Keep the system/tool overhead from the live count.
-      const imageTokens = resolveSlimmingConfig(
-        this.config.getChatCompression(),
-      ).imageTokenEstimate;
-      const persistedDelta =
-        persisted === dispatched
-          ? 0
-          : estimateContentTokens(persisted, imageTokens) -
-            estimateContentTokens(dispatched, imageTokens);
+      // Preserve the live system/tool overhead while sizing the history resume loads.
       payload.resumePromptTokenCount = Math.max(
         0,
         info.newTokenCount +
-          persistedDelta +
-          (pending ? estimateContentTokens([pending], imageTokens) : 0),
+          this.persistedPromptTokenDelta(persisted, dispatched, pending),
       );
     }
+    return payload;
+  }
+
+  private async recordCompression(
+    info: ChatCompressionInfo,
+    history: Content[],
+    pending?: Content,
+  ): Promise<void> {
+    if (!this.compressionObserver && !this.chatRecordingService) return;
+    const payload = this.compressionRecord(
+      info,
+      history,
+      info.summaryPrefixLength ?? history.length,
+      pending,
+    );
+    const { compressedHistory } = payload;
     if (this.compressionObserver) {
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
@@ -3256,6 +3282,17 @@ export class LlmChat {
     // Usage saved with legacy memory on already counts visible snapshots. The
     // rare suppressed-at-save resume relies on the pad and reactive recovery.
     this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
+    // Older pruned checkpoints saved zero. Size the restored history with
+    // this session's media settings before the first session-limit check.
+    if (isEstimated && promptTokenCount === 0) {
+      promptTokenCount = estimateContentTokens(
+        this.getHistoryShallow(true),
+        resolveSlimmingConfig(this.config.getChatCompression?.())
+          .imageTokenEstimate,
+      );
+      outputTokenCount = 0; // The restored history includes the last response.
+      this.telemetryService?.setLastPromptTokenCount(promptTokenCount);
+    }
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
@@ -3451,7 +3488,13 @@ export class LlmChat {
     // Use the same estimator on both sides so the NOOP gate compares
     // apples to apples. The API-authoritative lastPromptTokenCount is
     // then adjusted by the estimated delta — never replaced wholesale.
-    const beforeEstimate = estimateModelContentTokens(this.history);
+    const { imageTokenEstimate } = resolveSlimmingConfig(
+      this.config.getChatCompression?.(),
+    );
+    const beforeEstimate = estimateModelContentTokens(
+      this.history,
+      imageTokenEstimate,
+    );
     const projectRoot = this.config.getProjectRoot();
     const targetDir = this.config.getTargetDir?.() ?? projectRoot;
 
@@ -3473,7 +3516,10 @@ export class LlmChat {
       .map((c) => (c.role === 'model' ? stripThoughtPartsFromContent(c) : c))
       .filter((c): c is Content => c !== null);
 
-    const afterEstimate = estimateModelContentTokens(newHistory);
+    const afterEstimate = estimateModelContentTokens(
+      newHistory,
+      imageTokenEstimate,
+    );
 
     if (afterEstimate >= beforeEstimate) {
       const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
@@ -3506,14 +3552,14 @@ export class LlmChat {
       triggerReason: 'manual',
     };
 
-    this.chatRecordingService?.recordChatCompression({
-      info,
-      compressedHistory: newHistory,
-      summaryPrefixLength:
+    this.chatRecordingService?.recordChatCompression(
+      this.compressionRecord(
+        info,
+        newHistory,
         getStartupContextLength(newHistory, { includeCompressed: true }) ||
-        undefined,
-      completedToolCallIds: this.completedToolCallIds,
-    });
+          undefined,
+      ),
+    );
     logChatCompression(
       this.config,
       makeChatCompressionEvent({
@@ -6471,12 +6517,19 @@ export class LlmChat {
       }
     }
     params.config?.abortSignal?.throwIfAborted();
+    let resumePromptTokenDelta = 0;
     const apiCall = () => {
       // A dispatched request supersedes the report that sized it; only its own
       // successful response may anchor the next send.
       this.toolBudgetUsageAnchor = undefined;
       params.config?.abortSignal?.throwIfAborted();
       const contents = withModelToolErrorNotes(requestContents);
+      if (this.chatRecordingService) {
+        resumePromptTokenDelta = this.persistedPromptTokenDelta(
+          withoutCompactionTranscriptHint(requestContents),
+          contents,
+        );
+      }
       const groups = new Map<ToolOutputProvenance, Part[]>();
       for (const content of contents)
         for (const part of content.parts ?? []) {
@@ -6619,6 +6672,7 @@ export class LlmChat {
       acceptQuietToolResultCompletion,
       params.config?.abortSignal,
       { authType, extraRetryErrorCodes },
+      resumePromptTokenDelta,
     );
   }
 
@@ -7482,22 +7536,16 @@ export class LlmChat {
     acceptQuietToolResultCompletion = false,
     abortSignal?: AbortSignal,
     retryClassificationContext?: RetryErrorClassificationContext,
+    resumePromptTokenDelta = 0,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
     const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
     const rawToolCallIdsInCurrentTurn = new Set<string>();
     const reservedToolCallIds = new Map<string, string>();
+    let resumePromptTokenCount: number | undefined;
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
-    let coercedUsage:
-      | {
-          promptTokenCount: number;
-          totalTokenCount: number;
-          candidatesTokenCount: number;
-          cachedContentTokenCount: number;
-          thoughtsTokenCount: number;
-        }
-      | undefined;
+    let recordedUsage: GenerateContentResponseUsageMetadata | undefined;
 
     let hasToolCall = false;
     let hasFinishReason = false;
@@ -7667,38 +7715,37 @@ export class LlmChat {
             typeof usageMetadata.totalTokenCount === 'number' &&
             Number.isFinite(usageMetadata.totalTokenCount) &&
             usageMetadata.totalTokenCount >= 0;
-          const promptTokenCount = coerceUsageCount(
-            usageMetadata.promptTokenCount,
+          // A missing prompt or total selects a different fallback on resume.
+          // Only normalize fields the provider supplied.
+          recordedUsage = { ...usageMetadata };
+          for (const field of [
             'promptTokenCount',
-          );
-          const totalTokenCount = coerceUsageCount(
-            usageMetadata.totalTokenCount,
             'totalTokenCount',
-          );
-          const candidatesTokenCount = coerceUsageCount(
-            usageMetadata.candidatesTokenCount,
             'candidatesTokenCount',
-          );
-          const cachedContentTokenCount = coerceUsageCount(
-            usageMetadata.cachedContentTokenCount,
             'cachedContentTokenCount',
-          );
-          const thoughtsTokenCount = coerceUsageCount(
-            usageMetadata.thoughtsTokenCount,
             'thoughtsTokenCount',
-          );
-          // Stash coerced values so recordAssistantTurn can reuse them
-          // without re-calling coerceUsageCount inline.
-          coercedUsage = {
-            promptTokenCount,
-            totalTokenCount,
-            candidatesTokenCount,
-            cachedContentTokenCount,
-            thoughtsTokenCount,
-          };
+          ] as const) {
+            if (usageMetadata[field] !== undefined) {
+              recordedUsage[field] = coerceUsageCount(
+                usageMetadata[field],
+                field,
+              );
+            }
+          }
+          const {
+            promptTokenCount = 0,
+            totalTokenCount = 0,
+            candidatesTokenCount = 0,
+            cachedContentTokenCount = 0,
+            thoughtsTokenCount = 0,
+          } = recordedUsage;
           const lastPromptTokenCount = hasUsablePromptTokenCount
             ? promptTokenCount
             : totalTokenCount;
+          resumePromptTokenCount =
+            lastPromptTokenCount && resumePromptTokenDelta
+              ? Math.max(0, lastPromptTokenCount + resumePromptTokenDelta)
+              : undefined;
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
@@ -7803,9 +7850,8 @@ export class LlmChat {
             message: parts.map(
               (part) => redactStructuredOutputArgsForRecording(part) ?? part,
             ),
-            tokens: coercedUsage
-              ? { ...usageMetadata, ...coercedUsage }
-              : usageMetadata,
+            resumePromptTokenCount,
+            tokens: recordedUsage,
             contextWindowSize:
               this.config.getContentGeneratorConfig()?.contextWindowSize,
             ...(goalContext ? { goalContext: { ...goalContext } } : {}),
@@ -8268,9 +8314,8 @@ export class LlmChat {
             ? redactStructuredOutputArgsForRecording(part)!
             : part,
         ),
-        tokens: coercedUsage
-          ? { ...usageMetadata, ...coercedUsage }
-          : usageMetadata,
+        resumePromptTokenCount,
+        tokens: recordedUsage,
         contextWindowSize,
         ...(goalContext ? { goalContext: { ...goalContext } } : {}),
       };

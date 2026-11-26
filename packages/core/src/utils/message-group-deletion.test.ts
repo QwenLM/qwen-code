@@ -243,66 +243,81 @@ describe('message group deletion', () => {
     expect(detectTurnInterruption(restored).kind).toBe('none');
   });
 
-  it('preserves the summary and prunes raw copies and tools from every compression checkpoint', () => {
-    const summary: Content = {
-      role: 'user',
-      parts: [{ text: 'unchanged summary remembers u1' }],
-    };
-    const ack: Content = { role: 'model', parts: [{ text: 'Acknowledged' }] };
-    const u1 = user('u1', null);
-    const a1 = record('a1', 'u1', 'assistant');
-    const u2 = user('u2', 'a1');
-    const a2 = record('a2', 'u2', 'assistant');
-    const compression = record('compressed', 'a2', 'system', {
-      subtype: 'chat_compression',
-      systemPayload: {
-        info: {
-          originalTokenCount: 100,
-          newTokenCount: 20,
-          compressionStatus: CompressionStatus.COMPRESSED,
+  it.each([
+    { override: 120, reported: 20, expected: 94 },
+    { override: undefined, reported: 120, expected: 94 },
+    { override: undefined, reported: 2, expected: 2 },
+  ])(
+    'prunes a checkpoint and restores its adjusted count (override $override, reported $reported)',
+    ({ override, reported, expected }) => {
+      const summary: Content = {
+        role: 'user',
+        parts: [{ text: 'unchanged summary remembers u1' }],
+      };
+      const ack: Content = { role: 'model', parts: [{ text: 'Acknowledged' }] };
+      const u1 = user('u1', null);
+      u1.message!.parts!.push({
+        inlineData: { mimeType: 'image/png', data: 'AA==' },
+      });
+      const a1 = record('a1', 'u1', 'assistant');
+      const u2 = user('u2', 'a1');
+      const a2 = record('a2', 'u2', 'assistant');
+      const compression = record('compressed', 'a2', 'system', {
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            originalTokenCount: 100,
+            newTokenCount: reported,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          ...(override === undefined
+            ? {}
+            : { resumePromptTokenCount: override }),
+          compressedHistory: [
+            summary,
+            ack,
+            u1.message!,
+            a1.message!,
+            u2.message!,
+            a2.message!,
+          ],
+          promptIds: [null, null, 'api-u1', null, 'api-u2', null],
         },
-        resumePromptTokenCount: 120,
-        compressedHistory: [
-          summary,
-          ack,
-          u1.message!,
-          a1.message!,
-          u2.message!,
-          a2.message!,
-        ],
-        promptIds: [null, null, 'api-u1', null, 'api-u2', null],
-      },
-    });
-    const records = [
-      u1,
-      a1,
-      u2,
-      a2,
-      compression,
-      user('u3', 'compressed'),
-      record('a3', 'u3', 'assistant'),
-    ];
-    const { records: kept } = deleteTranscriptMessageGroups(
-      records,
-      ['u1', 'u3'],
-      anchor,
-    );
-    const payload = kept.find(
-      (item) => item.uuid === 'compressed',
-    )!.systemPayload;
-    expect(payload).toEqual({
-      ...compression.systemPayload,
-      resumePromptTokenCount: 0,
-      compressedHistory: [summary, ack, u2.message, a2.message],
-      promptIds: [null, null, 'api-u2', null],
-    });
-    expect(getResumeTokenCounts({ messages: kept })?.promptTokenCount).toBe(0);
-    expect(
-      buildApiHistoryFromConversation({ messages: kept }).map(
-        (content) => content.parts?.[0]?.text,
-      ),
-    ).toEqual(['unchanged summary remembers u1', 'Acknowledged', 'u2', 'a2']);
-  });
+      });
+      const records = [
+        u1,
+        a1,
+        u2,
+        a2,
+        compression,
+        user('u3', 'compressed'),
+        record('a3', 'u3', 'assistant'),
+      ];
+      const { records: kept } = deleteTranscriptMessageGroups(
+        records,
+        ['u1', 'u3'],
+        anchor,
+        25,
+      );
+      const payload = kept.find(
+        (item) => item.uuid === 'compressed',
+      )!.systemPayload;
+      expect(payload).toEqual({
+        ...compression.systemPayload,
+        resumePromptTokenCount: expected,
+        compressedHistory: [summary, ack, u2.message, a2.message],
+        promptIds: [null, null, 'api-u2', null],
+      });
+      expect(getResumeTokenCounts({ messages: kept })?.promptTokenCount).toBe(
+        expected,
+      );
+      expect(
+        buildApiHistoryFromConversation({ messages: kept }).map(
+          (content) => content.parts?.[0]?.text,
+        ),
+      ).toEqual(['unchanged summary remembers u1', 'Acknowledged', 'u2', 'a2']);
+    },
+  );
 
   it('deletes compressed-away original history without changing model input', () => {
     const compression = record('compression', 'a1', 'system', {

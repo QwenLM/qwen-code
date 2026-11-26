@@ -2547,6 +2547,7 @@ describe('ChatRecordingService', () => {
       svc.recordAssistantTurn({
         model: 'gemini-pro',
         message: parts,
+        resumePromptTokenCount: 90,
         tokens: {
           promptTokenCount: 100,
           candidatesTokenCount: 50,
@@ -2560,6 +2561,7 @@ describe('ChatRecordingService', () => {
       expect(record.message).toEqual({ role: 'model', parts });
       expect(record.model).toBe('gemini-pro');
       expect(record.usageMetadata?.totalTokenCount).toBe(160);
+      expect(record.resumePromptTokenCount).toBe(90);
     });
 
     it('should record assistant turn with only tokens', async () => {

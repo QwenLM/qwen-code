@@ -34,6 +34,7 @@ export interface TranscriptRecordInput {
   };
   readonly model?: unknown;
   readonly usageMetadata?: unknown;
+  readonly resumePromptTokenCount?: number;
   readonly toolCallResult?: unknown;
   readonly systemPayload?: unknown;
   readonly forkedFrom?: {
@@ -675,7 +676,14 @@ export function aggregateTranscriptRecordFragments<
           }
         : { ...record.message, parts: [...(record.message.parts ?? [])] };
     }
-    if (record.usageMetadata) base['usageMetadata'] = record.usageMetadata;
+    if (record.usageMetadata) {
+      base['usageMetadata'] = record.usageMetadata;
+      if (record.resumePromptTokenCount !== undefined) {
+        base['resumePromptTokenCount'] = record.resumePromptTokenCount;
+      } else {
+        delete base['resumePromptTokenCount'];
+      }
+    }
     if (record.toolCallResult && !base['toolCallResult']) {
       base['toolCallResult'] = record.toolCallResult;
     }

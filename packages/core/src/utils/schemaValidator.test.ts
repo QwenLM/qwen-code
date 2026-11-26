@@ -579,6 +579,71 @@ describe('SchemaValidator', () => {
       invalid(schema, { item: { ...item, items: {} } });
     });
 
+    it('keeps syntax guidance neutral when a dynamic reference changes the active union', () => {
+      const variant = (shape: string, kind: string) =>
+        obj({ items: { type: shape }, kind: { const: kind } });
+      const schema = {
+        $schema: DRAFT_2020,
+        $id: `https://example.test/${probe('doc')}`,
+        anyOf: [variant('array', 'file'), variant('object', 'docs')],
+        ...obj({
+          item: {
+            $id: `https://example.test/${probe('node')}`,
+            $dynamicAnchor: 'node',
+            anyOf: [variant('array', 'docs'), variant('object', 'file')],
+            ...obj({ child: { $dynamicRef: '#node' } }),
+          },
+        }),
+      };
+      const child = { kind: 'docs', items: '[1,]' };
+      const { report } = validateWithNote(schema, { item: { child } });
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.stringContaining(
+          'resend this field with the type required by its schema',
+        ),
+      );
+      valid(schema, { item: { child: { ...child, items: [] } } });
+      invalid(schema, { item: { child: { ...child, items: {} } } });
+    });
+
+    it('bounds schema lookups when diagnosing many referenced variants', () => {
+      const count = 40;
+      const variants = Array.from({ length: count }, (_, i) =>
+        obj({
+          payload: { type: i === 0 ? 'array' : 'object' },
+          kind: { const: i },
+        }),
+      );
+      const definitions = Object.fromEntries(
+        variants.map((v, i) => [`V${i}`, v]),
+      );
+      let reads = 0;
+      const schema = {
+        $schema: DRAFT_2020,
+        get $defs() {
+          reads++;
+          return definitions;
+        },
+        oneOf: variants.map((_, i) => ({ $ref: `#/$defs/V${i}` })),
+      };
+      const input = { kind: 0, payload: '[1,]' };
+      const compiled = SchemaValidator.compileIsolated(schema);
+      if (compiled.error !== undefined) throw new Error(compiled.error);
+      const { validate } = compiled;
+      reads = 0;
+      expect(validate(input)).not.toBeNull();
+      const baseline = reads;
+      reads = 0;
+      const report = vi.fn();
+      withSchemaValidationReporter(input, report, () => validate(input));
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.stringContaining('send it as a JSON array'),
+      );
+      expect(reads - baseline).toBeLessThan(5 * count);
+    });
+
     it('keeps the selected tag when unrelated definitions and examples have ids', () => {
       const schema = {
         $schema: DRAFT_2020,

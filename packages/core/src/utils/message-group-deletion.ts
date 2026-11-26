@@ -20,6 +20,7 @@ import {
 } from './transcript-records.js';
 
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
+import { estimateContentTokens } from './content-token-estimate.js';
 import { removeFileHistorySnapshots } from './file-history-snapshots.js';
 
 export interface MessageGroup {
@@ -300,6 +301,7 @@ function pruneCompression(
   removedPromptIds: ReadonlySet<string>,
   earlierPromptIds: ReadonlySet<string>,
   removedToolCalls: ReadonlySet<string>,
+  imageTokenEstimate: number | undefined,
 ): ChatRecord {
   if (record.subtype !== 'chat_compression') return record;
   const payload = record.systemPayload as ChatCompressionRecordPayload;
@@ -415,17 +417,30 @@ function pruneCompression(
   }
   assertNoRetainedToolCopies(retained);
   if (retained.length === payload.compressedHistory.length) return record;
+  const compressedHistory = retained.map(
+    (index) => payload.compressedHistory[index]!,
+  );
+  const previous =
+    payload.resumePromptTokenCount ?? payload.info?.newTokenCount ?? 0;
+  const visibleBefore = estimateContentTokens(
+    payload.compressedHistory,
+    imageTokenEstimate,
+  );
+  const visibleAfter = estimateContentTokens(
+    compressedHistory,
+    imageTokenEstimate,
+  );
+  // Keep system/tool overhead. A local estimate can exceed a provider count,
+  // but deleting input cannot increase that count.
+  const overhead = Math.max(0, previous - visibleBefore);
+  const resumePromptTokenCount =
+    previous > 0 ? Math.min(previous, overhead + visibleAfter) : visibleAfter;
   return {
     ...record,
     systemPayload: {
       ...payload,
-      // A zero seed makes the next send estimate the pruned history.
-      ...(payload.resumePromptTokenCount !== undefined
-        ? { resumePromptTokenCount: 0 }
-        : {}),
-      compressedHistory: retained.map(
-        (index) => payload.compressedHistory[index]!,
-      ),
+      resumePromptTokenCount,
+      compressedHistory,
       promptIds: retained.map((index) => payload.promptIds![index]!),
       ...(Array.isArray(payload.directoryContextIndices)
         ? {
@@ -444,6 +459,7 @@ export function deleteTranscriptMessageGroups(
   records: ChatRecord[],
   groupIds: string[],
   anchor: ChatRecord,
+  imageTokenEstimate?: number,
 ): { records: ChatRecord[]; result: DeleteMessageGroupsResult } {
   const groups = getTranscriptMessageGroups(records);
   const ids = new Set(groupIds);
@@ -555,6 +571,7 @@ export function deleteTranscriptMessageGroups(
         removedPromptIds,
         earlierPromptIds,
         removedToolCalls,
+        imageTokenEstimate,
       );
       if (record.subtype === 'file_history_snapshot') {
         const payload =
