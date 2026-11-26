@@ -22,6 +22,7 @@ import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
@@ -1030,13 +1031,26 @@ class HostedPublicWorkspaceIT {
     @ValueSource(strings = {"allow", "deny", "cancel", "mode-change", "expiry"})
     @Timeout(150)
     void publicChildrenShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql(String outcome) throws Exception {
+        shellApprovalSettlesAfterParkingAndHarnessReplacement(outcome, true, true);
+    }
+
+    @ParameterizedTest(name = "publication={0}, outcome={1}")
+    @CsvSource({"false, allow", "false, deny", "true, allow", "true, deny"})
+    @Timeout(150)
+    void versionZeroShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql(boolean publication, String outcome)
+            throws Exception {
+        shellApprovalSettlesAfterParkingAndHarnessReplacement(outcome, false, publication);
+    }
+
+    private void shellApprovalSettlesAfterParkingAndHarnessReplacement(
+            String outcome, boolean children, boolean publication) throws Exception {
         assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
         parkedShellOutcome = outcome;
         shell = true;
         approvals = true;
         definitionApproval = true;
-        publicChildren = true;
-        shellLifecycleV2 = true;
+        publicChildren = children;
+        shellLifecycleV2 = publication;
         List<Path> roots = boot();
         register("workspace-0", "storage-0");
         String session = request("POST", "/v1/agents/sessions",
@@ -1045,7 +1059,10 @@ class HostedPublicWorkspaceIT {
                 "parked-shell", "actor", 202).path("id").asText();
         String route = "/v1/agents/sessions/" + session;
         assertThat(request("GET", route, null, null, "actor", 200)
-                .at("/capabilities/child_agents").asBoolean()).isTrue();
+                .at("/capabilities/child_agents").asBoolean()).isEqualTo(children);
+        assertThat(jdbc.queryForObject("SELECT public_child_agents_version FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, session))
+                .isEqualTo(children ? 1 : 0);
         String turn = request("POST", route + "/events",
                 Map.of("type", "agent.session.input.message",
                         "input", List.of(Map.of("type", "input_text", "text", "G0_SHELL"))),
@@ -1069,7 +1086,7 @@ class HostedPublicWorkspaceIT {
         harness.destroyForcibly();
         assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
-        if ("allow".equals(outcome)) {
+        if (children && "allow".equals(outcome)) {
             spring.close();
             restarted = true;
             startSpring(cli, roots, harnessPort, brokerPort);
@@ -1114,6 +1131,11 @@ class HostedPublicWorkspaceIT {
                     """, Integer.class, session, parked.promptId().getBytes(StandardCharsets.UTF_8))).isEqualTo(1);
         } else {
             assertThat(proof).doesNotExist();
+            if ("deny".equals(outcome)) {
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
+                        + " WHERE harness_session_id = ? AND turn_id = ?", Integer.class,
+                        session, parked.promptId().getBytes(StandardCharsets.UTF_8))).isZero();
+            }
         }
         if ("expiry".equals(outcome)) {
             assertThat(jdbc.queryForObject("SELECT state FROM ma_session_record WHERE tenant_id = ?"

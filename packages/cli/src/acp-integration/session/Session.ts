@@ -456,6 +456,10 @@ import {
 import { modsWanted } from '../../services/display-translation-mod.js';
 import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
+import {
+  isRepetitiveToolCallsError,
+  REPETITIVE_TOOL_CALLS_HINT,
+} from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -1352,6 +1356,19 @@ function modelStreamError(error: StructuredError): unknown {
       ...(error.requestId ? { requestId: error.requestId } : {}),
     })
   );
+}
+
+function repetitiveToolCallsRequestError(
+  errorMessage: string,
+): RequestError | undefined {
+  if (!isRepetitiveToolCallsError(errorMessage)) return undefined;
+  const message = errorMessage.includes(REPETITIVE_TOOL_CALLS_HINT)
+    ? errorMessage
+    : errorMessage + REPETITIVE_TOOL_CALLS_HINT;
+  return new RequestError(-32603, message, {
+    errorKind: 'repetitive_tool_calls',
+    details: message,
+  });
 }
 
 function createLoopDetectedTurnError(
@@ -10028,7 +10045,8 @@ export class Session implements SessionContext {
         subscriptionQuota: quota,
       });
     }
-    throw error;
+
+    throw repetitiveToolCallsRequestError(errorMessage) ?? error;
   }
 
   async #handleStopHookLoop(
@@ -11055,7 +11073,7 @@ export class Session implements SessionContext {
         if (errorStatus === 429) {
           throw new RequestError(429, 'Rate limit exceeded. Try again later.');
         }
-        throw error;
+        throw repetitiveToolCallsRequestError(errorMessage) ?? error;
       } finally {
         this.mods?.settleModelText(
           modelTextAttempt,
