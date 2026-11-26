@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionReposit
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ssh.SshConnectionManager;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ssh.SshRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.SshConnections;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
 import org.h2.jdbcx.JdbcDataSource;
@@ -233,7 +234,8 @@ class SshRuntimeWiringTest {
         var context = new GenericApplicationContext();
         context.registerBean("settings", ManagedAgentProperties.class, () -> settings);
         context.registerBean("configuration", ManagedAgentConfiguration.class, () -> new ManagedAgentConfiguration(settings));
-        var method = ManagedAgentConfiguration.class.getMethod("managedSshConnections", ManagedAgentProperties.class);
+        var method = ManagedAgentConfiguration.class.getMethod(
+                "managedSshConnections", ManagedAgentProperties.class, ExternalRuntimeClient.class);
         var bean = method.getAnnotation(Bean.class);
         assertThat(bean).isNotNull();
         assertThat(bean.destroyMethod()).isEqualTo("close");
