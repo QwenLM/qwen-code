@@ -167,6 +167,8 @@ test('settings can turn off arrow-key prompt history across reloads @smoke', asy
   await editor.fill('short draft');
   await editor.press('ArrowUp');
   await expectText(editor, history[1]!);
+  await editor.press('ArrowUp');
+  await expectText(editor, history[0]!);
 
   await openUiSettings();
   await expect(toggle).toBeChecked();
@@ -174,9 +176,7 @@ test('settings can turn off arrow-key prompt history across reloads @smoke', asy
   await expect(toggle).not.toBeChecked();
   await back.click();
 
-  await editor.press('ArrowDown');
-  await expectText(editor, history[1]!);
-  await editor.fill('short draft');
+  await expectText(editor, 'short draft');
   await editor.press('ArrowUp');
   await expect(editor).toHaveText('short draft');
   await editor.press('ArrowDown');

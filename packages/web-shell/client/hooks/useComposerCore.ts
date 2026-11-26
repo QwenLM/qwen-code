@@ -3461,6 +3461,7 @@ export function useComposerCore(
     getMutationVersion,
     navigateUp,
     navigateDown,
+    endNavigation,
     isNavigating,
     reset,
     getReverseMatches,
@@ -5092,6 +5093,31 @@ export function useComposerCore(
   }, [portalRoot]);
 
   // ---- Reactions to prop changes ----
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (
+      arrowKeyHistoryEnabled ||
+      shellMode ||
+      searchMode ||
+      !historyBrowseActiveRef.current ||
+      !view
+    ) {
+      return;
+    }
+    const draft = endNavigation();
+    if (draft === null) return;
+    historyBrowseActiveRef.current = false;
+    restorePromptHistoryEntry(view, draft);
+    restorePromptHistoryDraftTags();
+  }, [
+    arrowKeyHistoryEnabled,
+    endNavigation,
+    restorePromptHistoryDraftTags,
+    restorePromptHistoryEntry,
+    searchMode,
+    shellMode,
+  ]);
 
   useEffect(() => {
     const view = viewRef.current;
