@@ -455,6 +455,7 @@ export {
   type PromptResult,
   type PromptTextContent,
   type RestoreSessionRequest,
+  type RestoreWorktreeSessionRequest,
   type ResumeSessionRequest,
   type SetModelResult,
   type SetSessionLanguageResult,

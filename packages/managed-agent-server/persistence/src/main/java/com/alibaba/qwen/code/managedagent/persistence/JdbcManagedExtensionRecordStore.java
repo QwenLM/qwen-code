@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.Body;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.TaskProjection;
@@ -45,6 +46,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -74,7 +76,7 @@ public class JdbcManagedExtensionRecordStore
                                     .MAX_JSON_DEPTH).build()).build())
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
-    public com.fasterxml.jackson.databind.JsonNode currentMcpSettings(String tenant, String session) { return ManagedMcpSettings.find(jdbc, tenant, session); }
+    public JsonNode currentMcpSettings(String tenant, String session) { return ManagedMcpSettings.find(jdbc, tenant, session); }
 
     public static final String OPENING_COMMAND_QUERY = "SELECT COUNT(*) FROM"
             + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
@@ -209,7 +211,7 @@ public class JdbcManagedExtensionRecordStore
 
     public JsonNode findActivityStatistics(String tenantId, String sessionId) {
         return activityDiagnostics.find(tenantId, sessionId,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.STATS, "latest");
+                ManagedActivityDiagnostics.STATS, "latest");
     }
 
     boolean rebuildActivityBatch(String tenant, String workspace, String session, boolean hasActivityDiagnostics, long revision, long sequence, String digest,
@@ -226,9 +228,9 @@ public class JdbcManagedExtensionRecordStore
 
     public ActivityPage listActivity(String tenantId, String sessionId, String domain, long upperSequence,
             Long beforeCreatedAt, String beforeKey, int limit) {
-        require(java.util.Set.of(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.TOOLS,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.FILES,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.SKILLS).contains(domain),
+        require(Set.of(ManagedActivityDiagnostics.TOOLS,
+                ManagedActivityDiagnostics.FILES,
+                ManagedActivityDiagnostics.SKILLS).contains(domain),
                 "Invalid activity domain.");
         return activityDiagnostics.page(tenantId, sessionId, domain, upperSequence, beforeCreatedAt, beforeKey, limit);
     }
@@ -519,7 +521,7 @@ public class JdbcManagedExtensionRecordStore
                 }
                 if ("compressed".equals(maintenance.path("outcome").asText())) {
                     long compaction = maintenance.path("compactionRevision").longValue();
-                    boolean sameTransaction = java.util.Arrays.stream(lines).map(ManagedExtensionRecordStore::parse)
+                    boolean sameTransaction = Arrays.stream(lines).map(ManagedExtensionRecordStore::parse)
                             .filter(Objects::nonNull).map(line -> line.path("managedSession"))
                             .anyMatch(candidate -> "context.compacted".equals(candidate.path("kind").asText())
                                     && candidate.path("sequence").longValue() == compaction
@@ -752,7 +754,7 @@ public class JdbcManagedExtensionRecordStore
     boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
             Function<String, StoredResource> resources, boolean v2, boolean resourcePhase) {
         boolean dispatch = false;
-        var revisions = new java.util.HashMap<String, JsonNode>();
+        var revisions = new HashMap<String, JsonNode>();
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
             JsonNode parsed = ManagedExtensionRecordStore.parse(line);
             if (parsed == null) {
@@ -817,7 +819,7 @@ public class JdbcManagedExtensionRecordStore
 
     void requireLifecycleSettlement(String tenantId, String sessionId, byte[] bytes,
             Function<String, StoredResource> resources) {
-        var revisions = new java.util.HashMap<String, JsonNode>();
+        var revisions = new HashMap<String, JsonNode>();
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
             JsonNode parsed = ManagedExtensionRecordStore.parse(line);
             if (parsed == null) {
@@ -848,7 +850,7 @@ public class JdbcManagedExtensionRecordStore
     }
 
     private JsonNode previousLifecycleRecord(String tenantId, String sessionId, String domain, JsonNode next,
-            java.util.Map<String, JsonNode> revisions) {
+            Map<String, JsonNode> revisions) {
         String id = ManagedExtensionProjection.RECORD_BODIES.get(domain).recordId().apply(next);
         String key = domain + ":" + id;
         JsonNode previous = revisions.get(key);
@@ -912,7 +914,7 @@ public class JdbcManagedExtensionRecordStore
                 recordKeys, (result, row) -> taskRow(result, tenantId, sessionId));
         Map<String, TaskRow> byTaskId = new HashMap<>();
         for (var entry : byKey.entrySet()) {
-            byTaskId.put(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+            byTaskId.put(ManagedExtensionProjection
                     .taskId(entry.getKey()), entry.getValue());
         }
         return byTaskId;

@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
 import {
   DaemonClient,
   DaemonHttpError,
@@ -17,6 +18,7 @@ import {
 } from '../../src/daemon/DaemonClient.js';
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 import type { DaemonSessionAgentsStatus } from '../../src/daemon/index.js';
+import type { RestoreWorktreeSessionRequest } from '../../src/index.js';
 import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
 import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
 import {
@@ -147,6 +149,151 @@ function recordingFetch(
   ) as unknown as typeof globalThis.fetch;
   return { fetch: fetchImpl, calls };
 }
+
+describe('worktree snapshot restore', () => {
+  it('uses the snapshot-restore route and workspace-scoped restore fields', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 'id/with/slash',
+        workspaceCwd: '/work/secondary',
+        attached: false,
+        callbackReplay: [],
+        state: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client.restoreWorktreeSession(
+      'id/with/slash',
+      {
+        workspaceCwd: '/work/secondary',
+        historyPageSize: 41,
+        approvalMode: 'yolo',
+        sourceType: 'fixture',
+        sourceId: 'fixture-1',
+      } satisfies RestoreWorktreeSessionRequest,
+      'local-client',
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      'http://daemon/session/id%2Fwith%2Fslash/worktree-restore',
+    );
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('local-client');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+      approvalMode: 'yolo',
+      historyPageSize: 41,
+      sourceType: 'fixture',
+      sourceId: 'fixture-1',
+    });
+  });
+
+  it('keeps legacy empty-body normalization for a primary-owned restore', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/primary',
+        attached: false,
+        restoreState: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client.restoreWorktreeSession('s-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({});
+  });
+
+  it('makes scope explicit through a workspace client but refuses id-only selectors', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/secondary',
+        attached: false,
+        state: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client
+      .workspaceByCwd('/work/secondary')
+      .restoreWorktreeSession('s-1', { historyPageSize: 77 }, 'client-1');
+    expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+      historyPageSize: 77,
+    });
+
+    await expect(
+      client.workspaceByCwd('secondary-id').restoreWorktreeSession('s-1'),
+    ).rejects.toThrow('registered workspace cwd');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('returns a replay-ready session client after ordinary restore', async () => {
+    const compactedReplay = [{ id: 1, v: 1, type: 'session_update', data: {} }];
+    const liveJournal = [{ id: 27, v: 1, type: 'session_update', data: {} }];
+    const lifecycleReplay = [
+      { id: 26, v: 1, type: 'session_update', data: {} },
+    ];
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/secondary',
+        state: { mode: 'replay-ready' },
+        lastEventId: 27,
+        eventEpoch: 'epoch-restore',
+        compactedReplay,
+        liveJournal,
+        lifecycleReplay,
+        lifecycleReplayIncomplete: true,
+        historyHasMore: true,
+        historyAnchorRecordId: 'anchor-restore-1',
+        replayProjectionWatermark: 17,
+        replayDegraded: true,
+        worktree: {
+          slug: 'recovered',
+          path: '/work/secondary/.qwen/worktrees/recovered',
+          branch: '',
+        },
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const restored = await DaemonSessionClient.restoreWorktree(
+      client,
+      's-1',
+      {
+        workspaceCwd: '/work/secondary',
+      },
+      'restore-client',
+    );
+    expect(restored).toBeInstanceOf(DaemonSessionClient);
+    expect(restored.workspaceCwd).toBe('/work/secondary');
+    expect(restored.worktree?.branch).toBe('');
+    expect(restored.state).toEqual({ mode: 'replay-ready' });
+    expect(restored.replaySnapshot).toEqual({
+      compactedReplay,
+      liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete: true,
+    });
+    expect(restored.lastEventId).toBe(27);
+    expect(restored.eventEpoch).toBe('epoch-restore');
+    expect(restored.historyHasMore).toBe(true);
+    expect(restored.historyAnchorRecordId).toBe('anchor-restore-1');
+    expect(restored.replayProjectionWatermark).toBe(17);
+    expect(restored.replayDegraded).toBe(true);
+    expect(restored.consumeReplaySnapshot().compactedReplay).toEqual(
+      compactedReplay,
+    );
+    expect(restored.replaySnapshot.compactedReplay).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('restore-client');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+    });
+  });
+});
 
 describe('DaemonClient', () => {
   describe('MCP App request deadlines', () => {

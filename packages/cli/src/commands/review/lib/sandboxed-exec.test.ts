@@ -1135,6 +1135,8 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       'QWEN_REVIEW_FORCE_HARDWARE',
       'QWEN_REVIEW_VM_KERNEL',
       'QWEN_REVIEW_VM_ROOTFS',
+      'QWEN_REVIEW_VM_BRIDGE_SOCKET',
+      'QWEN_REVIEW_VM_PID_FILE',
       'QWEN_REVIEW_PROVIDER_VM_DRIVER',
       'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
       'QWEN_REVIEW_FCSANDBOX_TEMPLATE',

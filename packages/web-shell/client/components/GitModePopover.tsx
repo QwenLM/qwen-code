@@ -71,6 +71,7 @@ interface GitModePopoverProps {
   branch: string;
   status?: DaemonWorkspaceGitStatus;
   compact?: boolean;
+  showDetails?: boolean;
   intent: SessionGitIntent;
   onIntentChange: (intent: SessionGitIntent) => void;
   open?: boolean;
@@ -85,6 +86,7 @@ export function GitModePopover({
   branch,
   status,
   compact = false,
+  showDetails = true,
   intent,
   onIntentChange,
   open: openProp,
@@ -177,7 +179,8 @@ export function GitModePopover({
     : isWorktree
       ? t('gitMode.worktree')
       : branch;
-  const statusPhrases = status ? gitStatusPhrases(deriveStatus(status), t) : [];
+  const derivedStatus = deriveStatus(status);
+  const statusPhrases = status ? gitStatusPhrases(derivedStatus, t) : [];
 
   return (
     <span className={styles.wrap}>
@@ -190,6 +193,13 @@ export function GitModePopover({
                   type="button"
                   className={`${styles.chip} ${isBranch ? styles.chipBranch : ''} ${isWorktree ? styles.chipWorktree : ''} ${compact ? styles.chipCompact : ''}`}
                   data-web-shell-git-branch
+                  data-compact={compact ? 'true' : undefined}
+                  data-git-mode={intent.mode}
+                  data-detached={
+                    derivedStatus.detached && !isBranch && !isWorktree
+                      ? 'true'
+                      : undefined
+                  }
                   data-testid="git-mode-chip"
                   aria-label={`${t('gitMode.title')}: ${chipLabel}${
                     statusPhrases.length > 0
@@ -201,11 +211,12 @@ export function GitModePopover({
                     branch={chipLabel}
                     status={status}
                     compact={compact}
+                    showDetails={showDetails}
                     worktree={isWorktree}
                   />
                   <svg
                     className={`${styles.chevron} ${open ? styles.chevronOpen : ''}`}
-                    viewBox="0 0 16 16"
+                    viewBox="0 1 16 16"
                     fill="currentColor"
                     width={9}
                     height={9}

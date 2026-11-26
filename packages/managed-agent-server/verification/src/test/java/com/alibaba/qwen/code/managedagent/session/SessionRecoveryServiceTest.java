@@ -516,36 +516,35 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.nextRecheckAt()).isEqualTo(10_000);
         assertThat(recovery.nextTurnAllowed()).isFalse();
         assertThat(recovery.actions().recheck()).isTrue();
-        verify(harness).inspectRecovery("tenant", "session", "private-prompt");
-        verifyNoInteractions(coordinator);
+        verifyNoInteractions(harness, coordinator);
     }
 
     @Test
-    void aStoppedHarnessExposesItsUnsettledInputInsteadOfRunningWork() {
+    void activeRecoveryViewAgreesOnColdAndWarmReplicas() {
         turn("RUNNING", AgentStateStore.HARNESS_RECOVERY_BLOCKED);
+        var cold = service.projection(session, "actor");
         when(harness.inspectRecovery("tenant", "session", "private-prompt"))
                 .thenReturn(new RecoveryStatus("awaiting_evidence", "inputs_unsettled",
                         "private-prompt", false, false, false));
         var recovery = service.projection(session, "actor");
-        assertThat(recovery).isNotNull();
+        assertThat(recovery).isEqualTo(cold);
         assertThat(recovery.state()).isEqualTo("awaiting_evidence");
-        assertThat(recovery.reasonCode()).isEqualTo("inputs_unsettled");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
         assertThat(recovery.nextTurnAllowed()).isFalse();
         assertThat(recovery.actions().recheck()).isFalse();
         assertThat(recovery.actions().cancel()).isTrue();
-        verifyNoInteractions(coordinator);
+        verifyNoInteractions(harness, coordinator);
     }
 
     @Test
     void aHarnessResultStillWaitsForTheOriginalControlPlaneTurnToSettle() {
         turn("RUNNING", AgentStateStore.HARNESS_RECOVERY_BLOCKED);
-        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
-                .thenReturn(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+        terminalEvent("boot:epoch:7");
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("recovering");
         assertThat(recovery.reasonCode()).isEqualTo("turn_settlement_pending");
         assertThat(recovery.nextTurnAllowed()).isFalse();
-        verifyNoInteractions(coordinator);
+        verifyNoInteractions(harness, coordinator);
     }
 
     @ParameterizedTest
@@ -556,7 +555,8 @@ class SessionRecoveryServiceTest {
                 .thenReturn(new RecoveryStatus("recovering", "turn_active", "private-prompt", false, false, false));
         var recovery = service.projection(session, "actor");
         assertThat(recovery).isNotNull();
-        assertThat(recovery.reasonCode()).isEqualTo("harness_work_active");
+        assertThat(recovery.reasonCode()).isEqualTo("RUNNING".equals(status)
+                ? "recovery_evidence_unavailable" : "harness_work_active");
         assertThat(recovery.nextTurnAllowed()).isFalse();
     }
 
@@ -618,11 +618,12 @@ class SessionRecoveryServiceTest {
     @Test
     void nativeReadyStillWaitsForTheActiveJavaTurnToSettle() {
         turn("CANCELLING", null);
-        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
-                .thenReturn(new RecoveryStatus("ready", "ready", "private-prompt", true, true, true));
+        terminalEvent("boot:epoch:7");
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("recovering");
+        assertThat(recovery.reasonCode()).isEqualTo("turn_settlement_pending");
         assertThat(recovery.nextTurnAllowed()).isFalse();
+        verifyNoInteractions(harness);
     }
 
     @Test

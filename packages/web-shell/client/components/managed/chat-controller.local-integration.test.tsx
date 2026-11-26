@@ -125,12 +125,12 @@ it('renders real messages without DaemonSessionProvider and submits exact manage
   expect(parentRenders).toBeGreaterThan(previousRenderCount);
   expect(options[0]!.getAttribute('aria-pressed')).toBe('true');
   act(() => options[2]!.click());
-  const input = question!.querySelector('input')!;
+  const input = question!.querySelector<HTMLTextAreaElement>('textarea')!;
   act(() => {
     Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
+      HTMLTextAreaElement.prototype,
       'value',
-    )?.set?.call(input, 'Verbose');
+    )?.set?.call(input, 'Verbose\nline 2');
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   act(() => {
@@ -139,7 +139,7 @@ it('renders real messages without DaemonSessionProvider and submits exact manage
   });
   expect(parentRenders).toBeGreaterThan(previousRenderCount);
   expect(options[0]!.getAttribute('aria-pressed')).toBe('true');
-  expect(input.value).toBe('Verbose');
+  expect(input.value).toBe('Verbose\nline 2');
   const submit = question!.querySelector<HTMLButtonElement>(
     '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
   )!;
@@ -153,7 +153,7 @@ it('renders real messages without DaemonSessionProvider and submits exact manage
   ).toBe('pending');
   expect(submitted).toEqual([
     { questionId: 'env', optionIds: ['dev'] },
-    { questionId: 'notes', optionIds: ['dry'], text: 'Verbose' },
+    { questionId: 'notes', optionIds: ['dry'], text: 'Verbose\nline 2' },
   ]);
   expect(onError).not.toHaveBeenCalled();
 });
@@ -252,11 +252,11 @@ it('handles optional, allowText: false, and text-only managed questions end-to-e
   );
   expect(q3Options).toHaveLength(1);
   act(() => q3Options[0]!.click());
-  const input = question.querySelector<HTMLInputElement>('input')!;
+  const input = question.querySelector<HTMLTextAreaElement>('textarea')!;
   expect(input.maxLength).toBe(8192);
   act(() => {
     Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
+      HTMLTextAreaElement.prototype,
       'value',
     )?.set?.call(input, 'Required explanation');
     input.dispatchEvent(new Event('input', { bubbles: true }));

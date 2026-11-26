@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -19,13 +20,16 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * H4b: the JDBC side of the child result relay — its V54 ledger plus the small reads the worker
@@ -59,7 +63,7 @@ public class JdbcChildResultRelayStore
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     public List<PendingChild> findPendingChildren(String workerId, int limit) {
@@ -135,7 +139,7 @@ public class JdbcChildResultRelayStore
         try {
             execution = text == null ? null
                     : MAPPER.readTree(text).path("run").path("execution");
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Child run " + childRunId
                     + "'s committed record is unreadable", error);
         }
@@ -167,7 +171,7 @@ public class JdbcChildResultRelayStore
         JsonNode body;
         try {
             body = text == null ? null : MAPPER.readTree(text);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Child run " + childRunId
                     + "'s committed record is unreadable", error);
         }
@@ -442,7 +446,7 @@ public class JdbcChildResultRelayStore
                 : readTree(readResource(tenantId, parentSessionId, rows.getFirst()));
     }
 
-    private void forEachJournalEvent(String tenantId, String sessionId, java.util.function.Consumer<JsonNode> visitor) {
+    private void forEachJournalEvent(String tenantId, String sessionId, Consumer<JsonNode> visitor) {
         List<Long> heads = jdbc.query("SELECT compacted_through_revision"
                         + " FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'"
                         + " AND tenant_id = ? AND harness_session_id = ? AND session_id = ?",
@@ -625,11 +629,11 @@ public class JdbcChildResultRelayStore
                     text.add(part);
                 }
             });
-            text.sort(java.util.Comparator.comparingLong((JsonNode part) -> part.path("lastSequence").asLong())
+            text.sort(Comparator.comparingLong((JsonNode part) -> part.path("lastSequence").asLong())
                     .thenComparing(part -> part.path("partId").asText()));
             return text.isEmpty() ? null : String.join("\n", text.stream()
                     .map(part -> part.path("text").asText()).toList());
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Message parts are invalid", error);
         }
     }

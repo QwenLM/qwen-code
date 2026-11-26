@@ -81,6 +81,7 @@ import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceExternalShellProfile,
+  isHostedWorkspacePublicShellProfile,
   isHostedWorkspaceSearchProfile,
   isHostedWorkspaceGlobProfile,
   isHostedWorkspaceReadProfile,
@@ -362,6 +363,7 @@ function isBusyWorkspaceAcquisition(cause: unknown): boolean {
 export interface HostedShellTurnOptions {
   resources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
+  writerOwner?: HttpToolPublicationOwner['owner'];
   // The Session-scoped publisher instance: one server owns every Shell
   // capture of the Session across turns, so background traffic keeps its
   // endpoint after the registering turn ends (H3 fifth slice drains it at
@@ -4626,12 +4628,12 @@ export class HostedWorkspaceToolTurn {
     if (
       !commandStep &&
       isHostedWorkspaceShellProfile(this.profile) &&
+      !isHostedWorkspacePublicShellProfile(this.profile) &&
       !singlePlanExit &&
       !singleQuestion &&
-      !memoryBatch &&
-      !this.publicChildren
+      !memoryBatch
     )
-      return 'shell_profile';
+      return 'team_lead_profile';
     if (!commandStep) {
       const owner = hostedNativeOwnerRefusal({
         mcp: this.mcp?.broker.runtimeSessionId,
@@ -4651,8 +4653,9 @@ export class HostedWorkspaceToolTurn {
             request.memory ||
             request.mcp ||
             (commandStep && request.call.name === 'skill') ||
-            (this.publicChildren &&
-              ['agent', 'run_shell_command'].includes(request.call.name)) ||
+            (this.publicChildren && request.call.name === 'agent') ||
+            (isHostedWorkspacePublicShellProfile(this.profile) &&
+              request.call.name === 'run_shell_command') ||
             [
               'read_file',
               'write_file',
@@ -4734,9 +4737,7 @@ export class HostedWorkspaceToolTurn {
         ),
         refusal: batch.refusals[ordinal] ?? null,
         actionId: batch.actionIds.get(ordinal) ?? null,
-        ...(this.publicChildren && request.isShell
-          ? { publicationId: request.publicationId }
-          : {}),
+        ...(request.isShell ? { publicationId: request.publicationId } : {}),
         ...(hookResults ? { hookResults: hookResults[ordinal] } : {}),
       });
     }
@@ -5944,8 +5945,10 @@ export class HostedWorkspaceToolTurn {
             this.monitors,
             () => this.shell!.monitorWakeKick?.(),
           );
+          const writer = await this.shell.writerOwner?.();
           this.bindingGeneration = await this.broker.registerPublisher(
             await this.publisher.start(),
+            writer?.writerGeneration,
           );
           this.workerOwnsObservation = this.broker.observationOwned;
         } else if (

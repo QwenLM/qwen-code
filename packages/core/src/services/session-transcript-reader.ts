@@ -327,6 +327,8 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
+  /** Original conversation clock, retained after the outer projection is consumed. */
+  conversationStartTime?: string;
   attributionSnapshot?: AttributionSnapshot;
   historyGaps?: HistoryGap[];
   recording: {
@@ -4418,6 +4420,7 @@ export class SessionTranscriptReader {
         position === compressionPosition ||
         ((entry?.type !== 'system' ||
           entry?.subtype === 'memory_catalog_snapshot' ||
+          entry?.subtype === 'permission_context_snapshot' ||
           entry?.subtype === 'goal_turn_end' ||
           entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
