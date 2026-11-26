@@ -250,6 +250,14 @@ A 建立元数据/授权；step 3a 提供已登记的放置；B0 提供原 worke
 
 选项保持闭合：不支持 shell、`monitor`、capture、hooks/extensions、MCP、child agents/workspaces/snapshots、plan mode、rewind 或输入附件。Session skills 是本里程碑唯一放开的通道：创建时 caller 目录进入不可变回执，Session 钉住的目录以资源引用发布，带目录的 Turn 声明 `skill` 工具——它只注入钉住的内容，不向 Workspace 写任何东西。本地 mounts/import、SSH 与 verified/operator/trusted-local-reboot recovery 开关必须保持关闭。这不是完整 Hosted 工具档案。见[配置](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java)、[准入](../../packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/repository/ManagedWorkspaceRegistry.java)与[闭合 Harness 选项](../../packages/cli/src/serve/hosted-workspace-profiles.ts)。
 
+### 运行已准备的 AgentDefinition
+
+宿主可以将准备回执中的原生 Agent ID 和版本传给 `createWorkspaceSession`，在已注册的外部 Workspace 上创建会话。控制面在当前租户内解析版本，检查调用者的 Workspace 权限，并使用该版本声明的工具档。在 `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` 中配置工具档，在 `QWEN_MANAGED_AGENT_DEFINITION_MODELS` 中配置定义指定的模型。注册的 Workspace 必须支持该工具档。内置 Agent 使用部署选择的外部工具档。见[定义准备设计](2026-11-25-managed-agent-execution-definition-spi.zh-CN.md)。
+
+Session 保存定义 ID、版本、摘要和初始审批模式。Hosted Harness 首次执行时按该版本读取模型和指令资源，重新加载时核对固定的版本和摘要。发布新版后，已有 Session 继续使用原版本。控制面复用定义编译器。Harness 打开 Session 时，按外部工具档检查 Hook 目录等执行选项。
+
+验收 [#18416](https://github.com/QwenLM/qwen-code/issues/18416) 时，先比较公开 Session 与准备回执，再发布新版，从真实模型请求中核对原模型 ID 和原版本独有的指令。还需覆盖内置 Agent、无权使用的 Workspace、其他租户的定义和不可用的工具档。
+
 ### 关闭与归属
 
 生命周期协议 `1` 可以合法持久化 `storeSynthesized=true`、空 `effects`：在此无 hooks 档案下，store 根据空闲 journal 和经过验证的已提交 `definitionRef` 构造 receipt。这**不是** Harness wire-settle 回包，也**不是**原生 drain 证明。关闭链另行 detach Harness、确认没有 live journal writer，再经 B0 停写原 binding/generation/handle，之后才释放物理归属。

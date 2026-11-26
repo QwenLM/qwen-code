@@ -2399,7 +2399,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (WorkspaceToolProfiles.isExternal(session.toolProfile())) {
             if (!supportsLifecycle(session.toolProfile()) || session.workspace() == null
                     || workspaceExecution == null || !workspaceExecution.isExternal(session.workspace())
-                    || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
+                    || !WorkspaceToolProfiles.hasAgentIdentity(session.agentId(), session.agentDefinitionDigest())
                     || session.publicChildAgentsVersion() != 0
                     || sessions.findChildLineage(session.tenantId(), session.sessionId()) != null
                     || sessionSkills != null && initialSelection(session) != null) {

@@ -844,7 +844,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         requireMemoryConfiguration(memoryStoreId);
         requireModelConfiguration(modelConfig);
         if (externalFilesConfiguration && !workspaces.externalFilesAvailable()
-                && !(WorkspaceToolProfiles.EXTERNAL_SHELL.equals(requestedToolProfile)
+                && !((!"qwen-code".equals(agentId) || WorkspaceToolProfiles.EXTERNAL_SHELL.equals(requestedToolProfile))
                         && workspaces.externalShellAvailable())) {
             throw new ManagedAgentException(409, "workspace_unavailable", "External Workspace creation is unavailable.");
         }

@@ -50,6 +50,7 @@ export class HostedHarnessProcess {
       args?: string[];
       extraArgs?: string[];
       env?: Record<string, string>;
+      additionalModel?: string;
     } = {},
   ) {
     await access(HOSTED_CLI).catch(() => {
@@ -69,12 +70,13 @@ export class HostedHarnessProcess {
           telemetry: { enabled: false },
           modelProviders: {
             openai: [
-              {
-                id: 'hosted-fixture',
-                envKey: 'OPENAI_API_KEY',
-                baseUrl: modelUrl,
-              },
-            ],
+              'hosted-fixture',
+              ...(options.additionalModel ? [options.additionalModel] : []),
+            ].map((id) => ({
+              id,
+              envKey: 'OPENAI_API_KEY',
+              baseUrl: modelUrl,
+            })),
           },
         }),
       );

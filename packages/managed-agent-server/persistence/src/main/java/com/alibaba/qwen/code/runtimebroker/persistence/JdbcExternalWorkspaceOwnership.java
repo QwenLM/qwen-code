@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
@@ -192,10 +193,9 @@ public final class JdbcExternalWorkspaceOwnership {
             try (var row = statement.executeQuery()) {
                 if (!row.next() || !scope.getTenantId().equals(row.getString("tenant_id"))
                         || !harness.equals(row.getString("session_id")) || row.getObject("deleted_at") != null
-                        || !"qwen-code".equals(row.getString("agent_id")) || row.getObject("agent_definition_digest") != null
+                        || !WorkspaceToolProfiles.hasAgentIdentity(row.getString("agent_id"), row.getString("agent_definition_digest"))
                         || row.getObject("parent_session_id") != null
-                        || !com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles
-                                .isExternal(row.getString("tool_profile"))
+                        || !WorkspaceToolProfiles.isExternal(row.getString("tool_profile"))
                         || !WorkspaceExecutionProfile.CONFIG_REF.equals(row.getString("workspace_config_ref"))
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(row.getString("workspace_policy_ref"))
                         || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(row.getString("context_config_ref"))

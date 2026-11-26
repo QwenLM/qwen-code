@@ -72,6 +72,7 @@ import {
   type ManagedContextBinding,
 } from './managed-workspace-binding.js';
 import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js';
+import { parseHostedAgentDefinition } from './hosted-agent-definition.js';
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
 import {
   parseSessionSkillsRef,
@@ -861,6 +862,9 @@ export async function verifyRecoverySession(
         'invalid genesis',
       );
       const definition = object(json(await read(header.definitionRef)));
+      if (isHostedWorkspaceExternalProfile(definition['toolProfile'])) {
+        parseHostedAgentDefinition(definition['agentDefinition']);
+      }
       // The W1b bundle includes Hosted file-search and Shell profiles in
       // its capture closure, so a search-capable Session must not abort
       // recovery of the whole shared storage.

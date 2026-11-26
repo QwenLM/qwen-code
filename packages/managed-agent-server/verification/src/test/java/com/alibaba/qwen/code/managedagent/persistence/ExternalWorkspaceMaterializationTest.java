@@ -5,12 +5,25 @@ import com.alibaba.qwen.code.managedagent.api.ExternalStorageRegistrationControl
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
+import com.alibaba.qwen.code.managedagent.catalog.ManagedAgentDefinitionService;
+import com.alibaba.qwen.code.managedagent.catalog.ManagedDefinitionInputProviders;
+import com.alibaba.qwen.code.managedagent.catalog.ManagedDefinitionPreparationService;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionPreparation.Command;
+import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionSource;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.AgentBootstrapBundleSource;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinitionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
@@ -25,6 +38,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.web.servlet.MockMvc;
@@ -36,7 +50,9 @@ import javax.sql.DataSource;
 
 import java.net.InetAddress;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -492,8 +508,7 @@ class ExternalWorkspaceMaterializationTest {
         }
     }
 
-    @Test
-    void externalFilesCreationRefusesMemoryStoreBinding() {
+    private void configureExternalFiles(AnnotationConfigApplicationContext context) {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setEnabled(true);
         properties.getSessionStore().setEnabled(true);
@@ -506,17 +521,24 @@ class ExternalWorkspaceMaterializationTest {
         properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
         properties.getRuntimeBroker().setWorkspaceId("workspace");
         var harness = mock(HarnessConnector.class);
-        when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
-        var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
-        when(warmer.supportsWorkspaceClose("hosted-workspace-external-files/1")).thenReturn(true);
-        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
-            context.registerBean(ManagedAgentProperties.class, () -> properties);
-            context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
-            context.registerBean(HarnessConnector.class, () -> harness);
-            context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
-            context.registerBean(com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.class, () -> registry);
-            context.refresh();
-            store.materialize("tenant", "workspace", "Name", "owner", "key");
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsLifecycle(WorkspaceToolProfiles.EXTERNAL_FILES)).thenReturn(true);
+        var warmer = mock(RuntimeWarmer.class);
+        when(warmer.supportsWorkspaceClose(WorkspaceToolProfiles.EXTERNAL_FILES)).thenReturn(true);
+        context.registerBean(ManagedAgentProperties.class, () -> properties);
+        context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
+        context.registerBean(HarnessConnector.class, () -> harness);
+        context.registerBean(RuntimeWarmer.class, () -> warmer);
+        context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
+        context.refresh();
+        store.materialize("tenant", "workspace", "Name", "owner", "key");
+    }
+
+    @Test
+    void externalFilesCreationRefusesMemoryStoreBinding() {
+        try (var context = new AnnotationConfigApplicationContext()) {
+            configureExternalFiles(context);
             var sessions = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties,
                     new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> sessions.insertWorkspaceSessionCommand(
@@ -544,6 +566,84 @@ class ExternalWorkspaceMaterializationTest {
             assertThat(sessions.requireSession("tenant", admitted.sessionId()).toolProfile())
                     .isEqualTo("hosted-workspace-external-files/1");
         }
+    }
+
+    @Test
+    void preparedDefinitionPinsAnExternalSessionToItsRevision() {
+        properties.setDefinitionToolProfiles(List.of(WorkspaceToolProfiles.EXTERNAL_FILES, WorkspaceToolProfiles.FILES));
+        properties.setDefinitionModels(List.of("prepared-model"));
+        try (var context = new AnnotationConfigApplicationContext()) {
+            configureExternalFiles(context);
+            var digests = new RequestDigests();
+            var revisions = new JdbcManagedAgentDefinitionStore(jdbc, digests);
+            var definitions = new ManagedAgentDefinitionService(revisions, digests, json);
+            var preparation = new ManagedDefinitionPreparationService(definitions, new JdbcDefinitionPreparationStore(jdbc, json),
+                    new ManagedDefinitionInputProviders("PRE_REGISTERED", context.getBeanProvider(ManagedAgentDefinitionSource.class),
+                            context.getBeanProvider(AgentBootstrapBundleSource.class), registry),
+                    digests, json, mock(ManagedAgentBootstrapPreparation.class));
+            var rules = new SdkHarnessRules();
+            var sessions = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties, rules,
+                    null, new JdbcManagedSessionSkills(jdbc, json, digests, revisions), null, null, revisions, null, null);
+            var service = new ManagedAgentService(sessions, digests, mock(HarnessCoordinator.class),
+                    context.getBean(HarnessConnector.class), registry, rules);
+            var request = definition(WorkspaceToolProfiles.EXTERNAL_FILES, "original instructions", null);
+            var prepared = preparation.prepare(new Command("tenant", "owner", "workspace", "workspace",
+                    "prepare", new ManagedAgentDefinitionSource.PreRegistered(request), Instant.now().plusSeconds(60))).definition();
+            String original = openSession(service, "owner", "first", prepared);
+            var transaction = new TransactionTemplate(manager);
+            var updated = transaction.execute(status -> definitions.update("tenant", prepared.id(), "v2",
+                    definition(WorkspaceToolProfiles.EXTERNAL_FILES, "updated instructions",
+                            Map.of("catalog_id", "review", "catalog_revision", 1, "definition_digest", "a".repeat(64))))).definition();
+            assertThat(updated.revision()).isEqualTo("2");
+            assertThat(updated.digest()).isNotEqualTo(prepared.digest());
+            String pinnedAgain = openSession(service, "owner", "exact-old", prepared);
+            for (String id : List.of(original, pinnedAgain)) {
+                var view = service.getPublicSession("tenant", "owner", id);
+                assertThat(view.agentId()).isEqualTo(prepared.id());
+                assertThat(view.agentRevision()).isEqualTo(prepared.revision());
+                assertThat(view.agentDefinitionDigest()).isEqualTo(prepared.digest());
+            }
+            String withHooks = openSession(service, "owner", "with-hooks", updated);
+            assertThat(service.getPublicSession("tenant", "owner", withHooks).agentDefinitionDigest()).isEqualTo(updated.digest());
+
+            var journal = new JdbcManagedSessionStore(jdbc);
+            String writerToken = "pinned-external-writer-token-0123456789";
+            var writer = transaction.execute(status -> journal.acquireWriter("tenant", original, writerToken,
+                    new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L)));
+            var approval = transaction.execute(status -> journal.approvalSelection("tenant", original, writerToken,
+                    new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "writer", writer.writerGeneration())));
+            assertThat(approval).containsExactlyInAnyOrderEntriesOf(Map.of("mode", "default", "revision", 0L));
+            var turn = transaction.execute(status -> service.submitTurn("tenant", "owner", "turn-1", original,
+                    List.of(new InputBlock("input_text", "Review README"))));
+            assertThat(turn.turnId()).isNotNull();
+            var saved = sessions.requireSession("tenant", original);
+            assertThat(revisions.pinnedContent(saved)).containsEntry("instructions", "original instructions")
+                    .containsEntry("model", Map.of("id", "prepared-model"));
+            var execution = new JdbcWorkspaceExecutionStore(jdbc, manager);
+            execution.authorizePassiveAttachment(saved);
+            execution.authorizeExternal(saved, null);
+
+            var foreign = definitions.create("other-tenant", "foreign", request).definition();
+            assertThatThrownBy(() -> openSession(service, "owner", "foreign-agent", foreign))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("agent_not_found"));
+            assertThatThrownBy(() -> openSession(service, "non-member", "denied", prepared))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_not_found"));
+            var local = definitions.create("tenant", "local", definition(WorkspaceToolProfiles.FILES, "local", null)).definition();
+            assertThatThrownBy(() -> openSession(service, "owner", "local-profile", local))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        }
+    }
+
+    private static AgentDefinitionRequest definition(String profile, String instructions, Map<String, Object> hooks) {
+        return new AgentDefinitionRequest(Map.of("id", "prepared-model"), instructions,
+                List.of(Map.of("type", "hosted_profile", "profile", profile)), null, null, hooks,
+                Map.of("approval_mode", "default"), null, null);
+    }
+
+    private String openSession(ManagedAgentService service, String actor, String key, AgentDefinition definition) {
+        return new TransactionTemplate(manager).execute(status -> service.createWorkspaceSession(
+                "tenant", actor, key, definition.id(), definition.revision(), null, null, List.of(),
+                new WorkspaceSelection("workspace", "."))).sessionId();
     }
 
     @Test

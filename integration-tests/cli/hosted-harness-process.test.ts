@@ -256,29 +256,43 @@ async function assertPortReleased(url: string) {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
+async function startWorkspaceBroker() {
+  const requests: string[] = [];
+  broker = createHttpServer((req, res) => {
+    requests.push(req.url ?? '');
+    req.resume();
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url?.endsWith('/runtimes:warm')) res.end('{}');
+    else if (req.url?.endsWith('/tool-sessions:active-holds'))
+      res.end(JSON.stringify({ heldRuntimeSessionIds: [] }));
+    else
+      res
+        .writeHead(404)
+        .end(JSON.stringify({ code: 'unexpected_runtime_work' }));
+  });
+  broker.listen(0, '127.0.0.1');
+  await once(broker, 'listening');
+  const address = broker.address();
+  if (!address || typeof address === 'string')
+    throw new Error('Missing broker port');
+  return {
+    requests,
+    extraArgs: [
+      '--managed-runtime-broker-url',
+      `http://127.0.0.1:${address.port}`,
+      '--managed-runtime-broker-token',
+      'workspace-fixture',
+    ],
+  };
+}
+
 describe(
   'Hosted packaged no-tool process',
   { timeout: 90_000, retry: 0 },
   () => {
     it('keeps basic tools and Shell todos across a packaged session reload', async () => {
-      const brokerRequests: string[] = [];
-      broker = createHttpServer((req, res) => {
-        brokerRequests.push(req.url ?? '');
-        req.resume();
-        res.setHeader('Content-Type', 'application/json');
-        if (req.url?.endsWith('/runtimes:warm')) res.end('{}');
-        else if (req.url?.endsWith('/tool-sessions:active-holds'))
-          res.end(JSON.stringify({ heldRuntimeSessionIds: [] }));
-        else
-          res
-            .writeHead(404)
-            .end(JSON.stringify({ code: 'unexpected_runtime_work' }));
-      });
-      broker.listen(0, '127.0.0.1');
-      await once(broker, 'listening');
-      const address = broker.address();
-      if (!address || typeof address === 'string')
-        throw new Error('Missing broker port');
+      const { extraArgs, requests: brokerRequests } =
+        await startWorkspaceBroker();
       const todos = [
         { id: 'basic', content: 'Persist a Shell todo', status: 'pending' },
       ];
@@ -291,14 +305,7 @@ describe(
                 ],
               }
             : { content: 'BASIC_TOOLS_OK' },
-        {
-          extraArgs: [
-            '--managed-runtime-broker-url',
-            `http://127.0.0.1:${address.port}`,
-            '--managed-runtime-broker-token',
-            'basic-tools-fixture',
-          ],
-        },
+        { extraArgs },
       );
       const created = await json<{ clientId: string }>('/session', {
         sessionId,
@@ -373,6 +380,63 @@ describe(
       ).toBe(true);
       await json(`/session/${sessionId}`, undefined, 204, 'DELETE');
       expect(store!.failures).toEqual([]);
+    });
+
+    it('uses the pinned external Workspace model and instructions after reload', async () => {
+      const modelId = 'external-revision-one';
+      const marker = 'EXTERNAL_REVISION_ONE_INSTRUCTIONS';
+      const { extraArgs } = await startWorkspaceBroker();
+      await start(undefined, { extraArgs, additionalModel: modelId });
+      const pin = {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+      };
+      const session = {
+        sessionId,
+        sessionScope: 'thread',
+        toolProfile: 'hosted-workspace-external-files/1',
+        managedSessionStore: connection(),
+      };
+      const created = await json<{ clientId: string }>('/session', {
+        ...session,
+        approvalMode: 'default',
+        agentDefinition: {
+          ...pin,
+          model: { id: modelId },
+          instructionsRef: await store!.publishInstructions(marker),
+        },
+      });
+      clientId = created.clientId;
+      await json(`/session/${sessionId}/detach`, {}, 204);
+      const route = `/session/${sessionId}/load`;
+      const conflict = await json<{ error: string }>(
+        route,
+        {
+          ...session,
+          agentDefinition: { ...pin, revision: '2', digest: 'c'.repeat(64) },
+        },
+        409,
+      );
+      expect(conflict.error).toBe('hosted_agent_definition_conflict');
+      const loaded = await json<{ clientId: string }>(route, {
+        ...session,
+        agentDefinition: pin,
+      });
+      clientId = loaded.clientId;
+      const turn = payload('Report readiness.');
+      await submit(turn);
+      assertCompleted(await settled(), turn.promptId, 'HOSTED_REPLY');
+      expect(model!.requests).toHaveLength(1);
+      const { body } = model!.requests[0];
+      expect(body.model).toBe(modelId);
+      const messages = body.messages as Array<{
+        role: string;
+        content: unknown;
+      }>;
+      expect(
+        JSON.stringify(messages.filter(({ role }) => role === 'system')),
+      ).toContain(marker);
     });
 
     it('persists an execution diagnostic epoch through packaged text output, replay and reload', async () => {

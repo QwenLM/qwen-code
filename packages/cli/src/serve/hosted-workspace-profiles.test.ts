@@ -93,7 +93,6 @@ it('rejects the removed Shell profile', () => {
 
 it('refuses every closed option the external lanes cannot serve', () => {
   for (const key of [
-    'agentDefinition',
     'hookCatalog',
     'mcpServers',
     'initialSelection',

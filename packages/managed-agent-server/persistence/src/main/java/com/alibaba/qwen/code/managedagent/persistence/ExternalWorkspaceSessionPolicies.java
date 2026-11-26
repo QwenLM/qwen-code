@@ -9,8 +9,7 @@ import java.util.Set;
 
 /**
  * External-Workspace admission eligibility, split out of the session policy
- * aggregates along the external-workspace seam. Pure delegation: the predicates
- * and their order are the ones the admission paths enforced inline.
+ * aggregates along the external-workspace seam.
  */
 final class ExternalWorkspaceSessionPolicies {
     private ExternalWorkspaceSessionPolicies() {
@@ -60,13 +59,18 @@ final class ExternalWorkspaceSessionPolicies {
     static AgentSessionPolicies.AgentPin creationPin(boolean external, JdbcManagedWorkspaceRegistry workspaces, ContextBinding binding,
             AgentSessionPolicies.AgentPin resolvedPin, SessionCreationCommand command) {
         AgentSessionPolicies.AgentPin effective = resolvedPin;
-        if (external) {
-            String profile = command.requestedToolProfile() == null
+        if (external && resolvedPin.digest() == null) {
+            String selected = command.requestedToolProfile() == null
                     ? WorkspaceToolProfiles.EXTERNAL_FILES : command.requestedToolProfile();
-            if (!WorkspaceToolProfiles.isExternal(profile)
-                    || !externalProfileAllowedOrRefuse(workspaces, binding, profile)
-                    || !"qwen-code".equals(command.agentId())
-                    || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
+            effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
+                    selected, false, false, resolvedPin.skills());
+        }
+        String profile = effective.toolProfile();
+        if (external != WorkspaceToolProfiles.isExternal(profile)) {
+            throw AgentSessionPolicies.workspaceExecutionUnavailable();
+        }
+        if (external) {
+            if (!externalProfileAllowedOrRefuse(workspaces, binding, profile)
                     || Boolean.TRUE.equals(command.requestedPlanMode()) || command.extensionPins() != null
                     || command.memoryStoreId() != null
                     || command.input().stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
@@ -77,12 +81,6 @@ final class ExternalWorkspaceSessionPolicies {
             if (!WorkspaceToolProfiles.admitsExternalApprovalMode(profile, resolvedPin.approvalMode())) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
-            // Session skills are content declarations persisted into the immutable creation
-            // receipt; the external Worker consumes them as installed files, so admission may
-            // carry them. Extension pins stay refused: package execution requires the native
-            // Shell/MCP lifecycle that external profiles never negotiate.
-            effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
-                    profile, false, false, command.skills());
         }
         return selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
     }

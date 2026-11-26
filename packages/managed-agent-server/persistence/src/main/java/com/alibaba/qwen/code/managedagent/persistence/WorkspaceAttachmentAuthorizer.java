@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
+import java.util.Objects;
 
 import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable;
 
@@ -36,9 +37,6 @@ final class WorkspaceAttachmentAuthorizer {
             boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
             boolean legacyClose, boolean committedStop) {
         boolean external = WorkspaceToolProfiles.isExternal(session.toolProfile()) && store.isExternal(session.workspace());
-        if (external && (!"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null)) {
-            throw unavailable();
-        }
         authorizeAttachment(session, cancellation, actionResponse, authority, legacyClose, committedStop, external);
     }
 
@@ -59,7 +57,8 @@ final class WorkspaceAttachmentAuthorizer {
             requireWorktreeAncestorsReady(jdbc, session.tenantId(), session.sessionId());
         }
         if (external) {
-            if (!store.isExternal(binding) || !WorkspaceToolProfiles.isExternal(session.toolProfile())) {
+            if (!store.isExternal(binding) || !WorkspaceToolProfiles.isExternal(session.toolProfile())
+                    || !WorkspaceToolProfiles.hasAgentIdentity(session.agentId(), session.agentDefinitionDigest())) {
                 throw unavailable();
             }
         } else {
@@ -105,8 +104,8 @@ final class WorkspaceAttachmentAuthorizer {
                 (row, index) -> {
                     boolean structural = session.tenantId().equals(row.getString("tenant_id"))
                             && session.sessionId().equals(row.getString("session_id"))
-                            && executableAgent(row.getString("session_agent"),
-                                    row.getString("session_definition_digest"))
+                            && Objects.equals(session.agentId(), row.getString("session_agent"))
+                            && Objects.equals(session.agentDefinitionDigest(), row.getString("session_definition_digest"))
                             && expectedStatus.equals(row.getString("session_status"))
                             && row.getObject("session_deleted_at") == null
                             && binding.getWorkspaceId().equals(row.getString("session_workspace"))

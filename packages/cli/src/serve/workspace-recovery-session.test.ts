@@ -1110,7 +1110,11 @@ describe('verifyRecoverySession', () => {
     },
   );
 
-  it('captures raw pinned agent instructions and refuses changed bytes', async () => {
+  it.each([
+    'hosted-workspace-files/1',
+    'hosted-workspace-external-files/1',
+    'hosted-workspace-external-shell/1',
+  ])('verifies pinned instruction bytes on %s', async (toolProfile) => {
     const bytes = Buffer.from('Keep the agent instructions. 保留指令。');
     const instructionsRef: ManagedSessionDurableRef = {
       resourceId: 'agent-instructions',
@@ -1120,7 +1124,7 @@ describe('verifyRecoverySession', () => {
       digest: hash(bytes),
     };
     const definition = {
-      toolProfile: 'hosted-workspace-files/1',
+      toolProfile,
       agentDefinition: {
         agentId: `agent_${'a'.repeat(32)}`,
         revision: '1',
@@ -1953,7 +1957,6 @@ describe('verifyRecoverySession', () => {
 
   it.each([
     { hookCatalog: {} },
-    { agentDefinition: {} },
     { initialSelection: {} },
     { lineage: {} },
     { childWorkspaces: true },
@@ -1965,6 +1968,16 @@ describe('verifyRecoverySession', () => {
     });
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
       'unsupported Hosted profile',
+    );
+  });
+
+  it('refuses a malformed agent pin during external Workspace recovery', async () => {
+    const f = fixture({
+      toolProfile: 'hosted-workspace-external-files/1',
+      agentDefinition: {},
+    });
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'Invalid agent definition identity',
     );
   });
 

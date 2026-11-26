@@ -181,8 +181,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void authorizeExternal(SessionRecord session,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        if (!isExternal(session.workspace()) || !WorkspaceToolProfiles.isExternal(session.toolProfile())
-                || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null) {
+        if (!isExternal(session.workspace()) || !WorkspaceToolProfiles.isExternal(session.toolProfile())) {
             throw unavailable();
         }
         if (authority != null) {

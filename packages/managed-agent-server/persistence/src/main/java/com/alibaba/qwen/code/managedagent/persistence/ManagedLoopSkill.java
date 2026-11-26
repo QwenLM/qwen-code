@@ -130,14 +130,7 @@ final class ManagedLoopSkill {
             List<Map<String, Object>> callerSkills, String profile,
             boolean sessionSkillsSupported, List<StandaloneSkill> packageSkills) {
         int definitionCount = merged.size();
-        if (WorkspaceToolProfiles.isExternal(profile)) {
-            // External creationPin already carried the caller skills into the pin;
-            // appending them again duplicates every name and the catalog validation
-            // refuses the creation. The pin slice is the whole caller catalog here.
-            definitionCount = 0;
-        } else {
-            merged.addAll(callerSkills);
-        }
+        merged.addAll(callerSkills);
         if (!sessionSkillsSupported) {
             return null;
         }
