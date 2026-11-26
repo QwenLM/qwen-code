@@ -2091,7 +2091,7 @@ export function normalizeGoalMaxActiveMinutes(value: unknown): number {
 }
 
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
-  if (value === undefined) return 0;
+  if (value == null) return 0;
   if (!Number.isInteger(value)) {
     throw new FatalConfigError(
       `Invalid maxToolCallsPerTurn: must be an integer, got ${String(value)}`,

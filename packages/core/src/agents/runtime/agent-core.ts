@@ -293,7 +293,7 @@ export interface ReasoningLoopResult {
   /** Number of model round-trips completed. */
   turnsUsed: number;
   /**
-   * Which loop detector fired, when terminateMode is LOOP_DETECTED (issue
+   * Which loop stop fired, when terminateMode is LOOP_DETECTED (issue
    * #9450 — attribution for stops that all render as one generic message
    * otherwise). null otherwise.
    */
@@ -306,14 +306,6 @@ interface ToolStepResult {
   repeatedDuplicateProviderToolCall: boolean;
   /** A tool hook returned `continue: false`: the run ends with this reason. */
   hookStopReason?: string;
-  /** Executed calls with their model-visible results, in call order.
-   * Consumed by the loop detector for result-aware stateful-read guards
-   * (issue #9450). */
-  results: Array<{
-    toolName: string;
-    args: Record<string, unknown>;
-    responseParts: Part[];
-  }>;
 }
 
 /** A call of a batch that settled, or that an abort cut off. */
@@ -1310,12 +1302,10 @@ export class AgentCore {
           } as AgentRoundEvent);
 
         const functionCalls: FunctionCall[] = [];
-        // callIds already streamed to the loop guard this attempt. Mirrors
-        // dedupeToolCallsById (which collapses execution to one call per
-        // id): a provider can emit the same call id twice in one response,
-        // and counting both emissions would leave the request counters one
-        // ahead of the executed result evidence (one recordToolResult per
-        // executed call), fail-safe-halting a productive stateful poller.
+        // callIds already counted toward the tool-call cap this attempt.
+        // Mirrors dedupeToolCallsById (which collapses execution to one call
+        // per id): a provider can emit the same call id twice in one
+        // response, and that call runs once, so it counts once.
         const loopGuardStreamedCallIds = new Set<string>();
         let roundText = '';
         let roundThoughtText = '';
@@ -1439,10 +1429,9 @@ export class AgentCore {
             for (const fc of chunkFunctionCalls) {
               const toolName = String(fc.name);
               // Provider-duplicate emissions of an already-streamed call id
-              // execute once (dedupeToolCallsById collapses them), so feed
-              // the loop guard once — request counts and result evidence
-              // must stay the same population. Id-less calls are never
-              // deduped, mirroring dedupeToolCallsById.
+              // execute once (dedupeToolCallsById collapses them), so they
+              // count once. Id-less calls are never deduped, mirroring
+              // dedupeToolCallsById.
               if (fc.id) {
                 if (loopGuardStreamedCallIds.has(fc.id)) {
                   continue;
@@ -2197,7 +2186,6 @@ export class AgentCore {
           return {
             messages: [{ role: 'user', parts: [] }],
             repeatedDuplicateProviderToolCall: true,
-            results: [],
           };
         }
         const responses = batch.responses ?? [];
@@ -2214,30 +2202,12 @@ export class AgentCore {
           }),
           timestamp: Date.now(),
         });
-        const requestByCallId = new Map(
-          Array.from(declaredNames.keys(), (request) => [
-            request.callId,
-            request,
-          ]),
-        );
         return {
           messages: [{ role: 'user', parts: batch.parts ?? [] }],
           repeatedDuplicateProviderToolCall: false,
           ...(batch.hookStopReason !== undefined
             ? { hookStopReason: batch.hookStopReason }
             : {}),
-          results: responses.flatMap(({ callId, parts }) => {
-            const request = requestByCallId.get(callId);
-            return request
-              ? [
-                  {
-                    toolName: request.name,
-                    args: request.args,
-                    responseParts: parts,
-                  },
-                ]
-              : [];
-          }),
         };
       },
     };
@@ -2712,7 +2682,6 @@ export class AgentCore {
       return {
         messages: [{ role: 'user', parts: [] }],
         repeatedDuplicateProviderToolCall: true,
-        results: [],
       };
     }
 
@@ -2885,31 +2854,9 @@ export class AgentCore {
       timestamp: Date.now(),
     });
 
-    // Pair each executed call with its model-visible (finalized) result so
-    // the reasoning loop can feed the loop detector's result-aware guards.
-    const finalizedByCallId = new Map(
-      finalizedResponses.map((response) => [response.callId, response]),
-    );
-    const results: Array<{
-      toolName: string;
-      args: Record<string, unknown>;
-      responseParts: Part[];
-    }> = [];
-    for (const fc of uniqueFunctionCalls) {
-      const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
-      const finalized = finalizedByCallId.get(callId);
-      if (!finalized) continue;
-      results.push({
-        toolName: String(fc.name ?? ''),
-        args: (fc.args ?? {}) as Record<string, unknown>,
-        responseParts: finalized.responseParts,
-      });
-    }
-
     return {
       messages: [{ role: 'user', parts: toolResponseParts }],
       repeatedDuplicateProviderToolCall: false,
-      results,
     };
   }
 

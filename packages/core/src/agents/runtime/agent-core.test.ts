@@ -150,7 +150,7 @@ async function runToolStep(
   abortController: AbortController,
   promptId: string,
   toolsList: FunctionDeclaration[],
-): Promise<{ messages: Content[]; results: unknown[] }> {
+): Promise<{ messages: Content[] }> {
   if (!shared) {
     return core.processFunctionCalls(
       calls,
@@ -161,7 +161,7 @@ async function runToolStep(
     );
   }
   const rounds = vi.mocked(runAgentLoop).mock.calls.length;
-  let step: { messages: Content[]; results: unknown[] } | undefined;
+  let step: { messages: Content[] } | undefined;
   core
     .getEventEmitter()
     .on(AgentEventType.TOOL_RESPONSES_FINALIZED, ({ responses }) => {
@@ -174,7 +174,6 @@ async function runToolStep(
             ),
           },
         ],
-        results: responses,
       };
     });
   let sent = 0;
@@ -224,7 +223,7 @@ async function runToolStep(
   // The agent-core loop entry marker must be logged for this surface.
   expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'agent-core');
   entrySpy.mockRestore();
-  return step ?? { messages: [{ role: 'user', parts: [] }], results: [] };
+  return step ?? { messages: [{ role: 'user', parts: [] }] };
 }
 
 const boundaryObserveMock = vi.hoisted(() =>
@@ -1156,7 +1155,7 @@ describe.each(LOOPS)(
           'prompt-rejected',
           reason === 'undeclared' ? [] : [{ name: 'read_file' }],
         );
-        expect(result.results).toHaveLength(1);
+        expect(result.messages[0].parts).toHaveLength(1);
         expect(events.results).toHaveLength(1);
         expect(events.results[0].success).toBe(false);
         expect(events.results[0].error).toContain(

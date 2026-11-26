@@ -296,7 +296,9 @@ function getSettingsFileKeyWarnings(
 
     ignoredLegacyKeys.add(oldKey);
     warnings.push(
-      `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
+      REMOVED_MODEL_SETTINGS.some((key) => newPath === `model.${key}`)
+        ? `Warning: Legacy setting '${oldKey}' was removed (loop detection no longer exists) and will be ignored in ${settingsFilePath}.`
+        : `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
     );
   }
 

@@ -1862,7 +1862,7 @@ sys.exit(0)
 
 ### Example 4: A Repeated-Call Guard
 
-Qwen Code does not judge whether the model is looping. A PreToolUse hook can: this one remembers the session's last tool call, reminds the model after the same call three times in a row, and ends the turn at six.
+Qwen Code does not judge whether the model is looping. A PreToolUse hook can: this one remembers the session's last tool call, reminds the model after the same call three times in a row, and ends the turn at six, starting the count over for the next prompt. Calls in one parallel batch can run the hook at the same time, so the count is approximate there.
 
 **repeat_guard.py**
 
@@ -1890,6 +1890,7 @@ with open(state_path, "w") as f:
     json.dump({"key": key, "count": count}, f)
 
 if count >= 6:
+    os.remove(state_path)
     print(json.dumps({
         "continue": False,
         "stopReason": f"{data['tool_name']} was called {count} times in a row with the same input.",

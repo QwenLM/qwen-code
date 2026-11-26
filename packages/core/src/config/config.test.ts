@@ -11847,6 +11847,13 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('has no cap when a settings file sets it to null', () => {
+      const config = makeConfig({
+        maxToolCallsPerTurn: null as unknown as number,
+      });
+      expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
+    });
+
     it('should use a custom maxToolCallsPerTurn if provided', () => {
       const config = makeConfig({ maxToolCallsPerTurn: 42 });
       expect(config.getMaxToolCallsPerTurn()).toBe(42);

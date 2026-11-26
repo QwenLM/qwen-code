@@ -129,7 +129,7 @@ daemon 中会越过上限的工具批次整批跳过。用一个小的每 turn �
 | 键                          | 变更后                                                                                                              |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `model.maxToolCallsPerTurn` | 默认不设置：没有上限。正数为硬上限。零或负数表示没有上限。显式设置过 100（今天的默认值）的用户仍保有 100 的硬上限。 |
-| `model.loopProtection`      | 移除。若存在则忽略，每个进程提示一次，说明该项已移除。                                                              |
+| `model.loopProtection`      | 移除。若存在则忽略，并对含有它的每个设置文件给出点名警告，与其他设置键警告一致。                                    |
 | `model.skipLoopDetection`   | 移除。处理方式相同。                                                                                                |
 
 settings schema、生成的 VS Code schema 和设置参考文档删除这两个键，并说明
@@ -262,7 +262,7 @@ hooks 指南中增加一个简短示例（示例 4），`model.maxToolCallsPerTu
 - daemon / Web Shell：重复的无效参数和重复失败既无提醒也无停止；显式上限以
   `turn_error` `loop_detected` / `explicit_cap` 停止；
 - 被重放的 provider call id 仍会停止；
-- 带有 `model.loopProtection` 或 `model.skipLoopDetection` 的设置只打印一次提示，
+- 带有 `model.loopProtection` 或 `model.skipLoopDetection` 的设置会逐个点名警告，
   并正常运行；
 - 带 DashScope 消息的模拟 400 在 headless 文本与 JSON 输出以及 daemon 会话中显示
   提示（已在 #18317 完成）。

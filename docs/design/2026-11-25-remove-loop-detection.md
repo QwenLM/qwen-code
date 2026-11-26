@@ -152,7 +152,7 @@ refused partial edit goes, with the other stops.
 | Key                         | After                                                                                                                                                                  |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `model.maxToolCallsPerTurn` | Default unset: no cap. A positive value is a hard cap. Zero or a negative value means no cap. A user who explicitly set 100 (today's default) keeps a hard cap of 100. |
-| `model.loopProtection`      | Removed. If present, ignored with one warning per process naming the removal.                                                                                          |
+| `model.loopProtection`      | Removed. If present, ignored with a warning naming the removal, shown for each settings file that has it, like the other settings-key warnings.                        |
 | `model.skipLoopDetection`   | Removed. Same handling.                                                                                                                                                |
 
 The settings schema, the generated VS Code schema and the settings reference
@@ -319,8 +319,8 @@ End to end, against a mock OpenAI-compatible server:
   reminder and no stop; the explicit cap stops with `turn_error`
   `loop_detected` / `explicit_cap`;
 - a replayed provider call id still stops;
-- settings with `model.loopProtection` or `model.skipLoopDetection` print one
-  warning and run;
+- settings with `model.loopProtection` or `model.skipLoopDetection` print a
+  warning naming each key and run;
 - a mock 400 with the DashScope message shows the hint in headless text and
   JSON output and in a daemon session (done for #18317).
 
