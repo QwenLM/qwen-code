@@ -45,6 +45,12 @@ class DefinitionInputContractsTest {
     }
 
     @Test
+    void allowsAnInheritedApprovalMode() {
+        assertThat(new ToolPolicy("hosted-workspace-files/1", null).approvalMode()).isNull();
+        assertThatThrownBy(() -> new ToolPolicy("hosted-workspace-files/1", " ")).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void validatesProviderAndExactBundleInputs() {
         assertThat(new BundleRef("catalog", "skill-17", "17", HASH, 1L)
                 .expectedDigest()).isEqualTo(HASH);
