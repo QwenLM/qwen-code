@@ -866,6 +866,7 @@ export class UiTelemetryService extends EventEmitter {
     this.#sessionOutputBaselines.delete(sessionId);
     this.#sessionMetrics.set(sessionId, createInitialMetrics());
     this.#closedSessions.delete(sessionId);
+    this.#lastCachedContentTokenCount = 0;
   }
 
   removeSession(sessionId: string): void {
