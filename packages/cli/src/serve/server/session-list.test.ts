@@ -199,6 +199,22 @@ describe('merged session catalog pagination', () => {
         ...persistedReads,
         [live.sessionId, 'active'],
       ]);
+
+      // A later request that reuses the settled projection revalidates the
+      // selected row instead of trusting the cached removal state.
+      const repeatedPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: firstPage.nextCursor },
+        readOptions,
+      );
+      expect(repeatedPage.sessions.map((row) => row.sessionId)).toEqual([
+        second.sessionId,
+      ]);
+      expect(worktree.mock.calls).toEqual([
+        ...persistedReads,
+        [second.sessionId, 'active'],
+      ]);
     },
   );
 

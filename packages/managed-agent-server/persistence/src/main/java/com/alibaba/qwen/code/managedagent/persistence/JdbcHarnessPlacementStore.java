@@ -205,6 +205,12 @@ public class JdbcHarnessPlacementStore
             if (!released && !expired) {
                 throw blocked("harness_owner_still_live");
             }
+            if (released) {
+                // A successor that never acquires a writer must not inherit the released writer's lease.
+                jdbc.update("UPDATE ma_session_head SET writer_lease_until = LEAST(writer_lease_until, ?)"
+                        + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                        now, tenant, session);
+            }
         }
         if (current.epoch() >= ManagedSessionStoreModels.MAX_SAFE_COUNTER) {
             throw blocked("harness_placement_epoch_exhausted");

@@ -411,13 +411,6 @@ export {
 export type { ReadTextRangeResult } from './utils/read-text-range.js';
 export { isUtf8CompatibleEncoding } from './utils/encoding.js';
 export * from './services/gitWorktreeService.js';
-export {
-  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
-  GLOBAL_DUPLICATE_THRESHOLD,
-  getToolCallRepeatKey,
-  getTurnToolCallCapHalt,
-} from './services/loopDetectionService.js';
-export type { TurnToolCallCapHalt } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
@@ -675,7 +668,6 @@ export {
   logExtensionEnable,
   logIdeConnection,
   logLoopDetected,
-  logRepeatedToolFailureGuard,
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
@@ -694,7 +686,6 @@ export {
   LoopDetectedEvent,
   LoopReason,
   LoopType,
-  RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,

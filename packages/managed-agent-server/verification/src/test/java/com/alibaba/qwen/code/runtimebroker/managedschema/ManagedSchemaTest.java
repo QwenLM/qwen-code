@@ -75,6 +75,7 @@ class ManagedSchemaTest {
             Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")),
             Map.entry("ma_client_files_binding", List.of("tenant_id", "session_id")),
             Map.entry("ma_client_files_request", List.of("tenant_id", "session_id", "binding_generation", "request_id")),
+            Map.entry("ma_terminal_ticket", List.of("ticket_hash")),
             Map.entry("ma_journal_pack", List.of("pack_id")));
 
     @Test

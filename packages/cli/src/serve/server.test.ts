@@ -888,6 +888,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
@@ -1017,6 +1018,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
+      f !== 'session_worktree_restore_v1' &&
       f !== 'session_worktree_branch_v1' &&
       f !== 'session_worktree_handoff_v1' &&
       f !== 'voice_transcribe' &&
@@ -1106,6 +1108,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
   'workspace_qualified_acp',
@@ -24925,7 +24928,8 @@ describe('createServeApp', () => {
           }),
         ]);
         expect(listSessionsSpy).toHaveBeenCalledTimes(1);
-        expect(readSidecar).toHaveBeenCalledTimes(1);
+        // Metadata stays cached; each later view revalidates the sidecar.
+        expect(readSidecar).toHaveBeenCalledTimes(2);
       } finally {
         listSessionsSpy.mockRestore();
         mockWt.readSidecar = undefined;
@@ -24978,7 +24982,9 @@ describe('createServeApp', () => {
           expect.objectContaining({ sessionId }),
         ]);
         expect(result.sessions[0]).not.toHaveProperty('worktree');
-        expect(mockWt.readSidecar).toHaveBeenCalledOnce();
+        // A historical missing checkout needs an ownership reread before
+        // considering its snapshot, but must not be enriched for this owner.
+        expect(mockWt.readSidecar).toHaveBeenCalledTimes(2);
         expect(mockWt.readMarkerLenient).toHaveBeenCalledOnce();
       } finally {
         mockWt.readSidecar = undefined;

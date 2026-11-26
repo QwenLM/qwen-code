@@ -408,7 +408,7 @@ describe('AgentInteractive', () => {
         text: '',
         terminateMode: AgentTerminateMode.LOOP_DETECTED,
         turnsUsed: 3,
-        loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        loopType: LoopType.TURN_TOOL_CALL_CAP,
       },
     });
     // Built inline: an extra async hop before the waitFor shifts its timing.
@@ -431,7 +431,7 @@ describe('AgentInteractive', () => {
       .filter((m) => m.role === 'info')
       .map((m) => String(m.content));
     expect(stopMessages).toContain(
-      'Agent stopped: duplicate tool-call loop detected (consecutive_identical_tool_calls).',
+      'Agent stopped: loop detected (turn_tool_call_cap).',
     );
 
     await agent.shutdown();
@@ -451,7 +451,7 @@ describe('AgentInteractive', () => {
     [AgentTerminateMode.ERROR, 'Agent stopped due to an error.', 'error'],
     [
       AgentTerminateMode.LOOP_DETECTED,
-      'Agent stopped: duplicate tool-call loop detected.',
+      'Agent stopped: loop detected.',
       'error',
     ],
   ] as const)(
