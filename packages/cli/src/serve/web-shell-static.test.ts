@@ -439,7 +439,9 @@ describe('public PWA HTTP routes', () => {
     '/channels',
     '/live',
     '/scheduled-tasks',
+    '/pr-watches',
     '/goals',
+    '/artifacts',
     '/settings',
   ])(
     'serves public document %s but leaves API requests protected',

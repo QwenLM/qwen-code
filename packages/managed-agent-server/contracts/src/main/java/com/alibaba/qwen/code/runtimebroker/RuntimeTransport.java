@@ -77,6 +77,12 @@ public interface RuntimeTransport {
                 "managed_extension_unavailable", "Extension metadata controls are unavailable.", false));
     }
 
+    /** Closes a parked owner's idle MCP connections; refused while it has pending work. */
+    public default CompletionStage<Void> reclaimMcp(RuntimeLease lease, RuntimeSession session) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_mcp_management_unavailable", "Runtime MCP reclamation is unavailable.", false));
+    }
+
     public default CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
                 "managed_mcp_management_unavailable", "Runtime MCP definitions are unavailable.", false));
@@ -94,49 +100,6 @@ public interface RuntimeTransport {
                 "runtime_broker_attestation_unavailable",
                 "Runtime transport does not support attestation.", false));
         return failed;
-    }
-
-    /** Separate CSI receipt; context attestation alone cannot prove the mounted storage. */
-    public default CompletionStage<Map<String, Object>> attestCsi(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            Map<String, Object> storage, Map<String, Object> pod) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "workspace_csi_attestation_unavailable", "Workspace CSI attestation is unavailable.", false));
-    }
-
-    public default CompletionStage<Map<String, Object>> attestCsiFiles(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            Map<String, Object> boot, Map<String, Object> pod) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "workspace_csi_attestation_unavailable", "Original file boot attestation is unavailable.", false));
-    }
-
-    public default CompletionStage<Map<String, Object>> csiFileHistory(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> boot,
-            ContextBinding binding, Map<String, Object> operation) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "csi_file_history_unavailable", "Original CSI file history is unavailable.", false));
-    }
-
-    public default CompletionStage<Map<String, Object>> csiFileExecute(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> boot,
-            ContextBinding binding, String executionId) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "csi_native_execution_unavailable", "Original CSI execution is unavailable.", false));
-    }
-
-    public default CompletionStage<byte[]> csiFileFinalize(RuntimeBindingRecord runtime, ContextBinding binding,
-            Map<String, Object> operation) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "csi_file_finalization_unavailable", "Original CSI file finalization is unavailable.", false));
-    }
-
-    /** Explicit comparison inputs are component expectations, not trusted CSI placement provenance. */
-    public default CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
-            Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
-            Map<String, Object> expectedCaptureIdentity) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "workspace_csi_acknowledgement_unavailable", "Workspace CSI acknowledgement is unavailable.", false));
     }
 
     /**
@@ -157,8 +120,8 @@ public interface RuntimeTransport {
     public CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session);
 
-    public default CompletionStage<Void> installPublisher(RuntimeLease lease,
-            RuntimeSession session, Map<String, Object> publisher) {
+    public default CompletionStage<Map<String, Object>> installPublisher(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher, Long writerGeneration) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
                 "managed_tool_publisher_unavailable",
                 "Runtime transport does not support output publication.", false));
@@ -182,6 +145,21 @@ public interface RuntimeTransport {
     public default CompletionStage<Void> acknowledgeV2(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference) {
         return CompletableFuture.completedFuture(null);
+    }
+
+    public default CompletionStage<Void> detachPublisher(
+            RuntimeLease lease, RuntimeSession session, Long writerGeneration) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_publisher_detach_unsupported",
+                "Runtime transport does not support Shell publisher detach.", false));
+    }
+
+    public default CompletionStage<Map<String, Object>> pullObservations(
+            RuntimeLease lease, String executionCallId, long afterSeq,
+            long ackThrough, int waitMs, int maxEntries) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_observation_pull_unsupported",
+                "Runtime transport does not support observation pull.", false));
     }
 
     public default CompletionStage<Void> installPublication(RuntimeLease lease,

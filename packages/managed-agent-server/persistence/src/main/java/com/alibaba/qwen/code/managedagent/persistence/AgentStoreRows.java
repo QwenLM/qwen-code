@@ -6,9 +6,9 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -18,6 +18,9 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -97,13 +100,13 @@ final class AgentStoreRows {
             "ACCEPTED", "RUNNING", "CANCELLING");
 
     static final String SESSION_WITH_STREAM =
-            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence, es.gmt_modified AS list_last_activity FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
+            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence, es.gmt_modified AS list_last_activity FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = ''";
 
     final RowMapper<SessionRecord> sessionMapper;
 
     final RowMapper<SessionRecord> sessionListMapper;
 
-    SessionRecord readSession(java.sql.ResultSet result, StreamCounters counters) throws java.sql.SQLException {
+    SessionRecord readSession(ResultSet result, StreamCounters counters) throws SQLException {
         return new SessionRecord(
                 result.getString("tenant_id"),
                 result.getString("session_id"),
@@ -128,9 +131,9 @@ final class AgentStoreRows {
                 result.getString("preview"), counters.lastActivity());
     }
 
-    private static Long optionalLong(java.sql.ResultSet result, String column)
-            throws java.sql.SQLException {
-        java.sql.ResultSetMetaData meta = result.getMetaData();
+    private static Long optionalLong(ResultSet result, String column)
+            throws SQLException {
+        ResultSetMetaData meta = result.getMetaData();
         for (int index = 1; index <= meta.getColumnCount(); index++) {
             if (meta.getColumnLabel(index).equalsIgnoreCase(column)) {
                 return nullableLong(result, column);
@@ -147,13 +150,12 @@ final class AgentStoreRows {
             "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL', 'CONTEXT_COMPRESSION')";
 
     static String sessionOperationTarget(String sessionId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(sessionId);
+        return sessionId;
     }
 
     static String sessionOperationKey(String tenantId, String sessionId, OperationKind kind, String operationId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), operationId);
+        return ManagedIdentityRefs.operationRef(
+                kind.name(), tenantId, "SESSION", sessionId, sessionId, operationId);
     }
 
     long lifecycleDatabaseTime() {
@@ -195,36 +197,19 @@ final class AgentStoreRows {
                         "The Session was not found."));
     }
 
-    void requireLegacyMutation(String tenantId, String sessionId) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
-    }
-
-    SessionRecord requireLegacySessionForUpdate(String tenantId, String sessionId) {
-        return requireSessionForUpdate(tenantId, sessionId, true);
-    }
-
-    SessionRecord requireSessionForUpdate(String tenantId,
-            String sessionId) {
-        return requireSessionForUpdate(tenantId, sessionId, false);
-    }
-
-    SessionRecord requireSessionForUpdate(
-            String tenantId, String sessionId, boolean legacyMutation) {
+    SessionRecord requireSessionForUpdate(String tenantId, String sessionId) {
         try {
             return jdbc.queryForObject(
                     "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session")
                             + " FROM ma_session WHERE ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id ="
                             + " ? AND ma_session.session_id = ? FOR UPDATE",
                     (rows, rowNumber) -> {
-                        if (legacyMutation) {
-                            ManagedLegacySessionGuard.requireLegacyMutation(rows.getBoolean("is_csi_guard"));
-                        }
                         // H2 can retain pre-wait outer-join values after locking the Session.
                         // Read its stream only after acquiring that lock.
                         List<StreamCounters> streams = jdbc.query(
                                 "SELECT last_sequence, replay_floor_sequence, gmt_modified FROM ma_event_stream"
                                         + " WHERE tenant_id = ? AND session_id = ? AND stream_kind ="
-                                        + " 'SESSION' AND stream_id = X'' FOR UPDATE",
+                                        + " 'SESSION' AND stream_id = '' FOR UPDATE",
                                 (stream, index) -> new StreamCounters(stream.getLong("last_sequence"),
                                         stream.getLong("replay_floor_sequence"),
                                         nullableLong(stream, "gmt_modified")),
@@ -247,11 +232,6 @@ final class AgentStoreRows {
 
     LockedSessionTurn requireSessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
         return new LockedSessionTurn(requireSessionForUpdate(tenantId, sessionId),
-                requireTurnForUpdate(tenantId, sessionId, turnId));
-    }
-
-    LockedSessionTurn requireLegacySessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
-        return new LockedSessionTurn(requireLegacySessionForUpdate(tenantId, sessionId),
                 requireTurnForUpdate(tenantId, sessionId, turnId));
     }
 
@@ -300,8 +280,8 @@ final class AgentStoreRows {
         }
     }
 
-    static ContextBinding readBinding(java.sql.ResultSet result)
-            throws java.sql.SQLException {
+    static ContextBinding readBinding(ResultSet result)
+            throws SQLException {
         String workspaceId = result.getString("workspace_id");
         if (workspaceId == null) {
             return null;
@@ -323,8 +303,8 @@ final class AgentStoreRows {
                 result.getLong("context_revision"));
     }
 
-    static Long nullableLong(java.sql.ResultSet result, String name)
-            throws java.sql.SQLException {
+    static Long nullableLong(ResultSet result, String name)
+            throws SQLException {
         long value = result.getLong(name);
         return result.wasNull() ? null : value;
     }
@@ -332,23 +312,23 @@ final class AgentStoreRows {
     // The cwd columns arrive with V46; an operation read against an
     // additive-upgrade schema that predates them must treat the columns as
     // absent instead of erroring the whole query.
-    static String additiveString(java.sql.ResultSet result,
-            String name) throws java.sql.SQLException {
+    static String additiveString(ResultSet result,
+            String name) throws SQLException {
         return hasColumn(result, name) ? result.getString(name) : null;
     }
 
-    static Long additiveLong(java.sql.ResultSet result, String name)
-            throws java.sql.SQLException {
+    static Long additiveLong(ResultSet result, String name)
+            throws SQLException {
         return hasColumn(result, name) ? nullableLong(result, name) : null;
     }
 
-    static int additiveInt(java.sql.ResultSet result, String name)
-            throws java.sql.SQLException {
+    static int additiveInt(ResultSet result, String name)
+            throws SQLException {
         return hasColumn(result, name) ? result.getInt(name) : 0;
     }
 
-    static boolean hasColumn(java.sql.ResultSet result, String name)
-            throws java.sql.SQLException {
+    static boolean hasColumn(ResultSet result, String name)
+            throws SQLException {
         var meta = result.getMetaData();
         for (int column = 1; column <= meta.getColumnCount(); column++) {
             if (name.equalsIgnoreCase(meta.getColumnLabel(column))) {

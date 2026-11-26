@@ -187,7 +187,7 @@
 
 /* The transcript takes the remaining height and scrolls independently per pane. */
 .body {
-  flex: 1 1 auto;
+  flex: 1 1 0%;
   min-height: 0;
   overflow-y: auto;
   display: flex;
@@ -206,33 +206,4 @@
 
 .composerHidden {
   display: none;
-}
-
-.admissionUnknown {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-  padding: 7px 9px;
-  border: 1px solid var(--warning-border);
-  border-radius: 8px;
-  background: var(--warning-bg);
-  color: var(--warning-color);
-  font-size: 12px;
-}
-
-.admissionUnknownActions {
-  display: inline-flex;
-  flex: 0 0 auto;
-  gap: 6px;
-}
-
-.admissionUnknownActions button {
-  border: 1px solid var(--warning-border);
-  border-radius: 6px;
-  padding: 3px 7px;
-  background: var(--background);
-  color: inherit;
-  cursor: pointer;
 }

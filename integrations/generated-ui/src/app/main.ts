@@ -8,10 +8,13 @@ import {
   applyDocumentTheme,
   applyHostStyleVariables,
 } from '@modelcontextprotocol/ext-apps';
+import { z } from 'zod';
 import { ViewController } from './controller.js';
-import type { CaptureResult, ViewState } from './controller.js';
+import type { CaptureResult, ViewState, ViewStateHost } from './controller.js';
 import { buildContinuationText } from './continuation.js';
 import { translator, type MessageKey } from './messages.js';
+import { DOWNLOAD_TYPES, MAX_STATE_BYTES } from './runtime-contract.js';
+import type { UiEffect } from './runtime-contract.js';
 import { ViewSurface, type HostStyle } from './surface.js';
 import './styles.css';
 
@@ -46,6 +49,18 @@ const REVIEW_OUTCOME = 'qwen-code/message-review';
 const REVIEW_REASON = 'qwen-code/message-error';
 // Values settle for this long before they are offered as model context.
 const CONTEXT_SYNC_DELAY = 800;
+// The host keeps the card's saved state. It knows which card this frame shows,
+// so requests never name one; it also reports each save's outcome itself.
+const STATE_CAPABILITY = 'qwen-code/generated-ui-state';
+const STATE_LOAD = 'qwen-code/generated-ui-state/load';
+const STATE_SAVE = 'qwen-code/generated-ui-state/save';
+// Give the host's daemon read (30 seconds) time to return or report a failure.
+const STATE_LOAD_TIMEOUT_MS = 35_000;
+const stateLoadResult = z.object({ value: z.unknown() });
+const stateSaveResult = z.object({});
+// The host performs a click's copy and shows the outcome outside the card.
+const COPY_CAPABILITY = 'qwen-code/generated-ui-copy';
+const COPY_WRITE = 'qwen-code/generated-ui-copy/write';
 
 let t = translator(undefined);
 let documentTitle = '';
@@ -64,6 +79,11 @@ let syncedContext = '';
 // Host-provided reason a message was not sent, shown after the status.
 let continuationDetail = '';
 let interacted = false;
+// Saves are sent only after the saved state was read; then the host, not
+// this frame's page-local notice, says what is kept.
+let canSaveState = false;
+let savingState = false;
+let effectUnavailable = false;
 let hostStyle: HostStyle = {};
 let continuationState:
   | 'idle'
@@ -164,11 +184,13 @@ function renderState(): void {
     else if (state.lastUpdate === 'outdated')
       notices.push(t('notice.outdated'));
     if (state.rejectedEvents) notices.push(t('notice.queue'));
+    if (state.effectDropped) notices.push(t('notice.effectDropped'));
+    else if (effectUnavailable) notices.push(t('notice.effectUnavailable'));
   }
   const message = notices.join(' ');
   setText(notice, message);
   notice.hidden = !message;
-  localNotice.hidden = !interacted || terminal;
+  localNotice.hidden = !interacted || terminal || savingState;
   renderContinuation();
 }
 
@@ -382,6 +404,89 @@ function onState(next: ViewState): void {
   renderState();
 }
 
+// ext-apps types only its own methods; the host registers these two.
+function hostRequest<T extends z.ZodType>(
+  method: string,
+  params: Record<string, unknown>,
+  schema: T,
+  timeout = 15_000,
+): Promise<z.output<T>> {
+  return app.request(
+    { method, params } as unknown as Parameters<App['request']>[0],
+    schema,
+    { timeout },
+  ) as Promise<z.output<T>>;
+}
+
+const stateHost: ViewStateHost = {
+  async load(document) {
+    if (
+      !document.cardId ||
+      !app.getHostCapabilities()?.experimental?.[STATE_CAPABILITY]
+    )
+      return null;
+    const { value } = await hostRequest(
+      STATE_LOAD,
+      {},
+      stateLoadResult,
+      STATE_LOAD_TIMEOUT_MS,
+    );
+    const json = JSON.stringify(value ?? null);
+    if (new TextEncoder().encode(json).byteLength > MAX_STATE_BYTES)
+      throw new Error('Saved view state is too large.');
+    canSaveState = true;
+    return json;
+  },
+  save(json) {
+    if (!canSaveState) return;
+    if (!savingState) {
+      savingState = true;
+      renderState();
+    }
+    void hostRequest(
+      STATE_SAVE,
+      { value: JSON.parse(json) as unknown },
+      stateSaveResult,
+    ).catch(() => {});
+  },
+};
+
+function performEffect(effect: UiEffect): void {
+  const capabilities = app.getHostCapabilities();
+  let request: Promise<unknown> | undefined;
+  if (effect.kind === 'copy') {
+    if (capabilities?.experimental?.[COPY_CAPABILITY])
+      request = hostRequest(COPY_WRITE, { text: effect.text }, z.object({}));
+  } else if (capabilities?.downloadFile) {
+    // Any host may implement the standard request; the name always carries
+    // the extension of its text type.
+    const extension = DOWNLOAD_TYPES[effect.mimeType];
+    const filename = effect.filename.toLowerCase().endsWith(extension)
+      ? effect.filename
+      : effect.filename + extension;
+    // Truncating a name can leave an unpaired surrogate that URI encoding rejects.
+    const wellFormedName = filename.replace(/[\uD800-\uDFFF]/gu, '\uFFFD');
+    request = app.downloadFile({
+      contents: [
+        {
+          type: 'resource',
+          resource: {
+            uri: `file:///${encodeURIComponent(wellFormedName)}`,
+            mimeType: effect.mimeType,
+            text: effect.text,
+          },
+        },
+      ],
+    });
+  }
+  // The host reports the outcome itself, including a refusal.
+  request?.catch(() => {});
+  if (effectUnavailable !== !request) {
+    effectUnavailable = !request;
+    renderState();
+  }
+}
+
 const surface = new ViewSurface(
   frame,
   (event) => {
@@ -403,6 +508,8 @@ const controller = new ViewController(
     fitSummary();
   },
   onState,
+  stateHost,
+  performEffect,
 );
 
 app.addEventListener('toolresult', (result) => {

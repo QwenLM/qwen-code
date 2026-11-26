@@ -11,6 +11,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import {
+  getAllowedKeys,
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
 } from './workspace-settings.js';
@@ -20,6 +21,7 @@ import {
   WORKSPACE_RESTRICTED_SETTINGS,
 } from '../../config/settingsUtils.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
+import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 
@@ -225,6 +227,7 @@ function makeApp(
 function makeQualifiedApp(
   overrides: {
     ssh?: boolean;
+    trusted?: boolean;
     workspaceCwd?: string;
     invokeWorkspaceCommand?: (
       method: string,
@@ -236,6 +239,7 @@ function makeQualifiedApp(
   app.use(express.json());
   const reloadModelProviders = vi.fn().mockResolvedValue({ status: 'applied' });
   const persistSetting = vi.fn(async () => {});
+  const persistSettings = vi.fn().mockResolvedValue(undefined);
   const invokeWorkspaceCommand =
     overrides.invokeWorkspaceCommand ?? vi.fn().mockResolvedValue(undefined);
   const publishWorkspaceEvent = vi.fn();
@@ -244,7 +248,7 @@ function makeQualifiedApp(
     state: 'active',
     current: {
       runtime: {
-        trusted: true,
+        trusted: overrides.trusted ?? true,
         workspaceCwd,
         routeFileSystemFactory: overrides.ssh
           ? {
@@ -274,6 +278,7 @@ function makeQualifiedApp(
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSetting,
+    persistSettings,
     workspaceRegistry: registry as unknown as Parameters<
       typeof registerWorkspaceQualifiedSettingsRoutes
     >[1]['workspaceRegistry'],
@@ -284,13 +289,14 @@ function makeQualifiedApp(
     app,
     reloadModelProviders,
     persistSetting,
+    persistSettings,
     invokeWorkspaceCommand,
     publishWorkspaceEvent,
     invalidateServeFeaturesCache,
   };
 }
 
-describe('terminal-only Mods settings', () => {
+describe('Mods settings', () => {
   it.each([
     { route: '/workspace/settings', scope: 'user', qualified: false },
     {
@@ -299,7 +305,7 @@ describe('terminal-only Mods settings', () => {
       qualified: true,
     },
   ])(
-    'keeps terminal-only Mods out of $route',
+    'serves Mods in $route, whose sessions the Web Shell draws',
     async ({ route, scope, qualified }) => {
       const { app, persistSetting } = qualified
         ? makeQualifiedApp()
@@ -309,16 +315,15 @@ describe('terminal-only Mods settings', () => {
       expect(read.status).toBe(200);
       expect(
         read.body.settings.map((setting: { key: string }) => setting.key),
-      ).not.toContain('experimental.mods');
+      ).toContain('experimental.mods');
 
       const write = await request(app).post(route).send({
         scope,
         key: 'experimental.mods',
         value: true,
       });
-      expect(write.status).toBe(400);
-      expect(write.body).toMatchObject({ code: 'disallowed_key' });
-      expect(persistSetting).not.toHaveBeenCalled();
+      expect(write.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledTimes(1);
     },
   );
 });
@@ -726,13 +731,16 @@ describe('POST /workspace/settings', () => {
   // a workspace-scope write persists a committable dead entry into the repo's
   // .qwen/settings.json and answers 200 + requiresRestart while the feature
   // never turns on. The TUI dialog already filters them; the API did not.
-  it('rejects a workspace-restricted key at workspace scope', async () => {
+  it.each([
+    ['tools.workflowsEnabled', true],
+    ['general.displayLanguage', 'zh-CN'],
+  ])('rejects the workspace-restricted setting %s', async (key, value) => {
     const { app, persistSetting } = makeApp();
 
     const res = await request(app).post('/workspace/settings').send({
       scope: 'workspace',
-      key: 'tools.workflowsEnabled',
-      value: true,
+      key,
+      value,
     });
 
     expect(res.status).toBe(400);
@@ -782,6 +790,33 @@ describe('POST /workspace/settings', () => {
 
     expect(res.status).toBe(200);
     expect(persistSetting).toHaveBeenCalled();
+  });
+
+  it('serves visionBridgeTimeoutMs to the Web Shell and writes it at workspace scope', async () => {
+    // showInDialog: false; Web Shell's /model --vision --timeout writes it.
+    const { app, persistSetting } = makeApp();
+
+    const list = await request(app).get('/workspace/settings');
+    expect(
+      list.body.settings.some(
+        (setting: { key: string }) => setting.key === 'visionBridgeTimeoutMs',
+      ),
+    ).toBe(true);
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'visionBridgeTimeoutMs',
+      value: 60_000,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ requiresRestart: true });
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      SettingScope.Workspace,
+      'visionBridgeTimeoutMs',
+      60_000,
+    );
   });
 
   it('serves serve.maxSessions to the Web Shell and writes it at user scope only', async () => {
@@ -1281,6 +1316,118 @@ describe('POST /workspaces/:workspace/settings', () => {
   });
 });
 
+describe('POST /workspaces/:workspace/settings/vision-bridge', () => {
+  const route = '/workspaces/secondary/settings/vision-bridge';
+
+  it('commits both settings to the selected workspace in one write', async () => {
+    const { app, persistSetting, persistSettings, publishWorkspaceEvent } =
+      makeQualifiedApp();
+    const model = 'openai:qwen-vl\0https://user:secret@vision.example/v1';
+    const result = await request(app)
+      .post(route)
+      .send({ model, timeoutMs: 60_000 });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({
+      key: 'visionBridgeTimeoutMs',
+      scope: 'workspace',
+      value: 60_000,
+      requiresRestart: true,
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+    expect(persistSettings).toHaveBeenCalledExactlyOnceWith(
+      '/selected-workspace',
+      [
+        { scope: SettingScope.Workspace, key: 'visionModel', value: model },
+        {
+          scope: SettingScope.Workspace,
+          key: 'visionBridgeTimeoutMs',
+          value: 60_000,
+        },
+      ],
+      expect.any(Function),
+    );
+    expect(publishWorkspaceEvent.mock.calls).toEqual([
+      [
+        {
+          type: 'settings_changed',
+          data: {
+            key: 'visionModel',
+            value: 'openai:qwen-vl\0https://vision.example/v1',
+            scope: 'workspace',
+          },
+        },
+      ],
+      [
+        {
+          type: 'settings_changed',
+          data: {
+            key: 'visionBridgeTimeoutMs',
+            value: 60_000,
+            scope: 'workspace',
+          },
+        },
+      ],
+    ]);
+  });
+
+  it.each([
+    ['missing timeout', { model: 'qwen-vl' }],
+    ['missing model', { timeoutMs: 60_000 }],
+    ['option as model', { model: '--global', timeoutMs: 60_000 }],
+    ['missing model after auth type', { model: 'openai:', timeoutMs: 60_000 }],
+    ['trailing option separator', { model: 'qwen-vl  --', timeoutMs: 60_000 }],
+    ['option after auth type', { model: 'openai:--global', timeoutMs: 60_000 }],
+    ['model too long', { model: 'm'.repeat(1_025), timeoutMs: 60_000 }],
+    ['zero timeout', { model: 'qwen-vl', timeoutMs: 0 }],
+    ['timeout too large', { model: 'qwen-vl', timeoutMs: 2_147_483_648 }],
+  ])(
+    'rejects an invalid pair without any writes (%s)',
+    async (_scenario, body) => {
+      const { app, persistSetting, persistSettings, publishWorkspaceEvent } =
+        makeQualifiedApp();
+      const result = await request(app).post(route).send(body);
+
+      expect(result.status).toBe(400);
+      expect(result.body).toMatchObject({ code: 'invalid_value' });
+      expect(persistSetting).not.toHaveBeenCalled();
+      expect(persistSettings).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses an untrusted workspace before persisting', async () => {
+    const { app, persistSettings } = makeQualifiedApp({ trusted: false });
+    const result = await request(app)
+      .post(route)
+      .send({ model: 'qwen-vl', timeoutMs: 60_000 });
+
+    expect(result.status).toBe(403);
+    expect(result.body).toMatchObject({ code: 'untrusted_workspace' });
+    expect(persistSettings).not.toHaveBeenCalled();
+  });
+
+  it('reports a generation closed during the batch commit without broadcasting', async () => {
+    const { app, persistSettings, publishWorkspaceEvent } = makeQualifiedApp();
+    persistSettings.mockRejectedValue(
+      new WorkspaceSettingsPartialPersistError(
+        'commit refused',
+        [],
+        new WorkspaceGenerationClosedError(),
+      ),
+    );
+    const result = await request(app)
+      .post(route)
+      .send({ model: 'qwen-vl', timeoutMs: 60_000 });
+
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({
+      code: 'workspace_runtime_unavailable',
+    });
+    expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+});
+
 describe('image model settings', () => {
   it.each(['user', 'workspace'])(
     'syncs the actual %s write scope after persistence',
@@ -1597,5 +1744,108 @@ describe('Web Shell approval mode allowlist settings', () => {
         (setting: { key: string }) => setting.key === 'advisorMaxUses',
       )?.values,
     ).toMatchObject({ effective: 3, user: 3, workspace: 9 });
+  });
+});
+
+describe('Web Shell worktree default setting', () => {
+  it('is served to Web Shell clients with its default', async () => {
+    expect(getAllowedKeys().has('worktree.defaultForNewSessions')).toBe(true);
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'worktree.defaultForNewSessions',
+        type: 'boolean',
+        default: true,
+        values: { effective: true },
+      }),
+    );
+  });
+
+  it('serves user/workspace overrides with workspace precedence', async () => {
+    const { app } = makeApp({
+      userSettings: { worktree: { defaultForNewSessions: true } },
+      workspaceSettings: { worktree: { defaultForNewSessions: false } },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'worktree.defaultForNewSessions',
+        values: { effective: false, user: true, workspace: false },
+      }),
+    );
+  });
+
+  it.each(['user', 'workspace'] as const)(
+    'accepts a %s override',
+    async (scope) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'worktree.defaultForNewSessions',
+        value: false,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+        'worktree.defaultForNewSessions',
+        false,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'worktree.defaultForNewSessions',
+        false,
+        scope,
+        undefined,
+      );
+    },
+  );
+
+  it('rejects a non-boolean value', async () => {
+    const { app, persistSetting } = makeApp();
+    const response = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'worktree.defaultForNewSessions',
+      value: 'yes',
+    });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ code: 'invalid_value' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+});
+
+describe('unset boolean settings', () => {
+  it('serves the unset toggle value when the schema has no default', async () => {
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    const descriptor = response.body.settings.find(
+      (setting: { key: string }) =>
+        setting.key === 'experimental.unifiedAgentLoop',
+    );
+    // With no stored value and no schema default, a host needs the schema's
+    // unset toggle value to know what the first flip means: the setting's
+    // per-surface default keeps ACP/headless/TUIs on the shared loop, so the
+    // first flip must not read as "off".
+    expect(descriptor).toMatchObject({
+      type: 'boolean',
+      unsetToggleValue: true,
+      values: {},
+    });
+    expect(descriptor.default).toBeUndefined();
+  });
+
+  it('omits unsetToggleValue when the schema does not declare one', async () => {
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    const descriptor = response.body.settings.find(
+      (setting: { key: string }) =>
+        setting.key === 'worktree.defaultForNewSessions',
+    );
+    expect(descriptor).toBeDefined();
+    expect(descriptor).not.toHaveProperty('unsetToggleValue');
   });
 });

@@ -25,7 +25,11 @@ public final class AgentDefinitionCompiler {
     private static final List<String> APPROVAL_MODES = List.of("default",
             "auto-edit", "yolo");
 
-    public record Compiled(String approvalMode, String toolProfile) {
+    public record Compiled(String modelId, String instructions,
+            String approvalMode, String toolProfile,
+            List<Map<String, Object>> skills,
+            List<Map<String, Object>> mcpServers,
+            Map<String, Object> hookCatalog, boolean hookCatalogPresent) {
     }
 
     private AgentDefinitionCompiler() {
@@ -40,83 +44,131 @@ public final class AgentDefinitionCompiler {
     public static Compiled compile(String definitionJson, boolean workspaceBound,
             String deploymentApprovalMode, List<String> toolProfiles,
             List<String> models) {
-        Map<String, Object> definition;
+        Map<String, Object> definition = definition(definitionJson);
+        String modelId = model(definition.get("model"), models);
+        String instructions = instructions(definition.get("instructions"));
+        String approvalMode = approvalMode(definition.get("permission_policy"),
+                deploymentApprovalMode);
+        String toolProfile = toolProfile(definition.get("tools"), workspaceBound,
+                approvalMode, toolProfiles);
+        List<Map<String, Object>> skills = AgentDefinitionExtensions.skills(
+                definition.get("skills"), toolProfile != null);
+        List<Map<String, Object>> mcpServers = AgentDefinitionExtensions.mcpServers(
+                definition.get("mcp_servers"), toolProfile);
+        Map<String, Object> hookCatalog = AgentDefinitionExtensions.hookCatalog(
+                definition.get("hook_catalog"), toolProfile != null);
+        if (definition.get("environment_template_id") != null) {
+            throw unsupported("environment_template_id");
+        }
+        return new Compiled(modelId, instructions, approvalMode, toolProfile,
+                skills, mcpServers, hookCatalog,
+                definition.containsKey("hook_catalog"));
+    }
+
+    /** Projects a pinned Session without reapplying current admission allowlists. */
+    public static Compiled fromPinnedContent(Map<String, Object> definition,
+            boolean workspaceBound, String approvalMode, String toolProfile) {
+        return new Compiled(model(definition.get("model"), null),
+                instructions(definition.get("instructions")), approvalMode,
+                toolProfile,
+                AgentDefinitionExtensions.skills(definition.get("skills"),
+                        workspaceBound),
+                AgentDefinitionExtensions.mcpServers(
+                        definition.get("mcp_servers"), toolProfile),
+                AgentDefinitionExtensions.hookCatalog(
+                        definition.get("hook_catalog"), workspaceBound),
+                definition.containsKey("hook_catalog"));
+    }
+
+    private static Map<String, Object> definition(String definitionJson) {
         try {
-            definition = JSON.readValue(definitionJson, CONTENT);
+            return JSON.readValue(definitionJson, CONTENT);
         } catch (Exception error) {
             throw new IllegalStateException(
                     "A stored agent definition is not valid JSON", error);
         }
-        Object model = definition.get("model");
-        if (model instanceof Map<?, ?> map) {
-            if (!map.isEmpty() && !(map.size() == 1
-                    && map.get("id") instanceof String id
-                    && !id.isBlank() && models.contains(id))) {
-                throw unsupported("model");
-            }
-        } else if (model != null) {
+    }
+
+    private static String model(Object value, List<String> models) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Map<?, ?> map)) {
             throw unsupported("model");
         }
-        Object instructions = definition.get("instructions");
-        if (instructions != null && (!(instructions instanceof String text)
+        if (map.isEmpty()) {
+            return null;
+        }
+        if (map.size() != 1 || !(map.get("id") instanceof String id)
+                || id.isBlank() || models != null && !models.contains(id)) {
+            throw unsupported("model");
+        }
+        return id;
+    }
+
+    private static String instructions(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof String text)
                 || text.getBytes(StandardCharsets.UTF_8).length
-                        > ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES)) {
+                        > ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES) {
             throw unsupported("instructions");
         }
-        String approvalMode = deploymentApprovalMode;
-        Object policy = definition.get("permission_policy");
-        if (policy instanceof Map<?, ?> map) {
-            if (!map.isEmpty()) {
-                if (map.size() == 1
-                        && map.get("approval_mode") instanceof String mode
-                        && APPROVAL_MODES.contains(mode)) {
-                    approvalMode = mode;
-                } else {
-                    throw unsupported("permission_policy");
-                }
-            }
-        } else if (policy != null) {
+        return text;
+    }
+
+    private static String approvalMode(Object value,
+            String deploymentApprovalMode) {
+        if (value == null) {
+            return deploymentApprovalMode;
+        }
+        if (!(value instanceof Map<?, ?> map)) {
             throw unsupported("permission_policy");
         }
-        Object raw = definition.get("tools");
-        List<?> tools = raw == null ? List.of()
-                : raw instanceof List<?> list ? list : null;
+        if (map.isEmpty()) {
+            return deploymentApprovalMode;
+        }
+        if (map.size() == 1
+                && map.get("approval_mode") instanceof String mode
+                && APPROVAL_MODES.contains(mode)) {
+            return mode;
+        }
+        throw unsupported("permission_policy");
+    }
+
+    private static String toolProfile(Object value, boolean workspaceBound,
+            String approvalMode, List<String> toolProfiles) {
+        List<?> tools = value == null ? List.of()
+                : value instanceof List<?> list ? list : null;
         if (tools == null) {
             throw unsupported("tools");
         }
-        String toolProfile = null;
         if (!workspaceBound) {
             if (!tools.isEmpty()) {
                 throw unsupported("tools");
             }
-        } else {
-            if (tools.size() != 1 || !(tools.getFirst() instanceof Map<?, ?> entry)
-                    || entry.size() != 2
-                    || !"hosted_profile".equals(entry.get("type"))
-                    || !(entry.get("profile") instanceof String profile)) {
-                throw unsupported("tools");
-            } else {
-                if (WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(profile)
-                        || profile.startsWith("hosted-workspace-shell/") && !WorkspaceToolProfiles.isPublicShell(profile)
-                        || !toolProfiles.contains(profile)) {
-                    throw unsupported("tools");
-                }
-                // Shell definitions must start with an asking policy (#13271).
-                // An eligible Session owner may select Full Access later.
-                if (profile.startsWith("hosted-workspace-shell/")
-                        && "yolo".equals(approvalMode)) {
-                    throw unsupported("tools");
-                }
-                toolProfile = profile;
-            }
+            return null;
         }
-        AgentDefinitionExtensions.skills(definition.get("skills"), toolProfile != null);
-        AgentDefinitionExtensions.mcpServers(definition.get("mcp_servers"), toolProfile);
-        AgentDefinitionExtensions.hookCatalog(definition.get("hook_catalog"), toolProfile != null);
-        if (definition.get("environment_template_id") != null) {
-            throw unsupported("environment_template_id");
+        if (tools.size() != 1 || !(tools.getFirst() instanceof Map<?, ?> entry)
+                || entry.size() != 2
+                || !"hosted_profile".equals(entry.get("type"))
+                || !(entry.get("profile") instanceof String profile)) {
+            throw unsupported("tools");
         }
-        return new Compiled(approvalMode, toolProfile);
+        if (WorkspaceToolProfiles.isInternalTeamLead(profile)
+                || profile.startsWith("hosted-workspace-shell/")
+                        && !WorkspaceToolProfiles.isPublicShell(profile)
+                || !toolProfiles.contains(profile)) {
+            throw unsupported("tools");
+        }
+        // Shell definitions must start with an asking policy (#13271).
+        // An eligible Session owner may select Full Access later.
+        if (profile.startsWith("hosted-workspace-shell/")
+                && "yolo".equals(approvalMode)) {
+            throw unsupported("tools");
+        }
+        return profile;
     }
 
     private static ManagedAgentException unsupported(String field) {

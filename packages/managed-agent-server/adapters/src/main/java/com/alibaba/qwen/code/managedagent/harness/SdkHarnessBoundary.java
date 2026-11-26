@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -184,17 +185,17 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     public boolean supportsPackagePreparation() { return call(delegate::supportsPackagePreparation); }
 
     @Override
-    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
         return call(() -> delegate.preparePackage(metadata, source));
     }
 
     @Override
-    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
         return call(() -> delegate.inspectPackage(metadata, source));
     }
 
     @Override
-    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
         return call(() -> delegate.previewPackage(metadata, source));
     }
 
@@ -239,6 +240,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public boolean supportsLifecycle(String profile) {
         return call(() -> delegate.supportsLifecycle(profile));
+    }
+
+    @Override
+    public boolean supportsSavedLifecycle(String profile) {
+        return call(() -> delegate.supportsSavedLifecycle(profile));
     }
 
     @Override

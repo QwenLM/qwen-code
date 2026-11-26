@@ -21,6 +21,7 @@ import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
 import { sanitizeTerminalLine } from '../ui/utils/textUtils.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { ModSession, type ModTurn } from './mod-session.js';
+import { modsWanted } from './display-translation-mod.js';
 import type { ICommandLoader } from './types.js';
 
 const sessions = new WeakMap<Config, InteractiveModSession>();
@@ -42,7 +43,7 @@ export function createInteractiveModSession(
   config: Config,
   settings: LoadedSettings,
 ): InteractiveModSession | undefined {
-  if (!settings.merged.experimental?.mods || !config.isInteractive()) return;
+  if (!modsWanted(settings) || !config.isInteractive()) return;
   let session = sessions.get(config);
   if (!session) {
     session = new InteractiveModSession(config, settings);
@@ -123,10 +124,7 @@ export class InteractiveModSession implements ICommandLoader {
           sessionId,
         ),
     })!;
-    this.unregisterCleanup = registerCleanup(() => {
-      this.unregisterCleanup = () => {};
-      return this.close();
-    });
+    this.unregisterCleanup = registerCleanup(() => this.close());
   }
 
   /**

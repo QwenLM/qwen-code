@@ -97,6 +97,7 @@ describe('main CI failure issue workflow', () => {
     const watchedFiles = {
       'E2E Tests': 'e2e',
       'Managed Agent gate': 'managed-agent-gate',
+      'Managed Agent loop verification': 'managed-agent-loop',
       'SDK Java': 'sdk-java',
       'SDK Python': 'sdk-python',
       'Qwen Code CI': 'ci',
@@ -138,7 +139,7 @@ describe('main CI failure issue workflow', () => {
         "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
-        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]\'), github.event.workflow.name)))) || ' +
+        'contains(fromJSON(\'["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]\'), github.event.workflow.name)))) || ' +
         "(github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
         "(github.event.workflow.name == 'Managed Agent gate' && " +
         'contains(fromJSON(\'["pull_request","pull_request_review"]\'), github.event.workflow_run.event))) }}',
@@ -155,7 +156,29 @@ describe('main CI failure issue workflow', () => {
     );
     for (const name of scheduledNames) {
       expect(Object.keys(watchedFiles), name).toContain(name);
+      expect(
+        parse(
+          readFileSync(`.github/workflows/${watchedFiles[name]}.yml`, 'utf8'),
+        ).on?.schedule ?? [],
+        name,
+      ).not.toHaveLength(0);
     }
+    // Nothing above reads the other direction: a watched workflow with a cron
+    // must be in that arm, or its nightly red is filtered out here while this
+    // suite stays green (how `E2E Tests` went unlisted since #5859). YAML 1.2
+    // keeps `on` a key; a 1.1 parser reads `on` as `true` and empties this.
+    const cronWatched = Object.entries(watchedFiles)
+      .filter(
+        ([, f]) =>
+          parse(readFileSync(`.github/workflows/${f}.yml`, 'utf8')).on
+            ?.schedule,
+      )
+      .map(([name]) => name);
+    expect(cronWatched.length, 'watched with a cron').toBeGreaterThan(0);
+    expect(
+      cronWatched.filter((name) => !scheduledNames.includes(name)),
+      `watched-with-cron: ${cronWatched.join(', ')}`,
+    ).toEqual([]);
   });
 
   // This matrix pins the TRIGGER gate only. A cancelled run now passes the
@@ -170,6 +193,11 @@ describe('main CI failure issue workflow', () => {
     ['tui-parity', 'schedule', 'main', 'success', false],
     ['tui-parity', 'schedule', 'main', 'cancelled', true],
     ['E2E Tests', 'push', 'main', 'cancelled', true],
+    // A nightly red arrives as a `schedule` event, which the push arm cannot
+    // carry by definition — not because the push arm stopped watching this
+    // lane: `e2e.yml` still declares `push: main`, and the row above is that
+    // path. Both arms matter here; neither row may be dropped for the other.
+    ['E2E Tests', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'skipped', false],
     ['tui-parity', 'schedule', 'main', 'timed_out', false],
     ['tui-parity', 'schedule', 'feature', 'failure', false],
@@ -1284,6 +1312,7 @@ printf '%s\\n' '1'
         markerIssues = [],
         closedIssues = [],
         provisional = false,
+        botPat = 'ghp_stub',
       } = opts;
       const tmp = mkdtempSync(join(tmpdir(), 'ci-issue-reuse-'));
       try {
@@ -1309,6 +1338,7 @@ printf '%s\\n' '1'
           `#!/usr/bin/env bash
 set -eu
 printf '%s\\n' "$*" >> "${tmp}/calls"
+printf '%s\\n' "\${GH_TOKEN:-}" >> "${tmp}/tokens"
 if [[ "$1 $2" == 'issue list' ]]; then
   [[ "$*" == *'--json number,title,author'* && "$*" != *'--search'* ]] || exit 2
   if [[ "$*" == *'--state open'* ]]; then
@@ -1376,7 +1406,9 @@ fi
               REPO: 'QwenLM/qwen-code',
               WORKFLOW_NAME: 'SDK Java',
               WORKFLOW_ID: '1234',
-              BOT_LOGIN: 'qwen-code-dev-bot',
+              BOT_PAT: botPat,
+              WORKFLOW_TOKEN: 'ghs_workflow_stub',
+              CONFIGURED_BOT_LOGIN: 'qwen-code-dev-bot',
               ISSUE_BODY: 'Run 123 failed at commit abcdef123456',
               RUN_ATTEMPT: '2',
               SIGNATURE_TITLE: signatureTitle,
@@ -1399,6 +1431,9 @@ fi
             : null,
           calls: existsSync(join(tmp, 'calls'))
             ? readFileSync(join(tmp, 'calls'), 'utf8')
+            : '',
+          tokens: existsSync(join(tmp, 'tokens'))
+            ? readFileSync(join(tmp, 'tokens'), 'utf8')
             : '',
           output: existsSync(join(tmp, 'output'))
             ? readFileSync(join(tmp, 'output'), 'utf8')
@@ -1894,13 +1929,58 @@ fi
         '${{ needs.analyze.outputs.comment_body }}',
       );
       expect(writer.env.WORKFLOW_ID).toBe('${{ github.event.workflow.id }}');
-      expect(writer.env.BOT_LOGIN).toBe(
+      expect(writer.env.BOT_PAT).toBe('${{ secrets.CI_DEV_BOT_PAT }}');
+      expect(writer.env.WORKFLOW_TOKEN).toBe('${{ github.token }}');
+      expect(writer.env.CONFIGURED_BOT_LOGIN).toBe(
         "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}",
       );
       expect(jobs.analyze.outputs.comment_body).toBe(
         '${{ steps.summary.outputs.body }}',
       );
       expect(workflow).not.toContain('apply_autofix_route');
+    });
+
+    it('records the failure with the workflow token when the bot PAT is absent', () => {
+      // A deleted or renamed CI_DEV_BOT_PAT used to leave GH_TOKEN empty, so
+      // gh refused every call and the reporter itself went red — main's
+      // failure went unrecorded, which is the silence this workflow exists
+      // to prevent. The fallback must also switch the lookup identity: the
+      // filings are authored by github-actions[bot] then, and searching for
+      // them under the bot's login would file a duplicate every run.
+      const result = run([], { botPat: '' });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.calls).toContain('issue create');
+      expect(result.stdout).toContain('CI_DEV_BOT_PAT is not configured');
+      expect(result.tokens.trim().split('\n')).toEqual(
+        expect.arrayContaining(['ghs_workflow_stub']),
+      );
+      expect(result.tokens).not.toContain('ghp_stub');
+    });
+
+    it('reuses its own workflow-token aggregate instead of filing a duplicate', () => {
+      const result = run(
+        [
+          {
+            ...botIssue(42),
+            author: { is_bot: true, login: 'app/github-actions' },
+          },
+        ],
+        { botPat: '' },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toContain('issue create');
+    });
+
+    it('still writes as the reporting bot while the PAT is configured', () => {
+      const result = run([botIssue(42)]);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.tokens.trim().split('\n')).toEqual(
+        expect.arrayContaining(['ghp_stub']),
+      );
+      expect(result.tokens).not.toContain('ghs_workflow_stub');
+      expect(result.stdout).not.toContain('CI_DEV_BOT_PAT is not configured');
     });
 
     it('wires the signature route from the analysis through to the writer', () => {

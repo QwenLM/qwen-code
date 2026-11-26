@@ -23,6 +23,10 @@ import {
 } from '../memory/request-context.js';
 import { markCompressedHistory } from '../core/environmentContext.js';
 import {
+  appendPermissionContext,
+  findLatestPermissionContext,
+} from '../core/permission-context.js';
+import {
   clearApiHistoryDirectoryContext,
   getApiHistoryPromptId,
   markApiHistoryPrompt,
@@ -49,10 +53,14 @@ export function getRecordRewindId(record: ChatRecord): string | undefined {
 
 /**
  * A turn starts at its prompt entry; a tool-loop continuation carries the
- * turn's id but no prompt of its own.
+ * turn's id but no prompt of its own. A retained model response can also carry
+ * its summarized prompt's id, but is not a rewind target.
  */
 function isPromptEntry(content: Content): boolean {
-  return !content.parts?.some((part) => part.functionResponse);
+  return (
+    content.role === 'user' &&
+    !content.parts?.some((part) => part.functionResponse)
+  );
 }
 
 /** Returns the unique matching prompt entry at or after `startIndex`, or -1. */
@@ -350,6 +358,21 @@ export class SessionApiHistoryAccumulator {
       return;
     }
     if (record.type === 'system') {
+      if (record.subtype === 'permission_context_snapshot') {
+        const snapshot = record.message?.parts?.[0];
+        if (
+          snapshot &&
+          findLatestPermissionContext([{ role: 'user', parts: [snapshot] }]) &&
+          typeof snapshot.text === 'string' &&
+          findLatestPermissionContext(this.history)?.text !== snapshot.text
+        ) {
+          const length = this.history.length;
+          appendPermissionContext(this.history, { ...snapshot });
+          if (this.history.length > length)
+            this.systemNotificationFlags.push(false);
+        }
+        return;
+      }
       if (record.subtype === 'memory_catalog_snapshot') {
         const snapshot = record.message?.parts?.[0];
         if (

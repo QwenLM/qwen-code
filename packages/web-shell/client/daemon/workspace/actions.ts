@@ -19,6 +19,7 @@ import type {
   DaemonDirectoryListing,
   DaemonFileStat,
   DaemonGoal,
+  DaemonInputHistoryKind,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
   DaemonWorkspaceDirectoryPickerResult,
@@ -1019,13 +1020,78 @@ export function createDaemonWorkspaceActions({
       };
     },
 
+    async loadInputHistory({ kind, limit, workspaceId, ifNoneMatch }) {
+      requireClient(getClient, 'Load input history failed');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/input-history`
+        : '/workspace/input-history';
+      const url = createDaemonRequestUrl(baseUrl, path);
+      url.searchParams.set('kind', kind);
+      if (limit !== undefined) {
+        url.searchParams.set('limit', String(limit));
+      }
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (ifNoneMatch) headers['If-None-Match'] = ifNoneMatch;
+      const res = await withActionTimeout(
+        requestRest(url, { headers }),
+        'Load input history timed out',
+      );
+      if (res.status === 304) {
+        return { notModified: true };
+      }
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `GET ${path}`));
+      }
+      const data = (await res.json()) as {
+        kind?: unknown;
+        entries?: unknown;
+        revision?: unknown;
+      };
+      const resolvedKind: DaemonInputHistoryKind =
+        data.kind === 'shell' ? 'shell' : kind;
+      return {
+        notModified: false,
+        kind: resolvedKind,
+        entries: Array.isArray(data.entries)
+          ? data.entries.filter(
+              (item): item is string => typeof item === 'string',
+            )
+          : [],
+        revision: typeof data.revision === 'string' ? data.revision : '',
+      };
+    },
+
+    async recordInputHistory({ kind, entry, workspaceId }) {
+      requireClient(getClient, 'Record input history failed');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/input-history`
+        : '/workspace/input-history';
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        requestRest(url, {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: JSON.stringify({ kind, entry }),
+        }),
+        'Record input history timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `POST ${path}`));
+      }
+    },
+
     // Goals. `GET /goals` is REST-only (like /scheduled-tasks) and not on the
     // DaemonClient transport; the clear path reuses the existing per-session
     // route so a page-level clear and a `/goal clear` in chat take the same
-    // code path in the daemon.
-    async listGoals() {
+    // code path in the daemon. With a `workspaceId` the listing targets that
+    // workspace's qualified route; without one it hits the primary surface.
+    async listGoals(workspaceId) {
       requireClient(getClient, 'List goals failed');
-      const url = createDaemonRequestUrl(baseUrl, '/goals');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/goals`
+        : '/goals';
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         requestRest(url, {
           headers: createDaemonHeaders(token),
@@ -1033,7 +1099,7 @@ export function createDaemonWorkspaceActions({
         'List goals timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, 'GET /goals'));
+        throw new Error(await readDaemonError(res, `GET ${path}`));
       }
       const data = (await res.json()) as {
         goals?: unknown[];
@@ -1436,6 +1502,20 @@ export function createDaemonWorkspaceActions({
         'Remove workspace timed out',
         options?.timeoutMs,
       );
+    },
+
+    async artifactLibrary(workspaceSelector, options) {
+      const client = requireClient(getClient, 'Load artifact library failed');
+      return client
+        .workspaceByCwd(workspaceSelector)
+        .artifactLibrary({ signal: options?.signal });
+    },
+
+    artifactLibraryStream(workspaceSelector, options) {
+      const client = requireClient(getClient, 'Stream artifact library failed');
+      return client
+        .workspaceByCwd(workspaceSelector)
+        .artifactLibraryStream({ signal: options?.signal });
     },
   };
 }

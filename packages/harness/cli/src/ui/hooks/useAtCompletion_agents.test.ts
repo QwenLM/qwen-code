@@ -1,0 +1,150 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { useState } from 'react';
+import { renderHook } from '../../test-utils/render.js';
+import { waitFor } from '../../test-utils/async.js';
+import { useAtCompletion } from './useAtCompletion.js';
+import type { Config, AgentDefinition } from '@qwen-code/core';
+import { createTmpDir, cleanupTmpDir } from '@qwen-code/core/test-utils';
+import type { Suggestion } from '../components/SuggestionsDisplay.js';
+import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
+import { CommandKind } from '../commands/types.js';
+
+// Test harness to capture the state from the hook's callbacks.
+function useTestHarnessForAtCompletion(
+  enabled: boolean,
+  pattern: string,
+  config: Config | undefined,
+  cwd: string,
+) {
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
+
+  useAtCompletion({
+    enabled,
+    pattern,
+    config,
+    cwd,
+    setSuggestions,
+    setIsLoadingSuggestions,
+  });
+
+  return { suggestions, isLoadingSuggestions };
+}
+
+describe('useAtCompletion with Agents', () => {
+  let testRootDir: string;
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    const mockAgentRegistry = {
+      getAllDefinitions: vi.fn(() => [
+        {
+          name: 'CodebaseInvestigator',
+          description: 'Investigates codebase',
+          kind: 'local',
+        } as AgentDefinition,
+        {
+          name: 'OtherAgent',
+          description: 'Another agent',
+          kind: 'local',
+        } as AgentDefinition,
+      ]),
+    };
+
+    mockConfig = {
+      getFileFilteringOptions: vi.fn(() => ({
+        respectGitIgnore: true,
+        respectBrandIgnore: true,
+      })),
+      getEnableRecursiveFileSearch: () => true,
+      getFileFilteringDisableFuzzySearch: () => false,
+      getFileFilteringEnableFuzzySearch: () => true,
+      getAgentsSettings: () => ({}),
+      getMcpClientManager: vi.fn().mockReturnValue({
+        getResources: () => [],
+      }),
+      getAgentRegistry: () => mockAgentRegistry,
+    } as unknown as Config;
+    vi.clearAllMocks();
+  });
+
+  afterEach(async () => {
+    if (testRootDir) {
+      await cleanupTmpDir(testRootDir);
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('should include agent suggestions', async () => {
+    testRootDir = await createTmpDir({});
+
+    const { result } = await renderHook(() =>
+      useTestHarnessForAtCompletion(true, '', mockConfig, testRootDir),
+    );
+
+    await waitFor(() => {
+      expect(result.current.suggestions.length).toBeGreaterThan(0);
+    });
+
+    const agentSuggestion = result.current.suggestions.find(
+      (s) => s.value === 'CodebaseInvestigator',
+    );
+    expect(agentSuggestion).toBeDefined();
+    expect(agentSuggestion?.commandKind).toBe(CommandKind.AGENT);
+  });
+
+  it('should keep agent suggestions beyond the visible window', async () => {
+    testRootDir = await createTmpDir({});
+    const agents = Array.from(
+      { length: MAX_SUGGESTIONS_TO_SHOW + 2 },
+      (_, i) =>
+        ({
+          name: `Agent${String(i + 1).padStart(2, '0')}`,
+          description: `Agent ${i + 1}`,
+          kind: 'local',
+        }) as AgentDefinition,
+    );
+
+    mockConfig.getAgentRegistry = vi.fn().mockReturnValue({
+      getAllDefinitions: vi.fn(() => agents),
+    });
+
+    const { result } = await renderHook(() =>
+      useTestHarnessForAtCompletion(true, '', mockConfig, testRootDir),
+    );
+
+    await waitFor(() => {
+      expect(result.current.suggestions.length).toBe(agents.length);
+    });
+
+    expect(result.current.suggestions.map((s) => s.value)).toEqual(
+      agents.map((agent) => agent.name),
+    );
+  });
+
+  it('should filter agent suggestions', async () => {
+    testRootDir = await createTmpDir({});
+
+    const { result } = await renderHook(() =>
+      useTestHarnessForAtCompletion(true, 'Code', mockConfig, testRootDir),
+    );
+
+    await waitFor(() => {
+      expect(result.current.suggestions.length).toBeGreaterThan(0);
+    });
+
+    expect(result.current.suggestions.map((s) => s.value)).toContain(
+      'CodebaseInvestigator',
+    );
+    expect(result.current.suggestions.map((s) => s.value)).not.toContain(
+      'OtherAgent',
+    );
+  });
+});

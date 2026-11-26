@@ -164,6 +164,7 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean terminal,
             boolean clientFiles) {
         @JsonProperty("diagnostics")
         public boolean diagnostics() {
@@ -318,6 +319,14 @@ public final class ApiModels {
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
 
+    public record WebShellTerminalTicketRequest(
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._-]{1,256}") String sessionId,
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._-]{1,256}") String terminalId) {
+    }
+
+    public record WebShellTerminalTicket(String ticket, long expiresInSeconds) {
+    }
+
     public record WebShellActivityQueryRequest(@NotBlank String sessionId, @NotBlank String kind,
             String cursor, Integer limit) { }
 
@@ -465,7 +474,7 @@ public final class ApiModels {
     public record WebShellChangeModelRequest(@Size(max = 128) String requestId,
             @NotBlank @Size(max = 128) String sessionId,
             @NotBlank @Size(max = 128) String idempotencyKey,
-            @NotBlank @Size(max = 512) String modelId,
+            @NotBlank @Size(max = 128) String modelId,
             @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision) {}
 
     public record WebShellModelChangeResult(String sessionId,
@@ -987,6 +996,15 @@ public final class ApiModels {
 
     public record WebShellArtifactQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) { }
+
+    public record WebShellWorkspaceArtifactQueryRequest(@NotBlank String workspaceId,
+            String cursor, Integer limit) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException(
+                    "Unknown workspace artifact query request field: " + name);
+        }
+    }
 
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {

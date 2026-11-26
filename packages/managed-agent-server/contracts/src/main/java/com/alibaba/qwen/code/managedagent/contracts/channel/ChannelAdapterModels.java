@@ -31,7 +31,7 @@ public final class ChannelAdapterModels {
 
     public record RegisterChannelRequest(
             @NotBlank @Size(max = 64) String platform,
-            @NotBlank @Size(max = 512) String accountId,
+            @NotBlank @Size(max = 256) String accountId,
             @Min(1) long accountGeneration,
             @NotBlank @Size(max = 512) String actorId,
             @NotBlank @Size(max = 128) String workspaceId,
@@ -49,9 +49,9 @@ public final class ChannelAdapterModels {
     public record RouteScope(
             @NotBlank @Pattern(regexp = "user|chat_thread|thread|single")
                     String kind,
-            @Size(max = 512) String senderId,
-            @Size(max = 512) String chatId,
-            @Size(max = 512) String threadId) {
+            @Size(max = 256) String senderId,
+            @Size(max = 256) String chatId,
+            @Size(max = 256) String threadId) {
     }
 
     public record InboundAttachment(
@@ -65,9 +65,9 @@ public final class ChannelAdapterModels {
             @NotBlank @Size(max = 512) String platformEventId,
             @Min(1) long semanticRevision,
             @NotNull @Valid RouteScope scope,
-            @NotBlank @Size(max = 512) String senderId,
-            @Size(max = 512) String chatId,
-            @Size(max = 512) String threadId,
+            @NotBlank @Size(max = 256) String senderId,
+            @Size(max = 256) String chatId,
+            @Size(max = 256) String threadId,
             @Size(max = 200) String subject,
             @NotNull @Size(max = 32_000) String text,
             @Size(max = 16) List<@Valid InboundAttachment> attachments,
@@ -114,5 +114,47 @@ public final class ChannelAdapterModels {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record ResendResponse(String deliveryId, String resentFrom,
             boolean possibleDuplicate, DeliveryView delivery) {
+    }
+
+    /** PR-watch binding create: the target Session is caller-chosen here,
+     * validated against the channel instance's Workspace; injection later
+     * forces the bound Session. Bounds mirror the TS envelope contract. */
+    public record PrWatchCreateRequest(
+            @NotBlank @Size(max = 512) String sessionId,
+            @NotBlank @Size(max = 64) String owner,
+            @NotBlank @Size(max = 128) String repo,
+            @Min(1) long prNumber,
+            @NotNull @Size(min = 1, max = 3) List<@NotBlank String> events) {
+    }
+
+    public record PrWatchRetireRequest(
+            @NotBlank @Size(max = 64) String owner,
+            @NotBlank @Size(max = 128) String repo,
+            @Min(1) long prNumber) {
+    }
+
+    public record PrWatchInjectRequest(
+            @NotBlank @Size(max = 64) String owner,
+            @NotBlank @Size(max = 128) String repo,
+            @Min(1) long prNumber,
+            @NotBlank @Size(max = 64) String transition,
+            @NotBlank @Size(max = 512) String headSha,
+            @Min(1) long episode,
+            @NotNull @Size(max = 4_000) String evidence,
+            @NotNull @Size(min = 1, max = 32_000) String text) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PrWatchBindingView(String bindingId, String owner,
+            String repo, long prNumber, String sessionId,
+            List<String> events, long createdAt) {
+    }
+
+    public record PrWatchBindingList(List<PrWatchBindingView> bindings) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PrWatchAdmission(String inputId, String turnId,
+            String sessionId, String bindingId, boolean replayed) {
     }
 }

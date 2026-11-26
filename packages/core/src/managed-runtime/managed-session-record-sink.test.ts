@@ -416,6 +416,18 @@ describe('managed session record sink', () => {
       wakeReason: 'input',
       notBefore: Date.now() + 60_000,
     });
+    // A watched-PR transition is a wake source on the same terms: a long
+    // bound Session that compacts mid-flight must not answer the adapter's
+    // injection with a conflict it cannot converge on.
+    await harness.authority.submitInput(command('wake-pr-event'), {
+      inputId: 'wake-pr-event',
+      turnId: 'wake-pr-event',
+      source: 'pr_event',
+      contentRef: inputRef,
+      deadline: null,
+      admissionRef: inputRef,
+      wakeReason: 'input',
+    });
     maintenance = {
       ...maintenance,
       phase: 'generating',
@@ -574,25 +586,34 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
-  it('round-trips marked memory snapshots through the managed projection', async () => {
-    const harness = await createHarness();
-    const snapshot = record({
-      type: 'system',
-      subtype: 'memory_catalog_snapshot',
-      message: {
-        role: 'user',
-        parts: [
-          {
-            text: 'full catalog',
-            partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
-          },
-        ],
-      },
-    });
-    await harness.sink.write(snapshot);
-    expect(await harness.sink.project()).toEqual([snapshot]);
-    await harness.close();
-  });
+  it.each(['memory_catalog_snapshot', 'permission_context_snapshot'] as const)(
+    'round-trips %s through the managed projection',
+    async (subtype) => {
+      const harness = await createHarness();
+      const snapshot = record({
+        type: 'system',
+        subtype,
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text:
+                subtype === 'memory_catalog_snapshot'
+                  ? 'full catalog'
+                  : 'effective permissions',
+              partMetadata:
+                subtype === 'memory_catalog_snapshot'
+                  ? { 'qwen-code:memory-catalog-snapshot': true }
+                  : { 'qwen-code:permission-context': 'default' },
+            },
+          ],
+        },
+      });
+      await harness.sink.write(snapshot);
+      expect(await harness.sink.project()).toEqual([snapshot]);
+      await harness.close();
+    },
+  );
 
   it('carries the record shapes the projection can reproduce', async () => {
     const harness = await createHarness();

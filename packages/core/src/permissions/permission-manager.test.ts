@@ -8,6 +8,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { evaluatePermissionRules } from '../core/permission-helpers.js';
+import { runWithTurnSkillSnapshot } from '../skills/turn-skill-snapshot.js';
 import {
   parseRule,
   parseRules,
@@ -236,6 +238,66 @@ const PROTO_KEYS = [
 /** The session allow list, which has no public accessor. */
 const sessionAllowRules = (pm: PermissionManager) =>
   (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules.allow;
+
+it.each(['read_file', 'run_shell_command'])(
+  'enforces source and staged Read restrictions for %s',
+  async (toolName) => {
+    const source = path.resolve('/project/skills/fixture/SKILL.md');
+    const staged = path.resolve('/snapshot/0/SKILL.md');
+    const request = (name: string) => {
+      const filePath = path.join(path.dirname(staged), name);
+      return toolName === 'read_file'
+        ? { toolName, filePath }
+        : { toolName, command: `cat "${filePath}"` };
+    };
+    const deny = makePm({
+      permissionsDeny: ['Read(./skills/fixture/private.txt)'],
+    });
+    const ask = makePm({
+      permissionsAsk: ['Read(./skills/fixture/review.txt)'],
+    });
+    const stagedFile = path
+      .join(path.dirname(staged), 'local.txt')
+      .replaceAll(path.sep, '/');
+    const stagedDeny = makePm({
+      permissionsDeny: [
+        `Read(${stagedFile.startsWith('/') ? '/' : ''}${stagedFile})`,
+      ],
+    });
+
+    await runWithTurnSkillSnapshot(
+      {
+        version: 1,
+        id: 'fixture',
+        digest: 'fixture',
+        skills: [
+          {
+            name: 'fixture',
+            description: 'fixture',
+            body: 'fixture',
+            level: 'project',
+            filePath: staged,
+            sourceFilePath: source,
+          },
+        ],
+      },
+      async () => {
+        await expect(
+          evaluatePermissionRules(deny, 'allow', request('private.txt')),
+        ).resolves.toEqual({ finalPermission: 'deny', pmForcedAsk: false });
+        await expect(
+          evaluatePermissionRules(ask, 'allow', request('review.txt')),
+        ).resolves.toEqual({ finalPermission: 'ask', pmForcedAsk: true });
+        await expect(
+          evaluatePermissionRules(ask, 'ask', request('public.txt')),
+        ).resolves.toEqual({ finalPermission: 'ask', pmForcedAsk: false });
+        await expect(
+          evaluatePermissionRules(stagedDeny, 'allow', request('local.txt')),
+        ).resolves.toEqual({ finalPermission: 'deny', pmForcedAsk: false });
+      },
+    );
+  },
+);
 
 // ─── getToolNameAliases ──────────────────────────────────────────────────────
 
@@ -1033,6 +1095,21 @@ describe('resolvePathPattern', () => {
   it('/Users/alice/file is relative to project root, NOT absolute', async () => {
     expect(resolve('/Users/alice/file')).toBe('/project/Users/alice/file');
   });
+
+  // A Windows absolute path carries its own root. Joined onto cwd it became
+  // `<cwd>/D:/probe/**`, which no candidate path ever matched (#17802).
+  it.each([
+    ['drive letter, forward slashes', 'D:/probe/**'],
+    ['drive letter, backslashes', 'D:\\probe\\**'],
+    ['`//` prefix + drive letter', '//D:/probe/**'],
+    ['`//` prefix + drive letter, backslashes', '//D:\\probe\\**'],
+  ])('resolves %s to the drive-rooted pattern', (_label, pattern) => {
+    expect(resolve(pattern)).toBe('D:/probe/**');
+  });
+
+  it('resolves a UNC root to its forward-slash form', async () => {
+    expect(resolve('\\\\server\\share\\**')).toBe('//server/share/**');
+  });
 });
 
 // ─── matchesPathPattern ──────────────────────────────────────────────────────
@@ -1050,6 +1127,19 @@ describe('matchesPathPattern', () => {
     expect(matches('.env', '/project/.env')).toBe(true);
     expect(matches('*.env', '/project/.env')).toBe(true);
   });
+
+  // The three spellings a Windows user can write for one absolute directory.
+  // Every row was `false` before, so a `deny` on `D:` silently did not apply
+  // and an "Always Allow" entry never stopped the repeat prompt (#17802).
+  it.each(['D:/probe/**', 'D:\\probe\\**', '//D:/probe/**'])(
+    'matches a Windows drive path against %s',
+    async (pattern) => {
+      expect(matches(pattern, 'D:\\probe\\p.txt')).toBe(true);
+      expect(matches(pattern, 'D:/probe/nested/p.txt')).toBe(true);
+      expect(matches(pattern, 'D:\\other\\p.txt')).toBe(false);
+      expect(matches(pattern, '/project/probe/p.txt')).toBe(false);
+    },
+  );
 
   // A line terminator is an ordinary word character to bash, so a redirect
   // target can end in one, and picomatch's `.`-based `**` body matches none of
@@ -2968,6 +3058,27 @@ describe('buildPermissionRules', () => {
     it('falls back to bare display name when no filePath', async () => {
       expect(build({ toolName: 'read_file' })).toEqual(['Read']);
     });
+
+    // A Windows dirPath carries no leading separator, so without the full `//`
+    // prefix "Always Allow" persisted `Read(D:\proj\docs/**)` — a rule that
+    // could never match again, re-prompting for the same directory (#17802).
+    it.each([
+      [
+        'read_file',
+        'D:/Workspace/proj/docs/guide.md',
+        'Read(//D:/Workspace/proj/docs/**)',
+      ],
+      [
+        'glob',
+        'D:\\Workspace\\proj\\docs',
+        'Read(//D:/Workspace/proj/docs/**)',
+      ],
+    ])(
+      'writes a `//` rule for the Windows path %s',
+      (toolName, filePath, rule) => {
+        expect(build({ toolName, filePath })).toEqual([rule]);
+      },
+    );
   });
 
   describe('generated rules round-trip through parseRule and matchesRule', () => {

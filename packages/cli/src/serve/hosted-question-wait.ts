@@ -54,8 +54,10 @@ export function questionWaitDefinitionAdmitted(
       'hosted-workspace-files/1',
       'hosted-workspace-files/2',
       'hosted-workspace-files/3',
+      'hosted-workspace-files/4',
       'hosted-workspace-shell/1',
       'hosted-workspace-shell/3',
+      'hosted-workspace-shell/4',
     ].includes(String(definition['toolProfile'] ?? 'hosted-workspace-files/1'))
   )
     return false;
@@ -69,7 +71,8 @@ export function questionWaitDefinitionAdmitted(
     definition['publicChildAgentsVersion'] === 1 &&
     (expectedDepth === undefined || expectedDepth === 1) &&
     (definition['toolProfile'] === 'hosted-workspace-shell/1' ||
-      definition['toolProfile'] === 'hosted-workspace-shell/3') &&
+      definition['toolProfile'] === 'hosted-workspace-shell/3' ||
+      definition['toolProfile'] === 'hosted-workspace-shell/4') &&
     child['depth'] === 1 &&
     typeof child['parentSessionId'] === 'string' &&
     child['parentSessionId'] === child['rootSessionId'] &&
@@ -140,6 +143,7 @@ export async function waitForHostedQuestion(options: {
   expiresAt: number;
   signal: AbortSignal;
   released?: () => void;
+  registerFreeze?: (freeze: () => boolean) => void;
 }): Promise<void> {
   const { session, broker, waiters, requestId, expiresAt, signal } = options;
   const claim = broker.mountClaim();
@@ -147,6 +151,8 @@ export async function waitForHostedQuestion(options: {
     throw new Error('Original question mount claim is unavailable.');
   const stop = new AbortController();
   let failure: unknown;
+  let released = false;
+  let retryRunning = true;
   const pending = () =>
     !stop.signal.aborted &&
     !signal.aborted &&
@@ -161,8 +167,10 @@ export async function waitForHostedQuestion(options: {
     if (!pending()) return false;
     try {
       await broker.releaseMount(claim);
-      if (!stop.signal.aborted && broker.mountClaim() === claim)
+      if (!stop.signal.aborted && broker.mountClaim() === claim) {
+        released = true;
         options.released?.();
+      }
       return false;
     } catch (cause) {
       if (!pending() || broker.mountClaim() !== claim) return false;
@@ -178,6 +186,14 @@ export async function waitForHostedQuestion(options: {
     signal,
     () => !pending() || failure !== undefined,
   );
+  const park = (): boolean => {
+    if (retryRunning || !released || !waiters.park(requestId)) return false;
+    stop.abort();
+    options.brokerOptions.mountHandbacks?.delete(finish);
+    signal.removeEventListener('abort', finish);
+    return true;
+  };
+  options.registerFreeze?.(park);
   options.brokerOptions.mountHandbacks?.add(finish);
   signal.addEventListener('abort', finish, { once: true });
   const first = attempt();
@@ -194,12 +210,16 @@ export async function waitForHostedQuestion(options: {
       again = await attempt();
     }
   })();
-  void retry.catch((cause: unknown) => {
-    if (!stop.signal.aborted) {
-      failure = cause;
-      waiters.notify(requestId);
-    }
-  });
+  void retry
+    .catch((cause: unknown) => {
+      if (!stop.signal.aborted) {
+        failure = cause;
+        waiters.notify(requestId);
+      }
+    })
+    .finally(() => {
+      retryRunning = false;
+    });
   try {
     await Promise.race([
       first,

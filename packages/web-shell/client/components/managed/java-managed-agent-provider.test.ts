@@ -1144,6 +1144,75 @@ describe('createJavaManagedAgentProvider', () => {
     },
   );
 
+  it('wires the workspace artifact reader and maps the page capability flag', async () => {
+    const page = { data: [], nextCursor: null, hasMore: false };
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (url) =>
+      jsonResponse(
+        String(url).endsWith('/workspaces/query')
+          ? {
+              data: [],
+              defaultWorkspace: null,
+              hasMore: false,
+              capabilities: {
+                workspaceBinding: true,
+                workspaceContext: false,
+                workspaceArtifactLibrary: true,
+              },
+            }
+          : page,
+      ),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant-a:actor-a',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    expect(
+      (await provider.workspaceBinding!.list({ clientId: 'client' }))
+        .artifactLibrary,
+    ).toBe(true);
+    const abort = new AbortController();
+    expect(
+      await provider.workspaceArtifacts!.listArtifacts('ws-a', {
+        clientId: 'client',
+        cursor: 'next',
+        limit: 50,
+        signal: abort.signal,
+      }),
+    ).toEqual(page);
+    expect(String(fetchImpl.mock.calls[1][0])).toContain(
+      '/workspaces/artifacts/query',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      workspaceId: 'ws-a',
+      cursor: 'next',
+      limit: 50,
+    });
+    expect(fetchImpl.mock.calls[1][1]?.signal).toBe(abort.signal);
+  });
+
+  it('defaults the artifact library flag to false when the page omits it', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: [],
+        defaultWorkspace: null,
+        hasMore: false,
+        capabilities: { workspaceBinding: true, workspaceContext: false },
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant-a:actor-a',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    expect(
+      (await provider.workspaceBinding!.list({ clientId: 'client' }))
+        .artifactLibrary,
+    ).toBe(false);
+  });
+
   it('creates a bound empty session without requiring turnId', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) =>
       jsonResponse(
@@ -2454,6 +2523,145 @@ describe('createJavaManagedAgentProvider', () => {
       );
       expect(calls.length).toBeGreaterThan(2);
     });
+    it('observes accepted admission before a completed response settles', async () => {
+      const onAccepted = vi.fn();
+      const onSettlement = vi.fn();
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(operation('pending'))
+        .mockResolvedValueOnce(operation('completed'));
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      const answer = provider.actions!.respond(action, 'allow', {
+        clientId: 'client-1',
+        idempotencyKey: 'tool_approval_1:allow',
+        onAccepted,
+        onSettlement,
+      });
+      await vi.advanceTimersByTimeAsync(250);
+      await answer;
+      expect(onAccepted).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operationId: 'op-1',
+          sessionId: 'session-1',
+        }),
+      );
+      expect(onSettlement).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operationId: 'op-1',
+          sessionId: 'session-1',
+          status: 'completed',
+        }),
+      );
+      expect(onAccepted.mock.invocationCallOrder[0]).toBeLessThan(
+        onSettlement.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('preserves accepted and failed operation evidence before rejecting', async () => {
+      const onAccepted = vi.fn();
+      const onSettlement = vi.fn();
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(operation('pending'))
+        .mockResolvedValueOnce(operation('failed', 'workspace_unavailable'));
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      // eslint-disable-next-line vitest/valid-expect -- attached before advancing timers, then awaited after the operation settles
+      const answer = expect(
+        provider.actions!.respond(action, 'allow', {
+          clientId: 'client-1',
+          idempotencyKey: 'tool_approval_1:allow',
+          onAccepted,
+          onSettlement,
+        }),
+      ).rejects.toThrow('approval answer failed (workspace_unavailable)');
+      await vi.advanceTimersByTimeAsync(250);
+      await answer;
+      expect(onAccepted).toHaveBeenCalledWith(
+        expect.objectContaining({ operationId: 'op-1' }),
+      );
+      expect(onSettlement).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operationId: 'op-1',
+          status: 'failed',
+          failureCode: 'workspace_unavailable',
+        }),
+      );
+      expect(onAccepted.mock.invocationCallOrder[0]).toBeLessThan(
+        onSettlement.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('does not report admission for a response without operation identity', async () => {
+      const onAccepted = vi.fn();
+      const onSettlement = vi.fn();
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(
+        jsonResponse({
+          sessionId: 'session-1',
+          type: 'action_response',
+          status: 'pending',
+          admissionStage: 'java_durable',
+          deliveryState: 'leased',
+          replayed: false,
+        }),
+      );
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      await expect(
+        provider.actions!.respond(action, 'allow', {
+          clientId: 'client-1',
+          idempotencyKey: 'tool_approval_1:allow',
+          onAccepted,
+          onSettlement,
+        }),
+      ).rejects.toThrow('Managed Agent action response identity mismatch');
+      expect(onAccepted).not.toHaveBeenCalled();
+      expect(onSettlement).not.toHaveBeenCalled();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a polled operation with mismatched identity without reporting settlement', async () => {
+      const onAccepted = vi.fn();
+      const onSettlement = vi.fn();
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(operation('pending'))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            operationId: 'op-other',
+            sessionId: 'session-1',
+            type: 'action_response',
+            status: 'completed',
+            admissionStage: 'java_durable',
+            deliveryState: 'confirmed',
+            replayed: false,
+          }),
+        );
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      // eslint-disable-next-line vitest/valid-expect -- attached before advancing timers, then awaited after the poll rejects
+      const answer = expect(
+        provider.actions!.respond(action, 'allow', {
+          clientId: 'client-1',
+          idempotencyKey: 'tool_approval_1:allow',
+          onAccepted,
+          onSettlement,
+        }),
+      ).rejects.toThrow('Managed Agent action response identity mismatch');
+      await vi.advanceTimersByTimeAsync(250);
+      await answer;
+      expect(onAccepted).toHaveBeenCalledTimes(1);
+      expect(onSettlement).not.toHaveBeenCalled();
+    });
   });
 
   it('reports the actions capability only when the Session has it', async () => {
@@ -2482,6 +2690,49 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       (await provider.getSession('session-1', { clientId: 'c' })).capabilities,
     ).toEqual({ canSend: true, canCancel: false });
+  });
+
+  it('reports the terminal capability from the Session summary', async () => {
+    const session = {
+      sessionId: 'session-1',
+      status: 'ACTIVE',
+      createdAt: 1,
+      updatedAt: 1,
+      lastSequence: 0,
+    };
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...session,
+            capabilities: { terminal: true },
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...session,
+            capabilities: { terminal: null },
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ ...session, capabilities: {} })),
+    });
+    const load = () => provider.getSession('session-1', { clientId: 'c' });
+    expect((await load()).capabilities).toEqual({
+      canSend: true,
+      canCancel: false,
+      terminal: true,
+    });
+    expect((await load()).capabilities).toEqual({
+      canSend: true,
+      canCancel: false,
+      terminal: null,
+    });
+    expect((await load()).capabilities).toEqual({
+      canSend: true,
+      canCancel: false,
+    });
   });
 
   it('lets a bound Session send only when the service allows its caller', async () => {

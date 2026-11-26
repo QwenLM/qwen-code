@@ -4,9 +4,11 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.harness.HarnessDiscovery;
 import com.alibaba.qwen.code.managedagent.harness.HarnessPoolConnector;
-import com.alibaba.qwen.code.managedagent.harness.KubernetesHarnessDiscovery;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
+import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcHarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
@@ -23,13 +25,14 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.HashSet;
 
 @Configuration
 public class HarnessConfiguration {
     @Bean
-    public com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules managedHarnessRules() {
-        return new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules();
+    public HarnessRules managedHarnessRules() {
+        return new SdkHarnessRules();
     }
 
     @Bean(destroyMethod = "close")
@@ -45,19 +48,11 @@ public class HarnessConfiguration {
             JdbcManagedSessionStore resources, JdbcSshWorkspaceStore ssh, JdbcHarnessPlacementStore placements,
             JdbcManagedSessionSkills skills, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
             JdbcManagedExtensionRecordStore extensionRecords) {
-        BrokerSecurity.checkHarnessTransport(properties, new java.util.ArrayList<>());
+        BrokerSecurity.checkHarnessTransport(properties, new ArrayList<>());
         var pool = properties.getHarness().getPool();
         if (pool.isEnabled()) {
-            if ("kubernetes-workspace".equals(properties.getRuntimeBroker().getProvisioner())) {
-                throw new IllegalStateException("Harness pool does not admit CSI resident Runtime ownership");
-            }
             HarnessDiscovery discovery;
-            if ("kubernetes".equals(pool.getDiscovery())) {
-                if (!pool.getInstances().isEmpty()) {
-                    throw new IllegalStateException("Kubernetes Harness discovery cannot combine with static instances");
-                }
-                discovery = new KubernetesHarnessDiscovery(pool, json);
-            } else if ("static".equals(pool.getDiscovery())) {
+            if ("static".equals(pool.getDiscovery())) {
                 if (pool.getInstances().isEmpty() || pool.getInstances().size() > 256) {
                     throw new IllegalStateException("Static Harness pool requires 1..256 instances");
                 }
@@ -70,10 +65,10 @@ public class HarnessConfiguration {
                 }).toList();
                 discovery = () -> new HarnessDiscovery.Snapshot(endpoints, true);
             } else {
-                throw new IllegalStateException("Harness pool discovery must be static or kubernetes");
+                throw new IllegalStateException("Harness pool discovery must be static");
             }
             try {
-                return new com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary(new HarnessPoolConnector(properties, placements, discovery,
+                return new SdkHarnessBoundary(new HarnessPoolConnector(properties, placements, discovery,
                         endpoint -> {
                             var connector = new QwenHostedHarnessConnector(properties, sessions, workspaceExecution,
                                     actions, definitions, resources, ssh);
@@ -88,7 +83,7 @@ public class HarnessConfiguration {
         var connector = new QwenHostedHarnessConnector(properties, sessions, workspaceExecution, actions, definitions, resources, ssh);
         connector.configureSessionSkills(skills);
         connector.configureExtensionResources(extensionRecords, json);
-        return new com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary(connector);
+        return new SdkHarnessBoundary(connector);
     }
 
     @Bean

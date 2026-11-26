@@ -123,20 +123,30 @@ jobs:
   classify_pr:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}"
-    # Gate runs on ECS for EVERY event it accepts — pull requests (untrusted
-    # forks included), merge queue, pushes to main, and dispatch — unless the
-    # kill-switch forces hosted. classify executes only trusted base-SHA code
-    # with a read-only token; the residual PR-YAML risk is the same class
-    # accepted for lint_and_static (2026-10-31 decision, see
-    # docs/design/2026-10-31-lint-static-ecs-routing.md). Keeping the gate on
-    # hosted for forks queued the entire fork CI chain behind a scarce pool.
-    # The association routing for the downstream lanes lives in pick_runner
-    # (ubuntu_runner) below; sdk-java.yml and serve-ab.yml mirror that form
-    # (the routing tests hold the mirrors to it). test_windows deliberately
-    # does not: a pull_request run executes the PR's own YAML, so no runs-on
-    # trust clause is enforceable there and its lane never admits pull
-    # requests to the pool.
-    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Association-gated ECS (kill-switch excepted): in-repo PRs, trusted
+    # associations, merge queue, push, and a maintainer dispatch — in THIS
+    # repository only (a fork named `qwen-code` would otherwise be sent to a pool
+    # it cannot reach, and classify_pr hangs before any lane is classified).
+    # Throughput policy, not a trust boundary: a pull_request run executes the
+    # PR's own YAML. The policy is stated once in
+    # docs/design/2026-10-31-lint-static-ecs-routing.md. Dispatch follows
+    # pick_runner's `linux_runner` for hosted vs self-hosted. The arm64 option
+    # is a residual with NO bound here: the gate has no arm64 labels, so an
+    # arm64 dispatch asks the x64 pool and, with no x64 runner online, queues —
+    # and `timeout-minutes` cannot cover that, because it starts only once a
+    # runner picks the job up (a REQUIRED context queued 110 minutes with no
+    # runner, job 128729488158; see `test_ubuntu` below and
+    # docs/design/windows-ecs-ci-validation.md). Because classify_pr is the
+    # `needs` prerequisite of every Linux lane, that state is a run showing a
+    # queued job with no failing check — not a timeout.
+    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.repository == ''QwenLM/qwen-code'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'' || github.event_name == ''push'' || (github.event_name == ''workflow_dispatch'' && github.event.inputs.linux_runner != ''hosted''))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Bounds a started-and-stalled classify at 10 minutes — this job declared no
+    # `timeout-minutes` before this PR, so its effective ceiling was GitHub's
+    # 360-minute default, as `.ci-budget` records (`13 320 4` → `13 330 3`).
+    # It does not bound the queue wait above: on dispatch the gate follows
+    # pick_runner's `linux_runner` for hosted vs self-hosted, and the arm64
+    # choice has no gate labels, so an arm64 dispatch runs the gate on x64.
+    timeout-minutes: 10
     continue-on-error: true
     permissions:
       contents: 'read'
@@ -1242,8 +1252,8 @@ jobs:
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
-      # The install-script packaging suite needs zip/unzip, and throws on a
-      # CI host that ships neither, so a silent skip there is impossible.
+      # The install-script packaging suite throws on CI if zip or unzip is
+      # unavailable. The next step can provision them without root.
       # tmux is PRE-LANDED for #8388: that PR's capture-tui carries a
       # describe.skipIf(!hasTmux)-gated real-tmux suite which, on a runner
       # without tmux (the hosted ubuntu-latest image ships none), would
@@ -1269,27 +1279,53 @@ jobs:
             # symlink, missing lib) must not fail the required Test check
             # before a single test has run.
             tmux -V || echo '::warning::tmux present but not answering; real-tmux capture tests will be skipped.'
-            zip -v > /dev/null 2>&1 || echo '::warning::zip present but not answering; the zip-packaging suite will throw on CI.'
-            unzip -v > /dev/null 2>&1 || echo '::warning::unzip present but not answering; the zip-packaging suite will throw on CI.'
+            zip -v > /dev/null 2>&1 || echo '::warning::zip present but not answering; user-local provisioning will retry.'
+            unzip -v > /dev/null 2>&1 || echo '::warning::unzip present but not answering; user-local provisioning will retry.'
           elif [ "$(id -u)" = '0' ] && command -v apt-get > /dev/null 2>&1; then
             # Root-container lanes have no sudo (and need none): apt-get
             # runs as-is. Advisory, not a gate: an apt hiccup must not red
             # this step before a single test has run — the suites carry
             # their own signal (the real-tmux suite skips; the zip suite
             # throws on CI). ::warning:: (not a plain echo) so a lane
-            # where the install PERMANENTLY fails shows the loss in the
-            # check UI instead of hiding it in a multi-thousand-line log.
+            # where the install fails shows the issue in the check UI.
             timeout 140 apt-get update -qq && timeout 140 apt-get install -y -qq --no-install-recommends tmux zip unzip \
-              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+              || echo '::warning::System tmux/zip install failed; user-local provisioning will check zip and unzip.'
           elif sudo -n true > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
             # Same advisory contract as the root branch; sudo -n here so a
             # runner without passwordless sudo fails fast instead of
             # hanging on a password prompt toward the step's bound.
             timeout 140 sudo -n apt-get update -qq && timeout 140 sudo -n apt-get install -y -qq --no-install-recommends tmux zip unzip \
-              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+              || echo '::warning::System tmux/zip install failed; user-local provisioning will check zip and unzip.'
           else
-            echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+            echo '::warning::System tmux/zip install unavailable; user-local provisioning will check zip and unzip.'
           fi
+
+      - name: 'Provision user-local zip and unzip'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |-
+          if zip -v > /dev/null 2>&1 && unzip -v > /dev/null 2>&1; then
+            exit 0
+          fi
+          archive_dir="$(mktemp -d "${RUNNER_TEMP}/qwen-zip.XXXXXX")"
+          cd "$archive_dir"
+          trap 'rm -rf -- lists apt.conf ./*.deb' EXIT
+          mkdir -p lists/partial
+          # Keep the host's signed package sources and skip system update hooks.
+          cat > apt.conf <<'EOF'
+          #clear APT::Update::Pre-Invoke;
+          #clear APT::Update::Post-Invoke;
+          #clear APT::Update::Post-Invoke-Success;
+          EOF
+          apt_options=(-c apt.conf -o "Dir::State::lists=${archive_dir}/lists")
+          apt-get "${apt_options[@]}" -o Acquire::Languages=none update -qq
+          apt-get "${apt_options[@]}" download zip unzip
+          dpkg-deb --extract ./zip_*.deb .
+          dpkg-deb --extract ./unzip_*.deb .
+          ./usr/bin/zip -v > /dev/null
+          ./usr/bin/unzip -v > /dev/null
+          printf '%s\n' "${archive_dir}/usr/bin" >> "$GITHUB_PATH"
 
       - name: 'Provision linters for real-binary tests'
         # The script-lint real-binary regressions (the #15974 unloadable

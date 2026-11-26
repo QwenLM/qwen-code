@@ -169,6 +169,43 @@ describe('TUI product evidence', () => {
       ['component', 'integration'],
     ],
     ['packages/cli/src/dualOutput/index.ts', ['component', 'integration']],
+    [
+      'packages/cli/src/ui/opentui/MemoryDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/dialogs-memory-status.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/opentui-dialog-mount.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/components/MemoryDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/hooks/useLaunchEditor.ts',
+      ['component', 'input', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/commands/memoryCommand.ts',
+      ['component', 'integration'],
+    ],
+    ['packages/core/src/memory/paths.ts', ['component', 'integration']],
+    [
+      'packages/core/src/utils/memory-constants.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/core/src/utils/editor.ts',
+      ['component', 'input', 'integration'],
+    ],
+    [
+      'integration-tests/interactive/tui-memory-manager.test.ts',
+      ['component', 'integration'],
+    ],
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
@@ -373,6 +410,7 @@ describe('TUI product evidence', () => {
       'tui-foreground-shell',
       'tui-extension-acquisition',
       'tui-dual-output',
+      'tui-memory-manager',
     ],
   };
   it.each(
@@ -898,7 +936,7 @@ describe('TUI product evidence', () => {
   });
 
   it('budgets cold setup and all three serial product acceptance legs', () => {
-    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(60);
   });
 
   it('treats unhandled errors as acceptance failures on every runner', () => {
@@ -1004,10 +1042,15 @@ describe('e2e workflow', () => {
       e2eRunScript.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
     ).toHaveLength(1);
     expect(
+      e2eRunScript.match(
+        /--exclude '\*\*\/cli\/qwen-serve-liveness-grace\.test\.ts'/g,
+      ),
+    ).toHaveLength(1);
+    expect(
       e2eRunScript.match(/--exclude '\*\*\/sdk-typescript\/\*\*'/g),
     ).toHaveLength(1);
     expect(e2eRunScript).toContain(
-      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1',
+      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts cli/qwen-serve-liveness-grace.test.ts --poolOptions.forks.maxForks=1',
     );
     expect(e2eRunScript).not.toContain('--poolOptions.forks.singleFork');
     // The arrangement is load-bearing: the batch must run first and the
@@ -1016,13 +1059,16 @@ describe('e2e workflow', () => {
     // the pattern tolerates formatting-only rewrites (continuations, comment
     // lines, trailing spaces) so a benign edit cannot turn CI red.
     expect(e2eRunScript).toMatch(
-      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
+      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts cli\/qwen-serve-liveness-grace\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
     );
     // Text pins never touch the tree: renaming the file or directory these
     // filters name silently returns the suites to the three-fork batch.
     expect(existsSync('integration-tests/cli/qwen-serve-routes.test.ts')).toBe(
       true,
     );
+    expect(
+      existsSync('integration-tests/cli/qwen-serve-liveness-grace.test.ts'),
+    ).toBe(true);
     expect(existsSync('integration-tests/sdk-typescript')).toBe(true);
     expect(existsSync('integration-tests/channel-plugin.test.ts')).toBe(true);
     expect(
@@ -1130,8 +1176,8 @@ describe('e2e workflow', () => {
     });
 
     it.each(jobs)('%s wires the switches per arm', (job) => {
-      expect(switchEnv(job, 'current')).toEqual(['', '']);
-      expect(switchEnv(job, 'unified')).toEqual(['1', '']);
+      expect(switchEnv(job, 'current')).toEqual(['0', '0']);
+      expect(switchEnv(job, 'unified')).toEqual(['1', '0']);
       expect(switchEnv(job, 'kernel')).toEqual(['1', '1']);
     });
 
@@ -1298,6 +1344,11 @@ describe('e2e workflow', () => {
     it('keeps the Docker build environment', () => {
       expect(runStep.env.QWEN_SANDBOX).toContain("'docker'");
       expect(runStep.env.VERBOSE).toBe('true');
+      // The two matrix legs have to pin opposite arms. An empty value means
+      // "no override" and would let both legs follow the
+      // `experimental.unifiedAgentLoop` default, so the scheduled signal that
+      // gates the default flip would report green while comparing nothing.
+      expect(runStep.env.QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP).toContain("'0'");
     });
 
     it('reaps only the sandbox containers owned by its matrix job', () => {
@@ -2036,7 +2087,7 @@ describe('installed npm acceptance workflow', () => {
     expect(workflow.jobs.changes.if).toBeUndefined();
   });
   it('keeps installed setup independent of the original source parity budget', () => {
-    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(60);
     expect(job['timeout-minutes']).toBe(60);
     expect(
       job.steps.some((step) => step.uses?.startsWith('oven-sh/setup-bun')),

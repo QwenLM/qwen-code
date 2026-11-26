@@ -2,25 +2,31 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -29,11 +35,11 @@ public class WorkspaceProfileLifecycleVerifier {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final JdbcManagedExtensionRecordStore records;
-    private final org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications;
-    private final org.springframework.beans.factory.ObjectProvider<JdbcManagedToolResultStore> results;
+    private final ObjectProvider<ToolPublicationDataStore> publications;
+    private final ObjectProvider<JdbcManagedToolResultStore> results;
 
-    public WorkspaceProfileLifecycleVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications,
-            org.springframework.beans.factory.ObjectProvider<JdbcManagedToolResultStore> results) {
+    public WorkspaceProfileLifecycleVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ObjectProvider<ToolPublicationDataStore> publications,
+            ObjectProvider<JdbcManagedToolResultStore> results) {
         this.jdbc = jdbc;
         this.records = new JdbcManagedExtensionRecordStore(jdbc);
         this.publications = publications;
@@ -87,6 +93,13 @@ public class WorkspaceProfileLifecycleVerifier {
         if (WorkspaceToolProfiles.MCP.equals(profile)) {
             return;
         }
+        // D3: ordinary files has no Shell capture/publication/monitor; its
+        // close invariants are the settled executions and owed file history
+        // already verified above, so it settles like MCP. External-files keeps
+        // v1 and never reaches this v2 resource phase.
+        if (WorkspaceToolProfiles.FILES.equals(profile)) {
+            return;
+        }
         if (!WorkspaceToolProfiles.isPublicShell(profile)) {
             unsettled();
         }
@@ -131,8 +144,8 @@ public class WorkspaceProfileLifecycleVerifier {
                 .collect(Collectors.toMap(ToolExecutionRecord::getExecutionCallId, Function.identity()));
         var backgroundCalls = backgroundCalls(operation);
         var sourcesByCall = jdbc.queryForList("SELECT request_json FROM ma_operation"
-                + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND session_scope_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
-                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()), operation.tenantId(), operation.sessionId()).stream().map(this::source)
+                + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
+                operation.tenantId(), operation.sessionId()).stream().map(this::source)
                 .collect(Collectors.groupingBy(JdbcManagedToolResultStore.Source::executionCallId));
         var inlineInputs = nativeInlineInputs(operation);
         for (ToolExecutionRecord execution : executions.values()) {
@@ -179,7 +192,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 if (!source.outcomeRef().isNull()) {
                     try {
                         outcome = records.readRecordResource(operation.tenantId(), operation.sessionId(), source.outcomeRef());
-                    } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException invalid) {
+                    } catch (ManagedAgentException invalid) {
                         unsettled();
                     }
                 }
@@ -248,7 +261,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 }
                 JsonNode receipt = records.readRecordResource(operation.tenantId(), operation.sessionId(), record.path("startReceiptRef"));
                 if (!call.equals(receipt.path("executionCallId").asText())
-                        || !java.util.Objects.equals(start.getReference().get("callId"), receipt.path("runtimeCallId").asText())
+                        || !Objects.equals(start.getReference().get("callId"), receipt.path("runtimeCallId").asText())
                         || !Long.toString(start.getRuntimeGeneration()).equals(receipt.path("bindingGeneration").asText())
                         || !"exited".equals(process.getResult().get("state"))
                         || exitCode.isNull() && exitSignal.isNull()) {
@@ -264,9 +277,9 @@ public class WorkspaceProfileLifecycleVerifier {
         }
     }
 
-    private java.util.Set<String> backgroundCalls(OperationRecord operation) {
+    private Set<String> backgroundCalls(OperationRecord operation) {
         // Detached output is verified against its record and physical exit, not a foreground receipt.
-        var calls = new java.util.HashSet<String>();
+        var calls = new HashSet<String>();
         for (String domain : List.of("child_run", "monitor_run")) {
             for (JsonNode record : records.listRecords(operation.tenantId(), operation.sessionId(), domain)) {
                 if ("monitor_run".equals(domain) || "shell".equals(record.path("kind").asText())) {
@@ -277,12 +290,11 @@ public class WorkspaceProfileLifecycleVerifier {
         return calls;
     }
 
-    private java.util.Set<String> nativeInlineInputs(OperationRecord operation) {
-        var inputs = new java.util.HashSet<String>();
+    private Set<String> nativeInlineInputs(OperationRecord operation) {
+        var inputs = new HashSet<String>();
         var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
-                + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                + " FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
                 + " AND kind = ? AND state = 'REFERENCED' FOR UPDATE",
-                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), "managed-tool-input");
         for (var row : refs) {
             var ref = JSON.createObjectNode().put("resourceId", row.get("resource_id").toString())
@@ -333,7 +345,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 || !execution.getBindingId().equals(binding.path("runtimeBindingId").asText())
                 || !Long.toString(execution.getRuntimeGeneration()).equals(binding.path("bindingGeneration").asText())
                 || !execution.getRequestDigest().equals(binding.path("requestDigest").asText())
-                || !java.util.Objects.equals(execution.getReference().get("argsDigest"), binding.path("reference").path("argsDigest").asText())) {
+                || !Objects.equals(execution.getReference().get("argsDigest"), binding.path("reference").path("argsDigest").asText())) {
             unsettled();
         }
     }
@@ -341,14 +353,14 @@ public class WorkspaceProfileLifecycleVerifier {
     private JdbcManagedToolResultStore.Source source(String text) {
         try {
             return JSON.readValue(text, JdbcManagedToolResultStore.Source.class);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
         }
     }
 
     private static boolean hold(ToolExecutionRecord execution) {
-        Object mode = execution.getReference().get("dispatchMode");
-        return "background_v3_process".equals(mode) || "background_v3_monitor".equals(mode);
+        return ManagedHoldFamily.ofDispatchMode(
+                execution.getReference().get("dispatchMode")) != null;
     }
 
     private static void known(JsonNode record) {
@@ -371,8 +383,8 @@ public class WorkspaceProfileLifecycleVerifier {
         }
         if (!"process_pipes".equals(manifest.path("captureScope").asText())
                 || !"complete_required".equals(manifest.path("capturePolicy").asText())
-                || !java.util.Objects.equals(execution.getReference().get("callId"), manifest.path("callId").asText())
-                || !java.util.Objects.equals(invocationDigest, manifest.path("invocationDigest").asText())
+                || !Objects.equals(execution.getReference().get("callId"), manifest.path("callId").asText())
+                || !Objects.equals(invocationDigest, manifest.path("invocationDigest").asText())
                 || !operation.tenantId().equals(manifest.path("tenantId").asText())
                 || !operation.sessionId().equals(manifest.path("sessionId").asText())
                 || !execution.getTurnId().equals(manifest.path("turnId").asText())
@@ -383,7 +395,7 @@ public class WorkspaceProfileLifecycleVerifier {
             unsettled();
         }
         String capture = manifest.path("captureId").asText();
-        var streams = new java.util.HashSet<String>();
+        var streams = new HashSet<String>();
         boolean complete = true;
         boolean emptyIncomplete = true;
         for (JsonNode content : manifest.path("contents")) {
@@ -450,8 +462,8 @@ public class WorkspaceProfileLifecycleVerifier {
 
     private byte[] readContent(OperationRecord operation, String id, JsonNode expected) {
         var rows = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
-                + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
-                + " AND resource_id = ? FOR UPDATE", ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                + " FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
+                + " AND resource_id = ? FOR UPDATE",
                 operation.tenantId(), operation.sessionId(), id);
         if (rows.size() != 1) {
             unsettled();
@@ -478,7 +490,7 @@ public class WorkspaceProfileLifecycleVerifier {
     private static String id(String capture, String stream, Object ordinal) {
         try {
             return ToolPublicationContract.sha256(JSON.writeValueAsBytes(List.of(capture, stream, ordinal)));
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException(error);
         }
     }

@@ -17,10 +17,12 @@ import {
 } from './managed-runtime-worker-routes.js';
 import {
   MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+  MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CAPABILITY_DIGEST,
   resolveManagedShellPublisherMode,
 } from './managed-workspace-activation.js';
+import { MANAGED_TERMINAL_WORKER_ROUTE } from './managed-terminal-routes.js';
 import { OWNED_MANAGED_RUNTIME_ROUTES } from './managed-runtime-attestation-contract.js';
 import { MANAGED_CONTEXT_WORKER_ROUTES } from './managed-context-worker.js';
 import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
@@ -36,8 +38,13 @@ import {
   MANAGED_CSI_ATTEST_ROUTE,
   MANAGED_CSI_DRAIN_ROUTE,
 } from './managed-csi-worker.js';
-import { MANAGED_SHELL_PUBLISHER_ROUTE } from './managed-shell-publisher.js';
+import {
+  MANAGED_OBSERVATION_PULL_ROUTE,
+  MANAGED_SHELL_PUBLISHER_DETACH_ROUTE,
+  MANAGED_SHELL_PUBLISHER_ROUTE,
+} from './managed-shell-publisher.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
+import { EXTERNAL_PUBLICATION_ROUTES } from './managed-external-publication.js';
 import {
   startManagedRuntimeAttestationWorker,
   type ManagedRuntimeAttestationWorkerHandle,
@@ -219,6 +226,19 @@ describe('resolveManagedRuntimeWorkerRoutePlan', () => {
       ]),
     ],
     [
+      'terminal-capable measured workspace',
+      planInput({
+        capabilityDigest: MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
+      }),
+      keys([
+        ...MANAGED_CONTEXT_WORKER_ROUTES,
+        MANAGED_TERMINAL_WORKER_ROUTE,
+        ...MANAGED_RUNTIME_TOOL_V4_ROUTES,
+        ...MANAGED_TOOL_RESULT_ROUTES,
+        PUBLICATION_INSTALL_ROUTE,
+      ]),
+    ],
+    [
       'resident files only',
       planInput({ capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST }),
       base,
@@ -257,7 +277,13 @@ describe('resolveManagedRuntimeWorkerRoutePlan', () => {
         capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
         publication: true,
       }),
-      keys([...MANAGED_CONTEXT_WORKER_ROUTES, ...MANAGED_TOOL_RESULT_ROUTES]),
+      // The main listener shares the publication channels with the
+      // dedicated listener (#15685), so the plan gates them too.
+      keys([
+        ...MANAGED_CONTEXT_WORKER_ROUTES,
+        ...MANAGED_TOOL_RESULT_ROUTES,
+        ...EXTERNAL_PUBLICATION_ROUTES,
+      ]),
     ],
     [
       'workspace with remote publishers',
@@ -270,6 +296,8 @@ describe('resolveManagedRuntimeWorkerRoutePlan', () => {
         ...MANAGED_TOOL_RESULT_ROUTES,
         PUBLICATION_INSTALL_ROUTE,
         MANAGED_SHELL_PUBLISHER_ROUTE,
+        MANAGED_SHELL_PUBLISHER_DETACH_ROUTE,
+        MANAGED_OBSERVATION_PULL_ROUTE,
       ]),
     ],
     [
@@ -279,6 +307,8 @@ describe('resolveManagedRuntimeWorkerRoutePlan', () => {
         ...MANAGED_CONTEXT_WORKER_ROUTES,
         ...MANAGED_TOOL_RESULT_ROUTES,
         MANAGED_SHELL_PUBLISHER_ROUTE,
+        MANAGED_SHELL_PUBLISHER_DETACH_ROUTE,
+        MANAGED_OBSERVATION_PULL_ROUTE,
       ]),
     ],
     [
@@ -318,10 +348,13 @@ const UNIVERSE = keys([
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ...MANAGED_CONTEXT_WORKER_ROUTES,
   ...MANAGED_RUNTIME_TOOL_V4_ROUTES,
+  MANAGED_TERMINAL_WORKER_ROUTE,
   ...MANAGED_TOOL_RESULT_ROUTES,
   ...EXTENSION_ROUTES,
   ...CSI_ROUTES,
   MANAGED_SHELL_PUBLISHER_ROUTE,
+  MANAGED_SHELL_PUBLISHER_DETACH_ROUTE,
+  MANAGED_OBSERVATION_PULL_ROUTE,
   PUBLICATION_INSTALL_ROUTE,
   SSH_ROUTE,
   { method: 'POST', path: '/internal/managed-runtime/v3/definitely-unknown' },
@@ -404,6 +437,7 @@ describe('worker gate conformance', () => {
     ['plain', PLAIN_DIGEST],
     ['workspace', WORKSPACE_CAPABILITY_DIGEST],
     ['measured', MEASURED_WORKSPACE_CAPABILITY_DIGEST],
+    ['terminal', MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST],
     ['resident', RESIDENT_WORKSPACE_CAPABILITY_DIGEST],
   ] as const)(
     'boot v2 %s admits exactly the plan surface',

@@ -9,8 +9,8 @@ import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -21,11 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class RuntimeBrokerHttpExecutorTest {
-    private static final String SESSION = "11111111-1111-1111-1111-111111111111";
-    private static final String PATH = "/internal/managed-session-store/v1/sessions/"
-            + SESSION + "/csi-retirement:worker-authority";
+    private static final String PATH = "/internal/runtime-broker/v1/runtimes:authorize-lifecycle";
+    private static final String BODY = "{\"protocolVersion\":1,\"requestId\":\"request\","
+            + "\"harnessSessionId\":\"harness\",\"runtimeSessionId\":\"runtime\"}";
 
     @Test
     void saturatedDispatchClosesExcessConnectionsAndRecovers() throws Exception {
@@ -35,7 +36,14 @@ class RuntimeBrokerHttpExecutorTest {
                 fixture.connect();
             }
             await().atMost(5, TimeUnit.SECONDS).until(() -> fixture.executor.getQueue().size() == 64);
-            try (Socket rejected = fixture.open()) {
+            try (Socket rejected = new Socket()) {
+                fixture.connectSocket(rejected);
+                try {
+                    // The HTTP dispatcher submits a connection once it is readable.
+                    rejected.getOutputStream().write('P');
+                } catch (SocketException reset) {
+                    // The rejection can race with the write. Verify the disconnect below.
+                }
                 assertDisconnected(rejected);
             }
             assertEquals(32, fixture.executor.getLargestPoolSize());
@@ -79,7 +87,7 @@ class RuntimeBrokerHttpExecutorTest {
     private static void assertResponse(Socket socket) throws Exception {
         String response = new String(socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         assertTrue(response.startsWith("HTTP/1.1 200"), response);
-        assertTrue(response.endsWith("{\"accepted\":true}"), response);
+        assertTrue(response.endsWith("\"authorized\":true}"), response);
     }
 
     private static final class Fixture implements AutoCloseable {
@@ -96,7 +104,7 @@ class RuntimeBrokerHttpExecutorTest {
             var field = RuntimeBrokerHttpServer.class.getDeclaredField("executor");
             field.setAccessible(true);
             executor = (ThreadPoolExecutor) field.get(server);
-            server.registerCsiApplicationAuthority("tenant", SESSION, (token, body) -> {
+            when(service.authorizeLifecycle("harness", null)).thenAnswer(invocation -> {
                 threads.add(Thread.currentThread());
                 entered.countDown();
                 try {
@@ -104,7 +112,7 @@ class RuntimeBrokerHttpExecutorTest {
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                 }
-                return Map.of("accepted", true);
+                return CompletableFuture.completedFuture(null);
             });
             server.start();
         }
@@ -123,18 +131,24 @@ class RuntimeBrokerHttpExecutorTest {
         private Socket open() throws Exception {
             Socket socket = new Socket();
             try {
-                socket.connect(new InetSocketAddress("127.0.0.1", server.getBaseUri().getPort()), 5000);
-                socket.setSoTimeout(5000);
+                connectSocket(socket);
+                byte[] payload = BODY.getBytes(StandardCharsets.UTF_8);
                 String request = "POST " + PATH + " HTTP/1.1\r\nHost: localhost\r\n"
-                        + "Authorization: Bearer worker\r\nX-Qwen-Tenant-Id: tenant\r\n"
+                        + "Authorization: Bearer secret\r\n"
                         + "Content-Type: application/json\r\nCache-Control: no-store\r\n"
-                        + "Content-Length: 2\r\nConnection: close\r\n\r\n{}";
+                        + "Content-Length: " + payload.length + "\r\nConnection: close\r\n\r\n";
                 socket.getOutputStream().write(request.getBytes(StandardCharsets.UTF_8));
+                socket.getOutputStream().write(payload);
                 return socket;
             } catch (Exception failure) {
                 socket.close();
                 throw failure;
             }
+        }
+
+        private void connectSocket(Socket socket) throws Exception {
+            socket.connect(new InetSocketAddress("127.0.0.1", server.getBaseUri().getPort()), 5000);
+            socket.setSoTimeout(5000);
         }
 
         @Override

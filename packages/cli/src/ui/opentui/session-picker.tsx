@@ -567,6 +567,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
     return (
       <box
         key={`preview-${boxWidth}-${height}`}
+        id="screen-reader-live-preview"
         flexDirection="column"
         width={boxWidth}
         height={Math.max(0, height - 1)}

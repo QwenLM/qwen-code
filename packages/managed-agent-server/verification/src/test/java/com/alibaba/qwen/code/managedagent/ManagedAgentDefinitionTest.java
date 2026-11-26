@@ -388,6 +388,6 @@ class ManagedAgentDefinitionTest {
     }
 
     private static String tenant() {
-        return "tenant-agents-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 }

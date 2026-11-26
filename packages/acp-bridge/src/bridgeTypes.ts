@@ -14,11 +14,14 @@ import type {
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
+  GoalStatus,
   SessionGroupPresetColor,
   SessionSourceInput,
   SessionSourcesResult,
   SessionSourceUpsertResult,
   SessionSourceRemoveResult,
+  GeneratedUiStateSnapshot,
+  GeneratedUiStateWriteResult,
   TurnResultCode,
   TurnResultErrorPayload,
   SessionExternalRecordRequest,
@@ -48,6 +51,7 @@ import type {
 import type { PermissionPolicy } from './permission.js';
 import type { BridgeExecutionEngine } from './bridgeOptions.js';
 import type {
+  DaemonSessionArtifact,
   SessionArtifactInput,
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
@@ -57,6 +61,7 @@ import type {
   SessionAttachmentUploadMetadata,
 } from './sessionAttachments.js';
 import type {
+  BridgeModRowAnswer,
   ServeSessionAgentsStatus,
   ServeSessionAgentTrace,
   ServeSessionContextStatus,
@@ -393,9 +398,21 @@ export interface BridgeSpawnRequest {
   sourceId?: string;
   approvalMode?: ApprovalMode;
   /** Worktree isolation metadata, set by the daemon route before spawn. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+    baseBranch?: string;
+  };
   /** Branch metadata, set by the daemon route before spawn. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
+  /**
+   * Start commit captured at creation for a plain session (no branch/worktree
+   * meta), set by the daemon route before spawn. The change overview's commit
+   * fallback scopes its window to `<baseCommit>..HEAD`.
+   */
+  baseCommit?: string;
   /**
    * Optional caller-supplied session id. When provided, the agent uses this
    * id instead of generating a random UUID. Must be validated at the route
@@ -533,11 +550,17 @@ export interface BridgeSession {
    */
   modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+    baseBranch?: string;
+  };
   /** Set by the daemon route after durable worktree ownership is verified. */
   worktreeState?: 'persisted-v1';
   /** Present when the session was created with a new branch. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -576,6 +599,8 @@ export interface BridgeRestoreSessionRequest {
   suppressWorktreeContextRestore?: boolean;
   /** Delay ask_user_question recovery until daemon route validation finishes. */
   deferRestoreAskUserQuestionPrompt?: boolean;
+  /** Hold cold-restored automatic work until the route reconciles cwd. */
+  deferAutomaticWorkUntilCwdRestore?: boolean;
   /**
    * Daemon-internal: session-level MCP servers for ACP `session/load` /
    * `session/resume` (see `BridgeSpawnRequest.mcpServers`). Absent means
@@ -847,6 +872,12 @@ export interface BridgeRestoredSession extends BridgeSession {
   state: BridgeSessionState;
   /** Artifact restore warnings surfaced during session load/resume. */
   artifactWarnings?: string[];
+  /**
+   * Restored artifact snapshot embedded in the restore response so clients can
+   * surface a session-level artifact entry before the replay renders. Omitted
+   * when the session has no artifacts.
+   */
+  artifacts?: DaemonSessionArtifact[];
   /** True when response-mode history replay aborted after emitting a prefix. */
   partial?: true;
   /** Agent-provided replay failure detail when `partial` is true. */
@@ -964,7 +995,13 @@ export interface BridgeBranchSessionRequest {
 export interface BridgeSessionExecutionSnapshot {
   workspaceCwd: string;
   effectiveCwd: string;
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+    baseBranch?: string;
+  };
 }
 
 export interface BridgePersistedBranchedSession {
@@ -1035,6 +1072,14 @@ export interface ChangeSessionCwdRequest {
    * before and after mutating the session Config.
    */
   conversationDirectoryExpectation?: BridgeConversationDirectoryExpectation;
+  /**
+   * Daemon-internal: the caller itself owns the reset-pending admission
+   * barrier for this session (the worktree handoff arms it for the whole
+   * transfer) and may relocate while it is armed. Only the handoff route
+   * sets this; the user cd route constructs its request literally, so an
+   * external client cannot inject the flag.
+   */
+  allowWhileResetPending?: boolean;
 }
 
 export interface ChangeSessionCwdResult {
@@ -1243,6 +1288,10 @@ export interface BridgeSessionSummary {
   sourceId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** Prompts admitted but not yet finished (running + queued). Flips
+   * synchronously at admission, before promptActive — covers the
+   * attachment-resolution window hasActivePrompt alone misses. */
+  pendingPromptCount?: number;
   /** Per-session active-work observation. `idle` is emitted only from a
    * fresh snapshot that covers every negotiated hold category. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
@@ -1256,6 +1305,12 @@ export interface BridgeSessionSummary {
   pendingInteractionCount?: number;
   /** True when the most recently completed turn failed. */
   hasTurnError?: boolean;
+  /**
+   * Persisted prompt-ledger evidence that the session's latest prompt was cut
+   * off mid-flight; a list-surface hint that opening the session can offer
+   * "Continue execution". Absent without ledger evidence; never `false`.
+   */
+  needsContinuation?: boolean;
   /** Present for live sessions in status and workspace-list responses. */
   turnError?: {
     message: string;
@@ -1274,14 +1329,62 @@ export interface BridgeSessionSummary {
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
   color?: SessionGroupPresetColor | null;
   /** Present when the session was created with worktree isolation. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+    baseBranch?: string;
+  };
   /** Present when the session was created with a new branch. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
+  /**
+   * The HEAD captured at creation for a plain session (no branch/worktree
+   * meta) — its immutable start commit for the change overview's commit
+   * fallback. Branch/worktree sessions carry it on their meta instead.
+   */
+  baseCommit?: string;
   /**
    * GitHub PRs bound to the session, in binding order (last = latest). A
    * session can produce several PRs (stacked or follow-up work).
    */
   prs?: SessionPrInfo[];
+  /**
+   * Session artifact count, present when non-zero. Live entries carry the
+   * live public count; there, absent means ZERO — the in-memory store is
+   * authoritative, and the list merge drops a stale sidecar-derived count
+   * when the live entry omits the field — EXCEPT while
+   * `artifactCountPending` is true (see there). Persisted summaries are
+   * enriched best-effort from the artifact summary sidecar with the
+   * restorable count; there, absent means unknown (no sidecar / older
+   * daemon), not zero.
+   */
+  artifactCount?: number;
+  /**
+   * True while the session's artifact restore is still in flight: the
+   * entry is live, but its store is not hydrated yet, so `artifactCount`
+   * is omitted and MUST NOT be read as zero. The list merge keeps the
+   * sidecar-enriched count for such rows. Absent once the restore settles.
+   */
+  artifactCountPending?: boolean;
+  /**
+   * List-facing projection of the session's Goal, read from the goal
+   * sidecar on disk — present for unloaded and archived sessions too,
+   * unlike the live-only Goals listing. Absent when the session has no
+   * goal (or none journaled yet).
+   */
+  goal?: BridgeSessionGoalInfo;
+}
+
+/**
+ * The goal sidecar's wire projection: identity + lifecycle state, no
+ * budgets or spend (the Goals page remains the detail surface).
+ */
+export interface BridgeSessionGoalInfo {
+  status: GoalStatus;
+  objective: string;
+  /** ISO time of the goal's last transition. */
+  updatedAt: string;
 }
 
 /** Original event-bus cursor captured when a prompt id was first admitted. */
@@ -1324,6 +1427,12 @@ export interface SessionPrInfo {
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
   /**
+   * Binding provenance: `create`/`worktree` are the session's own delivery
+   * units; `review` is a PR merely mentioned in a review/verify command and is
+   * not this session's work. Absent on bindings persisted before provenance.
+   */
+  source?: 'create' | 'worktree' | 'review';
+  /**
    * The job this session does for the PR (role-aware bound delivery);
    * assigned by the command-position backfill or the metadata route.
    * Absent means untyped.
@@ -1348,6 +1457,15 @@ export interface SessionMetadataUpdate {
   prs?: SessionPrInfo[];
 }
 
+export type {
+  SessionRetirementIdentity,
+  SessionRetirementReceipt,
+} from './session-retirement.js';
+import type {
+  SessionRetirementIdentity,
+  SessionRetirementReceipt,
+} from './session-retirement.js';
+
 export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
   /** Explicit client close cancels active work as user intent. */
@@ -1369,12 +1487,17 @@ export interface CloseSessionOpts {
    */
   requireAgentClose?: boolean;
   /**
+   * Require a durable close acknowledgement before deleting session data.
+   * A timed-out caller leaves the close running on its original channel.
+   */
+  forDeletion?: boolean;
+  /**
    * Bound the agent-close round trip. The close notification is otherwise
    * unbounded (it only loses to transport close), which is correct for an
    * ordinary close but not when the caller already has reason to believe the
    * child cannot answer. A timeout lands in the same unknown-outcome recovery
-   * as any other non-definitive failure: the channel is killed, which is what
-   * unblocks callers waiting on the session to drain.
+   * as any other non-definitive failure. For deletion, it bounds the caller's
+   * wait while the pending close continues.
    */
   agentCloseTimeoutMs?: number;
 }
@@ -1402,6 +1525,8 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /** Set at a client-facing prompt admission boundary. */
+  userPrompt?: true;
   /**
    * Internal originator for a daemon-owned mid-turn message promoted into the
    * normal prompt FIFO. It was authenticated when the message was enqueued, so
@@ -1416,12 +1541,42 @@ export interface BridgeClientRequestContext {
    * from request input.
    */
   onPromptAdmitted?: () => void;
+  /** Internal cancellation while a guarded prompt waits for its ACP write. */
+  dispatchSignal?: AbortSignal;
+  /**
+   * For continuation requests, resolve accepted only after the first dispatch
+   * fence succeeds and the ACP write begins. Do not wait for the turn to finish.
+   */
+  requireDispatchAck?: boolean;
+  /** Internal signal when the prompt write begins and may reach the ACP child. */
+  onPromptWriteStarted?: () => void;
+  /** Internal signal after the bridge writes the queued prompt to ACP. */
+  onPromptDispatched?: () => void;
+  /** Internal authorization check when dequeuing a prompt and before its ACP write. */
+  assertCanDispatch?: () => void;
+  /**
+   * Internal authorization check after the agent classifies a continuation
+   * and before the bridge admits its turn. HTTP routes never receive it as
+   * request input; an old workspace generation may throw to refuse the turn.
+   */
+  assertCanContinue?: () => void;
+  /**
+   * If supplied, admit only this actual interruption classification, not a
+   * stale classification previously read by a recovery-listing caller.
+   */
+  expectedInterruption?: 'interrupted_prompt' | 'interrupted_turn';
+  /** Approval mode required for the delegated turn. */
+  expectedApprovalMode?: ApprovalMode;
+  /** The live mode before the switch. Older children still enforce expectedApprovalMode. */
+  approvalModeBeforeStart?: ApprovalMode;
   /**
    * Internal model input that replaces the public prompt only inside the
    * trusted ACP child. The bridge still echoes and persists `PromptRequest`
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** Server-owned child reservation, never taken from prompt metadata. */
+  turnSkillLease?: string;
   /** Original text explicitly declared by a supported submission producer. */
   submittedPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
@@ -1478,7 +1633,15 @@ export interface BridgeClientRequestContext {
   deadlineMs?: number;
 }
 
+export const TURN_SKILL_LEASE_META_KEY = 'qwen.daemon.turnSkillLease';
+export const SESSION_RETIREMENT_RECEIPT_META_KEY =
+  'qwen.dev/sessionRetirementReceipt';
+export const TURN_SKILL_LEASE_METHOD = 'qwen/control/session/turnSkillLease';
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const DAEMON_EXPECTED_APPROVAL_MODE_META_KEY =
+  'qwen.daemon.expectedApprovalMode';
+export const DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY =
+  'qwen.daemon.approvalModeBeforeStart';
 export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.restoreAskUserQuestion';
 export const DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY =
@@ -1506,6 +1669,8 @@ export const DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.suppressRestoreAskUserQuestion';
 export const DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY =
   'qwen.daemon.suppressWorktreeContextRestore';
+export const DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY =
+  'qwen.daemon.deferAutomaticWorkUntilCwdRestore';
 export const DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY =
   'qwen.daemon.passiveManagedRuntimeRecovery';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
@@ -1525,6 +1690,7 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
 export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
+export const DAEMON_USER_PROMPT_META_KEY = 'qwen.daemon.userPrompt';
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 export const IMAGE_ONLY_PROMPT_TEXT = '[image]';
@@ -1590,6 +1756,9 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
  * tool boundary.
  */
 export const MID_TURN_SEND_NOW_METHOD = 'craft/midTurnSendNow';
+
+/** Child-to-host wait for the prompt FIFO to settle after a Send now handoff. */
+export const MID_TURN_GOAL_HANDOFF_METHOD = 'craft/waitForGoalHandoff';
 
 /**
  * Cap on each per-session mid-turn reconciliation ring.
@@ -1789,6 +1958,21 @@ export interface BridgeTurnStatus {
   originatorClientId?: string;
 }
 
+/** A per-turn satisfied/not-satisfied mark bound for telemetry. */
+export interface BridgeSessionFeedbackRequest {
+  /** The turn's admitted prompt id — the daemon's per-turn identity. */
+  promptId: string;
+  rating: 'up' | 'down';
+}
+
+export interface BridgeSessionFeedbackResult {
+  /**
+   * False when the session workspace's `ui.enableUserFeedback` setting
+   * suppresses collection; true once the event reached `logUserFeedback`.
+   */
+  recorded: boolean;
+}
+
 export interface BridgeDaemonStatusLimits {
   maxSessions: number | null;
   maxPendingPromptsPerSession: number | null;
@@ -1967,6 +2151,8 @@ export interface BridgeBackgroundNotification {
   kind: 'agent';
   toolUseId?: string;
   label?: string;
+  fromSession?: { sessionId: string; workspaceCwd: string };
+  sentMessageContext?: string;
 }
 
 export type RuntimeMcpServerAddResult =
@@ -2011,6 +2197,15 @@ export interface WorkspaceEventBridge extends WorkspaceEventPublisher {
 }
 
 export interface AcpSessionBridge extends WorkspaceEventBridge {
+  retireSessionIfIdle?(
+    identity: SessionRetirementIdentity,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionRetirementReceipt>;
+  getSessionRetirement?(
+    sessionId: string,
+    operationId?: string,
+  ): SessionRetirementReceipt | undefined;
+
   /**
    * Immutable proof derived at construction: this bridge's frozen
    * child-environment overrides carry the exact Conversations provenance
@@ -2126,7 +2321,13 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   setSessionWorktree(
     sessionId: string,
-    worktree: { slug: string; path: string; branch: string },
+    worktree: {
+      slug: string;
+      path: string;
+      branch: string;
+      baseCommit?: string;
+      baseBranch?: string;
+    },
   ): void;
 
   /**
@@ -2136,6 +2337,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * state. No-op when the session is not live or carries no worktree.
    */
   clearSessionWorktree?(sessionId: string): void;
+
+  /**
+   * Record the immutable start commit on a live session entry that has no
+   * branch/worktree meta (a current-checkout branch session, or a worktree
+   * handed back to the local checkout). The change overview's commit fallback
+   * scopes its window to `<baseCommit>..HEAD`; without it the fallback is
+   * suppressed. No-op when the session is not live or the read failed.
+   */
+  setSessionBaseCommit?(sessionId: string, baseCommit: string): void;
 
   /**
    * Arm the worktree-reset admission barrier for a session id: while armed,
@@ -2300,6 +2510,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   getSessionLastEventId(sessionId: string): number;
 
+  getSessionPendingPermissionIds(sessionId: string): readonly string[];
+
   /**
    * Return the epoch token of this session's event bus. Regenerated on
    * every bus construction (daemon restart), never persisted. Throws
@@ -2352,6 +2564,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   updateSessionMetadata(
     sessionId: string,
     metadata: SessionMetadataUpdate,
+    context?: BridgeClientRequestContext,
+  ): SessionMetadataUpdate;
+
+  initializeSessionTitle?(
+    sessionId: string,
+    displayName: string,
     context?: BridgeClientRequestContext,
   ): SessionMetadataUpdate;
 
@@ -2488,6 +2706,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   getSessionSummary(sessionId: string): BridgeSessionSummary;
 
+  /** Includes cold restores and explicit-id spawns before they become live. */
+  hasSessionOrPendingRegistration(sessionId: string): boolean;
+
   /** Daemon-internal execution location; never populated from client input. */
   getSessionExecutionSnapshot(
     sessionId: string,
@@ -2602,6 +2823,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
   ): Promise<ServeSessionContextStatus>;
 
+  /** Capture a guard for a live approval-mode read used by the daemon. */
+  captureSessionApprovalModeGuard(sessionId: string): () => void;
+
   /** Read structured context-window usage for a live session. */
   getSessionContextUsageStatus(
     sessionId: string,
@@ -2641,6 +2865,28 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
 
+  /**
+   * Read one Generated UI card's saved view state on the session's active
+   * branch. A card that was never saved has revision 0 and value null. Throws
+   * `GeneratedUiStateError` when the state cannot be read.
+   */
+  getGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    context: { clientId: string },
+  ): Promise<GeneratedUiStateSnapshot>;
+
+  /**
+   * Save one card's view state if `baseRevision` is still current; a stale or
+   * oversized write is reported in the result, not thrown.
+   */
+  setGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    write: { baseRevision: number; value: unknown },
+    context: { clientId: string },
+  ): Promise<GeneratedUiStateWriteResult>;
+
   /** Execute an App-visible tool through the bound session permission pipeline. */
   callMcpAppTool(
     sessionId: string,
@@ -2649,6 +2895,20 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context: { clientId: string },
   ): Promise<McpAppToolResult>;
 
+  readonly supportsTurnExtensionStoreLease?: true;
+  /** Reserve or release native skill files and optional extension generation before prompt admission. */
+  updateTurnSkillLease?(
+    sessionId: string,
+    key: string,
+    action: 'prepare' | 'release',
+    expectedDigest?: string,
+    expectedExtensionGeneration?: number,
+  ): Promise<{
+    digest?: string;
+    extensionGeneration?: number;
+    unsupportedExtensionComponent?: true;
+    sessionSkillEffectsCompatible?: boolean;
+  }>;
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
     sessionId: string,
@@ -2745,6 +3005,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    /** Present only when admission refused the actual interruption type. */
+    reason?: 'interruption_mismatch';
     /**
      * Replay cursor + correlation id for an accepted continuation, mirroring
      * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —
@@ -2902,6 +3164,31 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<{ sessionId: string; recap: string | null }>;
 
   /**
+   * Ask a live session's Mods for a transcript row the client draws,
+   * through `qwen/control/session/mod_row`. The child builds the row's
+   * envelope and answers once its hooks did, or once the ask timed out.
+   */
+  askSessionModRow(
+    sessionId: string,
+    row: { component: string; props: Record<string, unknown> },
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeModRowAnswer>;
+
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the owning
+   * session's telemetry pipeline. Thin pass-through to
+   * `qwen/control/session/feedback`: the ACP child maps the rating onto
+   * `UserFeedbackRating` and calls `logUserFeedback` with its own session
+   * Config, so model and approval mode come from the session's authority,
+   * not the caller. Throws `SessionNotFoundError` for unknown ids.
+   */
+  rateSessionTurn(
+    sessionId: string,
+    req: BridgeSessionFeedbackRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeSessionFeedbackResult>;
+
+  /**
    * Run a stateless, tool-free text generation request in the ACP child and
    * stream model deltas back only to this caller. The child prefers the
    * configured fast model and falls back to the session's main model.
@@ -3038,11 +3325,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /**
    * Ask the agent to deliver the session's queued mid-turn messages now: a
    * model response that a foreground turn is streaming is cut short so they
-   * reach the model in this round trip, unless it has started a tool call;
-   * running tools still finish first. Otherwise, as in a channel, cron or
-   * background turn, the messages are delivered as without the request, at a
-   * tool boundary or by promotion when the turn ends; the protocol reference
-   * lists the narrow windows where neither happens. `requested` is true
+   * reach the model in this round trip. During tool calls, the agent ends the
+   * foreground turn and the messages follow the prompt FIFO. When another
+   * prompt is already queued, it can drain the messages at a tool boundary or
+   * promote them on settlement. Channel, cron and background turns keep
+   * tool-boundary delivery. `requested` is true
    * when user messages were waiting and the agent was asked, not that a
    * response was cut; it is false when none were waiting. Authorized like
    * the sibling mid-turn methods.

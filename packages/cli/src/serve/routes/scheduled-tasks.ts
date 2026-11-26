@@ -59,7 +59,10 @@ import {
   type DurableCronTask,
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionNotFoundError,
+  SystemOverloadedError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -80,6 +83,7 @@ import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
   sendConversationRuntimeUnavailable,
+  sendDaemonDrainingError as sendActivityGateError,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
@@ -772,21 +776,6 @@ async function runWithScheduledTaskTarget<T>(
   return (await result) as Awaited<T>;
 }
 
-function sendActivityGateError(res: Response, error: unknown): boolean {
-  if (
-    !error ||
-    typeof error !== 'object' ||
-    (error as { code?: unknown }).code !== 'daemon_draining'
-  ) {
-    return false;
-  }
-  res.status(503).json({
-    error: 'The daemon is draining and no longer accepts work.',
-    code: 'daemon_draining',
-  });
-  return true;
-}
-
 /** On-the-wire task shape — normalizes the optional on-disk fields so the
  * client never has to special-case `undefined` name/enabled/runs. */
 interface ScheduledTaskView {
@@ -903,6 +892,24 @@ function canonicalCron(cron: string): string | null {
   } catch {
     return null;
   }
+}
+
+function sendScheduledTaskOverload(
+  res: Response,
+  error: SystemOverloadedError,
+  route: string,
+): void {
+  writeStderrLine(
+    `qwen serve: ${route} load admission rejected (reason=${error.reason}, loadRatio=${error.loadRatio}, eventLoopLagP99Ms=${error.eventLoopLagP99Ms})`,
+  );
+  res.set('Retry-After', '15');
+  res.status(503).json({
+    error: error.message,
+    code: 'system_overloaded',
+    reason: error.reason,
+    loadRatio: error.loadRatio,
+    eventLoopLagP99Ms: error.eventLoopLagP99Ms,
+  });
 }
 
 function registerScheduledTaskCrudRoutes(
@@ -1263,6 +1270,10 @@ function registerScheduledTaskCrudRoutes(
         } catch (err) {
           if (sendActivityGateError(res, err)) return;
           if (sendGenerationClosedError(res, err)) return;
+          if (err instanceof SystemOverloadedError) {
+            sendScheduledTaskOverload(res, err, `POST ${base}`);
+            return;
+          }
           writeStderrLine(
             `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
           );
@@ -2198,6 +2209,10 @@ function registerScheduledTaskCrudRoutes(
               removalGenerations,
               `POST ${base}/${id}/run fresh-session dispatch`,
             );
+          }
+          if (error instanceof SystemOverloadedError) {
+            sendScheduledTaskOverload(res, error, `POST ${base}/${id}/run`);
+            return;
           }
           writeStderrLine(
             `qwen serve: POST ${base}/${id}/run could not create a fresh session: ${error instanceof Error ? error.message : String(error)}`,

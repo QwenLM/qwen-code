@@ -18,7 +18,10 @@ import type {
   ManagedMcpManagementCommand,
   ManagedMcpManagementSnapshot,
 } from './managed-mcp-management-types';
-import type { ManagedToolResultReader } from './managed-tool-result-types';
+import type {
+  ManagedToolResultReader,
+  ManagedWorkspaceArtifactReader,
+} from './managed-tool-result-types';
 export type ManagedAgentSessionPhase =
   | 'created'
   | 'admitted'
@@ -75,6 +78,20 @@ export type ManagedWorkspaceFileUploadRequest = ManagedWorkspaceFileLocator & {
   expectedScopeRevision: string;
   uploadId: string;
 };
+
+export interface ManagedAgentTerminalTicket {
+  ticket: string;
+  expiresInSeconds: number;
+}
+
+export interface ManagedAgentTerminalProvider {
+  ticket(
+    sessionId: string,
+    terminalId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedAgentTerminalTicket>;
+  webSocketUrl(sessionId: string, terminalId: string): string;
+}
 
 export function isManagedApprovalMode(
   value: unknown,
@@ -271,6 +288,7 @@ export interface ManagedAgentSessionSummary {
     inputAttachments?: boolean;
     btw?: boolean;
     recap?: boolean;
+    terminal?: boolean | null;
     clientFiles?: boolean;
   };
   failure?: { code: string; message: string };
@@ -332,6 +350,22 @@ export interface ManagedAgentRequestOptions {
 
 export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
+}
+
+export interface ManagedAgentOperationAdmission {
+  readonly sessionId: string;
+  readonly operationId: string;
+  readonly turnId?: string;
+}
+
+export interface ManagedAgentOperationSettlement
+  extends ManagedAgentOperationAdmission {
+  readonly status: components['schemas']['WebShellOperation']['status'];
+}
+
+export interface ManagedAgentOperationObserver {
+  readonly onAccepted?: (admission: ManagedAgentOperationAdmission) => void;
+  readonly onSettlement?: (settlement: ManagedAgentOperationSettlement) => void;
 }
 
 export type ManagedContextCompressionOperation =
@@ -623,10 +657,13 @@ export interface ManagedAgentProvider {
     respond(
       action: ManagedAgentPendingAction,
       response: ManagedAgentActionResponse,
-      options: ManagedAgentCommandOptions,
+      options: ManagedAgentCommandOptions & ManagedAgentOperationObserver,
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  /** Present when the provider can list a Workspace's artifacts across Sessions. */
+  readonly workspaceArtifacts?: ManagedWorkspaceArtifactReader;
+  readonly terminal?: ManagedAgentTerminalProvider;
   readonly toolDetails?: {
     get(
       sessionId: string,
@@ -737,6 +774,7 @@ export interface ManagedAgentProvider {
       canSelectDirectory?: boolean;
       canImportLocalDirectory?: boolean;
       supportsApprovalModeSelection?: boolean;
+      artifactLibrary?: boolean;
     }>;
     get(
       workspaceId: string,

@@ -6,6 +6,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { managedCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-command-id.js';
 
 // A published chunk must survive its writer immediately, so every model delta
 // commits; only the journal's payload text limit forces a split.
@@ -74,7 +75,9 @@ export class HostedTextDeltaStream {
     const fromSequence = deltas[0].sequence;
     const throughSequence = deltas.at(-1)!.sequence;
     const activation = this.session.activation;
-    const commandId = `assistant-retract:${this.turnId}:${messageId}`;
+    const commandId = managedCommandId(
+      `assistant-retract:${this.turnId}:${messageId}`,
+    );
     await authority.appendExecutionEvent(
       {
         operation: 'assistantRetract',
@@ -133,10 +136,13 @@ export class HostedTextDeltaStream {
     if (messageId === undefined || fromSequence === undefined) return;
     const authority = this.session.authority;
     const activation = this.session.activation;
+    const commandId = managedCommandId(
+      `assistant-retract:${this.turnId}:${messageId}`,
+    );
     await authority.appendExecutionEvent(
       {
         operation: 'assistantRetract',
-        commandId: `assistant-retract:${this.turnId}:${messageId}`,
+        commandId,
         sessionKey: authority.sessionHeader.sessionKey,
         contentDigest: createHash('sha256')
           .update(`${messageId}:${fromSequence}`)
@@ -145,7 +151,7 @@ export class HostedTextDeltaStream {
       (sequence) => ({
         v: 1,
         sequence,
-        eventId: `assistant-retract:${this.turnId}:${messageId}`,
+        eventId: commandId,
         sessionKey: authority.sessionHeader.sessionKey,
         kind: 'message.retracted',
         occurredAt: Date.now(),
@@ -204,17 +210,20 @@ export class HostedTextDeltaStream {
     const activation = this.session.activation;
     const ordinal = this.ordinal;
     this.ordinal += 1;
+    const commandId = managedCommandId(
+      `assistant-delta:${this.turnId}:${messageId}:${ordinal}`,
+    );
     const receipt = await authority.appendExecutionEvent(
       {
         operation: 'assistantDelta',
-        commandId: `assistant-delta:${this.turnId}:${messageId}:${ordinal}`,
+        commandId,
         sessionKey: authority.sessionHeader.sessionKey,
         contentDigest: createHash('sha256').update(text).digest('hex'),
       },
       (sequence) => ({
         v: 1,
         sequence,
-        eventId: `assistant-delta:${this.turnId}:${messageId}:${ordinal}`,
+        eventId: commandId,
         sessionKey: authority.sessionHeader.sessionKey,
         kind: 'message.delta',
         occurredAt: Date.now(),

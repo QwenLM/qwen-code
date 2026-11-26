@@ -23,6 +23,7 @@ import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
 import { getMemoryBaseDir } from '../memory/paths.js';
+import { raceWithAbort } from '../utils/race-with-abort.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -167,9 +168,14 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
    * Executes the LS operation with the given parameters
    * @returns Result of the LS operation
    */
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  execute(signal: AbortSignal): Promise<ToolResult> {
+    return raceWithAbort(signal, () => this.listDirectory(signal));
+  }
+
+  private async listDirectory(signal: AbortSignal): Promise<ToolResult> {
     try {
       const stats = await fs.stat(this.params.path);
+      signal.throwIfAborted();
       if (!stats) {
         // fs.statSync throws on non-existence, so this check might be redundant
         // but keeping for clarity. Error message adjusted.
@@ -188,6 +194,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
       }
 
       const files = await fs.readdir(this.params.path);
+      signal.throwIfAborted();
       if (files.length === 0) {
         // Changed error message to be more neutral for LLM
         return {
@@ -238,6 +245,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
           // Log error internally but don't fail the whole listing
           debugLogger.warn(`Error accessing ${fullPath}: ${error}`);
         }
+        signal.throwIfAborted();
       }
 
       // Sort entries (directories first, then alphabetically)
@@ -292,6 +300,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
         returnDisplay: displayMessage,
       };
     } catch (error) {
+      signal.throwIfAborted();
       const errorMsg = `Error listing directory: ${error instanceof Error ? error.message : String(error)}`;
       return this.errorResult(
         errorMsg,

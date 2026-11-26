@@ -16,6 +16,7 @@ import {
   type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
@@ -83,12 +84,14 @@ import {
   GitWorktreeService,
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
+  worktreeBranchForSlug,
   type GoalTurnHost,
 } from '@qwen-code/qwen-code-core';
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from './utils/resumeHistoryUtils.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
@@ -299,8 +302,8 @@ import {
   MAIN_CONTENT_HEIGHT_RESERVATION,
   STATIC_EXTRA_HEIGHT,
 } from './utils/layoutUtils.js';
+import { CTRL_EXIT_PROMPT_DURATION_MS } from './utils/platformConstants.js';
 
-const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 // Startup gate for the goal runtime: under session-writer lease contention
 // getGoalRuntimeReady() can stay pending forever; bound it so the command
 // registry still loads and the TUI stays usable (see waitForGoalRuntime).
@@ -582,6 +585,9 @@ export function useQueuedSubmissionDrain({
           userAdmission: { turnKey: submission.turnKey },
           displayText: submission.displayText,
           humanInput: submission.humanInput,
+          ...(submission.promptHook
+            ? { promptHook: submission.promptHook }
+            : {}),
           ...(submission.hasUnknownInput ? { hasUnknownInput: true } : {}),
           ...(submission.pasteExpansions?.size
             ? { pasteExpansions: submission.pasteExpansions }
@@ -596,10 +602,7 @@ export function useQueuedSubmissionDrain({
             : { shellMode: submission.shellMode }),
           onAdmissionFailed: () => {
             // Deferred until idle, the same recovery the direct /btw
-            // path uses: admission failed because a turn is active,
-            // and the mid-turn steer drain returns raw text only, which
-            // would steer an undeferred restore into that turn with its
-            // projection lost.
+            // path uses: admission failed because a turn is active.
             restoreMessages(
               [submission.modelText],
               submission.submittedPrompt,
@@ -607,11 +610,13 @@ export function useQueuedSubmissionDrain({
               submission.shellMode,
               ...(submission.displayText !== undefined ||
               submission.humanInput !== undefined ||
+              submission.promptHook !== undefined ||
               submission.pasteExpansions?.size
                 ? ([
                     {
                       displayText: submission.displayText,
                       humanInput: submission.humanInput,
+                      promptHook: submission.promptHook,
                       ...(submission.hasUnknownInput
                         ? { hasUnknownInput: true }
                         : {}),
@@ -1125,6 +1130,7 @@ export const AppContainer = (props: AppContainerProps) => {
             originalCwd: worktreeSession.originalCwd,
             originalBranch: worktreeSession.originalBranch,
             originalHeadCommit: worktreeSession.originalHeadCommit,
+            worktreeBase: worktreeSession.worktreeBase,
           }
         : null,
     [worktreeSession],
@@ -1267,17 +1273,18 @@ export const AppContainer = (props: AppContainerProps) => {
             resumedSessionData.conversation.messages,
             config.getSessionId(),
           ),
+          computeResumedUserTurnCount(resumedSessionData.conversation.messages),
         );
       }
 
       // Restore the transcript before Mod diagnostics, without making input
-      // or Mod startup wait for asynchronous session recovery. Reply rows are
-      // offered only where the viewport can draw a committed row again; the
-      // terminal scrollback cannot.
+      // or Mod startup wait for asynchronous session recovery. Reply and
+      // thinking rows are offered only where the viewport can draw a committed
+      // row again; the terminal scrollback cannot.
       void getInteractiveModSession(config)
         ?.initialize(
           useTerminalBuffer
-            ? ['AbovePrompt', 'AssistantMessage']
+            ? ['AbovePrompt', 'AssistantMessage', 'Thinking']
             : ['AbovePrompt'],
           { prompts: true, runsPrompts: true },
         )
@@ -2271,6 +2278,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEffortDialog,
       openOutputStyleDialog,
       quit: (messages: HistoryItem[]) => {
+        prepareFileWatchersForProcessExit();
         try {
           cancelOngoingRequestRef.current();
         } catch (error) {
@@ -2455,6 +2463,12 @@ export const AppContainer = (props: AppContainerProps) => {
           const result = await svc.removeUserWorktree(activeWorktree.slug, {
             deleteBranch: true,
             forceDeleteBranch: true,
+            branchOwned:
+              activeWorktree.branch !== '' &&
+              activeWorktree.branch ===
+                worktreeBranchForSlug(activeWorktree.slug),
+            baseCommit:
+              activeWorktree.worktreeBase ?? activeWorktree.originalHeadCommit,
           });
           // removeUserWorktree returns {success, error} on failure — it
           // does NOT throw — so the previous try/catch never tripped on
@@ -2604,7 +2618,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const midTurnDrainRef = useRef<UseMessageQueueReturn['drainQueue'] | null>(
     null,
   );
-  const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
+  const midTurnRestoreRef = useRef<
+    UseMessageQueueReturn['restoreMessages'] | null
+  >(null);
   const goalQueueRef = useRef<
     | (Pick<
         UseMessageQueueReturn,
@@ -2728,7 +2744,7 @@ export const AppContainer = (props: AppContainerProps) => {
   useContextualTips({
     streamingState,
     lastPromptTokenCount: sessionStats.lastPromptTokenCount,
-    sessionPromptCount: sessionStats.promptCount,
+    sessionPromptCount: sessionStats.userPromptCount,
     config,
     tipHistory,
     addItem: historyManager.addItem,
@@ -4383,8 +4399,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isProjectHooksApprovalDialogOpen,
     pendingProjectHooks,
     handleProjectHooksApprovalSelect,
-  } = useProjectHooksApproval(config, settings, (text) =>
-    addHistoryItem({ type: MessageType.INFO, text }, Date.now()),
+  } = useProjectHooksApproval(config, settings, (notice) =>
+    addHistoryItem(notice, Date.now()),
   );
   const {
     needsRestart: ideNeedsRestart,
@@ -5004,7 +5020,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setPressedOnce(true);
         timerRef.current = setTimeout(() => {
           setPressedOnce(false);
-        }, 500);
+        }, CTRL_EXIT_PROMPT_DURATION_MS);
         return;
       }
 

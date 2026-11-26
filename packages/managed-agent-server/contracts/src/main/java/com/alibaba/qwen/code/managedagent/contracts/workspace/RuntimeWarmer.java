@@ -30,6 +30,11 @@ public interface RuntimeWarmer {
         return false;
     }
 
+    default boolean supportsWorkspaceClose(String profile) {
+        return !WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                && supportsWorkspaceClose();
+    }
+
     public default boolean supportsWorkspaceClose(ContextBinding binding) {
         return supportsWorkspaceClose();
     }

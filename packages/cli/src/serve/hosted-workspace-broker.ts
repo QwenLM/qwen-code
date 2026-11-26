@@ -5,6 +5,10 @@
  */
 
 import {
+  parseManagedDeliveryEntry,
+  type ManagedDeliveryEntry,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
+import {
   parseManagedRuntimeProviderResult,
   type ManagedWorkspaceContextFile,
 } from './managed-runtime-provider-protocol.js';
@@ -30,7 +34,9 @@ import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url
 import {
   WORKSPACE_CAPABILITY_DIGEST,
   MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+  MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  isMeasuredWorkspaceCapability,
 } from './managed-workspace-activation.js';
 import type {
   ManagedMcpControl,
@@ -211,6 +217,7 @@ export class HostedWorkspaceBroker {
   }
   private capabilityResolution?: Promise<void>;
   provisionerKind?: string;
+  mcpParkable = false;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -400,6 +407,7 @@ export class HostedWorkspaceBroker {
     if (response['acquired'] !== true)
       throw new Error('Runtime did not acquire the Session.');
     this.readRuntime(response);
+    this.mcpParkable = response['mcpParkable'] === true;
     this.leaseAcquired = true;
   }
 
@@ -410,6 +418,8 @@ export class HostedWorkspaceBroker {
       scope['workspaceId'] !== this.key.workspaceId ||
       (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !== MEASURED_WORKSPACE_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !==
+          MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !==
           MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !==
@@ -451,13 +461,24 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async registerPublisher(publisher: {
-    url: string;
-    token: string;
-  }): Promise<string> {
+  /** Phase 3b: set by the latest registerPublisher when the worker signals
+   * it owns the background capture and Monitor policy. */
+  observationOwned = false;
+  observedRuns: Readonly<Record<string, number>> = {};
+
+  async registerPublisher(
+    publisher: {
+      url: string;
+      token: string;
+    },
+    writerGeneration?: number,
+  ): Promise<string> {
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:publisher`,
-      { publisher },
+      {
+        publisher,
+        ...(writerGeneration !== undefined ? { writerGeneration } : {}),
+      },
     );
     const generation = response['bindingGeneration'];
     if (
@@ -468,7 +489,81 @@ export class HostedWorkspaceBroker {
     ) {
       throw new Error('Runtime did not install the original Shell publisher.');
     }
+    this.observationOwned = response['observation'] === true;
+    const rawRuns = response['observedRuns'];
+    if (rawRuns && typeof rawRuns === 'object' && !Array.isArray(rawRuns)) {
+      const parsed: Record<string, number> = {};
+      for (const [id, seq] of Object.entries(
+        rawRuns as Record<string, unknown>,
+      )) {
+        const value = Number(seq);
+        if (Number.isSafeInteger(value) && value >= 0) {
+          parsed[id] = value;
+        }
+      }
+      this.observedRuns = parsed;
+    } else {
+      this.observedRuns = {};
+    }
     return generation;
+  }
+
+  async detachPublisher(
+    writerGeneration: number,
+    appliedThrough?: Readonly<Record<string, number>>,
+  ): Promise<void> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/publisher/detach`,
+      {
+        writerGeneration,
+        ...(appliedThrough ? { appliedThrough } : {}),
+      },
+    );
+    if (response['detached'] !== true) {
+      throw new Error('Runtime did not detach the Shell publisher.');
+    }
+  }
+
+  async listStagedDeliveries(writer: {
+    readonly writerId: string;
+    readonly writerGeneration: number;
+  }): Promise<ManagedDeliveryEntry[]> {
+    const response = await this.request(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/staged-deliveries/list`,
+      {
+        writerId: writer.writerId,
+        writerGeneration: writer.writerGeneration,
+      },
+      true,
+      16 * 1024 * 1024,
+    );
+    const entries = response['entries'];
+    if (!Array.isArray(entries)) {
+      throw new Error('Runtime Broker staged deliveries response is invalid.');
+    }
+    return entries.map(parseManagedDeliveryEntry);
+  }
+
+  async acknowledgeStagedDeliveries(
+    writer: {
+      readonly writerId: string;
+      readonly writerGeneration: number;
+    },
+    executionCallId: string,
+    throughSeq: number,
+  ): Promise<void> {
+    const response = await this.harnessRequest(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/staged-deliveries/acknowledge`,
+      {
+        writerId: writer.writerId,
+        writerGeneration: writer.writerGeneration,
+        executionCallId,
+        throughSeq,
+      },
+    );
+    if (response['acknowledged'] !== true) {
+      throw new Error('Runtime Broker did not acknowledge staged deliveries.');
+    }
   }
 
   async prepare(
@@ -487,7 +582,7 @@ export class HostedWorkspaceBroker {
         promptId: turnId,
         callId,
         argsDigest: digest,
-        ...(this.capability === MEASURED_WORKSPACE_CAPABILITY_DIGEST
+        ...(isMeasuredWorkspaceCapability(this.capability ?? '')
           ? { resultProtocol: 4 }
           : {}),
         ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
@@ -600,7 +695,7 @@ export class HostedWorkspaceBroker {
         promptId: turnId,
         callId,
         argsDigest,
-        ...(this.capability === MEASURED_WORKSPACE_CAPABILITY_DIGEST
+        ...(isMeasuredWorkspaceCapability(this.capability ?? '')
           ? { resultProtocol: 4 }
           : {}),
       },

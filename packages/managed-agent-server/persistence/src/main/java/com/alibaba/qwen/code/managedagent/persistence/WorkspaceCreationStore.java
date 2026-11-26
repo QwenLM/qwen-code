@@ -203,7 +203,7 @@ public class WorkspaceCreationStore {
             var source = completed.sourceWorkspaceId() == null ? null : verifySource(tenant, actor, completed);
             if (completed.localRoot() != null) {
                 Path root = Path.of(completed.localRoot().root());
-                if (!completed.localRoot().equals(guard.identity(root))) {
+                if (!completed.localRoot().equals(guard.identity(root, completed.localRoot()))) {
                     throw WorkspaceExecutionStore.unavailable();
                 }
                 localDirectories.project(root.resolve(completed.cwdRelative()).toString());
@@ -215,7 +215,7 @@ public class WorkspaceCreationStore {
                     source == null ? WorkspaceExecutionProfile.CONFIG_REF : source.configRef(),
                     source == null ? WorkspaceExecutionProfile.POLICY_REF : source.policyRef(), now, now);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                            + " VALUES (?, ?, ?, 'OWNER')", tenant, completed.workspaceId(), actorKey);
+                            + " VALUES (?, ?, ?, 'OWNER')", tenant, completed.workspaceId(), actor);
             jdbc.update("UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ?"
                     + " WHERE receipt_key = ?", now, receiptKey);
         });
@@ -286,7 +286,7 @@ public class WorkspaceCreationStore {
                         + " JOIN ma_storage s ON s.tenant_id = w.tenant_id AND s.storage_id = w.storage_id"
                         + " WHERE w.tenant_id = ? AND a.actor_id = ? AND a.role = 'OWNER'"
                         + " AND w.state = 'ACTIVE' AND w.workspace_kind = 'ROOT' AND s.storage_kind = 'LOCAL'"
-                        + " ORDER BY w.workspace_id", String.class, tenant, ManagedWorkspaceRegistry.actorKey(tenant, actor));
+                        + " ORDER BY w.workspace_id", String.class, tenant, actor);
         for (String workspace : candidates) {
             String storage = jdbc.queryForObject("SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
                     String.class, tenant, workspace);
@@ -309,7 +309,7 @@ public class WorkspaceCreationStore {
         String receiptKey = details.workspaceId().substring("workspace-".length());
         Path root = Path.of(details.localRoot().root());
         localDirectories.requireStorageRoot(root);
-        if (!details.localRoot().equals(guard.identity(root))) {
+        if (!details.localRoot().equals(guard.identity(root, details.localRoot()))) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return transaction.execute(status -> {

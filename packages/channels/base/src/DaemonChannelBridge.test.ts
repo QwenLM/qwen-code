@@ -2100,51 +2100,6 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('ignores a rewritten background response to avoid duplicate delivery', async () => {
-    const events = new EventQueue();
-    const session = createFakeSession(events);
-    session.prompt.mockImplementation(async () => {
-      events.push(turnCompleteEvent());
-      return { stopReason: 'end_turn' };
-    });
-    const bridge = new DaemonChannelBridge({
-      cwd: '/repo',
-      sessionFactory: vi.fn().mockResolvedValue(session),
-    });
-    const backgroundResponses: Array<[string, string]> = [];
-    bridge.on('backgroundResponse', (sessionId, text) => {
-      backgroundResponses.push([sessionId, text]);
-    });
-
-    await bridge.start();
-    await bridge.newSession('/repo');
-    await bridge.prompt('session-1', 'investigate');
-
-    events.push({
-      id: 2,
-      v: 1,
-      type: 'session_update',
-      data: {
-        sessionId: 'session-1',
-        update: {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Background final answer.' },
-          _meta: {
-            source: 'background_notification_response',
-            qwenDiscreteMessage: true,
-            rewritten: true,
-          },
-        },
-      },
-    });
-
-    await new Promise((r) => setTimeout(r, 50));
-    expect(backgroundResponses).toEqual([]);
-
-    events.close();
-    bridge.stop();
-  });
-
   it('returns only the final slash-command output from the daemon', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -4928,7 +4883,12 @@ describe('DaemonChannelBridge', () => {
             },
           },
         });
-        for (const claimed of [true, false]) {
+        for (const [claimed, text, rewritten] of [
+          [true, 'Task result', false],
+          [false, 'Unrelated result', false],
+          [true, 'Rewritten task result', true],
+          [false, 'Rewritten unrelated result', true],
+        ] as const) {
           events.push({
             v: 1,
             type: 'session_update',
@@ -4936,13 +4896,11 @@ describe('DaemonChannelBridge', () => {
               sessionId: 'session-1',
               update: {
                 sessionUpdate: 'agent_message_chunk',
-                content: {
-                  type: 'text',
-                  text: claimed ? 'Task result' : 'Unrelated result',
-                },
+                content: { type: 'text', text },
                 _meta: {
                   qwenDiscreteMessage: true,
                   source: 'background_notification_response',
+                  rewritten,
                   [CHANNEL_TASK_OUTPUT_META_KEY]: claimed,
                   backgroundTask: {
                     taskId: 'task-1',

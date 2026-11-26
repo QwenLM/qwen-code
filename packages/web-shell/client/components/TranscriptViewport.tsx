@@ -24,10 +24,12 @@ import { MessageDeletionToolbar } from './MessageDeletionToolbar';
 import { GlobalTurnNavigation } from './GlobalTurnNavigation';
 import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
+import { useOptionalDaemonHistoryNavigationStore } from '../daemon/session/DaemonSessionProvider';
 import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
+import { ModRowsProvider } from './messages/ModAssistantMessage';
 
 interface ReadingAnchor {
   source: string;
@@ -77,12 +79,79 @@ export function followRangeFromRows(
 
 export interface TranscriptViewportProps extends MessageListProps {
   approvalOverlayActive?: boolean;
+  /**
+   * Enables session-context historical turn navigation and message deletion.
+   * Defaults to `true` for daemon callers; pass `false` for flat live hosts
+   * (including non-daemon surfaces co-mounted inside a daemon provider tree).
+   */
+  sessionViewportEnabled?: boolean;
 }
+
+const LiveTranscriptViewport = forwardRef<
+  MessageListHandle,
+  TranscriptViewportProps
+>(function LiveTranscriptViewport(
+  {
+    approvalOverlayActive: _approvalOverlayActive,
+    sessionViewportEnabled: _sessionViewportEnabled,
+    ...props
+  },
+  ref,
+) {
+  return (
+    <div
+      className={`${styles.root} relative flex min-h-0 flex-1`}
+      data-history-viewport="live"
+    >
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <ModRowsProvider messages={props.messages}>
+          <MessageList
+            {...props}
+            ref={ref}
+            hookStatisticsSessionId={props.sourceSessionId}
+            mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
+          />
+        </ModRowsProvider>
+      </div>
+    </div>
+  );
+});
+
+const SessionAwareTranscriptViewport = forwardRef<
+  MessageListHandle,
+  TranscriptViewportProps
+>(function SessionAwareTranscriptViewport(props, ref) {
+  const historyStore = useOptionalDaemonHistoryNavigationStore();
+  if (!historyStore) {
+    return <LiveTranscriptViewport ref={ref} {...props} />;
+  }
+  return <DaemonTranscriptViewport ref={ref} {...props} />;
+});
 
 export const TranscriptViewport = forwardRef<
   MessageListHandle,
   TranscriptViewportProps
->(function TranscriptViewport({ approvalOverlayActive, ...props }, ref) {
+>(function TranscriptViewport(
+  { sessionViewportEnabled = true, ...props },
+  ref,
+) {
+  if (!sessionViewportEnabled) {
+    return <LiveTranscriptViewport ref={ref} {...props} />;
+  }
+  return <SessionAwareTranscriptViewport ref={ref} {...props} />;
+});
+
+const DaemonTranscriptViewport = forwardRef<
+  MessageListHandle,
+  TranscriptViewportProps
+>(function DaemonTranscriptViewport(
+  {
+    approvalOverlayActive,
+    sessionViewportEnabled: _sessionViewportEnabled,
+    ...props
+  },
+  ref,
+) {
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
@@ -544,61 +613,65 @@ export const TranscriptViewport = forwardRef<
           <TurnCallsProvider
             onOpen={openTurnCalls ? openViewportTurnCalls : undefined}
           >
-            <MessageList
-              {...props}
-              key={viewport.viewKey}
-              ref={list}
-              messages={viewport.messages}
-              deletion={historical ? undefined : deletion}
-              mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
-              timelineAction={
-                globalNavigation || !navigationVisible
-                  ? undefined
-                  : props.timelineAction
-              }
-              hideSessionTimeline={
-                historical || globalNavigation || props.hideSessionTimeline
-              }
-              {...(viewport.historical
-                ? {
-                    frozenViewport: true,
-                    hasOlderHistory: false,
-                    onLoadOlderHistory: undefined,
-                    historyCapacityReached: false,
-                    historyPaginationError: false,
-                    loadingOlderHistory: false,
-                    onCanScrollToBottomChange: undefined,
-                    firstTurnMetrics: undefined,
-                    sessionKey: viewport.viewKey,
-                    pendingApproval: null,
-                    loadingTranscript: false,
-                    catchingUp: false,
-                    isResponding: false,
-                    transcriptActivity: undefined,
-                    onReloadTranscript: undefined,
-                    transcriptReloadPaused: true,
-                    onEditUserMessage: undefined,
-                    onSubmitUserMessageEdit: undefined,
-                    onShowContextDetail: undefined,
-                    onOpenMemoryFile: undefined,
-                    onBranchSession: undefined,
-                    onRetryClick: undefined,
-                    onRetryFailedPrompt: undefined,
-                    showRetryHint: false,
-                    failedPromptMessageId: undefined,
-                    tailContent: undefined,
-                    welcomeHeader: undefined,
-                    activeTurnStartedAt: undefined,
-                    turnFileChanges: undefined,
-                    sourceEntries: undefined,
-                    sourceSessionId: undefined,
-                    onSourceOpen: undefined,
-                    turnArtifacts: undefined,
-                    turnScheduledTasks: undefined,
-                    generateContent: undefined,
-                  }
-                : {})}
-            />
+            <ModRowsProvider messages={viewport.messages}>
+              <MessageList
+                {...props}
+                key={viewport.viewKey}
+                ref={list}
+                messages={viewport.messages}
+                hookStatisticsSessionId={props.sourceSessionId}
+                deletion={historical ? undefined : deletion}
+                mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
+                timelineAction={
+                  globalNavigation || !navigationVisible
+                    ? undefined
+                    : props.timelineAction
+                }
+                hideSessionTimeline={
+                  historical || globalNavigation || props.hideSessionTimeline
+                }
+                {...(viewport.historical
+                  ? {
+                      frozenViewport: true,
+                      hasOlderHistory: false,
+                      onLoadOlderHistory: undefined,
+                      historyCapacityReached: false,
+                      historyPaginationError: false,
+                      loadingOlderHistory: false,
+                      onCanScrollToBottomChange: undefined,
+                      firstTurnMetrics: undefined,
+                      sessionKey: viewport.viewKey,
+                      pendingApproval: null,
+                      loadingTranscript: false,
+                      catchingUp: false,
+                      isResponding: false,
+                      transcriptActivity: undefined,
+                      onReloadTranscript: undefined,
+                      transcriptReloadPaused: true,
+                      onEditUserMessage: undefined,
+                      onSubmitUserMessageEdit: undefined,
+                      onShowContextDetail: undefined,
+                      onOpenMemoryFile: undefined,
+                      onBranchSession: undefined,
+                      onRetryClick: undefined,
+                      onRetryFailedPrompt: undefined,
+                      showRetryHint: false,
+                      failedPromptMessageId: undefined,
+                      failedPromptStatus: undefined,
+                      tailContent: undefined,
+                      welcomeHeader: undefined,
+                      activeTurnStartedAt: undefined,
+                      turnFileChanges: undefined,
+                      sourceEntries: undefined,
+                      sourceSessionId: undefined,
+                      onSourceOpen: undefined,
+                      turnArtifacts: undefined,
+                      turnScheduledTasks: undefined,
+                      generateContent: undefined,
+                    }
+                  : {})}
+              />
+            </ModRowsProvider>
           </TurnCallsProvider>
           {deletion && !historical && (
             <MessageDeletionToolbar controls={deletion} />

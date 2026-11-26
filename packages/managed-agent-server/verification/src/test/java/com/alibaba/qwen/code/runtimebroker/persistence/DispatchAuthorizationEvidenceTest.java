@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DispatchAuthorizationEvidenceTest {
     @Test
     void onlyAtomicAdmissionMintsEvidenceAndOriginalResultPreservesIt() {
-        var f = fixture("kubernetes-workspace");
+        var f = fixture("external-workspace");
         var prepared = f.prepare("original");
         assertNull(prepared.getAuthorizedDispatchGeneration());
         assertFalse(prepared.wasDispatchAuthorizedBefore(Long.MAX_VALUE));
@@ -88,7 +88,7 @@ class DispatchAuthorizationEvidenceTest {
 
     @Test
     void genericCasCannotIntroduceEraseOrChangeEvidenceIncludingForgedExpected() {
-        var f = fixture("kubernetes-workspace");
+        var f = fixture("external-workspace");
         var claim = f.claim(f.prepare("original"));
         assertThrows(IllegalArgumentException.class, () -> f.executions.compareAndSet(claim,
                 claim.authorizeDispatch(f.binding.getVersion()), "owner", claim.getDispatchGeneration()));
@@ -106,7 +106,7 @@ class DispatchAuthorizationEvidenceTest {
 
     @Test
     void forgedClaimCannotRetroactivelyAuthorizeAnUnmarkedExecutingOrCancelledRow() {
-        var f = fixture("kubernetes-workspace");
+        var f = fixture("external-workspace");
         var claim = f.claim(f.prepare("legacy"));
         var legacy = f.executions.compareAndSet(claim, claim.withState(ToolExecutionRecord.State.EXECUTING, false),
                 "owner", claim.getDispatchGeneration());
@@ -120,7 +120,7 @@ class DispatchAuthorizationEvidenceTest {
 
     @Test
     void sealWinnerCannotAuthorizeLateClaimAndUnmarkedOutcomesStayUnmarked() {
-        var f = fixture("kubernetes-workspace");
+        var f = fixture("external-workspace");
         var claim = f.claim(f.prepare("late"));
         assertNotNull(f.bindings.compareAndSet(f.binding, f.binding.withState(RuntimeBindingRecord.State.DRAINING,
                 f.binding.getLease(), Instant.now()).withDrainRequested(true, Instant.now())));
@@ -138,7 +138,7 @@ class DispatchAuthorizationEvidenceTest {
 
     @Test
     void wrappedRepositoriesCannotBypassAtomicDispatchAdmission() {
-        for (String kind : new String[] {"test-supervisor", "kubernetes-workspace"}) {
+        for (String kind : new String[] {"test-supervisor", "external-workspace"}) {
             for (boolean wrapSessions : new boolean[] {false, true}) {
                 var f = fixture(kind);
                 var claim = f.claim(f.prepare("custom"));
@@ -156,7 +156,7 @@ class DispatchAuthorizationEvidenceTest {
 
     @Test
     void customRepositoryDefaultCannotMintDispatchEvidence() {
-        var f = fixture("kubernetes-workspace");
+        var f = fixture("external-workspace");
         var claim = f.claim(f.prepare("custom-default"));
         RuntimeBindingRepository custom = (RuntimeBindingRepository) Proxy.newProxyInstance(
                 RuntimeBindingRepository.class.getClassLoader(),
@@ -188,8 +188,8 @@ class DispatchAuthorizationEvidenceTest {
         assertThrows(IllegalStateException.class,
                 () -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(f.source));
         try (var connection = f.source.getConnection(); var statement = connection.prepareStatement(
-                "SELECT execution_call_id, execution_state FROM ma_tool_execution WHERE execution_call_id_hash = ?")) {
-            statement.setString(1, JdbcRepositorySupport.valueKey(prepared.getExecutionCallId()));
+                "SELECT execution_call_id, execution_state FROM ma_tool_execution WHERE execution_call_id = ?")) {
+            statement.setString(1, prepared.getExecutionCallId());
             try (var row = statement.executeQuery()) {
                 assertTrue(row.next());
                 assertEquals(prepared.getExecutionCallId(), row.getString(1));
@@ -253,7 +253,7 @@ class DispatchAuthorizationEvidenceTest {
         var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
                 seed.getToken(), seed.getLeaseId(), seed.getEpoch());
         var binding = bindings.compareAndSet(claimed, claimed.withAttestation(lease,
-                new RuntimeResourceHandle(kind, 3, Map.of("pod", "original")), Instant.now(), Instant.now()));
+                new RuntimeResourceHandle(kind, 3, Map.of("worker", "original")), Instant.now(), Instant.now()));
         var acquiring = bindings.admitSession(sessions, new RuntimeSessionRecord(new RuntimeSession(id, "session", "bootstrap", scope),
                 binding.getBindingId(), binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
         var session = sessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));

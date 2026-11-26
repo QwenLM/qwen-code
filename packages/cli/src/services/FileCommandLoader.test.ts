@@ -846,6 +846,40 @@ describe('FileCommandLoader', () => {
       expect(commands).toHaveLength(0);
     });
 
+    it('reads the commands path from a manifest saved with a UTF-8 BOM', async () => {
+      const extensionDir = path.join(process.cwd(), '.qwen/extensions/bom');
+
+      mock({
+        [extensionDir]: {
+          'qwen-extension.json':
+            '\uFEFF' +
+            JSON.stringify({
+              name: 'bom',
+              version: '1.0.0',
+              commands: 'prompts',
+            }),
+          prompts: {
+            'hello.toml': 'prompt = "Hello from a BOM manifest"',
+          },
+        },
+      });
+
+      const mockConfig = {
+        getProjectRoot: vi.fn(() => process.cwd()),
+        getExtensions: vi.fn(() => [
+          { name: 'bom', version: '1.0.0', isActive: true, path: extensionDir },
+        ]),
+        getFolderTrustFeature: vi.fn(() => false),
+        getFolderTrust: vi.fn(() => false),
+      } as unknown as Config;
+      const loader = new FileCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands).toHaveLength(1);
+      expect(commands[0].name).toBe('hello');
+      expect(commands[0].extensionName).toBe('bom');
+    });
+
     it('handles nested command structure in extensions', async () => {
       const extensionDir = path.join(process.cwd(), '.qwen/extensions/a');
 

@@ -1,24 +1,27 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 final class WorkspaceOperations {
     enum Kind {
-        WORKSPACE_RECOVERY, WORKSPACE_OPERATOR_RECOVERY, STORAGE_MIGRATION, CSI_RETIREMENT, WORKSPACE_RETIREMENT, CHILD_WORKSPACE, SESSION_WORKTREE
+        WORKSPACE_RECOVERY, WORKSPACE_OPERATOR_RECOVERY, STORAGE_MIGRATION, WORKSPACE_RETIREMENT, CHILD_WORKSPACE, SESSION_WORKTREE
     }
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -36,15 +39,15 @@ final class WorkspaceOperations {
     }
 
     static String key(Kind kind, String tenant, String id) {
-        return hash(kind.name(), tenant, id);
+        return ManagedIdentityRefs.tenantOperationRef(kind.name(), tenant, id);
     }
 
     static String hash(String... fields) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(fields);
+        return ManagedSchemaKeys.key(fields);
     }
 
     Map<String, Object> find(Kind kind, String id, boolean lock) {
-        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_key = ?"
+        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_ref = ?"
                         + " AND operation_kind = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> operation(row), key(kind, id), kind.name());
         if (rows.isEmpty()) {
@@ -59,10 +62,10 @@ final class WorkspaceOperations {
 
     void create(Kind kind, String id, Map<String, Object> data) {
         String storage = (String) data.get("storage_id");
-        Object physical = data.get("physical_key");
+        Object physical = null;
         if (storage != null) {
-            var aliases = jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?", String.class,
-                    RuntimeAdmissionFences.storageAliasKey(tenant, storage));
+            var aliases = jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE tenant_id = ? AND storage_id = ?", String.class,
+                    tenant, storage);
             if (aliases.size() == 1 && "LOCAL".equals(aliases.getFirst())) {
                 physical = LocalStorageOwners.key(jdbc, tenant, storage);
                 if (kind == Kind.CHILD_WORKSPACE || kind == Kind.SESSION_WORKTREE) {
@@ -75,12 +78,11 @@ final class WorkspaceOperations {
         String request = (String) data.getOrDefault("request_json", encode(data));
         String state = (String) data.getOrDefault("state", "PENDING");
         requireState(kind, state);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id, target_kind, target_key, target_id, target_revision, storage_key, physical_key, state, phase, delivery_state, request_digest, request_json, result_json, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                key(kind, id), hash(tenant), data.get("session_id") instanceof String session
-                        ? ManagedSessionStore.sessionScopeKey(tenant, session) : null, kind.name(), id.getBytes(StandardCharsets.UTF_8),
-                tenant.getBytes(StandardCharsets.UTF_8), data.get("session_id"),
-                data.containsKey("binding_id") ? "RUNTIME_BINDING" : "STORAGE", hash(target), target.getBytes(StandardCharsets.UTF_8), revision,
-                storage == null ? null : RuntimeAdmissionFences.storageAliasKey(tenant, storage),
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id, session_id, target_kind, target_id, target_revision, storage_id, physical_id, state, phase, delivery_state, request_digest, request_json, result_json, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
+                key(kind, id), "TENANT", tenant.getBytes(StandardCharsets.UTF_8), kind.name(), id,
+                tenant, data.get("session_id"),
+                data.containsKey("binding_id") ? "RUNTIME_BINDING" : "STORAGE", target.getBytes(StandardCharsets.UTF_8), revision,
+                storage,
                 physical, state, data.getOrDefault("phase", state), data.get("delivery_state"),
                 data.getOrDefault("request_digest", hash(request)), request, envelope(data), data.getOrDefault("available_at", 0L));
     }
@@ -96,13 +98,13 @@ final class WorkspaceOperations {
         if (changes.containsKey("state") && !changes.containsKey("phase")) {
             row.put("phase", row.get("state"));
         }
-        jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_key = ? AND operation_kind = ?",
+        jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_ref = ? AND operation_kind = ?",
                 row.get("state"), row.get("phase") == null ? row.get("state") : row.get("phase"), envelope(row), key(kind, id), kind.name());
     }
 
     static List<Map<String, Object>> rows(JdbcTemplate jdbc, String sql, Object... arguments) {
         return jdbc.query(sql, (row, index) ->
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), arguments);
+                ManagedSchemaRows.read(row), arguments);
     }
 
     static Map<String, Object> values(Object... fields) {
@@ -113,33 +115,33 @@ final class WorkspaceOperations {
         return result;
     }
 
-    void insertWork(Kind kind, String id, String workKind, String targetKey,
-            String rawKey, String session, Map<String, Object> data, String state) {
-        jdbc.update("INSERT INTO ma_operation_work (operation_key, work_kind, target_key, target_id, tenant_id, session_id, storage_key, state, payload_json, evidence_resource_key, evidence_sha256, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                key(kind, id), workKind, targetKey, rawKey.getBytes(StandardCharsets.UTF_8), tenant.getBytes(StandardCharsets.UTF_8), session,
-                data.get("storage_key"), state, workEnvelope(rawKey, data), data.get("evidence_resource_key"), data.get("evidence_sha256"));
+    void insertWork(Kind kind, String id, String workKind, String target,
+            String session, Map<String, Object> data, String state) {
+        jdbc.update("INSERT INTO ma_operation_work (operation_ref, work_kind, target_id, tenant_id, session_id, storage_id, state, payload_json, evidence_resource_ref, evidence_sha256, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
+                key(kind, id), workKind, target.getBytes(StandardCharsets.UTF_8), tenant, session,
+                data.get("storage_id"), state, workEnvelope(target, data), data.get("evidence_resource_ref"), data.get("evidence_sha256"));
     }
 
-    Map<String, Object> findWork(Kind kind, String id, String workKind, String targetKey, boolean lock) {
-        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_key = ?"
-                        + " AND work_kind = ? AND target_key = ?" + (lock ? " FOR UPDATE" : ""),
+    Map<String, Object> findWork(Kind kind, String id, String workKind, String target, boolean lock) {
+        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_ref = ?"
+                        + " AND work_kind = ? AND target_id = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> {
                     if (!tenant.equals(row.getString("tenant_id"))) {
                         throw new IllegalStateException("Workspace work tenant conflicts");
                     }
                     return work(row);
-                }, key(kind, id), workKind, targetKey);
+                }, key(kind, id), workKind, target);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
-    void updateWork(Kind kind, String id, String workKind, String targetKey, Map<String, Object> changes) {
-        Map<String, Object> row = findWork(kind, id, workKind, targetKey, true);
+    void updateWork(Kind kind, String id, String workKind, String target, Map<String, Object> changes) {
+        Map<String, Object> row = findWork(kind, id, workKind, target, true);
         if (row == null) {
             throw new IllegalStateException("Workspace operation work is missing");
         }
         row.putAll(changes);
-        jdbc.update("UPDATE ma_operation_work SET state = ?, payload_json = ?, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_key = ? AND work_kind = ? AND target_key = ?",
-                row.get("state"), workEnvelope((String) row.get("work_key"), row), key(kind, id), workKind, targetKey);
+        jdbc.update("UPDATE ma_operation_work SET state = ?, payload_json = ?, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_ref = ? AND work_kind = ? AND target_id = ?",
+                row.get("state"), workEnvelope((String) row.get("work_key"), row), key(kind, id), workKind, target);
     }
 
     static Map<String, Object> operation(ResultSet row) throws SQLException {
@@ -164,24 +166,22 @@ final class WorkspaceOperations {
         data.put("work_key", rawKey);
         data.put("session_id", row.getString("session_id"));
         data.put("state", row.getString("state"));
-        data.put("key_hash", row.getString("target_key"));
-        data.put("evidence_resource_key", row.getString("evidence_resource_key"));
+        data.put("evidence_resource_ref", ManagedSchemaRows.identity(row, "evidence_resource_ref"));
         data.put("evidence_sha256", row.getString("evidence_sha256"));
         return data;
     }
 
     static void requireState(Kind kind, String state) {
-        java.util.Set<String> allowed = switch (kind) {
-            case WORKSPACE_RECOVERY -> java.util.Set.of("CAPTURING", "VERIFYING", "SEALED", "VERIFIED", "INVALIDATED");
-            case WORKSPACE_OPERATOR_RECOVERY -> java.util.Set.of("PREPARED", "ATTESTED", "COMPLETED");
-            case STORAGE_MIGRATION -> java.util.Set.of("RETIRING", "RETIRED", "PREPARING", "PREPARED", "COMPLETED", "ABORTED", "INVALIDATED");
-            case CSI_RETIREMENT -> java.util.Set.of("DRAINING");
-            case WORKSPACE_RETIREMENT -> java.util.Set.of("DRAINING", "PLATFORM_CLEANED", "RELEASED");
-            case CHILD_WORKSPACE -> java.util.Set.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY,
+        Set<String> allowed = switch (kind) {
+            case WORKSPACE_RECOVERY -> Set.of("CAPTURING", "VERIFYING", "SEALED", "VERIFIED", "INVALIDATED");
+            case WORKSPACE_OPERATOR_RECOVERY -> Set.of("PREPARED", "ATTESTED", "COMPLETED");
+            case STORAGE_MIGRATION -> Set.of("RETIRING", "RETIRED", "PREPARING", "PREPARED", "COMPLETED", "ABORTED", "INVALIDATED");
+            case WORKSPACE_RETIREMENT -> Set.of("DRAINING", "PLATFORM_CLEANED", "RELEASED");
+            case CHILD_WORKSPACE -> Set.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY,
                     JdbcChildWorkspaceStore.MERGING, JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED,
                     JdbcChildWorkspaceStore.MERGED, JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.DISCARDING,
                     JdbcChildWorkspaceStore.DISCARDED, JdbcChildWorkspaceStore.FAILED, JdbcChildWorkspaceStore.BLOCKED);
-            case SESSION_WORKTREE -> java.util.Set.of("PREPARING", "READY", "FAILED", "BLOCKED", "REMOVING", "REMOVED");
+            case SESSION_WORKTREE -> Set.of("PREPARING", "READY", "FAILED", "BLOCKED", "REMOVING", "REMOVED");
         };
         if (!allowed.contains(state)) {
             throw new IllegalArgumentException("Unknown state for Workspace operation " + kind);
@@ -192,19 +192,19 @@ final class WorkspaceOperations {
         requireState(kind, from);
         requireState(kind, to);
         boolean allowed = from.equals(to) || switch (kind) {
-            case WORKSPACE_RECOVERY -> "CAPTURING".equals(from) && java.util.Set.of("SEALED", "INVALIDATED").contains(to)
+            case WORKSPACE_RECOVERY -> "CAPTURING".equals(from) && Set.of("SEALED", "INVALIDATED").contains(to)
                     || "VERIFYING".equals(from) && "VERIFIED".equals(to);
             case WORKSPACE_OPERATOR_RECOVERY -> "PREPARED".equals(from) && "ATTESTED".equals(to)
                     || "ATTESTED".equals(from) && "COMPLETED".equals(to);
-            case STORAGE_MIGRATION -> !java.util.Set.of("COMPLETED", "ABORTED").contains(from)
-                    && (java.util.Set.of("ABORTED", "INVALIDATED").contains(to)
+            case STORAGE_MIGRATION -> !Set.of("COMPLETED", "ABORTED").contains(from)
+                    && (Set.of("ABORTED", "INVALIDATED").contains(to)
                     || "RETIRING".equals(from) && "RETIRED".equals(to)
                     || "RETIRED".equals(from) && "PREPARING".equals(to)
                     || "PREPARING".equals(from) && "PREPARED".equals(to)
                     || "PREPARED".equals(from) && "COMPLETED".equals(to));
             case WORKSPACE_RETIREMENT -> "DRAINING".equals(from) && "PLATFORM_CLEANED".equals(to)
                     || "PLATFORM_CLEANED".equals(from) && "RELEASED".equals(to);
-            case CSI_RETIREMENT, CHILD_WORKSPACE, SESSION_WORKTREE -> false;
+            case CHILD_WORKSPACE, SESSION_WORKTREE -> false;
         };
         if (!allowed) {
             throw new IllegalStateException("Workspace operation transition conflicts");
@@ -218,7 +218,7 @@ final class WorkspaceOperations {
                 throw new IllegalStateException("Workspace operation payload version is invalid");
             }
             return JSON.convertValue(document.path("data"), MAP);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Workspace operation payload is invalid", error);
         }
     }
@@ -226,7 +226,7 @@ final class WorkspaceOperations {
     private static String decodeKey(String value) {
         try {
             return JSON.readTree(value).path("workKey").asText();
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Workspace work identity is invalid", error);
         }
     }
@@ -251,7 +251,7 @@ final class WorkspaceOperations {
     private static String encode(Object value) {
         try {
             return JSON.writeValueAsString(value);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Workspace operation payload cannot be encoded", error);
         }
     }

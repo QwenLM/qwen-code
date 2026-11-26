@@ -29,7 +29,7 @@
  *
  * Usage:
  *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
- *   node scripts/verify-pr-prepare.mjs --require-isolation
+ *   node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
  *
  * Options:
  *   --repo <owner>/<repo>  required for the coordinate path: never inferred
@@ -37,24 +37,35 @@
  *                          same PR number to an unrelated PR
  *   --require-isolation    check the process this runs in and exit 4 when no
  *                          boundary is detected; run it inside the boundary
+ *   --artifact-dir <dir>   with --require-isolation, a pass writes boundary-gate.json
+ *                          into the round's artifact directory — the record the
+ *                          checker requires beside a mode:"container" declaration
  *
  * Exit codes:
  *   0  coordinates resolved, or the boundary check passed
  *   2  usage error
- *   3  metadata, OID, tree-state, or filesystem failure
+ *   3  metadata, OID, tree-state, or filesystem failure (incl. writing the gate record)
  *   4  --require-isolation found no boundary — do not run PR code here
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -67,11 +78,12 @@ const FIELDS = [
   'baseRefName',
   'baseRefOid',
   'headRefOid',
+  'isCrossRepository',
   'commits',
 ].join(',');
 
-const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
-       node scripts/verify-pr-prepare.mjs --require-isolation
+const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> [--context-out <path>] [--local-owner] [--sponsored]
+       node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
 
 Resolves the coordinates a local /verify-pr round needs and writes the
 metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
@@ -95,7 +107,11 @@ isolated and must not execute PR code. A container marker alone does not pass:
 the CLI's own Docker/Podman launcher mounts ~/.config/gcloud and the ADC file
 and copies model API keys, so the check also requires the credential-free
 attestation and refuses when a known credential signal is visible. The
-built-in macOS sandbox (SANDBOX=sandbox-exec) never counts.
+built-in macOS sandbox (SANDBOX=sandbox-exec) never counts. With
+--artifact-dir, a pass also writes boundary-gate.json there — the record the
+checker requires alongside a mode:"container" declaration. The artifact tree
+is PR-writable, so the record corroborates an operator who ran the gate; it
+is not proof against a round that forges it.
 `;
 
 /** Returns `{owner, name}` for a GitHub repository slug, or null. */
@@ -130,6 +146,254 @@ export function artifactDirName(pr, now = new Date()) {
  * it is not the credential-free boundary the round needs.
  */
 export const SEATBELT = 'sandbox-exec';
+
+/**
+ * Host-side emergency switch (outside PR-controlled input). When set to `1`,
+ * every round is forced into `hardware-isolated`, disabling lightweight
+ * trusted exceptions during incident response (§4.4).
+ */
+export const FORCE_HARDWARE_ENV = 'QWEN_VERIFY_FORCE_HARDWARE';
+
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const WRITE_PERMISSIONS = new Set(['write', 'maintain', 'admin']);
+const NON_WRITE_PERMISSIONS = new Set(['read', 'triage', 'none']);
+
+const ESCALATION_RULES = [
+  {
+    reason: 'dependency-manifest',
+    test: (p) =>
+      /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?|npm-shrinkwrap\.json|pnpm-workspace\.yaml|\.npmrc|\.pnpmfile\.[cm]?js|\.yarnrc(?:\.yml)?)$/i.test(
+        p,
+      ) || /^patches\//i.test(p),
+  },
+  {
+    reason: 'maven-build',
+    test: (p) =>
+      /(?:^|\/)(?:pom\.xml|mvnw(?:\.cmd)?)$/i.test(p) ||
+      /(?:^|\/)\.mvn\//i.test(p),
+  },
+  {
+    reason: 'ci-workflow',
+    test: (p) => /^\.github\/(?:workflows|actions)\//i.test(p),
+  },
+  {
+    reason: 'verify-or-sandbox-script',
+    test: (p) =>
+      /^scripts\/(?:verify-pr-|sandbox|lib\/)/i.test(p) ||
+      /^\.husky\//i.test(p) ||
+      /(?:^|\/)(?:\.gitmodules|\.gitattributes|Dockerfile(?:\.[^/]+)?|docker-compose(?:\.[^/]+)?\.ya?ml|Makefile|esbuild\.config\.[cm]?js|eslint\.config\.[cm]?js|vitest\.config\.[cm]?[jt]s)$/i.test(
+        p,
+      ),
+  },
+  {
+    reason: 'agent-control-config',
+    test: (p) => /(?:^|\/)\.(?:qwen|claude)\//i.test(p),
+  },
+  {
+    reason: 'executable-or-binary',
+    test: (p) =>
+      /\.(?:node|wasm|so|dylib|dll|exe|bin|sh|bash|zsh|ps1|bat|cmd)$/i.test(p),
+  },
+];
+
+/**
+ * Parses `git diff --raw --no-renames -z` output into changed paths plus
+ * git-mode escalation sets (100755 executables, 120000 symlinks, 160000
+ * submodules) and extensionless live files eligible for magic-byte sniffing.
+ */
+export function parseRawDiffEntries(rawStdout) {
+  const changedPaths = [];
+  const executablePaths = [];
+  const specialModePaths = [];
+  const extensionlessLivePaths = [];
+  if (typeof rawStdout !== 'string' || rawStdout.length === 0) {
+    return {
+      changedPaths,
+      executablePaths,
+      specialModePaths,
+      extensionlessLivePaths,
+    };
+  }
+  const tokens = rawStdout.split('\0');
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const header = tokens[i];
+    const filePath = tokens[i + 1];
+    if (!header.startsWith(':') || !filePath) continue;
+    const parts = header.slice(1).split(' ');
+    const newMode = parts[1] ?? '';
+    const status = (parts[4] ?? '').charAt(0);
+    changedPaths.push(filePath);
+    if (status === 'D') continue;
+    if (newMode === '100755') {
+      executablePaths.push(filePath);
+    } else if (newMode === '120000' || newMode === '160000') {
+      specialModePaths.push(filePath);
+    } else if (!/\.[^/]+$/.test(basename(filePath))) {
+      extensionlessLivePaths.push(filePath);
+    }
+  }
+  return {
+    changedPaths,
+    executablePaths,
+    specialModePaths,
+    extensionlessLivePaths,
+  };
+}
+
+/**
+ * Checks the first 4 bytes of a regular file without following symlinks for
+ * shebang (`#!`), ELF (`\x7fELF`), Mach-O, or PE (`MZ`) executable headers.
+ */
+export function hasExecutableMagic(filePath) {
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  let fd;
+  try {
+    fd = openSync(filePath, flags);
+  } catch {
+    return false;
+  }
+  try {
+    const buf = Buffer.alloc(4);
+    const n = readSync(fd, buf, 0, 4, 0);
+    if (n >= 2 && buf[0] === 0x23 && buf[1] === 0x21) return true; // #!
+    if (n >= 2 && buf[0] === 0x4d && buf[1] === 0x5a) return true; // MZ (PE)
+    if (
+      n >= 4 &&
+      buf[0] === 0x7f &&
+      buf[1] === 0x45 &&
+      buf[2] === 0x4c &&
+      buf[3] === 0x46
+    ) {
+      return true; // ELF
+    }
+    if (n >= 4) {
+      const hex = buf.toString('hex');
+      if (
+        hex === 'feedface' ||
+        hex === 'cefaedfe' ||
+        hex === 'feedfacf' ||
+        hex === 'cffaedfe' ||
+        hex === 'cafebabe'
+      ) {
+        return true; // Mach-O / fat binary
+      }
+    }
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Returns every mandatory high-assurance escalation trigger matched by the
+ * changed file paths in `base..head` (§4.3). These triggers force
+ * `hardware-isolated` regardless of author trust; their absence is NOT proof
+ * that other changes are benign.
+ */
+export function detectMandatoryEscalations(
+  changedPaths = [],
+  { executablePaths = [], specialModePaths = [] } = {},
+) {
+  const normalizePath = (p) =>
+    p.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+  const execSet = new Set(
+    executablePaths
+      .filter((p) => typeof p === 'string')
+      .map(normalizePath)
+      .filter(Boolean),
+  );
+  const specialSet = new Set(
+    specialModePaths
+      .filter((p) => typeof p === 'string')
+      .map(normalizePath)
+      .filter(Boolean),
+  );
+  const hits = [];
+  for (const raw of changedPaths) {
+    if (typeof raw !== 'string') continue;
+    const normalized = normalizePath(raw);
+    if (!normalized) continue;
+    let matched = false;
+    for (const rule of ESCALATION_RULES) {
+      if (rule.test(normalized)) {
+        hits.push({ path: normalized, reason: rule.reason });
+        matched = true;
+        break;
+      }
+    }
+    if (!matched && specialSet.has(normalized)) {
+      hits.push({ path: normalized, reason: 'symlink-or-submodule' });
+    } else if (!matched && execSet.has(normalized)) {
+      hits.push({ path: normalized, reason: 'executable-or-binary' });
+    }
+  }
+  return hits;
+}
+
+/**
+ * Classifies a round into `(prTrust, executionClass)` per §4.1–§4.4.
+ * Fails closed to `hardware-isolated` on external/fork/unknown identity,
+ * missing changed-file data, mandatory escalation paths, or the host-side
+ * global hardware switch. `sponsored` authorizes execution budget only and
+ * never lowers `executionClass`.
+ */
+export function classifyPrTrust({
+  permission = null,
+  isLocalOwner = false,
+  isFork = null,
+  changedPaths = null,
+  executablePaths = [],
+  specialModePaths = [],
+  forceHardware = false,
+  sponsored = false,
+} = {}) {
+  let prTrust;
+  if (isFork === true) {
+    prTrust = 'external';
+  } else if (isLocalOwner === true) {
+    prTrust = 'local-owner';
+  } else if (typeof permission === 'string') {
+    const perm = permission.trim().toLowerCase();
+    if (WRITE_PERMISSIONS.has(perm)) {
+      prTrust = 'collaborator';
+    } else if (NON_WRITE_PERMISSIONS.has(perm)) {
+      prTrust = 'external';
+    } else {
+      prTrust = 'unknown';
+    }
+  } else {
+    prTrust = 'unknown';
+  }
+
+  const escalationReasons = [];
+  if (forceHardware === true) {
+    escalationReasons.push('global-hardware-only-switch');
+  }
+  if (!Array.isArray(changedPaths)) {
+    escalationReasons.push('changed-files-unavailable');
+  } else {
+    for (const hit of detectMandatoryEscalations(changedPaths, {
+      executablePaths,
+      specialModePaths,
+    })) {
+      escalationReasons.push(`${hit.reason}:${hit.path}`);
+    }
+  }
+
+  const eligibleForSharedKernel =
+    (prTrust === 'local-owner' || prTrust === 'collaborator') &&
+    escalationReasons.length === 0;
+  const executionClass = eligibleForSharedKernel
+    ? 'trusted-shared-kernel'
+    : 'hardware-isolated';
+
+  return {
+    prTrust,
+    executionClass,
+    escalationReasons,
+    sponsored: Boolean(sponsored),
+  };
+}
 
 /**
  * Set this only after confirming the boundary mounts no host credentials. A
@@ -184,8 +448,13 @@ export function detectCredentialSignals(
   for (const name of CREDENTIAL_ENV) {
     if (env[name]) signals.push(name);
   }
-  for (const [relative, label] of CREDENTIAL_PATHS) {
-    if (exists(join(home, relative))) signals.push(label);
+  // An unresolvable home (null/empty) has no credential paths to scan; the
+  // gate fails on it at the nonce write below. join(home, …) on a non-string
+  // would throw, and on '' would scan the PR-writable CWD instead (R5-1).
+  if (typeof home === 'string' && home !== '') {
+    for (const [relative, label] of CREDENTIAL_PATHS) {
+      if (exists(join(home, relative))) signals.push(label);
+    }
   }
   return signals;
 }
@@ -198,18 +467,33 @@ export function detectCredentialSignals(
  */
 export function detectIsolation(env = process.env, exists = existsSync) {
   const signals = [];
+  // Observed markers are filesystem facts the process can check, not strings
+  // an operator chooses. A self-chosen `container=<name>` is a DECLARATION;
+  // on its own it cannot distinguish a boundary from a bare host, so the
+  // gate and the checker treat it as insufficient for a container claim.
+  const observed = [];
   if (env.container) signals.push(`container=${env.container}`);
-  if (exists('/.dockerenv')) signals.push('/.dockerenv');
-  if (exists('/run/.containerenv')) signals.push('/run/.containerenv');
+  if (exists('/.dockerenv')) {
+    signals.push('/.dockerenv');
+    observed.push('/.dockerenv');
+  }
+  if (exists('/run/.containerenv')) {
+    signals.push('/run/.containerenv');
+    observed.push('/run/.containerenv');
+  }
   // A boolean-looking value reads as "sandbox disabled"; the CLI's transport
   // writes a container name or `sandbox-exec`, neither of which is a marker.
   const sandbox = (env.SANDBOX ?? '').trim();
-  if (sandbox && !['false', 'true', '0', '1'].includes(sandbox)) {
-    if (sandbox !== SEATBELT) signals.push(`SANDBOX=${sandbox}`);
-  }
+  const sandboxRuntime =
+    sandbox &&
+    !['false', 'true', '0', '1'].includes(sandbox) &&
+    sandbox !== SEATBELT;
+  if (sandboxRuntime) signals.push(`SANDBOX=${sandbox}`);
   return {
     isolated: signals.length > 0,
     signals,
+    observed,
+    sandboxRuntime: sandboxRuntime ? sandbox : null,
     seatbelt: sandbox === SEATBELT,
   };
 }
@@ -315,6 +599,10 @@ export function parseArgs(argv) {
     pr: null,
     repo: null,
     requireIsolation: false,
+    artifactDir: null,
+    contextOut: null,
+    localOwner: false,
+    sponsored: false,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -323,6 +611,20 @@ export function parseArgs(argv) {
       options.help = true;
     } else if (arg === '--require-isolation') {
       options.requireIsolation = true;
+    } else if (arg === '--local-owner') {
+      options.localOwner = true;
+    } else if (arg === '--sponsored') {
+      options.sponsored = true;
+    } else if (arg === '--artifact-dir') {
+      options.artifactDir = argv[(index += 1)] ?? null;
+      if (!options.artifactDir) {
+        return { error: '--artifact-dir needs <round-dir>' };
+      }
+    } else if (arg === '--context-out') {
+      options.contextOut = argv[(index += 1)] ?? null;
+      if (!options.contextOut) {
+        return { error: '--context-out needs <host-snapshot-path>' };
+      }
     } else if (arg === '--repo') {
       options.repo = argv[(index += 1)] ?? null;
       if (!options.repo) return { error: '--repo needs <owner>/<repo>' };
@@ -335,6 +637,9 @@ export function parseArgs(argv) {
     }
   }
   if (options.help || options.requireIsolation) return options;
+  if (options.artifactDir !== null) {
+    return { error: '--artifact-dir only applies with --require-isolation' };
+  }
   if (!Number.isInteger(options.pr) || options.pr <= 0) {
     return { error: 'a PR number is required' };
   }
@@ -346,6 +651,49 @@ export function parseArgs(argv) {
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: 'utf8', ...options });
+}
+
+/**
+ * Best-effort collaborator permission lookup for trust classification (§4.2).
+ * Never throws and never fails open: any lookup error returns permission: null,
+ * which classifyPrTrust maps to prTrust="unknown" -> hardware-isolated.
+ */
+function fetchAuthorPermission(owner, name, login) {
+  if (typeof login !== 'string' || !GITHUB_LOGIN.test(login)) {
+    return { permission: null, error: 'missing or invalid author login' };
+  }
+  const view = run('gh', [
+    'api',
+    `repos/${owner}/${name}/collaborators/${login}/permission`,
+  ]);
+  if (view.status !== 0) {
+    const detail =
+      (view.stderr || '').trim().split('\n')[0] ||
+      view.error?.message ||
+      `exit ${view.status}`;
+    return { permission: null, error: `gh api permission failed: ${detail}` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(view.stdout);
+  } catch {
+    return {
+      permission: null,
+      error: 'gh api permission returned non-JSON output',
+    };
+  }
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    typeof parsed.permission === 'string'
+  ) {
+    return { permission: parsed.permission, error: null };
+  }
+  return {
+    permission: null,
+    error: 'gh api permission returned no permission field',
+  };
 }
 
 /** `{state}` on success, `{error}` naming why the review state is unknown. */
@@ -529,7 +877,7 @@ function main(argv) {
     process.stdout.write(HELP);
     return 0;
   }
-  if (options.requireIsolation) return requireBoundary();
+  if (options.requireIsolation) return requireBoundary(options.artifactDir);
 
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
@@ -549,6 +897,9 @@ function main(argv) {
     return fail(3, 'not inside a git worktree — run this from the clone');
   }
   const root = toplevel.stdout.trim();
+  const rootFilterOverrides = localFilterOverrides(root);
+  const runGitRoot = (args) =>
+    run('git', [...rootFilterOverrides, ...GIT_HARDENING, '-C', root, ...args]);
 
   const view = run('gh', [
     'pr',
@@ -585,9 +936,7 @@ function main(argv) {
     ['head', context.head, `pull/${context.pr}/head`],
   ];
   for (const [label, oid, ref] of probes) {
-    if (
-      runGit(['-C', root, 'cat-file', '-e', `${oid}^{commit}`]).status !== 0
-    ) {
+    if (runGitRoot(['cat-file', '-e', `${oid}^{commit}`]).status !== 0) {
       return fail(
         3,
         `${label} ${oid} is not in this clone — run: git fetch https://github.com/${slug}.git ${ref}`,
@@ -599,7 +948,7 @@ function main(argv) {
   // than the PR head or an uncommitted change would measure code the report
   // does not name. Checked before the artifact directory exists, so a refusal
   // leaves nothing behind.
-  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD']);
+  const treeHead = runGitRoot(['rev-parse', 'HEAD']);
   if (treeHead.status !== 0) {
     return fail(3, 'could not read HEAD in this clone');
   }
@@ -621,7 +970,15 @@ function main(argv) {
   }
   // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
   // hide the untracked files this check exists to refuse.
-  const dirty = run('git', gitStatusArgs(root));
+  const dirty = run('git', [
+    ...rootFilterOverrides,
+    ...GIT_HARDENING,
+    '-C',
+    root,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  ]);
   if (dirty.status !== 0) {
     const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
     return fail(3, `could not read the working tree status: ${detail}`);
@@ -639,7 +996,7 @@ function main(argv) {
   // git status trusts the index: skip-worktree / assume-unchanged entries
   // (a sparse checkout sets them en masse) hide tracked divergence from it,
   // so refuse anything that is not a plain cached 'H' entry.
-  const flagged = runGit(['-C', root, 'ls-files', '-v']);
+  const flagged = runGitRoot(['ls-files', '-v']);
   if (flagged.status !== 0) {
     const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
     return fail(3, `could not read the index flags: ${detail}`);
@@ -658,6 +1015,22 @@ function main(argv) {
   const contextDir = join(root, 'tmp', 'verify-context');
   const contextPath = join(contextDir, `pr${context.pr}.json`);
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
+  // The tmp/ container is PR-controlled: a PR-committed symlink there would
+  // redirect every mkdir/write below before any leaf guard runs (R5-1). Refuse
+  // it before anything is created. A fresh clone has no tmp/ — that is fine.
+  const tmpDir = join(root, 'tmp');
+  try {
+    if (lstatSync(tmpDir).isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${tmpDir}`,
+      );
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      return fail(3, `could not inspect ${tmpDir}: ${error.message}`);
+    }
+  }
   try {
     mkdirSync(contextDir, { recursive: true });
     // Recursive, so a retry within the same second lands in the directory this
@@ -667,7 +1040,146 @@ function main(argv) {
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
-  writeFileSync(contextPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+  // The snapshot dir/file live in the PR-controlled tree: a symlink at either
+  // path redirects the host-side write, and a hard link at the snapshot path
+  // would make writeFileSync truncate a file the round does not own (R5-4).
+  // Refuse both rather than follow them.
+  for (const p of [contextDir, contextPath]) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the snapshot path ${p}: ${error.message}`,
+        );
+      }
+      continue; // not created yet (first run) — nothing to redirect
+    }
+    if (st.isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${p}`,
+      );
+    }
+    if (p === contextPath && (!st.isFile() || st.nlink !== 1)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a non-single-link file: ${p}`,
+      );
+    }
+  }
+  // Classify PR trust and mandatory hardware-isolation escalations host-side
+  // before writing the digest-bound snapshot (§4.1–§4.4). Failure to read
+  // permission or changed files fails closed to hardware-isolated.
+  // Use `--raw --no-renames -z` (NUL-delimited, never C-quoted) so non-ASCII
+  // filenames cannot bypass prefix rules via core.quotePath=true AND git file
+  // modes (100755 executables, 120000 symlinks, 160000 submodules) are captured
+  // in the same command. Extensionless 100644 files are also magic-sniffed
+  // (4 bytes, O_NOFOLLOW) for shebang/ELF/Mach-O/PE headers.
+  const diffRes = runGitRoot([
+    'diff',
+    '--raw',
+    '--no-renames',
+    '-z',
+    `${context.base}..${context.head}`,
+  ]);
+  let changedPaths = null;
+  let executablePaths = [];
+  let specialModePaths = [];
+  if (diffRes.status === 0) {
+    const parsedDiff = parseRawDiffEntries(diffRes.stdout);
+    changedPaths = parsedDiff.changedPaths;
+    executablePaths = [...parsedDiff.executablePaths];
+    specialModePaths = [...parsedDiff.specialModePaths];
+    for (const rel of parsedDiff.extensionlessLivePaths) {
+      if (hasExecutableMagic(join(root, rel))) {
+        executablePaths.push(rel);
+      }
+    }
+  }
+  const authorPerm = fetchAuthorPermission(owner, name, snapshot.author?.login);
+  const trust = classifyPrTrust({
+    permission: authorPerm.permission,
+    isLocalOwner: options.localOwner,
+    isFork: snapshot.isCrossRepository === true ? true : null,
+    changedPaths,
+    executablePaths,
+    specialModePaths,
+    forceHardware: process.env[FORCE_HARDWARE_ENV] === '1',
+    sponsored: options.sponsored,
+  });
+  const trustClassification = {
+    ...trust,
+    headRefOid: context.head,
+    permission: authorPerm.permission,
+    ...(authorPerm.error ? { permissionError: authorPerm.error } : {}),
+  };
+
+  // The host-held snapshot carries the slug too: the checker compares a
+  // waiver's approval permalink against these coordinates, and gh's field
+  // selector has no repo member, so it is added where the snapshot is
+  // written, not to FIELDS.
+  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug, trustClassification }, null, 2)}\n`;
+  writeFileSync(contextPath, contextBytes);
+  // Structural fix (R5-1): the authoritative snapshot also goes to a host
+  // destination outside the clone (--context-out), so the trusted source the
+  // checker reads never depends on the PR-writable in-tree copy, which stays
+  // only as the checker's untrusted no---context default.
+  let reportedContextPath = contextPath;
+  if (options.contextOut) {
+    // The host destination must be outside the PR-writable clone: step 1 runs
+    // with the clone as cwd, so a relative --context-out resolves inside it,
+    // where a PR-committed symlink would redirect this host-side write (R7-1).
+    // Apply the same containment + leaf guards the in-tree snapshot path uses.
+    const outPath = resolve(options.contextOut);
+    const realRoot = realpathSync(root);
+    if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+      );
+    }
+    try {
+      const st = lstatSync(outPath);
+      if (st.isSymbolicLink()) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a symlink: ${outPath}`,
+        );
+      }
+      if (!st.isFile() || st.nlink !== 1) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
+        );
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the host snapshot path ${outPath}: ${error.message}`,
+        );
+      }
+    }
+    try {
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, contextBytes);
+    } catch (error) {
+      return fail(
+        3,
+        `could not write the host snapshot to ${outPath}: ${error.message}`,
+      );
+    }
+    reportedContextPath = outPath;
+  }
+  // The digest binds the snapshot's content for the checker (--context-sha256):
+  // it is computed here host-side, before the round runs, so a later rewrite of
+  // the clone-side file cannot produce matching bytes (R2-1).
+  const contextSha256 = createHash('sha256')
+    .update(contextBytes, 'utf8')
+    .digest('hex');
   // Best-effort, like the lane: the round reads a missing file as "review
   // state unknown", so an earlier prepare's copy must not outlive a failed
   // fetch.
@@ -698,11 +1210,13 @@ function main(argv) {
     `  base       ${context.base}`,
     `  head       ${context.head}`,
     '  tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
-    `  context    ${contextPath}`,
+    `  context    ${reportedContextPath}`,
+    `  context-sha256  ${contextSha256}`,
     review.state
       ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
       : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,
     `  artifacts  ${artifacts}`,
+    `  trust      ${trust.prTrust} -> ${trust.executionClass}${trust.escalationReasons.length > 0 ? ` (${trust.escalationReasons.slice(0, 3).join(', ')}${trust.escalationReasons.length > 3 ? ', …' : ''})` : ''}`,
     `  isolation  ${isolation.isolated ? isolation.signals.join(', ') : 'none detected'}`,
   ]);
   if (isolation.seatbelt) {
@@ -715,9 +1229,24 @@ function main(argv) {
     '',
     `Next: build the round in ${artifacts}. This preflight ran on the host,`,
     'because resolving the coordinates needs `gh` and `gh` is mutually',
-    'exclusive with the boundary. Before executing PR code, run inside it:',
+    'exclusive with the boundary. Before executing PR code, run inside the',
+    "boundary — the container recipe's spelling (step 5), with the clone",
+    'mounted at /work:',
     '',
-    '  node scripts/verify-pr-prepare.mjs --require-isolation',
+    `  node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir "/work/tmp/${basename(artifacts)}"`,
+    '',
+    'The path is the in-container one: the gate runs from the read-only',
+    "/trusted-scripts mount, never the PR head's own copy of the script,",
+    'and the record lands in the mounted artifact directory so it survives',
+    'the container. A VM boundary takes the same trusted copy but runs',
+    'NO --require-isolation gate (a VM carries no observed container marker):',
+    'there is no in-boundary gate command and no boundary-gate.json for a VM.',
+    'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
+    'reason, attestation (what the operator confirmed: nothing mounted,',
+    "no host credentials), and approval (a permalink to the maintainer's",
+    'approval comment). The container gate writes boundary-gate.json into',
+    'the artifact directory; the checker requires that record alongside',
+    'the container declaration.',
   ]);
   return 0;
 }
@@ -726,18 +1255,75 @@ function main(argv) {
  * The in-boundary check, and the only place its answer means anything: the
  * coordinate path necessarily runs on the host, so a gate there would fire
  * every round and teach the maintainer to ignore it.
+ *
+ * On a pass with `artifactDir`, writes `boundary-gate.json` there: the
+ * record that the gate actually ran and exited 0, which the checker
+ * requires alongside a `mode:"container"` declaration. The declaration is
+ * a value a round can mint for itself; this record ties it to a gate run.
+ * (The artifact tree is PR-writable, so the record corroborates against an
+ * operator who skipped the gate — the incident's shape — not against PR
+ * code that forges it; the CI publisher writes its own lane record.)
  */
-function requireBoundary() {
-  const isolation = detectIsolation();
-  const credentials = detectCredentialSignals();
-  const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
+export function requireBoundary(artifactDir = null, options = {}) {
+  const env = options.env ?? process.env;
+  const exists = options.exists ?? existsSync;
+  // Resolve home lazily and defensively: os.homedir() throws SystemError when
+  // the UID has no passwd entry and HOME is unset (the arbitrary-UID container
+  // shape --user <uid>:<gid> invites), and returns '' when HOME is set but
+  // empty. Evaluating it in a default parameter let the throw escape as exit 1
+  // before invalidateRecord could run, leaving a stale pass record behind;
+  // both shapes must reach the gate's exit-3 refusal below (R5-1).
+  let home = options.home;
+  if (home === undefined) {
+    try {
+      home = homedir();
+    } catch {
+      home = null;
+    }
+  }
+  const recordPath = artifactDir
+    ? join(artifactDir, 'boundary-gate.json')
+    : null;
+  // A failed re-run must not leave an earlier pass's record behind: the
+  // checker would still accept the container declaration against evidence
+  // that predates the refusal. Every non-pass exit invalidates the record.
+  const invalidateRecord = () => {
+    if (!recordPath) return;
+    try {
+      rmSync(recordPath, { force: true });
+    } catch {
+      // Best-effort; the refusal exit is the contract.
+    }
+  };
+  const isolation = detectIsolation(env, exists);
+  const credentials = detectCredentialSignals(env, exists, home);
+  const attested = env[CREDENTIAL_FREE_ATTESTATION] === '1';
 
+  // A refusal from OUTSIDE any boundary does not contradict a record minted
+  // INSIDE one: a host-side sanity re-run must not destroy the in-container
+  // gate record (R10-30). Only a refusal that contradicts the record — an
+  // attested boundary leaking credentials, or a failed record write —
+  // invalidates it (below).
   if (!isolation.isolated) {
     const detail = isolation.seatbelt
       ? 'SANDBOX=sandbox-exec is the built-in macOS sandbox, whose default profile still reads host files'
       : 'no container marker was found';
     process.stderr.write(
       `verify-pr boundary: ${detail} — do not execute PR code in this process\n`,
+    );
+    return 4;
+  }
+
+  // A self-chosen `container=<name>` string — or an inherited `SANDBOX=`
+  // string — is a declaration, not an observed boundary: on a bare host it
+  // would mint a container claim with no isolation, and the checker refuses
+  // every non-ci-lane record whose observed list is empty, so such a pass
+  // could never be published anyway (R11-1). The gate needs an OBSERVED
+  // filesystem marker; a launcher container always carries one. An attested
+  // VM uses mode:"vm" with approval, not this path.
+  if (isolation.observed.length === 0) {
+    process.stderr.write(
+      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= or SANDBOX= string is not an observed boundary; run inside a real container, or use mode:"vm" with the maintainer's approval\n`,
     );
     return 4;
   }
@@ -757,7 +1343,78 @@ function requireBoundary() {
     process.stderr.write(
       `verify-pr boundary: ${isolation.signals.join(', ')} but ${refusals.join('; ')} — do not execute PR code here\n`,
     );
+    invalidateRecord();
     return 4;
+  }
+  if (artifactDir) {
+    // A per-round nonce ties the declaration to execution inside THIS
+    // container (R16-1). The plaintext is written to a container-local path
+    // (the process home, NOT the shared artifact mount) so the round must
+    // read it from inside the container and echo it into its raw harness
+    // logs; the checker refuses mode:"container" unless a log line's sha256
+    // matches the record. Only the HASH rides the gate record: a host
+    // battery cannot recover the plaintext from the hash, so it cannot copy
+    // it out of the PR-writable record into a forged log line. Like the
+    // record itself, this corroborates an operator who ran the round in the
+    // container — it is not proof against a round that forges both.
+    const nonce = randomBytes(16).toString('hex');
+    const record = {
+      gate: 'require-isolation',
+      passed: true,
+      at: new Date().toISOString(),
+      signals: isolation.signals,
+      // Observed filesystem markers, kept apart from the declared strings:
+      // the checker requires one to back a container claim.
+      observed: isolation.observed,
+      credentialFree: true,
+      nonceSha256: createHash('sha256').update(nonce).digest('hex'),
+    };
+    // An unresolvable $HOME (no passwd entry for this UID with HOME unset, or
+    // HOME set but empty) cannot host the container-local plaintext:
+    // join('', …) would write it into the PR-writable CWD instead, and a
+    // homedir() throw would escape as exit 1. Refuse with exit 3 and
+    // invalidate any stale record before the pass line (R5-1).
+    if (typeof home !== 'string' || home === '') {
+      invalidateRecord();
+      return fail(
+        3,
+        'could not resolve a container-local $HOME (no passwd entry for this UID and HOME unset or empty): the nonce plaintext cannot be written outside the PR-writable mount, so the round cannot declare mode:"container"',
+      );
+    }
+    // The plaintext must exist somewhere the battery can read it, or the
+    // record's hash binds a nonce nobody can echo and the round is silently
+    // uncertifiable after the whole battery ran (R1-4). Fail the gate now,
+    // before the pass line, naming $HOME. This refusal is reached only inside
+    // the boundary (a host re-run exits 4 above), so invalidating the record
+    // here does not contradict a record minted inside one.
+    const noncePath = join(home, '.qwen-verify-nonce');
+    try {
+      writeFileSync(noncePath, `${nonce}\n`);
+    } catch (error) {
+      invalidateRecord();
+      return fail(
+        3,
+        `could not write the container-local nonce to ${noncePath} ($HOME unwritable or absent): the round cannot declare mode:"container" without it: ${error.message}`,
+      );
+    }
+    const tmp = `${recordPath}.${process.pid}.tmp`;
+    // A filesystem failure here is the documented exit-3 path, not an
+    // uncaught throw after the pass line: a driver keyed on exit 4 must
+    // not proceed on a pass the record never landed.
+    try {
+      mkdirSync(artifactDir, { recursive: true });
+      writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`);
+      renameSync(tmp, recordPath);
+    } catch (error) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // Best-effort: force only covers ENOENT, and a cleanup failure
+        // (ENOTDIR on a non-directory parent) must not mask the original.
+      }
+      invalidateRecord();
+      return fail(3, `could not write the gate record: ${error.message}`);
+    }
   }
   report([
     `verify-pr boundary: ${isolation.signals.join(', ')}; credential-free per attestation, no known credential signal`,

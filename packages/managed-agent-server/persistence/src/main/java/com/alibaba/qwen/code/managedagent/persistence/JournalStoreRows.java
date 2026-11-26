@@ -8,16 +8,23 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
+import javax.sql.DataSource;
+
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
@@ -32,13 +39,10 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 final class JournalStoreRows {
-    private final com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion;
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore objects;
 
-    JournalStoreRows(com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
-            JdbcTemplate jdbc, ToolPublicationObjectStore objects) {
-        this.readerVersion = readerVersion;
+    JournalStoreRows(JdbcTemplate jdbc, ToolPublicationObjectStore objects) {
         this.jdbc = jdbc;
         this.objects = objects;
         this.headMapper = (result, row) ->
@@ -46,7 +50,7 @@ final class JournalStoreRows {
                         result.getString("workspace_id"),
                         result.getString("session_id"),
                         result.getString("state"),
-                        result.getInt("storage_version"),
+                        result.getBoolean("has_activity_diagnostics"),
                         result.getLong("writer_generation"),
                         result.getString("writer_id"),
                         ManagedSchemaTime.timestamp(result, "writer_lease_until"),
@@ -64,38 +68,45 @@ final class JournalStoreRows {
                         result.getString("activation_phase"),
                         result.getObject("activation_event_epoch", Long.class),
                         result.getObject("activation_expires_at", Long.class),
-                        result.getObject("activation_head_revision", Long.class));
+                        result.getObject("activation_head_revision", Long.class),
+                        result.getObject("wake_seal_revision", Long.class));
         this.transactionMapper = (result, row) -> transactionRow(result);
-        this.resourceMapper = (result, row) ->
-                        new ResourceRow(
-                                result.getString("tenant_id"),
-                                result.getString("workspace_id"),
-                                result.getString("session_id"),
-                                result.getString("resource_id"),
-                                result.getString("kind"),
-                                result.getInt("schema_version"),
-                                result.getLong("byte_length"),
-                                result.getString("sha256"),
-                                result.getString("storage_kind"),
-                                result.getBytes("inline_bytes"),
-                                result.getString("object_key"),
-                                result.getString("object_version_id"),
-                                result.getString("encryption_key_id"),
-                                result.getString("state"),
-                                result.getString("capture_state"),
-                                result.getString("deletion_operation_key"));
+        this.resourceMapper = (result, row) -> resourceRow(result);
+    }
+
+    /** The RESOURCE projection's row, shared by every reader of ma_resource so
+     * the committed-state predicate sees the same columns everywhere. */
+    static ResourceRow resourceRow(ResultSet result)
+            throws SQLException {
+        return new ResourceRow(
+                result.getString("tenant_id"),
+                result.getString("workspace_id"),
+                result.getString("session_id"),
+                result.getString("resource_id"),
+                result.getString("kind"),
+                result.getInt("schema_version"),
+                result.getLong("byte_length"),
+                result.getString("sha256"),
+                result.getString("storage_kind"),
+                result.getBytes("inline_bytes"),
+                result.getString("object_key"),
+                result.getString("object_version_id"),
+                result.getString("encryption_key_id"),
+                result.getString("state"),
+                result.getString("capture_state"),
+                ManagedSchemaRows.identity(result, "deletion_operation_ref"));
     }
 
     static final int STORAGE_VERSION = 1;
 
-    static final ObjectMapper CSI_JSON = new ObjectMapper();
+    static final ObjectMapper JSON = new ObjectMapper();
 
-    static final ObjectMapper CSI_TERMINAL_JSON = CSI_JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
-            .disable(com.fasterxml.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS)
-            .disable(com.fasterxml.jackson.databind.DeserializationFeature.ACCEPT_FLOAT_AS_INT);
+    static final ObjectMapper TERMINAL_JSON = JSON.copy().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
+            .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
+            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
 
     static final int MAX_ID_BYTES = 512;
 
@@ -116,8 +127,18 @@ final class JournalStoreRows {
 
     final RowMapper<ResourceRow> resourceMapper;
 
-    boolean usesDataSource(javax.sql.DataSource source) {
+    boolean usesDataSource(DataSource source) {
         return source != null && jdbc.getDataSource() == source;
+    }
+
+    /** The Session's creator actor id; empty when the row or its key is absent. */
+    String creatorActor(String tenantId, String sessionId) {
+        return jdbc.query("SELECT creator_actor_key FROM ma_session"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                (result, row) -> {
+                    String actor = result.getString("creator_actor_key");
+                    return actor == null ? "" : actor;
+                }, tenantId, sessionId).stream().findFirst().orElse("");
     }
 
     RestoreHead restoreHead(HeadRow head) {
@@ -126,7 +147,7 @@ final class JournalStoreRows {
                         + " AND activation_epoch = ? AND activation_lease_until IS NOT NULL LIMIT 1",
                 head.tenantId(), head.sessionId(), head.activationEpoch()).isEmpty();
         var lease = renewed ? activationLeaseRow(head).lease() : null;
-        return new RestoreHead(head.state(), head.storageVersion(),
+        return new RestoreHead(head.state(), head.activityDiagnostics(),
                 head.writerGeneration(), head.journalRevision(),
                 head.committedSequence(), head.lastCommitDigest(),
                 head.activationEpoch(), head.latestCheckpointResourceId(),
@@ -161,7 +182,7 @@ final class JournalStoreRows {
                                     throw journalCorrupt();
                                 }
                                 String first = new String(raw, StandardCharsets.UTF_8).split("\n", 2)[0];
-                                JsonNode event = CSI_TERMINAL_JSON.readTree(first).path("managedSession");
+                                JsonNode event = TERMINAL_JSON.readTree(first).path("managedSession");
                                 JsonNode payload = event.path("payload");
                                 if (!"activation.changed".equals(event.path("kind").asText())
                                         || !"active".equals(payload.path("phase").asText())) {
@@ -187,7 +208,7 @@ final class JournalStoreRows {
                                 }
                                 return new ActivationLeaseRow(result.getLong("journal_revision"),
                                         payload.path("workerId").textValue(), lease);
-                            } catch (java.io.IOException error) {
+                            } catch (IOException error) {
                                 throw journalCorrupt();
                             }
                         }, head.tenantId(), head.sessionId(), head.activationEpoch());
@@ -210,18 +231,29 @@ final class JournalStoreRows {
     }
 
     /** A committed resource of this transaction's Session, verified. */
-    StoredResource storedResource(String scopeKey, String tenantId,
+    StoredResource storedResource(String tenantId,
             String workspaceId, String sessionId, String resourceId) {
-        ResourceRow resource = findResource(scopeKey, resourceId);
+        ResourceRow resource = findResource(tenantId, sessionId, resourceId);
         if (resource == null) {
+            // The identity hash used to find a row whose tenant column was later
+            // moved, and requireResourceScope refused it as a foreign Session.
+            // The raw key cannot find it; the same Session's resource id under a
+            // foreign tenant is still a scope violation, not a missing body.
+            Integer elsewhere = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ma_resource WHERE resource_id = ?"
+                            + " AND session_id = ? AND tenant_id <> ?",
+                    Integer.class, resourceId, sessionId, tenantId);
+            if (elsewhere != null && elsewhere > 0) {
+                throw sessionNotFound();
+            }
             throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                     "A referenced Managed Session resource is missing.");
         }
         requireResourceScope(resource, tenantId, workspaceId, sessionId,
                 resourceId);
         if (!"REFERENCED".equals(resource.state())
-                && !("PUBLISHED".equals(resource.state())
-                    && Set.of("managed-agent-instructions", "managed-agent-skills").contains(resource.kind()))) {
+                && !settledPublishedConfiguration(resource)
+                && !publishedToolResult(resource)) {
             throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                     "A referenced Managed Session resource is missing.");
         }
@@ -229,6 +261,40 @@ final class JournalStoreRows {
         return new StoredResource(resource.resourceId(), resource.kind(),
                 resource.schemaVersion(), resource.byteLength(),
                 resource.digest(), resource.bytes());
+    }
+
+    /**
+     * Whether this row is a configuration or inherited-extension resource
+     * sitting at its committed terminal PUBLISHED state, within the bounds
+     * {@link ManagedSessionStoreModels#publishedConfigurationByteLimit} names
+     * for its kind. Empty bytes stay legal only for the kinds whose publisher
+     * may write them: instructions can be empty, every other one cannot.
+     */
+    static boolean settledPublishedConfiguration(ResourceRow resource) {
+        Integer limit = ManagedSessionStoreModels
+                .publishedConfigurationByteLimit(resource.kind());
+        if (limit == null || !"PUBLISHED".equals(resource.state())
+                || resource.schemaVersion() != 1) {
+            return false;
+        }
+        long minimum = "managed-agent-instructions".equals(resource.kind())
+                ? 0 : 1;
+        return resource.byteLength() >= minimum
+                && resource.byteLength() <= limit;
+    }
+
+    /**
+     * A running background capture's published tool-result resources stay
+     * PUBLISHED until admission promotes them, and promotion requires the
+     * completed capture to be VERIFIED. The child-run journal references the
+     * manifest while the process is still running, so the commit gate must
+     * accept these kinds at PUBLISHED just as the reader and
+     * {@link #verifyStoredResource} already do; the storage-kind integrity
+     * rules there still apply (TOOL_PUBLICATION outcomes stay fail-closed).
+     */
+    static boolean publishedToolResult(ResourceRow resource) {
+        return "PUBLISHED".equals(resource.state())
+                && toolResultLimit(resource.kind()) > 0;
     }
 
     HeadRow findHeadForUpdate(String tenantId, String sessionId) {
@@ -245,11 +311,10 @@ final class JournalStoreRows {
 
     private HeadRow findHeadWithRootLocked(String tenantId, String sessionId) {
         var heads = jdbc.query(
-                "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
-                        + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND"
+                        + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 headMapper,
-                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
+                tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         return heads.isEmpty() ? null : heads.getFirst();
     }
@@ -278,11 +343,9 @@ final class JournalStoreRows {
     HeadRow requireHead(String tenantId, String sessionId) {
         List<HeadRow> rows =
                 jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
-                            + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND"
+                            + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
                         headMapper,
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
         if (rows.isEmpty()) {
@@ -292,27 +355,27 @@ final class JournalStoreRows {
     }
 
     TransactionRow findTransactionByCommand(String tenantId,
-            String sessionId, String commandKeyHash) {
+            String sessionId, String commandRef) {
         List<TransactionRow> rows = jdbc.query(
                 "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND command_key_hash = ?",
-                transactionMapper, tenantId, sessionId, commandKeyHash);
+                        + " AND command_ref = ?",
+                transactionMapper, tenantId, sessionId, ManagedSchemaKeys.identity(commandRef));
         return rows.isEmpty() ? null : rows.get(0);
     }
 
-    ResourceRow findResource(String scopeKey, String resourceId) {
-        return findResource(scopeKey, resourceId, true);
+    ResourceRow findResource(String tenantId, String sessionId, String resourceId) {
+        return findResource(tenantId, sessionId, resourceId, true);
     }
 
-    ResourceRow findResource(String scopeKey, String resourceId, boolean lock) {
+    ResourceRow findResource(String tenantId, String sessionId, String resourceId, boolean lock) {
         List<ResourceRow> rows =
                 jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
-                        + " AND resource_id = ?" + (lock ? " FOR UPDATE" : ""),
+                        "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ?"
+                        + " AND session_id = ? AND resource_id = ?" + (lock ? " FOR UPDATE" : ""),
                         resourceMapper,
-                        ManagedSessionStore.resourceKey(scopeKey, resourceId),
-                        scopeKey,
+                        tenantId,
+                        sessionId,
                         resourceId);
         return rows.isEmpty() ? null : rows.get(0);
     }
@@ -388,6 +451,16 @@ final class JournalStoreRows {
         validateText(tenantId, "tenantId", 128);
         validateKeyComponent(workspaceId, "workspaceId");
         validateKeyComponent(sessionId, "sessionId");
+        // The JOURNAL owner reference percent-encodes (tenant, session), so a
+        // sessionId the byte validator admits can still overflow the column
+        // budget. Refuse it at admission rather than at the resource-ref INSERT
+        // every commit performs.
+        try {
+            ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, tenantId, sessionId);
+        } catch (IllegalArgumentException overflow) {
+            throw invalid("sessionId exceeds the " + ManagedIdentityRefs.OWNER_REF_BYTES
+                    + "-byte journal owner reference budget.");
+        }
     }
 
     static void validateKeyComponent(String value, String label) {
@@ -400,6 +473,23 @@ final class JournalStoreRows {
 
     static void validateStableId(String value, String label) {
         validateText(value, label, MAX_ID_BYTES);
+        // PAD SPACE collations fold trailing spaces, so two distinct stable ids
+        // would compare equal; the boundary refuses them rather than relying on
+        // the column to preserve exactness.
+        if (value.endsWith(" ")) {
+            throw invalid(label + " must not end with a space.");
+        }
+    }
+
+    /**
+     * A stable id bounded by its column's VARCHAR width. MySQL counts code
+     * points and H2 counts UTF-16 units, so the UTF-16 length bounds both.
+     */
+    static void validateStableId(String value, String label, int maxChars) {
+        validateStableId(value, label);
+        if (value.length() > maxChars) {
+            throw invalid(label + " exceeds " + maxChars + " characters.");
+        }
     }
 
     static void validateText(String value, String label,
@@ -414,7 +504,7 @@ final class JournalStoreRows {
             return false;
         }
         try {
-            return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value).length <= maxBytes;
+            return ManagedSchemaKeys.identity(value).length <= maxBytes;
         } catch (IllegalArgumentException invalidUnicode) {
             return false;
         }
@@ -465,11 +555,11 @@ final class JournalStoreRows {
             Long matching =
                     jdbc.queryForObject(
                             "SELECT COUNT(*) FROM ma_output_capture p JOIN ma_resource o ON"
-                                + " o.scope_key = p.scope_key AND o.publication_id ="
+                                + " o.scope_ref = p.scope_ref AND o.publication_id ="
                                 + " p.publication_id WHERE p.tenant_id = ? AND p.workspace_id = ?"
                                 + " AND p.session_id = ? AND p.admission_resource_id = ? AND"
                                 + " p.producer_phase IN ('FINISHED', 'REFERENCED') AND"
-                                + " p.is_quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
+                                + " p.is_quarantined = FALSE AND o.slot_key = 'admission'"
                                 + " AND o.capture_state = 'VERIFIED' AND o.resource_id = ? AND"
                                 + " o.capture_object_key = ? AND o.sha256 = ? AND o.byte_length ="
                                 + " ?",
@@ -498,14 +588,10 @@ final class JournalStoreRows {
         }
         if (!"MYSQL_INLINE".equals(resource.storageKind())
                 || !("REFERENCED".equals(resource.state())
-                    || "PUBLISHED".equals(resource.state()) && resource.schemaVersion() == 1
-                        && (resource.byteLength() > 0 && resource.byteLength() <= toolResultLimit(resource.kind())
-                            || "managed-agent-instructions".equals(resource.kind())
-                                && resource.byteLength() >= 0
-                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES
-                            || "managed-agent-skills".equals(resource.kind())
-                                && resource.byteLength() > 0
-                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES))
+                    || "PUBLISHED".equals(resource.state())
+                        && (resource.schemaVersion() == 1 && resource.byteLength() > 0
+                                && resource.byteLength() <= toolResultLimit(resource.kind())
+                            || settledPublishedConfiguration(resource)))
                 || resource.bytes() == null
                 || resource.objectKey() != null
                 || resource.objectVersionId() != null
@@ -580,11 +666,6 @@ final class JournalStoreRows {
                 || !sessionId.equals(head.sessionId())) {
             throw sessionNotFound();
         }
-        if (head.storageVersion() < 1 || head.storageVersion() > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED) {
-            throw conflict("managed_session_storage_version_unsupported",
-                    "The Managed Session storage version is unsupported.");
-        }
-        readerVersion.requireReadable(head.storageVersion());
         if (!HEAD_STATES.contains(head.state())
                 || !RECOVERY_STATES.contains(head.recoveryStatus())
                 || head.writerGeneration() < 1
@@ -646,16 +727,22 @@ final class JournalStoreRows {
         long now = epochMillis(databaseNow());
         jdbc.update(
                 "INSERT IGNORE INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
-                        + " gmt_modified) VALUES (?, ?, 'SESSION', X'', ?)",
+                        + " gmt_modified) VALUES (?, ?, 'SESSION', '', ?)",
                 tenantId,
                 sessionId,
                 now);
     }
 
+    // Kept name: JdbcManagedSessionStore.commandKeyHash delegates here; the value is now the
+    // canonical command reference, not a hash.
     static String commandKeyHash(String operation,
             String commandId) {
-        return sha256((operation + "\u0000" + commandId)
-                .getBytes(StandardCharsets.UTF_8));
+        try {
+            return ManagedIdentityRefs.commandRef(operation, commandId);
+        } catch (IllegalArgumentException overflow) {
+            throw invalid("operation/commandId exceeds the "
+                    + ManagedIdentityRefs.COMMAND_REF_BYTES + "-byte command reference budget.");
+        }
     }
 
     static String sha256(byte[] value) {
@@ -696,17 +783,11 @@ final class JournalStoreRows {
         return new ManagedAgentException(409, code, message);
     }
 
-    record HeadRow(String tenantId, String workspaceId,
-            String sessionId, String state, int storageVersion,
-            long writerGeneration, String writerId,
-            Timestamp writerLeaseUntil, String leaseTokenHash,
-            long journalRevision, long committedSequence,
-            String lastCommitDigest, long activationEpoch,
-            String latestCheckpointResourceId,
-            long compactedThroughRevision, long packedThroughRevision, String recoveryStatus,
-            String recoveryDetailCode, String activationId,
-            String activationPhase, Long activationEventEpoch,
-            Long activationExpiresAt, Long activationHeadRevision) {
+    record HeadRow(String tenantId, String workspaceId, String sessionId, String state, boolean activityDiagnostics, long writerGeneration,
+            String writerId, Timestamp writerLeaseUntil, String leaseTokenHash, long journalRevision, long committedSequence,
+            String lastCommitDigest, long activationEpoch, String latestCheckpointResourceId, long compactedThroughRevision,
+            long packedThroughRevision, String recoveryStatus, String recoveryDetailCode, String activationId, String activationPhase,
+            Long activationEventEpoch, Long activationExpiresAt, Long activationHeadRevision, Long wakeSealRevision) {
     }
 
     record TransactionRow(String workspaceId, long journalRevision,

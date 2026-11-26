@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent.maintenance;
 
+import com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
@@ -17,6 +19,8 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+import com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -44,7 +48,7 @@ public final class WorkspaceMigrationMain {
                     + " | inspect <request.json>");
         }
         var localFactory = "retire".equals(args[0]) ? new RuntimeProviderRegistry()
-                .require(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS) : null;
+                .require(RuntimeProviderKinds.LOCAL_PROCESS) : null;
         Path input = Path.of(args[1]);
         if (!Files.isRegularFile(input, LinkOption.NOFOLLOW_LINKS) || Files.size(input) > 1024 * 1024) {
             throw new IllegalArgumentException("Invalid migration request file");
@@ -65,8 +69,8 @@ public final class WorkspaceMigrationMain {
             var bindings = "inspect".equals(args[0]) ? null : new JdbcRuntimeBindingRepository(source,
                     AesGcmSecretProtector.fromBase64(required("W1_RUNTIME_CREDENTIAL_KEY_ID"), required("W1_RUNTIME_CREDENTIAL_KEY")),
                     MaintenanceObjectStores.readPacks(jdbc, objects));
-            var store = new WorkspaceMigrationStore(jdbc, manager, new WorkspaceStorageGuard(jdbc, manager, properties, new com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader()),
-                    bindings, bytes, "retire".equals(args[0]), new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
+            var store = new WorkspaceMigrationStore(jdbc, manager, new WorkspaceStorageGuard(jdbc, manager, properties, new NativeStorageIdentityReader()),
+                    bindings, bytes, "retire".equals(args[0]), new LocalRecoveryWorker());
             if ("inspect".equals(args[0])) {
                 System.out.println(store.inspect());
                 return;
@@ -100,7 +104,7 @@ public final class WorkspaceMigrationMain {
                         });
                         try (var broker = new RuntimeBrokerService(session -> CompletableFuture.failedFuture(
                                 new IllegalStateException("Maintenance never resolves active Sessions")),
-                                new WorkspaceRuntimeProvisioner(local, null, ownership), transport,
+                                new WorkspaceRuntimeProvisioner(local, null, ownership, bindings), transport,
                                 bindings, sessions, executions, UUID.randomUUID().toString(), Duration.ofSeconds(30),
                                 Duration.ofSeconds(30))) {
                             store.retire(broker);
@@ -110,7 +114,7 @@ public final class WorkspaceMigrationMain {
                 }
             } catch (Exception error) {
                 try {
-                    store.failed(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.errorCode(error));
+                    store.failed(WorkspaceRecoveryProtocol.errorCode(error));
                 } catch (Exception recordingFailure) {
                     error.addSuppressed(recordingFailure);
                 }
