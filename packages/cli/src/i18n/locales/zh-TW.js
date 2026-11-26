@@ -1107,6 +1107,7 @@ export default {
   'No hooks were loaded.': '未載入任何 Hook。',
   'skipped (unsupported args)': '已略過（不支援 args）',
   Hooks: 'Hook',
+  'A hook stopped the turn: {{reason}}': 'Hook 已結束本輪對話：{{reason}}',
   'Loading hooks...': '正在加載 Hook...',
   'Error loading hooks:': '加載 Hook 出錯：',
   'Press Escape to close': '按 Escape 關閉',

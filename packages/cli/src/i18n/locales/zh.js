@@ -1154,6 +1154,7 @@ export default {
   'skipped (unsupported args)': '已跳过（不支持 args）',
   // Hooks - Dialog
   Hooks: 'Hook',
+  'A hook stopped the turn: {{reason}}': 'Hook 已结束本轮对话：{{reason}}',
   'Loading hooks...': '正在加载 Hook...',
   'Error loading hooks:': '加载 Hook 出错：',
   'Press Escape to close': '按 Escape 关闭',
