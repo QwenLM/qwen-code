@@ -294,7 +294,7 @@ Current state.
 ## Delivery
 
 1. **DashScope hint** (small, independent): the formatter and daemon hint and
-   their tests (#18317).
+   their tests (#18317, merged).
 2. **Tool hooks end the turn** (#18345, merged): `continue: false` from any
    tool hook ends the turn after the batch (ledger C14 and T11, #18217), so the
    hook extension point can stop.

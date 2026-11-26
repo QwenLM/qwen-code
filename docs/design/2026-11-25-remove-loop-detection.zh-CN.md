@@ -241,7 +241,7 @@ hooks 指南中增加一个简短示例（示例 4），`model.maxToolCallsPerTu
 
 ## 交付
 
-1. **DashScope 提示**（小而独立）：格式化逻辑与 daemon 中的提示及其测试（#18317）。
+1. **DashScope 提示**（小而独立）：格式化逻辑与 daemon 中的提示及其测试（#18317，已合入）。
 2. **工具 hook 结束 turn**（#18345，已合入）：任一工具 hook 的 `continue: false`
    在该批次之后结束 turn（ledger C14 与 T11，#18217），使 hook 扩展点能够停止。
 3. **移除**：core、子 agent、daemon、设置、TUI、遥测和文档放在一个 PR 中，因为
