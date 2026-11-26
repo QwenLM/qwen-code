@@ -21,6 +21,11 @@ export interface PricedCatalogEntry {
   change: number;
 }
 
+export interface ResumeHistoryBoundary {
+  trailingEntries: number;
+  partCount?: number;
+}
+
 export interface ResumeTokenCounts {
   promptTokenCount: number;
   outputTokenCount: number;
@@ -29,6 +34,8 @@ export interface ResumeTokenCounts {
   isProviderAdjusted?: boolean;
   /** Local image estimate shared by all entries in the restored token baseline. */
   historyImageTokenEstimate?: number;
+  /** Saved history can be followed by new entries or a continuation of its last user turn. */
+  historyCheckpoint?: { entries: number; lastEntryParts?: number };
   /** Apply a positive delta when enabling memory catalogs, a negative one when disabling them. */
   catalogSwitchTokens?: number;
   /** Saved per-entry adjustments when only part of the history was priced locally. */
@@ -175,9 +182,18 @@ export class ResumeTokenCountsAccumulator {
       if (payload?.info) {
         const historyImageTokenEstimate =
           savedHistoryImageTokenEstimate(payload);
+        const history = payload.compressedHistory;
         this.value = {
           ...(historyImageTokenEstimate !== undefined && {
             historyImageTokenEstimate,
+            ...(Array.isArray(history) && {
+              historyCheckpoint: {
+                entries: history.length,
+                ...(history.length && {
+                  lastEntryParts: history.at(-1)?.parts?.length ?? 0,
+                }),
+              },
+            }),
           }),
           ...resumeCatalogPricing(payload, historyImageTokenEstimate),
           promptTokenCount:

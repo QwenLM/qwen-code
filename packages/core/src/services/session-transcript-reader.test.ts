@@ -3075,6 +3075,7 @@ describe('SessionTranscriptReader', () => {
         isEstimated: true,
         ...(local && {
           historyImageTokenEstimate: 100,
+          historyCheckpoint: { entries: 3, lastEntryParts: 1 },
           catalogSwitchTokens: Math.ceil(9 / 4) - Math.ceil((9 + chars) / 4),
         }),
       };

@@ -139,7 +139,10 @@ import {
   catalogSnapshotChars,
   estimateContentChars,
 } from '../utils/content-token-estimate.js';
-import type { PricedCatalogEntry } from '../services/session-resume-token-counts.js';
+import type {
+  PricedCatalogEntry,
+  ResumeHistoryBoundary,
+} from '../services/session-resume-token-counts.js';
 import { withoutCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
 import {
   ChatCompressionService,
@@ -859,9 +862,24 @@ export const userContentPushSnapshotKey = Symbol(
   'LlmChat.userContentPushSnapshot',
 );
 
+interface LocalHistoryEstimate {
+  imageTokenEstimate: number;
+  tokenOffset: number;
+  historyLength: number;
+  historyRevision: number;
+}
+
+function hasEstimatedMedia(part: Part): boolean {
+  return !!(
+    part.inlineData ||
+    part.fileData ||
+    getFunctionResponseParts(part)?.some(hasEstimatedMedia)
+  );
+}
+
 interface PromptTokenCountSource {
   kind: 'provider' | 'adjusted-provider' | 'estimate';
-  localHistory?: { imageTokenEstimate: number; tokenOffset: number };
+  localHistory?: LocalHistoryEstimate;
   catalogChanges?: WeakMap<Part, number>;
 }
 
@@ -2840,7 +2858,7 @@ export class LlmChat {
       historyImageTokenEstimate !== undefined &&
       (historyImageTokenEstimate === imageTokenEstimate ||
         !pending ||
-        estimateContentChars(pending, 0) === estimateContentChars(pending, 1));
+        !pending.parts?.some(hasEstimatedMedia));
     const payload: ChatCompressionRecordPayload = {
       info,
       ...(uniformImagePrice && { historyImageTokenEstimate }),
@@ -3342,6 +3360,7 @@ export class LlmChat {
   private estimatedCountSource(
     count: number,
     imagePrice: number | undefined,
+    coveredHistory = this.history,
   ): PromptTokenCountSource {
     if (
       imagePrice === undefined ||
@@ -3350,15 +3369,61 @@ export class LlmChat {
     ) {
       return { kind: 'estimate' };
     }
+    return this.localCountSource(
+      imagePrice,
+      count -
+        estimateModelContentTokens(
+          this.curatedBaseHistory(coveredHistory),
+          imagePrice,
+        ),
+    );
+  }
+
+  private localCountSource(
+    imageTokenEstimate: number,
+    tokenOffset: number,
+  ): PromptTokenCountSource {
     return {
       kind: 'estimate',
       localHistory: {
-        imageTokenEstimate: imagePrice,
-        tokenOffset:
-          count -
-          estimateModelContentTokens(this.curatedBaseHistory(), imagePrice),
+        imageTokenEstimate,
+        tokenOffset,
+        historyLength: this.history.length,
+        historyRevision: this.historyReplacementRevision,
       },
     };
+  }
+
+  private localImagePrice(
+    source?: LocalHistoryEstimate,
+    added?: Content[],
+  ): number {
+    const configured = resolveSlimmingConfig(
+      this.config.getChatCompression?.(),
+    ).imageTokenEstimate;
+    if (!source || configured === source.imageTokenEstimate) return configured;
+    // Old media retain their checkpoint price until new media enter. At that
+    // point reprice all visible history once, preserving the fixed overhead.
+    // Replacing history invalidates its former append boundary.
+    const suffix =
+      added ??
+      (source.historyRevision === this.historyReplacementRevision
+        ? this.history.slice(source.historyLength)
+        : this.history);
+    return suffix.some((content) => content.parts?.some(hasEstimatedMedia))
+      ? configured
+      : source.imageTokenEstimate;
+  }
+
+  private updateLocalCount(
+    price: number,
+    tokenOffset: number,
+    visible = estimateModelContentTokens(this.curatedBaseHistory(), price),
+  ): void {
+    this.lastPromptTokenCount = Math.max(0, tokenOffset + visible);
+    this.lastPromptTokenCountSource = this.localCountSource(price, tokenOffset);
+    this.lastOutputTokenCount = 0; // The visible history includes the output.
+    this.telemetryService?.setLastPromptTokenCount(this.lastPromptTokenCount);
   }
 
   private restoreCatalogChanges(entries: readonly PricedCatalogEntry[]): void {
@@ -3411,6 +3476,7 @@ export class LlmChat {
     isProviderAdjusted = false,
     historyImageTokenEstimate?: number,
     pricedCatalogEntries?: readonly PricedCatalogEntry[],
+    resumeBoundary?: ResumeHistoryBoundary,
   ): void {
     this.toolBudgetUsageAnchor = undefined;
     this.unaccountedMemorySnapshots = new WeakSet<Part>();
@@ -3419,7 +3485,9 @@ export class LlmChat {
     this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
     // Older pruned checkpoints saved zero. Size the restored history with
     // this session's media settings before the first session-limit check.
-    const hasProviderBaseline = isProviderAdjusted && promptTokenCount > 0;
+    const hasCheckpointCount =
+      Number.isFinite(promptTokenCount) && promptTokenCount > 0;
+    const hasProviderBaseline = isProviderAdjusted && hasCheckpointCount;
     if (isEstimated && promptTokenCount === 0) {
       historyImageTokenEstimate = resolveSlimmingConfig(
         this.config.getChatCompression?.(),
@@ -3434,12 +3502,44 @@ export class LlmChat {
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
+    let coveredHistory = this.history;
+    let added: Content[] | undefined;
+    if (
+      isEstimated &&
+      !hasProviderBaseline &&
+      hasCheckpointCount &&
+      historyImageTokenEstimate !== undefined &&
+      resumeBoundary
+    ) {
+      // The checkpoint may end inside a user message extended during replay.
+      // Its fixed overhead excludes all parts and turns added since then.
+      const index = this.history.length - 1 - resumeBoundary.trailingEntries;
+      const last = this.history[index];
+      const count = resumeBoundary.partCount ?? last?.parts?.length ?? 0;
+      const end = index + 1;
+      if (
+        index >= -1 &&
+        end <= this.history.length &&
+        count <= (last?.parts?.length ?? 0)
+      ) {
+        coveredHistory = this.history.slice(0, end);
+        added = this.history.slice(end);
+        if (last?.parts && count < last.parts.length) {
+          coveredHistory[index] = {
+            ...last,
+            parts: last.parts.slice(0, count),
+          };
+          added.unshift({ ...last, parts: last.parts.slice(count) });
+        }
+      }
+    }
     this.lastPromptTokenCountSource = hasProviderBaseline
       ? { kind: 'adjusted-provider' }
       : isEstimated
         ? this.estimatedCountSource(
             this.lastPromptTokenCount,
             historyImageTokenEstimate,
+            coveredHistory,
           )
         : { kind: 'provider' };
     if (
@@ -3453,6 +3553,13 @@ export class LlmChat {
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
+    const local = this.lastPromptTokenCountSource.localHistory;
+    if (local && added?.length) {
+      this.updateLocalCount(
+        this.localImagePrice(local, added),
+        local.tokenOffset,
+      );
+    }
     // Attribute the seeded counts to the active route so a model switch
     // after resume invalidates them like any API-reported count. (Detecting
     // a route that already differed at save time requires persisting route
@@ -3643,10 +3750,7 @@ export class LlmChat {
     // apples to apples. The API-authoritative lastPromptTokenCount is
     // then adjusted by the estimated delta — never replaced wholesale.
     const localSource = this.lastPromptTokenCountSource.localHistory;
-    const imageTokenEstimate =
-      localSource?.imageTokenEstimate ??
-      resolveSlimmingConfig(this.config.getChatCompression?.())
-        .imageTokenEstimate;
+    const imageTokenEstimate = this.localImagePrice(localSource);
     const beforeHistory = this.curatedBaseHistory();
     const beforeEstimate = estimateModelContentTokens(
       beforeHistory,
@@ -3679,8 +3783,18 @@ export class LlmChat {
       imageTokenEstimate,
     );
 
+    const apiBaseline = localSource
+      ? Math.max(0, beforeEstimate + localSource.tokenOffset)
+      : this.lastPromptTokenCount || beforeEstimate;
+
     if (afterEstimate >= beforeEstimate) {
-      const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
+      if (localSource) {
+        this.updateLocalCount(
+          imageTokenEstimate,
+          localSource.tokenOffset,
+          beforeEstimate,
+        );
+      }
       return {
         info: {
           originalTokenCount: apiBaseline,
@@ -3695,9 +3809,6 @@ export class LlmChat {
     // unknown. Only deduct text savings from an unpriced usage anchor.
     // Usage-less turns may add visible content (including catalogs that were
     // separately charged). Reusing the original offset counts it only once.
-    const apiBaseline = localSource
-      ? Math.max(0, beforeEstimate + localSource.tokenOffset)
-      : this.lastPromptTokenCount || beforeEstimate;
     const locallyPriced =
       !this.lastPromptTokenCount || localSource !== undefined;
     const reduction = !locallyPriced
@@ -3744,17 +3855,15 @@ export class LlmChat {
     );
     this.setHistory(newHistory, this.completedToolCallIds);
     this.lastPromptTokenCount = adjustedTokenCount;
-    this.lastPromptTokenCountSource = {
-      kind: 'estimate',
-      ...(locallyPriced
-        ? {
-            localHistory: {
-              imageTokenEstimate,
-              tokenOffset: adjustedTokenCount - afterEstimate,
-            },
-          }
-        : { catalogChanges: this.lastPromptTokenCountSource.catalogChanges }),
-    };
+    this.lastPromptTokenCountSource = locallyPriced
+      ? this.localCountSource(
+          imageTokenEstimate,
+          adjustedTokenCount - afterEstimate,
+        )
+      : {
+          kind: 'estimate',
+          catalogChanges: this.lastPromptTokenCountSource.catalogChanges,
+        };
     this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = this.currentRouteKey();
     // Fast compression rewrote the shared history every retained entry
@@ -8589,7 +8698,12 @@ export class LlmChat {
 
     // Charge newly retained catalogs only when the turn survives rollback.
     // A provider usage report already covers them and clears this ownership.
-    if (this.config.getAutoMemoryContext?.() && this.lastPromptTokenCount > 0) {
+    const source = this.lastPromptTokenCountSource;
+    if (
+      !source.localHistory &&
+      this.config.getAutoMemoryContext?.() &&
+      this.lastPromptTokenCount > 0
+    ) {
       const snapshots = this.history.flatMap((entry) =>
         (entry.parts ?? []).filter((part) =>
           this.unaccountedMemorySnapshots.has(part),
@@ -8601,24 +8715,20 @@ export class LlmChat {
         ]);
         // On a provider-derived baseline only these additions have a known
         // price. A new usage report replaces the entire source above.
-        const source = this.lastPromptTokenCountSource;
-        if (!source.localHistory) {
-          const changes = source.catalogChanges ?? new WeakMap<Part, number>();
-          let remaining = chargedTokens * TOKEN_TO_CHAR_RATIO;
-          snapshots.forEach((snapshot, index) => {
-            const chars =
-              index === snapshots.length - 1
-                ? remaining
-                : catalogSnapshotChars({ parts: [snapshot] });
-            changes.set(snapshot, -chars);
-            remaining -= chars;
-          });
-          this.lastPromptTokenCountSource = {
-            catalogChanges: changes,
-            kind:
-              source.kind === 'provider' ? 'adjusted-provider' : source.kind,
-          };
-        }
+        const changes = source.catalogChanges ?? new WeakMap<Part, number>();
+        let remaining = chargedTokens * TOKEN_TO_CHAR_RATIO;
+        snapshots.forEach((snapshot, index) => {
+          const chars =
+            index === snapshots.length - 1
+              ? remaining
+              : catalogSnapshotChars({ parts: [snapshot] });
+          changes.set(snapshot, -chars);
+          remaining -= chars;
+        });
+        this.lastPromptTokenCountSource = {
+          catalogChanges: changes,
+          kind: source.kind === 'provider' ? 'adjusted-provider' : source.kind,
+        };
         this.lastPromptTokenCount += chargedTokens;
         this.telemetryService?.setLastPromptTokenCount(
           this.lastPromptTokenCount,
@@ -8630,6 +8740,10 @@ export class LlmChat {
       role: 'model',
       parts: acceptedTurnParts,
     });
+    const local = source.localHistory;
+    if (local) {
+      this.updateLocalCount(this.localImagePrice(local), local.tokenOffset);
+    }
     this.toolBudgetUsageAnchor =
       fixedInputVersion === this.toolBudgetFixedInputVersion &&
       usageMetadata &&

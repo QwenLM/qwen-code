@@ -951,6 +951,7 @@ export class LlmClient {
     const resumedSessionData = this.config.getResumedSessionData();
     const restoreRuntime = this.config.getSessionRestoreRuntime?.();
     let resumeTokenCounts = restoreRuntime?.resumeTokenCounts;
+    let restoredHistoryLength = restoreRuntime?.apiHistory.length ?? 0;
     if (restoreRuntime) {
       this.armTelemetrySwapUndo(sessionId);
       uiTelemetryService.resetSession(sessionId);
@@ -983,6 +984,7 @@ export class LlmClient {
         resumedSessionData.conversation,
       );
       const resumedHistory = restored.apiHistory;
+      restoredHistoryLength = resumedHistory.length;
       this.seedRecentCompletedToolNamesFromHistory(resumedHistory);
       await this.startChat(
         resumedHistory,
@@ -1013,6 +1015,7 @@ export class LlmClient {
         promptTokenCount = Math.max(0, promptTokenCount + adjustment);
         uiTelemetryService.setLastPromptTokenCount(promptTokenCount);
       }
+      const checkpoint = resumeTokenCounts.historyCheckpoint;
       this.getChat().seedResumeTokenCounts(
         promptTokenCount,
         resumeTokenCounts.outputTokenCount,
@@ -1021,6 +1024,12 @@ export class LlmClient {
         resumeTokenCounts.isProviderAdjusted,
         resumeTokenCounts.historyImageTokenEstimate,
         resumeTokenCounts.pricedCatalogEntries,
+        checkpoint && checkpoint.entries <= restoredHistoryLength
+          ? {
+              trailingEntries: restoredHistoryLength - checkpoint.entries,
+              partCount: checkpoint.lastEntryParts,
+            }
+          : undefined,
       );
     }
     signal?.throwIfAborted();

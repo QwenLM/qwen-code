@@ -1398,6 +1398,7 @@ describe('Gemini Client (client.ts)', () => {
         undefined,
         undefined,
         undefined,
+        undefined,
       );
       expect(skill.restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(
         apiHistory,
@@ -1452,6 +1453,7 @@ describe('Gemini Client (client.ts)', () => {
         true,
         undefined,
         undefined,
+        undefined,
       );
     });
 
@@ -1478,9 +1480,46 @@ describe('Gemini Client (client.ts)', () => {
         undefined,
         512,
         undefined,
+        { trailingEntries: 0, partCount: undefined },
       );
       expect(resumedClient.getChat().isLastPromptTokenCountEstimated()).toBe(
         true,
+      );
+    });
+
+    it('prices a later image merged into the last user entry of a checkpoint', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        imageTokenEstimate: 3200,
+      });
+      const seeded = spySeedResumeTokenCounts();
+      const client = await resumeWith(
+        transcriptRecord('checkpoint', 'system', {
+          subtype: 'chat_compression',
+          systemPayload: {
+            info: compressionInfo(CompressionStatus.COMPRESSED, 1000, 200),
+            historyImageTokenEstimate: 100,
+            compressedHistory: [userText('saved')],
+          },
+        }),
+        transcriptRecord('midturn', 'user', {
+          subtype: 'mid_turn_user_message',
+          message: content('user', {
+            inlineData: { mimeType: 'image/png', data: 'AA==' },
+          }),
+        }),
+        transcriptRecord('answer', 'assistant', { message: modelText('done') }),
+      );
+      expect(seeded).toHaveBeenCalledWith(
+        200,
+        0,
+        true,
+        undefined,
+        100,
+        undefined,
+        { trailingEntries: 1, partCount: 1 },
+      );
+      expect(client.getChat().getLastPromptTokenCount()).toBeGreaterThanOrEqual(
+        3400,
       );
     });
 

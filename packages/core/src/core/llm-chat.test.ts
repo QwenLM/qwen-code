@@ -6930,25 +6930,39 @@ describe('LlmChat', async () => {
           content('user', snapshot),
         ]);
         expect(snapshotTokens).toBeGreaterThan(10000);
+        const compressedHistory = target.getHistoryShallow(true);
+        const tokenOffset = count - estimateContentTokens(compressedHistory);
+        const reseededHistory = [
+          ...compressedHistory,
+          content('user', snapshot, { text: 'Reseed catalog.' }),
+          modelText('READY'),
+        ];
+        const reseededCount =
+          tokenOffset + estimateContentTokens(reseededHistory);
         await run('Reseed catalog.');
         expect(
           getAutoMemorySnapshot(target.getHistory(), catalog),
         ).toBeUndefined();
-        expect(target.getLastPromptTokenCount()).toBe(count + snapshotTokens);
+        expect(target.getLastPromptTokenCount()).toBe(reseededCount);
         expect(
           uiTelemetryService.setLastPromptTokenCount,
-        ).toHaveBeenLastCalledWith(count + snapshotTokens);
+        ).toHaveBeenLastCalledWith(reseededCount);
         expect(target.isLastPromptTokenCountEstimated()).toBe(true);
         const callsBefore = compressSpy.mock.calls.length;
         await run('Next request.');
         expect(
           compressSpy.mock.calls[callsBefore][1].precomputedEffectiveTokens,
         ).toBe(
-          count +
-            snapshotTokens +
-            estimateContentTokens([userText('Next request.')]),
+          reseededCount + estimateContentTokens([userText('Next request.')]),
         );
-        expect(target.getLastPromptTokenCount()).toBe(count + snapshotTokens);
+        expect(target.getLastPromptTokenCount()).toBe(
+          tokenOffset +
+            estimateContentTokens([
+              ...reseededHistory,
+              userText('Next request.'),
+              modelText('READY'),
+            ]),
+        );
         supplyUsage = true;
         await run('Refresh usage.');
         expect(target.getLastPromptTokenCount()).toBe(43210);
@@ -6965,6 +6979,8 @@ describe('LlmChat', async () => {
           CompressionStatus.COMPRESSED,
         );
         const abortCount = target.getLastPromptTokenCount();
+        const abortOffset =
+          abortCount - estimateContentTokens(target.getHistoryShallow(true));
         abortResponse = true;
         await expect(run('Abort this pending turn.')).rejects.toThrow();
         const interruption = detectTurnInterruption(target.getHistory());
@@ -7051,6 +7067,25 @@ describe('LlmChat', async () => {
           expect(mockConfig.getAutoMemoryContext()).toBe('');
           expect(target.getLastPromptTokenCount()).toBe(abortCount);
         }
+        const expectedRetryHistory = [
+          ...target.getHistory().map((entry) =>
+            snapshotVisible
+              ? entry
+              : {
+                  ...entry,
+                  parts: entry.parts?.filter(
+                    (part) => part.text !== snapshot.text,
+                  ),
+                },
+          ),
+          content('user', ...expectedPending),
+          modelText('READY'),
+        ];
+        expect(
+          expectedRetryHistory
+            .flatMap((entry) => entry.parts ?? [])
+            .filter((part) => part.text === snapshot.text),
+        ).toHaveLength(snapshotVisible ? 1 : 0);
         const retryCallIndex = compressSpy.mock.calls.length;
         const requestIndex = streamMock().mock.calls.length;
         await run(retryParts);
@@ -7075,7 +7110,7 @@ describe('LlmChat', async () => {
               : 0),
         );
         expect(target.getLastPromptTokenCount()).toBe(
-          abortCount + (snapshotVisible ? snapshotTokens : 0),
+          abortOffset + estimateContentTokens(expectedRetryHistory),
         );
       },
     );
@@ -17068,6 +17103,107 @@ describe('LlmChat', async () => {
       },
     );
 
+    it.each([
+      ['noop', false, false],
+      ['compact', true, false],
+      ['nested tool media', true, true],
+    ] as const)(
+      'reprices an image added after a local checkpoint (%s)',
+      (_case, compact, nested) => {
+        const prices = vi.mocked(mockConfig.getChatCompression);
+        prices.mockReturnValue({ imageTokenEstimate: 100 });
+        pinFastCompressionIdleClear();
+        const recorder = { recordChatCompression: vi.fn() };
+        const initial = compact
+          ? thoughtHistory()
+          : [userText('before'), modelText('reply')];
+        const target = newChat({ history: initial, recorder });
+        const overhead = 500;
+        target.seedResumeTokenCounts(
+          estimateContentTokens(initial, 100) + overhead,
+          0,
+          true,
+          false,
+          100,
+        );
+        prices.mockReturnValue({ imageTokenEstimate: 3200 });
+        const toolImage = {
+          functionResponse: {
+            name: 'read_file',
+            response: { output: 'image' },
+            parts: [imagePart],
+          },
+        };
+        const newContent = nested
+          ? content('user', toolImage)
+          : content('user', imagePart);
+        target.addHistory(newContent);
+        const { info } = target.compressFast();
+        expect(info.compressionStatus).toBe(
+          compact ? CompressionStatus.COMPRESSED : CompressionStatus.NOOP,
+        );
+        const expected =
+          estimateContentTokens(target.getHistoryShallow(), 3200) + overhead;
+        expect(info.newTokenCount).toBe(expected);
+        expect(target.getLastPromptTokenCount()).toBe(expected);
+        expect(target.compressFast().info.newTokenCount).toBe(expected);
+        if (compact) {
+          expect(
+            recorder.recordChatCompression.mock.calls[0][0]
+              .historyImageTokenEstimate,
+          ).toBe(3200);
+        } else {
+          expect(recorder.recordChatCompression).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each([
+      ['appended turn', 100, false, false],
+      ['appended part', 100, true, false],
+      ['same price', 3200, true, false],
+      ['zero seed', 100, true, true],
+    ] as const)(
+      'charges media added after a saved local checkpoint once (%s)',
+      (_case, savedPrice, merged, zeroSeed) => {
+        vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+          imageTokenEstimate: 3200,
+        });
+        const prefix = [
+          userText('old input'),
+          modelText('previous reply'),
+          userText('pending'),
+        ];
+        const history = merged
+          ? [
+              ...prefix.slice(0, -1),
+              content('user', { text: 'pending' }, imagePart),
+              modelText('new reply'),
+            ]
+          : [...prefix, content('user', imagePart), modelText('new reply')];
+        const boundary = { trailingEntries: merged ? 1 : 2, partCount: 1 };
+        const expected =
+          estimateContentTokens(history, 3200) + (zeroSeed ? 0 : 700);
+        const seed = zeroSeed
+          ? 0
+          : estimateContentTokens(prefix, savedPrice) + 700;
+        const target = newChat({ history });
+        for (let load = 0; load < 2; load++) {
+          target.seedResumeTokenCounts(
+            seed,
+            0,
+            true,
+            false,
+            savedPrice,
+            undefined,
+            boundary,
+          );
+          expect(target.getLastPromptTokenCount()).toBe(expected);
+          expect(target.compressFast().info.newTokenCount).toBe(expected);
+        }
+      },
+    );
+
     it.each([true, false])(
       'prices subsequent fast compression after a new catalog and a turn with usage=%s',
       async (hasUsage) => {
@@ -17089,7 +17225,16 @@ describe('LlmChat', async () => {
             hasUsage ? { promptTokenCount: 30_000 } : undefined,
           ),
         );
+        vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+          imageTokenEstimate: 3200,
+        });
         await sendDrain([imagePart], 'new-image', target);
+        expect(target.getLastPromptTokenCount()).toBe(
+          hasUsage
+            ? 30_000
+            : estimateContentTokens(target.getHistoryShallow(true), 3200) +
+                overhead,
+        );
         expect(
           target
             .getHistoryShallow(true)
@@ -17099,12 +17244,12 @@ describe('LlmChat', async () => {
         const { info } = target.compressFast();
         expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
         expect(info.historyImageTokenEstimate).toBe(
-          hasUsage ? undefined : 1600,
+          hasUsage ? undefined : 3200,
         );
         expect(info.newTokenCount).toBe(
           hasUsage
             ? 30_000
-            : estimateContentTokens(target.getHistoryShallow(true), 1600) +
+            : estimateContentTokens(target.getHistoryShallow(true), 3200) +
                 overhead,
         );
       },
