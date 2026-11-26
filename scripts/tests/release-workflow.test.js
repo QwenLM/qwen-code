@@ -2834,6 +2834,7 @@ describe('release workflow', () => {
     postGateFailAt = 2,
     dockerPsFails = false,
     dockerPsIds = '',
+    aptMirror = '',
     aptDefaultRate,
     aptAliyunRate,
     aptTunaRate,
@@ -3000,6 +3001,7 @@ esac`,
         POST_GATE_FAIL_AT: String(postGateFailAt),
         DOCKER_PS_FAILS: dockerPsFails ? '1' : '0',
         DOCKER_PS_IDS: dockerPsIds,
+        APT_MIRROR: aptMirror,
         CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
         CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
         CURL_TUNA_RATE: String(aptTunaRate ?? 0),
@@ -3049,6 +3051,20 @@ esac`,
       rmSync(directory, { recursive: true, force: true });
     }
   };
+
+  it.skipIf(process.platform === 'win32')(
+    'uses the runner apt mirror without probing and preserves the CI label',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        aptMirror: 'mirrors.cloud.aliyuncs.com',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).not.toContain('apt probe:');
+      expect(calls).toContain(
+        '--label org.qwen-code.ci.sandbox=true --build-arg APT_MIRROR=mirrors.cloud.aliyuncs.com',
+      );
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'selects the fast apt mirror and preserves the CI label in the build flags',
