@@ -13982,6 +13982,7 @@ export function App({
       const includeLocalizedContext =
         includeErrorContext &&
         error instanceof Error &&
+        error.message.length > 0 &&
         !error.message.startsWith(fallback);
       const message = isAcpChildCapacityError(error)
         ? t('daemon.capacity.exhausted')
@@ -20003,14 +20004,45 @@ export function App({
       new Promise<void>((resolve, reject) => {
         const taskRuntimeClient =
           scheduledScope?.runtimeClient ?? workspace.client;
-        const scheduledScopeIsCurrent = () =>
-          taskRuntimeClient === boundRunRuntimeClientRef.current &&
-          (!scheduledScope ||
-            (scheduledScope.logicalSessionKey !== undefined &&
+        let targetLogicalSessionKey = scheduledScope?.logicalSessionKey;
+        let targetSessionId: string | undefined;
+        let sawTargetSessionConnected = false;
+        const scheduledScopeIsCurrent = () => {
+          if (taskRuntimeClient !== boundRunRuntimeClientRef.current) {
+            return false;
+          }
+          if (scheduledScope) {
+            return (
+              targetLogicalSessionKey !== undefined &&
               getLogicalSessionKey(
                 connectionRef.current.sessionId,
                 connectionRef.current.workspaceCwd,
-              ) === scheduledScope.logicalSessionKey));
+              ) === targetLogicalSessionKey
+            );
+          }
+          if (targetLogicalSessionKey !== undefined) {
+            return (
+              getLogicalSessionKey(
+                connectionRef.current.sessionId,
+                connectionRef.current.workspaceCwd,
+              ) === targetLogicalSessionKey
+            );
+          }
+          if (targetSessionId === undefined) return true;
+          const currentSessionId = connectionRef.current.sessionId;
+          if (currentSessionId === targetSessionId) {
+            sawTargetSessionConnected = true;
+            const logicalKey = getLogicalSessionKey(
+              targetSessionId,
+              connectionRef.current.workspaceCwd,
+            );
+            if (logicalKey !== undefined) {
+              targetLogicalSessionKey = logicalKey;
+            }
+            return true;
+          }
+          return !sawTargetSessionConnected && currentSessionId === undefined;
+        };
         const assertRunnable = () => {
           if (scheduledScope?.cancelledBeforeAdmission?.()) {
             throw createScheduledTaskCancellation('Bound run was cancelled');
@@ -20074,7 +20106,23 @@ export function App({
                 },
                 beforeDispatch: beforeTaskHttpDispatch,
                 beforeDetachedDispatch: beforeTaskHttpDispatch,
-                onAdmissionStarted: assertRunnable,
+                onAdmissionStarted: (startedSessionId) => {
+                  if (!scheduledScope && startedSessionId) {
+                    if (targetSessionId === undefined) {
+                      targetSessionId = startedSessionId;
+                    }
+                    if (connectionRef.current.sessionId === startedSessionId) {
+                      sawTargetSessionConnected = true;
+                      if (targetLogicalSessionKey === undefined) {
+                        targetLogicalSessionKey = getLogicalSessionKey(
+                          startedSessionId,
+                          connectionRef.current.workspaceCwd,
+                        );
+                      }
+                    }
+                  }
+                  assertRunnable();
+                },
               }
             : {}),
           canRebindOwner: () =>

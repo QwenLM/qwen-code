@@ -61059,6 +61059,66 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await flush();
     failedRevalidation.resolve();
     await expect(secondGuard).rejects.toSatisfy(isScheduledTaskCancellation);
+
+    // Unbound run started when connection.sessionId is initially undefined
+    // (e.g. /scheduled-tasks full page allocating a new session) must still
+    // bind its guard to the allocated session once admission starts, so
+    // switching to session-b during beforeDispatch converts any revalidation
+    // rejection into a structured cancellation with no toast.
+    const allocatedRevalidation = deferred<void>();
+    mockConnection.sessionId = undefined;
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    const runFromEmpty = await openRunHandler(container);
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'allocated-session',
+      workspaceCwd: '/tmp/project',
+    });
+    const thirdOptions: Array<{
+      beforeDispatch?: () => void | Promise<void>;
+      onAdmissionStarted?: () => void;
+    }> = [];
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      (_prompt: string, options: unknown) => {
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+          onAdmissionStarted?: () => void;
+        };
+        thirdOptions.push(opts);
+        opts.onAdmissionStarted?.();
+        return new Promise<void>(() => {});
+      },
+    );
+    let thirdPending!: Promise<void>;
+    await act(async () => {
+      thirdPending = runFromEmpty(
+        'unbound from empty page',
+        null,
+        undefined,
+        () => false,
+        async () => {
+          await allocatedRevalidation.promise;
+          throw new DOMException('Failed to record the run', 'AbortError');
+        },
+      );
+      thirdPending.catch(() => {});
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(thirdOptions[0]?.beforeDispatch).toBeDefined(),
+    );
+    const thirdGuard = Promise.resolve(thirdOptions[0]!.beforeDispatch!());
+    thirdGuard.catch(() => {});
+    mockConnection.sessionId = 'session-b';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    allocatedRevalidation.resolve();
+    await expect(thirdGuard).rejects.toSatisfy(isScheduledTaskCancellation);
   });
 
   it('does not apply the catch-up timeout while restore is pending', async () => {
