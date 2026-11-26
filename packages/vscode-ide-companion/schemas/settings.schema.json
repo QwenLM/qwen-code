@@ -2111,6 +2111,11 @@
       "type": "boolean",
       "default": false
     },
+    "enableDelegatedPromptHooks": {
+      "description": "Treat prompts from other sessions as messages checked by UserPromptSubmit hooks in the receiving session.",
+      "type": "boolean",
+      "default": false
+    },
     "stopHookBlockingCap": {
       "type": "integer",
       "minimum": 1,

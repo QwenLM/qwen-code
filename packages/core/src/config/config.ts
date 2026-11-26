@@ -271,6 +271,7 @@ import {
   type StopFailureErrorType,
   type TodoItem,
   type TodoStatus,
+  type UserPromptSource,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import {
@@ -4526,6 +4527,7 @@ export class Config {
                       input['submitted_prompt'].trim().length > 0
                       ? input['submitted_prompt']
                       : undefined,
+                    input['source'] as UserPromptSource | undefined,
                   );
                   break;
                 case 'UserPromptExpansion':
