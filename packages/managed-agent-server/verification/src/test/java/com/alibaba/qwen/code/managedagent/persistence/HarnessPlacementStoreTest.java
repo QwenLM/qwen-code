@@ -2,6 +2,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ParkedTurn;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WakeStamp;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
@@ -14,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -24,6 +28,7 @@ import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -174,6 +179,64 @@ public class HarnessPlacementStoreTest {
                 .extracting(ManagedSessionStoreModels.WriterGrant::writerGeneration).isEqualTo(successor.writerGeneration());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"ACTIVE", "QUIESCING"})
+    void expiredCleanSuspensionIsFoundOnlyForADepartedOwner(String state) {
+        var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
+        tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L)));
+        if ("QUIESCING".equals(state)) {
+            tx.executeWithoutResult(status -> store.quiesceOwnership(TENANT, SESSION, token(owner),
+                    new ManagedSessionStoreModels.QuiesceOwnershipRequest(
+                            WORKSPACE, "boot-a", 1, 1, "pod-a", "boot-a")));
+        }
+        jdbc.update("UPDATE ma_session_head SET journal_revision = 1, committed_sequence = 3,"
+                + " last_commit_digest = ?, activation_phase = 'released', activation_head_revision = 1,"
+                + " writer_lease_until = 0 WHERE tenant_id = ? AND session_id = ?",
+                "a".repeat(64), TENANT, SESSION);
+        tx.executeWithoutResult(status -> store.sealWriter(TENANT, SESSION, token(owner),
+                new SealWriterRequest(WORKSPACE, "boot-a", 1, new WakeStamp(1, false, 0))));
+
+        var candidates = placements.findExpiredSuspensions(Set.of("pod-b"), 10);
+        assertThat(candidates).hasSize(1);
+        assertThat(candidates.getFirst().state()).isEqualTo(state);
+        assertThat(placements.findExpiredSuspensions(Set.of("pod-a", "pod-b"), 10)).isEmpty();
+
+        var successor = tx.execute(status -> placements.takeover(TENANT, SESSION,
+                candidates.getFirst(), "pod-b", "boot-b"));
+        assertThat(successor.epoch()).isEqualTo(owner.epoch() + 1);
+        assertThat(placements.hasUnreleasedOwnership("pod-a", "boot-a")).isFalse();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record"
+                + " WHERE domain = 'hosted_harness_release'", Integer.class)).isZero();
+    }
+
+    @Test
+    void liveLeaseIsNotAReaperCandidate() {
+        var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
+        tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L)));
+        jdbc.update("UPDATE ma_session_head SET journal_revision = 1, activation_phase = 'released',"
+                + " activation_head_revision = 1 WHERE tenant_id = ? AND session_id = ?", TENANT, SESSION);
+        tx.executeWithoutResult(status -> store.sealWriter(TENANT, SESSION, token(owner),
+                new SealWriterRequest(WORKSPACE, "boot-a", 1, new WakeStamp(1, false, 0))));
+
+        assertThat(placements.findExpiredSuspensions(Set.of("pod-b"), 10)).isEmpty();
+    }
+
+    @Test
+    void bareSealIsNotAReaperCandidate() {
+        var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
+        tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L)));
+        jdbc.update("UPDATE ma_session_head SET journal_revision = 1, activation_phase = 'released',"
+                + " activation_head_revision = 1, writer_lease_until = 0"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, SESSION);
+        tx.executeWithoutResult(status -> store.sealWriter(TENANT, SESSION, token(owner),
+                new SealWriterRequest(WORKSPACE, "boot-a", 1)));
+
+        assertThat(placements.findExpiredSuspensions(Set.of("pod-b"), 10)).isEmpty();
+    }
+
     @Test
     void releaseRevokesTheEpochBeforeSuccessorCasAndReplaysOnlyTheExactReceipt() {
         var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
@@ -224,6 +287,134 @@ public class HarnessPlacementStoreTest {
         tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(next),
                 new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-b", 60_000L)));
         assertThat(store.restore(TENANT, WORKSPACE, SESSION, token(next)).journalRevision()).isEqualTo(1);
+    }
+
+    @Test
+    void cleanSealedSuspensionReleasesPlacementBeforeLeaseExpiry() {
+        var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
+        tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L)));
+        tx.executeWithoutResult(status -> store.quiesceOwnership(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.QuiesceOwnershipRequest(
+                        WORKSPACE, "boot-a", 1, 1, "pod-a", "boot-a")));
+        jdbc.update("UPDATE ma_session_head SET journal_revision = 1, committed_sequence = 3,"
+                + " last_commit_digest = ?, activation_phase = 'released', activation_head_revision = 1"
+                + " WHERE tenant_id = ? AND session_id = ?", "a".repeat(64), TENANT, SESSION);
+        tx.executeWithoutResult(status -> store.sealWriter(TENANT, SESSION, token(owner),
+                new SealWriterRequest(WORKSPACE, "boot-a", 1,
+                        new WakeStamp(1, false, 0, new ParkedTurn("prompt-1", 2_345, 7L)))));
+        Long sealedModified = jdbc.queryForObject("SELECT gmt_modified FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", Long.class, TENANT, SESSION);
+
+        var request = new ManagedSessionStoreModels.ReleaseOwnershipRequest(
+                WORKSPACE, "boot-a", 1, 1, 1, "pod-a", "boot-a", "release-clean-seal",
+                new ManagedSessionStoreModels.OwnershipCommitProof(3, "a".repeat(64)));
+        var release = tx.execute(status -> store.releaseOwnership(TENANT, SESSION, token(owner), request));
+
+        assertThat(release.path("state").asText()).isEqualTo("RELEASED");
+        assertThat(jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", Long.class, TENANT, SESSION))
+                .isGreaterThan(System.currentTimeMillis());
+        assertThat(placements.get(TENANT, SESSION).state()).isEqualTo("RELEASED");
+        assertThat(jdbc.queryForMap("SELECT state, wake_seal_revision, wake_seal_parked_prompt_id,"
+                + " wake_seal_parked_approval_revision, gmt_modified FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, SESSION))
+                .containsEntry("state", "SEALED")
+                .containsEntry("wake_seal_revision", 1L)
+                .containsEntry("wake_seal_parked_prompt_id", "prompt-1")
+                .containsEntry("wake_seal_parked_approval_revision", 7L)
+                .containsEntry("gmt_modified", sealedModified);
+        var successor = tx.execute(status -> placements.takeover(TENANT, SESSION, owner, "pod-b", "boot-b"));
+        assertThat(successor.epoch()).isEqualTo(owner.epoch() + 1);
+        assertThat(successor.instanceId()).isEqualTo("pod-b");
+        assertThat(tx.execute(status -> store.releaseOwnership(TENANT, SESSION, token(owner), request))
+                .equals(release)).isTrue();
+    }
+
+    @Test
+    void bareSealedWriterCannotReleaseItsPlacement() {
+        var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
+        tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L)));
+        tx.executeWithoutResult(status -> store.quiesceOwnership(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.QuiesceOwnershipRequest(
+                        WORKSPACE, "boot-a", 1, 1, "pod-a", "boot-a")));
+        jdbc.update("UPDATE ma_session_head SET journal_revision = 1, committed_sequence = 3,"
+                + " last_commit_digest = ?, activation_phase = 'released', activation_head_revision = 1"
+                + " WHERE tenant_id = ? AND session_id = ?", "a".repeat(64), TENANT, SESSION);
+        tx.executeWithoutResult(status -> store.sealWriter(TENANT, SESSION, token(owner),
+                new SealWriterRequest(WORKSPACE, "boot-a", 1)));
+        var release = new ManagedSessionStoreModels.ReleaseOwnershipRequest(
+                WORKSPACE, "boot-a", 1, 1, 1, "pod-a", "boot-a", "release-bare-seal",
+                new ManagedSessionStoreModels.OwnershipCommitProof(3, "a".repeat(64)));
+
+        assertThatThrownBy(() -> tx.execute(status -> store.releaseOwnership(TENANT, SESSION, token(owner), release)))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_session_writer_conflict"));
+        assertThat(placements.get(TENANT, SESSION).state()).isEqualTo("QUIESCING");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record"
+                + " WHERE domain = 'hosted_harness_release'", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", String.class, TENANT, SESSION))
+                .isEqualTo("SEALED");
+    }
+
+    @Test
+    void staleWakeSealCannotReleaseItsPlacement() {
+        var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
+        tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L)));
+        tx.executeWithoutResult(status -> store.quiesceOwnership(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.QuiesceOwnershipRequest(
+                        WORKSPACE, "boot-a", 1, 1, "pod-a", "boot-a")));
+        jdbc.update("UPDATE ma_session_head SET journal_revision = 1, committed_sequence = 3,"
+                + " last_commit_digest = ?, activation_phase = 'released', activation_head_revision = 1"
+                + " WHERE tenant_id = ? AND session_id = ?", "a".repeat(64), TENANT, SESSION);
+        tx.executeWithoutResult(status -> store.sealWriter(TENANT, SESSION, token(owner),
+                new SealWriterRequest(WORKSPACE, "boot-a", 1, new WakeStamp(1, false, 0))));
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 0"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, SESSION);
+        var release = new ManagedSessionStoreModels.ReleaseOwnershipRequest(
+                WORKSPACE, "boot-a", 1, 1, 1, "pod-a", "boot-a", "release-stale-wake",
+                new ManagedSessionStoreModels.OwnershipCommitProof(3, "a".repeat(64)));
+
+        assertThatThrownBy(() -> tx.execute(status -> store.releaseOwnership(TENANT, SESSION, token(owner), release)))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_session_writer_conflict"));
+        assertThat(placements.get(TENANT, SESSION).state()).isEqualTo("QUIESCING");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record"
+                + " WHERE domain = 'hosted_harness_release'", Integer.class)).isZero();
+    }
+
+    @Test
+    void cleanSealedReleaseRollsBackItsReceiptWithoutRewritingTheSeal() {
+        var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
+        tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L)));
+        tx.executeWithoutResult(status -> store.quiesceOwnership(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.QuiesceOwnershipRequest(
+                        WORKSPACE, "boot-a", 1, 1, "pod-a", "boot-a")));
+        jdbc.update("UPDATE ma_session_head SET journal_revision = 1, committed_sequence = 3,"
+                + " last_commit_digest = ?, activation_phase = 'released', activation_head_revision = 1"
+                + " WHERE tenant_id = ? AND session_id = ?", "a".repeat(64), TENANT, SESSION);
+        tx.executeWithoutResult(status -> store.sealWriter(TENANT, SESSION, token(owner),
+                new SealWriterRequest(WORKSPACE, "boot-a", 1, new WakeStamp(1, false, 0))));
+        var release = new ManagedSessionStoreModels.ReleaseOwnershipRequest(
+                WORKSPACE, "boot-a", 1, 1, 1, "pod-a", "boot-a", "release-clean-seal-rollback",
+                new ManagedSessionStoreModels.OwnershipCommitProof(3, "a".repeat(64)));
+        ((ReleaseFaultJdbc) jdbc).failPlacement = true;
+
+        assertThatThrownBy(() -> tx.execute(status -> store.releaseOwnership(TENANT, SESSION, token(owner), release)))
+                .isInstanceOf(IllegalStateException.class).hasMessage("injected placement release failure");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE domain = 'hosted_harness_release'",
+                Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE kind = ?",
+                Integer.class, "managed-hosted_harness_release")).isZero();
+        assertThat(placements.get(TENANT, SESSION).state()).isEqualTo("QUIESCING");
+        assertThat(jdbc.queryForMap("SELECT state, wake_seal_revision FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, SESSION))
+                .containsEntry("state", "SEALED")
+                .containsEntry("wake_seal_revision", 1L);
     }
 
     @Test
@@ -306,6 +497,7 @@ public class HarnessPlacementStoreTest {
 
     private static final class ReleaseFaultJdbc extends ManagedSchemaJdbcTemplate {
         private boolean failSeal;
+        private boolean failPlacement;
 
         private ReleaseFaultJdbc(DataSource source) {
             super(source);
@@ -315,6 +507,9 @@ public class HarnessPlacementStoreTest {
         public int update(String sql, Object... args) {
             if (failSeal && sql.startsWith("UPDATE ma_session_head SET state = 'SEALED'")) {
                 throw new IllegalStateException("injected release seal failure");
+            }
+            if (failPlacement && sql.startsWith("UPDATE ma_session SET harness_placement_state = 'RELEASED'")) {
+                throw new IllegalStateException("injected placement release failure");
             }
             return super.update(sql, args);
         }

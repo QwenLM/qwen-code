@@ -127,6 +127,7 @@ const GROUP_SYSTEM_SUBTYPES = new Set([
   // earlier turn on replay, restoring content the rewound session never
   // had; the next durable request re-appends the current catalog anyway.
   'memory_catalog_snapshot',
+  'permission_context_snapshot',
 ]);
 
 export function telemetryRecordIdentity(record: ChatRecord): {
