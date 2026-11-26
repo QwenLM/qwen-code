@@ -7,6 +7,7 @@
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
+import { validateBridgeSocketEndpoint } from './guest-exec-bridge.js';
 import type { ReviewExecutionClass } from './sandbox-trust.js';
 
 export type ContainerRuntime = 'docker' | 'podman';
@@ -43,6 +44,10 @@ export interface ReviewBackendProbe {
   providerVmDriver?: ProviderVmDriver;
   providerVmTemplate?: string;
   providerVmEndpoint?: string;
+  /** Operator-supplied local UDS endpoint speaking `guest-exec-v1` (never from repo `.env`). */
+  bridgeSocketPath?: string;
+  /** Optional VMM worker PID file used for identity-checked teardown on timeout/fault. */
+  workerPidFile?: string;
 }
 
 export interface ReviewBackendPlan {
@@ -59,6 +64,14 @@ export type ReviewBackendSelection =
       backend: 'container';
       runtime: ContainerRuntime;
       executionClass: 'trusted-shared-kernel';
+    }
+  | {
+      kind: 'hardware-bridge';
+      backend: 'firecracker' | 'vfkit';
+      executionClass: ReviewExecutionClass;
+      plan: ReviewBackendPlan;
+      socketPath: string;
+      workerPidFile?: string;
     }
   | {
       kind: 'hardware-planned';
@@ -209,6 +222,16 @@ export function probeHostReviewBackends(
       env,
       fileSourced,
     ),
+    bridgeSocketPath: operatorEnvValue(
+      'QWEN_REVIEW_VM_BRIDGE_SOCKET',
+      env,
+      fileSourced,
+    ),
+    workerPidFile: operatorEnvValue(
+      'QWEN_REVIEW_VM_PID_FILE',
+      env,
+      fileSourced,
+    ),
   };
 }
 
@@ -308,6 +331,50 @@ export interface SelectReviewBackendOptions {
   hostProbe?: ReviewBackendProbe;
 }
 
+function resolveHardwareBridgeOrPlan(
+  plan: ReviewBackendPlan,
+  executionClass: ReviewExecutionClass,
+  probe: ReviewBackendProbe,
+  checked: ReviewBackendPlan[],
+): ReviewBackendSelection {
+  if (
+    (plan.backend === 'firecracker' || plan.backend === 'vfkit') &&
+    probe.bridgeSocketPath
+  ) {
+    const endpoint = validateBridgeSocketEndpoint(
+      probe.bridgeSocketPath,
+      probe.platform,
+    );
+    if (!endpoint.ok) {
+      return {
+        kind: 'refused',
+        backend: 'refused',
+        executionClass,
+        reason: `hardware backend "${plan.backend}" bridge socket invalid (${endpoint.reason}) — refusing fail-closed without downgrading`,
+        checked,
+      };
+    }
+    return {
+      kind: 'hardware-bridge',
+      backend: plan.backend,
+      executionClass,
+      plan,
+      socketPath: probe.bridgeSocketPath,
+      ...(probe.workerPidFile ? { workerPidFile: probe.workerPidFile } : {}),
+    };
+  }
+  return {
+    kind: 'hardware-planned',
+    backend: plan.backend,
+    executionClass,
+    plan,
+    reason:
+      executionClass === 'hardware-isolated'
+        ? `hardware-isolated backend "${plan.backend}" is configured (${plan.summary}), but inline guest execution transport is not attached (set QWEN_REVIEW_VM_BRIDGE_SOCKET to a guest-exec-v1 UDS endpoint) — refusing fail-closed rather than downgrading to container or host`
+        : `hardware backend "${plan.backend}" prerequisites are ready, but inline guest execution transport is not attached (set QWEN_REVIEW_VM_BRIDGE_SOCKET to a guest-exec-v1 UDS endpoint) — refusing rather than downgrading to shared-kernel container or host`,
+  };
+}
+
 /**
  * Selects the sandbox execution backend fail-closed for a given
  * `executionClass`.
@@ -344,13 +411,9 @@ export function selectReviewSandboxBackend(
     // Operator explicitly requested hardware isolation even for a trusted PR.
     const plan = buildReviewBackendPlan(requested, probe);
     if (plan.ready) {
-      return {
-        kind: 'hardware-planned',
-        backend: requested,
-        executionClass: 'trusted-shared-kernel',
+      return resolveHardwareBridgeOrPlan(plan, 'trusted-shared-kernel', probe, [
         plan,
-        reason: `hardware backend "${requested}" prerequisites are ready, but inline guest execution transport is not attached in this CLI process — refusing rather than downgrading to shared-kernel container or host`,
-      };
+      ]);
     }
     return {
       kind: 'refused',
@@ -381,13 +444,12 @@ export function selectReviewSandboxBackend(
   const checked = candidates.map((b) => buildReviewBackendPlan(b, probe));
   const readyPlan = checked.find((p) => p.ready);
   if (readyPlan) {
-    return {
-      kind: 'hardware-planned',
-      backend: readyPlan.backend,
-      executionClass: 'hardware-isolated',
-      plan: readyPlan,
-      reason: `hardware-isolated backend "${readyPlan.backend}" is configured (${readyPlan.summary}), but inline guest execution transport is not attached in this CLI process — refusing fail-closed rather than downgrading to container or host`,
-    };
+    return resolveHardwareBridgeOrPlan(
+      readyPlan,
+      'hardware-isolated',
+      probe,
+      checked,
+    );
   }
 
   return {

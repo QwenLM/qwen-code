@@ -949,6 +949,23 @@ export function toRpcError(err: unknown): {
   }
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
+  if (
+    isObject(err) &&
+    err['code'] === RPC.INTERNAL_ERROR &&
+    isObject(err['data']) &&
+    err['data']['errorKind'] === 'repetitive_tool_calls' &&
+    typeof err['message'] === 'string' &&
+    err['data']['details'] === err['message']
+  ) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err['message'],
+      data: {
+        errorKind: err['data']['errorKind'],
+        details: err['message'],
+      },
+    };
+  }
   const workflowStatus =
     isObject(err) && isObject(err['data'])
       ? workflowRequestErrorStatus(err['data']['errorKind'])
@@ -6449,6 +6466,7 @@ export class AcpDispatcher {
         abort.signal,
         {
           ...this.sessionCtx(conn, sessionId, fromLoopback),
+          userPrompt: true,
           ...(typeof submittedPrompt === 'string' &&
           metadata?.[CHANNEL_PROMPT_META_KEY] === undefined &&
           metadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === undefined &&

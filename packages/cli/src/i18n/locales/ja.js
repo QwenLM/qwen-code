@@ -553,6 +553,8 @@ export default {
   'List all configured hooks': '設定済みのフックをすべて表示する',
   // Hooks - Dialog
   Hooks: 'フック',
+  'A hook stopped the turn: {{reason}}':
+    'フックがこのターンを終了しました：{{reason}}',
   'Loading hooks...': 'フックを読み込んでいます...',
   'Error loading hooks:': 'フックの読み込みエラー：',
   'Press Escape to close': 'Escape キーで閉じる',

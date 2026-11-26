@@ -8,13 +8,23 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.io.IOException;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.function.Function;
 
 final class LocalStorageOwners {
     static final String SESSION_AUTHORITY_SQL = "SELECT 1 FROM ma_session WHERE tenant_id = ? AND workspace_storage_id = ? AND is_resource_gc_completed = FALSE LIMIT 1";
@@ -118,12 +128,20 @@ final class LocalStorageOwners {
                 + " WHERE mount_host_id = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", identity.hostId());
         for (var owner : owners) {
             String root = (String) owner.get("mount_root");
-            if (!key.equals(owner.get("physical_id")) && root != null
+            if (!samePhysicalRef(owner.get("physical_id"), key)
+                    && root != null
                     && (contains(root, identity.root()) || contains(identity.root(), root))) {
                 throw new RuntimeBrokerException(409, "storage_overlapping_roots",
                         "Workspace directory overlaps an existing physical owner.", false);
             }
         }
+    }
+
+    /** The column is VARBINARY, but queryForList hands an identifier back as text on MySQL. */
+    private static boolean samePhysicalRef(Object stored, String key) {
+        return stored instanceof byte[] bytes
+                ? java.util.Arrays.equals(bytes, key.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                : key.equals(stored);
     }
 
     private static boolean contains(String root, String candidate) {
@@ -142,7 +160,7 @@ final class LocalStorageOwners {
         }
         var row = rows.getFirst();
         if (!tenant.equals(row.get("tenant_id")) || !storage.equals(row.get("storage_id"))
-                || !java.util.Set.of("LOCAL", "UNREGISTERED").contains(row.get("storage_kind"))) {
+                || !Set.of("LOCAL", "UNREGISTERED").contains(row.get("storage_kind"))) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return row;
@@ -161,7 +179,7 @@ final class LocalStorageOwners {
 
     static Map<String, Object> requireOwner(JdbcTemplate jdbc, Map<String, Object> alias, String lock) {
         if (alias == null || !"LOCAL".equals(alias.get("storage_kind"))
-                || !java.util.Set.of("REGISTERED", "RETIRING").contains(alias.get("registration_state"))
+                || !Set.of("REGISTERED", "RETIRING").contains(alias.get("registration_state"))
                 || !(alias.get("physical_id") instanceof String physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -193,12 +211,12 @@ final class LocalStorageOwners {
         // alias registered after that read is locked by the scan alone, which
         // never locks its alias record; a recovery of another alias that
         // already saw it can then deadlock with this one.
-        java.util.List<String[]> listed = committedRead(jdbc, current -> current.query(
+        List<String[]> listed = committedRead(jdbc, current -> current.query(
                 "SELECT tenant_id, storage_id FROM ma_storage WHERE physical_id = ? ORDER BY tenant_id, storage_id LIMIT 129",
                 (row, index) -> new String[] {row.getString("tenant_id"), row.getString("storage_id")}, physical),
                 "Physical recovery alias list is unavailable");
-        var known = new java.util.TreeSet<String[]>(
-                java.util.Comparator.comparing((String[] alias) -> alias[0]).thenComparing(alias -> alias[1]));
+        var known = new TreeSet<String[]>(
+                Comparator.comparing((String[] alias) -> alias[0]).thenComparing(alias -> alias[1]));
         known.addAll(listed);
         known.add(sourceAlias);
         // A range read of the alias unique index, which yields (tenant_id,
@@ -206,13 +224,13 @@ final class LocalStorageOwners {
         // and physical_id is read so it is never a scan of the whole alias
         // index either, which a covering read becomes once the list is as long
         // as the estimated row count, locking every gap of the index.
-        java.util.List<Object> locks = new java.util.ArrayList<>();
+        List<Object> locks = new ArrayList<>();
         for (String[] alias : known) {
             locks.add(alias[0]);
             locks.add(alias[1]);
         }
         jdbc.queryForList("SELECT tenant_id, storage_id, physical_id FROM ma_storage /*! FORCE INDEX (uk_ma_storage_business_key) */"
-                + " WHERE (tenant_id, storage_id) IN (" + String.join(", ", java.util.Collections.nCopies(known.size(), "(?, ?)"))
+                + " WHERE (tenant_id, storage_id) IN (" + String.join(", ", Collections.nCopies(known.size(), "(?, ?)"))
                 + ") ORDER BY tenant_id, storage_id FOR UPDATE", locks.toArray());
         // Through the physical index: a table scan, which the optimizer picks
         // when one storage holds most rows, would lock other storages' primary
@@ -222,7 +240,7 @@ final class LocalStorageOwners {
                 (row, index) -> new String[] {row.getString("tenant_id"), row.getString("storage_id"), row.getString("storage_kind")}, physical);
         if (aliases.size() > 128 || aliases.stream().noneMatch(candidate ->
                 sourceAlias[0].equals(candidate[0]) && sourceAlias[1].equals(candidate[1]))) {
-            throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409, "storage_alias_inventory_limit",
+            throw new RuntimeBrokerException(409, "storage_alias_inventory_limit",
                     "Physical recovery alias inventory is incomplete or exceeds 128 aliases.", false);
         }
         for (var candidate : aliases) {
@@ -264,16 +282,16 @@ final class LocalStorageOwners {
      * another maintenance entry on a sibling alias can commit beside it, and the later
      * transactions of the recovery recheck its boundary on fresh snapshots.
      */
-    private static <T> T committedRead(JdbcTemplate jdbc, java.util.function.Function<JdbcTemplate, T> read, String failure) {
-        var source = java.util.Objects.requireNonNull(jdbc.getDataSource());
-        if (source instanceof org.springframework.jdbc.datasource.SingleConnectionDataSource) {
+    private static <T> T committedRead(JdbcTemplate jdbc, Function<JdbcTemplate, T> read, String failure) {
+        var source = Objects.requireNonNull(jdbc.getDataSource());
+        if (source instanceof SingleConnectionDataSource) {
             return read.apply(jdbc);
         }
         try (var connection = source.getConnection()) {
             connection.setAutoCommit(true);
             connection.setReadOnly(true);
-            return read.apply(new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true)));
-        } catch (java.sql.SQLException error) {
+            return read.apply(new ManagedSchemaJdbcTemplate(new SingleConnectionDataSource(connection, true)));
+        } catch (SQLException error) {
             throw new IllegalStateException(failure, error);
         }
     }
@@ -282,8 +300,8 @@ final class LocalStorageOwners {
         return !jdbc.queryForList(sql, Integer.class, arguments).isEmpty();
     }
 
-    private static com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException uncovered() {
-        return new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409, "storage_alias_authority_uncovered",
+    private static RuntimeBrokerException uncovered() {
+        return new RuntimeBrokerException(409, "storage_alias_authority_uncovered",
                 "Another storage alias retains authority outside this recovery source cut.", false);
     }
 }

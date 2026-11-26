@@ -694,10 +694,10 @@ export function logApiResponse(
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
+  if (config.getUsageStatisticsEnabled()) {
+    recordTokenUsageFromApiResponseBestEffort(config, event);
+  }
   if (!isInternalPromptId(event.prompt_id)) {
-    if (config.getUsageStatisticsEnabled()) {
-      recordTokenUsageFromApiResponseBestEffort(config, event);
-    }
     recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);

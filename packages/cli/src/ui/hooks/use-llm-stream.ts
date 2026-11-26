@@ -10,6 +10,11 @@ import {
 } from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
+  runUserPromptSubmit,
+  type UserPromptSubmitDecision,
+} from '@qwen-code/qwen-code-core/hooks/user-prompt-submit.js';
+import { createUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
+import {
   useState,
   useRef,
   useCallback,
@@ -93,6 +98,7 @@ import {
   getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import { getStructuredErrorCause } from '@qwen-code/qwen-code-core/core/turn.js';
 import type {
   AgentLoopRound,
   AgentLoopStopReason,
@@ -175,6 +181,7 @@ import {
   GOAL_COMMAND_RE,
   type DirectUserAdmission,
   type QueuedGoalTurn,
+  type QueuedMessage,
 } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import {
@@ -261,7 +268,7 @@ interface PendingDuplicateToolResponses {
 interface ResolvedSteerMessages {
   parts: Part[];
   accept: () => void;
-  restoreMessages: string[];
+  restoreMessages: QueuedMessage[];
 }
 
 interface GoalTurnBinding {
@@ -829,7 +836,8 @@ export const useLlmStream = (
   terminalWidth: number,
   terminalHeight: number,
   midTurnDrainRef?: React.RefObject<
-    ((includeDeferred?: boolean, goalTurnActive?: boolean) => string[]) | null
+    | ((includeDeferred?: boolean, goalTurnActive?: boolean) => QueuedMessage[])
+    | null
   >,
   logger?: Logger | null,
   // Live content-area height (terminal minus composer/header). Used to bound the
@@ -840,7 +848,9 @@ export const useLlmStream = (
   // Live terminal width, paired with the height ref so the commit loop reads
   // both dimensions consistently across a mid-stream resize.
   terminalWidthRef?: React.RefObject<number>,
-  midTurnRestoreRef?: React.RefObject<((messages: string[]) => void) | null>,
+  midTurnRestoreRef?: React.RefObject<
+    ((messages: QueuedMessage[]) => void) | null
+  >,
   goalQueueRef?: React.RefObject<{
     peekNextUserBatchKey: (goalTurnActive?: boolean) => string | undefined;
     claimDirectUserAdmission?: () => DirectUserAdmission;
@@ -2929,7 +2939,10 @@ export const useLlmStream = (
       setThought(null); // Reset thought when there's an error
 
       // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-      const errorType = classifyApiError(eventValue.error);
+      const errorType = classifyApiError(
+        eventValue.error,
+        getStructuredErrorCause(eventValue.error),
+      );
       config
         .getHookSystem()
         ?.fireStopFailureEvent(
@@ -4098,7 +4111,7 @@ export const useLlmStream = (
 
   const resolveSteeredMessages = useCallback(
     async (
-      messages: string[],
+      messages: QueuedMessage[],
       signal: AbortSignal,
     ): Promise<ResolvedSteerMessages> => {
       const resolvedSegments: Part[][] = [];
@@ -4107,7 +4120,7 @@ export const useLlmStream = (
         parts: Part[];
         sideEffects: Array<() => void>;
       }> = [];
-      const restoreMessages: string[] = [];
+      const restoreMessages: QueuedMessage[] = [];
       const timestamp = Date.now();
 
       for (let index = 0; index < messages.length; index += 1) {
@@ -4116,7 +4129,8 @@ export const useLlmStream = (
           break;
         }
 
-        const message = messages[index];
+        const entry = messages[index];
+        const message = entry.text;
         if (GOAL_COMMAND_RE.test(message)) {
           await handleSlashCommand(message);
           // The command has already taken effect; restoring it after cancelled
@@ -4124,7 +4138,7 @@ export const useLlmStream = (
           continue;
         }
 
-        restoreMessages.push(message);
+        restoreMessages.push(entry);
         const sideEffects: Array<() => void> = [];
         let resolvedQuery: PartListUnion = [{ text: message }];
         if (isAtCommand(message)) {
@@ -4232,6 +4246,37 @@ export const useLlmStream = (
         const messageParts = normalizePartList(
           bridgeResult.parts ?? resolvedQuery,
         );
+        let decision = entry.promptHook;
+        try {
+          decision ??= await runUserPromptSubmit(
+            config,
+            message,
+            undefined,
+            signal,
+          );
+        } catch (error) {
+          decision = signal.aborted
+            ? undefined
+            : { blockReason: getErrorMessage(error) };
+        }
+        if (decision && !signal.aborted) entry.promptHook = decision;
+        if (decision?.blockReason !== undefined) {
+          restoreMessages.pop();
+          handleUserPromptSubmitBlockedEvent(
+            { reason: decision.blockReason, originalPrompt: message },
+            timestamp + index,
+          );
+          continue;
+        }
+        if (signal.aborted) {
+          restoreMessages.push(...messages.slice(index + 1));
+          break;
+        }
+        if (decision?.additionalContext) {
+          messageParts.push(
+            createUserPromptSubmitContextPart(decision.additionalContext),
+          );
+        }
         const formatCheck = checkImageFormatsSupport(messageParts);
         if (formatCheck.hasUnsupportedFormats) {
           sideEffects.push(() =>
@@ -4293,13 +4338,14 @@ export const useLlmStream = (
       applyVisionBridgeIfNeeded,
       config,
       handleSlashCommand,
+      handleUserPromptSubmitBlockedEvent,
       onDebugMessage,
     ],
   );
 
   const resolveDrainedSteerMessages = useCallback(
     async (
-      messages: string[],
+      messages: QueuedMessage[],
       signal: AbortSignal,
     ): Promise<SteerInput | undefined> => {
       try {
@@ -4328,7 +4374,11 @@ export const useLlmStream = (
           },
         };
       } catch (error) {
-        midTurnRestoreRef?.current?.(messages);
+        midTurnRestoreRef?.current?.(
+          messages.filter(
+            (message) => message.promptHook?.blockReason === undefined,
+          ),
+        );
         onDebugMessage(
           `Failed to prepare steer input: ${getErrorMessage(error)}`,
         );
@@ -4366,6 +4416,7 @@ export const useLlmStream = (
         onRequestStarted?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
+        promptHook?: UserPromptSubmitDecision;
         displayText?: string;
         humanInput?: HumanPromptInput;
         hasUnknownInput?: boolean;
@@ -4731,9 +4782,14 @@ export const useLlmStream = (
         // here on: what the transcript shows, what `turn.start` hears and
         // what workflow keywords are read from.
         const promptRewrite = preparedQuery.promptSubmitted?.rewritten;
-        const promptContext =
+        const promptHook =
+          promptRewrite === undefined ? metadata?.promptHook : undefined;
+        const modContext =
           preparedQuery.promptSubmitted?.context ??
           (modPrompt?.context?.length ? modPrompt.context : undefined);
+        const promptContext = promptHook?.additionalContext
+          ? [...(modContext ?? []), promptHook.additionalContext]
+          : modContext;
         const sentPrompt = promptRewrite?.display ?? submittedPrompt;
         const typedInput =
           promptRewrite === undefined || !metadata?.humanInput
@@ -5012,6 +5068,7 @@ export const useLlmStream = (
               submitType === SendMessageType.Retry);
           const sendOptions = {
             type: submitType,
+            ...(promptHook ? { skipUserPromptSubmit: true as const } : {}),
             ...(workflowModeEligible ? { workflowModeEligible: true } : {}),
             ...(startsModTurn
               ? {
@@ -7027,9 +7084,46 @@ export const useLlmStream = (
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
-      const terminatesTurn = llmTools.some(
-        (toolCall) => toolCall.response.terminateTurn === true,
-      );
+      const toolEndsTurn =
+        (shared !== undefined || toolGoalBinding !== undefined) &&
+        llmTools.some((toolCall) => toolCall.response.terminateTurn === true);
+      const quotaSwitchStopsTurn =
+        !toolEndsTurn && modelSwitchedFromQuotaErrorRef.current;
+      // Recheck capacity when the continuation would send. A slot can free
+      // up after the shared batch settled. Scheduler-owned calls can also
+      // be drained with the shared batch and report launches in their results.
+      const backgroundLaunchExhaustedCapacity =
+        !toolEndsTurn &&
+        !quotaSwitchStopsTurn &&
+        llmTools.some((toolCall) =>
+          sharedResultsByCallId.has(toolCall.request.callId)
+            ? shared?.backgroundLaunchCallIds.has(toolCall.request.callId) ===
+              true
+            : launchedBackgroundAgent(toolCall.request, toolCall.response),
+        ) &&
+        backgroundSlotsSpent(config);
+      const hookStopReason =
+        shared &&
+        !toolEndsTurn &&
+        !quotaSwitchStopsTurn &&
+        !backgroundLaunchExhaustedCapacity
+          ? llmTools.find(
+              (toolCall) => toolCall.response.hookStopReason !== undefined,
+            )?.response.hookStopReason
+          : undefined;
+      if (hookStopReason !== undefined) {
+        addItem(
+          {
+            type: 'info',
+            text: t('A hook stopped the turn: {{reason}}', {
+              reason: hookStopReason,
+            }),
+          },
+          Date.now(),
+        );
+      }
+      // A tool hook's stop ends the turn as a tool that ends it does.
+      const terminatesTurn = toolEndsTurn || hookStopReason !== undefined;
       if (terminatesTurn && toolGoalBinding) {
         llmClient.addHistory({ role: 'user', parts: responsesToSend });
         let goalFinishFailed = false;
@@ -7190,7 +7284,7 @@ export const useLlmStream = (
       // Don't continue if model was switched due to quota error. On the
       // shared loop the results answer the calls in history, as in a Goal
       // turn.
-      if (modelSwitchedFromQuotaErrorRef.current) {
+      if (quotaSwitchStopsTurn) {
         if (shared || toolGoalBinding) {
           llmClient?.addHistory({ role: 'user', parts: responsesToSend });
         }
@@ -7205,16 +7299,6 @@ export const useLlmStream = (
         return;
       }
 
-      // The shared batch noted the launches of the calls it executed; calls
-      // the scheduler ran alone, drained with it, are read from their
-      // results. The slots are checked now, as the continuation would wait.
-      const backgroundLaunchExhaustedCapacity =
-        llmTools.some((toolCall) =>
-          sharedResultsByCallId.has(toolCall.request.callId)
-            ? shared?.backgroundLaunchCallIds.has(toolCall.request.callId) ===
-              true
-            : launchedBackgroundAgent(toolCall.request, toolCall.response),
-        ) && backgroundSlotsSpent(config);
       if (backgroundLaunchExhaustedCapacity) {
         llmClient?.addHistory({ role: 'user', parts: responsesToSend });
         if (toolGoalBinding) {

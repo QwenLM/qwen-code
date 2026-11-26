@@ -465,6 +465,7 @@ describe('validateTranscriptRecord', () => {
     session_notes: true,
     chat_compression: true,
     memory_catalog_snapshot: true,
+    permission_context_snapshot: true,
     slash_command: true,
     ui_telemetry: true,
     at_command: true,

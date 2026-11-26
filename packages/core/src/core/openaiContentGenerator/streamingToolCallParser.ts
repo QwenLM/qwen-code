@@ -636,6 +636,11 @@ export class StreamingToolCallParser {
    * @returns true if at least one tool call buffer has incomplete JSON
    */
   hasIncompleteToolCalls(): boolean {
+    return this.getIncompleteToolCallName() !== undefined;
+  }
+
+  /** The name of the first named tool call whose JSON is still incomplete. */
+  getIncompleteToolCallName(): string | undefined {
     for (const [index] of this.buffers.entries()) {
       const meta = this.toolCallMeta.get(index);
       if (!meta?.name) continue;
@@ -643,9 +648,9 @@ export class StreamingToolCallParser {
       const depth = this.depths.get(index) || 0;
       const inString = this.inStrings.get(index) || false;
       if (depth > 0 || inString) {
-        return true;
+        return meta.name;
       }
     }
-    return false;
+    return undefined;
   }
 }

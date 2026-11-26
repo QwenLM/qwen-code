@@ -15,6 +15,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -209,8 +211,8 @@ public class JdbcManagedAgentDefinitionStore
                 revision.definitionJson(), revision.createdAt());
     }
 
-    private static DefinitionRevision row(java.sql.ResultSet row, int index)
-            throws java.sql.SQLException {
+    private static DefinitionRevision row(ResultSet row, int index)
+            throws SQLException {
         return new DefinitionRevision(row.getString("agent_id"),
                 row.getLong("revision"), row.getString("digest"),
                 row.getString("definition_json"), row.getLong("gmt_create"));

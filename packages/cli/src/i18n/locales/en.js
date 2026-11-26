@@ -1195,8 +1195,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
   'List all configured hooks': 'List all configured hooks',
+  'No hooks were loaded.': 'No hooks were loaded.',
+  'skipped (unsupported args)': 'skipped (unsupported args)',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}': 'A hook stopped the turn: {{reason}}',
   'Loading hooks...': 'Loading hooks...',
   'Error loading hooks:': 'Error loading hooks:',
   'Press Escape to close': 'Press Escape to close',

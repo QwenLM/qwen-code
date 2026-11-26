@@ -424,7 +424,7 @@ public final class ToolExecutionRecord {
             }
             return this;
         }
-        Map<String, Object> enriched = new java.util.LinkedHashMap<>(result);
+        Map<String, Object> enriched = new LinkedHashMap<>(result);
         enriched.put(RuntimeToolMeasurements.FIELD, metadata.wireValue());
         return withResult(enriched, lastSequence, settledAt);
     }

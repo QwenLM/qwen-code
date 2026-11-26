@@ -14,7 +14,9 @@ import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
@@ -219,7 +221,7 @@ final class AgentLifecycleOperations {
                             }
                             return operationMapper.mapRow(result, row);
                         },
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(sessionId),
                         operationId)
                 .stream()
                 .findFirst();
@@ -240,11 +242,11 @@ final class AgentLifecycleOperations {
                             }
                             return operationMapper.mapRow(result, row);
                         },
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(sessionId),
                         kind.name(),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         actorDigest,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+                        ManagedSchemaKeys.key(
                                 idempotencyKey))
                 .stream()
                 .findFirst();
@@ -265,8 +267,8 @@ final class AgentLifecycleOperations {
                             }
                             return operationMapper.mapRow(result, row);
                         },
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         operationId)
                 .stream()
                 .findFirst();
@@ -445,10 +447,10 @@ final class AgentLifecycleOperations {
                     + " gmt_create, gmt_modified, completed_at, lifecycle_protocol_version) VALUES"
                     + " (?, 'SESSION', ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'JAVA_DURABLE',"
                     + " ?, ?, ?, ?, ?, ?, ?, ?)",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(
+                ManagedSchemaKeys.identity(
                         AgentStoreRows.sessionOperationKey(tenantId, sessionId, kind, operationId)),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                 archive ? "COMPLETED" : "PENDING",
                 storeRows.writeJson(
                         Map.of(
@@ -462,7 +464,7 @@ final class AgentLifecycleOperations {
                                 sessionStatusBefore,
                                 "protocolVersion",
                                 protocolVersion)),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+                ManagedSchemaKeys.key(
                         idempotencyKey),
                 tenantId,
                 sessionId,
@@ -519,7 +521,7 @@ final class AgentLifecycleOperations {
                         carriedEffects, tenantId, sessionId, operationId);
             }
         } else if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
-            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            jdbc.execute((ConnectionCallback<Void>) connection -> {
                 RuntimeAdmissionFences.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
                 return null;
             });
@@ -605,8 +607,8 @@ final class AgentLifecycleOperations {
                         owner,
                         leaseDuration.toMillis(),
                         now,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         tenantId,
                         sessionId,
                         operationId,
@@ -643,8 +645,8 @@ final class AgentLifecycleOperations {
                                 + " AND target_id = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ? FOR UPDATE",
                         Boolean.class,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         tenantId,
                         sessionId,
                         operationId);
@@ -703,8 +705,8 @@ final class AgentLifecycleOperations {
                 AgentStoreRows.publicId("rcpt"),
                 now,
                 now,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                 tenantId,
                 sessionId,
                 operationId);
@@ -743,8 +745,8 @@ final class AgentLifecycleOperations {
                         + " AND claim_owner = ? AND claim_generation = ?"
                         + " AND claim_until > " + ManagedSchemaTime.SQL_NOW,
                 failureCode, AgentStoreRows.publicId("rcpt"), now, now,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)), tenantId, sessionId,
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)), tenantId, sessionId,
                 operationId, owner, claimGeneration);
         if (updated == 1) {
             // The terminal write also releases the lifecycle claim mirror a
@@ -779,8 +781,8 @@ final class AgentLifecycleOperations {
                                 + " AND target_id = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         duration.toMillis(),
                         now,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         tenantId,
                         sessionId,
                         operationId,
@@ -799,8 +801,8 @@ final class AgentLifecycleOperations {
                                 + AgentStoreRows.SESSION_OPERATION_KINDS
                                 + " AND target_id = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ?",
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         tenantId,
                         sessionId,
                         operationId);
@@ -843,8 +845,8 @@ final class AgentLifecycleOperations {
                         failureCode,
                         Math.addExact(now, Math.max(0, availableAt - clock.millis())),
                         now,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         tenantId,
                         sessionId,
                         operationId,
@@ -884,8 +886,8 @@ final class AgentLifecycleOperations {
                                 + " AND target_id = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         availableAt,
                         now,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         tenantId,
                         sessionId,
                         operationId,
@@ -925,8 +927,8 @@ final class AgentLifecycleOperations {
                         + " 'LEASED' AND claim_owner = ? AND claim_generation = ? AND"
                         + " claim_until > " + ManagedSchemaTime.SQL_NOW,
                 now,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                 tenantId,
                 sessionId,
                 operationId,

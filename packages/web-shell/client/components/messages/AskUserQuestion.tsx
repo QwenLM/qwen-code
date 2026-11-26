@@ -25,6 +25,7 @@ interface Question {
   required?: boolean;
   allowText?: boolean;
   maxTextLength?: number;
+  multilineText?: boolean;
 }
 
 function optionValue(index: number): string {
@@ -45,6 +46,11 @@ function questionRowCount(question: Question): number {
     : question.options.length;
 }
 
+export type AskUserQuestionDraft = Record<
+  string,
+  { optionIds: string[]; text: string }
+>;
+
 interface AskUserQuestionProps {
   request: PermissionRequest;
   onConfirm: (
@@ -57,6 +63,12 @@ interface AskUserQuestionProps {
   variant?: 'inline' | 'floating';
   /** Disables answering and submitting while keeping questions inspectable. */
   disabled?: boolean;
+  /** Blocks only submission (Submit button and submit shortcuts) while keeping inputs editable. */
+  submitDisabled?: boolean;
+  /** Optional initial draft hydrated when a request mounts or changes identity. */
+  initialDraft?: AskUserQuestionDraft;
+  /** Emitted after user-driven answer edits so a host can preserve drafts across switches. */
+  onDraftChange?: (draft: AskUserQuestionDraft) => void;
   customInputLabel?: string;
   /**
    * Opens a side task that explains the pending question before the user
@@ -97,12 +109,112 @@ function isQuestionAnswered(
   );
 }
 
+function hydrateQuestionDraft(
+  questions: readonly Question[],
+  draft: AskUserQuestionDraft | undefined,
+): {
+  answers: Record<number, string>;
+  selectedMulti: Record<number, string[]>;
+  customInputs: Record<number, string>;
+  firstSelectedIdx: number | null;
+} {
+  const answers: Record<number, string> = {};
+  const selectedMulti: Record<number, string[]> = {};
+  const customInputs: Record<number, string> = {};
+  if (draft) {
+    for (let i = 0; i < questions.length; i++) {
+      const question = questions[i];
+      if (!question) continue;
+      const entry = draft[question.id ?? String(i)];
+      if (!entry) continue;
+      const allowText = isQuestionTextAllowed(question);
+      const text = allowText ? entry.text : '';
+      const matchedIndices: number[] = [];
+      for (const optionId of entry.optionIds) {
+        const idx = question.options.findIndex(
+          (option) => option.id === optionId,
+        );
+        if (idx >= 0 && !matchedIndices.includes(idx)) {
+          matchedIndices.push(idx);
+        }
+      }
+      if (question.multiSelect) {
+        if (matchedIndices.length > 0) {
+          selectedMulti[i] = matchedIndices.map(optionValue);
+        }
+        if (text.length > 0) {
+          customInputs[i] = text;
+        }
+      } else if (matchedIndices.length > 0) {
+        answers[i] = optionValue(matchedIndices[0]!);
+      } else if (text.length > 0) {
+        customInputs[i] = text;
+      }
+    }
+  }
+  const firstQuestion = questions[0];
+  if (
+    firstQuestion &&
+    isQuestionRequired(firstQuestion) &&
+    !firstQuestion.multiSelect &&
+    firstQuestion.options[0] &&
+    answers[0] === undefined &&
+    !(customInputs[0]?.length ?? 0)
+  ) {
+    answers[0] = optionValue(0);
+  }
+  let firstSelectedIdx: number | null = null;
+  if (firstQuestion && questionRowCount(firstQuestion) > 0) {
+    if (
+      isQuestionTextAllowed(firstQuestion) &&
+      (customInputs[0]?.length ?? 0) > 0
+    ) {
+      firstSelectedIdx = firstQuestion.options.length;
+    } else if (!firstQuestion.multiSelect && answers[0] !== undefined) {
+      firstSelectedIdx = Number(answers[0]);
+    } else {
+      firstSelectedIdx = 0;
+    }
+  }
+  return { answers, selectedMulti, customInputs, firstSelectedIdx };
+}
+
+function buildQuestionDraft(
+  questions: readonly Question[],
+  multiSelections: Record<number, string[]>,
+  answerMap: Record<number, string>,
+  customMap: Record<number, string>,
+): AskUserQuestionDraft {
+  const draft: AskUserQuestionDraft = {};
+  for (let i = 0; i < questions.length; i++) {
+    const question = questions[i];
+    if (!question) continue;
+    const text = isQuestionTextAllowed(question) ? (customMap[i] ?? '') : '';
+    const selectedSet = question.multiSelect
+      ? new Set(multiSelections[i] ?? [])
+      : answerMap[i] !== undefined
+        ? new Set([answerMap[i]])
+        : new Set<string>();
+    const optionIds = question.options
+      .filter((_, index) => selectedSet.has(optionValue(index)))
+      .map((option) => option.id)
+      .filter((id): id is string => id !== undefined);
+    if (optionIds.length > 0 || text.length > 0) {
+      draft[question.id ?? String(i)] = { optionIds, text };
+    }
+  }
+  return draft;
+}
+
 export function AskUserQuestion({
   request,
   onConfirm,
   onError,
   variant = 'inline',
   disabled = false,
+  submitDisabled = false,
+  initialDraft,
+  onDraftChange,
   keyboardActive = true,
   customInputLabel,
   onAskDetails,
@@ -120,14 +232,24 @@ export function AskUserQuestion({
         : [],
     [request.rawInput],
   );
+  const [initialState] = useState(() =>
+    hydrateQuestionDraft(questions, initialDraft),
+  );
   const [currentIdx, setCurrentIdx] = useState(0);
-  const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
-  const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [customInputs, setCustomInputs] = useState<Record<number, string>>({});
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(
+    initialState.firstSelectedIdx,
+  );
+  const [answers, setAnswers] = useState<Record<number, string>>(
+    initialState.answers,
+  );
+  const [customInputs, setCustomInputs] = useState<Record<number, string>>(
+    initialState.customInputs,
+  );
   const [selectedMulti, setSelectedMulti] = useState<Record<number, string[]>>(
-    {},
+    initialState.selectedMulti,
   );
   const [customFocused, setCustomFocused] = useState(false);
+  const [multilineSession, setMultilineSession] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submittedRef = useRef(false);
@@ -137,47 +259,62 @@ export function AskUserQuestion({
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const customRef = useRef<HTMLButtonElement | null>(null);
   const selectedIdxRef = useRef<number | null>(selectedIdx);
-  const selectedIdxByQuestionRef = useRef<Record<number, number | null>>({});
+  const selectedIdxByQuestionRef = useRef<Record<number, number | null>>({
+    0: initialState.firstSelectedIdx,
+  });
+  const hydratedSourceRef = useRef({ questions, requestId: request.id });
   const focusAfterQuestionChangeRef = useRef(false);
   const focusCustomTriggerAfterEditRef = useRef(false);
   const focusCustomTriggerAfterSubmitFailureRef = useRef(false);
+  const initialDraftRef = useRef(initialDraft);
+  initialDraftRef.current = initialDraft;
+  const onDraftChangeRef = useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
+  const draftDirtyRef = useRef(false);
   selectedIdxRef.current = selectedIdx;
   const questionTextId = useId();
   const headingId = useId();
 
   useEffect(() => {
-    const firstQuestion = questions[0];
+    if (
+      hydratedSourceRef.current.questions === questions &&
+      hydratedSourceRef.current.requestId === request.id
+    ) {
+      return;
+    }
+    hydratedSourceRef.current = { questions, requestId: request.id };
+    const hydrated = hydrateQuestionDraft(questions, initialDraftRef.current);
     submittedRef.current = false;
     submissionAttemptRef.current++;
+    draftDirtyRef.current = false;
     setSubmitting(false);
     setCollapsed(false);
     setCurrentIdx(0);
     // Sync the ref too so the focus effect (which runs in this same commit on a
     // new request) reads the fresh index, not the previous request's selection.
-    const firstSelectedIdx =
-      firstQuestion && questionRowCount(firstQuestion) > 0 ? 0 : null;
-    selectedIdxByQuestionRef.current = { 0: firstSelectedIdx };
-    selectedIdxRef.current = firstSelectedIdx;
-    setSelectedIdx(firstSelectedIdx);
-    setAnswers(
-      firstQuestion &&
-        isQuestionRequired(firstQuestion) &&
-        !firstQuestion.multiSelect &&
-        firstQuestion.options[0]
-        ? { 0: optionValue(0) }
-        : {},
-    );
-    setCustomInputs({});
-    setSelectedMulti({});
+    selectedIdxByQuestionRef.current = { 0: hydrated.firstSelectedIdx };
+    selectedIdxRef.current = hydrated.firstSelectedIdx;
+    setSelectedIdx(hydrated.firstSelectedIdx);
+    setAnswers(hydrated.answers);
+    setCustomInputs(hydrated.customInputs);
+    setSelectedMulti(hydrated.selectedMulti);
     setCustomFocused(false);
     focusCustomTriggerAfterSubmitFailureRef.current = false;
   }, [questions, request.id]);
+
+  useEffect(() => {
+    if (!draftDirtyRef.current || !onDraftChangeRef.current) return;
+    onDraftChangeRef.current(
+      buildQuestionDraft(questions, selectedMulti, answers, customInputs),
+    );
+  }, [answers, customInputs, questions, selectedMulti]);
 
   const current = questions[currentIdx];
   const isMulti = current?.multiSelect ?? false;
   const currentRequired = current ? isQuestionRequired(current) : true;
   const currentAllowText = current ? isQuestionTextAllowed(current) : true;
   const controlsDisabled = submitting || disabled;
+  const submitBlocked = controlsDisabled || submitDisabled;
   const cancelOption = request.options.find(
     (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
   );
@@ -312,7 +449,7 @@ export function AskUserQuestion({
       answerMap?: Record<number, string>,
       customMap?: Record<number, string>,
     ) => {
-      if (submittedRef.current || disabled) return;
+      if (submittedRef.current || disabled || submitDisabled) return;
       const resolvedMulti = multiSelections ?? selectedMulti;
       const resolvedAnswers = answerMap ?? answers;
       const resolvedCustom = customMap ?? customInputs;
@@ -368,6 +505,7 @@ export function AskUserQuestion({
       request.options,
       selectedMulti,
       submitDecision,
+      submitDisabled,
       t,
     ],
   );
@@ -387,9 +525,13 @@ export function AskUserQuestion({
     (initialValue?: string) => {
       if (!currentAllowText || controlsDisabled) return;
       if (initialValue !== undefined) {
+        draftDirtyRef.current = true;
         setCustomInputs((prev) => ({ ...prev, [currentIdx]: initialValue }));
       }
       if (!isMulti) {
+        if (currentIdx in answers) {
+          draftDirtyRef.current = true;
+        }
         setAnswers((prev) => {
           if (!(currentIdx in prev)) return prev;
           const next = { ...prev };
@@ -397,9 +539,21 @@ export function AskUserQuestion({
           return next;
         });
       }
+      setMultilineSession(
+        Boolean(current?.multilineText) ||
+          Boolean((initialValue ?? customInputs[currentIdx])?.includes('\n')),
+      );
       setCustomFocused(true);
     },
-    [controlsDisabled, currentAllowText, currentIdx, isMulti],
+    [
+      answers,
+      controlsDisabled,
+      current,
+      currentAllowText,
+      currentIdx,
+      customInputs,
+      isMulti,
+    ],
   );
 
   const handleSelectOption = useCallback(
@@ -412,6 +566,7 @@ export function AskUserQuestion({
       }
       if (idx < 0 || idx >= current.options.length) return;
       const value = optionValue(idx);
+      draftDirtyRef.current = true;
       if (isMulti) {
         setSelectedMulti((prev) => {
           const selected = prev[currentIdx] || [];
@@ -460,6 +615,7 @@ export function AskUserQuestion({
       }
       if (idx < 0 || idx >= current.options.length) return;
       const value = optionValue(idx);
+      draftDirtyRef.current = true;
       setSelectedMulti((prev) => {
         const selected = prev[currentIdx] || [];
         const next = selected.includes(value)
@@ -519,6 +675,9 @@ export function AskUserQuestion({
       if (currentAllowText && idx === current.options.length) {
         customRef.current?.focus();
         if (!isMulti && currentRequired && !controlsDisabled) {
+          if (currentIdx in answers) {
+            draftDirtyRef.current = true;
+          }
           setAnswers((prev) => {
             if (!(currentIdx in prev)) return prev;
             const cleared = { ...prev };
@@ -534,6 +693,7 @@ export function AskUserQuestion({
       }
     },
     [
+      answers,
       controlsDisabled,
       current,
       currentAllowText,
@@ -604,7 +764,7 @@ export function AskUserQuestion({
       const allowText = isQuestionTextAllowed(question);
       setAnswers((prev) =>
         prev[nextIdx] ||
-        (allowText && hasCustomAnswer(customInputs[nextIdx])) ||
+        (allowText && (customInputs[nextIdx]?.length ?? 0) > 0) ||
         (allowText && nextSelectedIdx === question.options.length) ||
         !question.options[0]
           ? prev
@@ -639,17 +799,17 @@ export function AskUserQuestion({
       if (customFocused) {
         focusCustomTriggerAfterSubmitFailureRef.current = true;
       }
-      if (!controlsDisabled) {
+      if (!submitBlocked) {
         handleSubmit(submittedAnswers, multiSelections, answerMap, customMap);
       }
     },
     [
-      controlsDisabled,
       currentIdx,
       customFocused,
       handleSubmit,
       questions.length,
       selectQuestion,
+      submitBlocked,
     ],
   );
 
@@ -689,7 +849,7 @@ export function AskUserQuestion({
   }, [customFocused, submitting]);
 
   const handleCustomInputKeyDown = useCallback(
-    (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    (e: ReactKeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (e.ctrlKey || e.metaKey) return;
       if (e.key === 'Escape') {
@@ -699,6 +859,7 @@ export function AskUserQuestion({
         setCustomFocused(false);
       } else if (
         e.key === 'Enter' &&
+        !(e.currentTarget.tagName === 'TEXTAREA' && e.shiftKey) &&
         !controlsDisabled &&
         hasCustomAnswer(customInputs[currentIdx])
       ) {
@@ -740,7 +901,7 @@ export function AskUserQuestion({
       }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        if (!controlsDisabled) handleSubmit();
+        if (!submitBlocked) handleSubmit();
         return;
       }
       if (isEditableTarget(e.target)) return;
@@ -807,6 +968,7 @@ export function AskUserQuestion({
                 ...selectedMulti,
                 [currentIdx]: [...selected, value],
               };
+              draftDirtyRef.current = true;
               setSelectedMulti(nextSelectedMulti);
               advanceQuestion(
                 buildResult(nextSelectedMulti),
@@ -824,6 +986,7 @@ export function AskUserQuestion({
               const nextAnswers = { ...answers, [currentIdx]: value };
               const nextCustomInputs = { ...customInputs };
               delete nextCustomInputs[currentIdx];
+              draftDirtyRef.current = true;
               setAnswers(nextAnswers);
               setCustomInputs(nextCustomInputs);
               advanceQuestion(
@@ -866,6 +1029,7 @@ export function AskUserQuestion({
       moveSelection,
       selectedMulti,
       selectIndex,
+      submitBlocked,
     ],
   );
 
@@ -1141,41 +1305,88 @@ export function AskUserQuestion({
                           </svg>
                         </span>
                         {customFocused ? (
-                          <input
-                            type="text"
-                            className={styles.customInput}
-                            placeholder={
-                              customInputLabel ?? t('askUser.typePlaceholder')
-                            }
-                            value={customInputs[currentIdx] || ''}
-                            aria-label={
-                              customInputLabel ?? t('askUser.typePlaceholder')
-                            }
-                            maxLength={current.maxTextLength}
-                            disabled={controlsDisabled}
-                            onChange={(e) =>
-                              setCustomInputs({
-                                ...customInputs,
-                                [currentIdx]: e.target.value,
-                              })
-                            }
-                            // Clicking inside the input positions the caret; don't
-                            // let it bubble to the row's onClick and re-trigger the
-                            // option choice.
-                            onClick={(e) => e.stopPropagation()}
-                            onFocus={() =>
-                              rememberSelectedIndex(current.options.length)
-                            }
-                            onBlur={() => setCustomFocused(false)}
-                            onKeyDown={handleCustomInputKeyDown}
-                            autoFocus
-                          />
+                          multilineSession ? (
+                            <textarea
+                              rows={Math.min(
+                                6,
+                                Math.max(
+                                  1,
+                                  (customInputs[currentIdx] || '').split('\n')
+                                    .length,
+                                ),
+                              )}
+                              className={`${styles.customInput} ${styles.customTextarea}`}
+                              placeholder={
+                                customInputLabel ?? t('askUser.typePlaceholder')
+                              }
+                              value={customInputs[currentIdx] || ''}
+                              aria-label={
+                                customInputLabel ?? t('askUser.typePlaceholder')
+                              }
+                              maxLength={current.maxTextLength}
+                              disabled={controlsDisabled}
+                              onChange={(e) => {
+                                draftDirtyRef.current = true;
+                                setCustomInputs({
+                                  ...customInputs,
+                                  [currentIdx]: e.target.value,
+                                });
+                              }}
+                              // Clicking inside the textarea positions the caret;
+                              // don't let it bubble to the row's onClick and
+                              // re-trigger the option choice.
+                              onClick={(e) => e.stopPropagation()}
+                              onFocus={() =>
+                                rememberSelectedIndex(current.options.length)
+                              }
+                              onBlur={() => setCustomFocused(false)}
+                              onKeyDown={handleCustomInputKeyDown}
+                              autoFocus
+                            />
+                          ) : (
+                            <input
+                              type="text"
+                              className={styles.customInput}
+                              placeholder={
+                                customInputLabel ?? t('askUser.typePlaceholder')
+                              }
+                              value={customInputs[currentIdx] || ''}
+                              aria-label={
+                                customInputLabel ?? t('askUser.typePlaceholder')
+                              }
+                              maxLength={current.maxTextLength}
+                              disabled={controlsDisabled}
+                              onChange={(e) => {
+                                draftDirtyRef.current = true;
+                                setCustomInputs({
+                                  ...customInputs,
+                                  [currentIdx]: e.target.value,
+                                });
+                              }}
+                              // Clicking inside the input positions the caret; don't
+                              // let it bubble to the row's onClick and re-trigger the
+                              // option choice.
+                              onClick={(e) => e.stopPropagation()}
+                              onFocus={() =>
+                                rememberSelectedIndex(current.options.length)
+                              }
+                              onBlur={() => setCustomFocused(false)}
+                              onKeyDown={handleCustomInputKeyDown}
+                              autoFocus
+                            />
+                          )
                         ) : (
                           <button
                             type="button"
                             ref={customRef}
                             className={`${styles.customTrigger} ${
                               hasCustomValue ? '' : styles.optionPlaceholder
+                            } ${
+                              hasCustomValue &&
+                              (customInputs[currentIdx]?.includes('\n') ??
+                                false)
+                                ? styles.customTriggerMultiline
+                                : ''
                             }`}
                             data-web-shell-ask-option
                             tabIndex={isCustomActive ? 0 : -1}
@@ -1254,7 +1465,7 @@ export function AskUserQuestion({
             <button
               type="button"
               className={`${styles.button} ${styles.submitButton}`}
-              disabled={controlsDisabled || !allQuestionsAnswered}
+              disabled={submitBlocked || !allQuestionsAnswered}
               aria-busy={submitting}
               aria-keyshortcuts="Control+Enter Meta+Enter"
               data-shortcut={submitShortcutLabel}

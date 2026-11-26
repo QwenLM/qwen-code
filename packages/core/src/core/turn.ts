@@ -277,6 +277,11 @@ export interface ToolCallResponseInfo {
   modelOverride?: string;
   terminateTurn?: boolean;
   /**
+   * A tool hook returned `continue: false` without blocking: the turn ends
+   * after this batch, and this is the reason shown to the user.
+   */
+  hookStopReason?: string;
+  /**
    * Set only when the call was denied because it needed user approval and the
    * session had no way to ask for it (non-interactive mode). Headless front
    * ends use it to suggest an approval mode; every other denial, such as a

@@ -73,6 +73,11 @@ import {
   type ToolBatchResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import {
+  runUserPromptSubmit,
+  type UserPromptSubmitDecision,
+} from '@qwen-code/qwen-code-core/hooks/user-prompt-submit.js';
+import { createUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import { buildPermissionSuggestions } from '../../nonInteractive/permission-suggestions.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
@@ -136,6 +141,7 @@ const liveLogger = createDebugLogger('OPENTUI_LIVE');
 
 export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
   content: PartListUnion;
+  promptHook?: UserPromptSubmitDecision;
 }
 
 export interface PreparedLiveRequest {
@@ -205,6 +211,7 @@ export interface LivePromptOptions {
    * documented rule that continuations carry no provenance.
    */
   submittedPrompt?: string;
+  promptHook?: UserPromptSubmitDecision;
   humanInput?: HumanPromptInput;
   workflowModeEligible?: boolean;
   /** Context the Mods' `prompt.submit` hooks added; rides the first send. */
@@ -601,12 +608,8 @@ interface SteeredPromptResolution {
    * steer survives /resume. Empty when the hop is restored.
    */
   recordings: SteeredMessageRecording[];
-  /**
-   * Texts to put back at the front of the queue. All of them or none: ink
-   * discards the resolved parts when an abort lands, so nothing can go out
-   * twice.
-   */
-  restore: OpenTuiSteeringSubmission[];
+  /** Submissions to put back at the front of the queue on an aborted hop. */
+  restore?: OpenTuiSteeringSubmission[];
   accepted: OpenTuiSteeringSubmission[];
 }
 
@@ -630,16 +633,17 @@ async function resolveSteeredPromptParts(
   signal: AbortSignal,
   turnModel: TurnModelOverride,
 ): Promise<SteeredPromptResolution> {
+  const blocked = new Set<OpenTuiSteeringSubmission>();
+  const declinedEvents: OpenTuiStreamEvent[] = [];
   const restore = (): SteeredPromptResolution => ({
     parts: [],
     events: [],
-    declinedEvents: [],
+    declinedEvents,
     recordings: [],
-    restore: [...submissions],
+    restore: submissions.filter((submission) => !blocked.has(submission)),
     accepted: [],
   });
   const events: OpenTuiStreamEvent[] = [];
-  const declinedEvents: OpenTuiStreamEvent[] = [];
   const segments: Part[][] = [];
   const recordings: SteeredMessageRecording[] = [];
   const accepted: OpenTuiSteeringSubmission[] = [];
@@ -694,8 +698,36 @@ async function resolveSteeredPromptParts(
       declinedEvents.push(...messageEvents);
       continue;
     }
+    let decision = submission.promptHook;
+    try {
+      decision ??= await runUserPromptSubmit(
+        config,
+        message,
+        submission.submittedPrompt,
+        signal,
+      );
+    } catch (error) {
+      decision = signal.aborted
+        ? undefined
+        : { blockReason: getErrorMessage(error) };
+    }
+    if (decision && !signal.aborted) submission.promptHook = decision;
+    if (decision?.blockReason !== undefined) {
+      blocked.add(submission);
+      declinedEvents.push({
+        type: 'warning',
+        text: `UserPromptSubmit blocked: ${decision.blockReason}`,
+      });
+      continue;
+    }
+    if (signal.aborted) return restore();
     events.push(...messageEvents);
     const messageParts = normalizeParts(bridged.parts);
+    if (decision?.additionalContext) {
+      messageParts.push(
+        createUserPromptSubmitContextPart(decision.additionalContext),
+      );
+    }
     // U-27 (ink :3313-3327): the steering hop checks the resolved parts too.
     if (hasUnsupportedImageFormat(messageParts)) {
       events.push(imageFormatWarningEvent());
@@ -716,7 +748,7 @@ async function resolveSteeredPromptParts(
     if (parts.length > 0) parts.push({ text: '\n\n' });
     parts.push(...segment);
   }
-  return { parts, events, declinedEvents, recordings, restore: [], accepted };
+  return { parts, events, declinedEvents, recordings, accepted };
 }
 
 /**
@@ -1032,6 +1064,9 @@ export async function* livePromptEvents(
         }
       },
     };
+    const promptContext = options?.promptHook?.additionalContext
+      ? [...(options.promptContext ?? []), options.promptHook.additionalContext]
+      : options?.promptContext;
     const sendOptions = first
       ? {
           type: options?.retry
@@ -1050,8 +1085,11 @@ export async function* livePromptEvents(
           ...(!options?.retry && options?.submittedPrompt
             ? { submittedPrompt: options.submittedPrompt }
             : {}),
-          ...(!options?.retry && options?.promptContext?.length
-            ? { promptContext: options.promptContext }
+          ...(!options?.retry && options?.promptHook
+            ? { skipUserPromptSubmit: true as const }
+            : {}),
+          ...(!options?.retry && promptContext?.length
+            ? { promptContext }
             : {}),
           ...(!options?.retry && options?.modPrompt
             ? {
@@ -2051,11 +2089,22 @@ export async function* livePromptEvents(
       for (const { request, response } of answeredOnly)
         dualOutput?.emitToolResult(request, response);
     }
-    if (cancelled || shared?.stop === 'tool_ended_turn') {
+    const hookStopReason =
+      shared?.stop === 'hook_stopped' ? shared.hookStopReason : undefined;
+    if (
+      cancelled ||
+      shared?.stop === 'tool_ended_turn' ||
+      hookStopReason !== undefined
+    ) {
+      // A Goal turn that a tool or a tool hook ended finishes its Goal turn.
       const permit =
         shared &&
-        completed.find((call) => call.response.terminateTurn)?.request
-          .goalContext;
+        completed.find(
+          (call) =>
+            call.response.terminateTurn ||
+            (hookStopReason !== undefined &&
+              call.response.hookStopReason !== undefined),
+        )?.request.goalContext;
       let events: ServerLlmStreamEvent[] = [];
       try {
         if (responseParts.length > 0) {
@@ -2085,6 +2134,14 @@ export async function* livePromptEvents(
         throw error;
       }
       endBatchInteraction(cancelled ? 'cancelled' : 'ok');
+      if (!cancelled && hookStopReason !== undefined && isCurrentSession()) {
+        yield {
+          type: 'info',
+          text: t('A hook stopped the turn: {{reason}}', {
+            reason: hookStopReason,
+          }),
+        };
+      }
       for (const event of events) {
         if (!isCurrentSession()) return;
         dualOutput?.processEvent(event);
@@ -2112,18 +2169,14 @@ export async function* livePromptEvents(
         // response), nor commit a mid-turn user message the model never saw
         // (ink use-llm-stream :3386-3392 re-checks the signal after accept()).
         if (abort.aborted) {
-          options?.restoreSteering?.(
-            steered.restore.length > 0 ? steered.restore : texts,
-          );
+          options?.restoreSteering?.(steered.restore ?? steered.accepted);
           if (responseParts.length > 0) {
             await client.addHistory({ role: 'user', parts: responseParts });
           }
+          yield* steered.declinedEvents;
           return;
         }
-        if (steered.restore.length > 0) {
-          options?.restoreSteering?.(steered.restore);
-        }
-        for (const event of steered.declinedEvents) yield event;
+        yield* steered.declinedEvents;
         let settled = false;
         pendingSteer = {
           parts: steered.parts,

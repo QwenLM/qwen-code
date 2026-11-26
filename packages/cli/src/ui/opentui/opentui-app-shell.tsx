@@ -778,8 +778,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // app level; without it a `.mcp.json` checked into the project is never
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
-  const hooksApproval = useProjectHooksApproval(config, settings, (text) =>
-    addInfoItem({ type: MessageType.INFO, text }),
+  const hooksApproval = useProjectHooksApproval(config, settings, (notice) =>
+    onTranscriptEvent?.(notice),
   );
 
   const shellControl = props.foregroundShellControl;

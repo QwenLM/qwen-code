@@ -1996,7 +1996,10 @@ export class BackgroundAgentResumeService {
         );
 
         const typedStopOutput = stopHookOutput as StopHookOutput | undefined;
-        if (!typedStopOutput?.isBlockingDecision()) {
+        if (
+          !typedStopOutput?.isBlockingDecision() ||
+          subagent.getTerminateMode() === AgentTerminateMode.HOOK_STOPPED
+        ) {
           return undefined;
         }
 

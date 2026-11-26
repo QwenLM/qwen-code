@@ -775,6 +775,8 @@ export default {
   'List all configured hooks': 'Listar todos os hooks configurados',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Um hook interrompeu o turno: {{reason}}',
   'Loading hooks...': 'Carregando hooks...',
   'Error loading hooks:': 'Erro ao carregar hooks:',
   'Press Escape to close': 'Pressione Escape para fechar',

@@ -2,12 +2,14 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHostedRecoveryRecords;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -22,6 +24,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.ArgumentPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
@@ -32,7 +35,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -127,7 +132,7 @@ public class ManagedNativeJournalSnapshots {
         }
         byte[] claimed = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 byte[].class, tenant, session, manifestId(tenant, session, request.snapshotId()));
-        require(java.util.Arrays.equals(claimed, "{}".getBytes(StandardCharsets.UTF_8)), "managed_session_snapshot_corrupt");
+        require(Arrays.equals(claimed, "{}".getBytes(StandardCharsets.UTF_8)), "managed_session_snapshot_corrupt");
         require(head.journalRevision() == request.expectedJournalRevision()
                 && head.committedSequence() == request.expectedCommittedSequence()
                 && Objects.equals(head.lastCommitDigest(), request.expectedLastCommitDigest()),
@@ -205,7 +210,7 @@ public class ManagedNativeJournalSnapshots {
                 + " AND owner_ref = ? AND owner_revision = journal_revision AND journal_revision <= ?"
                 + " GROUP BY resource_id";
         // This setter bypasses schema coercion; binary identities are bound explicitly.
-        var arguments = new org.springframework.jdbc.core.ArgumentPreparedStatementSetter(new Object[] {
+        var arguments = new ArgumentPreparedStatementSetter(new Object[] {
                 ManagedSchemaKeys.identity(owner), revision, tenant, request.workspaceId(),
                 session, tenant, session,
                 ManagedSchemaKeys.identity(journalOwner(tenant, session)), revision
@@ -428,7 +433,7 @@ public class ManagedNativeJournalSnapshots {
         };
     }
 
-    private static void collectReferences(JsonNode node, java.util.Collection<JsonNode> refs, int depth) {
+    private static void collectReferences(JsonNode node, Collection<JsonNode> refs, int depth) {
         require(depth <= ManagedSessionStoreModels.MAX_JSON_DEPTH, "managed_session_snapshot_corrupt");
         if (node.isObject() && node.has("resourceId") && node.has("digest") && node.has("kind")) {
             refs.add(node);
@@ -461,15 +466,15 @@ public class ManagedNativeJournalSnapshots {
                     && resource.schemaVersion() == next.path("schemaVersion").asInt(-1)
                     && resource.byteLength() == next.path("byteLength").asLong(-1)
                     && resource.digest().equals(next.path("digest").asText()), "managed_session_snapshot_corrupt");
-            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
+            if (ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
                 require(resource.schemaVersion() == 1, "managed_session_snapshot_corrupt");
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.requireBody(
+                ManagedModelDiagnostics.requireBody(
                         resource.kind(), decode(resource.bytes(), JsonNode.class));
             }
-            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.KIND.equals(resource.kind())) {
-                require(resource.schemaVersion() == 1 && resource.byteLength() <= com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.MAX_BYTES,
+            if (ManagedToolMeasurements.KIND.equals(resource.kind())) {
+                require(resource.schemaVersion() == 1 && resource.byteLength() <= ManagedToolMeasurements.MAX_BYTES,
                         "managed_session_snapshot_corrupt");
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.requireEvidence(decode(resource.bytes(), JsonNode.class));
+                ManagedToolMeasurements.requireEvidence(decode(resource.bytes(), JsonNode.class));
             }
             if (seen.add(id) && structured(resource.kind())) {
                 JsonNode body = decode(resource.bytes(), JsonNode.class);
@@ -518,7 +523,7 @@ public class ManagedNativeJournalSnapshots {
                 && digest.equals(rows.getFirst().get("sha256")) && "REFERENCED".equals(rows.getFirst().get("state"))
                 && "MYSQL_INLINE".equals(rows.getFirst().get("storage_kind"))
                 && ((Number) rows.getFirst().get("schema_version")).intValue() == 1
-                && java.util.Arrays.equals(bytes, (byte[]) rows.getFirst().get("inline_bytes")), "managed_session_snapshot_corrupt");
+                && Arrays.equals(bytes, (byte[]) rows.getFirst().get("inline_bytes")), "managed_session_snapshot_corrupt");
         return new StoredResource(id, kind, 1, bytes.length, digest, bytes);
     }
 
