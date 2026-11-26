@@ -250,6 +250,7 @@ vi.mock('./TranscriptViewport', () => ({
     <div
       data-testid="pane-messages"
       data-approval={props.pendingApproval ? 'yes' : 'no'}
+      data-pinned={props.pinnedPrompt ? 'yes' : 'no'}
       data-file-changes={JSON.stringify(
         [...(props.turnFileChanges?.values() ?? [])].flat(),
       )}
@@ -1983,6 +1984,11 @@ describe('ChatPane', () => {
     render({ title: 'Refactor core' });
     expect(testid('pane-messages')?.textContent).toBe('1');
     expect(container!.textContent).toContain('Refactor core');
+  });
+
+  it('pins the prompt of the turn being read in its transcript viewport', () => {
+    render({ title: 'Split pane' });
+    expect(testid('pane-messages')?.getAttribute('data-pinned')).toBe('yes');
   });
 
   it('omits its frame header when embedded in another panel', () => {
