@@ -119,6 +119,8 @@ import type {
   DaemonWriteMemoryResult,
   DaemonRevisionRequest,
   SetUserLanguageResult,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -552,6 +554,19 @@ export interface DaemonAutofixPrWatchList {
   unreadable?: Array<{ pr: number; error: string }>;
 }
 
+/** Input history kinds persisted per workspace on the daemon. */
+export type DaemonInputHistoryKind = 'prompt' | 'shell';
+
+/** Result of `GET /workspace/input-history` (or workspace-qualified). */
+export type DaemonInputHistoryResult =
+  | { notModified: true }
+  | {
+      notModified: false;
+      kind: DaemonInputHistoryKind;
+      entries: string[];
+      revision: string;
+    };
+
 /** One entry of a Channel's event journal (`GET .../channels/events`). */
 export type DaemonChannelEventEntry = DaemonChannelEvent;
 
@@ -825,6 +840,19 @@ export interface DaemonWorkspaceActions
    * `listScheduledTasks`. Only to a daemon advertising `autofix_pr_watches`. */
   listAutofixPrWatches(workspaceId?: string): Promise<DaemonAutofixPrWatchList>;
 
+  /** Workspace-scoped prompt/shell input history (`workspace_input_history`). */
+  loadInputHistory(opts: {
+    kind: DaemonInputHistoryKind;
+    limit?: number;
+    workspaceId?: string;
+    ifNoneMatch?: string;
+  }): Promise<DaemonInputHistoryResult>;
+  recordInputHistory(opts: {
+    kind: DaemonInputHistoryKind;
+    entry: string;
+    workspaceId?: string;
+  }): Promise<void>;
+
   /** The provider workspace's Channel event journal, newest last. A scoped
    * workspace reads its own through its client. */
   listChannelEvents(
@@ -952,9 +980,24 @@ export interface DaemonWorkspaceActions
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },
   ): Promise<DaemonWorkspaceRemovalResult>;
+
+  // Workspace artifact library
+  artifactLibrary(
+    workspaceSelector: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<DaemonWorkspaceArtifactLibraryResult>;
+  artifactLibraryStream(
+    workspaceSelector: string,
+    options?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent>;
 }
 
 export type {
+  DaemonArtifactLibraryMemberError,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
   DaemonChannelQrLoginStartResult,
   DaemonChannelQrLoginView,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
 } from '@qwen-code/sdk/daemon';

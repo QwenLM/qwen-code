@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="190" viewBox="0 0 920 190">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="920" height="190" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="0" y="2" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> Thinking                                                                                           </text>
+    <text x="0" y="19" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> │ Initial analysis                                                                                 </text>
+    <text x="0" y="36" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> │ This is a multiple line paragraph for the first thinking message of how the                      </text>
+    <text x="0" y="53" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> │ model analyzes the problem.                                                                      </text>
+    <text x="0" y="70" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> │ Planning execution                                                                               </text>
+    <text x="0" y="87" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> │ This a second multiple line paragraph for the second thinking message                            </text>
+    <text x="0" y="104" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> │ explaining the plan in detail so that it wraps around the terminal display.                      </text>
+    <text x="0" y="121" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> │ Refining approach                                                                                </text>
+    <text x="0" y="138" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> │ And finally a third multiple line paragraph for the third thinking message to                    </text>
+    <text x="0" y="155" fill="#ffffff" textLength="900" lengthAdjust="spacingAndGlyphs"> │ refine the solution.                                                                             </text>
+  </g>
+</svg>

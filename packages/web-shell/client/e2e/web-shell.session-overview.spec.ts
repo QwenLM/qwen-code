@@ -419,65 +419,71 @@ for (const footerPosition of ['static', 'sticky'] as const) {
   });
 }
 
-for (const count of [4, 11]) {
-  test(`sorting during rename preserves keyboard navigation with ${count} sessions @smoke`, async ({
-    page,
-  }, testInfo) => {
-    const scenario = createWebShellDaemonScenario({
-      workspaceCwd,
-      sessionId: 'sort-0',
-      sessions: Array.from({ length: count }, (_, index) => ({
-        sessionId: `sort-${index}`,
+test.describe('sorting during rename', () => {
+  // These tests boot the app twice — once in beforeEach and once with their
+  // own scenario — so they need the same budget as the shadow-portal test.
+  test.describe.configure({ timeout: 120_000 });
+
+  for (const count of [4, 11]) {
+    test(`sorting during rename preserves keyboard navigation with ${count} sessions @smoke`, async ({
+      page,
+    }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
         workspaceCwd,
-        displayName: `Sort session ${index}`,
-        updatedAt: new Date(Date.UTC(2026, 8, 20 - index)).toISOString(),
-      })),
-      capabilities: {
-        features: [
-          'session_events',
-          'session_source_metadata',
-          'workspace_session_metadata',
-        ],
-      },
+        sessionId: 'sort-0',
+        sessions: Array.from({ length: count }, (_, index) => ({
+          sessionId: `sort-${index}`,
+          workspaceCwd,
+          displayName: `Sort session ${index}`,
+          updatedAt: new Date(Date.UTC(2026, 8, 20 - index)).toISOString(),
+        })),
+        capabilities: {
+          features: [
+            'session_events',
+            'session_source_metadata',
+            'workspace_session_metadata',
+          ],
+        },
+      });
+      await installMockDaemon(page, scenario, {
+        baseURL: String(testInfo.project.use.baseURL),
+      });
+      await page.evaluate(() =>
+        localStorage.setItem('qwen-web-shell-session-overview-page-size', '10'),
+      );
+      await page.goto('/');
+      await page.getByRole('button', { name: 'More', exact: true }).click();
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      const panel = page.locator('[data-web-shell-session-panel]');
+      await panel
+        .getByRole('row')
+        .filter({ hasText: 'Sort session 0' })
+        .getByRole('button', { name: 'Rename', exact: true })
+        .click();
+      const editor = panel.getByRole('textbox', {
+        name: 'Rename: Sort session 0',
+        exact: true,
+      });
+      await editor.fill('Unsaved name');
+      const sort = panel.getByRole('button', { name: 'Time', exact: true });
+      await sort.click();
+      await expect(
+        panel.getByRole('columnheader', { name: 'Time', exact: true }),
+      ).toHaveAttribute('aria-sort', 'ascending');
+      await expect(editor).toHaveCount(0);
+      await expect(sort).toBeFocused();
+      await expect(
+        panel.getByRole('button', { name: 'Sort session 0', exact: true }),
+      ).toHaveCount(count === 4 ? 1 : 0);
+      await page.keyboard.press('Tab');
+      await expect(
+        panel.locator('tbody').getByRole('checkbox').first(),
+      ).toBeFocused();
     });
-    await installMockDaemon(page, scenario, {
-      baseURL: String(testInfo.project.use.baseURL),
-    });
-    await page.evaluate(() =>
-      localStorage.setItem('qwen-web-shell-session-overview-page-size', '10'),
-    );
-    await page.goto('/');
-    await page.getByRole('button', { name: 'More', exact: true }).click();
-    await page
-      .getByRole('button', { name: 'Session Overview', exact: true })
-      .click();
-    const panel = page.locator('[data-web-shell-session-panel]');
-    await panel
-      .getByRole('row')
-      .filter({ hasText: 'Sort session 0' })
-      .getByRole('button', { name: 'Rename', exact: true })
-      .click();
-    const editor = panel.getByRole('textbox', {
-      name: 'Rename: Sort session 0',
-      exact: true,
-    });
-    await editor.fill('Unsaved name');
-    const sort = panel.getByRole('button', { name: 'Time', exact: true });
-    await sort.click();
-    await expect(
-      panel.getByRole('columnheader', { name: 'Time', exact: true }),
-    ).toHaveAttribute('aria-sort', 'ascending');
-    await expect(editor).toHaveCount(0);
-    await expect(sort).toBeFocused();
-    await expect(
-      panel.getByRole('button', { name: 'Sort session 0', exact: true }),
-    ).toHaveCount(count === 4 ? 1 : 0);
-    await page.keyboard.press('Tab');
-    await expect(
-      panel.locator('tbody').getByRole('checkbox').first(),
-    ).toBeFocused();
-  });
-}
+  }
+});
 
 test('hover details preserve a focused search field @smoke', async ({
   page,
@@ -499,47 +505,61 @@ test('hover details preserve a focused search field @smoke', async ({
   await expect(search).toBeFocused();
 });
 
-test('shadow portal details keep focus in the overview after hover replacement @smoke', async ({
-  page,
-}) => {
-  await page.goto('/e2e/session-overview-shadow-dom.html');
-  // A footer-only shell renders footer actions inline; there is no More menu.
-  await page
-    .getByRole('button', { name: 'Session Overview', exact: true })
-    .click();
-  const panel = page.locator('[data-web-shell-session-panel]');
-  await panel.getByRole('button', { name: 'Details for Idle fixture' }).click();
-  const copy = page.getByRole('button', { name: 'Copy session ID' });
-  await expect(copy).toBeFocused();
-  expect(
-    await copy.evaluate(
-      (element) => element.getRootNode() instanceof ShadowRoot,
-    ),
-  ).toBe(true);
-  const title = panel.getByRole('button', {
-    name: 'Approve fixture',
-    exact: true,
+test.describe('shadow portal details', () => {
+  // Boots the app twice (beforeEach on '/', then the shadow-DOM harness),
+  // which one-core contention stretches past the suite's 60s ceiling.
+  // describe-scoped so the 120s covers the beforeEach boot. #17063 raised it,
+  // #17067 withdrew the raise when its failure proved to be a deterministic
+  // More-locator timeout; this re-lands it for boot cost only. The budget buys
+  // reaching the assertions, not their outcome under load: a background
+  // refresh can remount the row and drop focus to <body>, and the copy button
+  // can resolve outside the shadow root (#17547).
+  test.describe.configure({ timeout: 120_000 });
+
+  test('shadow portal details keep focus in the overview after hover replacement @smoke', async ({
+    page,
+  }) => {
+    await page.goto('/e2e/session-overview-shadow-dom.html');
+    // A footer-only shell renders footer actions inline; there is no More menu.
+    await page
+      .getByRole('button', { name: 'Session Overview', exact: true })
+      .click();
+    const panel = page.locator('[data-web-shell-session-panel]');
+    await panel
+      .getByRole('button', { name: 'Details for Idle fixture' })
+      .click();
+    const copy = page.getByRole('button', { name: 'Copy session ID' });
+    await expect(copy).toBeFocused();
+    expect(
+      await copy.evaluate(
+        (element) => element.getRootNode() instanceof ShadowRoot,
+      ),
+    ).toBe(true);
+    const title = panel.getByRole('button', {
+      name: 'Approve fixture',
+      exact: true,
+    });
+    await title.hover();
+    await expect(page.getByRole('dialog')).toHaveCount(1);
+    await expect(
+      page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
+    ).toHaveAttribute('data-state', 'open');
+    await expect(title).toBeFocused();
+    await page.mouse.move(0, 0);
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(title).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(panel.getByRole('link', { name: /#4567/ })).toBeFocused();
+    const search = panel.getByRole('textbox', {
+      name: 'Search title, branch, PR or ID…',
+    });
+    await search.focus();
+    await title.hover();
+    await expect(
+      page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
+    ).toHaveAttribute('data-state', 'open');
+    await expect(search).toBeFocused();
   });
-  await title.hover();
-  await expect(page.getByRole('dialog')).toHaveCount(1);
-  await expect(
-    page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
-  ).toHaveAttribute('data-state', 'open');
-  await expect(title).toBeFocused();
-  await page.mouse.move(0, 0);
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(title).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(panel.getByRole('link', { name: /#4567/ })).toBeFocused();
-  const search = panel.getByRole('textbox', {
-    name: 'Search title, branch, PR or ID…',
-  });
-  await search.focus();
-  await title.hover();
-  await expect(
-    page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
-  ).toHaveAttribute('data-state', 'open');
-  await expect(search).toBeFocused();
 });
 
 test('overview details stay inside an embedded shell @smoke', async ({

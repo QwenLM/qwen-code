@@ -81,11 +81,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_create: { standing: 'managed', evidence: 'surface:SESSION_CREATE' },
   hosted_harness_private_v1: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence: 'docs:packages/cli/src/serve/hosted-harness-contract.ts',
   },
   managed_session_journal_delta_v1: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence:
+      'docs:packages/cli/src/serve/hosted-harness-session/observation-routes.ts',
   },
   session_startup_config: LEGACY_ONLY(
     'a client startup config, not a Managed input',
@@ -111,9 +112,27 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed session source metadata field',
   ),
   session_side_task: NO_MANAGED_EQUIVALENT('no Managed side-task surface'),
+  session_sub_session_send: NO_MANAGED_EQUIVALENT(
+    'no Managed sub-session send surface',
+  ),
   session_prompt: { standing: 'managed', evidence: 'surface:TURN_SUBMIT' },
+  session_retire_if_idle: NO_MANAGED_EQUIVALENT(
+    'source-native retirement is available only on trusted local daemon sessions',
+  ),
+  turn_skill_session_effects_check: NO_MANAGED_EQUIVALENT(
+    'Checks the captured native skill files before prompt enqueue',
+  ),
+  turn_extension_store_lease: NO_MANAGED_EQUIVALENT(
+    'A local Serve child holds an installed extension generation through its turn.',
+  ),
+  turn_skill_file_snapshot: NO_MANAGED_EQUIVALENT(
+    'optional snapshot support is restricted to trusted local daemon sessions',
+  ),
   session_turn_status: NO_MANAGED_EQUIVALENT(
     'Managed reads Turns by list and get, not a status route',
+  ),
+  session_turn_feedback: NO_MANAGED_EQUIVALENT(
+    'no Managed per-turn feedback telemetry surface',
   ),
   session_attachments: NO_MANAGED_EQUIVALENT(
     'Managed prompts carry no legacy attachment references',
@@ -146,11 +165,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:ARTIFACT_GET',
   },
-  workspace_artifact_library: NO_MANAGED_EQUIVALENT(
-    'no Managed workspace-wide artifact query or explicit-pair batch removal',
-  ),
+  workspace_artifact_library: {
+    standing: 'managed',
+    evidence: 'surface:WORKSPACE_ARTIFACT_LIST',
+  },
   workspace_artifact_library_stream: NO_MANAGED_EQUIVALENT(
-    'no Managed progressive workspace artifact query with session summaries',
+    'Managed workspace artifact reads are JSON cursor pages without progressive streaming or session-summary updates',
   ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
   generated_ui_state: NO_MANAGED_EQUIVALENT(
@@ -161,7 +181,8 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   typed_event_schema: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence:
+      'docs:packages/cli/src/serve/hosted-harness-session/observation-routes.ts',
   },
   session_set_model: {
     standing: 'managed',
@@ -403,27 +424,41 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_github_pr_files: NO_MANAGED_EQUIVALENT(
     'no Managed GitHub PR files route',
   ),
+  workspace_git_log_exclude_refs: NO_MANAGED_EQUIVALENT(
+    'no Managed git log exclude-refs route',
+  ),
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
-    'no Managed worktree management route',
+    'Managed lists, inspects and cleans up its own Session worktrees, not the repository-wide Git worktree set',
   ),
   workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
     'no Managed Git ignore query route',
+  ),
+  workspace_input_history: NO_MANAGED_EQUIVALENT(
+    'no Managed input history route',
   ),
   workspace_mcp_restart: {
     standing: 'managed',
     evidence: 'surface:MCP_MANAGEMENT',
   },
-  session_recap: NO_MANAGED_EQUIVALENT('no Managed recap route'),
+  session_recap: {
+    standing: 'managed',
+    evidence: 'surface:SIDE_QUERY_CREATE',
+  },
+  session_mod_rows: NO_MANAGED_EQUIVALENT('no Managed Mod row route'),
   session_generation: NO_MANAGED_EQUIVALENT(
     'no Managed stateless generation route',
   ),
   workspace_generation: NO_MANAGED_EQUIVALENT(
     'no Managed stateless generation route',
   ),
-  session_btw: NO_MANAGED_EQUIVALENT('no Managed side-question route'),
-  session_btw_stream: NO_MANAGED_EQUIVALENT(
-    'no Managed streaming side-question route',
-  ),
+  session_btw: {
+    standing: 'managed',
+    evidence: 'surface:SIDE_QUERY_CREATE',
+  },
+  session_btw_stream: {
+    standing: 'managed',
+    evidence: 'surface:SIDE_QUERY_STREAM',
+  },
   session_shell_command: {
     standing: 'managed',
     evidence: 'tool:run_shell_command',
@@ -559,24 +594,34 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:TRANSCRIPT_QUERY',
   },
-  workspace_archived_session_export: NO_MANAGED_EQUIVALENT(
-    'no Managed archived export route',
-  ),
+  workspace_archived_session_export: {
+    standing: 'managed',
+    evidence: 'surface:ITEM_LIST',
+  },
   workspace_session_live_state: NO_MANAGED_EQUIVALENT(
     'no Managed live-state snapshot',
   ),
   workspace_session_live_state_batch: NO_MANAGED_EQUIVALENT(
     'no Managed live-state snapshot',
   ),
+  restart_recovery: NO_MANAGED_EQUIVALENT(
+    'no Managed restart recovery surface',
+  ),
   workspace_session_metadata: NO_MANAGED_EQUIVALENT(
     'Managed renames a Session and has no metadata bag',
   ),
   session_worktree_persistence_v1: NO_MANAGED_EQUIVALENT(
-    'no Managed worktrees',
+    'Managed persists Session-owned worktrees, but its descriptor has no per-response persisted-v1 attestation',
   ),
-  session_worktree_reset_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
-  session_worktree_branch_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
-  session_worktree_handoff_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
+  session_worktree_reset_v1: NO_MANAGED_EQUIVALENT(
+    'Managed worktree inspect and cleanup do not transfer checkout ownership to a fresh replacement Session',
+  ),
+  session_worktree_branch_v1: NO_MANAGED_EQUIVALENT(
+    'Managed allocates an initial branch during worktree creation, but has no post-create create-branch-here operation',
+  ),
+  session_worktree_handoff_v1: NO_MANAGED_EQUIVALENT(
+    'Managed has no operation that moves a Session and its work between its worktree and the local checkout',
+  ),
   workspace_qualified_acp: LEGACY_ONLY('no ACP in Managed'),
   client_mcp_over_ws: NO_MANAGED_EQUIVALENT(
     'no client-hosted MCP over the Managed transport',
@@ -686,6 +731,20 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'STORE_WRITER_ACQUIRE',
   'STORE_WRITER_RENEW',
   'STORE_WRITER_SEAL',
+  // Internal channel-adapter surface: between the control plane and its trusted
+  // adapter deployment (tenant header + isolated internal listener), never a
+  // client capability. The PR-watch binding/injection routes are the same
+  // trusted-adapter surface for bound-session proactive delivery.
+  'CHANNEL_ADAPTER_REGISTER',
+  'CHANNEL_ADAPTER_DISCONNECT',
+  'CHANNEL_ADAPTER_INBOUND',
+  'CHANNEL_ADAPTER_DELIVERY_CLAIM',
+  'CHANNEL_ADAPTER_DELIVERY_RECEIPT',
+  'CHANNEL_ADAPTER_DELIVERY_RESEND',
+  'PR_WATCH_BINDING_CREATE',
+  'PR_WATCH_BINDING_LIST',
+  'PR_WATCH_BINDING_RETIRE',
+  'PR_WATCH_INJECT',
 ]);
 
 /**
@@ -729,10 +788,8 @@ export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'SESSION_WORKTREE',
   'SIDE_QUERY_CANCEL',
   'SIDE_QUERY_CONTEXT',
-  'SIDE_QUERY_CREATE',
   'SIDE_QUERY_GET',
   'SIDE_QUERY_LIST',
-  'SIDE_QUERY_STREAM',
 ];
 
 /**

@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -23,6 +25,7 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.util.Map;
 
 @RestController
@@ -81,7 +84,7 @@ public class ManagedExtensionPackageController {
     }
 
     @GetMapping(BASE + "/{extensionId}/packages/{packageRevision}/inspection")
-    public ResponseEntity<com.fasterxml.jackson.databind.JsonNode> inspection(TenantContext tenant,
+    public ResponseEntity<JsonNode> inspection(TenantContext tenant,
             @PathVariable String workspaceId, @PathVariable String extensionId, @PathVariable long packageRevision,
             @RequestParam String packageDigest) throws IOException {
         return noStore(service.inspection(tenant.tenantId(), tenant.requireActorId(), workspaceId,
@@ -89,7 +92,7 @@ public class ManagedExtensionPackageController {
     }
 
     @PostMapping(value = BASE + "/imports/preview", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
-    public ResponseEntity<com.fasterxml.jackson.databind.JsonNode> preview(TenantContext tenant,
+    public ResponseEntity<JsonNode> preview(TenantContext tenant,
             @PathVariable String workspaceId, @RequestParam String metadata, HttpServletRequest request) throws IOException {
         service.requireExecutionAccess(tenant.tenantId(), tenant.requireActorId(), workspaceId);
         requireIdentityEncoding(request);
@@ -128,7 +131,7 @@ public class ManagedExtensionPackageController {
         var saved = service.get(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
         StreamingResponseBody body = output -> {
             try (var archive = service.archive(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
-                    var input = Files.newInputStream(archive.path(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                    var input = Files.newInputStream(archive.path(), LinkOption.NOFOLLOW_LINKS)) {
                 input.transferTo(output);
             }
         };
@@ -178,13 +181,13 @@ public class ManagedExtensionPackageController {
     }
 
     @PostMapping(WEB + "/inspection/query")
-    public ResponseEntity<com.fasterxml.jackson.databind.JsonNode> inspectionQuery(TenantContext tenant,
+    public ResponseEntity<JsonNode> inspectionQuery(TenantContext tenant,
             @Valid @RequestBody PackageQuery request) throws IOException {
         return noStore(service.inspection(tenant.tenantId(), tenant.requireActorId(), request.workspaceId(), request.pin()));
     }
 
     @PostMapping(value = WEB + "/imports/preview", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
-    public ResponseEntity<com.fasterxml.jackson.databind.JsonNode> webPreview(TenantContext tenant,
+    public ResponseEntity<JsonNode> webPreview(TenantContext tenant,
             @RequestParam String workspaceId, @RequestParam String metadata, HttpServletRequest request) throws IOException {
         return preview(tenant, workspaceId, metadata, request);
     }
@@ -239,7 +242,7 @@ public class ManagedExtensionPackageController {
     private static void requireIdentityEncoding(HttpServletRequest request) {
         String encoding = request.getHeader("Content-Encoding");
         if (encoding != null && !"identity".equalsIgnoreCase(encoding)) {
-            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(415,
+            throw new ManagedAgentException(415,
                     "invalid_request", "Encoded package imports are unsupported.");
         }
     }

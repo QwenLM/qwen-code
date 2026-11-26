@@ -54,6 +54,8 @@ export interface TrajectoryTiming {
   startedAt?: number;
   /** Requests only: dispatch to first user-visible content. */
   ttftMs?: number;
+  /** Requests only: request start to first user-visible content. */
+  firstVisibleOffsetMs?: number;
 }
 
 /** What a subagent spent, rolled up onto the tool call that spawned it. */

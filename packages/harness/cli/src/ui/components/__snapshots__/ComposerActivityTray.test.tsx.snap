@@ -1,0 +1,9 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`<ComposerActivityTray /> > keeps queued messages above tasks 1`] = `
+"
+  Queued (press ↑ to edit):
+    queued follow-up
+Tasks 1/2 · review implementation
+"
+`;

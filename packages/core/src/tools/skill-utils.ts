@@ -8,6 +8,11 @@ import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
+import {
+  getSkillSource,
+  getTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+} from '../skills/turn-skill-snapshot.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { ToolNames } from './tool-names.js';
@@ -59,10 +64,11 @@ export function skillModelInvocationBlock(
   config: Config,
   skillManager: SkillManager,
   skill: SkillConfig,
+  liveOnly?: boolean,
 ): 'disabled' | 'inactive' | 'hidden' | undefined {
-  if (!config.isSkillEnabled(skill)) return 'disabled';
+  if (!config.isSkillEnabled(getSkillSource(skill))) return 'disabled';
   if (skill.disableModelInvocation) return 'hidden';
-  if (!skillManager.isSkillActive(skill)) return 'inactive';
+  if (!skillManager.isSkillActive(skill, liveOnly)) return 'inactive';
   return undefined;
 }
 
@@ -160,7 +166,12 @@ export function clearCollectedSkillEntriesCache(
 export async function collectAvailableSkillEntries(
   skillManager: SkillManager,
   config: Config,
+  options?: { liveOnly?: boolean },
 ): Promise<CollectedAvailableSkills> {
+  const snapshot = options?.liveOnly ? undefined : getTurnSkillSnapshot();
+  if (snapshot) {
+    return collectAvailableSkillEntriesUncached(skillManager, config, snapshot);
+  }
   const cached = collectCache.get(skillManager);
   if (cached && Date.now() - cached.ts < COLLECT_CACHE_TTL_MS) {
     return cached.promise;
@@ -186,15 +197,27 @@ export async function collectAvailableSkillEntries(
 async function collectAvailableSkillEntriesUncached(
   skillManager: SkillManager,
   config: Config,
+  snapshot?: TurnSkillSnapshot,
 ): Promise<CollectedAvailableSkills> {
   // Include a skill only when the model could invoke it right now (see
   // `skillModelInvocationBlock`). Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
-  const allSkills = await skillManager.listSkills();
-  const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
+  const allSkills = snapshot
+    ? [
+        ...snapshot.skills,
+        ...(await skillManager.listSkills({ level: 'bundled' })).filter(
+          (skill) =>
+            !snapshot.skills.some((pinned) => pinned.name === skill.name),
+        ),
+      ]
+    : await skillManager.listSkills();
+  const isEnabled = (skill: SkillConfig) =>
+    config.isSkillEnabled(getSkillSource(skill));
 
   const availableSkills = allSkills.filter(
-    (s) => skillModelInvocationBlock(config, skillManager, s) === undefined,
+    (s) =>
+      skillModelInvocationBlock(config, skillManager, s, !snapshot) ===
+      undefined,
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -210,7 +233,7 @@ async function collectAvailableSkillEntriesUncached(
           !s.disableModelInvocation &&
           s.paths &&
           s.paths.length > 0 &&
-          !skillManager.isSkillActive(s) &&
+          !skillManager.isSkillActive(s, !snapshot) &&
           isEnabled(s),
       )
       .map((s) => s.name),
@@ -502,6 +525,14 @@ export async function applySkillSideEffects(
       );
     }
     return;
+  }
+  if (
+    'sourceFilePath' in skill &&
+    (skill.allowedTools?.length || Object.keys(skill.hooks ?? {}).length)
+  ) {
+    throw new Error(
+      `turn_skill_session_effects_unavailable: "${skill.name}" requires session-scoped hooks or allow rules and cannot run in this pinned turn`,
+    );
   }
   applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools, {
     trustGated: skill.level === 'project',

@@ -10,11 +10,17 @@ function Drawer({
   return <DrawerPrimitive.Root data-slot="drawer" {...props} />;
 }
 
-function DrawerTrigger({
-  ...props
-}: React.ComponentProps<typeof DrawerPrimitive.Trigger>) {
-  return <DrawerPrimitive.Trigger data-slot="drawer-trigger" {...props} />;
-}
+const DrawerTrigger: React.ForwardRefExoticComponent<
+  React.ComponentPropsWithoutRef<typeof DrawerPrimitive.Trigger> &
+    React.RefAttributes<React.ComponentRef<typeof DrawerPrimitive.Trigger>>
+> = React.forwardRef<
+  React.ComponentRef<typeof DrawerPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof DrawerPrimitive.Trigger>
+>(function DrawerTrigger(props, ref) {
+  return (
+    <DrawerPrimitive.Trigger ref={ref} data-slot="drawer-trigger" {...props} />
+  );
+});
 
 function DrawerPortal({
   container,

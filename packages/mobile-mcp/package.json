@@ -39,9 +39,12 @@
     "minimatch@9 || 10": "11.0.8",
     "qs": "6.17.1",
     "fast-uri": "3.1.9",
+    "express-rate-limit@8": "8.7.2",
     "ip-address": "10.7.4",
     "hono": "4.13.18",
-    "@hono/node-server": "1.19.19"
+    "@hono/node-server": "1.19.19",
+    "proxy-addr": "^2.0.8",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",

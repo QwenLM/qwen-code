@@ -1550,6 +1550,13 @@ export interface GitLogOptions {
    * of at least four characters also resolves as a commit hash prefix.
    */
   search?: string;
+  /**
+   * Single refs whose reachable commits are excluded from the window
+   * (`git log <range> --not <refs>`). Used to drop commits already covered by
+   * a bound PR. Every ref must pass the single-ref whitelist; an unsafe ref
+   * refuses the whole fetch (`null`) rather than silently running unscoped.
+   */
+  excludeRefs?: string[];
 }
 
 const LOG_ALL_REVISIONS = ['HEAD', '--branches', '--tags', '--remotes'];
@@ -1563,25 +1570,19 @@ function isSafeLogRange(range: string): boolean {
 }
 
 /**
- * Whether `ref` resolves to a commit reachable from HEAD (`git merge-base
- * --is-ancestor`). False when the ref is unsafe, unknown, or git fails —
- * callers gate range composition on this, so a failed probe must refuse the
- * boundary rather than trust it.
+ * A single ref (no range): the log-range whitelist minus any `..`, so an
+ * excluded ref can never smuggle a second revision or a flag into argv. A
+ * leading `^` is also refused: it is git's negation operator, and `--not ^ref`
+ * XORs the two negations into an inclusion, widening the window instead of
+ * narrowing it (a trailing `^`/`~` revision suffix stays allowed).
  */
-export async function isGitAncestorOfHead(
-  cwd: string,
-  ref: string,
-  env?: Readonly<Record<string, string | undefined>>,
-): Promise<boolean> {
-  const gitRoot = findGitRoot(cwd);
-  if (!gitRoot) return false;
-  if (ref.startsWith('-') || !/^[A-Za-z0-9_./~^-]+$/.test(ref)) return false;
-  const stdout = await runGit(
-    ['merge-base', '--is-ancestor', ref, 'HEAD'],
-    gitRoot,
-    env,
+function isSafeSingleRef(ref: string): boolean {
+  return (
+    !ref.startsWith('-') &&
+    !ref.startsWith('^') &&
+    !ref.includes('..') &&
+    /^[A-Za-z0-9_./~^-]+$/.test(ref)
   );
-  return stdout !== null;
 }
 
 function parseLogRecords(stdout: string): GitLogEntry[] {
@@ -1616,10 +1617,41 @@ export async function fetchGitLog(
   );
   const skip = Math.max(options?.skip ?? 0, 0);
   const revisions = options?.all
-    ? LOG_ALL_REVISIONS
+    ? [...LOG_ALL_REVISIONS]
     : options?.range && isSafeLogRange(options.range)
       ? [options.range]
       : [];
+  const excludeRefs = options?.excludeRefs ?? [];
+  if (excludeRefs.length > 0) {
+    // Fail closed: an unsafe excluded ref must not degrade into an unscoped
+    // walk that re-lists the very commits the exclusion exists to drop.
+    if (!excludeRefs.every(isSafeSingleRef)) return null;
+    // Drop safe-but-absent refs instead of failing the whole walk. A bound PR
+    // head can be missing from the local object database (a refreshed
+    // headRefOid, a gc'd head), and a base branch's remote-tracking ref may
+    // not exist (a fork whose integration remote is `upstream`, a clone with
+    // no remote). `git log --not <missing>` dies with `bad object`, which
+    // would otherwise refuse the entire window and — via the caller's
+    // no-exclusion retry — drop the *present* exclusions too, re-listing the
+    // covered commits. Probing each ref keeps the exclusion surgical: only
+    // the absent ref's commits may reappear, the rest stay excluded.
+    const present: string[] = [];
+    for (const ref of excludeRefs) {
+      const sha = await runGit(
+        [
+          'rev-parse',
+          '--verify',
+          '--quiet',
+          '--end-of-options',
+          `${ref}^{commit}`,
+        ],
+        gitRoot,
+      );
+      if (sha !== null) present.push(ref);
+    }
+    if (revisions.length === 0) revisions.push('HEAD');
+    if (present.length > 0) revisions.push('--not', ...present);
+  }
   const search = options?.search?.trim();
   if (search) {
     return searchGitLog(gitRoot, revisions, search, limit, skip);
@@ -1667,6 +1699,11 @@ async function searchGitLog(
   skip: number,
 ): Promise<GitLogResult> {
   const window = String(skip + limit + 1);
+  // The hash-prefix arm below shows a single named commit with --no-walk, so
+  // it cannot take the positive revisions (a range would re-walk); it still
+  // must honour the exclusion, so carry just the `--not <refs>` tail.
+  const notAt = revisions.indexOf('--not');
+  const negation = notAt === -1 ? [] : revisions.slice(notAt);
   const walk = (filter: string) =>
     runGit(
       [
@@ -1707,6 +1744,7 @@ async function searchGitLog(
                 `--format=${LOG_FORMAT}`,
                 '--no-walk',
                 sha.trim(),
+                ...negation,
                 '--',
               ],
               gitRoot,
