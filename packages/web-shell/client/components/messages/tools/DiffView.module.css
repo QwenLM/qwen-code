@@ -97,3 +97,9 @@
   overflow-wrap: anywhere;
   min-width: 0;
 }
+
+.escaped {
+  background: var(--agent-blue-100);
+  color: var(--muted-foreground);
+  outline: 1px dotted currentColor;
+}

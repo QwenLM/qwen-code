@@ -80,7 +80,20 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // measures 2,155,573 renderer JS bytes and 2,428,500 CSS bytes on 2026-11-22,
 // across independent local transcript/export builds. Keep the house margins:
 // warning = measurement + 713, hard ceiling = measurement + 1,713.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_286;
+//
+// The context-diff renderer (#13766) is transcript-reachable by design: the
+// bounded unified-diff builder, the invisible-character escaping and the
+// narrow/wide diff views all render in the transcript column, so the document
+// entry legitimately carries them, and its four approval/gitDiff catalog keys
+// ride the two catalogs this entry inlines (EN and ZH-CN; zh-TW and RU are
+// transcript-stubbed). On the merged tree at main 91a14e33, after rebuilding
+// web-shell's three dist artifacts, the renderer measures 2,159,629 bytes
+// (+4,056 over the 2,155,573 main measurement, CSS separate at 2,428,823),
+// with the forbidden-input guard passing and the third-party input mix
+// unchanged (first-party inputs 2,010,167 -> 2,016,695 pre-minify). CI's Build
+// lane measured 2,158,816 on the parent tree. Re-track with the house margins:
+// warning = measurement + 713, hard ceiling = measurement + 1,713.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_160_342;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -210,10 +223,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_286;
 // A normal build at the measured size below is not warned; only further
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,
-// including the metadata checks: 2,155,023 bytes with ChatSurface merged.
-// The latest measured shared tree also re-tracks this ceiling to 2,157,286,
-// which is 1,713 bytes above its 2,155,573-byte measurement, and stays coupled
-// to the warning threshold instead of becoming an independent literal.
+// including the metadata checks: 2,159,629 bytes with the context-diff
+// renderer merged. The ceiling stays coupled to the warning threshold (1,713
+// bytes above the measurement, as above) instead of becoming a literal.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 
 // Modules that must not be reachable from the document entry, checked against
