@@ -68,7 +68,8 @@ final class JournalStoreRows {
                         result.getString("activation_phase"),
                         result.getObject("activation_event_epoch", Long.class),
                         result.getObject("activation_expires_at", Long.class),
-                        result.getObject("activation_head_revision", Long.class));
+                        result.getObject("activation_head_revision", Long.class),
+                        result.getObject("wake_seal_revision", Long.class));
         this.transactionMapper = (result, row) -> transactionRow(result);
         this.resourceMapper = (result, row) -> resourceRow(result);
     }
@@ -782,17 +783,11 @@ final class JournalStoreRows {
         return new ManagedAgentException(409, code, message);
     }
 
-    record HeadRow(String tenantId, String workspaceId,
-            String sessionId, String state, boolean activityDiagnostics,
-            long writerGeneration, String writerId,
-            Timestamp writerLeaseUntil, String leaseTokenHash,
-            long journalRevision, long committedSequence,
-            String lastCommitDigest, long activationEpoch,
-            String latestCheckpointResourceId,
-            long compactedThroughRevision, long packedThroughRevision, String recoveryStatus,
-            String recoveryDetailCode, String activationId,
-            String activationPhase, Long activationEventEpoch,
-            Long activationExpiresAt, Long activationHeadRevision) {
+    record HeadRow(String tenantId, String workspaceId, String sessionId, String state, boolean activityDiagnostics, long writerGeneration,
+            String writerId, Timestamp writerLeaseUntil, String leaseTokenHash, long journalRevision, long committedSequence,
+            String lastCommitDigest, long activationEpoch, String latestCheckpointResourceId, long compactedThroughRevision,
+            long packedThroughRevision, String recoveryStatus, String recoveryDetailCode, String activationId, String activationPhase,
+            Long activationEventEpoch, Long activationExpiresAt, Long activationHeadRevision, Long wakeSealRevision) {
     }
 
     record TransactionRow(String workspaceId, long journalRevision,

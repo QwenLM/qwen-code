@@ -5,7 +5,16 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parse } from 'yaml';
 
 // A tooling step that quietly stops installing is the same outage as no
@@ -687,6 +696,89 @@ describe('ci.yml capture tooling', () => {
   const steps = doc.jobs['test'].steps;
   const nameIndex = (name) => steps.findIndex((st) => st.name === name);
   const INSTALL = 'Install tmux and zip tooling';
+  const PROVISION_ARCHIVES = 'Provision user-local zip and unzip';
+
+  it('runs the user-local fallback on the same Linux lane before unit tests', () => {
+    const index = nameIndex(PROVISION_ARCHIVES);
+    expect(index).toBeGreaterThan(nameIndex(INSTALL));
+    expect(index).toBeLessThan(nameIndex('Run tests and generate reports'));
+    expect(steps[index].if).toBe(steps[nameIndex(INSTALL)].if);
+    expect(steps[index]['timeout-minutes']).toBe(5);
+    expect(steps[index]['continue-on-error']).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32').each([
+    { hostStatus: 1, brokenTool: '', status: 0, published: true },
+    { hostStatus: 1, brokenTool: 'zip', status: 1, published: false },
+    { hostStatus: 1, brokenTool: 'unzip', status: 1, published: false },
+    { hostStatus: 0, brokenTool: '', status: 0, published: false },
+  ])(
+    'provisions archives with host status $hostStatus and broken tool "$brokenTool"',
+    ({ hostStatus, brokenTool, status, published }) => {
+      const temp = mkdtempSync(join(tmpdir(), 'qwen-zip-ci-test-'));
+      try {
+        const bin = join(temp, 'bin');
+        const githubPath = join(temp, 'github-path');
+        mkdirSync(bin);
+        writeFileSync(githubPath, '');
+        for (const [tool, body] of Object.entries({
+          zip: `exit ${hostStatus}`,
+          unzip: `exit ${hostStatus}`,
+          sudo: 'exit 1',
+          'apt-get': `
+            test "$3" = -o
+            test "$4" = "Dir::State::lists=$PWD/lists"
+            shift 4
+            case "$*" in
+              *' update -qq') touch lists/partial/refreshed ;;
+              'download zip unzip')
+                test -f lists/partial/refreshed
+                touch zip_fixture.deb unzip_fixture.deb ;;
+              *) exit 1 ;;
+            esac`,
+          'dpkg-deb': `
+            test "$1" = --extract
+            test -f "$2"
+            test "$3" = .
+            mkdir -p usr/bin
+            archive=\${2##*/}
+            tool=\${archive%%_*}
+            code=0
+            if [ "$tool" = '${brokenTool}' ]; then code=1; fi
+            printf '#!/bin/sh\nexit %s\n' "$code" > "usr/bin/$tool"
+            chmod +x "usr/bin/$tool"`,
+        })) {
+          writeFileSync(join(bin, tool), `#!/bin/sh -e\n${body}\n`, {
+            mode: 0o755,
+          });
+        }
+
+        const run = steps[nameIndex(PROVISION_ARCHIVES)].run;
+        const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', run], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            RUNNER_TEMP: temp,
+            GITHUB_PATH: githubPath,
+          },
+        });
+        expect(result.status, result.stderr).toBe(status);
+        const path = readFileSync(githubPath, 'utf8');
+        if (published) {
+          const binDir = path.trim();
+          expect(binDir).toMatch(/\/qwen-zip\.[^/]+\/usr\/bin$/);
+          for (const tool of ['zip', 'unzip']) {
+            expect(spawnSync(join(binDir, tool), ['-v']).status).toBe(0);
+          }
+        } else {
+          expect(path).toBe('');
+        }
+      } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('installs tmux INSIDE the test job, before the tests run', () => {
     // Whole-file substring pins survive the step moving to another job or
@@ -1038,10 +1130,8 @@ describe('ci.yml capture tooling', () => {
       ).toBeDefined();
       expect(line, `${probe} is unguarded`).toMatch(/\|\|\s*(?:\{\s*)?echo\b/);
     }
-    // And the ELSE fallback exists: on a lane with no usable install path
-    // — no apt-get at all, and no passwordless sudo when running non-root
-    // — it is the only signal that the tooling is missing. Deleting it
-    // passed every other pin.
+    // The ELSE fallback reports that system provisioning is unavailable
+    // before the separate step checks zip and unzip.
     const elseIdx = lines.findIndex((l) => l === 'else');
     expect(elseIdx, 'no `else` fallback branch').toBeGreaterThan(-1);
     // And the conditional is CLOSED and BOUNDED: without `fi`, bash

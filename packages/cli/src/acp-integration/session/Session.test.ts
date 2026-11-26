@@ -39,6 +39,7 @@ import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { REPETITIVE_TOOL_CALLS_HINT } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
@@ -7213,6 +7214,99 @@ describe('Session', () => {
       expect(result.stopReason).toBe('end_turn');
       expect(send).toHaveBeenCalledOnce();
     });
+
+    it.each([
+      {
+        name: 'tool hook',
+        stop: 'hook_stopped',
+        extra: {},
+        refuseNotice: false,
+      },
+      {
+        name: 'undeliverable stop notice',
+        stop: 'hook_stopped',
+        extra: {},
+        refuseNotice: true,
+      },
+      {
+        name: 'channel turn with a terminating tool',
+        stop: 'tool_ended_turn',
+        extra: { _meta: { 'qwen.channel.prompt': true } },
+        refuseNotice: false,
+      },
+      {
+        name: 'requested delivery with a terminating tool',
+        stop: 'tool_ended_turn',
+        extra: {
+          _meta: {
+            'qwen.daemon.channelDelivery': {
+              deliveryId: 'hook-stop',
+              target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+            },
+          },
+        },
+        refuseNotice: false,
+      },
+    ])(
+      'ends the turn and keeps the tool response on a $name',
+      async ({ stop, extra, refuseNotice }) => {
+        useTool(core.Kind.Read, 'read_file');
+        runAcpToolBatchSpy.mockImplementation(
+          async (
+            host: unknown,
+            options: { requests: core.ToolCallRequestInfo[] },
+          ) => ({
+            ...(await runEachTool(host, options)),
+            stop,
+            hookStopReason: 'budget spent',
+          }),
+        );
+        const send = useSharedRounds([readCall('call-read'), finished()]);
+
+        if (refuseNotice) {
+          vi.mocked(mockClient.sessionUpdate).mockImplementation(
+            async ({ update }) => {
+              if (update._meta?.['source'] === 'stop_hook_notice') {
+                throw new Error('notice transport failed');
+              }
+            },
+          );
+        }
+        const result = await prompt(extra);
+
+        expect(result.stopReason).toBe('end_turn');
+        expect(send).toHaveBeenCalledOnce();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-read',
+                name: 'read_file',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        });
+        expect(updates()).toContainEqual({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            source: 'stop_hook_notice',
+            qwenDiscreteMessage: true,
+            stopReason: 'budget spent',
+          },
+        });
+        if (extra._meta?.['qwen.daemon.channelDelivery']) {
+          await vi.waitFor(() =>
+            expect(mockClient.extMethod).toHaveBeenCalledWith(
+              'qwen/control/channel-delivery',
+              expect.objectContaining({ deliveryId: 'hook-stop', text: '' }),
+            ),
+          );
+        }
+      },
+    );
 
     it('refuses a Goal approval the turn cannot own', async () => {
       useTool(core.Kind.Read, 'read_file');
@@ -53551,6 +53645,72 @@ describe('Session', () => {
             message: 'quota fallback',
             data: { details: 'quota fallback', subscriptionQuota },
           });
+        });
+        it('adds the recovery hint to a repeated-tool-call rejection', async () => {
+          const message =
+            '400 Repetitive tool calls detected in the conversation history.';
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            throw Object.assign(new Error(message), { status: 400 });
+          });
+          const expected = message + REPETITIVE_TOOL_CALLS_HINT;
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            message: expected,
+            data: {
+              errorKind: 'repetitive_tool_calls',
+              details: expected,
+            },
+          });
+        });
+        it('adds the recovery hint to a legacy Stop-hook continuation failure', async () => {
+          mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(false);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockResolvedValueOnce({
+              success: true,
+              output: { decision: 'block', reason: 'Continue after Stop hook' },
+            }),
+          });
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          const message =
+            '400 Repetitive tool calls detected in the conversation history.';
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createEmptyStream())
+            .mockRejectedValueOnce(
+              Object.assign(new Error(message), { status: 400 }),
+            );
+          const expected = message + REPETITIVE_TOOL_CALLS_HINT;
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            message: expected,
+            data: {
+              errorKind: 'repetitive_tool_calls',
+              details: expected,
+            },
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
         });
         it('preserves the subscription backend rate-limit message', async () => {
           mockConfig.getAuthType = vi

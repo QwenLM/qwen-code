@@ -4642,15 +4642,22 @@ class QwenAgent implements Agent {
       const settings = loadSettings(this.config.getTargetDir());
       const discoveryConfig = this.workspaceMcpDiscoveryConfig;
       const sessions = this.getActiveSessions();
+      const sessionConfigs = new Set(
+        sessions.map((session) => session.getConfig()),
+      );
       const liveConfigs = new Set([
         this.config,
-        ...sessions.map((session) => session.getConfig()),
+        ...sessionConfigs,
         ...(discoveryConfig ? [discoveryConfig] : []),
       ]);
       const syncErrors: unknown[] = [];
       for (const config of liveConfigs) {
         try {
-          const cwd = config.getTargetDir();
+          // MCP settings and approvals belong to the workspace that admitted
+          // the session. A session/cd only moves its working directory.
+          const workspaceRoot = sessionConfigs.has(config)
+            ? this.sessionWorkspaceRoot(config)
+            : config.getTargetDir();
           // Same bare/safe guard as registerMcpHotReload (config/hot-reload.ts)
           // — each live Config in this Set may independently be bare/safe or
           // not, so the check is per-config, not hoisted outside the loop.
@@ -4667,7 +4674,7 @@ class QwenAgent implements Agent {
             ? { ...config.getTopTierMcpServers() }
             : assembleMcpServers(
                 settings.merged.mcpServers,
-                cwd,
+                workspaceRoot,
                 config.getTopTierMcpServers(),
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
@@ -4676,7 +4683,7 @@ class QwenAgent implements Agent {
             : recomputeMcpGating(
                 settings,
                 mcpServers,
-                cwd,
+                workspaceRoot,
                 bootAllowed,
                 config.getApprovalMode() === ApprovalMode.YOLO,
               );
@@ -8295,7 +8302,9 @@ class QwenAgent implements Agent {
             };
             if (isGatedMcpScope(server.scope)) {
               const approvalState = approvals.getState(
-                config.getWorkingDir(),
+                scope === 'session'
+                  ? this.sessionWorkspaceRoot(config)
+                  : config.getWorkingDir(),
                 name,
                 server,
               );

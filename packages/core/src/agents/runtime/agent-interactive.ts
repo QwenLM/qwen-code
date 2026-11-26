@@ -34,6 +34,7 @@ import {
   type ToolResultDisplay,
 } from '../../tools/tools.js';
 import { AsyncMessageQueue } from '../../utils/asyncMessageQueue.js';
+import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import {
   AgentTerminateMode,
   AgentStatus,
@@ -242,11 +243,18 @@ export class AgentInteractive {
         result.terminateMode !== AgentTerminateMode.GOAL
       ) {
         const msg = terminateModeMessage(result.terminateMode, result.loopType);
+        const hookNotice =
+          result.terminateMode === AgentTerminateMode.HOOK_STOPPED
+            ? stripAnsiAndControl(result.text.replace(/\s+/g, ' ')).trim()
+            : undefined;
         if (msg) {
-          this.addMessage('info', msg.text, { metadata: { level: msg.level } });
+          this.addMessage('info', hookNotice || msg.text, {
+            metadata: { level: msg.level },
+          });
         }
-        this.lastRoundError = result.loopType
-          ? `Terminated: ${result.terminateMode} (${result.loopType})`
+        const detail = hookNotice || result.loopType;
+        this.lastRoundError = detail
+          ? `Terminated: ${result.terminateMode} (${detail})`
           : `Terminated: ${result.terminateMode}`;
       }
     } catch (err) {
@@ -530,6 +538,7 @@ const TERMINATE_MODE_LEVEL: Record<
   [AgentTerminateMode.GOAL]: null,
   [AgentTerminateMode.CANCELLED]: null,
   [AgentTerminateMode.SHUTDOWN]: null,
+  [AgentTerminateMode.HOOK_STOPPED]: 'warning',
 };
 
 /**
