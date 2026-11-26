@@ -87,6 +87,8 @@ Commands specifically for controlling interface and output language.
 - Available built-in UI languages: `zh-CN` (Simplified Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German), `ja-JP` (Japanese), `pt-BR` (Portuguese - Brazil), `fr-FR` (French), `ca-ES` (Catalan)
 - Output language examples: `Chinese`, `English`, `Japanese`, etc.
 
+UI language changes are saved to user settings by default or with `--global`, and to trusted workspace settings with `--project`. The current interface follows the effective language after saving, so a workspace override continues to apply after `/language ui de-DE --global`. `QWEN_CODE_LANG` takes precedence over settings.
+
 ### 1.4 Tool and Model Management
 
 Commands for managing AI tools and models.
