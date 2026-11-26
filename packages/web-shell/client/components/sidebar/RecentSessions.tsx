@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDownIcon, ChevronRightIcon, SquarePenIcon } from 'lucide-react';
 import type {
   DaemonClient,
@@ -27,6 +27,7 @@ export interface RecentSessionEntry {
 export function sortRecentSessions(
   entries: RecentSessionEntry[],
   sortBy?: 'updatedAt' | 'lastUserPromptAt',
+  allowedSources: readonly string[] = ['default', 'standalone'],
 ) {
   const unique = new Map<string, RecentSessionEntry>();
   for (const entry of entries) {
@@ -37,8 +38,7 @@ export function sortRecentSessions(
       session.isPinned ||
       session.sourceType === 'qwen-live' ||
       session.sourceId?.startsWith('realtime_voice:') ||
-      (session.sourceType &&
-        !['default', 'standalone'].includes(session.sourceType))
+      !allowedSources.includes(session.sourceType ?? 'default')
     )
       continue;
     unique.set(JSON.stringify([entry.workspaceCwd, session.sessionId]), entry);
@@ -67,6 +67,7 @@ async function readRecentPage(
   load: (cursor?: string) => Promise<DaemonSessionListPage>,
   workspaceCwd?: string,
   sortBy?: 'updatedAt' | 'lastUserPromptAt',
+  allowedSources: readonly string[] = ['default', 'standalone'],
 ): Promise<RecentSessionEntry[]> {
   let cursor: string | undefined;
   const entries: RecentSessionEntry[] = [];
@@ -76,8 +77,11 @@ async function readRecentPage(
       ...page.sessions.map((session) => ({ session, workspaceCwd })),
     );
     cursor = page.nextCursor;
-  } while (cursor && sortRecentSessions(entries, sortBy).length < LIMIT);
-  return sortRecentSessions(entries, sortBy);
+  } while (
+    cursor &&
+    sortRecentSessions(entries, sortBy, allowedSources).length < LIMIT
+  );
+  return sortRecentSessions(entries, sortBy, allowedSources);
 }
 
 interface RecentSessionsProps {
@@ -86,6 +90,7 @@ interface RecentSessionsProps {
   workspaces: DaemonWorkspaceCapability[];
   includeStandalone: boolean;
   sourceMetadataEnabled: boolean;
+  sessionSource?: 'default' | 'channel' | 'scheduled_task';
   organizationEnabled: boolean;
   currentSessionId?: string;
   refreshKey: number;
@@ -102,6 +107,7 @@ export function RecentSessions({
   workspaces,
   includeStandalone,
   sourceMetadataEnabled,
+  sessionSource,
   organizationEnabled,
   currentSessionId,
   refreshKey,
@@ -111,6 +117,17 @@ export function RecentSessions({
   onNewSession,
   newSessionDisabled,
 }: RecentSessionsProps) {
+  // The section follows the active source switch, so a non-default source
+  // never leaks default sessions into Recent (and standalone rows only
+  // belong to the default source).
+  const activeSource = sourceMetadataEnabled ? sessionSource : undefined;
+  const allowedRecentSources = useMemo(
+    () =>
+      activeSource === undefined || activeSource === 'default'
+        ? (['default', 'standalone'] as const)
+        : ([activeSource] as const),
+    [activeSource],
+  );
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(() =>
     readWorkspaceExpanded('recent-sessions'),
@@ -135,6 +152,7 @@ export function RecentSessions({
     workspaceKey,
     includeStandalone,
     sourceMetadataEnabled,
+    sessionSource,
     organizationEnabled,
     sortBy,
   ]);
@@ -160,13 +178,21 @@ export function RecentSessions({
                 : {}),
               pageSize: 50,
               cursor,
-              ...(sourceMetadataEnabled ? { sourceType: 'default' } : {}),
+              ...(activeSource
+                ? { sourceType: activeSource }
+                : sourceMetadataEnabled
+                  ? { sourceType: 'default' as const }
+                  : {}),
             }),
           cwd,
           sortBy,
+          allowedRecentSources,
         ),
       );
-      if (includeStandalone)
+      if (
+        includeStandalone &&
+        (activeSource === undefined || activeSource === 'default')
+      )
         requests.push(
           readRecentPage(
             (cursor) =>
@@ -178,6 +204,7 @@ export function RecentSessions({
               }),
             undefined,
             sortBy,
+            allowedRecentSources,
           ),
         );
       const results = await Promise.allSettled(requests);
@@ -188,6 +215,7 @@ export function RecentSessions({
             result.status === 'fulfilled' ? result.value : [],
           ),
           sortBy,
+          allowedRecentSources,
         ),
       );
       setFailed(results.some((result) => result.status === 'rejected'));
@@ -206,6 +234,7 @@ export function RecentSessions({
     workspaceKey,
     includeStandalone,
     sourceMetadataEnabled,
+    sessionSource,
     organizationEnabled,
     sortBy,
     expanded,
@@ -213,6 +242,8 @@ export function RecentSessions({
     currentSessionId,
     refreshKey,
     retry,
+    activeSource,
+    allowedRecentSources,
   ]);
 
   const workspaceCwds = new Set(JSON.parse(workspaceKey) as string[]);

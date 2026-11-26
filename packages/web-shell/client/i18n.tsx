@@ -2488,6 +2488,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.archiveSessionSource': 'Archived session source',
   'sidebar.sessionSource.tasks': 'Tasks',
   'sidebar.sessionSource.channels': 'Channels',
+  'sidebar.sessionSource.scheduledTasks': 'Scheduled tasks',
   'sidebar.channelType.other': 'Other channels',
   'sidebar.live': 'Live',
   'sidebar.liveVoicePending': 'Voice chat',

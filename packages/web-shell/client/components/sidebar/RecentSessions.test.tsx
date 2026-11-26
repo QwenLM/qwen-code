@@ -45,6 +45,7 @@ async function render(
     workspaces: DaemonWorkspaceCapability[];
     includeStandalone: boolean;
   },
+  sessionSource?: 'default' | 'channel' | 'scheduled_task',
 ) {
   const client = (stableClient ??= {
     listWorkspaceSessionsPage,
@@ -70,6 +71,7 @@ async function render(
         }
         includeStandalone={scope?.includeStandalone ?? true}
         sourceMetadataEnabled
+        sessionSource={sessionSource}
         organizationEnabled
         currentSessionId={currentSessionId}
         refreshKey={0}
@@ -190,6 +192,43 @@ describe('recent sessions', () => {
       '/project',
       expect.objectContaining({ cursor: 'next' }),
     );
+  });
+
+  it('scopes the recent section to the active source switch', async () => {
+    // A daemon that ignores the sourceType filter: only the client-side
+    // scope may keep the section honest.
+    listWorkspaceSessionsPage.mockImplementation(async (cwd: string) => ({
+      sessions:
+        cwd === '/project'
+          ? [
+              session('default', '2026-10-22'),
+              session('bound', '2026-10-21', {
+                sourceType: 'scheduled_task',
+              }),
+            ]
+          : [],
+    }));
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        session('standalone', '2026-10-23', { sourceType: 'standalone' }),
+      ],
+    });
+    await render(
+      'standalone',
+      false,
+      undefined,
+      undefined,
+      undefined,
+      'scheduled_task',
+    );
+    expect(buttons().map((button) => button.title)).toEqual([
+      'bound · project',
+    ]);
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledWith(
+      '/project',
+      expect.objectContaining({ sourceType: 'scheduled_task' }),
+    );
+    expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
   });
 
   it('does not render stale rows while the workspace scope changes', async () => {

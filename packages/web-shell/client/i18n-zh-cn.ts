@@ -2423,6 +2423,7 @@ export const ZH: Messages = {
   'sidebar.archiveSessionSource': '归档会话来源',
   'sidebar.sessionSource.tasks': '任务',
   'sidebar.sessionSource.channels': '频道',
+  'sidebar.sessionSource.scheduledTasks': '定时任务',
   'sidebar.channelType.other': '其他频道',
   'sidebar.live': 'Live',
   'sidebar.liveVoicePending': 'Voice chat',
