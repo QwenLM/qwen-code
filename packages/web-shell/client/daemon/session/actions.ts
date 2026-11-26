@@ -1510,7 +1510,8 @@ export function createDaemonSessionActions({
         const optimisticMessageAppended =
           shouldAppendOptimisticMessage &&
           displayedImages.length === 0 &&
-          displayedFiles.length === 0;
+          displayedFiles.length === 0 &&
+          !options?.beforeDispatch;
         let optimisticBlockId: string | undefined = options?.bindBlockId;
         if (optimisticMessageAppended) {
           store.appendLocalUserMessage(
@@ -1626,7 +1627,8 @@ export function createDaemonSessionActions({
           if (
             sessionRef.current === session &&
             shouldAppendOptimisticMessage &&
-            !optimisticMessageAppended
+            !optimisticMessageAppended &&
+            !(options?.beforeDispatch && isAbortError(error))
           ) {
             store.appendLocalUserMessage(
               text,

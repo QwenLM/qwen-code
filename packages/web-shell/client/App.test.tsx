@@ -8088,7 +8088,14 @@ describe('task activity key', () => {
         const opts = options as {
           beforeDispatch?: () => void | Promise<void>;
         };
-        await opts.beforeDispatch?.();
+        try {
+          await opts.beforeDispatch?.();
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') {
+            return { stopReason: 'cancelled' };
+          }
+          throw error;
+        }
       });
 
     const { container } = renderApp({
@@ -60896,6 +60903,46 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       'second',
       expect.any(Object),
     );
+  });
+
+  it('cancels a pending bound run with a structured cancellation when New Chat is clicked', async () => {
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    const run = await openRunHandler(container);
+    const restore = deferred<void>();
+    mockSessionActions.loadSession.mockReturnValueOnce(restore.promise);
+    mockSessionActions.clearSession.mockImplementationOnce(async () => {
+      restore.reject(new DOMException('Session cleared', 'AbortError'));
+    });
+
+    let settlement!: Promise<unknown>;
+    await act(async () => {
+      settlement = run('scheduled work', 'session-bound').catch(
+        (error) => error,
+      );
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+        'session-bound',
+        expect.any(Object),
+      ),
+    );
+
+    const newSessionBtn = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'new session');
+    expect(newSessionBtn).toBeDefined();
+    await act(async () => {
+      newSessionBtn?.click();
+      await Promise.resolve();
+    });
+
+    const result = await settlement;
+    expect(isScheduledTaskCancellation(result)).toBe(true);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
   });
 
   it('does not apply the catch-up timeout while restore is pending', async () => {

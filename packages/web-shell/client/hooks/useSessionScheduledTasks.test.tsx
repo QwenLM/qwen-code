@@ -1603,4 +1603,45 @@ describe('useSessionScheduledTasks', () => {
       }),
     ).toBe(false);
   });
+
+  it('ignores a stale refresh closure after switching sessions', async () => {
+    const taskA = durableTask({ id: 'task-a', sessionId: 'session-a' });
+    const taskB = durableTask({ id: 'task-b', sessionId: 'session-b' });
+    let releaseReadB!: (tasks: DaemonScheduledTask[]) => void;
+    const readB = new Promise<DaemonScheduledTask[]>((resolve) => {
+      releaseReadB = resolve;
+    });
+    sdkMock.workspaceActions.listScheduledTasks
+      .mockResolvedValueOnce([taskA])
+      .mockReturnValueOnce(readB);
+
+    renderHarness({
+      sessionId: 'session-a',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+    const staleRefresh = latest!.refresh;
+
+    sdkMock.ownerVersion += 1;
+    renderHarness({
+      sessionId: 'session-b',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+    });
+    await vi.waitFor(() =>
+      expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledTimes(
+        2,
+      ),
+    );
+
+    await act(async () => {
+      staleRefresh();
+      releaseReadB([taskB]);
+      await readB;
+      await Promise.resolve();
+    });
+
+    expect(latest?.tasks.map((item) => item.id)).toEqual(['task-b']);
+  });
 });

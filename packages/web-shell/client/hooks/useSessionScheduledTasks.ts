@@ -374,11 +374,12 @@ export function useSessionScheduledTasks(options: {
   );
 
   const refresh = useCallback(() => {
+    if (!owner.isCurrent()) return;
     // Revoke older reads before React starts the replacement request.
     durableReqRef.current += 1;
     manualRefreshSessionRef.current = sessionId;
     setManualRefreshTick((n) => n + 1);
-  }, [sessionId]);
+  }, [owner, sessionId]);
 
   const markBusy = useCallback(
     (task: Parameters<typeof scheduledTaskRuntimeKey>[0], busy: boolean) => {

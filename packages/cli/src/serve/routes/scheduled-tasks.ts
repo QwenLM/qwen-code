@@ -2097,16 +2097,10 @@ function registerScheduledTaskCrudRoutes(
               assertCanCommit: target.assertGenerationOpen,
               // Rejected owners and ambiguous ids cannot veto restoration.
               // A bound-owner intent also records a consumed task's deletion.
-              deletionIds: () => {
-                if (ambiguousId) return [];
-                if (expectedOwner.provided && expectedOwner.sessionId) {
-                  return [scheduledTaskDeletionGuardId(id, expectedOwner)];
-                }
-                if (!expectedOwner.provided) {
-                  return [cronTaskLegacyDeletionId(id)];
-                }
-                return [JSON.stringify([expectedOwner.sessionId ?? null, id])];
-              },
+              deletionIds: () =>
+                ambiguousId
+                  ? []
+                  : [scheduledTaskDeletionGuardId(id, expectedOwner)],
             },
           );
         });

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonChannelDelivery } from '@qwen-code/sdk/daemon';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { createScheduledTaskCancellation } from '../../utils/scheduledTaskManualRun';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -3081,6 +3082,49 @@ describe('ScheduledTasksDialog autofix-pr watches', () => {
     await flush();
     expect(onRunPrompt).toHaveBeenCalledWith('/autofix-pr stop 12', SESSION);
   });
+
+  it.each([
+    {
+      label: 'structured cancellation',
+      error: createScheduledTaskCancellation('Bound run target was replaced'),
+      expectError: false,
+    },
+    {
+      label: 'plain AbortError',
+      error: new DOMException('Session cleared', 'AbortError'),
+      expectError: false,
+    },
+    {
+      label: 'transport error',
+      error: new Error('network down'),
+      expectError: true,
+    },
+  ])(
+    'handles watch stop rejection cleanly ($label)',
+    async ({ error, expectError }) => {
+      actions.listAutofixPrWatches.mockResolvedValue({
+        available: true,
+        watches: [watch()],
+      });
+      const onRunPrompt = vi.fn().mockRejectedValue(error);
+      const onError = vi.fn();
+      await mount([watchTask()], {
+        autofixPrWatchesAvailable: true,
+        onRunPrompt,
+        onError,
+      });
+      await flush();
+
+      click(findButton('Stop watch'));
+      await flush();
+
+      if (expectError) {
+        expect(onError).toHaveBeenCalledWith(error, 'Could not stop the watch');
+      } else {
+        expect(onError).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('names the one workspace of a single-project daemon when it stops a watch', async () => {
     // From a standalone or Live conversation, the session is restored in

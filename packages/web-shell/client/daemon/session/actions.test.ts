@@ -378,6 +378,52 @@ describe('sendPrompt admission notices', () => {
     },
   );
 
+  it.each([true, false])(
+    'defers optimistic user bubble until beforeDispatch passes (reject=%s)',
+    async (shouldReject) => {
+      const session = createMockSession('session-a');
+      const guardError = new DOMException(
+        'Failed to record the run',
+        'AbortError',
+      );
+      session.submitPrompt.mockImplementationOnce(
+        async (_req, _signal, beforeDispatch) => {
+          await beforeDispatch?.('client-1');
+          return { promptId: 'p-guarded', lastEventId: 1 };
+        },
+      );
+      const onAdmitted = vi.fn();
+      const h = createActionsHarness({ session });
+
+      if (shouldReject) {
+        await expect(
+          h.actions.sendPrompt('Scheduled prompt', {
+            beforeDispatch: async () => {
+              throw guardError;
+            },
+            onAdmitted,
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+        expect(onAdmitted).not.toHaveBeenCalled();
+      } else {
+        const pending = h.actions.sendPrompt('Scheduled prompt', {
+          beforeDispatch: async () => {},
+          onAdmitted,
+        });
+        await vi.waitFor(() =>
+          expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({
+            promptId: 'p-guarded',
+          }),
+        );
+        expect(h.store.appendLocalUserMessage).toHaveBeenCalledTimes(1);
+        const active = h.activePromptsRef.current.get('session-a');
+        active?.resolve?.({ stopReason: 'end_turn' });
+        await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+      }
+    },
+  );
+
   it('keeps notices for MCP App errors before admission starts', async () => {
     const session = createMockSession('session-a');
     const error = new Error('Admission preparation failed');

@@ -803,6 +803,7 @@ export class CronScheduler {
     }
     for (const { job } of this.gatesInFlight.values()) {
       if (job.boundSessionId === ownerSessionId) return true;
+      if (job.boundSessionId !== undefined) continue;
       if (job.durable && ownerSessionId !== this.sessionId) continue;
       if (this.sessionId !== undefined && ownerSessionId !== this.sessionId) {
         continue;

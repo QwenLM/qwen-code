@@ -13972,7 +13972,8 @@ export function App({
       if (isAbortError(error)) {
         const message = isScheduledTaskCancellation(error)
           ? fallback
-          : error instanceof Error &&
+          : includeErrorContext &&
+              error instanceof Error &&
               error.message &&
               !error.message.startsWith(fallback)
             ? `${fallback}: ${error.message}`
@@ -14487,6 +14488,9 @@ export function App({
               detachedWorkspaceCwd,
             );
           }
+          if (opts?.onCancelledBeforeAdmission) {
+            throw error;
+          }
           if (appMountedRef.current) {
             reportError(error, 'Failed to send message');
           }
@@ -14750,6 +14754,11 @@ export function App({
         // connection — session navigation that must discard an armed
         // `/clear` carry, mirroring loadSidebarSession.
         pendingManualTitleRef.current = undefined;
+        if (pendingBoundRunRef.current) {
+          pendingBoundRunRef.current.reject(
+            createScheduledTaskCancellation('Bound run target was replaced'),
+          );
+        }
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).createSession({
@@ -18200,6 +18209,11 @@ export function App({
       let focusRequest: number | undefined;
       try {
         autoRecapVersionRef.current += 1;
+        if (pendingBoundRunRef.current) {
+          pendingBoundRunRef.current.reject(
+            createScheduledTaskCancellation('Bound run target was replaced'),
+          );
+        }
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession(
@@ -19932,10 +19946,17 @@ export function App({
             );
           }
         };
+        let guardFailure: unknown;
         const beforeTaskHttpDispatch = async () => {
-          assertRunnable();
-          await beforeTaskDispatch?.();
-          assertRunnable();
+          guardFailure = undefined;
+          try {
+            assertRunnable();
+            await beforeTaskDispatch?.();
+            assertRunnable();
+          } catch (error) {
+            guardFailure = error;
+            throw error;
+          }
         };
         try {
           assertRunnable();
@@ -19986,11 +20007,22 @@ export function App({
         }).then(
           () => {
             if (!admitted) {
-              reject(new Error('Run was cancelled before it started'));
+              if (guardFailure !== undefined) {
+                reject(guardFailure);
+                return;
+              }
+              reject(
+                !scheduledScopeIsCurrent() ||
+                  scheduledScope?.cancelledBeforeAdmission?.()
+                  ? createScheduledTaskCancellation(
+                      'Run was cancelled before it started',
+                    )
+                  : new Error('Run was cancelled before it started'),
+              );
             }
           },
           (error: unknown) => {
-            if (!admitted) reject(error);
+            if (!admitted) reject(guardFailure ?? error);
           },
         );
       }),

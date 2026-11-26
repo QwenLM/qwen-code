@@ -40,7 +40,10 @@ import type {
   DaemonSessionGroupPresetColor,
 } from '@qwen-code/sdk/daemon';
 import { sanitizeDisplayText } from '../../hooks/useAtMentionMenu';
-import { runScheduledTaskManually } from '../../utils/scheduledTaskManualRun';
+import {
+  isScheduledTaskCancellation,
+  runScheduledTaskManually,
+} from '../../utils/scheduledTaskManualRun';
 import { useI18n } from '../../i18n';
 import { useWebShellPortalRoot } from '../../portalRoot';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
@@ -1520,6 +1523,13 @@ export function ScheduledTasksDialog({
       try {
         await onRunPrompt(stopCommand(watch), sessionId, ...inWorkspace(task));
       } catch (err) {
+        if (
+          isScheduledTaskCancellation(err) ||
+          (err instanceof DOMException && err.name === 'AbortError') ||
+          (err instanceof Error && err.name === 'AbortError')
+        ) {
+          return;
+        }
         onError(err, t('autofixPrWatches.stopFailed'));
       } finally {
         if (mountedRef.current) setStoppingWatch(null);
