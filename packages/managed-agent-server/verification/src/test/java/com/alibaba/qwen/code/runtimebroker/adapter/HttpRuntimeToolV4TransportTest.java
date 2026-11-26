@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.adapter;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
-import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -146,7 +145,7 @@ class HttpRuntimeToolV4TransportTest {
         value.put(
                 "resultDigest",
                 DigestUtils.sha256Hex(
-                        CsiNativeActivationProof.canonical(JSON.valueToTree(signed))));
+                        RuntimeToolMeasurements.canonical(JSON.valueToTree(signed))));
         return value;
     }
 
@@ -190,8 +189,8 @@ class HttpRuntimeToolV4TransportTest {
         assertEquals(baseResult(), RuntimeToolMeasurements.base(result));
         assertEquals(
                 wire.get("resultDigest"),
-                RuntimeToolMeasurements.metadata(result).get("resultDigest"));
-        assertEquals(measurements(), RuntimeToolMeasurements.metadata(result).get("measurements"));
+                RuntimeToolMeasurements.metadata(result).resultDigest());
+        assertEquals(measurements(), RuntimeToolMeasurements.metadata(result).measurements());
         assertEquals(
                 execute,
                 transport
@@ -349,8 +348,8 @@ class HttpRuntimeToolV4TransportTest {
                         .get(2, TimeUnit.SECONDS);
         @SuppressWarnings("unchecked")
         Map<String, Object> result = (Map<String, Object>) execute.get("result");
-        assertTrue(RuntimeToolMeasurements.metadata(result).containsKey("measurements"));
-        assertNull(RuntimeToolMeasurements.metadata(result).get("measurements"));
+        assertTrue(RuntimeToolMeasurements.metadata(result).wireValue().containsKey("measurements"));
+        assertNull(RuntimeToolMeasurements.metadata(result).measurements());
         response.set(
                 Map.of(
                         "protocolVersion",

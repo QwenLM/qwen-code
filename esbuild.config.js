@@ -56,6 +56,32 @@ const wasmBinaryPlugin = {
   },
 };
 
+// OpenCC's prebuilt converter has no license banner for esbuild to preserve.
+const openccLicensePlugin = {
+  name: 'opencc-license',
+  setup(build) {
+    build.onLoad(
+      { filter: /[/\\]opencc-js[/\\]dist[/\\]esm[/\\]t2cn\.js$/ },
+      ({ path: source }) => {
+        const packageDir = path.resolve(path.dirname(source), '../..');
+        const license = readFileSync(path.join(packageDir, 'LICENSE'), 'utf8');
+        const notices = readFileSync(
+          path.join(packageDir, 'THIRD_PARTY_LICENSES.md'),
+          'utf8',
+        );
+        return {
+          contents:
+            '/** @license opencc-js\n' +
+            (license + '\n' + notices).replaceAll('*/', '* /') +
+            '\n*/\n' +
+            readFileSync(source, 'utf8'),
+          loader: 'js',
+        };
+      },
+    );
+  },
+};
+
 // `@opentelemetry/sdk-node` eagerly require()s every exporter package to
 // support `OTEL_*_EXPORTER` env-based auto-configuration, which would drag
 // both OTLP protocol chains (~2 MiB) back into the sdk-impl static closure
@@ -247,6 +273,7 @@ const mainBuild = esbuild.build({
     sdkNodeExporterStubPlugin,
     syncFileEncodingTreeShakePlugin,
     wasmBinaryPlugin,
+    openccLicensePlugin,
     wasmLoader({ mode: 'embedded' }),
   ],
   metafile: true,

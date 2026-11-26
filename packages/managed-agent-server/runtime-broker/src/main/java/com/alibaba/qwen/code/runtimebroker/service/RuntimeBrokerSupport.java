@@ -4,15 +4,21 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
+import com.alibaba.qwen.code.runtimebroker.RuntimeExecutionStatus;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -23,15 +29,15 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 final class RuntimeBrokerSupport {
     private RuntimeBrokerSupport() { }
 
-    static final Set<String> RUNTIME_STATUS_STATES = Set.of(
-            "prepared", "executing", "cancel_requested", "settled",
-            "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
 
     /** Tool v3 publication dispatch: a payload digest and publication grant. */
@@ -263,7 +269,7 @@ final class RuntimeBrokerSupport {
 
     static Map<String, Object> projectV3Status(Map<String, Object> response) {
         Object state = response.get("state");
-        if (!(state instanceof String name) || !RUNTIME_STATUS_STATES.contains(name)
+        if (!(state instanceof String name) || !RuntimeExecutionStatus.State.supports(name)
                 || "settled".equals(name) != (response.get("result") instanceof Map)) {
             throw conflict("runtime_execution_conflict", "Tool v3 returned an invalid status");
         }
@@ -274,7 +280,7 @@ final class RuntimeBrokerSupport {
 
     static CompletionStage<HarnessSessionResolver.Capabilities> resolveCapabilities(
             HarnessSessionResolver sessionResolver, String harnessSessionId, RuntimeLifecycleAuthority authority) {
-        String id = BrokerValues.requirePathSafe(BrokerValues.requireId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
+        String id = BrokerValues.requirePathSafe(BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
         return mapFailure(safeStage(() -> sessionResolver.resolveCapabilities(id, authority)),
                 "runtime_scope_resolution_failed", "Runtime scope resolution failed").thenApply(value -> {
                     if (value == null || value.scope() == null) {
@@ -300,6 +306,23 @@ final class RuntimeBrokerSupport {
                     }
                     return scope;
                 });
+    }
+
+    static ScheduledExecutorService newScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable,
+                    "qwen-runtime-broker-coordination");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    static Duration requireDuration(Duration duration,
+            String name) {
+        if (duration == null || duration.isZero() || duration.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return duration;
     }
 
     static void requireOpen(AtomicBoolean closed) {
@@ -373,5 +396,76 @@ final class RuntimeBrokerSupport {
 
     static long renewalDelayMillis(Duration duration) {
         return Math.max(1, duration.toMillis() / 3);
+    }
+
+    /**
+     * A retryable external-workspace provision failure keeps the binding
+     * recoverable instead of blocking it: the provider may answer on retry.
+     */
+    static boolean retryableExternalWorkspaceProvision(
+            RuntimeProvisionRequest request, Throwable cause) {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)) {
+            return false;
+        }
+        if (cause instanceof RuntimeBrokerException failure) {
+            return failure.isRetryable()
+                    && ("runtime_external_provider_failed".equals(failure.getCode())
+                            || failure.getStatusCode() == 503 && (RuntimeProvisionFailureHandler.externalRetryable(request, failure)
+                                    || "runtime_broker_provision_timeout".equals(failure.getCode())
+                                    || "managed_runtime_unavailable".equals(failure.getCode())));
+        }
+        return cause instanceof IOException || cause instanceof TimeoutException;
+    }
+
+    /**
+     * An external-workspace binding that already carries a lease and
+     * attestation adopts the worker through reconciliation rather than
+     * re-provisioning.
+     */
+    static boolean shouldReconcileExternalWorkspace(
+            RuntimeProvisionRequest request,
+            RuntimeBindingRecord record) {
+        return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
+                && record.getResourceHandle() != null && record.getLease() != null
+                && record.getAttestationGeneration() > 0;
+    }
+
+    /**
+     * A drain claim stays valid while its binding is DRAINING, or while a
+     * LOST binding still belongs to the claim that captured it.
+     */
+    static boolean isDrainClaimStateValid(RuntimeBindingRecord binding, boolean stoppedRecovery, boolean lostClaim) {
+        return binding.getState() == RuntimeBindingRecord.State.DRAINING
+                || (stoppedRecovery || lostClaim) && binding.getState() == RuntimeBindingRecord.State.LOST;
+    }
+
+    /**
+     * A restart-fenced external-workspace binding may still own a live worker
+     * with one stale Session row. The drain marks it drain-requested, stops
+     * that worker for the persisted receipt and re-checks for unsettled rows
+     * before RELEASED, so refusing here would only fence the storage holder
+     * with no exit. Executions in flight still refuse: nothing can settle
+     * them without their worker.
+     */
+    static boolean isLiveWorkerStopRecoverable(RuntimeBindingRecord claimed, boolean lost,
+            RuntimeRecoveryEvidence absence, boolean activeExecutions) {
+        return lost && absence == null && claimed.getDrainReceipt() == null && !activeExecutions
+                && WorkspaceExecutionProfile.isExternalWorkspaceRequest(claimed.getRequest());
+    }
+
+    /**
+     * Verifies that a drain receipt matches the claimed binding's identity,
+     * including the external-workspace seed/lease/handle chain.
+     */
+    static void verifyDrainReceiptIdentity(RuntimeBindingRecord expected, RuntimeDrainReceipt receipt) {
+        if (receipt == null || !receipt.matches(expected)
+                || expected.getDrainReceipt() != null && !expected.getDrainReceipt().equals(receipt)
+                || RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(expected.getRequest().getProvisionerKind())
+                        && (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(expected.getRequest())
+                                || expected.getResourceHandle() == null || expected.getProvisionSeed() == null
+                                || expected.getLease() == null || !expected.getProvisionSeed().matches(expected.getLease())
+                                || !expected.getResourceHandle().equals(receipt.resourceHandle()))) {
+            throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
+        }
     }
 }

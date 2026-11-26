@@ -1,11 +1,20 @@
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImapFlow } from 'imapflow';
 import type { Transporter } from 'nodemailer';
 import { simpleParser } from 'mailparser';
+import { MANAGED_OUTBOUND_LIMIT } from '@qwen-code/channel-base';
 import {
   ManagedEmailAdapter,
   type ManagedChannelControlPlane,
@@ -77,6 +86,7 @@ class FakeImap extends EventEmitter {
 }
 
 class FakeControlPlane implements ManagedChannelControlPlane {
+  destinationKey = '';
   registrations: Array<{ accountGeneration: number }> = [];
   events: ManagedInboundEvent[] = [];
   admitted = new Map<string, string>();
@@ -85,13 +95,30 @@ class FakeControlPlane implements ManagedChannelControlPlane {
   failSubmits = 0;
   refuseSubmitsWithStatus = 0;
   failRegisters = 0;
+  enforceGenerationFence = false;
+  highestGeneration = 0;
+  registerGate?: Promise<void>;
+  registerEntered?: () => void;
   submitErrors: Array<{ status: number; code?: string }> = [];
   receiptErrors: Array<{ status: number; code?: string }> = [];
   submitAttempts = 0;
   disconnected = false;
 
   async register(request: { accountGeneration: number }) {
+    this.registerEntered?.();
+    if (this.registerGate) await this.registerGate;
     this.registrations.push({ accountGeneration: request.accountGeneration });
+    // Mirror the control plane's monotonic fence: a generation below the
+    // highest it has seen is refused channel_generation_stale (R1-8).
+    if (this.enforceGenerationFence) {
+      if (request.accountGeneration < this.highestGeneration) {
+        throw Object.assign(new Error('HTTP 409'), {
+          status: 409,
+          code: 'channel_generation_stale',
+        });
+      }
+      this.highestGeneration = request.accountGeneration;
+    }
     if (this.failRegisters > 0) {
       this.failRegisters -= 1;
       throw new Error('ECONNRESET');
@@ -382,6 +409,43 @@ describe('managed email inbound', () => {
     // Nothing is admitted or claimed after a compromise reaps the lock.
     expect(plane.events).toHaveLength(0);
     expect(state(adapter).pending).toEqual([]);
+    await adapter.disconnect();
+  });
+
+  it('stops persisting after the state lock is compromised (#17173 R6/R7 parity)', async () => {
+    const adapter = make();
+    await adapter.connect();
+    const store = (
+      adapter as unknown as { store: { save: (s: unknown) => void } }
+    ).store;
+    const saveSpy = vi.spyOn(store, 'save');
+    // Park the tick inside submitInbound so its post-answer persist lands after
+    // the compromise — the in-flight tick, not a shutdown drain, is the writer
+    // the ownership guard must silence.
+    let releaseSubmit!: () => void;
+    const submitGate = new Promise<void>((resolve) => {
+      releaseSubmit = resolve;
+    });
+    let submitEntered!: () => void;
+    const enteredSubmit = new Promise<void>((resolve) => {
+      submitEntered = resolve;
+    });
+    const originalSubmit = plane.submitInbound.bind(plane);
+    plane.submitInbound = async (event) => {
+      submitEntered();
+      await submitGate;
+      return originalSubmit(event);
+    };
+    append(raw('m1', 'hello'));
+    const ticking = adapter.tick();
+    // The email tick polls the mailbox before it submits; wait until it is
+    // actually parked inside submitInbound, not merely started.
+    await enteredSubmit;
+    saveSpy.mockClear();
+    lockCompromised!(); // a second owner won the mailbox mid-tick
+    releaseSubmit();
+    await ticking;
+    expect(saveSpy).not.toHaveBeenCalled();
     await adapter.disconnect();
   });
 
@@ -1545,6 +1609,23 @@ describe('managed email outbound', () => {
     };
   }
 
+  it('caps the persisted outbound ledger at the shared limit (R1-3)', async () => {
+    const adapter = make();
+    await adapter.connect();
+    // Receipt answers are lost so every sent segment stays in the ledger.
+    plane.receipt = async () => {
+      throw Object.assign(new Error('answer lost'), { status: 503 });
+    };
+    plane.outbox = Array.from({ length: MANAGED_OUTBOUND_LIMIT + 1 }, (_, i) =>
+      delivery(`d-${i}`),
+    );
+    await adapter.tick();
+    expect(sent).toHaveBeenCalledTimes(MANAGED_OUTBOUND_LIMIT + 1);
+    // The append slices to the cap, so the persisted ledger stays loadable.
+    expect(state(adapter).outbound).toHaveLength(MANAGED_OUTBOUND_LIMIT);
+    await adapter.disconnect();
+  });
+
   it('sends a claimed reply into the thread and reports the provider acceptance', async () => {
     const adapter = make();
     await adapter.connect();
@@ -2014,5 +2095,665 @@ describe('managed email outbound', () => {
     await adapter.connect();
     await adapter.disconnect();
     expect(plane.disconnected).toBe(true);
+  });
+});
+
+describe('managed email adapter registration-identity isolation', () => {
+  function legacyState(pending: number, outbound: number) {
+    return {
+      version: 1,
+      uidValidity: '1',
+      generation: 1,
+      lastUid: pending,
+      pending: Array.from({ length: pending }, (_, i) => ({
+        uid: i + 1,
+        eventId: `1:${i + 1}`,
+      })),
+      outbound: Array.from({ length: outbound }, (_, i) => ({
+        deliveryId: `d-${i}`,
+        ordinal: i,
+        messageId: `<m-${i}@example.com>`,
+      })),
+      recent: [],
+      routes: [],
+    };
+  }
+
+  it('a destination change never replays one tenant pending into another', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const a = make();
+    await a.connect();
+    // A real message at uid 1 so a replayed claim would reach the wire: a
+    // hand-written claim against an empty mailbox is dropped before submission
+    // and cannot witness the cross-tenant replay at all.
+    append(raw('tenant-a-mail'));
+    const sA = state(a);
+    sA.pending = [{ uid: 1, eventId: '1:1' }];
+    sA.lastUid = 1;
+    writeFileSync(a.stateFile, JSON.stringify(sA));
+    await a.disconnect();
+    const stateFileA = a.stateFile;
+
+    plane.destinationKey = 'cp|tenant-b|chan|actor|ws|.';
+    const b = make();
+    await b.connect();
+    expect(b.stateFile).not.toBe(stateFileA);
+    expect(dirname(b.stateFile)).toBe(dirname(stateFileA));
+    expect(state(b).pending).toEqual([]);
+    await b.tick();
+    expect(plane.submitAttempts).toBe(0);
+    expect(plane.events).toHaveLength(0);
+    await b.disconnect();
+  });
+
+  it('a workspace change within one tenant isolates the ledger', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const a = make();
+    await a.connect();
+    const sA = state(a);
+    sA.pending = [{ uid: 1, eventId: '1:1' }];
+    sA.lastUid = 1;
+    writeFileSync(a.stateFile, JSON.stringify(sA));
+    await a.disconnect();
+
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws-2|.';
+    const b = make();
+    await b.connect();
+    expect(b.stateFile).not.toBe(a.stateFile);
+    expect(state(b).pending).toEqual([]);
+    await b.disconnect();
+  });
+
+  it('logs the stranded legacy ledger on upgrade rather than dropping it silently', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify(legacyState(2, 3)),
+    );
+    // Mail up to UID 5 arrived while down, so the legacy cursor (2) sits below
+    // the tip and the offline window is genuine.
+    for (let i = 0; i < 5; i++) append(raw(`strand-${i}`));
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain(join(dir, 'managed-state.json'));
+    expect(stranded[0]).toContain('2 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    expect(stranded[0]).toContain('does not re-fetch them');
+    expect(stranded[0]).toContain(
+      'outbound segments with an unknown delivery status were dropped',
+    );
+    // The legacy cursor (lastUid 2) is named as a skipped offline window even
+    // though this legacy also carries pending/outbound (R1-1), bounded by the
+    // pinned cursor (the fresh tip, 5).
+    expect(stranded[0]).toContain(
+      'Mail between the legacy cursor (UID 2) and the pinned cursor (UID 5)',
+    );
+    // Not adopted: the legacy pending never enters this registration's state.
+    expect(state(adapter).pending).toEqual([]);
+    // Archive contract: renamed (not deleted), claims preserved, path logged,
+    // and a second start does not re-announce it.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    const archived = readdirSync(dir).filter((f) =>
+      f.startsWith('managed-state.json.stranded-'),
+    );
+    expect(archived).toHaveLength(1);
+    const archivedState = JSON.parse(
+      readFileSync(join(dir, archived[0]), 'utf8'),
+    );
+    expect(archivedState.pending).toHaveLength(2);
+    expect(archivedState.outbound).toHaveLength(3);
+    expect(lines.some((l) => l.includes(join(dir, archived[0])))).toBe(true);
+    await adapter.disconnect();
+    lines.length = 0;
+    const second = make({}, { log: (l: string) => lines.push(l) });
+    await second.connect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    await second.disconnect();
+  });
+
+  it('a genuinely cursor-less quiescent legacy (0/0) reports no loss', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // No lastUid: a genuinely cursor-less legacy skips no offline window.
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), lastUid: undefined }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).not.toContain('re-fetch');
+    expect(stranded[0]).not.toContain('unknown delivery status');
+    expect(stranded[0]).not.toContain('Mail between the legacy cursor');
+    await adapter.disconnect();
+  });
+
+  it('names the skipped offline window for a quiescent cursor-bearing legacy', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // UIDs 1..5 arrived while the adapter was stopped (tip 5); the legacy
+    // cursor sits at 2, so 3..5 are below the fresh tip and never re-fetched.
+    for (let i = 0; i < 5; i++) append(raw(`offline-${i}`));
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), lastUid: 2 }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).toContain(
+      'Mail between the legacy cursor (UID 2) and the pinned cursor (UID 5)',
+    );
+    expect(stranded[0]).toContain('will not be admitted');
+    // The skipped mail is never admitted: the fresh ledger starts at the tip.
+    await adapter.tick();
+    expect(plane.events).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('an unreadable legacy ledger reports unknown counts and a possible loss', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('unknown pending');
+    expect(stranded[0]).toContain('unknown outbound');
+    expect(stranded[0]).toContain('could not be read');
+    expect(stranded[0]).not.toContain('0 pending');
+    await adapter.disconnect();
+  });
+
+  it('a legacy ledger staged after a rollback is still reported (keyed ledger exists)', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const first = make({}, { log: (l: string) => lines.push(l) });
+    await first.connect();
+    await first.disconnect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    // A rollback stages a fresh legacy after the keyed ledger already exists.
+    writeFileSync(
+      join(dirname(first.stateFile), 'managed-state.json'),
+      JSON.stringify(legacyState(1, 0)),
+    );
+    lines.length = 0;
+    const second = make({}, { log: (l: string) => lines.push(l) });
+    await second.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    // Roll-forward: the keyed ledger keeps its own cursor (below the legacy
+    // cursor) and re-fetches, so the loss clauses must NOT fire (R1-2).
+    expect(stranded[0]).not.toContain('re-fetch');
+    expect(stranded[0]).not.toContain('Mail between the legacy cursor');
+    await second.disconnect();
+  });
+
+  it('reports settled-receipt outbound as zero, not an unknown-status loss', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        ...legacyState(0, 0),
+        outbound: [
+          {
+            deliveryId: 'd-a',
+            ordinal: 0,
+            messageId: '<a@x>',
+            receipt: {
+              outcome: 'accepted',
+              ordinal: 0,
+              providerMessageId: '<a@x>',
+              acceptedAt: 1,
+            },
+          },
+          {
+            deliveryId: 'd-r',
+            ordinal: 1,
+            messageId: '<r@x>',
+            receipt: { outcome: 'rejected' },
+          },
+        ],
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).not.toContain('unknown delivery status');
+    await adapter.disconnect();
+  });
+
+  it('a fresh generation-1 ledger is refused when the server holds a higher generation', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    const adapter = make();
+    await expect(adapter.connect()).rejects.toThrow();
+    expect(plane.registrations).toContainEqual({ accountGeneration: 1 });
+  });
+
+  it('seeds the legacy generation so a re-keyed mailbox still registers after upgrade', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    const adapter = make();
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 2 }),
+    );
+    await adapter.connect();
+    expect(plane.registrations).toContainEqual({ accountGeneration: 2 });
+    expect(state(adapter).generation).toBe(2);
+    // Seeding the counter adopts no pending/cursor state.
+    expect(state(adapter).pending).toEqual([]);
+    await adapter.disconnect();
+  });
+
+  it('does not seed a non-integer legacy generation that would brick the fresh ledger', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const first = make();
+    const dir = dirname(first.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 2.5 }),
+    );
+    await first.connect();
+    // A float generation is not a safe integer: seeding it would persist a
+    // state the validator rejects on the next load, bricking the ledger.
+    expect(state(first).generation).toBe(1);
+    await first.disconnect();
+    const second = make();
+    await second.connect();
+    expect(state(second).generation).toBe(1);
+    await second.disconnect();
+  });
+
+  it('rejects when the lock is lost during connection', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    let release!: () => void;
+    plane.registerGate = new Promise<void>((r) => {
+      release = r;
+    });
+    let entered!: () => void;
+    const enteredP = new Promise<void>((r) => {
+      entered = r;
+    });
+    plane.registerEntered = entered;
+    const adapter = make();
+    const connecting = adapter.connect();
+    await enteredP;
+    lockCompromised!();
+    release();
+    await expect(connecting).rejects.toThrow(/stopped during connection/);
+  });
+
+  it('a failed first start leaves the legacy unarchived for a rollback', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make();
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify(legacyState(1, 0)),
+    );
+    plane.failRegisters = 1;
+    await expect(adapter.connect()).rejects.toThrow();
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('a second registration seeds the archived generation high-water', async () => {
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    plane.destinationKey = 'cp|tenant-a|chan|actor-a|ws|.';
+    const a = make();
+    const dir = dirname(a.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 2 }),
+    );
+    await a.connect();
+    expect(plane.registrations).toContainEqual({ accountGeneration: 2 });
+    // A archived the literal legacy on its successful start.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    await a.disconnect();
+    // B is a different actor/workspace of the same tenant/channel: it shares
+    // the control plane's generation row but keys a different ledger, and the
+    // literal legacy is gone — the seed must come from the archives/siblings.
+    plane.destinationKey = 'cp|tenant-a|chan|actor-b|ws|.';
+    const b = make();
+    await b.connect();
+    expect(b.stateFile).not.toBe(a.stateFile);
+    expect(plane.registrations.at(-1)).toEqual({ accountGeneration: 2 });
+    expect(state(b).generation).toBe(2);
+    await b.disconnect();
+  });
+
+  it('a second registration seeds from an archive that outranks every ledger', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor-a|ws|.';
+    const a = make();
+    await a.connect();
+    const dir = dirname(a.stateFile);
+    await a.disconnect();
+    // The rollback case: an archive carries a generation above A's keyed ledger
+    // (the pre-upgrade build advanced it, then the file was archived), so the
+    // archive arm — not any live ledger — must decide the seed.
+    writeFileSync(
+      join(dir, 'managed-state.json.stranded-fixture'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 4 }),
+    );
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 4;
+    plane.destinationKey = 'cp|tenant-a|chan|actor-b|ws|.';
+    const b = make();
+    await b.connect();
+    expect(plane.registrations.at(-1)).toEqual({ accountGeneration: 4 });
+    expect(state(b).generation).toBe(4);
+    await b.disconnect();
+  });
+
+  it('repeats the loss clauses on the retry after a failed first start', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const first = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(first.stateFile);
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 5; i++) append(raw(`retry-${i}`));
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(1, 0), lastUid: 2 }),
+    );
+    plane.failRegisters = 1;
+    await expect(first.connect()).rejects.toThrow();
+    const s1 = lines.filter((l) => l.includes('is stranded and not replayed'));
+    expect(s1[0]).toContain('does not re-fetch them');
+    expect(s1[0]).toContain(
+      'Mail between the legacy cursor (UID 2) and the pinned cursor (UID 5)',
+    );
+    await first.disconnect();
+    // Mail arrives after the failed start. The retry loads the ledger pinned to
+    // 5, so the notice must bound the lost window by 5 (not claim the new mail
+    // is lost) and must not describe the loaded ledger as a fresh one.
+    append(raw('retry-after'));
+    lines.length = 0;
+    const second = make({}, { log: (l: string) => lines.push(l) });
+    await second.connect();
+    const s2 = lines.filter((l) => l.includes('is stranded and not replayed'));
+    expect(s2).toHaveLength(1);
+    expect(s2[0]).toContain('so they are not re-fetched');
+    expect(s2[0]).toContain("this ledger's cursor (UID 5)");
+    expect(s2[0]).toContain(
+      'Mail between the legacy cursor (UID 2) and the pinned cursor (UID 5)',
+    );
+    expect(s2[0]).not.toContain('fresh ledger');
+    expect(s2[0]).not.toContain('UID 6');
+    // The mail above the pinned cursor is admitted by the next poll, not lost.
+    await second.tick();
+    expect(plane.events).toHaveLength(1);
+    await second.disconnect();
+  });
+
+  it('logs and keeps the legacy when the archive rename fails', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify(legacyState(1, 0)),
+    );
+    const store = (
+      adapter as unknown as {
+        store: { archiveStrandedLegacy(): string | undefined };
+      }
+    ).store;
+    const spy = vi
+      .spyOn(store, 'archiveStrandedLegacy')
+      .mockReturnValue(undefined);
+    try {
+      await adapter.connect();
+      expect(
+        lines.some((l) => l.includes('could not archive the legacy ledger')),
+      ).toBe(true);
+      expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+      expect(
+        readdirSync(dir).filter((f) =>
+          f.startsWith('managed-state.json.stranded-'),
+        ),
+      ).toHaveLength(0);
+      await adapter.disconnect();
+      // The kept legacy is reported again on the next start.
+      lines.length = 0;
+      const second = make({}, { log: (l: string) => lines.push(l) });
+      await second.connect();
+      expect(
+        lines.filter((l) => l.includes('is stranded and not replayed')),
+      ).toHaveLength(1);
+      await second.disconnect();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('the epoch branch clamps a multi-generation lag to the durable high-water', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor-a|ws|.';
+    const a = make();
+    await a.connect();
+    const dir = dirname(a.stateFile);
+    // A sibling registration advanced the shared row to 3 while A was down.
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 3 }),
+    );
+    await a.disconnect();
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 3;
+    box.epoch = 3n;
+    box.messages.clear();
+    box.next = 1;
+    // A loads its generation-1 ledger; the epoch branch must jump to the
+    // high-water (3), not register generation 2 and meet a 409 before the seed.
+    const a2 = make();
+    await a2.connect();
+    expect(plane.registrations.at(-1)).toEqual({ accountGeneration: 3 });
+    expect(state(a2).generation).toBe(3);
+    await a2.disconnect();
+  });
+
+  it('heals a lagging loaded ledger and drops its dead staged claims visibly', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor-a|ws|.';
+    const a = make({}, { log: (l: string) => lines.push(l) });
+    await a.connect();
+    const dir = dirname(a.stateFile);
+    const sA = state(a);
+    sA.pending = [{ uid: 1, eventId: '1:1' }];
+    sA.lastUid = 1;
+    writeFileSync(a.stateFile, JSON.stringify(sA));
+    // A sibling of the same mailbox advanced the shared row to 2.
+    writeFileSync(
+      join(dir, 'managed-state-aaaaaaaaaaaaaaaa.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 2 }),
+    );
+    await a.disconnect();
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    lines.length = 0;
+    // A2 loads the generation-1 ledger with a staged claim, epoch unchanged.
+    // The claim's generation can never be registered (the row is ahead), so it
+    // is dead: heal to 2 and drop it visibly rather than wedge on every start.
+    const a2 = make({}, { log: (l: string) => lines.push(l) });
+    await a2.connect();
+    expect(state(a2).generation).toBe(2);
+    expect(state(a2).pending).toEqual([]);
+    expect(plane.registrations.at(-1)).toEqual({ accountGeneration: 2 });
+    expect(lines.some((l) => l.includes('admit nothing further'))).toBe(true);
+    await a2.disconnect();
+  });
+
+  it('does not claim a skipped offline window when the retry cursor equals the legacy cursor', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const first = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(first.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // Quiescent upgrade: the legacy cursor sits at the tip (0); the first start
+    // pins the fresh ledger to that same tip, then fails at registration.
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), lastUid: 0 }),
+    );
+    plane.failRegisters = 1;
+    await expect(first.connect()).rejects.toThrow();
+    await first.disconnect();
+    // Mail arrives after the failed start; the retry cursor still equals the
+    // legacy cursor, so the next poll (cursor + 1) admits it — no skipped window.
+    append(raw('after-failed-start'));
+    lines.length = 0;
+    const second = make({}, { log: (l: string) => lines.push(l) });
+    await second.connect();
+    const s2 = lines.filter((l) => l.includes('is stranded and not replayed'));
+    expect(s2).toHaveLength(1);
+    expect(s2[0]).not.toContain('Mail between the legacy cursor');
+    await second.tick();
+    expect(plane.events.length).toBeGreaterThan(0);
+    await second.disconnect();
+  });
+
+  it('an unreadable legacy carries a restore instruction when the row refuses the fresh generation', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await expect(adapter.connect()).rejects.toThrow();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('restore or repair it before restarting');
+    expect(stranded[0]).toContain('only local copy');
+  });
+
+  it('keeps an unreadable legacy in place for repair instead of archiving it', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await adapter.connect();
+    // The repair target stays at the printed path; archiving it would
+    // invalidate the restore instruction and make the warning permanent.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+    expect(
+      lines.some((l) => l.includes('restore or repair it before restarting')),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('names an unreadable generation source on a runtime mailbox reopen', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    const corrupt = join(dir, 'managed-state-aaaaaaaaaaaaaaaa.json');
+    writeFileSync(corrupt, '{not json');
+    await adapter.connect();
+    // Exactly one line per start: openMailbox names it, the heal does not re-log.
+    expect(
+      lines.filter((l) => l.includes('could not read the generation source')),
+    ).toHaveLength(1);
+    lines.length = 0;
+    // Force a runtime reopen: tick() re-enters openMailbox without connect().
+    (adapter as unknown as { imap: { usable: boolean } }).imap.usable = false;
+    await adapter.tick();
+    expect(
+      lines.filter(
+        (l) =>
+          l.includes('could not read the generation source') &&
+          l.includes(corrupt),
+      ),
+    ).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('does not report a skipped offline window for a lossless quiescent upgrade', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // Quiescent at the pre-upgrade cursor: legacy lastUid 0, empty mailbox (tip
+    // 0). Nothing arrived while down, so the upgrade skipped no offline window.
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), lastUid: 0 }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).not.toContain('Mail between the legacy cursor');
+    await adapter.disconnect();
   });
 });

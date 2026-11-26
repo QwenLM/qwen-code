@@ -936,7 +936,7 @@ describe('TUI product evidence', () => {
   });
 
   it('budgets cold setup and all three serial product acceptance legs', () => {
-    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(60);
   });
 
   it('treats unhandled errors as acceptance failures on every runner', () => {
@@ -1042,10 +1042,15 @@ describe('e2e workflow', () => {
       e2eRunScript.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
     ).toHaveLength(1);
     expect(
+      e2eRunScript.match(
+        /--exclude '\*\*\/cli\/qwen-serve-liveness-grace\.test\.ts'/g,
+      ),
+    ).toHaveLength(1);
+    expect(
       e2eRunScript.match(/--exclude '\*\*\/sdk-typescript\/\*\*'/g),
     ).toHaveLength(1);
     expect(e2eRunScript).toContain(
-      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1',
+      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts cli/qwen-serve-liveness-grace.test.ts --poolOptions.forks.maxForks=1',
     );
     expect(e2eRunScript).not.toContain('--poolOptions.forks.singleFork');
     // The arrangement is load-bearing: the batch must run first and the
@@ -1054,13 +1059,16 @@ describe('e2e workflow', () => {
     // the pattern tolerates formatting-only rewrites (continuations, comment
     // lines, trailing spaces) so a benign edit cannot turn CI red.
     expect(e2eRunScript).toMatch(
-      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
+      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts cli\/qwen-serve-liveness-grace\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
     );
     // Text pins never touch the tree: renaming the file or directory these
     // filters name silently returns the suites to the three-fork batch.
     expect(existsSync('integration-tests/cli/qwen-serve-routes.test.ts')).toBe(
       true,
     );
+    expect(
+      existsSync('integration-tests/cli/qwen-serve-liveness-grace.test.ts'),
+    ).toBe(true);
     expect(existsSync('integration-tests/sdk-typescript')).toBe(true);
     expect(existsSync('integration-tests/channel-plugin.test.ts')).toBe(true);
     expect(
@@ -1168,8 +1176,8 @@ describe('e2e workflow', () => {
     });
 
     it.each(jobs)('%s wires the switches per arm', (job) => {
-      expect(switchEnv(job, 'current')).toEqual(['', '']);
-      expect(switchEnv(job, 'unified')).toEqual(['1', '']);
+      expect(switchEnv(job, 'current')).toEqual(['0', '0']);
+      expect(switchEnv(job, 'unified')).toEqual(['1', '0']);
       expect(switchEnv(job, 'kernel')).toEqual(['1', '1']);
     });
 
@@ -1336,6 +1344,11 @@ describe('e2e workflow', () => {
     it('keeps the Docker build environment', () => {
       expect(runStep.env.QWEN_SANDBOX).toContain("'docker'");
       expect(runStep.env.VERBOSE).toBe('true');
+      // The two matrix legs have to pin opposite arms. An empty value means
+      // "no override" and would let both legs follow the
+      // `experimental.unifiedAgentLoop` default, so the scheduled signal that
+      // gates the default flip would report green while comparing nothing.
+      expect(runStep.env.QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP).toContain("'0'");
     });
 
     it('reaps only the sandbox containers owned by its matrix job', () => {
@@ -2074,7 +2087,7 @@ describe('installed npm acceptance workflow', () => {
     expect(workflow.jobs.changes.if).toBeUndefined();
   });
   it('keeps installed setup independent of the original source parity budget', () => {
-    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(60);
     expect(job['timeout-minutes']).toBe(60);
     expect(
       job.steps.some((step) => step.uses?.startsWith('oven-sh/setup-bun')),

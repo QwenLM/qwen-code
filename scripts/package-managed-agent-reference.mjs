@@ -62,6 +62,11 @@ export const ADMIN_COMMANDS = Object.freeze([
     'Retire, prepare, promote, abort or inspect a Workspace migration.',
   ],
   [
+    'workspace-identity-reattest',
+    `${PERSISTENCE}.WorkspaceIdentityReattestationMain`,
+    'Plan, fence, retire or complete an offline macOS storage identity upgrade.',
+  ],
+  [
     'maintenance-recovery',
     `${PERSISTENCE}.WorkspaceMaintenanceRecoveryMain`,
     'Inspect or reconcile a Workspace held by maintenance.',
@@ -70,41 +75,6 @@ export const ADMIN_COMMANDS = Object.freeze([
     'operator-recovery',
     `${WORKSPACE_RUNTIME}.WorkspaceRecoveryCommand`,
     'Prepare, complete or inspect a Hosted Shell lease recovery.',
-  ],
-  [
-    'csi-registration',
-    `${PERSISTENCE}.WorkspaceCsiRegistrationMain`,
-    'Register or inspect a reviewed CSI Workspace registration.',
-  ],
-  [
-    'csi-protection',
-    `${WORKSPACE_RUNTIME}.WorkspaceCsiProtectionMain`,
-    'Render the protection policy for a CSI registration.',
-  ],
-  [
-    'csi-session',
-    `${PERSISTENCE}.WorkspaceCsiSessionMain`,
-    'Create a reviewed CSI Session offline.',
-  ],
-  [
-    'csi-runtime',
-    `${PERSISTENCE}.WorkspaceCsiRuntimeMain`,
-    'Serve, prompt or retire one reviewed CSI Session Runtime.',
-  ],
-  [
-    'csi-retirement',
-    `${PERSISTENCE}.WorkspaceCsiRetirementMain`,
-    'Inspect or begin a CSI Workspace retirement.',
-  ],
-  [
-    'csi-worker-ack',
-    `${PERSISTENCE}.WorkspaceCsiWorkerAckMain`,
-    'Acknowledge or inspect a CSI worker publication.',
-  ],
-  [
-    'resident-retirement',
-    `${PERSISTENCE}.ResidentWorkspaceRetirementMain`,
-    'Inspect, begin or delete the pod of a resident Workspace retirement.',
   ],
   [
     'resolved-configuration',
@@ -444,7 +414,7 @@ export async function createReferenceDistribution({
     throw new Error(`${CONTRACT_DOCUMENT} ${publicApi.error}.`);
   }
   const capabilities = await readFile(
-    path.join(root, 'packages/cli/src/serve/capabilities.ts'),
+    path.join(root, 'packages/sdk-typescript/src/daemon/capabilities.ts'),
     'utf8',
   );
   const brokerClient = await readFile(
@@ -474,12 +444,19 @@ export async function createReferenceDistribution({
   }
   const lifecycleV2ProfilesDefault = uniqueMatch(
     withoutComments(hostedHarnessContract),
-    /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
+    // The default may wrap across lines (Prettier splits a long `??`), so allow
+    // an optional newline between the operator and the literal.
+    /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*\r?\n?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
     'Hosted lifecycle v2 profile default',
   );
-  if (lifecycleV2ProfilesDefault !== 'hosted-workspace-shell/1') {
+  // D3: ordinary files closes on v2 too, so the reference distribution advertises
+  // files alongside canonical Shell by default; external-files keeps v1.
+  if (
+    lifecycleV2ProfilesDefault !==
+    'hosted-workspace-files/1,hosted-workspace-shell/1'
+  ) {
     throw new Error(
-      'Hosted lifecycle v2 profiles must default to canonical Shell only.',
+      'Hosted lifecycle v2 profiles must default to canonical files and Shell.',
     );
   }
 

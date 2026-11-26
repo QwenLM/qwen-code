@@ -49,7 +49,7 @@ class JdbcPlacementGuardTest {
             }
         }
         for (RuntimeBindingRecord.State state : RuntimeBindingRecord.State.values()) {
-            for (String kind : List.of("legacy", "local-process", "kubernetes-workspace")) {
+            for (String kind : List.of("legacy", "local-process")) {
                 for (boolean seeded : List.of(false, true)) {
                     if (state == RuntimeBindingRecord.State.READY && !"legacy".equals(kind)) {
                         continue;
@@ -243,7 +243,7 @@ class JdbcPlacementGuardTest {
             }
             execute("UPDATE ma_runtime_binding SET binding_state = ?, attestation_generation = ? WHERE binding_id = ?",
                     state.name(), attested, created.getBindingId());
-            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_key = ?",
+            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_id = ?",
                     JdbcRepositorySupport.requestKey(request));
             nextId = "candidate";
             return new RuntimeBindingRecord(created.getBindingId(), request, seed, created.getGeneration(), state,

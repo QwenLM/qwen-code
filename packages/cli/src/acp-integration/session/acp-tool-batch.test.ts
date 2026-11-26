@@ -34,6 +34,8 @@ type SchedulerOptions = {
     status: string,
     durationMs: number,
   ) => void;
+  isTrustedTool?: (tool: unknown) => boolean;
+  readOnlyRefusalMessage?: string;
 };
 
 const batch = vi.hoisted(() => ({
@@ -479,6 +481,120 @@ describe('runAcpToolBatch', () => {
     expect(result.stopAfterPermissionCancel).toBe(false);
   });
 
+  it('reports promotion and settlement only for top-level calls', async () => {
+    const shell: ToolCallRequestInfo = {
+      ...read,
+      callId: 'call_shell',
+      name: 'run_shell_command',
+      args: { command: 'npm test' },
+    };
+    const promote = new AbortController();
+    const nestedShell = {
+      ...shell,
+      callId: 'call_exec:code:1',
+      parentCallId: 'call_exec',
+    };
+    const onShellMovable = vi.fn();
+    const onCallSettled = vi.fn();
+    batch.run = async (shared) => {
+      const { onToolCallsUpdate } = batch.options;
+      onToolCallsUpdate([
+        { status: 'executing', request: read, invocation },
+        { status: 'executing', request: shell, invocation },
+      ]);
+      expect(onShellMovable.mock.calls).toEqual([[shell.callId, undefined]]);
+      onToolCallsUpdate([
+        { status: 'executing', request: read, invocation },
+        {
+          status: 'executing',
+          request: shell,
+          invocation,
+          promoteAbortController: promote,
+        },
+        {
+          status: 'executing',
+          request: nestedShell,
+          invocation,
+          promoteAbortController: new AbortController(),
+        },
+      ]);
+      expect(onShellMovable.mock.calls).toEqual([
+        [shell.callId, undefined],
+        [shell.callId, promote],
+      ]);
+      expect(onCallSettled).not.toHaveBeenCalled();
+      onToolCallsUpdate([
+        { status: 'executing', request: shell, invocation },
+        {
+          status: 'success',
+          request: nestedShell,
+          response: response(nestedShell),
+        },
+      ]);
+      expect(onShellMovable).toHaveBeenLastCalledWith(shell.callId, undefined);
+      expect(onCallSettled).not.toHaveBeenCalled();
+      onToolCallsUpdate([
+        { status: 'success', request: read, response: response(read) },
+        { status: 'success', request: shell, response: response(shell) },
+      ]);
+      shared.onToolResult(executed(read));
+      shared.onToolResult(executed(shell));
+      return { parts: [] };
+    };
+
+    await runAcpToolBatch(host, {
+      requests: [read, shell],
+      loop,
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+      onShellMovable,
+      onCallSettled,
+    });
+
+    expect(onCallSettled.mock.calls).toEqual([
+      [read.callId, 'success'],
+      [shell.callId, 'success'],
+    ]);
+  });
+
+  it('reports the status each call settles with', async () => {
+    const shell: ToolCallRequestInfo = {
+      ...read,
+      callId: 'call_shell',
+      name: 'run_shell_command',
+      args: { command: 'npm test' },
+    };
+    const onCallSettled = vi.fn();
+    batch.run = async () => {
+      batch.options.onToolCallsUpdate([
+        {
+          status: 'error',
+          request: read,
+          response: response(read, { error: new Error('Rejected.') }),
+        },
+        {
+          status: 'cancelled',
+          request: shell,
+          response: response(shell, { responseParts: [] }),
+        },
+      ]);
+      return { parts: [] };
+    };
+
+    await runAcpToolBatch(host, {
+      requests: [read, shell],
+      loop,
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+      onCallSettled,
+    });
+
+    expect(onCallSettled.mock.calls).toEqual([
+      [read.callId, 'error'],
+      [shell.callId, 'cancelled'],
+    ]);
+  });
+
   it('asks the client for an approval and answers the scheduler', async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     batch.run = async () => {
@@ -687,6 +803,7 @@ describe('runAcpToolBatch', () => {
   });
 
   it('reports a replayed call as failed', async () => {
+    const onCallSettled = vi.fn();
     batch.run = async (shared) => {
       shared.onToolResult({
         ...executed(read),
@@ -701,9 +818,11 @@ describe('runAcpToolBatch', () => {
       loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
+      onCallSettled,
     });
 
     expect(events()).toEqual([['result', false]]);
+    expect(onCallSettled).toHaveBeenCalledExactlyOnceWith(read.callId, 'error');
   });
 
   it('forwards shell heartbeats of a running call', async () => {
@@ -732,5 +851,30 @@ describe('runAcpToolBatch', () => {
         _meta: { toolName: 'read_file', shellProgress: heartbeat },
       },
     ]);
+  });
+
+  it('forwards live-tool trust and read-only refusal to the scheduler', async () => {
+    const trustedTool = { name: 'capture_screen_context' };
+    batch.run = async () => ({ parts: [] });
+
+    await runAcpToolBatch(
+      {
+        ...host,
+        isTrustedLiveTool: (tool) => tool === trustedTool,
+        readOnlyRefusalMessage: 'read-only host refusal for __name__',
+      },
+      {
+        requests: [read],
+        loop,
+        signal: new AbortController().signal,
+        duplicates: { handled: new Map(), responded: new Set() },
+      },
+    );
+
+    expect(batch.options.isTrustedTool?.(trustedTool)).toBe(true);
+    expect(batch.options.isTrustedTool?.({ name: 'other' })).toBe(false);
+    expect(batch.options.readOnlyRefusalMessage).toBe(
+      'read-only host refusal for __name__',
+    );
   });
 });

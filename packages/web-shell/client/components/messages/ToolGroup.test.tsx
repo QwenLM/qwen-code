@@ -2,7 +2,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonToolTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonModRowAnswer,
+  DaemonToolTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, PermissionRequest } from '../../adapters/types';
 import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 import type { SessionContentGenerator } from './AssistantMessage';
@@ -179,7 +182,7 @@ function renderToolGroup(
     | boolean = 'interactive',
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
-  language: 'en' | 'zh-CN' = 'en',
+  language: 'en' | 'zh-CN' | 'zh-TW' = 'en',
   generateContent?: SessionContentGenerator,
   mcpAppHostUrl?: string,
   documentExpanded = true,
@@ -798,7 +801,10 @@ describe('tool group summary logic', () => {
 });
 
 describe('tool output session links', () => {
-  function renderSessionLinkTool(readonly: boolean): HTMLElement {
+  function renderSessionLinkTool(
+    readonly: boolean,
+    target = 'child-session',
+  ): HTMLElement {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -806,7 +812,7 @@ describe('tool output session links', () => {
       <ToolLine
         tool={makeTool({
           toolName: 'custom_tool',
-          rawOutput: '[child](qwen-session://child-session)',
+          rawOutput: `[child](qwen-session://${target})`,
         })}
         forceExpanded
       />
@@ -828,10 +834,21 @@ describe('tool output session links', () => {
     return container;
   }
 
-  it('keeps interactive tool session links clickable by default', () => {
-    const handler = vi.fn();
+  it.each([
+    { target: 'child-session', detail: 'child-session' },
+    {
+      target: 'child-session?workspace=C%3A%5Crepos%5Cproject+%28copy%29',
+      detail: {
+        sessionId: 'child-session',
+        workspaceCwd: 'C:\\repos\\project (copy)',
+        source: 'session-link',
+      },
+    },
+  ])('opens the tool result link to $target', ({ target, detail }) => {
+    const seen: unknown[] = [];
+    const handler = (event: Event) => seen.push((event as CustomEvent).detail);
     window.addEventListener('qwen:open-session', handler);
-    const container = renderSessionLinkTool(false);
+    const container = renderSessionLinkTool(false, target);
     const link = container.querySelector('a[role="button"]');
     expect(link?.textContent).toBe('child');
     act(() => {
@@ -839,8 +856,8 @@ describe('tool output session links', () => {
         new MouseEvent('click', { bubbles: true, cancelable: true }),
       );
     });
-    expect(handler).toHaveBeenCalledOnce();
     window.removeEventListener('qwen:open-session', handler);
+    expect(seen).toEqual([detail]);
   });
 
   it('renders tool session links as inert text in readonly mode', () => {
@@ -3007,6 +3024,53 @@ describe('thinking rows in the compact summary', () => {
     );
   });
 
+  it('offers the zh-TW thought translation and asks for Traditional Chinese', async () => {
+    const prompts: string[] = [];
+    const generateContent: SessionContentGenerator = async function* (prompt) {
+      prompts.push(prompt);
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'r1',
+        seq: 0,
+        text: '譯文',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'r1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 1,
+        outputTokens: 1,
+      };
+    };
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'zh-TW group thought to translate' }],
+      false,
+      undefined,
+      undefined,
+      'zh-TW',
+      generateContent,
+    );
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const button =
+      container.querySelector<HTMLButtonElement>('button[title="翻譯"]');
+    expect(button).not.toBeNull();
+    await act(async () => button?.click());
+    expect(prompts[0]).toContain('into Traditional Chinese');
+  });
+
   it('keeps the single tool compact when thinking is folded in', () => {
     const container = renderToolGroup(
       [
@@ -3031,6 +3095,352 @@ describe('thinking rows in the compact summary', () => {
     });
     // The single tool renders as a compact line, not a force-expanded dump.
     expect(container.textContent).not.toContain('DUMPED CONTENT');
+  });
+
+  it("asks for a folded thought once it is expanded, and never for a subagent's", async () => {
+    const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+    const { ModRowsProvider } = await import('./ModAssistantMessage');
+    const ask = vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text: '先读文件。' },
+    }));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="zh-CN">
+          <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+            <ModRowsProvider messages={[]}>
+              <ToolGroup
+                generateContent={vi.fn()}
+                tools={[
+                  makeTool({
+                    callId: 'tool-1',
+                    toolName: 'ReadFile',
+                    status: 'completed',
+                  }),
+                  makeTool({
+                    callId: 'tool-2',
+                    toolName: 'Glob',
+                    status: 'completed',
+                  }),
+                ]}
+                thoughts={[
+                  { content: 'Read the file.\n', beforeToolCallId: 'tool-1' },
+                  {
+                    content: 'Subagent plan',
+                    beforeToolCallId: 'tool-2',
+                    parentToolCallId: 'agent-1',
+                  },
+                ]}
+              />
+            </ModRowsProvider>
+          </ModRowAskerContext.Provider>
+        </I18nProvider>,
+      ),
+    );
+
+    const translateButtons = () =>
+      container.querySelectorAll('button[title="翻译"]').length;
+    act(() => container.querySelector('button')?.click());
+    expect(ask).not.toHaveBeenCalled();
+    expect(translateButtons()).toBe(2);
+    // jsdom has no IntersectionObserver, so a mounted body counts as shown.
+    await act(async () => {
+      for (const header of container.querySelectorAll(
+        '[data-testid="compact-thinking-summary"]',
+      )) {
+        (header as HTMLElement).click();
+      }
+    });
+    expect(ask).toHaveBeenCalledOnce();
+    expect(ask).toHaveBeenCalledWith({
+      component: 'Thinking',
+      props: { text: 'Read the file.' },
+    });
+    const text = container.textContent ?? '';
+    expect(text).toContain('先读文件。');
+    expect(text).not.toContain('Read the file.');
+    expect(text).toContain('Subagent plan');
+    // Only the rewritten thought drops its translate button.
+    expect(translateButtons()).toBe(1);
+  });
+
+  it.each([
+    { layout: 'standalone', dismiss: 'Close' },
+    { layout: 'folded', dismiss: 'Close' },
+    { layout: 'standalone', dismiss: 'Escape' },
+    { layout: 'folded', dismiss: 'Escape' },
+    { layout: 'standalone', dismiss: 'Escape before rewrite' },
+  ])(
+    'keeps translation open until $dismiss for a $layout thought',
+    async ({ layout, dismiss }) => {
+      const { ThinkingMessage } = await import('./AssistantMessage');
+      const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+      const { ModRowsProvider } = await import('./ModAssistantMessage');
+      const rewrite = Promise.withResolvers<DaemonModRowAnswer>();
+      const translation = Promise.withResolvers<void>();
+      const ask = vi.fn(() => rewrite.promise);
+      const generateContent = vi.fn<SessionContentGenerator>(
+        async function* () {
+          yield {
+            v: 1,
+            type: 'delta',
+            requestId: 'thought-translation',
+            seq: 0,
+            text: '正在读取',
+          };
+          await translation.promise;
+          yield {
+            v: 1,
+            type: 'done',
+            requestId: 'thought-translation',
+            model: 'fast-model',
+            modelSource: 'fast',
+          };
+        },
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const content = `Inspect the ${layout} thought with ${dismiss}.`;
+      const translateButton = () =>
+        container.querySelector<HTMLButtonElement>('button[title="翻译"]');
+      const closeWithEscape = () =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="zh-CN">
+              <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+                <ModRowsProvider messages={[]}>
+                  {layout === 'folded' ? (
+                    <ToolGroup
+                      tools={[
+                        makeTool({ callId: 'read', toolName: 'ReadFile' }),
+                      ]}
+                      thoughts={[{ id: 'thought', content }]}
+                      generateContent={generateContent}
+                    />
+                  ) : (
+                    <ThinkingMessage
+                      content={content}
+                      generateContent={generateContent}
+                    />
+                  )}
+                </ModRowsProvider>
+              </ModRowAskerContext.Provider>
+            </I18nProvider>,
+          ),
+        );
+        if (layout === 'folded') {
+          act(() => container.querySelector('button')!.click());
+        }
+        const thoughtSummary = container.querySelector<HTMLButtonElement>(
+          layout === 'folded'
+            ? '[data-testid="compact-thinking-summary"]'
+            : 'button[aria-expanded]',
+        );
+        act(() => thoughtSummary!.click());
+        expect(ask).toHaveBeenCalledOnce();
+        await act(async () => translateButton()!.click());
+        expect(document.body.textContent).toContain('正在读取');
+        const signal = generateContent.mock.calls[0]?.[1]?.signal;
+        expect(signal?.aborted).toBe(false);
+
+        if (dismiss === 'Escape before rewrite') {
+          act(() => closeWithEscape());
+          expect(translateButton()).not.toBeNull();
+          expect(signal?.aborted).toBe(false);
+          await vi.waitFor(() =>
+            expect(document.activeElement).toBe(translateButton()),
+          );
+        }
+        await act(async () =>
+          rewrite.resolve({
+            status: 'answered',
+            props: { text: 'Mod 改写后的思考' },
+          }),
+        );
+        expect(container.textContent).toContain('Mod 改写后的思考');
+        if (dismiss !== 'Escape before rewrite') {
+          expect(document.body.textContent).toContain('正在读取');
+          expect(signal?.aborted).toBe(false);
+          if (dismiss === 'Close') {
+            await act(async () => translation.resolve());
+            const closeButton = Array.from(
+              document.body.querySelectorAll('button'),
+            ).find((button) => button.textContent === '关闭');
+            act(() => closeButton!.click());
+            expect(signal?.aborted).toBe(false);
+          } else {
+            act(() => closeWithEscape());
+          }
+        }
+        await vi.waitFor(() =>
+          expect(document.activeElement).toBe(thoughtSummary),
+        );
+        if (dismiss !== 'Close') expect(signal?.aborted).toBe(true);
+        expect(document.body.textContent).not.toContain('正在读取');
+        expect(translateButton()).toBeNull();
+      } finally {
+        await act(async () => {
+          rewrite.resolve({ status: 'unanswered' });
+          translation.resolve();
+        });
+      }
+    },
+  );
+
+  it.each([
+    { afterReplay: 'Replayed thought', collapsed: false },
+    { afterReplay: 'Original thought', collapsed: true },
+  ])(
+    'restores Translate for a reused folded thought ($afterReplay)',
+    async ({ afterReplay, collapsed }) => {
+      const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+      const { ModRowsProvider } = await import('./ModAssistantMessage');
+      const ask = vi
+        .fn(async (): Promise<DaemonModRowAnswer> => ({ status: 'answered' }))
+        .mockResolvedValueOnce({
+          status: 'answered',
+          props: { text: 'Rewritten thought' },
+        });
+      const asker = new ModRowAsker(ask);
+      const askAfterReplay = vi.fn(async () => ({
+        status: 'unhooked' as const,
+      }));
+      const replayAsker = new ModRowAsker(askAfterReplay);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const generateContent = vi.fn();
+      const tools = [makeTool({ callId: 'read', toolName: 'ReadFile' })];
+      const draw = (content: string, activeAsker: typeof asker) =>
+        root.render(
+          <I18nProvider language="zh-CN">
+            <ModRowAskerContext.Provider value={activeAsker}>
+              <ModRowsProvider messages={[]}>
+                <ToolGroup
+                  generateContent={generateContent}
+                  tools={tools}
+                  thoughts={[{ id: 'thought', content }]}
+                />
+              </ModRowsProvider>
+            </ModRowAskerContext.Provider>
+          </I18nProvider>,
+        );
+      const translateButton = () =>
+        container.querySelector('button[title="翻译"]');
+      const thoughtHeader = () =>
+        container.querySelector<HTMLButtonElement>(
+          '[data-testid="compact-thinking-summary"]',
+        )!;
+
+      act(() => draw('Original thought', asker));
+      act(() => container.querySelector('button')!.click());
+      const openThought = thoughtHeader();
+      await act(async () => openThought.click());
+      expect(container.textContent).toContain('Rewritten thought');
+      expect(translateButton()).toBeNull();
+      if (collapsed) act(() => openThought.click());
+
+      await act(async () => draw(afterReplay, collapsed ? replayAsker : asker));
+      expect(thoughtHeader()).toBe(openThought);
+      expect(translateButton()).not.toBeNull();
+      if (collapsed) {
+        expect(askAfterReplay).not.toHaveBeenCalled();
+        await act(async () => openThought.click());
+        expect(askAfterReplay).toHaveBeenCalledOnce();
+      }
+      expect(collapsed ? askAfterReplay : ask).toHaveBeenLastCalledWith({
+        component: 'Thinking',
+        props: { text: afterReplay },
+      });
+      expect(container.textContent).toContain(afterReplay);
+      expect(container.textContent).not.toContain('Rewritten thought');
+    },
+  );
+
+  it('withdraws a queued thought when its workflow summary closes', async () => {
+    const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+    const { ModRowsProvider } = await import('./ModAssistantMessage');
+    const observers: Array<
+      (entries: Array<{ isIntersecting: boolean }>) => void
+    > = [];
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(
+          callback: (entries: Array<{ isIntersecting: boolean }>) => void,
+        ) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    try {
+      const first = Promise.withResolvers<void>();
+      const ask = vi.fn(async () => ({ status: 'answered' as const }));
+      ask.mockImplementationOnce(async () => {
+        await first.promise;
+        return { status: 'answered' };
+      });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+              <ModRowsProvider messages={[]}>
+                <ToolGroup
+                  compactSummary
+                  tools={[
+                    makeTool({ callId: 'workflow', toolName: 'workflow' }),
+                  ]}
+                  thoughts={[
+                    { content: 'First thought', beforeToolCallId: 'workflow' },
+                    { content: 'Second thought' },
+                  ]}
+                />
+              </ModRowsProvider>
+            </ModRowAskerContext.Provider>
+          </I18nProvider>,
+        ),
+      );
+
+      const summary = container.querySelector('button')!;
+      act(() => summary.click());
+      act(() => {
+        for (const header of container.querySelectorAll<HTMLElement>(
+          '[data-testid="compact-thinking-summary"]',
+        )) {
+          header.click();
+        }
+      });
+      expect(observers).toHaveLength(2);
+      act(() => {
+        for (const observer of observers) observer([{ isIntersecting: true }]);
+      });
+      expect(ask).toHaveBeenCalledOnce();
+      act(() => summary.click());
+      expect(container.querySelector('[inert]')).not.toBeNull();
+      // The first request can settle before the visibility observer reports the collapse.
+      await act(async () => first.resolve());
+      expect(ask).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('renders thoughts interleaved with their tools in original order', () => {

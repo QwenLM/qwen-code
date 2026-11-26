@@ -100,7 +100,7 @@ public final class RuntimeBindingRecord {
             Instant lastReconciledAt, Instant lastActiveAt,
             RuntimeRecoveryEvidence lossEvidence, RuntimeRecoveryEvidence stopEvidence,
             RuntimeDrainReceipt drainReceipt) {
-        this.bindingId = BrokerValues.requireId(bindingId, "bindingId");
+        this.bindingId = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (request == null) {
             throw new IllegalArgumentException("request is required");
         }
@@ -385,10 +385,8 @@ public final class RuntimeBindingRecord {
                         || (state == State.OPERATOR_RECOVERY || state == State.LOST || state == State.DRAINING
                                 || state == State.RECOVERY_BLOCKED || state == State.FAILED)
                                 && (request.getStorageId().equals(candidate.getStorageId())
-                                        || (!(ResidentWorkspaceProfile.selects(request)
-                                                        && ResidentWorkspaceProfile.selects(candidate))
-                                                && request.getScope().getCanonicalCwd().equals(
-                                                        candidate.getScope().getCanonicalCwd())))
+                                        || request.getScope().getCanonicalCwd().equals(
+                                                candidate.getScope().getCanonicalCwd()))
                         || request.getScope().getWorkspaceId().equals(
                                 candidate.getScope().getWorkspaceId()));
     }
@@ -405,17 +403,6 @@ public final class RuntimeBindingRecord {
     public void requireSafeReplacement(RuntimeBindingRecord replacement) {
         if (drainReceipt != null && !drainReceipt.equals(replacement.drainReceipt)) {
             throw new IllegalArgumentException("Drain proof cannot be overwritten");
-        }
-        if ("kubernetes-workspace".equals(request.getProvisionerKind()) && resourceHandle != null
-                && !Objects.equals(resourceHandle, replacement.resourceHandle)) {
-            throw new IllegalArgumentException("Original CSI resource identity cannot be replaced");
-        }
-        if ("kubernetes-workspace".equals(request.getProvisionerKind()) && drainRequested
-                && (!replacement.drainRequested || replacement.state != state
-                        || !hasSameLease(replacement.lease)
-                        || !Objects.equals(resourceHandle, replacement.resourceHandle)
-                        || attestationGeneration != replacement.attestationGeneration)) {
-            throw new IllegalArgumentException("Sealed CSI binding requires durable retirement");
         }
         if (!Objects.equals(lossEvidence, replacement.lossEvidence)
                         && lossEvidence != null

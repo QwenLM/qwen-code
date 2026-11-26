@@ -16,6 +16,8 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 import org.springframework.beans.factory.ObjectProvider;
 
@@ -1583,6 +1585,27 @@ class ChildResultRelayTest {
         verify(store, never()).terminalResultText(TENANT, CHILD, "turn-1");
     }
 
+    // #18149 Stage 3: an Action-parked child Turn stays RUNNING, so a park
+    // that outlives the message-turn bound with a message still waiting is
+    // a wait, never the bound's failure.
+    @Test
+    void waitsOutAParkedChildPastTheMessageTurnBound() {
+        watching();
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "RUNNING", null,
+                AgentStateStore.HARNESS_ACTION_PARKED, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new JdbcChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now - 31 * 60_000L, null));
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        assertThat(row.get().attempts()).isZero();
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+    }
+
     // The settlement names the messages it saw, so the parent refuses it
     // over one opened after the relay's reads (a message accepted in that
     // window would otherwise be closed away unread).
@@ -2132,7 +2155,9 @@ class ChildResultRelayTest {
                         .containsEntry("started", false));
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
                 JdbcChildWorkspaceStore.DISCARD);
-        // Any other refusal is retried as before.
+        // child_parent_unavailable settles immediately: the parent's profile
+        // cannot admit a child, so retrying would defer the refusal until the
+        // parent's Turn deadline.
         harness.operations.clear();
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 0, 0, null, now, now));
@@ -2140,8 +2165,11 @@ class ChildResultRelayTest {
                 .createChildSession(TENANT, PARENT, RUN, "audit the diff",
                         "review", true);
         relay.scan();
-        assertThat(harness.operations).isEmpty();
-        assertThat(row.get().attempts()).isEqualTo(1);
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations).singleElement()
+                .satisfies(fail -> assertThat(fail)
+                        .containsEntry("stopReason", "creation_failed")
+                        .containsEntry("started", false));
     }
 
     @Test
@@ -3258,10 +3286,13 @@ class ChildResultRelayTest {
         assertThat(row.get().attempts()).isEqualTo(1);
     }
 
-    // A child waiting on its recovery takes no stop yet: the heartbeat asks
-    // again without spending an attempt.
-    @Test
-    void aStopTheChildCannotTakeYetSpendsNoAttempt() {
+    // A child waiting on its recovery, closing, or out of cold-open slots
+    // takes no stop yet: the heartbeat asks again without spending an
+    // attempt.
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted_turn_recovery_required",
+            "hosted_session_closing", "hosted_session_open_busy"})
+    void aStopTheChildCannotTakeYetSpendsNoAttempt(String refusalCode) {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
@@ -3272,7 +3303,7 @@ class ChildResultRelayTest {
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
                 new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now, null));
-        harness.refuseMessageCode = "hosted_turn_recovery_required";
+        harness.refuseMessageCode = refusalCode;
         relay.scan();
         assertThat(row.get().attempts()).isZero();
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),
@@ -3481,5 +3512,119 @@ class ChildResultRelayTest {
                 .getAnnotation(
                         org.springframework.scheduling.annotation.Scheduled.class);
         assertThat(scheduled.scheduler()).isEqualTo("childRelayScheduler");
+    }
+
+    // #17261: the child whose Session load failed before it ever acquired a
+    // Runtime. The coordinator settles that Turn FAILED with no dispatch sent,
+    // so no binding will ever appear — and `watching`, the only arm that reads
+    // the child's Turn, is unreachable from `binding`. Retrying the binding
+    // alone hid a decided failure behind ~4.7 h of backoff while the parent's
+    // Turn ran to its deadline with no output at all. The binding arm has to
+    // read the Turn and settle the proven pre-admission terminal shape at once,
+    // on the FIRST attempt, carrying the child's own error code.
+    @Test
+    void aChildThatFailedBeforeBindingSettlesAtOnceWithItsOwnErrorCode() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn("intent");
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "FAILED", now + 1L, "hosted_harness_unavailable",
+                false, null));
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "creation_failed")
+                .containsEntry("started", false)
+                .containsEntry("childSessionId", CHILD);
+        // The diagnosis survives on the ledger: an operator reading the row
+        // sees the child's real cause, not a generic deadline.
+        assertThat(row.get().lastError())
+                .contains("hosted_harness_unavailable")
+                .contains("before admission");
+        // Settled on the first pass — no attempt budget was spent waiting.
+        verify(store, never()).defer(any(RelayRow.class), anyString(),
+                anyLong(), any(), anyLong(), anyLong());
+    }
+
+    // The other half of the same guard: a child still on its way is a genuine
+    // wait. An enqueued ACCEPTED Turn shares `!dispatched()` with the terminal
+    // failure, and a RUNNING or dispatched Turn may still bind — neither may
+    // be settled as never-started just because no binding is visible yet.
+    @Test
+    void aChildStillOnItsWayKeepsWaitingForItsBinding() {
+        for (TurnLine live : List.of(
+                new TurnLine("turn-1", "ACCEPTED", null, null, false, null),
+                new TurnLine("turn-1", "RUNNING", null, null, true, "epoch-1"),
+                new TurnLine("turn-1", "FAILED", now + 1L, "child_failed",
+                        true, "epoch-1"))) {
+            harness.operations.clear();
+            row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                    "binding", "owner", now + 30_000, 0, 0, null, now, now));
+            when(store.latestTurn(TENANT, CHILD)).thenReturn(live);
+            when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                    .thenReturn(null);
+            relay.scan();
+            assertThat(row.get().state()).as(live.status()).isEqualTo("binding");
+            assertThat(row.get().lastError()).as(live.status())
+                    .isEqualTo("child runtime binding is not visible yet");
+            assertThat(harness.operations).as(live.status()).isEmpty();
+            verify(childCloses, never()).admitChildClose(TENANT, PARENT, CHILD,
+                    RUN);
+        }
+    }
+
+    // A child with no Turn at all is still the original wait: nothing has
+    // decided anything, so the binding arm must not invent a verdict.
+    @Test
+    void aChildWithoutAnyTurnYetKeepsWaitingForItsBinding() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(row.get().lastError())
+                .isEqualTo("child runtime binding is not visible yet");
+        assertThat(harness.operations).isEmpty();
+    }
+
+    // The guard reads the READY-only binding, so a child whose binding
+    // RETIRED lands in the same arm as one that never bound. Its terminal
+    // Turn looks undispatched only until the historical row is read: the
+    // give-up chain re-checks dispatch evidence against the AnyState
+    // binding and must still tell the started failure, never the
+    // never-started one, for a child that really ran (#17261's guard must
+    // not regress R23/R25).
+    @Test
+    void aRetiredBindingsTerminalChildStillTakesTheStartedPairing() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn("intent");
+        // Undispatched and terminal: exactly the shape the new guard admits.
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "CANCELLED", now + 1L, null, false, null));
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
+        RuntimeBindingRecord retired = mock(RuntimeBindingRecord.class);
+        when(retired.getBindingId()).thenReturn("binding-1");
+        when(retired.getGeneration()).thenReturn(7L);
+        when(broker.findLatestBindingByHarnessSessionAnyState(TENANT, CHILD))
+                .thenReturn(retired);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("dispatch_started", "attach", "fail");
+        assertThat(harness.operations.get(2))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true)
+                .containsEntry("childSessionId", CHILD);
     }
 }

@@ -75,6 +75,8 @@ if (mode === 'child') {
     );
     record('hook.hold', { childPid: child.pid });
     setInterval(() => {}, 1000);
+  } else if (value.tool_input?.value === 'EXT_PARK') {
+    process.stdout.write('{}');
   } else {
     process.stdout.write(
       JSON.stringify({

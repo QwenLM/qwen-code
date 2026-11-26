@@ -110,7 +110,7 @@ export function parsePublicChildModelRoute(
         'authType,endpointDigest,modelId,providerPin' ||
       typeof source['modelId'] !== 'string' ||
       !source['modelId'].trim() ||
-      Buffer.byteLength(source['modelId']) > 512
+      source['modelId'].length > 128
     )
       throw new ManagedSessionRecordError('Invalid public child model origin.');
     origin = Object.freeze({
@@ -225,7 +225,7 @@ function parsePublicChildLaunch(value: unknown): PublicChildLaunchSnapshot {
     !['default', 'auto-edit', 'yolo'].includes(fields['approvalMode']) ||
     typeof fields['modelId'] !== 'string' ||
     !fields['modelId'].trim() ||
-    Buffer.byteLength(fields['modelId'], 'utf8') > 512 ||
+    fields['modelId'].length > 128 ||
     !Number.isSafeInteger(fields['approvalRevision']) ||
     (fields['approvalRevision'] as number) < 0 ||
     !Number.isSafeInteger(fields['modelRevision']) ||

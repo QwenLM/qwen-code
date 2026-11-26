@@ -8,8 +8,24 @@
 // The worker checks each hook's answer and the host the tree the chain settles
 // on, so a tree Qwen Code accepts is one Claude Code accepts.
 
-export const MOD_RENDER_SITES = ['AbovePrompt', 'AssistantMessage'] as const;
+export const MOD_RENDER_SITES = [
+  'AbovePrompt',
+  'AssistantMessage',
+  'Thinking',
+] as const;
 export type ModRenderSite = (typeof MOD_RENDER_SITES)[number];
+
+/**
+ * The transcript rows: a hook rewrites the props the engine draws the row
+ * with, never the row's tree.
+ */
+export const MOD_ROW_SITES: ReadonlySet<string> = new Set<ModRenderSite>([
+  'AssistantMessage',
+  'Thinking',
+]);
+
+/** The surfaces a host draws Mod renders on. */
+export type ModRenderSurface = 'terminal' | 'desktop';
 
 /** The terminal's element table, as Claude Code declares it. */
 export const TERMINAL_ELEMENTS = [
@@ -24,6 +40,19 @@ export const TERMINAL_ELEMENTS = [
   'Client',
   'Raster',
   'Image',
+] as const;
+/** The desktop's element table, as Claude Code declares it. */
+export const DESKTOP_ELEMENTS = [
+  'Box',
+  'Text',
+  'Button',
+  'Input',
+  'Select',
+  'Svg',
+  'Link',
+  'Code',
+  'Markdown',
+  'Client',
 ] as const;
 const DRAWN = new Set(['Box', 'Text']);
 
@@ -74,8 +103,18 @@ export interface ModAssistantMessageProps {
   isFirstOfReply: boolean;
 }
 
+/**
+ * One block of the model's thinking, raised once the block is complete and
+ * shown expanded. Qwen Code's own site. A hook rewrites `text` to change what
+ * the expanded block shows; the collapsed line and the stored thought stay as
+ * they were.
+ */
+export interface ModThinkingProps {
+  text: string;
+}
+
 interface ModRenderInputBase {
-  surface: 'terminal';
+  surface: ModRenderSurface;
   requestId: string;
   viewport?: { columns: number; rows: number; isFullscreen?: boolean };
 }
@@ -92,7 +131,16 @@ export interface ModAssistantMessageInput extends ModRenderInputBase {
   props: ModAssistantMessageProps;
 }
 
-export type ModRenderInput = ModBandInput | ModAssistantMessageInput;
+/** A row of the transcript that shows a block of the model's thinking. */
+export interface ModThinkingInput extends ModRenderInputBase {
+  component: 'Thinking';
+  props: ModThinkingProps;
+}
+
+export type ModRenderInput =
+  | ModBandInput
+  | ModAssistantMessageInput
+  | ModThinkingInput;
 
 /**
  * The props each site pins: a hook that passes another value down fails.
@@ -102,6 +150,7 @@ export const MOD_RENDER_PINNED_PROPS: Record<ModRenderSite, readonly string[]> =
   {
     AbovePrompt: ['view'],
     AssistantMessage: ['isFirstOfReply'],
+    Thinking: [],
   };
 
 /** Whether a text a hook wrote into a row breaks the rules a tree's text keeps. */

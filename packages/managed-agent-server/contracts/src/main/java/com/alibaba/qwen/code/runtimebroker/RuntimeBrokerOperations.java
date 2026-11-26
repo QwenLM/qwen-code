@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.BooleanSupplier;
 
 public interface RuntimeBrokerOperations {
     public RuntimeBindingRecord findLatestBindingByHarnessSession(
@@ -16,8 +18,6 @@ public interface RuntimeBrokerOperations {
     public void requestHarnessDrain(String tenantId, String harnessSessionId);
 
     public CompletionStage<Void> drainHarnessSession(String tenantId, String harnessSessionId);
-
-    public CompletionStage<Void> closeResidentHarnessSession(RuntimeProvisionRequest request, String harnessSessionId);
 
     public CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,
             RuntimeLifecycleAuthority authority, boolean stoppedOnly);
@@ -40,6 +40,16 @@ public interface RuntimeBrokerOperations {
     }
 
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId);
+
+    /**
+     * Closes a parked owner's MCP connections and hands back its mount, without
+     * a terminal release. Answers false when {@code parked} stops holding or
+     * this process does not hold the live binding.
+     */
+    public default CompletionStage<Boolean> reclaimParkedMcp(String bindingId, long generation,
+            String runtimeSessionId, BooleanSupplier parked) {
+        return CompletableFuture.completedFuture(false);
+    }
 
     public CompletionStage<Map<String, Object>> extensionControl(String harnessSessionId, String expectedBindingId,
             Long expectedGeneration, Map<String, Object> operation);
@@ -82,12 +92,6 @@ public interface RuntimeBrokerOperations {
     public CompletionStage<Void> markTerminalPtyEstablished(
             String harnessSessionId, String terminalId);
 
-    public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
-            String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes);
-
-    public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
-            String promptId, String batchId, Map<String, Object> recoveryOwner);
-
     public CompletionStage<ToolExecutionRecord> prepareExecution(
             String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference,
@@ -109,7 +113,31 @@ public interface RuntimeBrokerOperations {
             String harnessSessionId);
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
-            String runtimeSessionId, Map<String, Object> publisher);
+            String runtimeSessionId, Map<String, Object> publisher, Long writerGeneration);
+
+    public default CompletionStage<Void> detachPublisher(
+            String harnessSessionId,
+            String runtimeSessionId,
+            Long writerGeneration,
+            Map<String, Long> appliedThrough) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_publisher_detach_unsupported",
+                "Runtime Broker does not support Shell publisher detach.", false));
+    }
+
+    public default CompletionStage<List<Map<String, Object>>> listStagedDeliveries(
+            String harnessSessionId, String writerId, long writerGeneration) {
+        return CompletableFuture.completedFuture(List.of());
+    }
+
+    public default CompletionStage<Void> acknowledgeStagedDeliveries(
+            String harnessSessionId,
+            String writerId,
+            long writerGeneration,
+            String executionCallId,
+            long throughSeq) {
+        return CompletableFuture.completedFuture(null);
+    }
 
     public CompletionStage<Map<String, Object>> acknowledgeExecution(
             String harnessSessionId, String runtimeSessionId,

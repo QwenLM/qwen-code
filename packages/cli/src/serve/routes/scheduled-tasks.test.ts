@@ -21,7 +21,10 @@ import {
   removeCronTasks,
   updateCronTasks,
 } from '@qwen-code/qwen-code-core';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionNotFoundError,
+  SystemOverloadedError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -125,7 +128,7 @@ interface StubBridge {
     displayName?: string;
     titleSource?: 'manual' | 'auto';
   }>;
-  failNext: boolean;
+  failNext: boolean | Error;
   modelApplied?: boolean;
   persistenceError?: Error;
 }
@@ -148,8 +151,9 @@ function makeStubBridge(): StubBridge {
     liveSessions: new Map(),
     async spawnOrAttach(req) {
       if (bridge.failNext) {
+        const error = bridge.failNext;
         bridge.failNext = false;
-        throw new Error('spawn failed');
+        throw error === true ? new Error('spawn failed') : error;
       }
       const sessionId = `sess-${++seq}`;
       bridge.spawned.push(sessionId);
@@ -960,6 +964,67 @@ describe('scheduled-tasks routes', () => {
       enabled: false,
     });
     expect(stored[0]?.runs).toHaveLength(1);
+    expect(stored[0]?.runs?.[0]).toMatchObject({
+      kind: 'manual',
+      sessionDispatchFailed: true,
+    });
+  });
+
+  it('preserves overload coding when task creation needs a fresh child', async () => {
+    h.bridge.failNext = new SystemOverloadedError('cpu_load', 2.5, 20);
+
+    const response = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'requires a fresh task child',
+      recurring: true,
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers['retry-after']).toBe('15');
+    expect(response.body).toMatchObject({
+      code: 'system_overloaded',
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 20,
+    });
+    expect(h.bridge.spawned).toEqual([]);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('preserves overload coding for refused per-run children', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const boundBefore = [...h.bridge.spawned];
+    expect(boundBefore).toHaveLength(1);
+    h.bridge.failNext = new SystemOverloadedError('cpu_load', 2.5, 20);
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(503);
+    expect(run.headers['retry-after']).toBe('15');
+    expect(run.body).toMatchObject({
+      error:
+        'System overloaded (cpu_load: load ratio 2.50, event-loop p99 20 ms); new sessions are paused until load subsides',
+      code: 'system_overloaded',
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 20,
+    });
+    expect([...h.bridge.spawned]).toEqual(boundBefore);
+    const stored = await readCronTasks(h.workspace);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      id: created.body.id,
+      recurring: false,
+      sessionMode: 'per_run',
+      enabled: false,
+    });
     expect(stored[0]?.runs?.[0]).toMatchObject({
       kind: 'manual',
       sessionDispatchFailed: true,
@@ -3135,24 +3200,32 @@ describe('scheduled-tasks routes', () => {
   it('re-enabling a one-shot task re-seats its anchor (not fired as missed + deleted)', async () => {
     // A one-shot paused past its slot then re-enabled must fire at its NEXT
     // occurrence, not be read as a missed one-shot on the next reload and
-    // silently deleted.
-    const createdAt = 1_700_000_000_000; // long past
-    await seedTask({
-      id: 'o1',
-      cron: '0 9 1 1 *',
-      prompt: 'p',
-      recurring: false,
-      createdAt,
-      lastFiredAt: createdAt,
-      enabled: false,
-    });
-    const now = Date.now();
-    const patch = await request(h.app)
-      .patch('/scheduled-tasks/o1')
-      .send({ enabled: true });
-    expect(patch.status).toBe(200);
-    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
-    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+    // silently deleted. Pin the clock at local midnight so the projected 09:00
+    // is hours out and the <=90s early one-shot jitter can't undercut `now`.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date().setHours(0, 0, 0, 0));
+    try {
+      const createdAt = 1_700_000_000_000; // long past
+      await seedTask({
+        id: 'o1',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: false,
+        createdAt,
+        lastFiredAt: createdAt,
+        enabled: false,
+      });
+      const now = Date.now();
+      const patch = await request(h.app)
+        .patch('/scheduled-tasks/o1')
+        .send({ enabled: true });
+      expect(patch.status).toBe(200);
+      expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
+      expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+      expect(patch.body.nextRunAt).toBeLessThanOrEqual(now + 86_400_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('editing an enabled recurring task cron re-seats the anchor to now (no catch-up on save)', async () => {
@@ -3249,25 +3322,38 @@ describe('scheduled-tasks routes', () => {
     // A long-ago createdAt would make the new one-shot read as a MISSED slot the
     // scheduler fires + deletes immediately. Re-seating createdAt to now points
     // its next fire at the upcoming occurrence instead.
-    const createdAt = 1_700_000_000_000;
-    const firedAt = createdAt + 3 * 86_400_000;
-    await seedTask({
-      id: 'r2o',
-      cron: '0 9 * * *',
-      prompt: 'p',
-      recurring: true,
-      createdAt,
-      lastFiredAt: firedAt,
-      enabled: true,
-    });
-    const now = Date.now();
-    const patch = await request(h.app)
-      .patch('/scheduled-tasks/r2o')
-      .send({ recurring: false });
-    expect(patch.status).toBe(200);
-    expect(patch.body.recurring).toBe(false);
-    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
-    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+    //
+    // Pin the clock at local midnight so the projected 09:00 is hours out: a
+    // one-shot landing on :00/:30 is jittered EARLY by up to 90s, so a real clock
+    // inside that window makes nextRunAt legitimately land before `now`. Fake
+    // only Date so supertest's real timers keep working.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date().setHours(0, 0, 0, 0));
+    try {
+      const createdAt = 1_700_000_000_000;
+      const firedAt = createdAt + 3 * 86_400_000;
+      await seedTask({
+        id: 'r2o',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt,
+        lastFiredAt: firedAt,
+        enabled: true,
+      });
+      const now = Date.now();
+      const patch = await request(h.app)
+        .patch('/scheduled-tasks/r2o')
+        .send({ recurring: false });
+      expect(patch.status).toBe(200);
+      expect(patch.body.recurring).toBe(false);
+      expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
+      // The upcoming 09:00, minus at most the 90s early jitter.
+      expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+      expect(patch.body.nextRunAt).toBeLessThanOrEqual(now + 86_400_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('re-seats a schedule edit made while DISABLED (so a later re-enable is not a missed fire)', async () => {
@@ -3295,23 +3381,34 @@ describe('scheduled-tasks routes', () => {
   });
 
   it('editing an ENABLED one-shot cron re-seats createdAt (fires next, not as missed)', async () => {
-    const createdAt = 1_700_000_000_000; // long past
-    await seedTask({
-      id: 'eo1',
-      cron: '0 9 1 1 *',
-      prompt: 'p',
-      recurring: false,
-      createdAt,
-      lastFiredAt: createdAt,
-      enabled: true,
-    });
-    const now = Date.now();
-    const patch = await request(h.app)
-      .patch('/scheduled-tasks/eo1')
-      .send({ cron: '30 8 1 1 *' });
-    expect(patch.status).toBe(200);
-    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
-    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+    // Pin the clock at local midnight so the yearly projection is months out and
+    // the <=90s early one-shot jitter on a :00/:30 landing can't undercut `now`.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date().setHours(0, 0, 0, 0));
+    try {
+      const createdAt = 1_700_000_000_000; // long past
+      await seedTask({
+        id: 'eo1',
+        cron: '0 9 1 1 *',
+        prompt: 'p',
+        recurring: false,
+        createdAt,
+        lastFiredAt: createdAt,
+        enabled: true,
+      });
+      const now = Date.now();
+      const patch = await request(h.app)
+        .patch('/scheduled-tasks/eo1')
+        .send({ cron: '30 8 1 1 *' });
+      expect(patch.status).toBe(200);
+      expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
+      expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+      // A yearly cron is up to ~366 days out from the pinned midnight; the bound
+      // rejects a far-future anchor without assuming which year the test runs in.
+      expect(patch.body.nextRunAt).toBeLessThanOrEqual(now + 366 * 86_400_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects re-enabling an archive-disabled task via PATCH (409, no write)', async () => {

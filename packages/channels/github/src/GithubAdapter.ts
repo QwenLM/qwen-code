@@ -204,6 +204,13 @@ interface GithubCursor {
   lastProcessedAt: string;
   metaFloor?: string;
   /**
+   * Heartbeat stamped after every successful poll and saved by the base
+   * class, independent of watch eligibility. The first poll of a process
+   * compares it against now to detect a downtime gap for the comment-backlog
+   * digest. Legacy cursors lack it (no digest on the upgrade poll).
+   */
+  lastPollAt?: string;
+  /**
    * Thread keys (`chatId|threadId`) whose issue/PR body has already been fed as
    * a first-contact trigger. Dedupes body dispatch when a thread is re-fetched
    * with `last_read_at` still null — which happens if `markNotificationsAsRead`
@@ -313,7 +320,18 @@ interface GithubComment {
   body?: string;
   created_at?: string | null;
   updated_at?: string | null;
-  user?: { login?: string } | null;
+  user?: { login?: string; type?: string } | null;
+}
+
+/**
+ * An account no human posts from: a GitHub App bot, or an integration account
+ * whose login ends in `[bot]`.
+ */
+function isMachineAuthor(
+  user?: { login?: string; type?: string } | null,
+): boolean {
+  if (!user) return false;
+  return user.type === 'Bot' || (user.login ?? '').endsWith('[bot]');
 }
 
 /** An inline pull-request review comment (pulls.listReviewComments). */
@@ -586,6 +604,15 @@ const PR_WATCH_BUDGET_RESERVE = 200;
 const COMMENT_RECHECK_INTERVAL_MS = 2 * 60 * 1000;
 
 /**
+ * Minimum downtime gap before the first watch pass after startup digests the
+ * comment backlog instead of delivering one prompt per comment. The effective
+ * threshold scales with the poll interval (5 intervals) so a long-interval
+ * channel does not digest every poll; a sustained API outage counts as a gap
+ * because failed polls do not save the cursor heartbeat.
+ */
+const STARTUP_DIGEST_MIN_GAP_MS = 10 * 60 * 1000;
+
+/**
  * Pass-wide budget on watched comments, shared by every watched PR in a single
  * watch pass (not a per-PR cap): commentSince survives a restart, so after a
  * long outage every comment in the gap would otherwise become eligible at once,
@@ -595,6 +622,18 @@ const COMMENT_RECHECK_INTERVAL_MS = 2 * 60 * 1000;
  * processed comment so the tail drains over subsequent passes, never dropped.
  */
 const MAX_WATCH_COMMENTS_PER_PASS = 20;
+
+/**
+ * Bound on consecutive PERMANENT digest retirements (a preflight rejection
+ * returns settled with no delivery). A retired digest is re-listed and retried
+ * — the route/sender gate may be fixed — but not forever: without a bound a
+ * permanently-rejected digest holds its cursor and spends the pass-wide watch
+ * budget every poll for the process lifetime with zero prompts. At this bound
+ * the backlog is consumed with a visible journal trace instead. Transient
+ * deferrals (settled === false) do not count toward it and keep the fail-closed
+ * hold.
+ */
+const MAX_DIGEST_RETIREMENT_RETRIES = 3;
 
 /**
  * Backpressure horizon for bound-session delivery: queue-full and
@@ -648,6 +687,40 @@ interface PrWatchEntry {
   commentBaseline?: string;
   commentSince?: string;
   commentLastFetchAt?: number;
+  /**
+   * Persisted digest arm: a detected downtime gap (or an over-cap window's
+   * omitted tail) sets it. Consumption of this PR's backlog clears it; the
+   * watch-disabled gate clears it too (so a restart with watching off cannot
+   * digest non-gap comments), and so does the permanent-retirement bound. It
+   * survives degraded first polls, per-PR errors, cap exclusion, and restarts,
+   * so the backlog digests instead of flooding one prompt per comment.
+   */
+  digestPending?: boolean;
+  /**
+   * True when the digest arm was set by the SIZE arm (an over-cap window on a
+   * healthy heartbeat) rather than a downtime gap, so the digest and its
+   * follow-ups use the neutral backlog lead instead of claiming an outage.
+   * Cleared together with digestPending, and reset to false whenever a
+   * detected gap re-arms the entry (the gap becomes the current origin).
+   */
+  digestSizeArmed?: boolean;
+  /**
+   * Dedupe frontier of the rendered members of a HELD digest (omitted tail).
+   * The shared dispatchedComments ring evicts keys older than the notification
+   * cursor, which a healthy poll advances past a held digest's backlog; this
+   * per-entry frontier keeps the rendered keys deduped across the drain so an
+   * evicted key is not re-listed and delivered twice. Accumulated while the
+   * cursor is held; cleared when the backlog is consumed.
+   */
+  digestRendered?: string[];
+  /**
+   * Consecutive PERMANENT digest retirements (preflight rejected the digest:
+   * settled with no delivery). Bounds the retry so a permanently-rejected
+   * digest cannot hold the cursor and spend the watch budget forever; at
+   * MAX_DIGEST_RETIREMENT_RETRIES the backlog is consumed with a journal
+   * trace. A transient deferral or a successful delivery resets it.
+   */
+  digestRetiredCount?: number;
 }
 
 interface PrWatchStateFile {
@@ -675,7 +748,15 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     stringOrUndef(entry.title) &&
     stringOrUndef(entry.commentBaseline) &&
     stringOrUndef(entry.commentSince) &&
-    numberOrUndef(entry.commentLastFetchAt)
+    numberOrUndef(entry.commentLastFetchAt) &&
+    (entry.digestPending === undefined ||
+      typeof entry.digestPending === 'boolean') &&
+    (entry.digestSizeArmed === undefined ||
+      typeof entry.digestSizeArmed === 'boolean') &&
+    (entry.digestRendered === undefined ||
+      (Array.isArray(entry.digestRendered) &&
+        entry.digestRendered.every((k) => typeof k === 'string'))) &&
+    numberOrUndef(entry.digestRetiredCount)
   );
 }
 
@@ -724,10 +805,12 @@ function normalizeBoundSessionActions(
 }
 
 /**
- * Whether the channel still uses the deprecated state-watch surface:
- * `prWatchEvents` itself, or a `watch:*` key in `boundSessionActions`.
- * These keys are accepted for one minor release; the daemon reads them as a
- * per-host alias when `serve.sessionPrWatch` is unset.
+ * Whether the channel still uses any of the four deprecated state-watch keys:
+ * `prWatchEvents`, a `watch:*` key in `boundSessionActions`, `prWatchLimit`
+ * or `prWatchBudgetReserve`. The first two are accepted for one minor release
+ * and read by the daemon as a per-host alias while `serve.sessionPrWatch` and
+ * its events environment override are both unset; the two limit knobs are
+ * ignored, and the pass uses its built-in budget.
  */
 function usesDeprecatedPrWatchSurface(
   config: BoundSessionConfigFields,
@@ -1153,6 +1236,9 @@ const BOUND_DELIVERY_COPY: Readonly<
       commentTruncated(count: number): string;
       newCommentLead(author: string): string;
       newInlineReviewCommentLead(author: string): string;
+      offlineCommentsLead(count: number): string;
+      commentBacklogLead(count: number): string;
+      offlineOmittedNotice(count: number): string;
       reviewRequestedInstruction: string;
       assignInstruction: string;
     }
@@ -1169,6 +1255,12 @@ const BOUND_DELIVERY_COPY: Readonly<
     newCommentLead: (author) => `New comment by @${author}:`,
     newInlineReviewCommentLead: (author) =>
       `New inline review comment by @${author}:`,
+    offlineCommentsLead: (count) =>
+      `Offline backlog: ${count} new comment(s) on the PR since the last successful poll:`,
+    commentBacklogLead: (count) =>
+      `Comment backlog: ${count} new comment(s) on this PR:`,
+    offlineOmittedNotice: (count) =>
+      `${count} comment(s) omitted from this digest to fit the prompt budget; they will follow in further digests`,
     reviewRequestedInstruction:
       'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
     assignInstruction: 'Triage this issue and respond with the next action.',
@@ -1183,6 +1275,11 @@ const BOUND_DELIVERY_COPY: Readonly<
     commentTruncated: (count) => `评论已截断：省略了 ${count} 个字符`,
     newCommentLead: (author) => `@${author} 的新评论：`,
     newInlineReviewCommentLead: (author) => `@${author} 的新行内评审评论：`,
+    offlineCommentsLead: (count) =>
+      `离线积压：自上次成功轮询以来 PR 新增 ${count} 条评论：`,
+    commentBacklogLead: (count) => `评论积压：本 PR 新增 ${count} 条评论：`,
+    offlineOmittedNotice: (count) =>
+      `本摘要因篇幅省略了 ${count} 条评论，将分批摘要补投`,
     reviewRequestedInstruction:
       '请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。',
     assignInstruction: '请分诊该 issue 并给出下一步行动。',
@@ -1492,9 +1589,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private boundDeliveredOrder: string[] = [];
   /**
    * An unreadable ring cannot prove a negative: fail CLOSED for the public
-   * fallback (suppress it) rather than risk an irreversible duplicate.
+   * fallback (suppress it) rather than risk an irreversible duplicate. This
+   * verdict is NEVER cleared by a repair: the keys lost with the file stay
+   * unknown, so the suppression callers must keep failing closed for them.
    */
   private boundDeliveredUnreadable = false;
+  /**
+   * A successful ring write after a startup-unreadable ring. Lets the digest
+   * prove its OWN acceptance from the freshly written key without clearing
+   * boundDeliveredUnreadable (which would convert the lost history from
+   * "unknown" to "not delivered" and open the public-duplicate window for
+   * every pre-corruption event). Suppression stays fail-closed; only the
+   * digest's delivered check consults this latch.
+   */
+  private boundDeliveredRepaired = false;
   /**
    * Tasks retired privately during the current runInboundTask call (role
    * lost its match, siblings already delivered, ring suppression). Their
@@ -1515,6 +1623,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * gated on this (a partial answer is not an absence).
    */
   private boundSnapshotTrusted = false;
+  /**
+   * One-shot flag set when a downtime gap is detected; it arms the per-entry
+   * digestPending flags and clears as soon as it has armed them, so a skipped,
+   * aborted or untrusted pass cannot re-arm an entry an earlier pass already
+   * drained. The per-entry flags carry the digest for individual PRs across
+   * errors, cap exclusion, and restarts.
+   */
+  private startupDigestPending = false;
   /**
    * False until ANY binding snapshot succeeds (complete or partial). The
    * cold-start comment-lane gate uses this, not boundSnapshotTrusted: the
@@ -1756,6 +1872,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         Number.isNaN(new Date(base.metaFloor).getTime()))
     ) {
       delete base.metaFloor;
+    }
+    if (
+      base.lastPollAt !== undefined &&
+      (typeof base.lastPollAt !== 'string' ||
+        Number.isNaN(new Date(base.lastPollAt).getTime()))
+    ) {
+      delete base.lastPollAt;
     }
     for (const field of [
       'dispatchedBodies',
@@ -2711,10 +2834,66 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   protected async pollOnce(): Promise<void> {
+    await this.runPollOnce();
+    // Heartbeat stamped only on a SUCCESSFUL poll (the base class saves the
+    // cursor after this resolves): failed polls leave it stale, so an
+    // in-process outage grows the gap and is detected when polls recover.
+    this.cursor.lastPollAt = new Date().toISOString();
+  }
+
+  private async runPollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
     this.notificationRetryPending = false;
     this.publicationAuditBlocked = false;
     this.publicationAuditKeysCache = undefined;
+
+    // Downtime-gap detection on EVERY poll: a pure local comparison against
+    // the last successful heartbeat. A healthy poll re-stamps it, so this
+    // cannot fire in steady state; a restart OR an in-process outage whose
+    // failed polls skipped the cursor save both grow the gap past the
+    // threshold. The threshold scales with the poll interval so a
+    // long-interval channel does not digest every poll.
+    const lastPollAt = this.cursor.lastPollAt;
+    if (lastPollAt !== undefined) {
+      const gapMs = Date.now() - Date.parse(lastPollAt);
+      const thresholdMs = Math.max(
+        STARTUP_DIGEST_MIN_GAP_MS,
+        5 * this.pollInterval,
+      );
+      if (
+        gapMs > thresholdMs &&
+        !this.startupDigestPending &&
+        this.deliverToBoundSessions &&
+        this.prCommentWatchEnabled
+      ) {
+        this.startupDigestPending = true;
+        // Persist the arm immediately: this poll's comment watch may be
+        // skipped (failed binding refresh), and a restart before a trusted
+        // pass must still find the arm and digest the backlog instead of
+        // flooding one prompt per comment.
+        try {
+          this.loadPrWatchState();
+          for (const entry of Object.values(this.prWatchState.entries)) {
+            entry.digestPending = true;
+            // A genuine gap is the current origin: reset any stale size-arm
+            // origin so an outage that interrupts a size-armed drain still
+            // reports the offline lead rather than the neutral one.
+            entry.digestSizeArmed = false;
+          }
+          this.savePrWatchState();
+        } catch (err) {
+          // Watch state unreadable or the arm write failed: the in-memory flag
+          // still arms the next successful pass. Surface it so a persisted-arm
+          // write failure is not swallowed silently.
+          process.stderr.write(
+            `[Channel:${this.name}] could not persist the downtime-gap digest arm (the in-memory flag still arms the next pass): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+          );
+        }
+        process.stderr.write(
+          `[Channel:${this.name}] downtime gap detected (${Math.round(gapMs / 1000)}s since the last successful poll); each bound PR's comment backlog digests into one prompt\n`,
+        );
+      }
+    }
 
     if (this.deliverToBoundSessions) {
       await this.refreshBoundSessions();
@@ -2758,6 +2937,34 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // recovers during this window still owes its recovery row.
       this.watchBudgetLow = false;
       this.closeWatchBudgetEpisode();
+      if (!commentWatchActive) {
+        // Comment watching is OFF (not merely skipped this poll): a persisted
+        // digest arm must not survive a disabled restart and later digest the
+        // comments accumulated while it was off. This is the observable site —
+        // runPrStateWatch is never called while disabled. The design promises
+        // per-comment delivery for comments accumulated while watching is off.
+        // A transient boundRefreshFailed skip keeps the arm (the backlog is real).
+        try {
+          this.loadPrWatchState();
+          let cleared = false;
+          for (const entry of Object.values(this.prWatchState.entries)) {
+            if (entry.digestPending === true) {
+              entry.digestPending = false;
+              entry.digestSizeArmed = false;
+              // Keep the rendered frontier: it dedupes already-DELIVERED
+              // members while commentSince stays held. Clearing it here would
+              // let ring-evicted rendered keys re-list and re-deliver on
+              // re-enable. It clears through the consumption paths instead.
+              entry.digestRetiredCount = 0;
+              cleared = true;
+            }
+          }
+          if (cleared) this.savePrWatchState();
+        } catch {
+          // Watch state unreadable: nothing to clear, and the arm cannot be
+          // consumed while watching is off anyway.
+        }
+      }
     }
 
     if (this.inboundRecoveryPending) {
@@ -3261,6 +3468,44 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return true;
   }
 
+  /**
+   * A comment a machine wrote that does not name the bot. Such a comment can
+   * only be a request when it mentions the bot, so an unmentioned one is
+   * ambient traffic: a CI failure notice, a dependabot bump.
+   */
+  private isAmbientMachineComment(comment: GithubComment): boolean {
+    if (!isMachineAuthor(comment.user)) return false;
+    const botUsername = this.botUsername;
+    return !(
+      typeof botUsername === 'string' &&
+      testBotMention(comment.body || '', botUsername)
+    );
+  }
+
+  /**
+   * Record one skipped machine-authored comment, once per window. The comment
+   * is never dispatched, so it is re-listed and re-skipped by later windows;
+   * the per-window key keeps that to one row each.
+   */
+  private journalMachineAuthorSkip(
+    ctx: NotificationContext,
+    key: string,
+    actor: string,
+  ): void {
+    if (!this.journalOncePerWindow(`machine_author\0${key}`)) return;
+    this.recordChannelEvent({
+      type: 'inbound',
+      outcome: 'skipped',
+      reason: 'machine_author',
+      triggerKind: ctx.reason,
+      repository: ctx.chatId,
+      thread: ctx.threadId,
+      number: ctx.issueNumber,
+      messageId: key,
+      actor,
+    });
+  }
+
   private async processCommentLane(
     ctx: NotificationContext,
     onlyMentioned: boolean,
@@ -3346,6 +3591,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
 
+      // A machine author that does not name the bot is ambient traffic (a CI
+      // failure notice, a dependabot bump). Running it spends three model
+      // attempts on an event nobody is waiting for and, when they fail,
+      // publishes a receipt that reads as the channel account talking to
+      // itself. Skip it before the claim, and journal the skip so the dropped
+      // event stays visible.
+      if (this.isAmbientMachineComment(comment)) {
+        this.journalMachineAuthorSkip(ctx, key, senderId);
+        continue;
+      }
+
       // The same per-conversation gate preflight applies, so an approved
       // paired group admits its members here too.
       const allowed = this.senderGateFor({
@@ -3370,6 +3626,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             allowed &&
             (this.config.groupPolicy !== 'pairing' ||
               this.groupGate.isGroupApproved(ctx.chatId))),
+        isExplicitMention: hasMention,
         isReplyToBot: false,
         metadata: this.buildRouteMetadata(
           mentionWaived ? { ...ctx, reason: 'comment' } : ctx,
@@ -3474,6 +3731,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           : BOUND_DELIVERY_COPY.en.assignInstruction,
       isGroup: true,
       isMentioned: true,
+      isExplicitMention: true,
       isReplyToBot: false,
       metadata: `${this.buildMetadata(ctx.chatId, ctx.threadId, title)}\n${GITHUB_PUBLICATION_INSTRUCTIONS}\nTrigger: ${reason}.\n${buildTriggerGuidance(reason)}\n${details}`,
     };
@@ -3497,12 +3755,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isGroup: true,
       chatId: ctx.chatId,
     });
-    const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+    const listed = await this.fetchNewComments(ctx);
+    for (const comment of listed) {
+      if (!this.isAmbientMachineComment(comment)) continue;
+      this.journalMachineAuthorSkip(
+        ctx,
+        comment.node_id || String(comment.id),
+        (comment.user?.login || 'unknown').toLowerCase(),
+      );
+    }
+    const newComments = listed.filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
         !this.cursor.dispatchedComments?.includes(key) &&
-        senderGate.isAllowed(sender)
+        senderGate.isAllowed(sender) &&
+        !this.isAmbientMachineComment(comment)
       );
     });
     // The dedupe keys are recorded by applyTaskDedupe AFTER the task write
@@ -3517,6 +3785,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (comments.length === 0) return;
 
     const first = comments[0]!.comment;
+    const botUsername = this.botUsername;
     // Comments dropped by the batch cap are recorded as dispatched once the
     // task is claimed, so they would vanish from every surface; the omission
     // must be visible in the prompt itself. It rides at the FRONT: a tail
@@ -3586,6 +3855,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       text: `${AGGREGATE_COMMENTS_PROMPT_PREFIX}${summary}`,
       isGroup: true,
       isMentioned: true,
+      isExplicitMention:
+        typeof botUsername === 'string' &&
+        comments.some(({ comment }) =>
+          testBotMention(comment.body || '', botUsername),
+        ),
       isReplyToBot: false,
       metadata: this.buildRouteMetadata(ctx),
     };
@@ -3843,6 +4117,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       text,
       isGroup: true,
       isMentioned,
+      isExplicitMention: isMentioned,
       isReplyToBot: false,
       metadata: this.buildRouteMetadata(ctx),
     };
@@ -4435,10 +4710,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // A failed public attempt is run again on a later poll until the
         // budget is spent (see isRecoverableInboundTask), so the comment,
         // which asks the user to mention the bot again, waits for the last.
+        // Only an explicit mention earns that comment: an event the account
+        // merely overheard (an ambient comment, a digest) has no sender
+        // waiting for an answer, and a receipt there reads as the account
+        // reporting a failure nobody asked about. Its attempts still land in
+        // the task row and the event timeline.
         if (
           !posted &&
           !stillBound &&
           task.privateOnly !== true &&
+          envelope.isExplicitMention === true &&
           attempts >= MAX_INBOUND_TASK_ATTEMPTS
         ) {
           posted = await this.postErrorComment(
@@ -6427,6 +6708,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `${JSON.stringify({ keys: this.boundDeliveredOrder })}\n`,
         { encoding: 'utf-8', mode: 0o600 },
       );
+      // A successful write repairs the ring for the digest's own acceptance
+      // check: latch the repair so the digest can prove its freshly written
+      // key. Do NOT clear boundDeliveredUnreadable — the keys lost with the
+      // file stay unknown, and the public-duplicate suppression callers must
+      // keep failing closed for them (clearing it would open an irreversible
+      // public-reply window for every pre-corruption event).
+      this.boundDeliveredRepaired = true;
     } catch (err) {
       process.stderr.write(
         `[Channel:${this.name}] failed to persist bound-delivered ring (in-memory suppression still active): ${sanitizeLogText(
@@ -7335,6 +7623,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // can be due at once, and a per-PR cap would claim up to cap × watched-PR
     // durable tasks in a single poll. PRs that find it spent keep their cursor
     // and resume next pass.
+    // Arm the digest on EVERY persisted entry — not just this snapshot's
+    // active keys: a degraded (empty/partial) first poll must still arm the
+    // entries on disk, so a restart before a complete snapshot finds the arm
+    // and digests the backlog instead of flooding per comment. Entries
+    // outside the watch-cap slice keep their arm until watched. The one-shot
+    // clears HERE, once it has armed: the per-entry flags (persisted below)
+    // carry the digest across per-PR errors, cap exclusion, untrusted
+    // snapshots, and restarts. Keeping the global flag alive across aborted
+    // passes would re-arm entries an earlier pass already drained, so a later
+    // single fresh comment would digest under an outage lead that never
+    // happened.
+    if (this.startupDigestPending) {
+      for (const entry of Object.values(this.prWatchState.entries)) {
+        entry.digestPending = true;
+        entry.digestSizeArmed = false;
+      }
+      this.startupDigestPending = false;
+    }
     const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
     for (const [key, candidate] of candidates) {
       if (candidate.terminal) continue;
@@ -7355,12 +7661,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           candidate.chatId,
           candidate.number,
           commentBudget,
+          this.prWatchState.entries[key]?.digestPending === true,
         );
       } catch (err) {
         if (isWatchPassAbortError(err)) {
           // Shared credential/rate-limit failure: abort the rest of the
           // pass instead of issuing one doomed request per watched PR.
-          // Later polls retry the full set once the condition clears.
+          // Later polls retry the full set once the condition clears. The
+          // per-entry arms persisted below carry the digest across the abort.
           process.stderr.write(
             `[Channel:${this.name}] PR watch pass aborted at ${key} (credential/rate limit); the remaining watched PRs skip this poll: ${sanitizeLogText(
               err instanceof Error ? err.message : String(err),
@@ -7391,21 +7699,27 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * what prevents a fix session's own reply from re-triggering it.
    *
    * Default-on with deliverToBoundSessions; `prCommentWatch: false` disables
-   * it. Failures are isolated here so one PR's fetch never skips the next.
+   * it. Failures are isolated here so they never skip the state transitions.
+   *
+   * `digestMode` (the persisted per-entry arm set by a detected downtime gap,
+   * or a window larger than the per-comment pass cap) renders AT MOST the
+   * newest members that fit the shared body budget as ONE private summary
+   * prompt; the remainder is named in a front omission notice with its keys
+   * unrecorded and the cursor held before the backlog head, so the next pass
+   * digests the remainder. The event class stays `comment`, so role routing is
+   * identical to individual deliveries.
    */
   private async watchPrComments(
     key: string,
     chatId: string,
     number: number,
     budget: { remaining: number },
+    digestMode: boolean,
   ): Promise<void> {
-    if (
-      !this.deliverToBoundSessions ||
-      !this.prCommentWatchEnabled ||
-      !this.boundSessions
-    ) {
-      return;
-    }
+    // The poll loop only reaches this pass with bound delivery and comment
+    // watching enabled, and clears any stale digest arm when they are off. The
+    // handle guard narrows the nullable handle for the delivery lookups below.
+    if (!this.boundSessions) return;
     const entry = this.prWatchState.entries[key] ?? {};
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
@@ -7417,6 +7731,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         commentBaseline: nowIso,
         commentSince: nowIso,
         commentLastFetchAt: now,
+        digestPending: false,
+        digestSizeArmed: false,
+        digestRendered: [],
+        digestRetiredCount: 0,
       };
       this.savePrWatchState();
       return;
@@ -7430,6 +7748,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // The burst budget is shared by every watched PR in this pass. A PR that
     // arrives after it is spent fetches nothing and keeps its cursor untouched,
     // so its tail resumes on the next pass instead of being skipped past.
+    // The digest path never decrements it (one task per PR, not per comment),
+    // so a digest pass always finds the budget intact.
     if (budget.remaining <= 0) {
       return;
     }
@@ -7523,21 +7843,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return;
     }
     const baseline = entry.commentBaseline;
+    // The held digest's rendered frontier backs up the shared dispatchedComments
+    // ring: the ring evicts keys older than the notification cursor, which a
+    // healthy poll advances past a held digest's backlog, so a rendered key can
+    // be evicted mid-drain. The per-entry frontier keeps it deduped regardless.
+    const renderedFrontier = new Set(entry.digestRendered ?? []);
     const alreadyDispatched = (commentKey: string): boolean =>
-      this.cursor.dispatchedComments?.includes(commentKey) === true;
+      this.cursor.dispatchedComments?.includes(commentKey) === true ||
+      renderedFrontier.has(commentKey);
     const candidates: Array<{
       key: string;
       attrKey: string;
       createdAt: string;
       boundText?: string;
       envelope: Envelope;
+      author: string;
+      url: string;
+      body: string;
+      inlineLocation?: string;
     }> = [];
     const threadId = `pr:${number}`;
     const metadata = `${this.buildMetadata(chatId, threadId, entry.title ?? '')}\nTrigger: comment.`;
     const copy = BOUND_DELIVERY_COPY[this.locale];
     const renderBody = (
       body: string | undefined,
-    ): { text: string; boundText: string } => {
+    ): { text: string; boundText: string; display: string } => {
       const display = sanitizeDisplayText((body ?? '').trim());
       const total = Array.from(display).length;
       // A watch delivery carries ONE comment, so it uses the bound prompt's
@@ -7545,7 +7875,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // cutting a single finding at 400 code points drops the actionable steps
       // past the cut. The bound prompt caps the final body at the same value.
       const omitted = total - BOUND_PROMPT_BODY_MAX_CODE_POINTS;
-      if (omitted <= 0) return { text: display, boundText: display };
+      if (omitted <= 0) return { text: display, boundText: display, display };
       const prefix = truncateCodePoints(
         display,
         BOUND_PROMPT_BODY_MAX_CODE_POINTS,
@@ -7553,6 +7883,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return {
         text: `${prefix}… [${BOUND_DELIVERY_COPY.en.commentTruncated(omitted)}]`,
         boundText: `${prefix}… [${copy.commentTruncated(omitted)}]`,
+        display,
       };
     };
     // The watch closes the SAME-account gap: GitHub sends the channel account no
@@ -7584,6 +7915,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         key: commentKey,
         attrKey: `ic:${comment.id}`,
         createdAt: comment.created_at,
+        author,
+        url,
+        body: rendered.display,
         boundText:
           this.locale === 'en'
             ? undefined
@@ -7624,6 +7958,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         key: commentKey,
         attrKey: `rc:${comment.id}`,
         createdAt: comment.created_at,
+        author,
+        url,
+        body: rendered.display,
+        inlineLocation: location,
         boundText:
           this.locale === 'en'
             ? undefined
@@ -7645,7 +7983,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     candidates.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
-    const commitCursor = (newSince: string): void => {
+    const commitCursor = (newSince: string, clearDigest = false): void => {
       // GitHub compares `since` at whole-second granularity while nowIso carries
       // milliseconds: a comment created later in the same second as the fetch
       // snapshot would be excluded from every later fetch. Floor the cursor to
@@ -7658,13 +7996,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ...(this.prWatchState.entries[key] ?? {}),
         commentSince: floored,
         commentLastFetchAt: now,
+        // The digest arm clears only when this PR's backlog is consumed;
+        // a held cursor (omitted tail, refused dispatch) keeps it armed.
+        ...(clearDigest
+          ? {
+              digestPending: false,
+              digestSizeArmed: false,
+              digestRendered: [],
+              digestRetiredCount: 0,
+            }
+          : {}),
       };
       this.savePrWatchState();
     };
 
     // No new comments: advance the cursor without any attribution round-trip.
     if (candidates.length === 0) {
-      commitCursor(nowIso);
+      commitCursor(nowIso, true);
       return;
     }
 
@@ -7748,8 +8096,270 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
     }
     if (deliverable.length === 0) {
-      commitCursor(gateHoldCursor ?? nowIso);
+      // A gate grace hold keeps the backlog (and the digest arm) for the next
+      // pass; a genuine no-target retirement consumes it with a trace.
+      commitCursor(gateHoldCursor ?? nowIso, gateHoldCursor === undefined);
       return;
+    }
+
+    // Digest mode is armed by a downtime gap (per-entry flag) OR by backlog
+    // size: a window larger than the per-comment pass cap would flood one
+    // prompt per comment however it accumulated (a healed endpoint after
+    // sustained per-PR fetch failures keeps the heartbeat fresh, so the gap
+    // alone never arms it).
+    const digesting =
+      digestMode || deliverable.length > MAX_WATCH_COMMENTS_PER_PASS;
+    if (digesting) {
+      // The gap arm reports the outage; the size arm (and its follow-ups,
+      // which re-enter via the persisted arm) fires on a healthy heartbeat and
+      // must not claim the channel was not running.
+      const gapLead =
+        digestMode && this.prWatchState.entries[key]?.digestSizeArmed !== true;
+      // Allocate the shared body ceiling NEWEST-FIRST: the cap keeps the
+      // prefix, so rendering oldest-first would let it eat exactly the
+      // newest, most actionable members. Members that do not fit are named
+      // in the front omission notice, their keys are NOT recorded, and the
+      // cursor holds before the backlog head so the next pass digests the
+      // remainder — nothing is consumed without being delivered.
+      const newest = deliverable.slice(-MAX_AGGREGATE_COMMENTS);
+      const memberLine = (
+        candidate: (typeof deliverable)[number],
+        language: BoundPromptLanguage,
+      ): string => {
+        const digestCopy = BOUND_DELIVERY_COPY[language];
+        const total = Array.from(candidate.body).length;
+        const excerpt =
+          total > MAX_AGGREGATE_COMMENT_CHARS
+            ? `${truncateCodePoints(candidate.body, MAX_AGGREGATE_COMMENT_CHARS)}… [${digestCopy.commentTruncated(total - MAX_AGGREGATE_COMMENT_CHARS)}]`
+            : candidate.body;
+        const lead =
+          candidate.inlineLocation !== undefined
+            ? `${digestCopy.newInlineReviewCommentLead(candidate.author)}\n${candidate.inlineLocation}`
+            : digestCopy.newCommentLead(candidate.author);
+        return `${lead}\n${excerpt}\nComment: ${candidate.url}`;
+      };
+      const cp = (text: string): number => Array.from(text).length;
+      const renderFor = (
+        language: BoundPromptLanguage,
+        members: ReadonlyArray<(typeof deliverable)[number]>,
+      ): string => {
+        const digestCopy = BOUND_DELIVERY_COPY[language];
+        const omitted = deliverable.length - members.length;
+        const leadText = gapLead
+          ? digestCopy.offlineCommentsLead(deliverable.length)
+          : digestCopy.commentBacklogLead(deliverable.length);
+        // The omission notice rides at the FRONT: a tail notice would be
+        // the first thing the shared body cap truncates away.
+        return (
+          leadText +
+          (omitted > 0
+            ? `\n[${digestCopy.offlineOmittedNotice(omitted)}]`
+            : '') +
+          `\n${members.map((candidate) => memberLine(candidate, language)).join('\n')}`
+        );
+      };
+      const leadCp = cp(
+        gapLead
+          ? BOUND_DELIVERY_COPY[this.locale].offlineCommentsLead(
+              deliverable.length,
+            )
+          : BOUND_DELIVERY_COPY[this.locale].commentBacklogLead(
+              deliverable.length,
+            ),
+      );
+      const rendered: Array<(typeof deliverable)[number]> = [];
+      let used = leadCp + 1;
+      for (let i = newest.length - 1; i >= 0; i -= 1) {
+        const candidate = newest[i]!;
+        const lineCp = cp(memberLine(candidate, this.locale));
+        // Notice sized for the count IF this member is accepted; the final
+        // notice is no larger, so a fit here stays a fit at the end.
+        const noticeCp =
+          deliverable.length - (rendered.length + 1) > 0
+            ? cp(
+                `\n[${BOUND_DELIVERY_COPY[this.locale].offlineOmittedNotice(deliverable.length - (rendered.length + 1))}]`,
+              )
+            : 0;
+        if (used + lineCp + 1 + noticeCp > BOUND_PROMPT_BODY_MAX_CODE_POINTS) {
+          break;
+        }
+        rendered.unshift(candidate);
+        used += lineCp + 1;
+      }
+      if (rendered.length > 0) {
+        // Authorship exclusion is computed over the RENDERED slice (the
+        // body the session actually sees) and over the SAME follower
+        // population as the per-comment path, so the delivery-time Gone
+        // fallback cannot hand the digest back to a session that authored
+        // every rendered member. A follower is excluded only if it authored
+        // EVERY rendered member; a partial author still receives the digest
+        // (the mutual-authorship case must not consume with zero prompts).
+        // An all-targets exclusion is unreachable: every deliverable member
+        // has some target that did not author it.
+        const exclude = new Set<string>();
+        for (const sessionId of followerIds) {
+          if (
+            rendered.every((candidate) => excludeFor(candidate).has(sessionId))
+          ) {
+            exclude.add(sessionId);
+          }
+        }
+        const omitted = deliverable.length - rendered.length;
+        // Content-hash identity over the RENDERED members (the aggregate
+        // lane's superset semantics): a crash before the cursor save
+        // re-lists the window, the member dedupe filters consumed comments,
+        // and a grown window dispatches only the new remainder.
+        const digestId = `comment-digest:${number}:${createHash('sha256')
+          .update(
+            rendered
+              .map((candidate) => candidate.key)
+              .sort()
+              .join('\n'),
+          )
+          .digest('hex')
+          .slice(0, 40)}`;
+        // The digest carries the CHANNEL ACCOUNT's identity, exactly like
+        // the per-comment envelopes on this same-account lane: a synthetic
+        // sender would fail the group sender allowlist preflight (the
+        // waiver matches the channel login), retiring the digest while the
+        // cursor advanced past the whole backlog.
+        const envelope: Envelope = {
+          channelName: this.name,
+          senderId: this.botUsername?.toLowerCase() ?? 'github',
+          senderName: this.botUsername ?? 'GitHub',
+          chatId,
+          threadId,
+          messageId: digestId,
+          text: renderFor('en', rendered),
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+          metadata,
+        };
+        const settled = await this.dispatchEnvelope(
+          envelope,
+          number,
+          { dispatchedComments: rendered.map((candidate) => candidate.key) },
+          true,
+          exclude,
+          this.locale === 'en' ? undefined : renderFor(this.locale, rendered),
+        );
+        // A retired verdict (e.g. preflight rejection) consumes the task
+        // and returns settled WITHOUT recording a delivery: treat it as
+        // unconsumed so the cursor never advances past members that were
+        // never delivered. The durable delivery ring is the evidence. An
+        // unreadable ring is unknown, not positive evidence — but once a
+        // successful write latches the repair, the digest may prove its OWN
+        // acceptance from the freshly written key. The unreadable verdict
+        // itself is never cleared: the suppression callers keep failing
+        // closed for the keys lost with the file (gate the repair here only).
+        const delivered =
+          settled &&
+          (this.boundDeliveredUnreadable
+            ? this.boundDeliveredRepaired &&
+              this.boundDeliveredKeys.has(this.boundEventKey(envelope))
+            : this.boundEventAlreadyDelivered(envelope));
+        if (!delivered) {
+          const heldEntry = this.prWatchState.entries[key];
+          if (settled) {
+            // Permanent retirement: preflight rejected the digest (settled
+            // with no delivery). Bound the retry — the route/sender gate may
+            // be fixed, but a permanently-rejected digest must not hold the
+            // cursor and spend the pass-wide watch budget every poll for the
+            // process lifetime with zero prompts. A transient deferral
+            // (settled === false) keeps the fail-closed hold below instead.
+            const retiredCount = (heldEntry?.digestRetiredCount ?? 0) + 1;
+            if (heldEntry) heldEntry.digestRetiredCount = retiredCount;
+            if (retiredCount >= MAX_DIGEST_RETIREMENT_RETRIES) {
+              // Consume the WHOLE deliverable window with a visible trace
+              // rather than retry the identical rejected attempt forever: the
+              // cursor advances past every deliverable member (the rendered
+              // keys stay recorded; the omitted tail is consumed by the cursor
+              // advance), so none of them re-list.
+              this.recordChannelEvent({
+                type: 'inbound',
+                outcome: 'skipped',
+                reason: 'comment_digest_retired',
+                repository: chatId,
+                thread: threadId,
+                number,
+                messageId: digestId,
+                detail: {
+                  consumedComments: deliverable.length,
+                  retirements: retiredCount,
+                },
+              });
+              process.stderr.write(
+                `[Channel:${this.name}] comment digest for ${key} retired at preflight ${retiredCount} times; consuming ${deliverable.length} comment(s) with a trace instead of retrying\n`,
+              );
+              commitCursor(nowIso, true);
+              return;
+            }
+          } else if (heldEntry) {
+            // Transient deferral, not a permanent retirement: reset the streak.
+            heldEntry.digestRetiredCount = 0;
+          }
+          // Undo the claim-time member recording: otherwise the next pass
+          // filters every member as already dispatched, the empty candidate
+          // set advances the cursor past the whole backlog, and the retired
+          // digest is consumed with zero prompts one poll later. The removed
+          // keys re-list next pass; the arm and commentSince are kept.
+          const claimed = new Set(rendered.map((candidate) => candidate.key));
+          this.cursor.dispatchedComments = (
+            this.cursor.dispatchedComments ?? []
+          ).filter((key) => !claimed.has(key));
+          const times = this.cursor.dispatchedCommentTimes;
+          if (times) {
+            for (const key of claimed) delete times[key];
+          }
+          commitCursor(since);
+          return;
+        }
+        if (omitted === 0) {
+          commitCursor(nowIso, true);
+        } else {
+          // Hold before the backlog head and KEEP the arm: the omitted
+          // prefix re-lists next pass and digests again (the notice promised
+          // further digests); the rendered suffix is deduped. Arm regardless
+          // of how the digest was entered — the size arm has no gap-arming
+          // loop, so the omitted tail must persist its own arm or it would
+          // drain one prompt per comment. Remember a size-triggered origin so
+          // the follow-up keeps the neutral lead (no outage was detected).
+          const armedEntry = this.prWatchState.entries[key];
+          if (armedEntry) {
+            armedEntry.digestPending = true;
+            if (!digestMode) armedEntry.digestSizeArmed = true;
+            // A delivered digest breaks any permanent-retirement streak.
+            armedEntry.digestRetiredCount = 0;
+            // Persist the rendered frontier so the shared ring's eviction
+            // (keyed to the notification cursor, which a healthy poll advances
+            // past this held backlog) cannot re-list and re-deliver a rendered
+            // member, nor over-count the follow-up digest's "new comment(s)".
+            armedEntry.digestRendered = [
+              ...new Set([
+                ...(armedEntry.digestRendered ?? []),
+                ...rendered.map((candidate) => candidate.key),
+              ]),
+            ];
+          }
+          // Clamp the hold anchor at `since`: the fetch filters on updated_at,
+          // so an old comment edited today re-lists and sorts to deliverable[0]
+          // even though it was created before commentSince. Anchoring at its
+          // creation time would drag the cursor backwards and re-fetch (then
+          // re-deliver, once the ring evicts their keys) the whole window.
+          commitCursor(
+            new Date(
+              Math.max(
+                Date.parse(deliverable[0]!.createdAt),
+                Date.parse(since),
+              ) - 1000,
+            ).toISOString(),
+          );
+        }
+        return;
+      }
+      // Not even one member fits (a pathologically long URL): fall through
+      // to the per-comment path rather than consume anything.
     }
 
     // Cap the burst against the pass-wide budget shared by all watched PRs;
@@ -7785,17 +8395,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // independent one). Keep commentSince so the next pass re-fetches and
       // retries; dispatchedComments dedupes anything already claimed. Advancing
       // here would skip the comment past with no task and no re-delivery chance.
+      // The cursor stays held, so keep the arm AND the rendered frontier too —
+      // clearing the frontier would re-deliver ring-evicted rendered members.
       commitCursor(since);
     } else {
       // Resume just before the last processed comment when capped so the
       // unprocessed tail is re-fetched next pass (a second of overlap is
       // deduped, never lost). A gate-held comment never reaches here: a hold
-      // implies an empty deliverable, which returned above.
+      // implies an empty deliverable, which returned above. A digest that
+      // fell through to this path (no member fit the body budget) consumes
+      // its arm: the backlog delivers individually from here on.
       const last = batch[batch.length - 1]!;
       commitCursor(
         capped
           ? new Date(Date.parse(last.createdAt) - 1000).toISOString()
           : nowIso,
+        // A capped cursor resumes before the last processed comment (still
+        // held), so it must keep the rendered frontier; only an uncapped
+        // advance to nowIso has consumed the backlog and may clear it.
+        digesting && !capped,
       );
     }
   }

@@ -1,4 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { performance as nodePerformance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +13,7 @@ import {
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   createExportTranscriptDocumentV1,
+  createExportTranscriptDocumentV2,
   type ExportTranscriptBlockV1,
   type ExportTranscriptDocumentV1,
 } from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
@@ -676,6 +679,304 @@ describe('ExportTranscriptDocument browser gate', () => {
       await page.close();
     }
   });
+
+  it('renders valid Cron metadata in a V2 document', async () => {
+    const prompt = '/loop 60 seconds: continue with verified metadata';
+    const document = createExportTranscriptDocumentV2(
+      [
+        {
+          ...record('valid-cron-metadata', null, 'user', prompt),
+          subtype: 'cron',
+          systemPayload: { displayText: prompt },
+        },
+      ],
+      {
+        startTime: '2026-08-16T00:00:00.000Z',
+        metadata: {
+          sessionId: 'valid-cron-metadata',
+          startTime: '2026-08-16T00:00:00.000Z',
+          exportTime: EXPORTED_AT,
+          cwd: '/workspace/project',
+          promptCount: 1,
+          uniqueFiles: [],
+        },
+      },
+      { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+    );
+    const html = renderExportTranscriptDocumentToHtml(document);
+    expect(html).toContain('"schemaVersion":2');
+
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const probe = await installNetworkAndCspProbe(page);
+    await page.setContent(html, { waitUntil: 'load' });
+    await expect
+      .poll(() => page.locator('body').getAttribute('data-render-complete'))
+      .toBe('true');
+    const card = page.locator('[data-web-shell-automatic-trigger-message]');
+    expect(await card.count()).toBe(1);
+    expect(
+      await card
+        .locator('[data-web-shell-automatic-trigger-summary]')
+        .textContent(),
+    ).toBe(prompt);
+    const instructions = card.locator(
+      '[data-web-shell-automatic-trigger-instructions]',
+    );
+    expect(await instructions.isVisible()).toBe(true);
+    expect(await instructions.innerText()).toBe(prompt);
+    expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+    expect(probe.allowedStyleRequests).toEqual([RENDERER_CSS_URL]);
+    expect(probe.unexpectedRequests).toHaveLength(
+      expectedNetwork.unexpectedRequests,
+    );
+    expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+      expectedNetwork.cspViolations,
+    );
+    await page.close();
+    await browser.close();
+    browser = undefined;
+  });
+
+  it('opens V1 and rejects V2 with the pinned pre-V2 public renderer', async () => {
+    const legacyVersion = '0.28.3';
+    const legacyIdentity = legacyVersion + '+88485ce86a090982';
+    const legacyBase = `https://unpkg.com/@qwen-code/qwen-code@${legacyVersion}/`;
+    const legacyAssets = [
+      {
+        file: 'export-transcript-document.js',
+        integrity:
+          'sha384-RmZTu+dlEMG0jEt1MPe6uwIFPUR0wy3BVWW/vf8HIJwf0DvYK5GVg9c8F+mo3xei',
+        bytes: 2_149_861,
+      },
+      {
+        file: 'export-transcript-document.css',
+        integrity:
+          'sha384-1b7aeIUXXz756dLmrlvZotdgyGVkZgJTxDJSHyrGt+l87CPiuPqosQM4Uz7dElT7',
+        bytes: 2_426_053,
+      },
+    ].map((asset) => ({ ...asset, url: legacyBase + asset.file }));
+    const readPublishedFile = async (url: string, timeoutMs: number) => {
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+      return Buffer.from(await response.arrayBuffer());
+    };
+    let publishedAssets: Buffer[];
+    try {
+      publishedAssets = await Promise.all(
+        legacyAssets.map(({ url }) => readPublishedFile(url, 10_000)),
+      );
+    } catch (cdnFailure) {
+      try {
+        // Some CI runners cannot reach unpkg. Use the original npm package's
+        // identical, immutable bytes when the CDN is unavailable.
+        const tarball = await readPublishedFile(
+          `https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-${legacyVersion}.tgz`,
+          180_000,
+        );
+        publishedAssets = legacyAssets.map(({ file, bytes }) =>
+          execFileSync('tar', ['-xOzf', '-', `package/${file}`], {
+            input: tarball,
+            maxBuffer: bytes + 1,
+            timeout: 30_000,
+          }),
+        );
+      } catch (registryFailure) {
+        throw new AggregateError(
+          [cdnFailure, registryFailure],
+          'Cannot load the published renderer from the CDN or npm',
+        );
+      }
+    }
+    // Both sources must match the same pinned bytes before Chromium uses them.
+    legacyAssets.forEach(({ url, integrity, bytes }, index) => {
+      const asset = publishedAssets[index]!;
+      expect(asset.byteLength, url).toBe(bytes);
+      expect(
+        `sha384-${createHash('sha384').update(asset).digest('base64')}`,
+        url,
+      ).toBe(integrity);
+    });
+
+    const prompt = '/loop 60 seconds: preserve this V1 instruction';
+    const cronRecord = {
+      ...record('legacy-cron', null, 'user', prompt),
+      subtype: 'cron',
+      systemPayload: { displayText: prompt },
+    };
+    const sessionData = {
+      startTime: '2026-08-16T00:00:00.000Z',
+      metadata: {
+        sessionId: 'legacy-cron',
+        startTime: '2026-08-16T00:00:00.000Z',
+        exportTime: EXPORTED_AT,
+        cwd: '/workspace/project',
+        promptCount: 1,
+        uniqueFiles: [],
+      },
+    };
+    const options = {
+      rendererVersion: RENDERER_VERSION,
+      exportedAt: EXPORTED_AT,
+    };
+    const documents = [
+      createExportTranscriptDocumentV1([cronRecord], sessionData, options),
+      createExportTranscriptDocumentV2([cronRecord], sessionData, options),
+    ];
+    expect(documents[0].blocks[0]).not.toHaveProperty('meta');
+    expect(documents[1].blocks[0]).toMatchObject({
+      kind: 'user',
+      meta: { source: 'cron' },
+    });
+
+    const currentRendererIntegrity = `sha384-${createHash('sha384').update(rendererAsset).digest('base64')}`;
+    const currentCssIntegrity = `sha384-${createHash('sha384').update(rendererCssAsset).digest('base64')}`;
+    browser = await chromium.launch({ headless: true });
+    for (const document of documents) {
+      const page = await browser.newPage();
+      await page.route('**/*', async (route) => {
+        const index = legacyAssets.findIndex(
+          ({ url }) => route.request().url() === url,
+        );
+        if (index === -1) {
+          await route.abort('blockedbyclient');
+          return;
+        }
+        await route.fulfill({
+          body: publishedAssets[index],
+          contentType: index === 0 ? 'text/javascript' : 'text/css',
+          headers: { 'access-control-allow-origin': '*' },
+        });
+      });
+      let html = renderExportTranscriptDocumentToHtml(document);
+      html = replaceDocumentEnvelope(html, {
+        ...document,
+        rendererVersion: legacyIdentity,
+      })
+        .replaceAll(RENDERER_URL, legacyAssets[0]!.url)
+        .replaceAll(RENDERER_CSS_URL, legacyAssets[1]!.url)
+        .replaceAll(currentRendererIntegrity, legacyAssets[0]!.integrity)
+        .replaceAll(currentCssIntegrity, legacyAssets[1]!.integrity);
+      await page.setContent(html, { waitUntil: 'load' });
+      if (document.schemaVersion === 1) {
+        await expect
+          .poll(() => page.locator('body').getAttribute('data-render-complete'))
+          .toBe('true');
+        expect(await page.locator('body').innerText()).toContain(prompt);
+        expect(
+          await page
+            .locator('[data-web-shell-automatic-trigger-message]')
+            .count(),
+        ).toBe(0);
+      } else {
+        await expect
+          .poll(() => page.locator('body').getAttribute('data-render-complete'))
+          .toBe('error');
+        expect(await page.getByRole('alert').textContent()).toContain(
+          'Unable to open this chat export',
+        );
+        expect(await page.locator('body').innerText()).not.toContain(prompt);
+      }
+      await page.close();
+    }
+    await browser.close();
+    browser = undefined;
+  });
+
+  it.each([
+    {
+      caseName: 'V1 with injected cron metadata',
+      schemaVersion: 1,
+      meta: { source: 'cron' },
+    },
+    {
+      caseName: 'V2 with a non-canonical source',
+      schemaVersion: 2,
+      meta: { source: 'loop' },
+    },
+    {
+      caseName: 'V2 with extra user metadata',
+      schemaVersion: 2,
+      meta: { source: 'cron', additionalKey: 'not-allowed' },
+    },
+    {
+      caseName: 'V2 with metadata on an assistant block',
+      schemaVersion: 2,
+      meta: { source: 'cron' },
+      metaIndex: 1,
+    },
+    {
+      caseName: 'an unsupported schema version',
+      schemaVersion: 3,
+      meta: { source: 'cron' },
+    },
+  ])(
+    'rejects $caseName from a static document reader',
+    async ({ schemaVersion, meta, metaIndex = 0 }) => {
+      const document = createExportTranscriptDocumentV1(
+        [
+          record('metadata-error', null, 'user', 'Untrusted metadata marker'),
+          record(
+            'assistant-marker',
+            'metadata-error',
+            'assistant',
+            'Assistant metadata marker',
+          ),
+        ],
+        {
+          startTime: '2026-08-16T00:00:00.000Z',
+          metadata: {
+            sessionId: 'metadata-error',
+            startTime: '2026-08-16T00:00:00.000Z',
+            exportTime: EXPORTED_AT,
+            cwd: '/workspace/project',
+            promptCount: 1,
+            uniqueFiles: [],
+          },
+        },
+        { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+      );
+      expect(document.blocks.map(({ kind }) => kind)).toEqual([
+        'user',
+        'assistant',
+      ]);
+      const invalidDocument = {
+        ...document,
+        schemaVersion,
+        blocks: document.blocks.map((block, index) =>
+          index === metaIndex ? { ...block, meta } : block,
+        ),
+      };
+      const html = replaceDocumentEnvelope(
+        renderExportTranscriptDocumentToHtml(document),
+        invalidDocument,
+      );
+
+      browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      const probe = await installNetworkAndCspProbe(page);
+      await page.setContent(html, { waitUntil: 'load' });
+      await expect
+        .poll(() => page.locator('body').getAttribute('data-render-complete'))
+        .toBe('error');
+      expect(await page.getByRole('alert').textContent()).toContain(
+        'Unable to open this chat export',
+      );
+      expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+      expect(probe.allowedStyleRequests).toEqual([RENDERER_CSS_URL]);
+      expect(probe.unexpectedRequests).toHaveLength(
+        expectedNetwork.unexpectedRequests,
+      );
+      expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+        expectedNetwork.cspViolations,
+      );
+      await page.close();
+      await browser.close();
+      browser = undefined;
+    },
+  );
 
   it('fails closed when the CDN renderer is unavailable or fails integrity', async () => {
     const document = createExportTranscriptDocumentV1(

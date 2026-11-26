@@ -45,6 +45,13 @@ public interface ManagedToolResultStore {
     public ArtifactPage listArtifacts(String tenant, String session, Long watermark, Long beforeSequence,
             String beforeId, int limit);
 
+    public WorkspaceArtifactPage listWorkspaceArtifacts(String tenant, byte[] actorKey, String workspace,
+            Long watermark, Long beforeId, int limit);
+
+    /** Workspace page position is the global artifact row id, not a per-session sequence. */
+    public record WorkspaceArtifactPage(List<Artifact> artifacts, long watermark, boolean hasMore,
+            long lastId) { }
+
     public static String identity(String prefix, String... values) {
         var digest = new ByteArrayOutputStream();
         for (String value : values) {

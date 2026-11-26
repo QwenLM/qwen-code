@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import org.springframework.jdbc.core.ConnectionCallback;
@@ -31,15 +30,15 @@ final class WorkspaceStorageKindGuard {
     }
 
     static void requireLocalAlias(JdbcTemplate jdbc, String tenantId, String storageId) {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('CSI', 'SSH_LOCAL', 'EXTERNAL')",
-                Long.class, WorkspaceCsiRegistration.aliasKey(tenantId, storageId)) != 0) {
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind IN ('SSH_LOCAL', 'EXTERNAL')",
+                Long.class, tenantId, storageId) != 0) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     static void requireExecutionAlias(JdbcTemplate jdbc, String tenantId, String storageId) {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('CSI', 'EXTERNAL')",
-                Long.class, WorkspaceCsiRegistration.aliasKey(tenantId, storageId)) != 0) {
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'EXTERNAL'",
+                Long.class, tenantId, storageId) != 0) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }

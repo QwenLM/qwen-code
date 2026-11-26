@@ -141,10 +141,9 @@ describe.runIf(enabled)('Generated UI acceptance replay (#14019)', () => {
 
 /**
  * Baseline on main, 2026-11. `fail` entries are the gaps later stages close:
- * copy and export need host-mediated clipboard/download (stage 8), the
- * checklist needs persisted view state (stage 6), extension needs card
- * revisions (stage 8). The save acknowledgement and isolation rows are
- * `not-applicable` until something persists.
+ * copy and export need host-mediated clipboard/download (stage 8), extension
+ * needs card revisions (stage 8). The checklist keeps its items through saved
+ * view state (stage 6).
  */
 const EXPECTED: Record<string, Record<string, string>> = {
   bill: {
@@ -167,10 +166,10 @@ const EXPECTED: Record<string, Record<string, string>> = {
     'checklist.delete': 'pass',
     'checklist.repeated-undo': 'pass',
     'checklist.edit': 'pass',
-    'checklist.persists-after-reload': 'fail',
-    'checklist.persists-after-reopen': 'fail',
-    'checklist.save-acknowledged': 'not-applicable',
-    'checklist.isolated-across-sessions': 'not-applicable',
+    'checklist.persists-after-reload': 'pass',
+    'checklist.persists-after-reopen': 'pass',
+    'checklist.save-acknowledged': 'pass',
+    'checklist.isolated-across-sessions': 'pass',
   },
   form: {
     'form.called-tool': 'pass',

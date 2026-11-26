@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
@@ -13,14 +14,14 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -33,12 +34,12 @@ import java.util.Set;
 
 final class AgentSessionQueries {
     private final AgentStoreRows storeRows;
-    private final com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
+    private final WorktreeFiles worktreeFiles;
     private final JdbcTemplate jdbc;
     private final List<WebShellModelOption> modelCatalog;
 
     AgentSessionQueries(AgentStoreRows storeRows,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             JdbcTemplate jdbc,
             List<WebShellModelOption> modelCatalog) {
         this.storeRows = storeRows;
@@ -109,10 +110,11 @@ final class AgentSessionQueries {
         }
         List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
         arguments.add(tenantId);
-        sessionIds.forEach(id -> arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, id)));
+        sessionIds.forEach(id -> arguments.add(
+                ManagedSchemaKeys.identity(id)));
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM"
                         + " ma_operation WHERE tenant_id = ?"
-                        + " AND scope_key IN (" + AgentStoreRows.placeholders(sessionIds.size())
+                        + " AND scope_kind = 'SESSION' AND scope_id IN (" + AgentStoreRows.placeholders(sessionIds.size())
                         + ") AND operation_kind = 'CLOSE' AND state = 'COMPLETED'"
                         + " AND receipt_id IS NOT NULL",
                 String.class, arguments.toArray()));
@@ -134,7 +136,7 @@ final class AgentSessionQueries {
 
     /** The batch twin of {@link #hasExecutionRegistryFacts}. */
     Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
-            java.util.Collection<String> sessionIds) {
+            Collection<String> sessionIds) {
         if (sessionIds.isEmpty()) {
             return Set.of();
         }
@@ -156,7 +158,8 @@ final class AgentSessionQueries {
                                 + " s.workspace_storage_id AND r.state = 'ACTIVE' LEFT JOIN"
                                 + " ma_workspace_access a ON a.tenant_id = r.tenant_id AND"
                                 + " a.workspace_id = r.workspace_id AND a.actor_id ="
-                                + " s.creator_actor_key AND a.role IN ('OPERATOR', 'OWNER') WHERE"
+                                + " s.creator_actor_key"
+                                + " AND a.role IN ('OPERATOR', 'OWNER') WHERE"
                                 + " s.tenant_id = ? AND s.session_id IN ("
                                     + AgentStoreRows.placeholders(pending.size())
                                     + ")",
@@ -219,12 +222,13 @@ final class AgentSessionQueries {
 
     SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
+        if (actorId != null) {
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        }
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
-        arguments.add(actorId == null ? null
-                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
-        arguments.add(actorId == null ? null
-                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        arguments.add(actorId);
+        arguments.add(actorId);
         String archiveClause = switch (archiveState) {
             case "archived" -> " AND ma_session.status = 'ARCHIVED'";
             case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
@@ -250,7 +254,16 @@ final class AgentSessionQueries {
         Map<String, JdbcSessionWorktreeStore.Row> worktrees = new LinkedHashMap<>();
         List<SessionRecord> rows =
                 jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", COALESCE(es.last_sequence, 0) AS list_last_sequence,"
+                        "SELECT ma_session.tenant_id, ma_session.session_id, ma_session.agent_id,"
+                            + " ma_session.agent_revision, ma_session.title, ma_session.status,"
+                            + " ma_session.harness_boot_id, ma_session.harness_event_epoch, ma_session.harness_last_event_id,"
+                            + " ma_session.gmt_create, ma_session.gmt_modified, ma_session.deleted_at, ma_session.version,"
+                            + " ma_session.approval_mode, ma_session.tool_profile, ma_session.agent_definition_digest,"
+                            + " ma_session.public_child_agents_version, ma_session.model_config_digest, ma_session.memory_store_id,"
+                            + " ma_session.owner_only, ma_session.preview, ma_session.workspace_id, ma_session.workspace_generation,"
+                            + " ma_session.workspace_storage_id, ma_session.workspace_config_ref, ma_session.workspace_policy_ref,"
+                            + " ma_session.context_config_ref, ma_session.context_revision, ma_session.cwd_relative,"
+                            + " COALESCE(es.last_sequence, 0) AS list_last_sequence,"
                             + " COALESCE(es.replay_floor_sequence, 0) AS list_floor_sequence,"
                             + " w.tenant_id AS worktree_tenant_id, w.session_id AS worktree_session_id,"
                             + " w.workspace_id AS worktree_workspace_id, w.worktree_id AS worktree_worktree_id,"
@@ -262,7 +275,7 @@ final class AgentSessionQueries {
                             + " o.phase AS worktree_phase, o.attempt_count AS worktree_attempt_count FROM"
                             + " ma_session LEFT JOIN ma_event_stream es ON es.tenant_id ="
                             + " ma_session.tenant_id AND es.session_id = ma_session.session_id AND"
-                            + " es.stream_kind = 'SESSION' AND es.stream_id = X''"
+                            + " es.stream_kind = 'SESSION' AND es.stream_id = ''"
                             + " LEFT JOIN ma_session_worktree w ON w.tenant_id = ma_session.tenant_id"
                             + " AND w.session_id = ma_session.session_id LEFT JOIN ma_operation o"
                             + " ON o.operation_kind = 'SESSION_WORKTREE' AND o.tenant_id = w.tenant_id"
@@ -290,7 +303,7 @@ final class AgentSessionQueries {
             rows = new ArrayList<>(rows.subList(0, limit));
         }
         var selectedWorktrees = rows.stream().map(row -> worktrees.get(row.sessionId()))
-                .filter(java.util.Objects::nonNull).toList();
+                .filter(Objects::nonNull).toList();
         return new SessionPage(List.copyOf(rows), hasMore, JdbcSessionWorktreeStore.descriptors(worktreeFiles, jdbc, selectedWorktrees));
     }
 
@@ -363,12 +376,13 @@ final class AgentSessionQueries {
                                 + " event.turn_id FROM ma_public_event event JOIN (SELECT"
                                 + " accepted.session_id, MAX(accepted.sequence_id) AS max_sequence FROM"
                                 + " ma_public_event accepted WHERE accepted.stream_kind = 'SESSION' AND accepted.stream_id ="
-                                + " X'' AND accepted.tenant_id = ? AND accepted.session_id IN ("
+                                + " '' AND accepted.tenant_id = ? AND accepted.session_id IN ("
                                 + AgentStoreRows.placeholders(sessionIds.size())
                                 + ") AND accepted.event_type = 'turn.accepted' GROUP BY"
                                 + " accepted.session_id) latest ON latest.session_id ="
                                 + " event.session_id AND latest.max_sequence ="
-                                + " event.sequence_id WHERE event.tenant_id = ?)"
+                                + " event.sequence_id WHERE event.tenant_id = ? AND event.stream_kind = 'SESSION'"
+                                + " AND event.stream_id = '')"
                                 + " latest_turn ON latest_turn.session_id ="
                                 + " turn_record.session_id AND latest_turn.turn_id ="
                                 + " turn_record.turn_id WHERE turn_record.tenant_id ="
@@ -445,7 +459,7 @@ final class AgentSessionQueries {
         }
         List<Object> args = new ArrayList<>();
         args.add(tenantId);
-        args.add(ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        args.add(actorId);
         args.addAll(sessionIds);
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id=?"
                         + " AND COALESCE(owner_actor_key, creator_actor_key)=? AND session_id IN ("
@@ -456,13 +470,16 @@ final class AgentSessionQueries {
             String promptId) {
         var rows = jdbc.query("SELECT t.approval_mode, t.approval_revision, t.is_plan_enabled, t.permission_rules_json,"
                         + " s.approval_revision AS selected_revision, s.agent_id, s.agent_definition_digest,"
-                        + " s.workspace_id, s.tool_profile FROM ma_turn t JOIN ma_session s"
+                        + " s.workspace_id, s.tool_profile, s.parent_session_id, s.public_child_agents_version FROM ma_turn t JOIN ma_session s"
                         + " ON s.tenant_id=t.tenant_id AND s.session_id=t.session_id"
                         + " WHERE t.tenant_id=? AND t.session_id=? AND t.prompt_id=?", (row, index) -> {
                     if (("qwen-code".equals(row.getString("agent_id"))
                             ? row.getString("agent_definition_digest") != null
                             : row.getString("agent_definition_digest") == null) || row.getString("workspace_id") == null
-                            || !(WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
+                            || !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(row.getString("tool_profile"))
+                                    ? "qwen-code".equals(row.getString("agent_id")) && row.getString("agent_definition_digest") == null
+                                            && row.getString("parent_session_id") == null && row.getInt("public_child_agents_version") == 0
+                                    : WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.FILES_V3.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.FILES_V4.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile")))) {
@@ -521,13 +538,13 @@ final class AgentSessionQueries {
     Optional<String> findLastVisibleStatusBeforeDelete(String tenantId,
             String sessionId) {
         return jdbc.query("SELECT session_status_before FROM ma_operation"
-                        + " WHERE scope_key = ? AND operation_kind = 'DELETE'"
-                        + " AND target_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_kind = 'DELETE'"
+                        + " AND target_id = ? AND tenant_id = ? AND session_id = ?"
                         + " AND session_status_before IS NOT NULL"
                         + " ORDER BY gmt_create DESC LIMIT 1",
                 (rows, row) -> rows.getString(1),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                AgentStoreRows.sessionOperationTarget(sessionId), tenantId, sessionId)
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)), tenantId, sessionId)
                 .stream().findFirst();
     }
 

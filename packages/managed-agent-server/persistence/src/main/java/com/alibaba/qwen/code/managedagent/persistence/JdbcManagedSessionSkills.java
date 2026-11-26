@@ -1,21 +1,28 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Repository
 public class JdbcManagedSessionSkills
@@ -24,8 +31,8 @@ public class JdbcManagedSessionSkills
     private final ObjectMapper json;
     private final RequestDigests digests;
     private final JdbcManagedAgentDefinitionStore definitions;
-    @org.springframework.beans.factory.annotation.Autowired
-    @org.springframework.context.annotation.Lazy
+    @Autowired
+    @Lazy
     private JdbcManagedExtensionRecordStore resources;
 
     public JdbcManagedSessionSkills(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
@@ -37,7 +44,7 @@ public class JdbcManagedSessionSkills
     }
 
     public List<Map<String, Object>> fromLaunchReference(String tenant, String session,
-            com.fasterxml.jackson.databind.JsonNode ref) {
+            JsonNode ref) {
         if (ref.isNull()) {
             return null;
         }
@@ -49,7 +56,7 @@ public class JdbcManagedSessionSkills
             return AgentDefinitionExtensions.sessionSkills(json.readValue(resource.bytes(), new TypeReference<List<Map<String, Object>>>() { }));
         } catch (ManagedAgentException error) {
             throw inConflictVocabulary(error);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw conflict(error);
         }
     }
@@ -70,8 +77,8 @@ public class JdbcManagedSessionSkills
 
     private String creationJson(String tenant, String session) {
         var rows = jdbc.query("SELECT result_json FROM ma_request_receipt WHERE namespace = 'SESSION_CREATE_ACTOR'"
-                        + " AND tenant_key = ? AND tenant_id = ? AND session_id = ?",
-                (row, index) -> row.getString("result_json"), ManagedSchemaKeys.key(tenant), tenant, session);
+                        + " AND tenant_id = ? AND session_id = ?",
+                (row, index) -> row.getString("result_json"), tenant, session);
         if (rows.isEmpty()) {
             return null;
         }
@@ -87,11 +94,30 @@ public class JdbcManagedSessionSkills
         }
         try {
             var snapshot = json.readValue(value, new TypeReference<Map<String, Object>>() { });
-            if (Integer.valueOf(2).equals(snapshot.get("version"))) {
-                requireCreationIntent(snapshot, json, digests);
+            if (Integer.valueOf(3).equals(snapshot.get("version"))) {
+                if (!Boolean.TRUE.equals(snapshot.get("serverLoop"))) {
+                    throw conflict();
+                }
+                if (snapshot.containsKey("initialSelection")) {
+                    requireCreationIntent(snapshot, json, digests, true);
+                } else {
+                    if (!snapshot.keySet().equals(Set.of("version", "skills", "serverLoop", "digest"))) {
+                        throw conflict();
+                    }
+                    Map<String, Object> content = new LinkedHashMap<>();
+                    content.put("skills", snapshot.get("skills"));
+                    content.put("serverLoop", true);
+                    if (!digests.digest(content).equals(snapshot.get("digest"))) {
+                        throw conflict();
+                    }
+                }
                 return snapshot.get("skills") == null ? null : AgentDefinitionExtensions.sessionSkills(snapshot.get("skills"));
             }
-            if (!snapshot.keySet().equals(java.util.Set.of("version", "skills", "digest"))
+            if (Integer.valueOf(2).equals(snapshot.get("version"))) {
+                requireCreationIntent(snapshot, json, digests, false);
+                return snapshot.get("skills") == null ? null : AgentDefinitionExtensions.sessionSkills(snapshot.get("skills"));
+            }
+            if (!snapshot.keySet().equals(Set.of("version", "skills", "digest"))
                     || !Integer.valueOf(1).equals(snapshot.get("version"))) {
                 throw conflict();
             }
@@ -107,6 +133,25 @@ public class JdbcManagedSessionSkills
         }
     }
 
+    public boolean serverLoopInjected(String tenant, String session) {
+        String value = creationJson(tenant, session);
+        decode(value, json, digests);
+        return serverLoopMarker(value, json);
+    }
+
+    private static boolean serverLoopMarker(String value, ObjectMapper json) {
+        if (value == null) {
+            return false;
+        }
+        try {
+            var snapshot = json.readValue(value, new TypeReference<Map<String, Object>>() { });
+            return Integer.valueOf(3).equals(snapshot.get("version"))
+                    && Boolean.TRUE.equals(snapshot.get("serverLoop"));
+        } catch (Exception error) {
+            throw conflict(error);
+        }
+    }
+
     public Map<String, Object> initialSelection(String tenant, String session) {
         String value = creationJson(tenant, session);
         if (value == null) {
@@ -114,61 +159,74 @@ public class JdbcManagedSessionSkills
         }
         try {
             var snapshot = json.readValue(value, new TypeReference<Map<String, Object>>() { });
-            if (!Integer.valueOf(2).equals(snapshot.get("version"))) {
+            boolean v3 = Integer.valueOf(3).equals(snapshot.get("version"));
+            boolean v2 = Integer.valueOf(2).equals(snapshot.get("version"));
+            if (!v2 && !(v3 && snapshot.containsKey("initialSelection"))) {
                 decode(value, json, digests);
                 return null;
             }
-            Map<String, Object> command = requireCreationIntent(snapshot, json, digests);
+            Map<String, Object> command = requireCreationIntent(snapshot, json, digests, v3);
             String identity = tenant + ":" + session;
             if (!ManagedConfigInstall.derivedOperationId("managed-extension-initial:", identity).equals(command.get("operationId"))
-                    || !org.apache.commons.codec.digest.DigestUtils.sha256Hex("managed-extension-initial:" + identity).equals(command.get("actorKey"))) {
+                    || !DigestUtils.sha256Hex("managed-extension-initial:" + identity).equals(command.get("actorKey"))) {
                 throw conflict();
             }
             return command;
         } catch (ManagedAgentException error) {
             throw inConflictVocabulary(error);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw conflict(error);
         }
     }
 
     public void saveInitialSelection(String tenant, String session,
-            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> pins) {
+            List<ManagedExtensionPackages.Pin> pins) {
         String previous = creationJson(tenant, session);
         List<Map<String, Object>> skills = decode(previous, json, digests);
+        boolean serverLoop = serverLoopMarker(previous, json);
         if (initialSelection(tenant, session) != null) {
             throw conflict();
         }
         String identity = tenant + ":" + session;
         Map<String, Object> command = Map.of("operationId", ManagedConfigInstall.derivedOperationId("managed-extension-initial:", identity),
-                "actorKey", org.apache.commons.codec.digest.DigestUtils.sha256Hex("managed-extension-initial:" + identity),
+                "actorKey", DigestUtils.sha256Hex("managed-extension-initial:" + identity),
                 "expectedRevision", 0, "extensions", json.convertValue(pins, new TypeReference<List<Map<String, Object>>>() { }));
         Map<String, Object> content = new LinkedHashMap<>();
         content.put("skills", skills);
+        if (serverLoop) {
+            content.put("serverLoop", true);
+        }
         content.put("initialSelection", command);
         var snapshot = new LinkedHashMap<>(content);
-        snapshot.put("version", 2);
+        snapshot.put("version", serverLoop ? 3 : 2);
         snapshot.put("digest", digests.digest(content));
         try {
             String value = json.writeValueAsString(snapshot);
             if (jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE namespace='SESSION_CREATE_ACTOR'"
-                            + " AND tenant_key=? AND tenant_id=? AND session_id=? AND (result_json IS NULL OR result_json=?)",
-                    value, ManagedSchemaKeys.key(tenant), tenant, session, previous) != 1) {
+                            + " AND tenant_id=? AND session_id=? AND (result_json IS NULL OR result_json=?)",
+                    value, tenant, session, previous) != 1) {
                 throw conflict();
             }
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException("Cannot save initial extension selection", error);
         }
     }
 
-    private static Map<String, Object> requireCreationIntent(Map<String, Object> snapshot, ObjectMapper json, RequestDigests digests) {
-        if (!snapshot.keySet().equals(java.util.Set.of("version", "skills", "initialSelection", "digest"))
+    private static Map<String, Object> requireCreationIntent(Map<String, Object> snapshot, ObjectMapper json,
+            RequestDigests digests, boolean withServerLoop) {
+        Set<String> keys = withServerLoop
+                ? Set.of("version", "skills", "serverLoop", "initialSelection", "digest")
+                : Set.of("version", "skills", "initialSelection", "digest");
+        if (!snapshot.keySet().equals(keys)
                 || !(snapshot.get("initialSelection") instanceof Map<?, ?> raw)) {
+            throw conflict();
+        }
+        if (withServerLoop && !Boolean.TRUE.equals(snapshot.get("serverLoop"))) {
             throw conflict();
         }
         @SuppressWarnings("unchecked")
         Map<String, Object> command = (Map<String, Object>) raw;
-        if (!command.keySet().equals(java.util.Set.of("operationId", "actorKey", "expectedRevision", "extensions"))
+        if (!command.keySet().equals(Set.of("operationId", "actorKey", "expectedRevision", "extensions"))
                 || !(command.get("operationId") instanceof String operation) || !operation.matches("[a-f0-9-]{36}")
                 || !(command.get("actorKey") instanceof String actor) || !actor.matches("[a-f0-9]{64}")
                 || !Integer.valueOf(0).equals(command.get("expectedRevision"))) {
@@ -180,6 +238,9 @@ public class JdbcManagedSessionSkills
         }
         Map<String, Object> content = new LinkedHashMap<>();
         content.put("skills", snapshot.get("skills"));
+        if (withServerLoop) {
+            content.put("serverLoop", true);
+        }
         content.put("initialSelection", command);
         if (!digests.digest(content).equals(snapshot.get("digest"))) {
             throw conflict();
@@ -188,15 +249,31 @@ public class JdbcManagedSessionSkills
     }
 
     public void save(String tenant, String session, List<Map<String, Object>> skills) {
+        save(tenant, session, skills, false);
+    }
+
+    public void save(String tenant, String session, List<Map<String, Object>> skills,
+            boolean serverLoopInjected) {
         try {
-            String value = json.writeValueAsString(Map.of("version", 1, "skills", skills,
-                    "digest", digests.digest(skills)));
+            String value;
+            if (serverLoopInjected) {
+                Map<String, Object> content = new LinkedHashMap<>();
+                content.put("skills", skills);
+                content.put("serverLoop", true);
+                var snapshot = new LinkedHashMap<>(content);
+                snapshot.put("version", 3);
+                snapshot.put("digest", digests.digest(content));
+                value = json.writeValueAsString(snapshot);
+            } else {
+                value = json.writeValueAsString(Map.of("version", 1, "skills", skills,
+                        "digest", digests.digest(skills)));
+            }
             if (jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE namespace = 'SESSION_CREATE_ACTOR'"
-                            + " AND tenant_key = ? AND tenant_id = ? AND session_id = ? AND result_json IS NULL",
-                    value, ManagedSchemaKeys.key(tenant), tenant, session) != 1) {
+                            + " AND tenant_id = ? AND session_id = ? AND result_json IS NULL",
+                    value, tenant, session) != 1) {
                 throw conflict();
             }
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException("Cannot save Session Skills", error);
         }
     }

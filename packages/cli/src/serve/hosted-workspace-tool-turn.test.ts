@@ -109,7 +109,6 @@ import {
   LOOP_PROMPT_MAX_CHARS,
 } from './hosted-loop-session.js';
 import { HostedCronSession } from './hosted-cron-session.js';
-import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
@@ -3447,6 +3446,9 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
     ...file,
     'glob',
   ]);
+  await expect(
+    advertised('hosted-workspace-external-files/1'),
+  ).resolves.toEqual(['read_file', 'write_file', 'edit', 'glob']);
   await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual([
     ...shellTools,
     'glob',
@@ -3469,6 +3471,190 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
     'read_file',
     'glob',
   ]);
+});
+
+it('refuses an external files Skill lane before warming the Broker', () => {
+  broker.warm.mockClear();
+  expect(
+    () =>
+      new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        undefined,
+        undefined,
+        undefined,
+        {
+          profile: 'hosted-workspace-external-files/1',
+          skills: publishedSkills(),
+        },
+      ),
+  ).toThrow('External files profile does not support optional lanes.');
+  expect(broker.warm).not.toHaveBeenCalled();
+});
+
+it('declares the external Shell tool set: file tools, foreground Shell and glob', async () => {
+  const publication = {
+    owner: {} as HttpToolPublicationOwner,
+    captureBytes: 4096,
+  };
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    publication,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-external-shell/1' },
+  );
+  const declared = await turn.declarations(new AbortController().signal);
+  expect(declared.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'run_shell_command',
+    'glob',
+  ]);
+  const shell = declared.find((tool) => tool.name === 'run_shell_command')!;
+  const schema = shell.parametersJsonSchema as {
+    properties?: Record<string, unknown>;
+  };
+  // The lane's drain proves foreground captures only: no background switch.
+  expect(schema.properties?.['is_background']).toBeUndefined();
+});
+
+it('refuses an external Shell Turn without its publication or with another lane', () => {
+  const build = (
+    publication?: { owner: HttpToolPublicationOwner; captureBytes: number },
+    extras?: { skills?: ReturnType<typeof publishedSkills> },
+  ) =>
+    new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      publication,
+      undefined,
+      undefined,
+      { profile: 'hosted-workspace-external-shell/1', ...extras },
+    );
+  // Deleting the Shell arm of the closedLane ternary (testing presence, not
+  // which member) lets the no-publication construction through: red here.
+  expect(() => build()).toThrow(
+    'External Shell profile requires a publication and no other lanes.',
+  );
+  expect(() =>
+    build(
+      { owner: {} as HttpToolPublicationOwner, captureBytes: 4096 },
+      { skills: publishedSkills() },
+    ),
+  ).toThrow(
+    'External Shell profile requires a publication and no other lanes.',
+  );
+});
+
+it('dispatches exactly the external file tools with ordinary capture controls', async () => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'yolo', timeoutMs: 60_000 }, waiters },
+    { profile: 'hosted-workspace-external-files/1' },
+  );
+  const batch = [
+    { name: 'read_file', args: { file_path: 'a.txt' } },
+    { name: 'write_file', args: { file_path: 'b.txt', content: 'new' } },
+    {
+      name: 'edit',
+      args: { file_path: 'a.txt', old_string: 'a', new_string: 'b' },
+    },
+    { name: 'glob', args: { pattern: '**/*.txt' } },
+  ].map((call, index) => ({
+    ...calls[0],
+    ...call,
+    callId: `external-${index}`,
+  }));
+  await turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(
+    broker.execute.mock.calls.map(
+      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+    ),
+  ).toEqual(['read_file', 'write_file', 'edit', 'glob']);
+  expect(broker.fileHistory).toHaveBeenCalledWith({
+    kind: 'raw-file-history',
+    action: 'bind',
+    state: null,
+  });
+  expect(broker.fileHistory).toHaveBeenCalledWith({
+    kind: 'raw-file-history',
+    action: 'prepare',
+    promptId: 'prompt',
+    paths: ['b.txt', 'a.txt'],
+  });
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.fileHistory).toHaveBeenCalledWith({
+    kind: 'raw-file-history',
+    action: 'snapshot',
+  });
+});
+
+it.each([
+  'web_fetch',
+  'run_shell_command',
+  'monitor',
+  'agent',
+  'workflow',
+  'skill',
+  'send_message',
+  'todo_write',
+  'exit_plan_mode',
+  'mcp_tool',
+])('refuses %s on external files before dispatch', async (name) => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-external-files/1' },
+  );
+  const call = { ...calls[0], name, args: {} };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name, args: {} } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -3518,30 +3704,19 @@ it.each([
   );
 });
 
-it('keeps PDF pages out of resident and private CSI declarations', async () => {
+it('keeps PDF pages out of resident declarations', async () => {
   broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
   turn = createTurn();
-  const resident = await turn.declarations(new AbortController().signal);
-  const csi = await new HostedCsiToolTurn(
-    session,
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    { bindingId: 'binding', generation: '1' },
-    'prompt',
-    commit,
-    harness,
-    messageFitsInline,
-  ).declarations(new AbortController().signal);
-  for (const declarations of [resident, csi]) {
-    expect(declarations.map((tool) => tool.name)).toEqual([
-      'read_file',
-      'write_file',
-      'edit',
-    ]);
-    expect(declarations[0]).toEqual(HOSTED_WORKSPACE_FILE_TOOLS[0]);
-    expect(declarations[0]).not.toHaveProperty(
-      'parametersJsonSchema.properties.pages',
-    );
-  }
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+  ]);
+  expect(declarations[0]).toEqual(HOSTED_WORKSPACE_FILE_TOOLS[0]);
+  expect(declarations[0]).not.toHaveProperty(
+    'parametersJsonSchema.properties.pages',
+  );
 });
 
 it('dispatches PDF pages with the original input and declaration persisted', async () => {
@@ -3686,6 +3861,57 @@ it.each([false, true])(
   },
 );
 
+// S5 (#18149): a Hooks plan resumes only on a Hooks Session, and only while
+// the journal still holds exactly the Hook results the plan recorded. An
+// occurrence with a record but no result reads as undefined.
+it.each([
+  ['a Session without Hooks', false, [] as const],
+  ['an occurrence with no result', true, undefined],
+  [
+    'a different result',
+    true,
+    [{ event: 'PreToolUse', resultDigest: 'b'.repeat(64) }] as const,
+  ],
+])('declines a saved Hooks batch on %s', async (_, hooks, current) => {
+  const call = { ...calls[0], args: { file_path: 'a.txt' } };
+  const saved = {
+    plan: {
+      promptId: 'prompt',
+      runtime: {
+        runtimeSessionId: 'extensions-components-owner',
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      },
+      calls: [
+        {
+          call,
+          hookResults: [{ event: 'PreToolUse', resultDigest: 'a'.repeat(64) }],
+        },
+      ],
+    },
+  };
+  const receiver = {
+    session,
+    hooks: hooks
+      ? { broker: { runtimeSessionId: 'extensions-components-owner' } }
+      : undefined,
+    broker: { ...broker, runtimeSessionId: 'extensions-components-owner' },
+    promptId: 'prompt',
+    savedToolHookResults: vi.fn().mockReturnValue(current),
+    executeNative: vi.fn(),
+  };
+  await expect(
+    Reflect.apply(
+      HostedWorkspaceToolTurn.prototype.resumeSavedNativeBatch,
+      receiver,
+      [saved, 1, new AbortController().signal],
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(receiver.executeNative).not.toHaveBeenCalled();
+});
+
 // #13753 I3: the read profile's two tools dispatch like any profile's.
 it('dispatches read_file and glob on the read profile', async () => {
   turn = new HostedWorkspaceToolTurn(
@@ -3767,6 +3993,7 @@ it.each([
   ['hosted-workspace-files/1', 'default'],
   ['hosted-workspace-files/1', 'auto-edit'],
   ['hosted-workspace-read/1', 'default'],
+  ['hosted-workspace-external-files/1', 'default'],
   ['hosted-workspace-shell/1', 'default'],
   ['hosted-workspace-shell/1', 'auto-edit'],
 ] as const)(
@@ -6466,7 +6693,7 @@ it('asks before an edit in default mode and runs the batch once the owner allows
     (await session.resources.read(action.optionsRef!)).toString(),
   );
   expect(options).toEqual({
-    v: 2,
+    v: 3,
     inputRef: (await checkpoint()).approval!.invocationRef,
     requestId,
     turnId: 'prompt',
@@ -6636,7 +6863,7 @@ it.each(['allow', 'deny'])(
         )
       ).toString(),
     );
-    expect(options.v).toBe(1);
+    expect(options.v).toBe(3);
     expect(options).not.toHaveProperty('inputRef');
     const approvedRef = (await checkpoint()).approval!.invocationRef!;
     const approved = (await session.resources.read(approvedRef)).toString();
@@ -6721,7 +6948,7 @@ it('binds successive approvals for the same tool to their own inputs', async () 
     ).toString(),
   );
   expect(options).toMatchObject({
-    v: 2,
+    v: 3,
     functionCallId: 'call-1',
     toolName: 'write_file',
     inputRef: (await checkpoint()).approval!.invocationRef,
@@ -7204,7 +7431,7 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
     (await session.resources.read(action.optionsRef!)).toString(),
   );
   expect(options).toMatchObject({
-    v: 2,
+    v: 3,
     functionCallId: 'call-1',
     toolName: 'run_shell_command',
   });
@@ -8971,7 +9198,7 @@ it('asks once, after PreToolUse and PermissionRequest, about the input PreToolUs
         )
       ).toString(),
     ),
-  ).toMatchObject({ v: 2, inputRef });
+  ).toMatchObject({ v: 3, inputRef });
   expect(
     JSON.parse(
       JSON.parse((await session.resources.read(inputRef)).toString())
@@ -12978,7 +13205,7 @@ it('registers the Session capture lane for a background turn in publication mode
   // installed on the Runtime, fed this call's register, and its
   // settleAttached is the hook the attach arm drives — it fires right
   // after the attach, without any client retry anywhere in the turn.
-  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor);
+  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor, 1);
   expect(broker.registerPublisher).toHaveBeenCalledTimes(1);
   const register = lane.publisher!.register as ReturnType<typeof vi.fn>;
   expect(register).toHaveBeenCalledTimes(1);
@@ -13055,7 +13282,7 @@ it('picks the background lane from the input a PreToolUse Hook left, not the mod
   expect(result[0]?.functionResponse?.response).toMatchObject({
     executionStatus: 'success',
   });
-  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor);
+  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor, 1);
   expect(register).toHaveBeenCalledOnce();
   expect(register.mock.calls[0]![0]).toMatchObject({
     capture: { background: true },
@@ -15155,7 +15382,7 @@ it('restores an approved personal memory action without a Runtime or a second ap
   await harness.resolveDurableWait();
   const saved = await readHostedApprovalContinuation(
     session,
-    options.continuationRef,
+    options.continuationRef!,
     'prompt',
   );
   expect(saved.plan.runtime).toBeNull();

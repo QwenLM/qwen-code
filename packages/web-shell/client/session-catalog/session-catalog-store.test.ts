@@ -204,6 +204,58 @@ describe('SessionCatalogStore', () => {
     });
   });
 
+  describe('continuation hint freshness', () => {
+    const target = query('/work');
+    const live = {
+      sessionId: 'one',
+      clientCount: 1,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+
+    beforeEach(async () => {
+      legacy.mockResolvedValue({
+        sessions: [
+          {
+            sessionId: 'one',
+            workspaceCwd: '/work',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:01:00.000Z',
+            needsContinuation: true,
+          },
+        ],
+      });
+      await store.loadOnce(target);
+    });
+
+    it('clears the hint when a newer live terminal watermark lands', () => {
+      store.applyLiveState('/work', [
+        { ...live, updatedAt: '2026-01-01T00:02:00.000Z' },
+      ]);
+      expect(
+        store.getSnapshot(target).page?.sessions[0]?.needsContinuation,
+      ).toBeUndefined();
+    });
+
+    it.each([
+      ['equal', '2026-01-01T00:01:00.000Z'],
+      ['older', '2026-01-01T00:00:30.000Z'],
+    ])('keeps the hint for an %s watermark', (_label, updatedAt) => {
+      store.applyLiveState('/work', [{ ...live, updatedAt }]);
+      expect(
+        store.getSnapshot(target).page?.sessions[0]?.needsContinuation,
+      ).toBe(true);
+    });
+
+    it('keeps the hint when the live entry carries no watermark', () => {
+      store.applyLiveState('/work', [live]);
+      expect(
+        store.getSnapshot(target).page?.sessions[0]?.needsContinuation,
+      ).toBe(true);
+    });
+  });
+
   it('keeps a pending prompt title on every catalog read until a custom title lands', async () => {
     store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
     legacy.mockResolvedValueOnce(page('session-1'));

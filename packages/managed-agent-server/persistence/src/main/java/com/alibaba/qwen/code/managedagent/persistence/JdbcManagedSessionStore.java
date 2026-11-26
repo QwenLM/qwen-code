@@ -20,20 +20,28 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
 
-import java.sql.SQLException;
+import javax.sql.DataSource;
+
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 @Repository
@@ -51,7 +59,7 @@ public class JdbcManagedSessionStore
     private final JournalWriterLifecycle writerLifecycle;
     private final JournalCommit commits;
     private final JdbcJournalPacks journalPacks;
-    private final org.springframework.transaction.support.TransactionTemplate writerTransactions;
+    private final TransactionTemplate writerTransactions;
 
     public JdbcManagedSessionStore(JdbcTemplate jdbc) {
         this(jdbc, new JdbcManagedExtensionRecordStore(jdbc));
@@ -64,52 +72,42 @@ public class JdbcManagedSessionStore
     public JdbcManagedSessionStore(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore extensionRecords,
             JdbcManagedActionStore actions) {
         this(jdbc, extensionRecords, actions, null,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
-                null, null, null, null, null, WriterCredentialPolicy.unbound(), null, null);
+                null, null, null, null, null, WriterCredentialPolicy.unbound(), null);
     }
 
     @Autowired
     public JdbcManagedSessionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             JdbcManagedExtensionRecordStore extensionRecords, JdbcManagedActionStore actions,
-            com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules,
-            com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
-            @org.springframework.lang.Nullable JdbcWorkspaceExecutionStore lifecycleExecution,
-            @org.springframework.lang.Nullable SessionQueryStore lifecycleSessions,
-            @org.springframework.lang.Nullable ToolPublicationObjectStore publicationObjects,
-            @org.springframework.lang.Nullable JdbcManagedToolResultStore toolResults,
-            @org.springframework.lang.Nullable JournalEventTransport journalEventTransport,
+            HarnessRules harnessRules,
+            @Nullable JdbcWorkspaceExecutionStore lifecycleExecution,
+            @Nullable SessionQueryStore lifecycleSessions,
+            @Nullable ToolPublicationObjectStore publicationObjects,
+            @Nullable JdbcManagedToolResultStore toolResults,
+            @Nullable JournalEventTransport journalEventTransport,
             WriterCredentialPolicy credentials,
-            @org.springframework.lang.Nullable RuntimeBindingRepository bindings,
-            @org.springframework.lang.Nullable
-            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings sessionResourceSettings) {
+            @Nullable
+            ManagedAgentSettings sessionResourceSettings) {
         if (lifecycleExecution == null || lifecycleSessions == null) {
             lifecycleExecution = null;
             lifecycleSessions = null;
         }
-        JdbcRuntimeBindingRepository csiBindings =
-                bindings instanceof JdbcRuntimeBindingRepository original
-                                && original.usesDataSource(jdbc.getDataSource())
-                        ? original
-                        : null;
-        var manager = new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource());
-        this.writerTransactions = new org.springframework.transaction.support.TransactionTemplate(manager);
-        this.writerTransactions.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        var manager = new DataSourceTransactionManager(jdbc.getDataSource());
+        this.writerTransactions = new TransactionTemplate(manager);
+        this.writerTransactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.writerTransactions.setTimeout(30);
         ToolPublicationRetentionStore outputRetention = new ToolPublicationRetentionStore(jdbc, manager);
-        var ownerReads = new org.springframework.transaction.support.TransactionTemplate(manager);
-        ownerReads.setTimeout(10);
         this.journalPacks = sessionResourceSettings == null ? null
                 : new JdbcJournalPacks(jdbc, publicationObjects, sessionResourceSettings);
-        this.storeRows = new JournalStoreRows(readerVersion, jdbc, publicationObjects);
+        this.storeRows = new JournalStoreRows(jdbc, publicationObjects);
         this.jdbc = jdbc;
         this.publicationObjects = publicationObjects;
-        this.fencing = new JournalFencing(storeRows, jdbc, journalEventTransport, credentials, csiBindings, journalPacks);
+        this.fencing = new JournalFencing(storeRows, jdbc, credentials);
         this.historyQueries = new JournalHistoryQueries(fencing, storeRows, jdbc, journalPacks);
         this.lifecycleAuthorization = new JournalLifecycleAuthorization(fencing, storeRows, harnessRules, jdbc, extensionRecords, lifecycleExecution, lifecycleSessions);
-        this.resourceReads = new JournalResourceReads(fencing, storeRows, jdbc, publicationObjects, outputRetention, ownerReads);
+        this.resourceReads = new JournalResourceReads(fencing, storeRows, jdbc, publicationObjects, outputRetention);
         this.resourceWrites = new JournalResourceWrites(fencing, storeRows, jdbc, sessionResourceSettings);
-        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords, journalPacks);
-        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions, journalPacks);
+        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, jdbc, credentials, extensionRecords);
+        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, jdbc, toolResults, journalEventTransport, extensionRecords, actions);
     }
 
     static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS;
@@ -117,13 +115,13 @@ public class JdbcManagedSessionStore
     @Transactional
     public void authorizeLifecycle(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RuntimeLifecycleAuthority authority) {
         lifecycleAuthorization.authorizeLifecycle(tenantId, sessionId, writerToken, request, authority);
     }
 
     static <T> T skipContended(
-            org.springframework.transaction.support.TransactionTemplate transactions,
-            org.springframework.transaction.support.TransactionCallback<T> body) {
+            TransactionTemplate transactions,
+            TransactionCallback<T> body) {
         return JournalFencing.skipContended(transactions, body);
     }
 
@@ -155,12 +153,12 @@ public class JdbcManagedSessionStore
     }
 
     @Transactional
-    public java.util.Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
+    public Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
         return lifecycleAuthorization.approvalSelection(tenantId, sessionId, writerToken, request);
     }
 
-    boolean usesDataSource(javax.sql.DataSource source) {
+    boolean usesDataSource(DataSource source) {
         return storeRows.usesDataSource(source);
     }
 
@@ -202,7 +200,7 @@ public class JdbcManagedSessionStore
 
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
-            AcquireWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            AcquireWriterRequest request, RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId, writerToken);
         for (;;) {
@@ -221,7 +219,7 @@ public class JdbcManagedSessionStore
 
     @Transactional
     public WriterGrant renewWriter(String tenantId, String sessionId, String writerToken,
-            RenewWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RenewWriterRequest request, RuntimeLifecycleAuthority authority) {
         return writerLifecycle.renewWriter(tenantId, sessionId, writerToken, request, authority);
     }
 
@@ -233,7 +231,7 @@ public class JdbcManagedSessionStore
 
     @Transactional
     public SealReceipt sealWriter(String tenantId, String sessionId, String writerToken,
-            SealWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            SealWriterRequest request, RuntimeLifecycleAuthority authority) {
         return writerLifecycle.sealWriter(tenantId, sessionId, writerToken, request, authority);
     }
 
@@ -264,7 +262,7 @@ public class JdbcManagedSessionStore
 
     @Transactional
     public CommitReceipt commit(String tenantId, String sessionId, String writerToken,
-            CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            CommitTransactionRequest request, RuntimeLifecycleAuthority authority) {
         return commits.commit(tenantId, sessionId, writerToken, request, authority);
     }
 
@@ -281,13 +279,13 @@ public class JdbcManagedSessionStore
         return historyQueries.transactions(tenantId, workspaceId, sessionId, writerToken, afterRevision, limit);
     }
 
-    @Transactional(readOnly = true, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED)
     public ManagedSessionStoreModels.RecentTransactionPage recentTransactions(String tenantId, String workspaceId,
             String sessionId, String writerToken, Long throughRevision, Long beforeRevision, int limit) {
         return historyQueries.recentTransactions(tenantId, workspaceId, sessionId, writerToken, throughRevision, beforeRevision, limit);
     }
 
-    @Transactional(readOnly = true, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED)
     public ManagedSessionStoreModels.CommandTransaction commandTransaction(String tenantId, String workspaceId,
             String sessionId, String writerToken, Long throughRevision, String operation, String commandId) {
         return historyQueries.commandTransaction(tenantId, workspaceId, sessionId, writerToken, throughRevision, operation, commandId);
@@ -325,7 +323,7 @@ public class JdbcManagedSessionStore
 
     @Transactional
     public ToolResultResourceRef publishAgentSkills(String tenantId,
-            String workspaceId, String sessionId, List<java.util.Map<String, Object>> skills) {
+            String workspaceId, String sessionId, List<Map<String, Object>> skills) {
         return resourceWrites.publishAgentSkills(tenantId, workspaceId, sessionId, skills);
     }
 
@@ -343,46 +341,12 @@ public class JdbcManagedSessionStore
     @Transactional
     public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RuntimeLifecycleAuthority authority) {
         return resourceWrites.publishToolResult(tenantId, sessionId, writerToken, request, authority);
     }
 
     static int toolResultLimit(String kind) {
         return JournalStoreRows.toolResultLimit(kind);
-    }
-
-    record TerminalCandidate(CommitTransactionRequest request,
-            com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TerminalProof proof, String writerTokenSha256) {
-    }
-
-    void requireCsiApplicationCredential(java.sql.Connection target,
-            com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Authority authority,
-            String writerToken) throws SQLException {
-        fencing.requireCsiApplicationCredential(target, authority, writerToken);
-    }
-
-    void requireCsiHistoricalCredential(String tenant, String workspace, String session, String token, String retainedHash) {
-        fencing.requireCsiHistoricalCredential(tenant, workspace, session, token, retainedHash);
-    }
-
-    TerminalCandidate preflightCsiTerminal(java.sql.Connection target,
-            com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Authority authority,
-            String writerToken, byte[] exactBody, JdbcRuntimeBindingRepository bindings) throws SQLException {
-        return commits.preflightCsiTerminal(target, authority, writerToken, exactBody, bindings);
-    }
-
-    String commitCsiTerminal(java.sql.Connection target,
-            com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Authority authority,
-            String writerToken, byte[] exactBody, JdbcRuntimeBindingRepository bindings) throws SQLException {
-        return commits.commitCsiTerminal(target, authority, writerToken, exactBody, bindings);
-    }
-
-    static CommitTransactionRequest validateCsiTerminalBytes(byte[] bytes) {
-        return JournalCommit.validateCsiTerminalBytes(bytes);
-    }
-
-    JdbcCsiFilesRetirementGuard.Original lockCsiOriginal(String tenantId, String sessionId) {
-        return fencing.lockCsiOriginal(tenantId, sessionId);
     }
 
     @Transactional

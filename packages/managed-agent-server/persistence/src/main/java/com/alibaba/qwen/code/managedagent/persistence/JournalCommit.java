@@ -3,28 +3,24 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHostedRecoveryRecords;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -32,121 +28,65 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 final class JournalCommit {
     private final JournalFencing fencing;
     private final JournalLifecycleAuthorization lifecycleAuthorization;
     private final JournalResourceWrites resourceWrites;
     private final JournalStoreRows storeRows;
-    private final com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion;
     private final JdbcTemplate jdbc;
     private final JdbcManagedToolResultStore toolResults;
     private final JournalEventTransport journalEventTransport;
     private final JdbcManagedExtensionRecordStore extensionRecords;
     private final JdbcManagedActionStore actions;
     private final JournalCheckpointValidation checkpoints;
-    private final JdbcJournalPacks packs;
 
     JournalCommit(JournalFencing fencing,
             JournalLifecycleAuthorization lifecycleAuthorization,
             JournalResourceWrites resourceWrites,
             JournalStoreRows storeRows,
-            com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
             JdbcTemplate jdbc,
             JdbcManagedToolResultStore toolResults,
             JournalEventTransport journalEventTransport,
             JdbcManagedExtensionRecordStore extensionRecords,
-            JdbcManagedActionStore actions,
-            JdbcJournalPacks packs) {
+            JdbcManagedActionStore actions) {
         this.fencing = fencing;
         this.lifecycleAuthorization = lifecycleAuthorization;
         this.resourceWrites = resourceWrites;
         this.storeRows = storeRows;
-        this.readerVersion = readerVersion;
         this.jdbc = jdbc;
         this.toolResults = toolResults;
         this.journalEventTransport = journalEventTransport;
         this.extensionRecords = extensionRecords;
         this.actions = actions;
-        this.packs = packs;
         this.checkpoints = new JournalCheckpointValidation(jdbc);
     }
 
     CommitReceipt commit(String tenantId, String sessionId, String writerToken,
-            CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            CommitTransactionRequest request, RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         ValidatedCommit validated = validateCommit(request);
         if (HostedCleanupReferences.containsCleanup(validated.recordBytes())) {
             fencing.lockPlacementBounded(tenantId);
         }
         // Other ordinary commits queue on their Session before any consistent
         // read, so lifecycle and placement cannot change it mid-commit. Cleanup
-        // commits already hold placement; lifecycle authority holds both guards.
-        // CSI-pinned Sessions take them behind this root in
-        // lockCsiContinuation (design 2026-11-03-managed-journal-commit-tenant-guard).
-        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
+        // commits already hold placement; lifecycle authority holds both guards
+        // (design 2026-11-03-managed-journal-commit-tenant-guard).
+        fencing.lockSessionFirst(tenantId, sessionId);
         JdbcHarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
-        int storageFloor = ManagedModelDiagnosticProjection.storageFloor(validated.recordBytes(), request.resources(), validated.resources());
-        if (storageFloor > 1) {
-            readerVersion.requireReadable(storageFloor);
-        }
-        var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
-        var csiOriginal = continuation == null ? null : continuation.original();
-        if (csiOriginal != null) {
-            csiOriginal.requireContinuation();
-        }
-        JournalStoreRows.HeadRow csiHead = csiOriginal == null ? null : fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
-        if (csiOriginal != null && !com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.supportsStorage(
-                csiOriginal.request().getScope(), Math.max(csiHead.storageVersion(), storageFloor))) {
-            throw JournalStoreRows.invalid("This CSI profile does not admit the requested storage format.");
-        }
-        JournalFencing.requireCsiWriter(csiOriginal, csiHead);
-        if (csiOriginal != null
-                && ("commitFileHistory".equals(request.operation())
-                        || !jdbc.query(
-                                        "SELECT journal_revision FROM ma_session_journal_tx WHERE"
-                                            + " tenant_id = ? AND session_id = ? AND operation ="
-                                            + " 'commitFileHistory' ORDER BY journal_revision LIMIT"
-                                            + " 1 FOR UPDATE",
-                                        (row, index) -> row.getLong(1),
-                                        tenantId,
-                                        sessionId)
-                                .isEmpty())) {
-            fencing.requireCsiHistoryOwner(csiOriginal);
-        }
+        boolean activityDiagnostics = ManagedModelDiagnosticProjection.hasActivityDiagnostics(validated.recordBytes(), validated.resources());
         JournalStoreRows.TransactionRow existing = storeRows.findTransactionByCommand(tenantId,
                 sessionId, JournalStoreRows.commandKeyHash(request.operation(),
                         request.commandId()));
         if (existing != null) {
             JournalStoreRows.requireTransactionWorkspace(existing, request.workspaceId());
-            if (csiOriginal != null) {
-                fencing.requireWriter(
-                        csiHead,
-                        request.writerId(),
-                        request.writerGeneration(),
-                        writerToken,
-                        storeRows.databaseNow(),
-                        true);
-                jdbc.execute(
-                        (org.springframework.jdbc.core.ConnectionCallback<Void>)
-                                connection -> {
-                                    JdbcCsiActivationAdmission.requireReplay(
-                                            connection,
-                                            csiOriginal,
-                                            csiHead.journalRevision(),
-                                            csiHead.committedSequence(),
-                                            csiHead.lastCommitDigest(),
-                                            csiHead.writerId(),
-                                            packs);
-                                    return null;
-                                });
-                fencing.requireCsiCurrentTime(continuation);
-            }
             // A duplicate is fenced like a first attempt: before #13800 the
             // v2 claim check ran ahead of this lookup.
             if (authority == null) {
@@ -157,15 +97,14 @@ final class JournalCommit {
         }
         // Physical fencing and migration require stopped writers. Ordinary
         // commits only read storage state and need not block member updates.
-        if (authority == null && csiOriginal == null) {
+        if (authority == null) {
             fencing.requireSessionStorageOpenForRead(tenantId, request.workspaceId(), sessionId);
         } else {
             fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
         }
-        JournalStoreRows.HeadRow head = csiHead == null
-                ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
+        JournalStoreRows.HeadRow head = fencing.requireHeadAfterRootLock(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
-        if (head.storageVersion() >= 4) {
+        if (head.activityDiagnostics()) {
             JsonNode activity = extensionRecords.findActivityStatistics(tenantId, sessionId);
             if (activity == null || !"ready".equals(activity.path("readiness").asText())) {
                 throw JournalStoreRows.conflict("managed_activity_rebuilding", "Session diagnostics are being restored before writer admission.");
@@ -180,45 +119,16 @@ final class JournalCommit {
         validateHead(head, request);
         long revision = JournalStoreRows.increment(head.journalRevision(),
                 "journal revision");
-        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        if (csiOriginal != null
-                && java.util.Set.of("commitFileHistory", "toolIntent", "commitCheckpoint")
-                        .contains(request.operation())) {
-            jdbc.execute(
-                    (org.springframework.jdbc.core.ConnectionCallback<Void>)
-                            connection -> {
-                                JdbcCsiActivationAdmission.preflightCommit(
-                                        connection,
-                                        csiOriginal,
-                                        JournalStoreRows.CSI_JSON.valueToTree(request),
-                                        com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof
-                                                .records(validated.recordBytes()),
-                                        head.journalRevision(),
-                                        head.committedSequence(),
-                                        head.lastCommitDigest(),
-                                        head.writerId(),
-                                        packs);
-                                return null;
-                            });
-            fencing.requireWriter(
-                    head,
-                    request.writerId(),
-                    request.writerGeneration(),
-                    writerToken,
-                    storeRows.databaseNow(),
-                    true);
-        }
-        resourceWrites.commitResources(scopeKey, tenantId, sessionId, request, revision,
-                now, validated.resources(),
-                () -> fencing.requireCsiCurrentTime(continuation));
+        resourceWrites.commitResources(tenantId, sessionId, request, revision,
+                now, validated.resources());
         Set<String> declaredResources = new HashSet<>();
         for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
             declaredResources.add(resource.resourceId());
         }
         var resourceCache = new HashMap<String, StoredResource>();
         var hostedReferences = new HashMap<String, JsonNode>();
-        java.util.function.Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
-                id -> storeRows.storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, id));
+        Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
+                id -> storeRows.storedResource(tenantId, request.workspaceId(), sessionId, id));
         ManagedHostedRecoveryRecords.HistoricalResources closureReader = new ManagedHostedRecoveryRecords.HistoricalResources() {
             @Override
             public StoredResource apply(String resourceId) {
@@ -236,7 +146,7 @@ final class JournalCommit {
         };
         for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
             if (ManagedCheckpointHistory.KIND.equals(resource.kind())) {
-                ObjectNode ref = JournalStoreRows.CSI_JSON.valueToTree(resource);
+                ObjectNode ref = JournalStoreRows.JSON.valueToTree(resource);
                 ref.remove("bytesBase64");
                 closureReader.checkpointHistory(ref);
             } else if ("managed-checkpoint".equals(resource.kind())) {
@@ -246,14 +156,14 @@ final class JournalCommit {
                 ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
-            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
+            if (ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
                 ManagedModelDiagnosticProjection.validateResource(closureReader.apply(resource.resourceId()));
             }
-            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.kind())) {
+            if (ManagedActivityDiagnostics.KIND.equals(resource.kind())) {
                 StoredResource evidence = closureReader.apply(resource.resourceId());
                 JdbcManagedExtensionRecordStore.require(evidence.schemaVersion() == 1 && evidence.byteLength() <= 65_536,
                         "Invalid execution diagnostic resource.");
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.requireEvidence(
+                ManagedActivityDiagnostics.requireEvidence(
                         JdbcManagedExtensionRecordStore.readBody(evidence));
             }
         }
@@ -290,47 +200,9 @@ final class JournalCommit {
             extensionRecords.requireLifecycleSettlement(tenantId, sessionId, validated.recordBytes(),
                     reader);
         }
-        var applied =
-                csiOriginal == null
-                        ? extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
+        var applied = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
                 request.firstSequence(), request.eventCount(),
-                validated.recordBytes(), reader, now.getTime())
-                        : extensionRecords.applyNative(
-                                tenantId,
-                                request.workspaceId(),
-                                sessionId,
-                                request.firstSequence(),
-                                request.eventCount(),
-                                validated.recordBytes(),
-                                reader,
-                                now.getTime());
-        if (csiOriginal != null) {
-            jdbc.execute(
-                    (org.springframework.jdbc.core.ConnectionCallback<Void>)
-                            connection -> {
-                                JdbcCsiActivationAdmission.acceptCommit(
-                                        org.springframework.jdbc.datasource.DataSourceUtils
-                                                .getTargetConnection(connection),
-                                        csiOriginal,
-                                        JournalStoreRows.CSI_JSON.valueToTree(request),
-                                        applied.records(),
-                                        head.journalRevision(),
-                                        head.committedSequence(),
-                                        head.lastCommitDigest(),
-                                        head.writerId(),
-                                        now.toInstant().toEpochMilli(),
-                                        continuation.progress(),
-                                        packs);
-                                return null;
-                            });
-            fencing.requireWriter(
-                    head,
-                    request.writerId(),
-                    request.writerGeneration(),
-                    writerToken,
-                    storeRows.databaseNow(),
-                    true);
-        }
+                validated.recordBytes(), reader, now.getTime());
         var receiptEvents = applied.receipts();
         if (actions != null) {
             actions.apply(
@@ -340,11 +212,9 @@ final class JournalCommit {
                     validated.recordBytes(),
                     reader, hostedReferences);
         }
-        fencing.requireCsiWriterCurrent(
-                continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("INSERT INTO ma_session_journal_tx"
                         + " (tenant_id, workspace_id, session_id,"
-                        + " journal_revision, command_key_hash,"
+                        + " journal_revision, command_ref,"
                         + " transaction_id, operation, command_id,"
                         + " content_digest, first_sequence, last_sequence,"
                         + " event_count, events_digest,"
@@ -358,7 +228,7 @@ final class JournalCommit {
                         + " ?,"
                         + " 'identity', ?, ?, ?, ?)",
                 tenantId, request.workspaceId(), sessionId, revision,
-                JournalStoreRows.commandKeyHash(request.operation(), request.commandId()),
+                ManagedSchemaKeys.identity(JournalStoreRows.commandKeyHash(request.operation(), request.commandId())),
                 request.transactionId(), request.operation(),
                 request.commandId(), request.contentDigest(),
                 request.firstSequence(), request.lastSequence(),
@@ -383,8 +253,6 @@ final class JournalCommit {
                 && activationHeadRevision == head.journalRevision())) {
             activationHeadRevision = revision;
         }
-        fencing.requireCsiWriterCurrent(
-                continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("UPDATE ma_session_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
                         + " is_wake_pending = is_wake_pending OR ?,"
@@ -396,9 +264,9 @@ final class JournalCommit {
                         + " activation_id = ?, activation_phase = ?,"
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
-                        + " activation_head_revision = ?, storage_version = ?, gmt_modified = ?"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                        + " AND session_id = ?",
+                        + " activation_head_revision = ?, has_activity_diagnostics = has_activity_diagnostics OR ?, gmt_modified = ?"
+                        + " WHERE tenant_id = ? AND"
+                        + " harness_session_id = ?",
                 revision, request.lastSequence(),
                 wakeInput,
                 head.journalRevision(), revision, head.journalRevision(), revision, request.commitDigest(),
@@ -412,8 +280,8 @@ final class JournalCommit {
                         : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
                         : activation.expiresAt(),
-                activationHeadRevision, Math.max(head.storageVersion(), storageFloor), now.getTime(), RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
-        if (toolResults != null && csiOriginal == null) {
+                activationHeadRevision, activityDiagnostics, now.getTime(), tenantId, sessionId);
+        if (toolResults != null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
         JdbcManagedUserMessageStore.capture(jdbc, tenantId, sessionId, applied.records());
@@ -446,139 +314,15 @@ final class JournalCommit {
                 });
     }
 
-    void persistTransaction(
-            String tenantId,
-            String sessionId,
-            String writerTokenHash,
-            CommitTransactionRequest request,
-            long revision,
-            ValidatedCommit validated,
-            Timestamp now) {
-        jdbc.update(
-                "INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, events_digest, previous_commit_digest, commit_digest, writer_generation, writer_id, writer_token_hash, activation_epoch, latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'identity', ?, ?, ?, ?)",
-                tenantId,
-                request.workspaceId(),
-                sessionId,
-                revision,
-                JournalStoreRows.commandKeyHash(request.operation(), request.commandId()),
-                request.transactionId(),
-                request.operation(),
-                request.commandId(),
-                request.contentDigest(),
-                request.firstSequence(),
-                request.lastSequence(),
-                request.eventCount(),
-                request.eventsDigest(),
-                request.previousCommitDigest(),
-                request.commitDigest(),
-                request.writerGeneration(),
-                request.writerId(),
-                writerTokenHash,
-                request.activationEpoch(),
-                request.latestCheckpointResourceId(),
-                validated.recordBytes(),
-                validated.recordBytes().length,
-                validated.recordDigest(),
-                now.getTime());
-    }
-
-    JdbcManagedSessionStore.TerminalCandidate preflightCsiTerminal(java.sql.Connection target,
-            com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Authority authority,
-            String writerToken, byte[] exactBody, JdbcRuntimeBindingRepository bindings) throws SQLException {
-        authority.requirePreCut(target);
-        if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(
-                org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(target), jdbc.getDataSource())
-                || bindings == null || !bindings.usesDataSource(jdbc.getDataSource())
-                || exactBody == null || exactBody.length == 0 || exactBody.length > com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT) {
-            throw JournalFencing.nativeReadConflict();
-        }
-        var original = authority.original();
-        CommitTransactionRequest request = csiTerminalRequest(exactBody);
-        String tenant = original.request().getScope().getTenantId();
-        String session = original.request().getIsolationKey();
-        JournalStoreRows.validateScope(tenant, request.workspaceId(), session);
-        fencing.requireCredential(tenant, request.workspaceId(), session, writerToken);
-        fencing.requireCsiJournalIsolation();
-        validateCommit(request);
-        JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenant, session);
-        storeRows.requireHeadScope(head, tenant, request.workspaceId(), session);
-        JournalFencing.requireCsiWriter(original, head);
-        fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, storeRows.databaseNow(), true);
-        validateHead(head, request);
-        var proof = JdbcCsiActivationAdmission.terminalPreflight(target, authority, JournalStoreRows.CSI_JSON.valueToTree(request), bindings, true, packs);
-        return new JdbcManagedSessionStore.TerminalCandidate(request, proof, head.leaseTokenHash());
-    }
-
-    String commitCsiTerminal(java.sql.Connection target,
-            com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Authority authority,
-            String writerToken, byte[] exactBody, JdbcRuntimeBindingRepository bindings) throws SQLException {
-        authority.requireConnection(target);
-        if (authority.stage() != com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Stage.FROZEN) {
-            throw JournalFencing.nativeReadConflict();
-        }
-        var frozen = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationStore.FROZEN_LIMIT);
-        byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
-        if (!java.util.Arrays.equals(saved, exactBody)
-                || !com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(saved)
-                        .equals(frozen.path("preparedCommitSha256").textValue())) {
-            throw JournalFencing.nativeReadConflict();
-        }
-        var candidate = preflightCsiTerminal(target, authority, writerToken, exactBody, bindings);
-        var request = candidate.request();
-        String tenant = authority.original().request().getScope().getTenantId();
-        String session = authority.original().request().getIsolationKey();
-        JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenant, session);
-        var validated = validateCommit(request);
-        Timestamp now = storeRows.databaseNow();
-        String writtenAt = now.toInstant().toString();
-        long revision = JournalStoreRows.increment(head.journalRevision(), "journal revision");
-        Runnable fence = () -> {
-            try {
-                authority.requireCurrentTime(target);
-            } catch (SQLException error) {
-                throw new org.springframework.dao.DataAccessResourceFailureException("Original terminal time is unavailable", error);
-            }
-            fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, storeRows.databaseNow(), true);
-        };
-        resourceWrites.commitResources(ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, request, revision, now, validated.resources(), fence);
-        fence.run();
-        persistTransaction(tenant, session, candidate.writerTokenSha256(), request, revision, validated, now);
-        fence.run();
-        int changed = jdbc.update("UPDATE ma_session_head SET state = 'SEALED',"
-                        + " journal_revision = ?, wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END, committed_sequence = ?, last_commit_digest = ?,"
-                        + " activation_phase = 'released', activation_head_revision = ?, gmt_modified = ?"
-                        + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'ACTIVE'"
-                        + " AND journal_revision = ? AND committed_sequence = ? AND last_commit_digest = ?",
-                revision, head.journalRevision(), revision, candidate.proof().terminalSequence(), request.commitDigest(), revision, now.getTime(),
-                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session), tenant, session,
-                head.journalRevision(), head.committedSequence(), head.lastCommitDigest());
-        if (changed != 1) {
-            throw JournalFencing.nativeReadConflict();
-        }
-        authority.requireCurrentTime(target);
-        return writtenAt;
-    }
-
-    static CommitTransactionRequest csiTerminalRequest(byte[] bytes) {
-        WorkspaceCsiApplicationJson.object(bytes, com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
-        try {
-            return JournalStoreRows.CSI_TERMINAL_JSON.readValue(bytes, CommitTransactionRequest.class);
-        } catch (IOException malformed) {
-            throw JournalStoreRows.invalid("Invalid original terminal request.");
-        }
-    }
-
-    static CommitTransactionRequest validateCsiTerminalBytes(byte[] bytes) {
-        var request = csiTerminalRequest(bytes);
-        validateCommit(request);
-        return request;
-    }
-
     static ValidatedCommit validateCommit(
             CommitTransactionRequest request) {
-        JournalStoreRows.validateStableId(request.transactionId(), "transactionId");
+        JournalStoreRows.validateStableId(request.transactionId(), "transactionId", 128);
         JournalStoreRows.validateText(request.operation(), "operation", JournalStoreRows.MAX_TEXT_BYTES);
-        JournalStoreRows.validateStableId(request.commandId(), "commandId");
+        JournalStoreRows.validateStableId(request.commandId(), "commandId", 128);
+        // Encode the command reference at admission, before any lock or INSERT,
+        // so an over-budget operation/commandId is a named 400 here rather than
+        // a raw overflow on the commit or replay path.
+        JournalStoreRows.commandKeyHash(request.operation(), request.commandId());
         JournalStoreRows.validateDigest(request.contentDigest(), "contentDigest", false);
         JournalStoreRows.validateDigest(request.eventsDigest(), "eventsDigest", true);
         JournalStoreRows.validateDigest(request.previousCommitDigest(),
@@ -649,7 +393,7 @@ final class JournalCommit {
             if (resource == null) {
                 throw JournalStoreRows.invalid("resources must not contain null entries.");
             }
-            JournalStoreRows.validateStableId(resource.resourceId(), "resourceId");
+            JournalStoreRows.validateStableId(resource.resourceId(), "resourceId", 256);
             JournalStoreRows.validateStableId(resource.kind(), "resource kind");
             if (ManagedNativeJournalSnapshots.isSnapshotKind(resource.kind())
                     || ManagedNativeJournalSnapshots.isSnapshotId(resource.resourceId())) {

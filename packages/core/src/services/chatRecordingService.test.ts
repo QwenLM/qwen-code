@@ -32,6 +32,9 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import * as storageUtils from '../utils/sessionStorageUtils.js';
+import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
+import { postProcessSummary } from './postCompactAttachments.js';
 import {
   collectSessionTurnState,
   computeInitialTurnFromHistory,
@@ -49,6 +52,10 @@ import {
   SessionWriterUnavailableError,
   type SessionWriterLease,
 } from './session-writer-lease.js';
+import {
+  deleteSessionGoalSidecar,
+  writeSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
@@ -151,6 +158,15 @@ const attributionSnapshot = {
 };
 
 vi.mock('node:path');
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  assertSessionArchiveGeneration: vi.fn(),
+  readSessionArchiveGeneration: vi.fn(),
+  withSessionArchiveWriteLockSync: vi.fn((_path, run) => run()),
+}));
 vi.mock('node:child_process');
 vi.mock('node:crypto', () => ({
   randomUUID: vi.fn(),
@@ -161,6 +177,15 @@ vi.mock('node:crypto', () => ({
   })),
 }));
 vi.mock('../utils/jsonl-utils.js');
+// The goal sidecar does real fs/promises I/O; this suite mocks the sync fs
+// surface instead. Mock only the mutations (the projection stays real) so
+// the journal-hook cases can assert calls and inject failures.
+vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-goal-sidecar.js')>()),
+  // The original implementation survives the suite's restoreAllMocks.
+  writeSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+  deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+}));
 
 const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
@@ -264,6 +289,73 @@ describe('ChatRecordingService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('getExistingTranscriptPath', () => {
+    const transcript =
+      '/test/project/root/.gemini/projects/test-project/chats/test-session-id.jsonl';
+
+    beforeEach(() => {
+      vi.mocked(path.basename).mockImplementation(
+        (file) => file.split('/').at(-1)!,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation((file) =>
+        file.startsWith('/'),
+      );
+    });
+
+    it('returns an existing local file and never creates it', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      const stat = vi.spyOn(fs, 'lstatSync').mockReturnValue({
+        isFile: () => true,
+        size: 100,
+      } as fs.Stats);
+      const managed = vi
+        .spyOn(storageUtils, 'readManagedExecutionEvidenceSync')
+        .mockReturnValue(false);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBe(transcript);
+      expect(stat).toHaveBeenCalledWith(transcript);
+      managed.mockReturnValue(true);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(undefined);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(false);
+      stat.mockReturnValue({ isFile: () => true, size: 0 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockReturnValue({ isFile: () => false, size: 100 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(fs.mkdirSync).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('does not broaden the lookup for a glob metacharacter in a session ID', async () => {
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-*');
+      const recorder = new ChatRecordingService(mockConfig, undefined, false);
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await recorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+    });
+
+    it('does not point a rotated recorder at the new session', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      legacyRecorder.pinSessionIdentity('test-session-id');
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+    });
   });
 
   type UserArgs = Parameters<ChatRecordingService['recordUserMessage']>;
@@ -491,6 +583,19 @@ describe('ChatRecordingService', () => {
       user('persisted');
       await expect(svc.flush()).resolves.toBeUndefined();
     });
+  });
+
+  it('cancels work on the replaced branch after a rewind', async () => {
+    const branch = svc.getBranchAbortSignal();
+    turn('first', 'first answer');
+    user('second');
+    await svc.flush();
+    expect(svc.getBranchAbortSignal()).toBe(branch);
+    expect(branch.aborted).toBe(false);
+
+    svc.rewindRecording(1, { truncatedCount: 1 });
+    expect(branch.aborted).toBe(true);
+    expect(svc.getBranchAbortSignal().aborted).toBe(false);
   });
 
   describe('background execution recording ownership', () => {
@@ -738,6 +843,46 @@ describe('ChatRecordingService', () => {
 
       const record = await flushed();
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
+    });
+
+    it('persists the summary without its live transcript pointer', async () => {
+      vi.mocked(path.basename).mockReturnValue('session.jsonl');
+      const hint = buildCompactionTranscriptHint('/host/session.jsonl');
+      const liveSummary = postProcessSummary('Task summary', hint);
+      svc.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [
+          {
+            role: 'user',
+            parts: [{ text: 'Startup prelude' }, { text: liveSummary }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+        ],
+      });
+      const record = await flushed();
+      const checkpoint = JSON.stringify(record.systemPayload);
+      expect(checkpoint).not.toContain('<compaction-transcript-hint>');
+      expect(checkpoint).not.toContain('/host');
+      expect(checkpoint).not.toContain('session.jsonl');
+      expect(record.systemPayload).toMatchObject({
+        compressedHistory: [
+          {
+            parts: [
+              { text: 'Startup prelude' },
+              { text: postProcessSummary('Task summary') },
+            ],
+          },
+          {},
+        ],
+      });
+      expect(liveSummary).toContain(hint);
     });
 
     it('freezes compression snapshot containers against later live-history mutation', async () => {
@@ -1039,6 +1184,37 @@ describe('ChatRecordingService', () => {
       expect(cold).toBeDefined();
       expect('deliveredTurn' in (cold as object)).toBe(false);
     });
+
+    it('persists teammateTurn only on a Teammate notification record (R17-1)', async () => {
+      // Producer guard for the teammateTurn stamp: the resume Prompts seed
+      // counts notification records bearing it, so the argument must survive
+      // recordNotification -> recordNotificationLike -> createNotificationRecord
+      // -> appendRecord. A cold background notification stays unmarked.
+      svc.recordNotification(
+        [{ text: 'teammate finished' }],
+        'Teammate finished',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+        /* teammateTurn */ true,
+      );
+      svc.recordNotification(
+        [{ text: 'background notification' }],
+        'Background',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+        /* teammateTurn */ false,
+      );
+
+      const [teammate, background] = await flushedAll();
+      expect(teammate).toMatchObject({
+        subtype: 'notification',
+        teammateTurn: true,
+      });
+      expect(background).toMatchObject({ subtype: 'notification' });
+      expect('teammateTurn' in (background as object)).toBe(false);
+    });
   });
 
   describe('recordBranchCheckpointTransaction', () => {
@@ -1334,6 +1510,102 @@ describe('ChatRecordingService', () => {
         },
       });
       expect(svc.getTranscriptCursor()).toEqual({ recordId: 'goal-record' });
+    });
+
+    describe('goal sidecar projection', () => {
+      const sidecarPath =
+        '/test/project/root/.gemini/projects/test-project/chats/test-session-id.goal.json';
+      let emitSessionGoalChanged: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        vi.mocked(writeSessionGoalSidecar).mockClear();
+        vi.mocked(writeSessionGoalSidecar).mockResolvedValue(undefined);
+        vi.mocked(deleteSessionGoalSidecar).mockClear();
+        vi.mocked(deleteSessionGoalSidecar).mockResolvedValue(undefined);
+        emitSessionGoalChanged = vi.fn();
+        vi.mocked(mockConfig.getSessionService).mockReturnValue({
+          emitSessionGoalChanged,
+        } as unknown as ReturnType<Config['getSessionService']>);
+      });
+
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      };
+
+      it('writes the projection after the journal append and marks the catalog', async () => {
+        await svc.recordGoalState('goal-record', goalPayload);
+        await settle();
+
+        expect(writeSessionGoalSidecar).toHaveBeenCalledWith(sidecarPath, {
+          v: 1,
+          goalId: 'goal-1',
+          status: 'active',
+          objective: 'ship it',
+          updatedAt: 100,
+        });
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).toHaveBeenCalledWith('test-session-id');
+      });
+
+      it('deletes the projection when the goal is cleared', async () => {
+        await svc.recordGoalState('goal-record', {
+          ...goalPayload,
+          cause: 'clear',
+          snapshot: { ...goalPayload.snapshot, goal: null },
+        });
+        await settle();
+
+        expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(sidecarPath);
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).toHaveBeenCalledWith('test-session-id');
+      });
+
+      it('a sidecar failure never fails the journal', async () => {
+        vi.mocked(writeSessionGoalSidecar).mockRejectedValueOnce(
+          new Error('disk full'),
+        );
+
+        const record = await svc.recordGoalState('goal-record', goalPayload);
+        await settle();
+
+        expect(record.uuid).toBe('goal-record');
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
+
+      it('does not touch the projection when the journal append fails', async () => {
+        // The projection refresh runs only after the strict append resolves;
+        // a failed append must leave the sidecar and the catalog clock alone.
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('disk full'),
+        );
+
+        await expect(
+          svc.recordGoalState('goal-record', goalPayload),
+        ).rejects.toThrow('disk full');
+        await settle();
+
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
+
+      it('skips the projection for managed logs', async () => {
+        // Managed logs own their metadata; the guard must short-circuit
+        // before any sidecar mutation or catalog mark.
+        const managed = new ChatRecordingService(mockConfig, undefined, true);
+        managed.bindManagedSink({
+          logSize: () => 0,
+        } as unknown as Parameters<ChatRecordingService['bindManagedSink']>[0]);
+
+        managed.refreshGoalProjection(goalPayload.snapshot.goal);
+        await settle();
+
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
     });
 
     it('restores the persisted cursor when a queued append fails', async () => {

@@ -132,6 +132,11 @@ function bridgeWithColdLoad(
   return {
     loadSession: vi.fn(async () => restored),
     resumeSession: vi.fn(async () => restored),
+    getMidTurnMessages: vi.fn(() => ({
+      messages: [],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    })),
     getSessionSummary: vi.fn((requestedId: string) => {
       throw new SessionNotFoundError(requestedId);
     }),
@@ -298,6 +303,10 @@ describe('POST /session/:id/load prompt terminals', () => {
       .send({ message: 'hello', messageId: 'mid', eventDetailMode: 'summary' });
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ accepted: false, reason: 'session_idle' });
+    expect(fixture.runtime.bridge.getMidTurnMessages).toHaveBeenCalledWith(
+      fixture.sessionId,
+      undefined,
+    );
     expect(fixture.runtime.bridge.enqueueMidTurnMessage).toHaveBeenCalledWith(
       fixture.sessionId,
       'hello',
@@ -457,14 +466,11 @@ describe('POST /session/:id/load prompt terminals', () => {
           executionSummary: usage,
         }),
       });
+      // Both routes now read daemon-local and replay identically, so the
+      // completed tool output sits directly under `data` (the singular route
+      // no longer wraps bridge events in `data.update`).
       expect(summaryEvents).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            data: qualified
-              ? completed
-              : expect.objectContaining({ update: completed }),
-          }),
-        ]),
+        expect.arrayContaining([expect.objectContaining({ data: completed })]),
       );
     },
   );

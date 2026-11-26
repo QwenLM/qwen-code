@@ -410,6 +410,7 @@ function isStrictlyValidSchema(schema: object): boolean {
 export async function convertLlmToolsToOpenAI(
   llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
+  openUndeclaredObjects = false,
 ): Promise<OpenAI.Chat.ChatCompletionTool[]> {
   const openAITools: OpenAI.Chat.ChatCompletionTool[] = [];
 
@@ -484,6 +485,7 @@ export async function convertLlmToolsToOpenAI(
             parameters = relaxSchemaForFunctionCalling(
               parameters,
               canValidateLocally,
+              openUndeclaredObjects,
             );
             if (
               canValidateLocally &&
@@ -1025,7 +1027,7 @@ function createMediaContentPart(
   part: Part,
   requestContext: RequestContext,
 ): OpenAIContentPart | null {
-  const { modalities } = requestContext;
+  const { modalities, imageDetail } = requestContext;
 
   if (part.inlineData?.mimeType && part.inlineData?.data) {
     const mimeType = part.inlineData.mimeType;
@@ -1043,7 +1045,10 @@ function createMediaContentPart(
       const dataUrl = `data:${mimeType};base64,${part.inlineData.data}`;
       return {
         type: 'image_url' as const,
-        image_url: { url: dataUrl },
+        image_url: {
+          url: dataUrl,
+          ...(imageDetail ? { detail: imageDetail } : {}),
+        },
       };
     }
 
@@ -1125,7 +1130,10 @@ function createMediaContentPart(
       }
       return {
         type: 'image_url' as const,
-        image_url: { url: fileUri },
+        image_url: {
+          url: fileUri,
+          ...(imageDetail ? { detail: imageDetail } : {}),
+        },
       };
     }
 

@@ -7,6 +7,52 @@
 // Traductions françaises pour Qwen Code CLI
 
 export default {
+  user: 'utilisateur',
+  assistant: 'assistant',
+  thinking: 'réflexion',
+  task: 'tâche',
+  compaction: 'compression',
+  info: 'information',
+  warning: 'avertissement',
+  retry: 'nouvelle tentative',
+  'stop-hook': 'hook d’arrêt',
+  'away-recap': 'résumé d’absence',
+  'user-shell': 'commande utilisateur',
+  advisor: 'conseiller',
+  'arena-agent': 'agent d’arène',
+  'arena-session': 'session d’arène',
+  goal: 'objectif',
+  'Protected input': 'Saisie protégée',
+  'Focused input. Cursor: {{position}}':
+    'Saisie active. Curseur : {{position}}',
+  'Unfocused input.': 'Saisie inactive.',
+  'Focused Prompt: {{value}}': 'Invite active : {{value}}',
+  'Prompt: {{value}}': 'Invite : {{value}}',
+  'Focused Input: {{value}}': 'Saisie active : {{value}}',
+  'Input: {{value}}': 'Saisie : {{value}}',
+  'Placeholder: {{value}}': 'Indication : {{value}}',
+  'Cursor: {{position}}': 'Curseur : {{position}}',
+  'Selected {{value}}': 'Sélectionné {{value}}',
+  'Disabled {{value}}': 'Désactivé {{value}}',
+  'Focused Toggle on: {{value}}': 'Actif, option activée : {{value}}',
+  'Focused Toggle off: {{value}}': 'Actif, option désactivée : {{value}}',
+  'Toggle on: {{value}}': 'Option activée : {{value}}',
+  'Toggle off: {{value}}': 'Option désactivée : {{value}}',
+  'Conversation cleared.': 'Conversation effacée.',
+  '{{role}}: {{value}}': '{{role}} : {{value}}',
+  'Revision {{value}}': 'Révision {{value}}',
+  Dialog: 'Boîte de dialogue',
+  'Dialog closed. Focus: prompt.': 'Dialogue fermé. Focus : invite.',
+  'Dialog closed.': 'Dialogue fermé.',
+  'Waiting for confirmation': 'En attente de confirmation',
+  'Working. Escape to cancel.': 'Traitement en cours. Échap pour annuler.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Historique {{start}}-{{end}} sur {{total}}.',
+  'Worktree: {{value}}': 'Arbre de travail : {{value}}',
+  'Workflow mode: on': 'Mode workflow : activé',
+  'Workflow mode: on (unavailable)': 'Mode workflow : activé (indisponible)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Maj+Haut/Bas ou Page précédente/suivante pour lire ; Ctrl+Début/Fin pour le premier/dernier élément.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Active Generated UI intégré dans les sessions locales compatibles. Redémarrez la session concernée pour appliquer les modifications.',
@@ -100,6 +146,7 @@ export default {
   OS: 'OS',
   Model: 'Modèle',
   'Fast Model': 'Modèle rapide',
+  'Agent Loop': 'Boucle agent',
   Sandbox: 'Bac à sable',
   'Session ID': 'ID de session',
   'Base URL': 'Base URL',
@@ -494,6 +541,7 @@ export default {
   'Debug Keystroke Logging': 'Journalisation des frappes de débogage',
   'Language: UI': 'Langue : Interface',
   'Language: Model': 'Langue : Modèle',
+  'Language: Display Translation': "Langue : Traduction de l'affichage",
   'Output Format': 'Format de sortie',
   'Hide Window Title': 'Masquer le titre de la fenêtre',
   'Show Status in Title': 'Afficher le statut dans le titre',
@@ -806,6 +854,8 @@ export default {
   'Manage Qwen Code hooks': 'Gérer les hooks Qwen Code',
   'List all configured hooks': 'Lister tous les hooks configurés',
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Un hook a interrompu le tour : {{reason}}',
   'Loading hooks...': 'Chargement des hooks...',
   'Error loading hooks:': 'Erreur lors du chargement des hooks :',
   'Press Escape to close': 'Appuyez sur Escape pour fermer',
@@ -1219,6 +1269,8 @@ export default {
     "Impossible de compresser l'historique du chat, car le résumé de compression a été tronqué.",
   'Could not compress chat history due to an API error.':
     "Impossible de compresser l'historique du chat en raison d'une erreur d'API.",
+  'Could not compress chat history because it is too large for the context window.':
+    "Impossible de compresser l'historique du chat : il est trop volumineux pour la fenêtre de contexte.",
   // ============================================================================
   // Commandes - Répertoire
   // ============================================================================

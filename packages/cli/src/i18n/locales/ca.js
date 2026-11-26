@@ -7,6 +7,53 @@
 // Traduccions en català per al CLI de Qwen Code per Jordi Mas i Hernàndez <jmas@softcatala.org>
 
 export default {
+  user: 'usuari',
+  assistant: 'assistent',
+  thinking: 'raonament',
+  task: 'tasca',
+  compaction: 'compressió',
+  info: 'informació',
+  warning: 'avís',
+  retry: 'reintent',
+  'stop-hook': 'ganxo d’aturada',
+  'away-recap': 'resum d’absència',
+  'user-shell': 'ordre de l’usuari',
+  advisor: 'assessor',
+  'arena-agent': 'agent d’arena',
+  'arena-session': 'sessió d’arena',
+  goal: 'objectiu',
+  'Protected input': 'Entrada protegida',
+  'Focused input. Cursor: {{position}}':
+    'Entrada amb focus. Cursor: {{position}}',
+  'Unfocused input.': 'Entrada sense focus.',
+  'Focused Prompt: {{value}}': 'Indicació amb focus: {{value}}',
+  'Prompt: {{value}}': 'Indicació: {{value}}',
+  'Focused Input: {{value}}': 'Entrada amb focus: {{value}}',
+  'Input: {{value}}': 'Entrada: {{value}}',
+  'Placeholder: {{value}}': 'Text de mostra: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Seleccionat {{value}}',
+  'Disabled {{value}}': 'Desactivat {{value}}',
+  'Focused Toggle on: {{value}}': 'Amb focus, opció activada: {{value}}',
+  'Focused Toggle off: {{value}}': 'Amb focus, opció desactivada: {{value}}',
+  'Toggle on: {{value}}': 'Opció activada: {{value}}',
+  'Toggle off: {{value}}': 'Opció desactivada: {{value}}',
+  'Conversation cleared.': 'Conversa esborrada.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Revisió {{value}}',
+  Dialog: 'Diàleg',
+  'Dialog closed. Focus: prompt.': 'Diàleg tancat. Focus: indicació.',
+  'Dialog closed.': 'Diàleg tancat.',
+  'Waiting for confirmation': 'Esperant confirmació',
+  'Working. Escape to cancel.': 'En curs. Escape per cancel·lar.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Historial {{start}}-{{end}} de {{total}}.',
+  'Worktree: {{value}}': 'Arbre de treball: {{value}}',
+  'Workflow mode: on': 'Mode de flux de treball: activat',
+  'Workflow mode: on (unavailable)':
+    'Mode de flux de treball: activat (no disponible)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Maj+Amunt/Avall o PageUp/PageDown per llegir; Ctrl+Home/End per al primer/més recent.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Activa el Generated UI integrat a les sessions locals compatibles. Reinicieu la sessió corresponent per aplicar els canvis.',
@@ -102,6 +149,7 @@ export default {
   Auth: 'Autenticació',
   Model: 'Model',
   'Fast Model': 'Model ràpid',
+  'Agent Loop': 'Bucle agent',
   Sandbox: 'Entorn aïllat',
   'Session ID': 'ID de sessió',
   'Base URL': 'Base URL',
@@ -486,6 +534,7 @@ export default {
   'Debug Keystroke Logging': 'Registre de tecles per a depuració',
   'Language: UI': 'Idioma: Interfície',
   'Language: Model': 'Idioma: Model',
+  'Language: Display Translation': 'Idioma: Traducció de la visualització',
   'Output Format': 'Format de sortida',
   'Hide Window Title': 'Amaga el títol de la finestra',
   'Show Status in Title': "Mostra l'estat al títol",
@@ -793,6 +842,8 @@ export default {
   'Manage Qwen Code hooks': 'Gestiona els hooks de Qwen Code',
   'List all configured hooks': 'Llista tots els hooks configurats',
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Un hook ha aturat el torn: {{reason}}',
   'Loading hooks...': 'Carregant hooks...',
   'Error loading hooks:': 'Error en carregar els hooks:',
   'Press Escape to close': 'Premeu Escape per tancar',
@@ -1230,6 +1281,8 @@ export default {
     "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió s'ha truncat.",
   'Could not compress chat history due to an API error.':
     "No s'ha pogut comprimir l'historial del xat per un error de l'API.",
+  'Could not compress chat history because it is too large for the context window.':
+    "No s'ha pogut comprimir l'historial del xat perquè és massa gran per a la finestra de context.",
   // ============================================================================
   // Ordres - Directori
   // ============================================================================

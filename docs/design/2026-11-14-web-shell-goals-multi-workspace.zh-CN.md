@@ -2,8 +2,10 @@
 
 [English](2026-11-14-web-shell-goals-multi-workspace.md) | [简体中文](2026-11-14-web-shell-goals-multi-workspace.zh-CN.md)
 
-状态：已实现、待评审（2026-11-14）。「现状」声明已按 `origin/main`
-`114694062b` 核实；实现基于 `23ccf4d0b7`（两个提交之间 goals 各面无变化）。
+状态：已合入 main（`8161b9f91f`，2026-11-14）；合入后评审修订（activity
+gate 包裹、选择器对齐、语言包措辞）在本后续 PR。「现状」声明已按
+`origin/main` `114694062b` 核实；实现基于 `23ccf4d0b7`（两个提交之间
+goals 各面无变化）。
 
 ## 问题
 
@@ -42,10 +44,14 @@ scheduled tasks 回 503，goals primary 列举不做运行时查询。）本设�
 
 - Goals 页列出每个可操作 workspace（primary 加所有受信 secondary）的非终
   态 Goal；存在多个 workspace 时每张卡片标注所属 workspace。
-- 创建表单可指向任一可操作 workspace；默认仍是当前选中的 workspace。
+- 创建表单可指向任一受信本地 workspace；默认仍是当前选中的 workspace
+  （若可创建），否则可创建的 primary，再否则第一个可创建项。未受信
+  primary 留在聚合列举里让其失败可见，但绝不成为创建目标。
 - 暂停 / 恢复 / 编辑 / 清除对任何 workspace 的 Goal 保持可用（会话级控制
   路由已能解析属主）。
-- 单 workspace 部署保持今天的行为与外观（无徽章、无选择器）。锁定到
+- 单 workspace 部署保持今天的行为与外观（无徽章、无选择器）——唯一例外
+  是仅有的 workspace 未受信或远程时，新建表单现在报
+  `goals.error.workspaceUnavailable`，而不是静默无操作。锁定到
   primary 的部署保持无后缀路由；锁定到 secondary 的部署经该 workspace 的
   限定路由列举，同样无徽章、无选择器。
 
@@ -69,8 +75,9 @@ scheduled tasks 回 503，goals primary 列举不做运行时查询。）本设�
 
 - `registerGoalsRoutes` 保持 primary 契约逐字不变（路径、信任门、
   generation 断言、响应形状 `{ v: 1, goals, droppedCount }`）。
-- 新增 `registerWorkspaceQualifiedGoalsRoutes(app, { workspaceRegistry })`，
-  注册 `GET /workspaces/:workspace/goals`。每个请求：
+- 新增 `registerWorkspaceQualifiedGoalsRoutes(app, { workspaceRegistry,
+conversationRuntimeActivity })`，注册
+  `GET /workspaces/:workspace/goals`。每个请求：
   1. 用 `resolveWorkspaceRuntimeWithLiveCompatibilityFromParam` 解析运行时
      （未知或非法选择器 → 400 `workspace_mismatch`；运行时未激活 → 503
      `workspace_runtime_unavailable`；Conversations 运行时不可用 → 503
@@ -79,6 +86,11 @@ scheduled tasks 回 503，goals primary 列举不做运行时查询。）本设�
      `untrusted_workspace`）。
   3. 对 `runtime.bridge` 与 `runtime.workspaceCwd` 跑共享列举逻辑；运行时
      带 `generationGuard` 时以其为 generation 断言。
+  4. 对 `live-conversation` 运行时，与限定 scheduled-tasks 面完全一致地把
+     列举放进 `conversationRuntimeActivity.run(…)`，使 drain 的
+     `sealAndWait()` 计入在飞列举：gate 已 seal 时回 503 `daemon_draining`
+     而不是部分探针页；未接 gate 的 daemon 回 503
+     `conversation_runtime_unavailable`。
 - 共享列举保持今天的语义：过滤 agent-host 会话、探针并发 10、失败探针丢弃
   并计数、按设置时间倒序、只读。
 
@@ -104,7 +116,9 @@ scheduled tasks 回 503，goals primary 列举不做运行时查询。）本设�
   的同一方式传入（`lockedWorkspaceCwd ? visibleWorkspaces :
 ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
 - 派生状态：`isMultiWorkspace = !lockedWorkspace && workspaces.length > 1`；
-  `operableWorkspaces = workspaces.filter(ws => ws.primary || ws.trusted)`；
+  `operableWorkspaces = workspaces.filter(ws => ws.primary || (ws.trusted && !ws.ssh))`；
+  `skippedWorkspaces = workspaces.filter(ws => !ws.primary && (!ws.trusted || ws.ssh))`；
+  `creatableWorkspaces = operableWorkspaces.filter(ws => ws.trusted !== false)`；
   `workspaceActionId(ws) = ws.primary ? undefined : ws.id`。
 - 重载：锁定 → 单次限定（或 primary）请求，打上锁定 workspace 的 cwd；
   多 workspace → 对 `operableWorkspaces` 用 `Promise.all` fan-out，给每条
@@ -121,13 +135,23 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
   daemon 全局的，不同于 scheduled-task id）。
 - 未受信 secondary 与 SSH workspace 被排除在 fan-out 之外（SSH 边界以 501
   拒绝限定 goals 路由，其列举永远无法加载）；聚合视图显示计数提示
-  （`goals.workspacesSkipped`，「未受信或远程」），而不是对从未读取的
+  （`goals.workspacesSkipped`，「不受信任或远程」），而不是对从未读取的
   workspace 显示干巴巴的「没有目标」空态。
-- 创建表单：多 workspace 视图下提供 workspace 选择器，默认当前选中的
-  workspace（若可操作），否则 primary。App 通过 `defaultWorkspaceCwd`
-  prop 提供该默认值。选择器与徽章标签经 `disambiguateWorkspaceLabels`
-  消歧，两个同 basename 的 checkout 在原生 `<select>`（无法承载 tooltip）
-  里仍可区分。编辑表单无选择器——Goal 的会话已确定其 workspace。
+- 创建表单：多 workspace 视图下提供 workspace 选择器，选项与默认值都来自
+  `creatableWorkspaces`（`operableWorkspaces` 的受信子集）——fan-out 刻意
+  保留的未受信 primary（让其列举失败可见）绝不成为 App 会拒绝的创建目标。
+  默认当前选中的 workspace（若可创建），否则 primary（再否则第一个可创建
+  项）；App 通过 `defaultWorkspaceCwd` prop 提供该默认值。提交目标是
+  `effectiveFormWorkspaceCwd`：选择仍可创建时用选择，否则用默认——
+  capabilities 刷新移除或撤销所选 workspace 的信任时，渲染的 `<select>`
+  与提交一并回退（否则控件会落到第一项、提交却仍是已消失的 cwd）。
+  daemon 宣告了 workspace 但无一可创建时，表单在空选择器下方内联提示
+  并在提交时显示已翻译的 `goals.error.workspaceUnavailable`，而不是静默
+  无操作；可创建目标重新出现后该拒绝提示自动退役。不宣告 workspace 列表
+  的 daemon 保持 legacy 的提交 undefined 形状。选择器
+  与徽章标签经 `disambiguateWorkspaceLabels` 消歧，两个同 basename 的
+  checkout 在原生 `<select>`（无法承载 tooltip）里仍可区分。编辑表单无
+  选择器——Goal 的会话已确定其 workspace。
 - `onCreateGoal` 变为 `(condition: string, workspaceCwd?: string)`。
   `onOpenSession` 变为 `(sessionId: string, workspaceCwd?: string)`，App
   在 Goal 自己的 workspace 里加载会话，与 scheduled-tasks 页完全一致。
@@ -151,7 +175,7 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
 ### i18n
 
 en、zh、ru 三个语言包各新增 `goals.workspace`（选择器标签）、
-`goals.workspacesSkipped`（被跳过 workspace 提示，「未受信或远程」）与
+`goals.workspacesSkipped`（被跳过 workspace 提示，「不受信任或远程」）与
 `goals.error.workspaceUnavailable`——ru 语言包翻译了整个 Goals 对话框，
 因此补全这三个键，而不是在整片俄文里留一个英文回退；ru 提示的名词经
 `ruPlural` 变格。workspace 显示名来自现有 `workspaceLabel` /
@@ -231,7 +255,9 @@ en、zh、ru 三个语言包各新增 `goals.workspace`（选择器标签）、
 - 经选择器创建的 Goal 落在所选 workspace，页面下次轮询即列出。
 - 暂停/恢复/编辑/清除对 secondary workspace 的 Goal 可用。
 - 单个 workspace 列举失败不清空其他 workspace；错误与丢弃计数可见。
-- 单 workspace 视图不变（无徽章、无选择器、无后缀路由）。锁定到 primary
+- 单 workspace 视图不变（无徽章、无选择器、无后缀路由），唯一例外是仅
+  有的 workspace 未受信或远程时，提交现在报
+  `goals.error.workspaceUnavailable` 而非静默无操作。锁定到 primary
   的部署保持无后缀路由；锁定到 secondary 的部署走该 workspace 的限定路
   由，无徽章、无选择器。
 - primary `GET /goals` 响应契约不变。
