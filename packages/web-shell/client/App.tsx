@@ -3245,7 +3245,9 @@ function updateCockpitLocation(open: boolean, replace = false): void {
 }
 
 function formatError(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+  return error instanceof Error && error.message.length > 0
+    ? error.message
+    : fallback;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -14697,7 +14699,7 @@ export function App({
           : {}),
         onAdmissionStarted: () => {
           opts?.onAdmissionStarted?.(
-            connectionRef.current.sessionId ?? allocatedSessionId,
+            sessionIdAfterEnsure ?? connectionRef.current.sessionId,
           );
           admissionStarted = true;
         },
@@ -20004,6 +20006,8 @@ export function App({
       new Promise<void>((resolve, reject) => {
         const taskRuntimeClient =
           scheduledScope?.runtimeClient ?? workspace.client;
+        const startSourceVersion = composerSourceVersionRef.current;
+        const startSessionOpenInvocation = sessionOpenInvocationRef.current;
         let targetLogicalSessionKey = scheduledScope?.logicalSessionKey;
         let targetSessionId: string | undefined;
         let sawTargetSessionConnected = false;
@@ -20019,6 +20023,12 @@ export function App({
                 connectionRef.current.workspaceCwd,
               ) === targetLogicalSessionKey
             );
+          }
+          if (
+            composerSourceVersionRef.current !== startSourceVersion ||
+            sessionOpenInvocationRef.current !== startSessionOpenInvocation
+          ) {
+            return false;
           }
           if (targetLogicalSessionKey !== undefined) {
             return (
@@ -20144,18 +20154,22 @@ export function App({
         }).then(
           () => {
             if (!admitted) {
+              if (
+                !scheduledScopeIsCurrent() ||
+                scheduledScope?.cancelledBeforeAdmission?.()
+              ) {
+                reject(
+                  createScheduledTaskCancellation(
+                    'Run was cancelled before it started',
+                  ),
+                );
+                return;
+              }
               if (guardFailure !== undefined) {
                 reject(guardFailure);
                 return;
               }
-              reject(
-                !scheduledScopeIsCurrent() ||
-                  scheduledScope?.cancelledBeforeAdmission?.()
-                  ? createScheduledTaskCancellation(
-                      'Run was cancelled before it started',
-                    )
-                  : new Error('Run was cancelled before it started'),
-              );
+              reject(new Error('Run was cancelled before it started'));
             }
           },
           (error: unknown) => {

@@ -8178,6 +8178,22 @@ describe('task activity key', () => {
     await vi.waitFor(() =>
       expect(onToast).toHaveBeenCalledWith('error', 'Dialog consumed warning'),
     );
+
+    // Empty-message Error must fall back cleanly to the localized fallback
+    // rather than producing a blank toast or trailing colon.
+    onToast.mockClear();
+    await act(async () => {
+      testState.latestScheduledTasksProps?.onError?.(
+        new Error(''),
+        'Dialog empty-error fallback',
+      );
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'Dialog empty-error fallback',
+      ),
+    );
   });
 
   it('preserves secondary workspaceCwd on EnvironmentPanel manual run and isolates primary deletion scope', async () => {
@@ -61061,11 +61077,13 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await expect(secondGuard).rejects.toSatisfy(isScheduledTaskCancellation);
 
     // Unbound run started when connection.sessionId is initially undefined
-    // (e.g. /scheduled-tasks full page allocating a new session) must still
-    // bind its guard to the allocated session once admission starts, so
-    // switching to session-b during beforeDispatch converts any revalidation
-    // rejection into a structured cancellation with no toast.
+    // (e.g. /scheduled-tasks full page allocating a new session) must allow
+    // admission start before React commits the allocated session, enter
+    // beforeTaskDispatch, and then convert any revalidation rejection after
+    // switching to session-b into a structured cancellation with no toast.
     const allocatedRevalidation = deferred<void>();
+    let enteredAllocatedRevalidation = false;
+    let admissionStartError: unknown = null;
     mockConnection.sessionId = undefined;
     await act(async () => {
       rerender();
@@ -61087,7 +61105,12 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
           onAdmissionStarted?: () => void;
         };
         thirdOptions.push(opts);
-        opts.onAdmissionStarted?.();
+        try {
+          opts.onAdmissionStarted?.();
+        } catch (error) {
+          admissionStartError = error;
+          return Promise.reject(error);
+        }
         return new Promise<void>(() => {});
       },
     );
@@ -61099,6 +61122,7 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
         undefined,
         () => false,
         async () => {
+          enteredAllocatedRevalidation = true;
           await allocatedRevalidation.promise;
           throw new DOMException('Failed to record the run', 'AbortError');
         },
@@ -61109,8 +61133,10 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await vi.waitFor(() =>
       expect(thirdOptions[0]?.beforeDispatch).toBeDefined(),
     );
+    expect(admissionStartError).toBeNull();
     const thirdGuard = Promise.resolve(thirdOptions[0]!.beforeDispatch!());
     thirdGuard.catch(() => {});
+    await vi.waitFor(() => expect(enteredAllocatedRevalidation).toBe(true));
     mockConnection.sessionId = 'session-b';
     await act(async () => {
       rerender();
@@ -61119,6 +61145,117 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await flush();
     allocatedRevalidation.resolve();
     await expect(thirdGuard).rejects.toSatisfy(isScheduledTaskCancellation);
+
+    // Clicking New Chat while POST /session is in flight (detached outcome with
+    // connection.sessionId still undefined) must cancel the detached dispatch.
+    const createForNewChat = deferred<{ sessionId: string }>();
+    mockConnection.sessionId = undefined;
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    const runBeforeNewChat = await openRunHandler(container);
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const created = await createForNewChat.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return {
+          ...created,
+          updateMetadata: vi.fn(async () => ({})),
+          setModel: vi.fn(async () => ({})),
+          setConfigOption: vi.fn(async () => ({})),
+          close: vi.fn(async () => {}),
+          detach: vi.fn(async () => {}),
+          client: {
+            setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })),
+          },
+        };
+      },
+    );
+    let detachedGuardError: unknown = null;
+    mockSessionActions.sendDetachedPrompt.mockImplementationOnce(
+      async (_session: unknown, _text: string, options?: unknown) => {
+        const opts = options as {
+          onAdmissionStarted?: () => void;
+          beforeDetachedDispatch?: () => void | Promise<void>;
+        };
+        opts.onAdmissionStarted?.();
+        await opts.beforeDetachedDispatch?.();
+        return { promptId: 'unexpected-detached' };
+      },
+    );
+    let newChatSettlement!: Promise<unknown>;
+    await act(async () => {
+      newChatSettlement = runBeforeNewChat(
+        'unbound before new chat',
+        null,
+        undefined,
+        () => false,
+        async () => {},
+      ).catch((error) => {
+        detachedGuardError = error;
+        return error;
+      });
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.createSession).toHaveBeenCalled(),
+    );
+    const newSessionBtn = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'new session');
+    expect(newSessionBtn).toBeDefined();
+    await act(async () => {
+      newSessionBtn?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      createForNewChat.resolve({ sessionId: 'detached-after-new-chat' });
+      await createForNewChat.promise;
+    });
+    await newChatSettlement;
+    expect(isScheduledTaskCancellation(detachedGuardError)).toBe(true);
+
+    // Navigating to another session while attachSession() is still pending
+    // (before onAdmissionStarted runs) must also classify the rejection as a
+    // structured cancellation instead of leaking a raw attach error.
+    const createForSwitch = deferred<{ sessionId: string }>();
+    mockConnection.sessionId = undefined;
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    const runBeforeSwitch = await openRunHandler(container);
+    mockSessionActions.createSession.mockImplementationOnce(async () => {
+      await createForSwitch.promise;
+      throw new DOMException(
+        'Session load superseded by a newer request',
+        'AbortError',
+      );
+    });
+    let switchSettlement!: Promise<unknown>;
+    await act(async () => {
+      switchSettlement = runBeforeSwitch(
+        'unbound before switch',
+        null,
+        undefined,
+        () => false,
+        async () => {},
+      ).catch((error) => error);
+      await Promise.resolve();
+    });
+    testState.prompt = '/resume session-b';
+    await clickSubmit(container);
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+        'session-b',
+        expect.any(Object),
+      ),
+    );
+    createForSwitch.resolve({ sessionId: 'superseded-session' });
+    expect(isScheduledTaskCancellation(await switchSettlement)).toBe(true);
   });
 
   it('does not apply the catch-up timeout while restore is pending', async () => {
