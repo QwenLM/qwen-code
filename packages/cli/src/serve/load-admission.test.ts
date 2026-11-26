@@ -108,6 +108,25 @@ describe('createLoadAdmissionMonitor', () => {
     monitor.dispose();
   });
 
+  it('holds at the exact ratio exit boundary', () => {
+    const monitor = makeMonitor();
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 300 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().overloaded).toBe(true);
+
+    // Literal 1.0 pins the documented ratio exit: the strict `<` matters.
+    // At exactly 1.0 with the loop still pressured (300 ms, inside the
+    // corroboration hold band) neither exit operand holds, so the gate
+    // stays engaged — a `<=` or a raised exit threshold would release here.
+    signals = { loadRatio: 1.0, eventLoopLagP99Ms: 300 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 2);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: true,
+      reason: 'cpu_load',
+    });
+    monitor.dispose();
+  });
+
   it('engages and releases the lag signal independently of CPU load', () => {
     const monitor = makeMonitor();
     signals = { loadRatio: 0.2, eventLoopLagP99Ms: EVENT_LOOP_LAG_ENTER_MS };

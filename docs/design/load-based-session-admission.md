@@ -47,7 +47,8 @@ delay, or free memory.
 ## Goals
 
 - Refuse new child spawns with a retryable `503` while the host is saturated
-  or the daemon's own event loop is starved.
+  corroborated by daemon event-loop lag, or the daemon's own event loop is
+  starved.
 - Keep existing sessions and the control plane (prompt, cancel, detach,
   status, SSE) fully usable during overload.
 - Make the decision observable through `GET /daemon/status`.
