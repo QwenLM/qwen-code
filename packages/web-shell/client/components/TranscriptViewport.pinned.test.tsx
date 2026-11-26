@@ -27,6 +27,19 @@ vi.mock('../i18n', () => {
   const t = (key: string) => key;
   return { useI18n: () => ({ t }) };
 });
+// main's TranscriptViewport dispatcher routes to the daemon variant only
+// when a history navigation store is in scope; provide one so the pinned
+// prompt pill under test renders (the live variant strips the feature).
+vi.mock('../daemon/session/DaemonSessionProvider', async () => {
+  const { createDaemonTurnNavigationStore } = await import(
+    '../daemon/session/turn-navigation-store'
+  );
+  const store = createDaemonTurnNavigationStore();
+  return {
+    useDaemonHistoryNavigationStore: () => store,
+    useOptionalDaemonHistoryNavigationStore: () => store,
+  };
+});
 vi.mock('../hooks/useTranscriptViewport', () => ({
   useTranscriptViewport: (messages: Message[]) => ({
     navigation: observed.navigation,
