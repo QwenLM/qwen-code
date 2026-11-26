@@ -448,14 +448,17 @@ BODY
     # an open v0.18.10 issue. The bot-authored issue is preferred because the
     # `// .[0]` fallback would otherwise hand a human's same-titled issue to
     # the autofix dispatch below.
+    # Without a tag, only another attempt of the same run may reuse the issue.
     existing_issue="$(
       gh issue list --repo "${GH_REPO}" \
         --state open \
         --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
         --limit 30 \
-        --json number,url,labels,author,title \
-      | jq -c --arg tag "${RELEASE_TAG}" \
-        '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) ] | (map(select(.author.login == "github-actions[bot]"))[0] // .[0]) // empty'
+        --json number,url,labels,author,title,body \
+      | jq -c --arg tag "${RELEASE_TAG}" --arg run "${DETAILS_URL}" '
+        [ .[] | select(.title | startswith("Release Failed for " + $tag + " on "))
+          | select($tag != "N/A" or ((.body // "") | split("\n") | any(endswith("Run: " + $run)))) ]
+        | (map(select(.author.login == "app/github-actions"))[0] // .[0]) // empty'
     )"
     gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}" \
       --description 'Maintainer explicitly approved this issue for autonomous autofix' \
@@ -467,13 +470,15 @@ BODY
       # Only a workflow-owned issue may be reused: commenting on and
       # labelling a human's issue would attach autofix to someone else's
       # report.
-      if [[ "${issue_author}" != "github-actions[bot]" ]]; then
+      if [[ "${issue_author}" != "app/github-actions" ]]; then
         echo "::warning::Existing ${issue_url} was opened by ${issue_author:-unknown}; creating a workflow-owned issue instead."
         existing_issue=''
       elif jq -e \
         '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
         <<< "${existing_issue}" >/dev/null; then
         echo "::warning::Release failed but existing ${issue_url} has an autofix exclusion label; no autofix dispatched."
+        gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}"
+        echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT:?}"
         exit 0
       else
         gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
@@ -533,23 +538,27 @@ BODY
     # release.yml's.
     release_version="${RELEASE_VERSION:-${RELEASE_TAG:-unknown}}"
     title_prefix="${FAILURE_TITLE_PREFIX:-Release Failed for }"
-    existing_issue="$(
+    existing_issues="$(
       gh issue list --repo "${GH_REPO}" \
         --state open \
-        --search "\"${title_prefix}${release_version}\" in:title" \
+        --search "\"${title_prefix}${release_version}\" in:title -linked:pr" \
         --limit 30 \
-        --json number,url,labels,author,title \
+        --json number,url,labels,author,title,assignees \
       | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
-        '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "github-actions[bot]") ][0] // empty'
+        '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "app/github-actions") ]'
     )"
-    if [[ -z "${existing_issue}" ]]; then
-      echo "No workflow-owned release-failure issue is open for ${release_version}; nothing to reconcile."
-      exit 0
-    fi
-    issue_number="$(jq -r '.number' <<< "${existing_issue}")"
-    issue_url="$(jq -r '.url' <<< "${existing_issue}")"
-    body_file="$(mktemp)"
-    cat > "${body_file}" <<BODY
+    while read -r existing_issue; do
+      [[ -z "${existing_issue}" ]] && continue
+      issue_number="$(jq -r '.number' <<< "${existing_issue}")"
+      issue_url="$(jq -r '.url' <<< "${existing_issue}")"
+      if (( $(jq -r '.assignees | length' <<< "${existing_issue}") > 0 )) || jq -e \
+        '(.labels // []) | map(.name) | any(. == "autofix/in-progress" or . == "status/need-information" or . == "status/need-retesting")' \
+        <<< "${existing_issue}" >/dev/null; then
+        echo "::warning::${issue_url} looks maintainer-owned; leaving it open."
+        continue
+      fi
+      body_file="$(mktemp)"
+      cat > "${body_file}" <<BODY
 The release completed successfully on a later attempt of this run, so the failure this issue reported is no longer current.
 
 Release tag: ${release_version}
@@ -557,15 +566,36 @@ Run: ${DETAILS_URL} (attempt ${RUN_ATTEMPT:-unknown})
 
 Closing as not planned. Reopen if the ${release_version} artifacts later prove incomplete.
 BODY
-    gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" || {
-      echo "::warning::Failed to comment on ${issue_url}; closing regardless."
+      gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" || {
+        echo "::warning::Failed to comment on ${issue_url}; closing regardless."
+      }
+      # Removed one at a time: `gh issue edit --remove-label` fails the whole call
+      # when any label is absent, and an absent label must not block the close.
+      for label in 'status/ready-for-agent' 'autofix/approved' 'autofix/in-progress'; do
+        gh issue edit "${issue_number}" --repo "${GH_REPO}" --remove-label "${label}" || true
+      done
+      gh issue close "${issue_number}" --repo "${GH_REPO}" --reason 'not planned' || {
+        echo "::warning::Failed to close ${issue_url}; continuing with the remaining matches."
+      }
+    done < <(jq -c '.[]' <<< "${existing_issues}")
+    linked_issues="$(
+      gh issue list --repo "${GH_REPO}" \
+        --state open \
+        --search "\"${title_prefix}${release_version}\" in:title linked:pr" \
+        --limit 30 \
+        --json url,author,title \
+      | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
+        '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "app/github-actions") ]'
+    )" || {
+      echo "::warning::Failed to look up linked release-failure issues for ${release_version}."
+      exit 0
     }
-    # Removed one at a time: `gh issue edit --remove-label` fails the whole call
-    # when any label is absent, and an absent label must not block the close.
-    for label in 'status/ready-for-agent' 'autofix/approved' 'autofix/in-progress'; do
-      gh issue edit "${issue_number}" --repo "${GH_REPO}" --remove-label "${label}" || true
-    done
-    gh issue close "${issue_number}" --repo "${GH_REPO}" --reason 'not planned'
+    if [[ "${existing_issues}" == '[]' && "${linked_issues}" == '[]' ]]; then
+      echo "No workflow-owned release-failure issue is open for ${release_version}; nothing to reconcile."
+    fi
+    while read -r issue_url; do
+      echo "::notice::${issue_url} was not reconciled because it is linked to a pull request."
+    done < <(jq -r '.[].url' <<< "${linked_issues}")
     ;;
 
   *)
