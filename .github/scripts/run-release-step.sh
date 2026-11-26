@@ -448,14 +448,17 @@ BODY
     # an open v0.18.10 issue. The bot-authored issue is preferred because the
     # `// .[0]` fallback would otherwise hand a human's same-titled issue to
     # the autofix dispatch below.
+    # Without a tag, only another attempt of the same run may reuse the issue.
     existing_issue="$(
       gh issue list --repo "${GH_REPO}" \
         --state open \
         --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
         --limit 30 \
-        --json number,url,labels,author,title \
-      | jq -c --arg tag "${RELEASE_TAG}" \
-        '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) ] | (map(select(.author.login == "app/github-actions"))[0] // .[0]) // empty'
+        --json number,url,labels,author,title,body \
+      | jq -c --arg tag "${RELEASE_TAG}" --arg run "${DETAILS_URL}" '
+        [ .[] | select(.title | startswith("Release Failed for " + $tag + " on "))
+          | select($tag != "N/A" or ((.body // "") | split("\n") | any(endswith("Run: " + $run)))) ]
+        | (map(select(.author.login == "app/github-actions"))[0] // .[0]) // empty'
     )"
     gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}" \
       --description 'Maintainer explicitly approved this issue for autonomous autofix' \
@@ -474,8 +477,8 @@ BODY
         '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
         <<< "${existing_issue}" >/dev/null; then
         echo "::warning::Release failed but existing ${issue_url} has an autofix exclusion label; no autofix dispatched."
-        gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
-          || echo "::warning::Failed to comment on ${issue_url}."
+        gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}"
+        echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT:?}"
         exit 0
       else
         gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
@@ -544,26 +547,6 @@ BODY
       | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
         '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "app/github-actions") ]'
     )"
-    if [[ "${existing_issues}" == '[]' ]]; then
-      linked_issues="$(
-        gh issue list --repo "${GH_REPO}" \
-          --state open \
-          --search "\"${title_prefix}${release_version}\" in:title linked:pr" \
-          --limit 30 \
-          --json url,author,title \
-        | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
-          '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "app/github-actions") ]'
-      )"
-      if [[ "${linked_issues}" == '[]' ]]; then
-        echo "No workflow-owned release-failure issue is open for ${release_version}; nothing to reconcile."
-      else
-        while read -r linked_issue; do
-          [[ -z "${linked_issue}" ]] && continue
-          echo "::notice::$(jq -r '.url' <<< "${linked_issue}") was not reconciled because it is linked to a pull request."
-        done < <(jq -c '.[]' <<< "${linked_issues}")
-      fi
-      exit 0
-    fi
     while read -r existing_issue; do
       [[ -z "${existing_issue}" ]] && continue
       issue_number="$(jq -r '.number' <<< "${existing_issue}")"
@@ -595,6 +578,24 @@ BODY
         echo "::warning::Failed to close ${issue_url}; continuing with the remaining matches."
       }
     done < <(jq -c '.[]' <<< "${existing_issues}")
+    linked_issues="$(
+      gh issue list --repo "${GH_REPO}" \
+        --state open \
+        --search "\"${title_prefix}${release_version}\" in:title linked:pr" \
+        --limit 30 \
+        --json url,author,title \
+      | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
+        '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "app/github-actions") ]'
+    )" || {
+      echo "::warning::Failed to look up linked release-failure issues for ${release_version}."
+      exit 0
+    }
+    if [[ "${existing_issues}" == '[]' && "${linked_issues}" == '[]' ]]; then
+      echo "No workflow-owned release-failure issue is open for ${release_version}; nothing to reconcile."
+    fi
+    while read -r issue_url; do
+      echo "::notice::${issue_url} was not reconciled because it is linked to a pull request."
+    done < <(jq -r '.[].url' <<< "${linked_issues}")
     ;;
 
   *)

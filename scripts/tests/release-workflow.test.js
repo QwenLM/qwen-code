@@ -1265,7 +1265,13 @@ describe('release workflow', () => {
     },
   );
 
-  function runNotifyFailureWithExistingIssue({ author, excludedLabel }) {
+  function runNotifyFailureWithExistingIssue({
+    author,
+    excludedLabel,
+    releaseTag = 'v1.2.3',
+    priorRun = 'https://github.example/run/2',
+    commentFails = false,
+  }) {
     const directory = mkdtempSync(join(tmpdir(), 'release-notify-reuse-'));
     const bin = join(directory, 'bin');
     const ghLog = join(directory, 'gh-calls');
@@ -1283,7 +1289,8 @@ describe('release workflow', () => {
           url: 'https://github.example/QwenLM/qwen-code/issues/15672',
           labels,
           author: { login: author },
-          title: 'Release Failed for v1.2.3 on 2026-11-26',
+          title: `Release Failed for ${releaseTag} on 2026-11-26`,
+          body: `The release workflow failed.\n\nRun: ${priorRun}\n`,
         },
       ]),
     );
@@ -1297,6 +1304,9 @@ describe('release workflow', () => {
         '    *) cat "$GH_ISSUES" ;;\n' +
         '  esac\n' +
         '  exit 0\n' +
+        'fi\n' +
+        'if [ "$1" = issue ] && [ "$2" = comment ] && [ "$GH_COMMENT_FAILS" = true ]; then\n' +
+        '  exit 1\n' +
         'fi\n' +
         'if [ "$1" = issue ] && [ "$2" = create ]; then\n' +
         "  echo 'https://github.example/QwenLM/qwen-code/issues/9999'\n" +
@@ -1316,9 +1326,10 @@ describe('release workflow', () => {
             PATH: `${bin}:${process.env.PATH}`,
             GH_CALL_LOG: ghLog,
             GH_ISSUES: issues,
+            GH_COMMENT_FAILS: String(commentFails),
             GITHUB_OUTPUT: output,
             GH_REPO: 'QwenLM/qwen-code',
-            RELEASE_TAG: 'v1.2.3',
+            RELEASE_TAG: releaseTag,
             DETAILS_URL: 'https://github.example/run/2',
             PREPARE_RESULT: 'success',
             QUALITY_RESULT: 'failure',
@@ -1394,7 +1405,39 @@ describe('release workflow', () => {
         expect(calls).not.toContain('issue create');
         expect(calls).not.toContain('workflow run');
         expect(calls).not.toContain('--add-label');
+        expect(output).toBe(
+          'issue_url=https://github.example/QwenLM/qwen-code/issues/15672\n',
+        );
       }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32').each([
+    ['https://github.example/run/2', 15672],
+    ['https://github.example/run/20', 9999],
+  ])('matches unknown release versions by run URL (%s)', (priorRun, issue) => {
+    const { result, calls } = runNotifyFailureWithExistingIssue({
+      author: 'app/github-actions',
+      releaseTag: 'N/A',
+      priorRun,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls).toContain(`issue_number=${issue}`);
+    if (issue === 9999) expect(calls).not.toContain('issue comment 15672');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'hands an excluded issue comment failure to the workflow fallback',
+    () => {
+      const { result, calls, output } = runNotifyFailureWithExistingIssue({
+        author: 'app/github-actions',
+        excludedLabel: 'autofix/skip',
+        commentFails: true,
+      });
+      expect(result.status).toBe(1);
+      expect(calls).toContain('issue comment 15672');
+      expect(calls).not.toContain('workflow run');
+      expect(output).toBe('');
     },
   );
 
@@ -1531,6 +1574,9 @@ describe('release workflow', () => {
           { cwd: directory, encoding: 'utf8', env: environment },
         );
         expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          'https://github.example/QwenLM/qwen-code/issues/15677 was not reconciled because it is linked to a pull request.',
+        );
         const calls = readFileSync(ghLog, 'utf8');
         for (const adopted of [15672, 15675, 15676, 15677, 15678]) {
           expect(calls).not.toContain(`issue comment ${adopted}`);

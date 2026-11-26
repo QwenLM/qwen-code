@@ -26,14 +26,17 @@ const workflows = [
   {
     path: '.github/workflows/release-vscode-companion.yml',
     titlePrefix: 'VSCode IDE Companion Release Failed for ',
+    publishCondition: "needs.prepare.outputs.is_dry_run == 'false'",
   },
   {
     path: '.github/workflows/release-chrome-extension.yml',
     titlePrefix: 'Chrome extension release failed for ',
+    publishCondition: "needs.build.outputs.should_publish == 'true'",
   },
 ];
 
-describe.each(workflows)('$path failure reporting', ({ path, titlePrefix }) => {
+describe.each(workflows)('$path failure reporting', ({ path, ...meta }) => {
+  const { titlePrefix, publishCondition } = meta;
   const yml = parse(readFileSync(path, 'utf8'));
 
   it('files an issue for a failure but not for a cancelled run', () => {
@@ -52,6 +55,7 @@ describe.each(workflows)('$path failure reporting', ({ path, titlePrefix }) => {
     expect(job.if).toContain('always()');
     expect(job.if).toContain("needs.build.result == 'success'");
     expect(job.if).toContain("needs.publish.result == 'success'");
+    expect(job.if.split(/\s*&&\s*/)).toContain(publishCondition);
     expect(job.permissions).toEqual({ contents: 'read', issues: 'write' });
 
     const checkout = job.steps.find(
