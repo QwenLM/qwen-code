@@ -290,6 +290,7 @@ import type {
   ManagedAgentProvider,
   ManagedAgentWorkspace,
 } from './components/managed/managed-agent-provider';
+import { WorkspaceSelector } from './components/WorkspaceSelector';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
@@ -4928,9 +4929,13 @@ export function App({
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
   // The composer picker chooses the target of the next session, so a
   // projectless draft keeps it enabled: that is where "no workspace" is
-  // chosen. An attached projectless session hides it again.
+  // chosen. An attached projectless session hides it again. A live session
+  // keeps it too: choosing another workspace there starts the next session
+  // without leaving the one being watched.
   const composerWorkspaceSelectEnabled =
-    workspaceContextActive || connection.sessionId === undefined;
+    workspaceContextActive ||
+    connection.sessionId === undefined ||
+    effectiveSessionContext?.kind === 'live';
   const effectiveStandaloneSession =
     effectiveSessionContext?.kind === 'standalone'
       ? connection.standaloneSession
@@ -25820,6 +25825,40 @@ export function App({
                       }
                       workspaceName={headerWorkspaceName}
                       workspacePath={activeWorkspaceCwd}
+                      workspacePicker={
+                        effectiveSessionContext?.kind === 'live' &&
+                        composerWorkspaceSelectEnabled &&
+                        composerWorkspaces ? (
+                          <WorkspaceSelector
+                            workspaces={composerWorkspaces}
+                            disabled={!composerWorkspaceSelectEnabled}
+                            busy={workspaceMutationBusy}
+                            alwaysVisible
+                            scratchSupported={
+                              composerWorkspaceSelectEnabled &&
+                              scratchWorkspaceRegistrationSupported
+                            }
+                            existingFolderSupported={
+                              composerWorkspaceSelectEnabled &&
+                              dynamicWorkspaceRegistrationSupported
+                            }
+                            standaloneSupported={
+                              composerWorkspaceSelectEnabled &&
+                              standaloneSessionsSupported &&
+                              !lockedWorkspaceCwd
+                            }
+                            onSelectWorkspace={handleSelectComposerWorkspace}
+                            onSelectHostedWorkspace={handleSelectHostedWorkspace}
+                            onSelectStandalone={handleSelectComposerStandalone}
+                            onCreateScratch={
+                              handleCreateComposerScratchWorkspace ?? (() => {})
+                            }
+                            onOpenExistingFolder={
+                              handleOpenExistingWorkspace ?? (() => {})
+                            }
+                          />
+                        ) : undefined
+                      }
                       hideWorkspaceIcon={isChatEmptyState && composerNamesWorkspace}
                       environmentOpen={environmentPanelVisible}
                       environmentAvailable={

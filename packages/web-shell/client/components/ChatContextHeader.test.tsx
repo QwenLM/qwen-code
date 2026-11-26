@@ -82,6 +82,16 @@ describe('ChatContextHeader', () => {
     ).toBeNull();
   });
 
+  it('renders the workspace picker slot only when provided', () => {
+    const withPicker = mount({
+      workspacePicker: <button type="button">Pick workspace</button>,
+    });
+    expect(withPicker.textContent).toContain('Pick workspace');
+
+    const withoutPicker = mount();
+    expect(withoutPicker.textContent).not.toContain('Pick workspace');
+  });
+
   it('hides the right-panel action until content exists', () => {
     const view = mount();
 
