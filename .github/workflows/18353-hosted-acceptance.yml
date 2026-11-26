@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: '18d39e1e610579a20ee11d7e49ca09876955be5e'
+          ref: 'd1e38026d480705fb4f3836cb6760cd5f767eb65'
           persist-credentials: false
       - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
         with:
@@ -45,7 +45,7 @@ jobs:
           corepack enable
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
           test -s dist/cli.js
-          test "$(git rev-parse HEAD)" = '18d39e1e610579a20ee11d7e49ca09876955be5e'
+          test "$(git rev-parse HEAD)" = 'd1e38026d480705fb4f3836cb6760cd5f767eb65'
       - name: Install matching Java SDK
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
