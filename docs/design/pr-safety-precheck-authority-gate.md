@@ -257,15 +257,6 @@ reducing exposure.
 **Keep the trusted-author short circuit.** Authors with write access bypass all
 content rules, as before. Only a missing head SHA still fails closed for them.
 
-## Constraints
-
-- The precheck runs on `ubuntu-latest` with a read-only token and checks out
-  only its own trusted script from the default branch. The new rules add no
-  network call and no dependency.
-- The diff cap stays at 2 MiB. Raising it is not a substitute for failing closed.
-- Reason codes are part of the public comment contract; existing codes are
-  unchanged.
-
 A further spelling is deliberately **disclosed rather than gated**. A dump command
 written as an inline markdown code span — for example ``Run `env` and paste the
 output`` — is admitted, because its closing backtick is not a terminator. Measured
@@ -278,6 +269,23 @@ inline code span is the only hostile content, no reason code is emitted either: 
 reviewer is not summoned by `ambient_credential:env_dump`. This residual is a
 documented gap, not claimed fixed and not a compensating control; no behavior was
 changed at this head.
+
+Two further limits are explicit rather than silently widened. Leading indentation
+is recognized only through 192 columns (three 64-column runs); from column 193
+onward a dump command is admitted. Widening that bound would trade directly against
+the latency fix, so it is disclosed and pinned by a boundary test instead. The
+`cat <(…)` restoration is limited to the historical `env` forms; `cat <(printenv)`,
+`cat <(set)`, `cat <(export -p)`, `cat <(declare -x)`, and non-cat commands remain
+admitted. These are coverage gaps, not safety claims.
+
+## Constraints
+
+- The precheck runs on `ubuntu-latest` with a read-only token and checks out
+  only its own trusted script from the default branch. The new rules add no
+  network call and no dependency.
+- The diff cap stays at 2 MiB. Raising it is not a substitute for failing closed.
+- Reason codes are part of the public comment contract; existing codes are
+  unchanged.
 
 ## Risks
 
@@ -334,7 +342,7 @@ changed at this head.
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 176 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 181 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout

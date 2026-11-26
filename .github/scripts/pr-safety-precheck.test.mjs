@@ -633,6 +633,11 @@ for (const [label, payload, code] of [
     'ambient_credential:env_dump',
   ],
   [
+    'process substitution with a null-separated env dump',
+    'cat <(env -0)',
+    'ambient_credential:env_dump',
+  ],
+  [
     'printenv with an argument inside a wrapper',
     "sh -c 'printenv CI_BOT_PAT'",
     'ambient_credential:env_dump',
@@ -736,6 +741,23 @@ test('handles a padded whitespace run without unbounded regex backtracking', () 
   );
 });
 
+test('pins the 192-column indentation recognition boundary', () => {
+  for (const [columns, decision] of [
+    [192, 'manual_required'],
+    [193, 'allow_triage'],
+  ]) {
+    const result = assessPullRequestSafety({
+      pr: pr({ title: '', body: `${' '.repeat(columns)}env` }),
+      diff: diffFor('docs/note.md', '# Note'),
+    });
+
+    assert.equal(result.decision, decision);
+    if (decision === 'manual_required') {
+      assert.deepEqual(result.reason_codes, ['ambient_credential:env_dump']);
+    }
+  }
+});
+
 for (const [label, payload] of [
   ['ordinary property access', 'rows.map((env) => env.id);'],
   ['an ordinary if condition', 'if (env && env.DEBUG) {'],
@@ -744,6 +766,18 @@ for (const [label, payload] of [
   ['env prefix', 'env NODE_ENV=test vitest run'],
   ['env with a cleared environment', 'env -i FOO=bar node x.mjs'],
   ['a URL for an ordinary host', 'curl -s https://example.com/status'],
+  [
+    'a metadata-looking but longer hostname',
+    'curl -s http://169.254.169.254.example.com/latest/',
+  ],
+  [
+    'a metadata-looking but longer domain',
+    'curl -s http://notmetadata.google.internal/latest/',
+  ],
+  [
+    'cat with an env prefix inside process substitution',
+    'cat <(env FOO=bar npm test)',
+  ],
   ['shell option string', 'set -euo pipefail'],
   ['single shell option', 'set -o pipefail'],
   ['declare that assigns one variable', 'declare -x FOO=bar'],
