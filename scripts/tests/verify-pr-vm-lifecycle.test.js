@@ -565,7 +565,7 @@ describe('verify-pr-vm-lifecycle finalize -> verify-pr-check end-to-end', () => 
         ],
         { encoding: 'utf8' },
       );
-      expect(fin.status, fin.stderr).toBe(0);
+      expect(fin.status, fin.stderr || fin.stdout).toBe(0);
       const finOut = JSON.parse(fin.stdout);
       expect(finOut.ok).toBe(true);
       expect(finOut.boundary.mode).toBe(expectedMode);
