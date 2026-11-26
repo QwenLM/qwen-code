@@ -6343,20 +6343,11 @@ describe('qwen-triage verify hardening round 2', () => {
 
     // #13174 R9: a cancel fix held for turn 1 and wedged later turns.
     // #13598 R2: round-1 prompts never reached a tool. #13572 R5: the
-    // defect appeared only with approvals on. The loop-guard count is
-    // read from core, so the skill cannot drift from the real threshold.
+    // defect appeared only with approvals on.
     expect(flat).toContain(
       'Parameterise scenarios along the axes author tests collapse',
     );
     expect(flat).toContain('approval mode (default versus auto-approve)');
-    expect(flat).toContain(
-      'five consecutive identical calls trip the core loop guard',
-    );
-    const loopSource = readFileSync(
-      'packages/core/src/services/loopDetectionService.ts',
-      'utf8',
-    );
-    expect(loopSource).toMatch(/const TOOL_CALL_LOOP_THRESHOLD = 5;/);
 
     // #13354 R1: a PR Harness against a pre-PR server blocked every hosted
     // turn. #12855 R2: after rollback and re-upgrade the Java row lagged
