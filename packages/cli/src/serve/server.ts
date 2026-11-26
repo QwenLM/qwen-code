@@ -2710,6 +2710,7 @@ export function createServeApp(
         ? {
             baseUrl: opts.managedRuntimeBrokerUrl,
             token: opts.managedRuntimeBrokerToken,
+            requireTls: opts.managedRuntimeBrokerRequireTls,
           }
         : undefined;
     const ordinary = registerHostedHarnessSessionRoutes(

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.preflight;
 
 import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedLocalConfiguration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.harness.HarnessNegotiation;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilities;
@@ -211,7 +212,12 @@ public final class ManagedAgentPreflight {
         checks.add(startupValidationCheck(properties));
         checks.add(keyRingCheck(properties));
         checks.add(row("auth", () -> authCheck(environment, properties)));
-        checks.add(harnessCheck(properties, distributionQwenCodeVersion()));
+        checks.add(row("harness", () -> {
+            if (environment.matchesProfiles("managed-local")) {
+                ManagedLocalConfiguration.requireLoopbackHarness(properties.getHarness());
+            }
+            return harnessCheck(properties, distributionQwenCodeVersion());
+        }));
         checks.add(credentialsFileCheck(properties, access.account(), runner));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
@@ -1261,7 +1267,7 @@ public final class ManagedAgentPreflight {
             if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
                 return new Check("harness", Status.FAIL, "pool Session Store or binding key is missing", "enable session-store with a binding key");
             }
-            return new Check("harness", Status.SKIP, "pool endpoints negotiate identity and TLS through the configured discovery source",
+            return new Check("harness", Status.SKIP, "pool endpoints negotiate identity through the configured discovery source",
                     "verify individual Harness pool readiness after startup");
         }
         String baseUrl = harness.getBaseUrl();
@@ -1275,6 +1281,11 @@ public final class ManagedAgentPreflight {
         URI origin = harnessOrigin(baseUrl);
         if (origin == null) {
             return unusableHarnessUrl();
+        }
+        try {
+            BrokerSecurity.checkHarnessTransport(properties);
+        } catch (IllegalStateException error) {
+            return new Check("harness", Status.FAIL, error.getMessage(), "configure the Harness transport before probing");
         }
         String url = trimTrailingSlash(baseUrl) + "/capabilities";
         try {
@@ -1907,12 +1918,15 @@ public final class ManagedAgentPreflight {
                         : "the https URL of the TLS-terminating proxy in front"
                                 + " of " + address);
         HarnessBrokerUrl.Result read = HarnessBrokerUrl.read(url);
+        if (read.verdict() == HarnessBrokerUrl.Verdict.PLAIN_OUTSIDE_LOOPBACK) {
+            return new Check("broker-url", Status.WARN,
+                    url + " uses remote HTTP; preflight cannot see the Hosted Harness startup arguments",
+                    "use HTTPS or pass --managed-runtime-broker-require-tls=false to the Hosted Harness");
+        }
         String refusal = switch (read.verdict()) {
             case INVALID -> ", which is not a valid URL";
             case NOT_ORIGIN -> ", which is not an http or https origin";
-            case PLAIN_OUTSIDE_LOOPBACK -> ", because it uses plain http"
-                    + " outside the loopback interface";
-            case ACCEPTED, UNCLASSIFIED -> null;
+            case ACCEPTED, UNCLASSIFIED, PLAIN_OUTSIDE_LOOPBACK -> null;
         };
         if (refusal != null) {
             return new Check("broker-url", Status.FAIL,
@@ -1966,8 +1980,8 @@ public final class ManagedAgentPreflight {
     }
 
     // The URL that reaches the Broker's listener directly, which the Harness
-    // accepts only on the loopback interface; null for a non-loopback bind,
-    // which the Harness reaches through a TLS-terminating proxy. It is built
+    // accepts by default on the loopback interface; null for a non-loopback
+    // bind, where remote HTTP requires an explicit Harness argument. It is built
     // from the bound address, which the Harness reads the same way whatever
     // the configured spelling.
     private static String directBrokerUrl(

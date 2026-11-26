@@ -7504,38 +7504,58 @@ describe('runQwenServe deployment profiles', () => {
     }
   });
 
-  it('rejects a hosted localhost name that resolves outside loopback before listening', async () => {
-    const listen = vi.spyOn(net.Server.prototype, 'listen');
-    vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
-    try {
-      await expect(
-        runQwenServe(
-          {
-            port: 0,
-            hostname: 'localhost',
-            mode: 'http-bridge',
-            workspace: isolatedTestRuntimeDir,
-            profile: 'hosted-harness',
-            token: 'hosted-secret',
-            serveWebShell: false,
-            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
-          },
-          {
-            bindHostnameLookup: async () => ({
-              address: '192.0.2.1',
-              family: 4,
-            }),
-          },
-        ),
-      ).rejects.toThrow(/outside the loopback interface/);
-      expect(listen).not.toHaveBeenCalled();
-      // The refusal lands after the marker stamp; an embedded caller must
-      // not keep it.
-      expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
-    } finally {
-      listen.mockRestore();
-    }
+  it('requires a configured Hosted Harness token even for a remote listener', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '0.0.0.0',
+        mode: 'http-bridge',
+        workspace: isolatedTestRuntimeDir,
+        profile: 'hosted-harness',
+        hostedHarnessRequireLoopback: false,
+        serveWebShell: false,
+        hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      }),
+    ).rejects.toThrow('requires a bearer token');
   });
+
+  it.each([true, false])(
+    'rejects a hosted localhost resolving outside loopback (requireLoopback=%s)',
+    async (hostedHarnessRequireLoopback) => {
+      const listen = vi.spyOn(net.Server.prototype, 'listen');
+      vi.stubEnv(QWEN_CODE_MANAGED_RUNTIME_ENV, undefined);
+      try {
+        await expect(
+          runQwenServe(
+            {
+              port: 0,
+              hostname: 'localhost',
+              mode: 'http-bridge',
+              workspace: isolatedTestRuntimeDir,
+              profile: 'hosted-harness',
+              hostedHarnessRequireLoopback,
+              token: 'hosted-secret',
+              serveWebShell: false,
+              hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+            },
+            {
+              bindHostnameLookup: async () => ({
+                address: '192.0.2.1',
+                family: 4,
+              }),
+            },
+          ),
+        ).rejects.toThrow(/outside the loopback interface/);
+        expect(listen).not.toHaveBeenCalled();
+        // The refusal lands after the marker stamp; an embedded caller must
+        // not keep it.
+        expect(process.env[QWEN_CODE_MANAGED_RUNTIME_ENV]).toBeUndefined();
+      } finally {
+        listen.mockRestore();
+      }
+    },
+  );
 
   it('stamps the managed attribution marker while the Hosted Harness runs and restores it on close', async () => {
     const workspace = fs.realpathSync(

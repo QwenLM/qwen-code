@@ -346,6 +346,34 @@ class BrokerSecurityTest {
     }
 
     @Test
+    void poolStartupRequiresTheHarnessOptInForRemoteHttp() throws Exception {
+        var properties = new ManagedAgentProperties();
+        var harness = properties.getHarness();
+        harness.setEnabled(true);
+        harness.getPool().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getSessionStore().setBindingKey("k".repeat(32));
+        var member = new ManagedAgentProperties.HarnessInstance();
+        member.setInstanceId("member");
+        member.setBaseUrl("http://harness.internal:4170");
+        harness.getPool().setInstances(java.util.List.of(member));
+        properties.getAuth().setAllowInsecureBind(true);
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .hasMessageContaining("mTLS");
+        properties.getAuth().setAllowInsecureBind(false);
+        harness.setRequireRemoteTls(false);
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+        harness.getPool().setKeyStoreFile("client.p12");
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .hasMessageContaining("both PKCS12 key and trust stores");
+        harness.getPool().setKeyStoreFile("");
+        member.setBaseUrl("https://harness.internal:4170");
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .hasMessageContaining("mTLS");
+    }
+
+    @Test
     void refusesAPlaintextNonLoopbackHarnessUrl() throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setEnabled(true);
@@ -357,6 +385,12 @@ class BrokerSecurityTest {
         assertThatCode(() -> security(properties, "127.0.0.1"))
                 .doesNotThrowAnyException();
         properties.getHarness().setBaseUrl("http://10.0.0.9:4170");
+        properties.getHarness().setRequireRemoteTls(false);
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> security(properties, "0.0.0.0"))
+                .hasMessageContaining("auth.mode");
+        properties.getHarness().setRequireRemoteTls(true);
         properties.getAuth().setAllowInsecureBind(true);
         assertThatCode(() -> security(properties, "127.0.0.1"))
                 .doesNotThrowAnyException();

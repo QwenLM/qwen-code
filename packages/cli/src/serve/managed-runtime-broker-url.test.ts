@@ -49,6 +49,30 @@ const readings = cases.map((fixture) => ({
 }));
 
 describe('resolveManagedRuntimeBrokerBaseUrl', () => {
+  it('requires an explicit false from untyped callers to permit remote HTTP', () => {
+    expect(() =>
+      // @ts-expect-error A JavaScript caller may supply a null option.
+      resolveManagedRuntimeBrokerBaseUrl('http://runtime-broker:4182', null),
+    ).toThrow('must use HTTPS');
+  });
+
+  it.each([
+    'ftp://runtime-broker:4182',
+    'http://user:secret@runtime-broker:4182',
+    'http://runtime-broker:4182/api/..',
+    'http://runtime-broker:4182?query',
+    'http://runtime-broker:4182#fragment',
+    'http://runtime-broker:65536',
+    'http://127.1:4182',
+  ])(
+    'still requires a canonical HTTP(S) origin for %s when TLS is optional',
+    (url) => {
+      expect(() => resolveManagedRuntimeBrokerBaseUrl(url, false)).toThrow(
+        'Managed Runtime Broker URL',
+      );
+    },
+  );
+
   it.each(readings)(
     'reads $url as $expected',
     ({ url, verdict, idnaHost, expected, hostname, port }) => {

@@ -29,6 +29,43 @@ const identity = {
   runtimeSessionId: 'turn',
 };
 
+it('acquires a tool session over remote HTTP only with the TLS opt-out', async ({
+  onTestFinished,
+}) => {
+  const options = { baseUrl: 'http://runtime-broker:4182', token: 'test' };
+  const key = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: 'session',
+  };
+  expect(() => new HostedWorkspaceBroker(options, key, 'turn')).toThrow(
+    'HTTPS',
+  );
+  const fetch = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(Response.json(runtimeResponse()));
+  onTestFinished(() => fetch.mockRestore());
+
+  const broker = new HostedWorkspaceBroker(
+    { ...options, requireTls: false },
+    key,
+    'turn',
+  );
+  await broker.acquire();
+
+  expect(broker.acquired).toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  const [url, init] = fetch.mock.calls[0]!;
+  expect(String(url)).toBe(
+    `${options.baseUrl}/internal/runtime-broker/v1/tool-sessions:acquire`,
+  );
+  expect(init).toMatchObject({
+    method: 'POST',
+    headers: { Authorization: 'Bearer test' },
+    redirect: 'error',
+  });
+});
+
 it('resolves and pins Harness capability once without acquiring or warming a Runtime', async () => {
   const requests: string[] = [];
   const broker = await fixture((path, body) => {

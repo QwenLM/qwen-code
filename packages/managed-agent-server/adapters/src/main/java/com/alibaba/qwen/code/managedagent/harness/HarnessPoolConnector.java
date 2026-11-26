@@ -113,7 +113,7 @@ public class HarnessPoolConnector implements HarnessConnector {
             throw new IllegalStateException("Harness pool discovery must be static");
         }
         for (var endpoint : discovery.snapshot().endpoints()) {
-            validateEndpoint(endpoint, tls);
+            validateEndpoint(endpoint, settings.isRequireRemoteTls(), tls != null);
         }
         this.clients = clients == null ? this::connect : clients;
         if (clients == null) {
@@ -128,15 +128,15 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     private HostedHarnessClient connect(HarnessDiscovery.Endpoint endpoint) {
-        validateEndpoint(endpoint, tls);
         var settings = properties.getHarness();
+        validateEndpoint(endpoint, settings.isRequireRemoteTls(), tls != null);
         return HostedHarnessClient.builder().baseUri(endpoint.baseUri()).sslContext(tls)
                 .bearerToken(settings.getToken()).capabilityDigest(settings.getCapabilityDigest())
                 .connectTimeout(settings.getConnectTimeout()).requestTimeout(settings.getRequestTimeout())
                 .loadTimeout(settings.getLoadTimeout()).heartbeatInterval(settings.getHeartbeatInterval()).build();
     }
 
-    static void validateEndpoint(HarnessDiscovery.Endpoint endpoint, SSLContext tls) {
+    public static void validateEndpoint(HarnessDiscovery.Endpoint endpoint, boolean requireRemoteTls, boolean hasMutualTls) {
         var uri = endpoint.baseUri();
         if (endpoint.instanceId() == null || !endpoint.instanceId().matches("[A-Za-z0-9._:-]{1,128}")
                 || uri == null || uri.getHost() == null || uri.getUserInfo() != null || uri.getQuery() != null
@@ -145,8 +145,11 @@ public class HarnessPoolConnector implements HarnessConnector {
             throw new IllegalArgumentException("Invalid Harness pool endpoint");
         }
         boolean local = Set.of("127.0.0.1", "localhost", "[::1]", "::1").contains(uri.getHost());
-        if (!("https".equals(uri.getScheme()) || local && "http".equals(uri.getScheme()))
-                || !local && tls == null) {
+        boolean https = "https".equals(uri.getScheme());
+        if (!https && !"http".equals(uri.getScheme())) {
+            throw new IllegalArgumentException("Invalid Harness pool endpoint scheme");
+        }
+        if (!local && (https ? !hasMutualTls : requireRemoteTls)) {
             throw new IllegalArgumentException("Remote Harness pool endpoints require configured mTLS");
         }
     }

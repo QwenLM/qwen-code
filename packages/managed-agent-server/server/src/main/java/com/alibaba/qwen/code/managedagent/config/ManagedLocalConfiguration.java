@@ -40,7 +40,7 @@ public class ManagedLocalConfiguration {
                 || !BrokerSecurity.isLoopback(properties.getRuntimeBroker().getHost())) {
             throw new IllegalStateException("Managed local listeners must use loopback addresses");
         }
-        requireLoopbackUrl(properties.getHarness().getBaseUrl());
+        requireLoopbackHarness(properties.getHarness());
         requireLoopbackUrl(properties.getSessionStore().getBaseUrl());
         var broker = properties.getRuntimeBroker();
         if (!"signed".equals(properties.getAuth().getMode())
@@ -95,9 +95,23 @@ public class ManagedLocalConfiguration {
         }
     }
 
+    public static void requireLoopbackHarness(ManagedAgentProperties.Harness harness) {
+        requireLoopbackUrl(harness.getBaseUrl());
+        if (harness.getPool().isEnabled()) {
+            for (var instance : harness.getPool().getInstances()) {
+                requireLoopbackUrl(instance.getBaseUrl());
+            }
+        }
+    }
+
     private static void requireLoopbackUrl(String value) {
-        URI uri = URI.create(value);
-        if (!"http".equals(uri.getScheme())
+        URI uri;
+        try {
+            uri = value == null ? null : URI.create(value);
+        } catch (IllegalArgumentException malformed) {
+            uri = null;
+        }
+        if (uri == null || !"http".equals(uri.getScheme())
                 || uri.getHost() == null
                 || !Set.of("127.0.0.1", "localhost", "[::1]").contains(uri.getHost())
                 || uri.getPort() < 1 || uri.getUserInfo() != null

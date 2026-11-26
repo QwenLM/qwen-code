@@ -27,13 +27,18 @@ export function validateHostedHarnessProfile(
     if (
       opts.managedRuntimeBrokerUrl === undefined &&
       opts.managedRuntimeBrokerToken === undefined &&
+      opts.managedRuntimeBrokerRequireTls !== false &&
+      opts.hostedHarnessRequireLoopback !== false &&
       opts.hostedHarnessCapabilityDigest === undefined
     ) {
       return;
     }
     throw new Error('Hosted Harness options require --profile hosted-harness.');
   }
-  if (!isLoopbackBind(opts.hostname)) {
+  if (
+    opts.hostedHarnessRequireLoopback !== false &&
+    !isLoopbackBind(opts.hostname)
+  ) {
     throw new Error('--profile hosted-harness requires a loopback --hostname.');
   }
   if (opts.mode !== 'http-bridge') {
@@ -75,7 +80,10 @@ export function validateHostedHarnessProfile(
     ) {
       throw new Error('Hosted Runtime Broker requires both URL and token.');
     }
-    resolveManagedRuntimeBrokerBaseUrl(opts.managedRuntimeBrokerUrl);
+    resolveManagedRuntimeBrokerBaseUrl(
+      opts.managedRuntimeBrokerUrl,
+      opts.managedRuntimeBrokerRequireTls,
+    );
   }
   if (
     !opts.hostedHarnessCapabilityDigest ||

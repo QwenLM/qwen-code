@@ -802,6 +802,10 @@ describe('serve fast path argument parsing', () => {
       ['experimental-lsp', ['--experimental-lsp']],
       ['profile', ['--profile', 'hosted-harness']],
       [
+        'hosted-harness-require-loopback',
+        ['--hosted-harness-require-loopback=false'],
+      ],
+      [
         'hosted-harness-capability-digest',
         ['--hosted-harness-capability-digest', `sha256:${'a'.repeat(64)}`],
       ],
@@ -830,6 +834,10 @@ describe('serve fast path argument parsing', () => {
       [
         'managed-runtime-broker-token',
         ['--managed-runtime-broker-token', 'test-token'],
+      ],
+      [
+        'managed-runtime-broker-require-tls',
+        ['--managed-runtime-broker-require-tls=false'],
       ],
       ['restore-ask-user-question', ['--restore-ask-user-question']],
       ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
@@ -868,6 +876,7 @@ describe('serve fast path argument parsing', () => {
       'managed-web-config',
       'profile',
       'hosted-harness-capability-digest',
+      'hosted-harness-require-loopback',
       'experimental-paired-engines',
       'experimental-managed-agents',
       'experimental-managed-runtime-worker',
@@ -876,6 +885,7 @@ describe('serve fast path argument parsing', () => {
       'experimental-managed-runtime-token',
       'managed-runtime-broker-url',
       'managed-runtime-broker-token',
+      'managed-runtime-broker-require-tls',
       'external-tool-guard-endpoint',
       'external-tool-guard-mode',
       'external-tool-guard-timeout-ms',

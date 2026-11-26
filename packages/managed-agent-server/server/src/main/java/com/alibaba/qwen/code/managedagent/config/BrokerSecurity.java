@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.managedagent.harness.HarnessPoolConnector;
+import com.alibaba.qwen.code.managedagent.harness.HarnessTls;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -273,25 +275,28 @@ public class BrokerSecurity {
     }
 
     // The broker→harness attach leg carries the issued writer credential.
-    static void checkHarnessTransport(ManagedAgentProperties properties,
+    public static void checkHarnessTransport(ManagedAgentProperties properties) {
+        checkHarnessTransport(properties, new java.util.ArrayList<>());
+    }
+
+    private static void checkHarnessTransport(ManagedAgentProperties properties,
             java.util.List<String> skippedGuards) {
-        if (!properties.getHarness().isEnabled()) {
+        var harness = properties.getHarness();
+        if (!harness.isEnabled()) {
             return;
         }
-        if (properties.getHarness().getPool().isEnabled()) {
+        var pool = harness.getPool();
+        if (pool.isEnabled()) {
             if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
                 throw new IllegalStateException("Harness pool requires an enabled Session Store and binding key");
             }
-            for (var instance : properties.getHarness().getPool().getInstances()) {
-                java.net.URI endpoint = java.net.URI.create(instance.getBaseUrl());
-                if (!"https".equals(endpoint.getScheme())
-                        && !("http".equals(endpoint.getScheme()) && isLoopback(hostOf(endpoint)))) {
-                    throw new IllegalStateException("Harness pool requires TLS for remote endpoints");
-                }
+            boolean hasMutualTls = HarnessTls.hasPoolStores(pool);
+            for (var instance : pool.getInstances()) {
+                HarnessPoolConnector.validateEndpoint(HarnessConfiguration.poolEndpoint(instance), harness.isRequireRemoteTls(), hasMutualTls);
             }
             return;
         }
-        String baseUrl = properties.getHarness().getBaseUrl();
+        String baseUrl = harness.getBaseUrl();
         if (StringUtils.isBlank(baseUrl)) {
             return;
         }
@@ -303,13 +308,12 @@ public class BrokerSecurity {
         }
         if ("http".equalsIgnoreCase(uri.getScheme())
                 && !isLoopback(hostOf(uri))) {
-            if (!properties.getAuth().isAllowInsecureBind()) {
+            if (harness.isRequireRemoteTls() && !properties.getAuth().isAllowInsecureBind()) {
                 throw new IllegalStateException(
                         "qwen.managed-agent.harness.base-url uses plaintext"
                                 + " http on a non-loopback host, exposing"
                                 + " provisioned writer credentials; use https"
-                                + " or set auth.allow-insecure-bind=true to"
-                                + " override.");
+                                + " or explicitly set harness.require-remote-tls=false.");
             }
             skippedGuards.add("harness-transport");
         }

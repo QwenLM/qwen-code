@@ -46,11 +46,11 @@ class HarnessBrokerUrlTest {
 
     @Test
     void leavesWhatItCannotReadUnclassified() {
-        // An https host with an xn-- label goes through IDNA, which the
+        // A host with an xn-- label goes through IDNA, which the
         // Harness may accept or refuse; text outside the credentials file's
         // characters never reaches the row.
         for (String url : new String[] {"https://xn--bcher-kva.example:8443",
-                "https://xn--a:8443", "https://xn--localhost-:8443",
+                "https://xn--a:8443", "http://xn--a:4182", "https://xn--localhost-:8443",
                 "http://127.0.0.1:4182/?x"}) {
             assertEquals(HarnessBrokerUrl.Verdict.UNCLASSIFIED,
                     HarnessBrokerUrl.read(url).verdict(), url);
@@ -87,6 +87,8 @@ class HarnessBrokerUrlTest {
                 HarnessBrokerUrl.Verdict.UNCLASSIFIED, "https://broker.example:8443"));
         assertFalse(declaredApproximation("accepted",
                 HarnessBrokerUrl.Verdict.UNCLASSIFIED, "http://xn--a:4182"));
+        assertTrue(declaredApproximation("plain-outside-loopback",
+                HarnessBrokerUrl.Verdict.UNCLASSIFIED, "http://xn--a:4182"));
         assertFalse(declaredApproximation("accepted",
                 HarnessBrokerUrl.Verdict.NOT_ORIGIN, "http://127.0.0.1:4182"));
         assertFalse(declaredApproximation("invalid",
@@ -99,7 +101,7 @@ class HarnessBrokerUrlTest {
 
     // The two exceptions HarnessBrokerUrl documents, and only those: a
     // non-http(s) scheme read before the host may name another refusal for a
-    // URL the Harness finds invalid, and an https xn-- host stays
+    // URL the Harness finds invalid, and an xn-- host stays
     // unclassified, since IDNA alone decides whether the Harness takes it.
     // For an xn-- host the fixture records the verdict where the URL parser
     // keeps the label, which is how preflight reads it without IDNA.
@@ -109,8 +111,9 @@ class HarnessBrokerUrlTest {
         return switch (verdict) {
             case NOT_ORIGIN -> expected.equals("invalid")
                     && !url.regionMatches(true, 0, "http", 0, 4);
-            case UNCLASSIFIED -> idna && url.regionMatches(true, 0, "https:", 0, 6)
-                    && expected.equals("accepted");
+            case UNCLASSIFIED -> idna && (url.regionMatches(true, 0, "https:", 0, 6)
+                    && expected.equals("accepted") || url.regionMatches(true, 0, "http:", 0, 5)
+                    && expected.equals("plain-outside-loopback"));
             case ACCEPTED, INVALID, PLAIN_OUTSIDE_LOOPBACK -> false;
         };
     }

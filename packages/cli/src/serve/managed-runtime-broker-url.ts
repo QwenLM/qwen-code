@@ -57,7 +57,10 @@ function canonicalHost(rawHost: string, parsedHostname: string): boolean {
   return lower === parsedHostname;
 }
 
-export function resolveManagedRuntimeBrokerBaseUrl(raw: string): URL {
+export function resolveManagedRuntimeBrokerBaseUrl(
+  raw: string,
+  requireTls?: boolean,
+): URL {
   const scheme = SCHEME.exec(raw);
   if (!scheme) {
     throw new Error(INVALID);
@@ -94,7 +97,11 @@ export function resolveManagedRuntimeBrokerBaseUrl(raw: string): URL {
   if (rawPath !== undefined && rawPath !== '/') {
     throw new Error(NOT_ORIGIN);
   }
-  if (url.protocol === 'http:' && !isLoopbackBind(url.hostname)) {
+  if (
+    requireTls !== false &&
+    url.protocol === 'http:' &&
+    !isLoopbackBind(url.hostname)
+  ) {
     throw new Error(
       'Managed Runtime Broker URL must use HTTPS outside the loopback interface.',
     );
