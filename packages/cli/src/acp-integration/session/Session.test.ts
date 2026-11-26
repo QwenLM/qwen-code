@@ -33,6 +33,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import { StreamInactivityTimeoutError } from '@qwen-code/qwen-code-core/core/stream-guards.js';
 import type { UserTurnInput } from '@qwen-code/qwen-code-core/core/client.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
@@ -7213,6 +7214,99 @@ describe('Session', () => {
       expect(send).toHaveBeenCalledOnce();
     });
 
+    it.each([
+      {
+        name: 'tool hook',
+        stop: 'hook_stopped',
+        extra: {},
+        refuseNotice: false,
+      },
+      {
+        name: 'undeliverable stop notice',
+        stop: 'hook_stopped',
+        extra: {},
+        refuseNotice: true,
+      },
+      {
+        name: 'channel turn with a terminating tool',
+        stop: 'tool_ended_turn',
+        extra: { _meta: { 'qwen.channel.prompt': true } },
+        refuseNotice: false,
+      },
+      {
+        name: 'requested delivery with a terminating tool',
+        stop: 'tool_ended_turn',
+        extra: {
+          _meta: {
+            'qwen.daemon.channelDelivery': {
+              deliveryId: 'hook-stop',
+              target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+            },
+          },
+        },
+        refuseNotice: false,
+      },
+    ])(
+      'ends the turn and keeps the tool response on a $name',
+      async ({ stop, extra, refuseNotice }) => {
+        useTool(core.Kind.Read, 'read_file');
+        runAcpToolBatchSpy.mockImplementation(
+          async (
+            host: unknown,
+            options: { requests: core.ToolCallRequestInfo[] },
+          ) => ({
+            ...(await runEachTool(host, options)),
+            stop,
+            hookStopReason: 'budget spent',
+          }),
+        );
+        const send = useSharedRounds([readCall('call-read'), finished()]);
+
+        if (refuseNotice) {
+          vi.mocked(mockClient.sessionUpdate).mockImplementation(
+            async ({ update }) => {
+              if (update._meta?.['source'] === 'stop_hook_notice') {
+                throw new Error('notice transport failed');
+              }
+            },
+          );
+        }
+        const result = await prompt(extra);
+
+        expect(result.stopReason).toBe('end_turn');
+        expect(send).toHaveBeenCalledOnce();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-read',
+                name: 'read_file',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        });
+        expect(updates()).toContainEqual({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            source: 'stop_hook_notice',
+            qwenDiscreteMessage: true,
+            stopReason: 'budget spent',
+          },
+        });
+        if (extra._meta?.['qwen.daemon.channelDelivery']) {
+          await vi.waitFor(() =>
+            expect(mockClient.extMethod).toHaveBeenCalledWith(
+              'qwen/control/channel-delivery',
+              expect.objectContaining({ deliveryId: 'hook-stop', text: '' }),
+            ),
+          );
+        }
+      },
+    );
+
     it('refuses a Goal approval the turn cannot own', async () => {
       useTool(core.Kind.Read, 'read_file');
       useSharedRounds([readCall('call-read'), finished()]);
@@ -7267,6 +7361,36 @@ describe('Session', () => {
 
       await expect(prompt()).rejects.toBe(providerError);
       expect(clientFinished).toBe(true);
+    });
+
+    it('keeps a stream timeout out of billing StopFailure hooks', async () => {
+      const timeout = new StreamInactivityTimeoutError(
+        1000,
+        2,
+        1000,
+        'check_quota',
+      );
+      const structured = { message: timeout.message };
+      structuredErrorCauses.set(structured, timeout);
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getHookSystem = vi.fn().mockReturnValue({
+        fireStopFailureEvent,
+      });
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((name: string) => name === 'StopFailure');
+      useSharedRounds([
+        {
+          type: core.LlmEventType.Error,
+          value: { error: structured },
+        },
+      ]);
+
+      await expect(prompt()).rejects.toBe(timeout);
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'unknown',
+        timeout.message,
+      );
     });
 
     describe('a turn it re-enters', () => {
@@ -53541,7 +53665,23 @@ describe('Session', () => {
             'Concurrent request limit exceeded (principal scope)',
           );
         });
-        it('fires StopFailure hook when API error occurs during sendMessageStream', async () => {
+        it.each([
+          {
+            category: 'rate_limit',
+            error: Object.assign(new Error('Rate limit exceeded'), {
+              status: 429,
+            }),
+          },
+          {
+            category: 'unknown',
+            error: new StreamInactivityTimeoutError(
+              1000,
+              2,
+              1000,
+              'check_quota',
+            ),
+          },
+        ])('StopFailure: $category', async ({ category, error }) => {
           const mockFireStopFailureEvent = vi.fn().mockResolvedValue({
             success: true,
           });
@@ -53551,14 +53691,8 @@ describe('Session', () => {
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
           mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
 
-          // Simulate API error (rate limit)
-          const apiError = new Error('Rate limit exceeded') as Error & {
-            status: number;
-          };
-          apiError.status = 429;
-
           mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
-            throw apiError;
+            throw error;
           });
 
           await expect(
@@ -53568,10 +53702,9 @@ describe('Session', () => {
             }),
           ).rejects.toThrow();
 
-          // StopFailure hook should be called with rate_limit error type
           expect(mockFireStopFailureEvent).toHaveBeenCalledWith(
-            'rate_limit',
-            'Rate limit exceeded',
+            category,
+            error.message,
           );
         });
 

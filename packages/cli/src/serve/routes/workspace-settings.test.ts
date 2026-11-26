@@ -1867,3 +1867,37 @@ describe('Web Shell worktree retention setting', () => {
     },
   );
 });
+
+describe('unset boolean settings', () => {
+  it('serves the unset toggle value when the schema has no default', async () => {
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    const descriptor = response.body.settings.find(
+      (setting: { key: string }) =>
+        setting.key === 'experimental.unifiedAgentLoop',
+    );
+    // With no stored value and no schema default, a host needs the schema's
+    // unset toggle value to know what the first flip means: the setting's
+    // per-surface default keeps ACP/headless/TUIs on the shared loop, so the
+    // first flip must not read as "off".
+    expect(descriptor).toMatchObject({
+      type: 'boolean',
+      unsetToggleValue: true,
+      values: {},
+    });
+    expect(descriptor.default).toBeUndefined();
+  });
+
+  it('omits unsetToggleValue when the schema does not declare one', async () => {
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    const descriptor = response.body.settings.find(
+      (setting: { key: string }) =>
+        setting.key === 'worktree.defaultForNewSessions',
+    );
+    expect(descriptor).toBeDefined();
+    expect(descriptor).not.toHaveProperty('unsetToggleValue');
+  });
+});

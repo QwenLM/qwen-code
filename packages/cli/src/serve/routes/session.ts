@@ -227,6 +227,11 @@ import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
 } from '../skill-details-redaction.js';
+import {
+  appendWorkspaceInputHistory,
+  extractPromptHistoryText,
+  type WorkspaceInputHistoryKind,
+} from '../workspace-input-history.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import {
   readSessionToolCalls,
@@ -10189,6 +10194,38 @@ export function registerSessionRoutes(
         res.once('finish', onResFinish);
 
         let admission: SessionPromptAdmission;
+        let historyRecorded: Promise<void> | undefined;
+        const recordInputHistory = () => {
+          if (
+            historyRecorded ||
+            body['suppressInputHistory'] === true ||
+            classification.channelPrompt ||
+            classification.requestedChannelPrompt
+          ) {
+            return;
+          }
+          const historyText = extractPromptHistoryText(
+            prompt,
+            classification.submittedPrompt,
+          );
+          if (!historyText) return;
+          historyRecorded = runWithWorkspaceRuntimeStorage(runtime, () =>
+            appendWorkspaceInputHistory(
+              runtime.workspaceCwd,
+              'prompt',
+              historyText,
+            )
+              .then(() => undefined)
+              .catch((err) => {
+                daemonLog?.warn('failed to record workspace input history', {
+                  sessionId,
+                  kind: 'prompt' satisfies WorkspaceInputHistoryKind,
+                  workspaceCwd: runtime.workspaceCwd,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }),
+          );
+        };
         let turnSkillLease: string | undefined;
         let skillDigest: string | undefined;
         let releasePreparation: (() => void) | undefined;
@@ -10415,7 +10452,10 @@ export function registerSessionRoutes(
               signal: abort.signal,
               onPromptId: (promptId) =>
                 addDaemonRequestAttribute('qwen-code.prompt_id', promptId),
-              onPromptAdmitted,
+              onPromptAdmitted: () => {
+                onPromptAdmitted?.();
+                recordInputHistory();
+              },
             },
           );
         } catch (err) {
@@ -10448,6 +10488,8 @@ export function registerSessionRoutes(
           });
           return;
         }
+        recordInputHistory();
+        await historyRecorded;
         res.status(202).json({
           skillDigest: admission.skillDigest,
           sessionSkillEffectsChecked: admission.sessionSkillEffectsChecked,
@@ -13361,7 +13403,7 @@ export function registerSessionRoutes(
     mutate(),
     withOwnerMutableSession(
       'POST /session/:id/mid-turn-message',
-      (req, res, sessionId, runtime) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const eventDetailMode = parseReplayMode(body, res, 'eventDetailMode');
         if (eventDetailMode === null) return;
@@ -13434,6 +13476,19 @@ export function registerSessionRoutes(
         // originator for SSE echo routing. `null` = malformed id (already answered).
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        let alreadyRecordedMidTurn = false;
+        if (typeof messageId === 'string') {
+          const previous = runtime.bridge.getMidTurnMessages(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          alreadyRecordedMidTurn =
+            previous.messages.some(
+              (message) => message.messageId === messageId,
+            ) ||
+            previous.settledMessageIds.includes(messageId) ||
+            previous.promotedMessageIds.includes(messageId);
+        }
         const result = runtime.bridge.enqueueMidTurnMessage(
           sessionId,
           trimmed,
@@ -13445,6 +13500,22 @@ export function registerSessionRoutes(
             ...(mediaBlocks ? { content: mediaBlocks } : {}),
           },
         );
+        if (trimmed.length > 0 && result.accepted && !alreadyRecordedMidTurn) {
+          await runWithWorkspaceRuntimeStorage(runtime, () =>
+            appendWorkspaceInputHistory(
+              runtime.workspaceCwd,
+              'prompt',
+              trimmed,
+            ),
+          ).catch((err) => {
+            daemonLog?.warn('failed to record workspace input history', {
+              sessionId,
+              kind: 'prompt' satisfies WorkspaceInputHistoryKind,
+              workspaceCwd: runtime.workspaceCwd,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
         res.status(200).json(result);
       },
     ),
@@ -13638,6 +13709,21 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const trimmedCommand = command.trim();
+        void runWithWorkspaceRuntimeStorage(runtime, () =>
+          appendWorkspaceInputHistory(
+            runtime.workspaceCwd,
+            'shell',
+            trimmedCommand,
+          ),
+        ).catch((err) => {
+          daemonLog?.warn('failed to record workspace input history', {
+            sessionId,
+            kind: 'shell' satisfies WorkspaceInputHistoryKind,
+            workspaceCwd: runtime.workspaceCwd,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
         const abort = new AbortController();
         const onResClose = () => {
           if (!res.writableEnded) abort.abort();
@@ -13646,7 +13732,7 @@ export function registerSessionRoutes(
         try {
           const result = await runtime.bridge.executeShellCommand(
             sessionId,
-            command.trim(),
+            trimmedCommand,
             abort.signal,
             { clientId },
           );

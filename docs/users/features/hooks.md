@@ -30,7 +30,7 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 
 ### Browsing your hooks
 
-Run `/hooks` to open a read-only browser of the hooks this session runs. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Hooks registered for the current session by skills or the SDK are listed with the source Session.
+Run `/hooks` to open a read-only browser of configured and session hooks. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Ink marks command hooks with unsupported `args` as skipped in the handler list. Hooks registered for the current session by skills or the SDK are listed with the source Session.
 
 The browser never edits your configuration: to add, change or remove a hook, edit `settings.json`. It does re-read it. Opening the interactive menu reloads hook definitions from the user, workspace and system (System and SystemDefaults) settings files used by this session, including when the session runs in a worktree, so definitions you added, changed or removed since the session started take effect without a restart. If the user or workspace file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown. If a system settings file cannot be read or parsed, the hooks from the system files stay as they were, your other edits still take effect, the file is left untouched, and an error names it.
 
@@ -535,6 +535,14 @@ Hook output supports three categories of fields:
 2. **Top-level Decision**: `decision`, `reason` (used by some events)
 3. **Event-specific Control**: `hookSpecificOutput` (must include `hookEventName`)
 
+On the shared agent loop, `continue: false` on `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, or `PostToolBatch` ends the current turn. The batch finishes, its results stay in the conversation, and the model receives no further request in that turn. In a subagent, the parent receives the reason and can continue. An autonomous Goal can start another turn. To suspend the Goal, pause it.
+
+Interactive terminals and ACP clients show `stopReason` (or `reason`). Headless text mode prints the notice to stderr. Headless `json` and `stream-json` finish the turn without a stop notice.
+
+When the same hook output also blocks (`decision: "block"` or `"deny"`, a PreToolUse `permissionDecision: "deny"`, or exit code 2), the blocking decision takes precedence and the turn can continue. The turn can also continue on legacy loops (`experimental.unifiedAgentLoop: false`), in the Hosted Harness, and for an ACP `ask_user_question` call restored after a daemon restart. Those paths have their own continuation handling.
+
+If a tool uses an Omni media policy while running or preparing its result, a hook on the policy's tool call can end the enclosing turn after the batch. A policy can also run while expanding a user's `@file` or retrying a provider request, before any tool batch owns the call. In those cases, a stop on the policy call follows the policy's failure handling.
+
 ```json
 {
   "continue": true,
@@ -617,6 +625,8 @@ In Code Mode (`tools.codeModeOnly`), a call made from an `exec` script returns i
 
 A PermissionRequest hook's `decision.updatedInput` is checked the same way: one that is not a JSON object stops the call, and a replacement is validated and checked against the permission rules before it runs, and the hook's `"allow"` counts only as the approval of that replacement. A replacement that needs a decision the hook cannot make, such as an answer from the user, goes to the approval prompt instead; in ACP sessions it is not run. In AUTO mode, a replacement is reviewed again before it runs.
 
+`continue: false` without a deny stops the call before it runs; its result is the error `stopReason`. The other calls of the batch still run, and then the turn ends.
+
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
 **Example Output**:
@@ -655,6 +665,7 @@ A PermissionRequest hook's `decision.updatedInput` is checked the same way: one 
 - `decision`: "allow", "deny", "block" (defaults to "allow" if not specified)
 - `reason`: reason for the decision
 - `hookSpecificOutput.additionalContext`: additional information to be included
+- `continue: false`: the tool's result is kept, and the turn ends after the batch. Together with `decision: "block"` or `"deny"`, the result is instead replaced by an error carrying `stopReason`, and the turn goes on.
 
 **Example Output**:
 
@@ -690,6 +701,7 @@ A PermissionRequest hook's `decision.updatedInput` is checked the same way: one 
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: error handling information, appended after the error in the tool result the model sees next. This applies both when the tool returns an error and when it throws. For a call made from a Code Mode `exec` script, it goes to the `exec` call's result instead (see [PreToolUse](#pretooluse)). `<` and `>` are escaped.
+- `continue: false`: the turn ends after the batch (see [Hook Output Structure](#hook-output-structure)). It has no effect when the call was interrupted.
 - Standard hook output fields
 
 **Example Output**:
@@ -729,8 +741,9 @@ A PermissionRequest hook's `decision.updatedInput` is checked the same way: one 
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: appended to the result of the last call in the batch, after a blank line. `<` and `>` are escaped.
-- `decision`: `"block"` or `"deny"` stops the batch, and so does `continue: false` or exit code 2. The last call's result is replaced by an error that carries `stopReason`, or `reason` when there is no `stopReason`. The other results are kept, and `additionalContext` is still appended.
-- `stopReason` / `reason`: the text of that error.
+- `decision`: `"block"` or `"deny"` stops the batch, and so does exit code 2. The last call's result is replaced by an error that carries `stopReason`, or `reason` when there is no `stopReason`. The other results are kept, `additionalContext` is still appended, and the turn goes on.
+- `continue: false` without a blocking decision keeps every result and ends the turn.
+- `stopReason` / `reason`: the text of that error, or of the notice when the turn ends.
 
 If the hooks fail, or do not finish within 15 seconds, the batch continues with its results unchanged.
 
@@ -1851,11 +1864,12 @@ sys.exit(0)
 
 ### A hook does not fire
 
-1. **Event name.** The key must be one of the events in [Hook Events](#hook-events), spelled exactly, including case. An unknown event name is skipped with the warning `Invalid hook event name`.
-2. **Matcher.** Tool events match the runtime tool id, such as `run_shell_command` or `write_file`, or an accepted alias such as Claude Code's `Bash` or `Write` (see [Matcher Patterns](#matcher-patterns)). On events without matcher support, `matcher` is ignored.
-3. **Folder trust or approval.** Hooks in a project's `.qwen/settings.json` run when you have approved the exact configuration (see [Approving project hooks](#approving-project-hooks)) or the folder is explicitly trusted: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE (see [Trusted Folders](../configuration/trusted-folders.md)). With neither authority they stay withheld in every mode, headless included; with the trust feature on and the folder untrusted, workspace settings do not load at all — trust the folder first. User hooks load regardless of folder trust.
-4. **Hooks disabled.** `"disableAllHooks": true`, `--safe-mode` (or `QWEN_CODE_SAFE_MODE`) and `--bare` (or `QWEN_CODE_SIMPLE`) turn off all hooks, including user hooks.
-5. **Debug log.** Start Qwen Code with `--debug`, or set `QWEN_DEBUG_LOG_FILE=1`, then read the session log at `~/.qwen/debug/latest` (under `$QWEN_RUNTIME_DIR` when that is set). Each line is tagged with a namespace:
+1. **Event name.** The key must be one of the events in [Hook Events](#hook-events), spelled exactly, including case. An unknown event name is skipped with a warning that names it.
+2. **Configuration warnings.** The default Ink terminal UI and headless stderr report hook configuration problems at startup. The terminal UI also shows warnings when `/hooks` reloads the settings and when you approve project hooks. The `/hooks` text listing shows the configuration warnings when no hooks were loaded. Warnings identify the source, event and positions in the loaded list. For system hooks, entries from SystemDefaults come before entries from System settings. Qwen Code skips hooks with missing or unsupported types, hooks missing their required `command`, `url` or `prompt`, and command hooks that set `args` other than an empty list. Fields that are not supported yet, `onFailure`, `asyncRewake`, `if` and `once` (except on HTTP hooks), are ignored with a warning, and the hook still runs. Explicit defaults `asyncRewake: false`, `if: ""` and `once: false` are accepted silently.
+3. **Matcher.** Tool events match the runtime tool id, such as `run_shell_command` or `write_file`, or an accepted alias such as Claude Code's `Bash` or `Write` (see [Matcher Patterns](#matcher-patterns)). On events without matcher support, `matcher` is ignored.
+4. **Folder trust or approval.** Hooks in a project's `.qwen/settings.json` run when you have approved the exact configuration (see [Approving project hooks](#approving-project-hooks)) or the folder is explicitly trusted: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE (see [Trusted Folders](../configuration/trusted-folders.md)). With neither authority they stay withheld in every mode, headless included; with the trust feature on and the folder untrusted, workspace settings do not load at all — trust the folder first. User hooks load regardless of folder trust.
+5. **Hooks disabled.** `"disableAllHooks": true`, `--safe-mode` (or `QWEN_CODE_SAFE_MODE`) and `--bare` (or `QWEN_CODE_SIMPLE`) turn off all hooks, including user hooks.
+6. **Debug log.** Start Qwen Code with `--debug`, or set `QWEN_DEBUG_LOG_FILE=1`, then read the session log at `~/.qwen/debug/latest` (under `$QWEN_RUNTIME_DIR` when that is set). Each line is tagged with a namespace:
    - `[HOOK_REGISTRY]`: `Hook registry initialized with N hook entries`, and hook definitions discarded as invalid
    - `[TRUSTED_HOOKS]`: `Hook <name> started for event <event>` and the matching `ended` line for each run, async hook status, and hook system messages
    - `[HOOK_MATCHER]`: matchers that are not valid regular expressions
@@ -1864,7 +1878,7 @@ sys.exit(0)
 
    Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
 
-6. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls, HTTP security settings and `security.folderTrust` (including trust-store entries) require a restart. Settings-file project hooks are also registered once, so a later IDE trust grant or revocation applies only after that reload or restart.
+7. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls, HTTP security settings and `security.folderTrust` (including trust-store entries) require a restart. Settings-file project hooks are also registered once, so a later IDE trust grant or revocation applies only after that reload or restart.
 
 ### Other checks
 

@@ -856,7 +856,9 @@ describe('ChatPane', () => {
     act(() => {
       pending = registerContextUsageControls.mock.calls.at(-1)![0].compress();
     });
-    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress');
+    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress', {
+      suppressInputHistory: true,
+    });
     expect(clearFollowup).toHaveBeenCalledOnce();
     expect(onBeforeContextCompress).toHaveBeenCalledExactlyOnceWith(
       connectionState.sessionId,

@@ -1574,6 +1574,9 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
+        if (options?.suppressInputHistory) {
+          promptRequest['suppressInputHistory'] = true;
+        }
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
         try {
           const request = promptRequest as Parameters<
@@ -1963,6 +1966,9 @@ export function createDaemonSessionActions({
       if (options?.retry) {
         promptRequest['retry'] = true;
       }
+      if (options?.suppressInputHistory) {
+        promptRequest['suppressInputHistory'] = true;
+      }
       options?.onAdmissionStarted?.();
       let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
       try {
@@ -2103,6 +2109,9 @@ export function createDaemonSessionActions({
         }
         if (options?.retry) {
           promptRequest['retry'] = true;
+        }
+        if (options?.suppressInputHistory) {
+          promptRequest['suppressInputHistory'] = true;
         }
         options?.onAdmissionStarted?.();
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;

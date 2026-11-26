@@ -433,6 +433,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
     'no Managed Git ignore query route',
   ),
+  workspace_input_history: NO_MANAGED_EQUIVALENT(
+    'no Managed input history route',
+  ),
   workspace_mcp_restart: {
     standing: 'managed',
     evidence: 'surface:MCP_MANAGEMENT',

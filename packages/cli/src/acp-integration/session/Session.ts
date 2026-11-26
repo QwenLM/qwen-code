@@ -825,6 +825,8 @@ type RunToolResult = {
    * boundary, such as Goal checkpoints and workspace-agent hand-offs.
    */
   terminateTurn?: boolean;
+  /** A tool hook returned `continue: false`: the turn ends, with this reason. */
+  hookStopReason?: string;
   /**
    * Hook additionalContext of a code-mode nested call. Its parts are a value
    * for the exec script, so the parent exec delivers this to the model.
@@ -10000,7 +10002,10 @@ export class Session implements SessionContext {
     ) {
       hookSystem
         .fireStopFailureEvent(
-          classifyApiError({ message: errorMessage, status: errorStatus }),
+          classifyApiError(
+            { message: errorMessage, status: errorStatus },
+            error,
+          ),
           errorMessage,
         )
         .catch((err) => {
@@ -11031,10 +11036,10 @@ export class Session implements SessionContext {
         this.todoStopGuard.pauseForTrustedRetry();
         const errorStatus = getErrorStatus(error);
         const errorMessage = getErrorMessage(error);
-        const errorType = classifyApiError({
-          message: errorMessage,
-          status: errorStatus,
-        });
+        const errorType = classifyApiError(
+          { message: errorMessage, status: errorStatus },
+          error,
+        );
         const hookSystem = this.config.getHookSystem?.();
         if (
           !this.config.getDisableAllHooks?.() &&
@@ -12148,10 +12153,8 @@ export class Session implements SessionContext {
    * queued for the next continuation rather than drained into a turn that is
    * already over.
    *
-   * Channel turns and requested channel deliveries keep the loop alive for
-   * their final tool-free response; ending on the tool batch would return or
-   * submit an empty response because only a tool-free response is committed
-   * as the channel final.
+   * Channels normally need a final tool-free response for delivery. A hook
+   * stop ends the turn even when a channel is waiting for that response.
    */
   async #endTurnAfterToolRun(
     toolRun: RunToolResult,
@@ -12161,11 +12164,11 @@ export class Session implements SessionContext {
   ): Promise<boolean> {
     // Loop protection keeps its own stop path, with the telemetry and the
     // context message that go with it, so it wins a batch that trips both.
+    const hookStop = toolRun.hookStopReason;
     if (
-      toolRun.terminateTurn !== true ||
       toolRun.loopDetected ||
-      channelTurn ||
-      hasChannelDelivery
+      (hookStop === undefined &&
+        (toolRun.terminateTurn !== true || channelTurn || hasChannelDelivery))
     ) {
       return false;
     }
@@ -12178,6 +12181,15 @@ export class Session implements SessionContext {
       goalTurn.endingToolCallId = toolRun.parts.findLast(
         (part) => part.functionResponse?.id,
       )?.functionResponse?.id;
+    }
+    if (hookStop !== undefined) {
+      try {
+        await this.messageEmitter.emitStopHookNotice(hookStop);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to emit tool hook stop notice: ${this.#formatError(error)}`,
+        );
+      }
     }
     return true;
   }
@@ -16820,6 +16832,9 @@ export class Session implements SessionContext {
       stopAfterPermissionCancel: batch.stopAfterPermissionCancel,
       ...(toolLoopState.loopDetected ? { loopDetected: true } : {}),
       ...(batch.stop === 'tool_ended_turn' ? { terminateTurn: true } : {}),
+      ...(batch.hookStopReason !== undefined
+        ? { hookStopReason: batch.hookStopReason }
+        : {}),
       repeatedToolFailureBatch: {
         complete: batch.results.length === requests.length,
         observations,
@@ -20704,8 +20719,10 @@ export class Session implements SessionContext {
               );
             }
 
-            // If hook indicates to stop, return an error response
-            if (postHookResult.shouldStop) {
+            // If hook indicates to stop, return an error response. Calls run
+            // outside the shared batch keep that behavior for a
+            // `continue: false` too.
+            if (postHookResult.shouldStop || postHookResult.endsTurn) {
               this.#stopMovedShell(this.movableShells.get(callId));
               const stopMessage =
                 postHookResult.stopReason ||

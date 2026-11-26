@@ -11,7 +11,11 @@ import type {
   AgentLoopResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
-import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  getStructuredErrorCause,
+  type ToolCallRequestInfo,
+} from '@qwen-code/qwen-code-core/core/turn.js';
+import { StreamInactivityTimeoutError } from '@qwen-code/qwen-code-core/core/stream-guards.js';
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -91,6 +95,17 @@ const queuedSteers = (...texts: string[]): QueuedMessage[] =>
   texts.map((text) => ({ text, key: text, deferUntilIdle: false }));
 
 // --- MOCKS ---
+vi.mock('@qwen-code/qwen-code-core/core/turn.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/core/turn.js')
+    >();
+  return {
+    ...actual,
+    getStructuredErrorCause: vi.fn(actual.getStructuredErrorCause),
+  };
+});
+
 const pendingToolPersistence = vi.hoisted(() => ({
   directory: '',
   wait: undefined as Promise<void> | undefined,
@@ -22530,6 +22545,39 @@ describe('useLlmStream', () => {
       });
     });
 
+    it('uses the stream timeout cause to classify StopFailure', async () => {
+      const timeout = new StreamInactivityTimeoutError(
+        1000,
+        2,
+        1000,
+        'check_quota',
+      );
+      const error = { message: timeout.message };
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getHookSystem = vi.fn().mockReturnValue({
+        fireStopFailureEvent,
+      });
+      vi.mocked(getStructuredErrorCause).mockImplementationOnce((value) =>
+        value === error ? timeout : undefined,
+      );
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Error, value: { error } };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('Check model response');
+      });
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'unknown',
+        timeout.message,
+        expect.any(String),
+      );
+    });
+
     it('omits the Ctrl+Y retry hint for stream errors during a Goal turn', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -25959,8 +26007,11 @@ describe('useLlmStream', () => {
           },
         );
 
-      it('ends the turn on a tool that ends it, outside a Goal turn too, with its results in history', async () => {
-        completeBatchesWith(() => ({ terminateTurn: true }));
+      it('gives a turn-ending tool priority over a hook stop', async () => {
+        completeBatchesWith(() => ({
+          terminateTurn: true,
+          hookStopReason: 'budget spent',
+        }));
         rounds([toolRequest('read_a')]);
         const client = mockConfig.getLlmClient();
         const { result } = renderTestHook([], client);
@@ -25981,10 +26032,41 @@ describe('useLlmStream', () => {
         });
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['read_a']);
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          { type: 'info', text: 'A hook stopped the turn: budget spent' },
+          expect.any(Number),
+        );
       });
 
-      it('stops without a continuation when the model was switched after a quota error', async () => {
-        completeBatches();
+      it('ends the turn on a tool hook stop, with its results in history and the reason shown', async () => {
+        completeBatchesWith(() => ({ hookStopReason: 'budget spent' }));
+        rounds([toolRequest('read_a')]);
+        const client = mockConfig.getLlmClient();
+        const { result } = renderTestHook([], client);
+
+        await act(async () => {
+          await result.current.submitQuery('Read the file.');
+        });
+
+        await waitFor(() => {
+          expect(mockAddItem).toHaveBeenCalledWith(
+            { type: 'info', text: 'A hook stopped the turn: budget spent' },
+            expect.any(Number),
+          );
+        });
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'read_a' }),
+            }),
+          ],
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('gives a quota-driven model switch priority over a hook stop', async () => {
+        completeBatchesWith(() => ({ hookStopReason: 'budget spent' }));
         rounds([toolRequest('read_a')]);
         const client = mockConfig.getLlmClient();
         const { result } = renderTestHook(
@@ -26006,6 +26088,10 @@ describe('useLlmStream', () => {
         });
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
         expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          { type: 'info', text: 'A hook stopped the turn: budget spent' },
+          expect.any(Number),
+        );
         // The results answer the calls in history, outside a Goal turn too.
         expect(client.addHistory).toHaveBeenCalledWith({
           role: 'user',
@@ -26087,6 +26173,109 @@ describe('useLlmStream', () => {
           mockBackgroundTaskRegistry.canStartBackgroundAgent,
         ).toHaveBeenCalledTimes(2);
       });
+
+      it.each([false, true])(
+        'settles a hook-stopped Goal against current background capacity (slot freed: %s)',
+        async (slotFreed) => {
+          const permit: GoalTurnPermit = {
+            goalId: 'goal-background-capacity',
+            revision: 1,
+            turnId: 'turn-background-capacity',
+          };
+          let currentPermit: GoalTurnPermit | undefined = permit;
+          let goalActive = false;
+          const dispatch = vi.fn(async () => {
+            currentPermit = undefined;
+          });
+          const finishTurn = vi.fn(async () => {
+            currentPermit = undefined;
+          });
+          const runtime = {
+            permitForTurn: () => currentPermit,
+            dispatch,
+            finishTurn,
+            getSnapshot: () => ({
+              goal: goalActive ? { ...permit, status: 'active' } : null,
+            }),
+          } as unknown as ReturnType<Config['getGoalRuntime']>;
+          mockConfig.getGoalRuntime = vi.fn(() => runtime);
+          mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+          mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+            flush: vi.fn().mockResolvedValue(undefined),
+          });
+          mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+            1,
+          );
+          mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(
+            false,
+          );
+          const runAgentLoop = mockRunAgentLoop.getMockImplementation()!;
+          mockRunAgentLoop.mockImplementationOnce(async (options) => {
+            const result = await runAgentLoop(options);
+            mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(
+              slotFreed,
+            );
+            return result;
+          });
+          const pending = holdBatches((request) => {
+            const call = completedCall(request);
+            return {
+              ...call,
+              response: {
+                ...call.response,
+                resultDisplay: { type: 'task_execution', status: 'background' },
+                hookStopReason: 'budget spent',
+              },
+            };
+          });
+          const request = toolRequest('agent_a');
+          rounds([
+            {
+              ...request,
+              value: { ...request.value, name: 'agent', goalContext: permit },
+            },
+          ]);
+          const { result } = renderTestHook();
+
+          let prompt!: Promise<void>;
+          await act(async () => {
+            prompt = result.current.submitQuery(
+              'Start the agent.',
+              SendMessageType.UserQuery,
+              request.value.prompt_id,
+            );
+          });
+          expect(pending).toHaveLength(1);
+          await act(async () => {
+            goalActive = true;
+            pending[0]();
+            await prompt;
+          });
+
+          await expect(
+            mockRunAgentLoop.mock.results[0].value,
+          ).resolves.toMatchObject({ reason: 'surface_ended' });
+          if (slotFreed) {
+            expect(dispatch).not.toHaveBeenCalled();
+          } else {
+            expect(dispatch).toHaveBeenCalledWith({
+              action: 'pause',
+              expectedGoalId: permit.goalId,
+              expectedRevision: permit.revision,
+              reason: goalPauseReasonForFailure(''),
+            });
+          }
+          expect(finishTurn).toHaveBeenCalledTimes(slotFreed ? 1 : 0);
+          expect(
+            mockAddItem.mock.calls.filter(
+              ([item]) =>
+                item.type === 'info' &&
+                item.text === 'A hook stopped the turn: budget spent',
+            ),
+          ).toHaveLength(slotFreed ? 1 : 0);
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        },
+      );
 
       it('continues past a background agent launch while background slots remain', async () => {
         completeBatchesWith(() => ({
