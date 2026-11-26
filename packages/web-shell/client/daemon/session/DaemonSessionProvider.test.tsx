@@ -5169,6 +5169,7 @@ describe('DaemonSessionProvider', () => {
           iterations: 4,
           durationMs: 5000,
           lastReason: 'token budget reached',
+          limitKind: 'token_budget',
         },
       }),
     );
@@ -5337,6 +5338,7 @@ describe('DaemonSessionProvider', () => {
         data: {
           kind: 'set',
           condition: 'revise the evaluation',
+          limitKind: 'token_budget',
         },
       }),
       expect.objectContaining({
@@ -5345,6 +5347,134 @@ describe('DaemonSessionProvider', () => {
         data: {
           kind: 'aborted',
           condition: 'finish the aborted run',
+        },
+      }),
+    ]);
+  });
+
+  it('threads the budget stop fields from canonical goal state into the card', async () => {
+    const session = createMockSession({
+      events: async function* goalStatusEvents() {
+        yield {
+          id: 18,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-budget',
+                    revision: 2,
+                    objective: 'ship the release notes',
+                    status: 'usage_limited',
+                    limitKind: 'token_budget',
+                    tokenBudget: 30_000_000,
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 4,
+                    activeTimeMs: 5000,
+                    tokensUsed: 30_000_000,
+                    createdAt: 1234,
+                    updatedAt: 2345,
+                    lastReason: 'token budget reached',
+                  },
+                },
+                goalStatus: {
+                  kind: 'usage_limited',
+                  condition: 'ship the release notes',
+                  lastReason: 'token budget reached',
+                },
+              },
+            },
+          },
+        };
+        yield {
+          id: 19,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalStatus: {
+                  kind: 'usage_limited',
+                  condition: 'no canonical state',
+                  lastReason: 'operational prose',
+                },
+              },
+            },
+          },
+        };
+        yield {
+          id: 20,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalState: 'not-a-record',
+                goalStatus: {
+                  kind: 'usage_limited',
+                  condition: 'bad goal state',
+                  lastReason: 'still fine',
+                },
+              },
+            },
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'usage_limited',
+          condition: 'ship the release notes',
+          lastReason: 'token budget reached',
+          limitKind: 'token_budget',
+          tokenBudget: 30_000_000,
+        },
+      }),
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'usage_limited',
+          condition: 'no canonical state',
+          lastReason: 'operational prose',
+        },
+      }),
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'usage_limited',
+          condition: 'bad goal state',
+          lastReason: 'still fine',
         },
       }),
     ]);

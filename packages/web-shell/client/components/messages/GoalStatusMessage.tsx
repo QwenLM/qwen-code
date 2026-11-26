@@ -2,6 +2,7 @@ import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
 import { useState } from 'react';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
+import { composeGoalBudgetReason } from '../../utils/goalBudgetReason';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import {
   Collapsible,
@@ -28,6 +29,15 @@ export interface SerializedGoalStatusMessage {
   durationMs?: number;
   setAt?: number;
   lastReason?: string;
+  /**
+   * The machine-readable stop half, threaded from the canonical goal state
+   * in the same daemon event. Present only for budget stops of a build that
+   * records `limitKind`; its absence keeps the card on the raw `lastReason`.
+   */
+  limitKind?: string;
+  tokenBudget?: number;
+  turnBudget?: number;
+  activeTimeBudgetMs?: number;
 }
 
 const {
@@ -76,6 +86,11 @@ function normalizeGoalStatus(
   const setAt = getNumber(record.setAt);
   const lastReason =
     typeof record.lastReason === 'string' ? record.lastReason : undefined;
+  const limitKind =
+    typeof record.limitKind === 'string' ? record.limitKind : undefined;
+  const tokenBudget = getNumber(record.tokenBudget);
+  const turnBudget = getNumber(record.turnBudget);
+  const activeTimeBudgetMs = getNumber(record.activeTimeBudgetMs);
   return {
     kind: kind as GoalStatusKind,
     condition,
@@ -83,6 +98,10 @@ function normalizeGoalStatus(
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(setAt !== undefined ? { setAt } : {}),
     ...(lastReason !== undefined ? { lastReason } : {}),
+    ...(limitKind !== undefined ? { limitKind } : {}),
+    ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+    ...(turnBudget !== undefined ? { turnBudget } : {}),
+    ...(activeTimeBudgetMs !== undefined ? { activeTimeBudgetMs } : {}),
   };
 }
 
@@ -161,7 +180,7 @@ export function GoalStatusMessage({
 }: {
   status: SerializedGoalStatusMessage;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [expanded, setExpanded] = useState(false);
 
   const title = getTitle(status, t);
@@ -175,6 +194,9 @@ export function GoalStatusMessage({
     }
   }
   const subtitle = stats.length > 0 ? ` · ${stats.join(' · ')}` : '';
+  // A budget stop records both the EN prose and the machine-readable half;
+  // compose the phrase in the client language and fall back to the prose.
+  const composedReason = composeGoalBudgetReason(status, language, t);
   const showReason =
     (status.kind === 'checking' ||
       status.kind === 'achieved' ||
@@ -183,7 +205,7 @@ export function GoalStatusMessage({
       status.kind === 'blocked' ||
       status.kind === 'usage_limited' ||
       status.kind === 'paused') &&
-    status.lastReason?.trim();
+    (composedReason ?? status.lastReason?.trim());
   const reasonLabel =
     status.kind === 'checking' ? t('goal.judge') : t('goal.lastCheck');
 

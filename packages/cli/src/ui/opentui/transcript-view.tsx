@@ -87,10 +87,11 @@ import {
 import { getCompressionStatusText } from '../utils/compression-text.js';
 import { ICON } from '../constants.js';
 import { formatClockTime, formatDuration } from '../utils/formatters.js';
+import { composeGoalBudgetReason } from '../utils/goal-budget-reason.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import { ToolCallStatus, type ArenaAgentCardData } from '../types.js';
 import { isHistoryItemVisibleAfterRestore } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { getCurrentLanguage, t } from '../../i18n/index.js';
 import {
   buildToolSummary,
   isCollapsibleTool,
@@ -1515,7 +1516,9 @@ function GoalCard({
   if (item.legacy) {
     return <LegacyGoalCard legacy={item.legacy} />;
   }
-  const view = describeGoalCard(item.snapshot, item.cause);
+  const view = describeGoalCard(item.snapshot, item.cause, (g) =>
+    composeGoalBudgetReason(g, t, getCurrentLanguage()),
+  );
   if (view.state === 'hidden') return null;
   if (view.state === 'cleared') {
     return <text fg={C.dim}>Goal cleared</text>;

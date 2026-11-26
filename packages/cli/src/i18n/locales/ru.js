@@ -3190,4 +3190,25 @@ export default {
     'Подсказка: используйте /btw, чтобы задать короткий побочный вопрос, не прерывая текущую работу',
   '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
     '(Модель попыталась вызвать {{tool}} вместо прямого ответа. Переформулируйте вопрос или задайте его в основном разговоре.)',
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    'Цель исчерпала автономный бюджет токенов ({{count}} {{unit}}). Возобновите цель, чтобы выдать ещё одно окно бюджета, или снимите её.',
+  'goal.reason.turn_budget':
+    'Цель исчерпала бюджет ходов ({{count}} {{unit}}). Возобновите цель, чтобы выдать ещё одно окно ходов, или снимите её.',
+  'goal.reason.time_budget':
+    'Цель исчерпала бюджет активного времени ({{count}} {{unit}}). Возобновите цель, чтобы выдать ещё одно окно времени, или снимите её.',
+  'goal.reason.unit.token.one': 'токен',
+  'goal.reason.unit.token.few': 'токена',
+  'goal.reason.unit.token.many': 'токенов',
+  'goal.reason.unit.turn.one': 'ход',
+  'goal.reason.unit.turn.few': 'хода',
+  'goal.reason.unit.turn.many': 'ходов',
+  'goal.reason.unit.minute.one': 'минута',
+  'goal.reason.unit.minute.few': 'минуты',
+  'goal.reason.unit.minute.many': 'минут',
+  'goal.reason.unit.second.one': 'секунда',
+  'goal.reason.unit.second.few': 'секунды',
+  'goal.reason.unit.second.many': 'секунд',
 };

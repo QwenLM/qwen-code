@@ -39,7 +39,12 @@ interface MockGoal {
       checkpointStalls?: number;
       lastCheckpointFailure?: string;
       lastReason?: string;
-      limitKind?: 'evidence_catalog' | 'checkpoint_request';
+      limitKind?:
+        | 'evidence_catalog'
+        | 'checkpoint_request'
+        | 'token_budget'
+        | 'turn_budget'
+        | 'time_budget';
     };
   };
 }
@@ -127,6 +132,7 @@ async function mount(
     onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
     onError?: (error: unknown, message: string) => void;
     droppedCount?: number;
+    language?: 'en' | 'zh-CN' | 'ru';
     workspaces?: Array<{
       id: string;
       cwd: string;
@@ -184,7 +190,7 @@ async function mount(
   root = createRoot(container);
   await act(async () => {
     root!.render(
-      <I18nProvider language="en">
+      <I18nProvider language={opts.language ?? 'en'}>
         <GoalsDialog
           onCreateGoal={opts.onCreateGoal ?? vi.fn()}
           onOpenSession={opts.onOpenSession ?? vi.fn()}
@@ -698,6 +704,33 @@ describe('GoalsDialog', () => {
       }),
     ]);
     expect(resumeButton()).not.toBeNull();
+  });
+
+  it('composes the RU budget stop reason on a budget-limited Goal', async () => {
+    await mount(
+      [
+        stopped({
+          turnCount: 2,
+          turnBudget: 2,
+          limitKind: 'turn_budget',
+          lastReason:
+            'The Goal ran its Goal-turn budget (2 turns). Resume the Goal to authorize another window of turns, or clear it.',
+        }),
+      ],
+      { language: 'ru' },
+    );
+    expect(document.body.textContent).toContain(
+      'Цель исчерпала бюджет ходов (2 хода). Возобновите цель, чтобы выдать ещё одно окно ходов, или снимите её.',
+    );
+  });
+
+  it('keeps the raw reason on a non-budget stop in a RU client', async () => {
+    await mount([stopped({ lastReason: 'The provider rate-limited us.' })], {
+      language: 'ru',
+    });
+    expect(document.body.textContent).toContain(
+      'The provider rate-limited us.',
+    );
   });
 
   const checkpointLine = () =>

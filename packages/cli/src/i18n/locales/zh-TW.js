@@ -2742,4 +2742,26 @@ export default {
     '提示：用 /btw 順帶問一個旁路問題，不打斷目前的工作',
   '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
     '（模型嘗試呼叫 {{tool}}，而沒有直接回答。請換個問法，或在主對話中提問。）',
+
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    '目標已用盡自主 token 預算（{{count}} {{unit}}）。恢復目標以授權另一個預算窗口，或將其清除。',
+  'goal.reason.turn_budget':
+    '目標已用盡輪次預算（{{count}} {{unit}}）。恢復目標以授權另一個輪次窗口，或將其清除。',
+  'goal.reason.time_budget':
+    '目標已用盡活躍時間預算（{{count}} {{unit}}）。恢復目標以授權另一個時間窗口，或將其清除。',
+  'goal.reason.unit.token.one': '詞元',
+  'goal.reason.unit.token.few': '詞元',
+  'goal.reason.unit.token.many': '詞元',
+  'goal.reason.unit.turn.one': '輪',
+  'goal.reason.unit.turn.few': '輪',
+  'goal.reason.unit.turn.many': '輪',
+  'goal.reason.unit.minute.one': '分鐘',
+  'goal.reason.unit.minute.few': '分鐘',
+  'goal.reason.unit.minute.many': '分鐘',
+  'goal.reason.unit.second.one': '秒',
+  'goal.reason.unit.second.few': '秒',
+  'goal.reason.unit.second.many': '秒',
 };

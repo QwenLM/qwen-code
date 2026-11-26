@@ -2226,4 +2226,26 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
   'Kept model as {{model}}': 'モデルは {{model}} のままです',
+
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    'Goal は自律的なトークン予算（{{count}} {{unit}}）を使い切りました。Goal を再開して別の予算ウィンドウを許可するか、削除してください。',
+  'goal.reason.turn_budget':
+    'Goal は Goal ターン予算（{{count}} {{unit}}）を使い切りました。Goal を再開して別のターンウィンドウを許可するか、削除してください。',
+  'goal.reason.time_budget':
+    'Goal はアクティブ時間予算（{{count}} {{unit}}）を使い切りました。Goal を再開して別の時間ウィンドウを許可するか、削除してください。',
+  'goal.reason.unit.token.one': 'トークン',
+  'goal.reason.unit.token.few': 'トークン',
+  'goal.reason.unit.token.many': 'トークン',
+  'goal.reason.unit.turn.one': 'ターン',
+  'goal.reason.unit.turn.few': 'ターン',
+  'goal.reason.unit.turn.many': 'ターン',
+  'goal.reason.unit.minute.one': '分',
+  'goal.reason.unit.minute.few': '分',
+  'goal.reason.unit.minute.many': '分',
+  'goal.reason.unit.second.one': '秒',
+  'goal.reason.unit.second.few': '秒',
+  'goal.reason.unit.second.many': '秒',
 };

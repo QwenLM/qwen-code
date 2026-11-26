@@ -2983,4 +2983,26 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     "Els canvis del gestor d'habilitats automàtiques només estan disponibles en espais de treball de confiança. Marca aquesta carpeta com a fiable amb `/trust` i torna-ho a provar.",
   'Kept model as {{model}}': 'Model mantingut com a {{model}}',
+
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    "El Goal ha esgotat el seu pressupost autònom de crèdits de token ({{count}} {{unit}}). Repren el Goal per autoritzar una altra finestra de pressupost, o elimina'l.",
+  'goal.reason.turn_budget':
+    "El Goal ha esgotat el seu pressupost de torns ({{count}} {{unit}}). Repren el Goal per autoritzar una altra finestra de torns, o elimina'l.",
+  'goal.reason.time_budget':
+    "El Goal ha esgotat el seu pressupost de temps actiu ({{count}} {{unit}}). Repren el Goal per autoritzar una altra finestra de temps, o elimina'l.",
+  'goal.reason.unit.token.one': 'crèdit de token',
+  'goal.reason.unit.token.few': 'crèdits de token',
+  'goal.reason.unit.token.many': 'crèdits de token',
+  'goal.reason.unit.turn.one': 'torn',
+  'goal.reason.unit.turn.few': 'torns',
+  'goal.reason.unit.turn.many': 'torns',
+  'goal.reason.unit.minute.one': 'minut',
+  'goal.reason.unit.minute.few': 'minuts',
+  'goal.reason.unit.minute.many': 'minuts',
+  'goal.reason.unit.second.one': 'segon',
+  'goal.reason.unit.second.few': 'segons',
+  'goal.reason.unit.second.many': 'segons',
 };

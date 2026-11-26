@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { goalTokenBudgetReason } from '@qwen-code/qwen-code-core';
 import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import {
   WEB_SHELL_LANGUAGES,
@@ -850,6 +851,53 @@ describe('web-shell ru locale', () => {
     expect(t('goal.tokensOfBudget', { used: 3, budget: 11 })).toBe(
       '3 / 11 токенов',
     );
+  });
+
+  it('pins the EN budget stop-reason to the core generator prose', () => {
+    const t = getTranslator('en');
+    expect(t('goal.reason.token_budget', { count: 1, unit: 'token' })).toBe(
+      goalTokenBudgetReason(1),
+    );
+  });
+
+  it('pluralises the RU budget units the Russian way', () => {
+    const t = getTranslator('ru');
+    expect(t('goal.reason.unit.token.one')).toBe('токен');
+    expect(t('goal.reason.unit.token.few')).toBe('токена');
+    expect(t('goal.reason.unit.token.many')).toBe('токенов');
+    expect(t('goal.reason.unit.turn.one')).toBe('ход');
+    expect(t('goal.reason.unit.turn.many')).toBe('ходов');
+    expect(t('goal.reason.unit.minute.many')).toBe('минут');
+    expect(t('goal.reason.unit.second.few')).toBe('секунды');
+  });
+
+  it('carries the zh-CN budget units', () => {
+    const t = getTranslator('zh-CN');
+    expect(t('goal.reason.unit.turn.one')).toBe('轮');
+    expect(t('goal.reason.unit.minute.one')).toBe('分钟');
+    expect(t('goal.reason.unit.second.many')).toBe('秒');
+  });
+
+  it('keeps every budget stop-reason key in every shipped catalog', () => {
+    for (const language of WEB_SHELL_LANGUAGES) {
+      const t = getTranslator(language);
+      for (const key of [
+        'goal.reason.token_budget',
+        'goal.reason.turn_budget',
+        'goal.reason.time_budget',
+        'goal.reason.unit.token.one',
+        'goal.reason.unit.token.few',
+        'goal.reason.unit.token.many',
+        'goal.reason.unit.turn.one',
+        'goal.reason.unit.minute.one',
+        'goal.reason.unit.second.one',
+      ]) {
+        const vars = key.startsWith('goal.reason.unit')
+          ? undefined
+          : { count: 1, unit: 'token' };
+        expect(t(key, vars)).not.toBe(key);
+      }
+    }
   });
 
   it('pluralises the goals counter the Russian way', () => {

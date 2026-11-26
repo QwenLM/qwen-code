@@ -2444,4 +2444,26 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'As alterações do gerenciador de habilidades automáticas estão disponíveis apenas em espaços de trabalho confiáveis. Marque esta pasta como confiável usando `/trust` e tente novamente.',
   'Kept model as {{model}}': 'Modelo mantido como {{model}}',
+
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    'O Goal esgotou o seu orçamento autônomo de créditos de token ({{count}} {{unit}}). Retome o Goal para autorizar outra janela de orçamento, ou remova-o.',
+  'goal.reason.turn_budget':
+    'O Goal esgotou o seu orçamento de turnos do Goal ({{count}} {{unit}}). Retome o Goal para autorizar outra janela de turnos, ou remova-o.',
+  'goal.reason.time_budget':
+    'O Goal esgotou o seu orçamento de tempo ativo ({{count}} {{unit}}). Retome o Goal para autorizar outra janela de tempo, ou remova-o.',
+  'goal.reason.unit.token.one': 'crédito de token',
+  'goal.reason.unit.token.few': 'créditos de token',
+  'goal.reason.unit.token.many': 'créditos de token',
+  'goal.reason.unit.turn.one': 'turno',
+  'goal.reason.unit.turn.few': 'turnos',
+  'goal.reason.unit.turn.many': 'turnos',
+  'goal.reason.unit.minute.one': 'minuto',
+  'goal.reason.unit.minute.few': 'minutos',
+  'goal.reason.unit.minute.many': 'minutos',
+  'goal.reason.unit.second.one': 'segundo',
+  'goal.reason.unit.second.few': 'segundos',
+  'goal.reason.unit.second.many': 'segundos',
 };
