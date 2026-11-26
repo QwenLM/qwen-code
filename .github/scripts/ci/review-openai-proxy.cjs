@@ -4,6 +4,20 @@ const { Readable } = require('node:stream');
 const base = new URL(process.env.UPSTREAM_BASE_URL);
 const basePath = base.pathname.replace(/\/+$/, '');
 const token = process.env.PROXY_TOKEN;
+if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {
+  try {
+    // npm is bundled in the proxy image; its pinned Undici supplies Node
+    // fetch's proxy dispatcher. Runner egress settings arrive explicitly.
+    const { EnvHttpProxyAgent, setGlobalDispatcher } = require(
+      process.env.UNDICI_MODULE ||
+        '/usr/local/lib/node_modules/npm/node_modules/undici',
+    );
+    setGlobalDispatcher(new EnvHttpProxyAgent());
+  } catch (error) {
+    console.error('Cannot configure proxy egress:', error.message);
+    process.exit(1);
+  }
+}
 const server = http.createServer(async (req, res) => {
   const incoming = new URL(req.url || '/', 'http://127.0.0.1');
   if (req.method === 'GET' && incoming.pathname === '/__health') {

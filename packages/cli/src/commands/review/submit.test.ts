@@ -3441,6 +3441,23 @@ describe('payload consistency — refuse before GitHub sees it', () => {
   });
 });
 
+describe('trusted CI COMMENT-only publication', () => {
+  it('publishes one COMMENT instead of an APPROVE and skips old threads', () => {
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    vi.stubEnv('QWEN_CI_REVIEW_PUBLISHER', 'qwen-code-pr-review/publish-comment');
+    runSubmit(args({ userAuthorized: true, commentOnly: true }));
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(ghMock.mock.calls[0]![0] as string).event).toBe('COMMENT');
+    expect(ghViewMock).not.toHaveBeenCalled();
+  });
+
+  it('COMMENT-only alone never authorizes an unapproved review', () => {
+    runSubmit(args({ commentOnly: true }));
+    expect(process.exitCode).toBe(3);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+});
+
 // The failure this whole change exists for.
 describe('the verdict is computed, not carried', () => {
   const authorized = (over: Record<string, unknown> = {}) =>

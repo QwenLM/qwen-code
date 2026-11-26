@@ -121,18 +121,15 @@ describe('qwen pr review runner routing', () => {
     // Review and autofix use separate runner pools.
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
-    expect(runsOn).toBe(
-      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\' && (github.event_name != \'pull_request_target\' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
-    );
+    expect(runsOn).toContain("needs.review-trust.outputs.untrusted != 'true'");
     expect(runsOn).not.toContain('ecs-qwen');
     expect(runsOn).not.toContain('ecs-agent');
     // A fork pull_request_target payload never reaches the persistent pool:
-    // the PR's own install/build runs in this job, and `off` containment on
-    // a shared host exposes GitHub credentials AND persists whatever
-    // a postinstall plants. Comment/dispatch triggers keep the pool (no fork
-    // payload); the sandbox preflight is their fail-closed backstop.
+    // Every fork event, including comment and dispatch, resolves trust in a
+    // checkout-free job and uses a disposable hosted VM. Same-host Docker
+    // does not isolate a privileged CI process or same-UID filesystem reads.
     expect(runsOn).toContain(
-      "github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository",
+      "needs.review-trust.outputs.untrusted != 'true'",
     );
     expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
     expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
@@ -143,7 +140,7 @@ describe('qwen pr review runner routing', () => {
       (s) => s.name === 'Setup Node.js for hosted review',
     );
     expect(setupNode.if).toContain(
-      "(github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)",
+      "needs.review-trust.outputs.untrusted == 'true'",
     );
   });
 
@@ -151,20 +148,55 @@ describe('qwen pr review runner routing', () => {
     const review = parse(workflow).jobs['review-pr'].steps.find(
       (step) => step.id === 'review',
     );
-    expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.GITHUB_TOKEN');
+    expect(review.env.SECURITY_GITHUB_TOKEN).toContain("'' || secrets.CI_BOT_PAT");
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.CI_BOT_PAT');
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain(
-      "github.event.pull_request.head.repo.full_name != github.repository",
+      "needs.review-trust.outputs.untrusted",
     );
-    expect(review.run).toContain('UPSTREAM_API_KEY="$OPENAI_API_KEY"');
+    expect(review.run).toContain(
+      '"${QWEN_CI_REAL_RM:-rm}" -f .qwen/tmp/qwen-skill-args-review.txt',
+    );
+    expect(review.run).toContain('UPSTREAM_OPENAI_API_KEY="$OPENAI_API_KEY"');
+    expect(review.run).toContain('UPSTREAM_API_KEY="$UPSTREAM_OPENAI_API_KEY"');
     expect(review.run).toContain('OPENAI_API_KEY="${PROXY_TOKEN}"');
     expect(review.run).toContain('env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN');
     const invocation = review.run.slice(
       review.run.indexOf('timeout --kill-after=10s "${attempt_timeout}s"'),
     );
     expect(invocation).not.toContain('UPSTREAM_API_KEY');
+    expect(invocation).toContain('-u SECURITY_GITHUB_TOKEN -u GITHUB_TOKEN');
     expect(review.run).toContain('/usr/bin/docker run --detach');
     expect(review.run).toContain("if [ \"$FORK_LIFECYCLE_REVIEW\" = 'true' ]");
+    expect(review.run).toContain('review-untrusted-no-token');
+
+    const publisher = parse(workflow).jobs['publish-review'];
+    expect(publisher.uses).toBeUndefined();
+    expect(publisher['runs-on']).toBe('ubuntu-latest');
+    expect(String(publisher.if)).not.toContain('review_result');
+    expect(String(publisher.if)).toContain(
+      "needs.review-pr.outputs.review_mode == 'comment'",
+    );
+    expect(String(publisher.if)).toContain(
+      "needs.review-pr.outputs.review_failed == 'true'",
+    );
+    expect(publisher.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'write',
+      issues: 'write',
+    });
+    const publish = publisher.steps.find((s) => s.name === 'Validate and publish COMMENT only');
+    expect(publish.env.ALLOW_STALE).toContain('needs.review-pr.outputs.salvage_post');
+    expect(publish.env.MOVED_TO).toContain('salvage_moved_to');
+    expect(publish.env.DOCS_ONLY_FAILED).toBe(
+      '${{ needs.review-pr.outputs.docs_only_failed }}',
+    );
+    expect(publish.env.GH_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
+    expect(publish.run).toContain('review-publish-comment.mjs');
+    for (const step of parse(workflow).jobs['review-pr'].steps) {
+      if (['Report docs-only medium outcome', 'Supersede stale docs-only badge', 'Post fallback comment on failure'].includes(step.name)) {
+        expect(step.if).toContain("needs.review-trust.outputs.untrusted != 'true'");
+      }
+    }
   });
 
   it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {

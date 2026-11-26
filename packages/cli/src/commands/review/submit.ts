@@ -287,6 +287,7 @@ interface SubmitArgs {
   /** The CLI-written record of what the user typed. Overridable for tests. */
   skillArgs?: string;
   userAuthorized: boolean;
+  commentOnly?: boolean;
   host?: string;
   dryRun: boolean;
 }
@@ -979,6 +980,7 @@ function submit(
     );
   }
 
+  const commentOnly = args.commentOnly === true;
   const auth = authorization(args, defaultComment);
   if (!auth.ok) {
     // Not an error the caller can retry around — a refusal it must accept. The
@@ -1710,6 +1712,13 @@ function submit(
         };
       });
 
+  if (commentOnly) {
+    if (!args.userAuthorized || aoneWrite) {
+      throw new Error('COMMENT-only publication requires GitHub and its trusted publisher.');
+    }
+    event = 'COMMENT';
+  }
+
   // Same-commit retry tripwire (GitHub only). The Create Review POST is
   // atomic: a receipt recording THIS commit means every inline finding is
   // already on the PR. A re-run is not a no-op — the thread lifecycle below
@@ -1775,12 +1784,11 @@ function submit(
     commentId: number;
     body: string;
   }> = [];
-  if (aoneWrite) {
+  if (aoneWrite || commentOnly) {
     if (fixedFindings.length > 0) {
       writeStderrLine(
-        `Note: ${fixedFindings.length} fixed ruling(s) name threads to ` +
-          `resolve, but the thread lifecycle is GitHub-only — Aone's MR ` +
-          `discussions stay as posted.`,
+        `${commentOnly ? 'COMMENT-only publication' : 'Aone Code'} leaves ` +
+          `${fixedFindings.length} historical thread(s) unchanged; resolve them separately.`,
       );
     }
   } else {
@@ -1812,7 +1820,7 @@ function submit(
           finding: { id: string; fixInduced: boolean };
         } => x.finding !== null && !x.finding.fixInduced,
       );
-    if (carried.length > 0 || fixedFindings.length > 0) {
+    if ((carried.length > 0 || fixedFindings.length > 0) && !commentOnly) {
       const threads = fetchReviewThreads(args.repo, args.pr);
       const plan = planThreadActions(
         threads,
@@ -2420,6 +2428,12 @@ export const submitCommand: CommandModule = {
         default: false,
         describe:
           'Pass ONLY when the user asked, in a message they typed this session, for this review to be published. Never infer it.',
+      })
+      .option('comment-only', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Authorized CI only: publish a new COMMENT review, never APPROVE or thread mutations.',
       })
       .option('host', {
         type: 'string',
