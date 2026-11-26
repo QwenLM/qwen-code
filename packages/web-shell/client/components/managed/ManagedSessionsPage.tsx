@@ -2246,6 +2246,13 @@ function ManagedSessionsContent({
     compression.blocked ||
     approvalChange.blocked ||
     sendsBlocked;
+  const composerVisible = Boolean(
+    (!hostSessionOnly || !!sessionId) &&
+      (hostSessionOnly ||
+        !summary?.workspace ||
+        summary.capabilities.workspaceTurns) &&
+      (!provider.workspaceBinding || (sessionId && summary)),
+  );
   const pendingElsewhereBanner =
     pendingElsewhere && !busy ? (
       <div
@@ -2951,13 +2958,7 @@ function ManagedSessionsContent({
                     </div>
                   </>
                 }
-                composerVisible={Boolean(
-                  (!hostSessionOnly || !!sessionId) &&
-                    (hostSessionOnly ||
-                      !summary?.workspace ||
-                      summary.capabilities.workspaceTurns) &&
-                    (!provider.workspaceBinding || (sessionId && summary)),
-                )}
+                composerVisible={composerVisible}
                 composerContainerRef={composerContainerRef}
                 composerClassName={`${shellStyles.footer} flex flex-col gap-2`}
                 composerKey={`${provider.storageKey}:${sessionId ?? 'new'}`}
@@ -3030,6 +3031,7 @@ function ManagedSessionsContent({
                 composerCancelEnabled={
                   home &&
                   cancellationEnabled &&
+                  !busy &&
                   Boolean(
                     summary?.capabilities.canCancel && summary?.activeTurnId,
                   )
@@ -3461,16 +3463,9 @@ function ManagedSessionsContent({
               />
             </ToolDetailsContext.Provider>
           )}
-          {!(
-            (!hostSessionOnly || !!sessionId) &&
-            (hostSessionOnly ||
-              !summary?.workspace ||
-              summary.capabilities.workspaceTurns) &&
-            (!provider.workspaceBinding || (sessionId && summary))
-          ) &&
-            cancelButton && (
-              <div className="flex shrink-0 justify-end">{cancelButton}</div>
-            )}
+          {!composerVisible && cancelButton && (
+            <div className="flex shrink-0 justify-end">{cancelButton}</div>
+          )}
           {interactive &&
             outputTarget &&
             outputTarget.sessionId === sessionId &&

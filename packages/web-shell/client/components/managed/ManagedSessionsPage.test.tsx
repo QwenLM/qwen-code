@@ -3815,6 +3815,38 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('hides the composer stop action while a submit is in flight so it matches canCancel authority', async () => {
+    mocks.client.getSession.mockImplementation(async () =>
+      summary('s1', {
+        phase: 'agent_running',
+        capabilities: { canSend: true, canCancel: true },
+      }),
+    );
+    let finishSubmit!: (value: { sessionId: string; turnId: string }) => void;
+    mocks.client.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise<{ sessionId: string; turnId: string }>((resolve) => {
+          finishSubmit = resolve;
+        }),
+    );
+    await render('s1', 'en', provider, null);
+    const findStop = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Stop managed task',
+      );
+    expect(findStop()).toBeDefined();
+
+    await input('Steer while running');
+    await click('Send');
+    expect(findStop()).toBeUndefined();
+
+    await act(async () => {
+      finishSubmit({ sessionId: 's1', turnId: 'p1' });
+      await flush();
+    });
+    expect(findStop()).toBeDefined();
+  });
+
   it('handles Escape only for the visible Managed conversation after composition and other controls', async () => {
     mocks.client.getSession.mockImplementation(async () =>
       summary('s1', {

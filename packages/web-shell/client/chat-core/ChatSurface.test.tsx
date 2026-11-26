@@ -1988,7 +1988,9 @@ describe('ChatSurface', () => {
         composerFooter={<div data-testid="cmp-ftr">Queue</div>}
       />,
     );
+    expect(container.querySelector('.custom-transcript')).not.toBeNull();
     expect(captured.transcript?.hideSessionTimeline).toBe(true);
+    expect(container.querySelector('.custom-decision')).not.toBeNull();
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).not.toBeNull();
@@ -1999,7 +2001,11 @@ describe('ChatSurface', () => {
     });
     expect(captured.question?.onDraftChange).toBe(onDraftChange);
     expect(captured.question?.submitDisabled).toBe(true);
-    // hideComposerWhenCardActive=false keeps composer visible alongside card.
+    // hideComposerWhenCardActive=false keeps composer visible alongside card
+    // without appending the hidden utility class to the custom wrapper class.
+    const composerWrapper = container.querySelector('.custom-composer');
+    expect(composerWrapper).not.toBeNull();
+    expect(composerWrapper?.className).toBe('custom-composer');
     expect(captured.editor?.dialogOpen).toBe(false);
     expect(captured.editor?.sessionId).toBeUndefined();
     expect(captured.editor?.isRunning).toBe(true);

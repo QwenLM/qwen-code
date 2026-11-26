@@ -43,14 +43,16 @@
 ## 范围
 
 - **`use-managed-actions.ts`：**
-  - 为 `respond` 新增可选第三参数 `observer?: ManagedAgentOperationObserver`，
+  - 为 `respond` 新增可选第三参数 `options?: ManagedActionRespondOptions`
+    （`ManagedAgentOperationObserver & { readonly signal?: AbortSignal }`），
     原样透传给 `provider.actions.respond(...)`。
-  - 返回 `Promise<boolean>`（响应成功或终态 `endedAction` 关闭卡片时返回
-    `true`；非待处理或在飞早退返回 `false`；可重试错误仍按原样抛出）。
+  - 返回 `Promise<ManagedActionRespondOutcome>`（响应成功返回 `'responded'`；
+    终态 `endedAction` 关闭卡片返回 `'ended'`；非待处理或在飞早退返回
+    `'skipped'`；可重试错误仍按原样抛出）。
 - **`chat-controller.ts`：**
-  - 将 `pendingProjection.requests` 缓存键改为
-    `${action.sessionId}:${action.actionId}`，防止不同子会话同 `actionId`
-    撞车。
+  - 将 `pendingProjection.requests`、`inFlightActionKeys` 与 `hasLiveAction` 键
+    改为 `JSON.stringify([action.sessionId, action.actionId])`，防止不同子会话
+    同 `actionId` 撞车。
   - 仅在 `action.sessionId === deps.sessionId` 时向
     `toManagedPermissionRequest` 传入 `messages`，防止根会话消息混入子会话审
     批参数预览。
@@ -66,10 +68,12 @@
     SSE 流、零重复轮询绑定实时 `SessionChatController`。将 `selectedAction`
     限定为单个选中动作可从类型上杜绝多个子会话同 `actionId` 时的裸 ID 提交
     歧义。
-  - 审批与提问提交经由 `pending.respond(action, response, observer)` 单次派发，
-    同步驱动 `useManagedActions` 状态（`submitting`、`answerError`、
-    `respondForbidden`、草稿清理、已答过滤）与控制器的准入/结算观测，并对子会
-    话动作按 `action.sessionId` 校验。
+  - 审批与提问提交经由 `pending.respond(action, response, { onAccepted, onSettlement, signal })`
+    单次派发，同步驱动 `useManagedActions` 状态（`submitting`、`answerError`、
+    `respondForbidden`、草稿清理、已答过滤）与控制器的准入/结算观测，在卸载或
+    切会话时中止请求，并对子会话动作按 `action.sessionId` 校验。仅
+    `'responded'` 记为已准入，`'ended'` 与 `'skipped'` 均按 `'rejected'` 结算，
+    避免在 `tracked` 中残留永不结算的 `pending` 操作。
   - 保留独立导出 `useManagedChatController({ provider, clientId, sessionId })`
     的原有契约与严格准入语义零变化。
 - **`ChatSurface.tsx`：**
@@ -110,12 +114,14 @@
      载 `useManagedSession`（SSE + 转录请求）、`useManagedActions`（轮询 + 子
      会话动作 + 草稿 + 禁止闩锁）与 `useManagedTurnCancel`（持久化取消意图 +
      操作轮询）。
-2. **通过 `pending.respond(action, response, observer)` 单次派发动作响应。**
+2. **通过 `pending.respond(action, response, { onAccepted, onSettlement, signal })` 单次派发动作响应。**
    - 让 `useManagedActions` 的禁止闩锁、错误提示、草稿清理、已答过滤与控制器意
-     图台账保持一致。当单测 mock 的 `provider.actions.respond` 未触发
-     `onAccepted` 却正常 resolve 时，`useManagedChatControllerFromState` 将已
-     完成调用视为已准入（仍绝不在缺少 `onSettlement` 时伪造 `established`），
-     而独立 `useManagedChatController` 继续保持严格的 `unknown` 规则。
+     图台账保持一致，同时透传生命周期中止信号。当单测 mock 的
+     `provider.actions.respond` 未触发 `onAccepted` 却正常 resolve（`'responded'`）
+     时，`useManagedChatControllerFromState` 将已完成调用视为已准入（仍绝不在
+     缺少 `onSettlement` 时伪造 `established`）；终态 `'ended'` 失败按
+     `'rejected'` 结算以免残留待结算操作；独立 `useManagedChatController` 继续
+     保持严格的 `unknown` 规则。
 3. **投影期按需保留过期动作（`retainExpiredActions: true`），对权限与提问统一禁用展示且提交期保持 fail-closed 拒绝。**
    - 保留 Managed 在过期卡片上的体验（经统一的 32 位安全定时器禁用控件，提问
      展示 `managed.question.expired`，权限展示 `managed.actions.expired`），

@@ -56,6 +56,7 @@ export type ChatSurfaceTranscriptProps = Omit<
 type ChatEditorComponentProps = ComponentProps<typeof ChatEditor>;
 
 type SurfaceOwnedComposerKeys =
+  | 'ref'
   | 'commands'
   | 'atWorkspaceCwd'
   | 'composerScopeKey'

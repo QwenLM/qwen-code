@@ -758,10 +758,17 @@ export function useManagedChatControllerFromState({
         };
         signal.addEventListener('abort', onAbort, { once: true });
         void currentFacts.pending
-          .respond(action, response, { onAccepted, onSettlement })
+          .respond(action, response, { onAccepted, onSettlement, signal })
           .then(
-            (completed) =>
-              settle({ admission: completed ? 'accepted' : 'rejected' }),
+            (outcome) =>
+              // Only a completed response counts as admitted when a mock
+              // provider omits `onAccepted`; an `ended` action was refused
+              // service-side and must reject cleanly so `tracked` does not
+              // retain an unsettleable pending op that blocks a replica-miss
+              // re-list.
+              settle({
+                admission: outcome === 'responded' ? 'accepted' : 'rejected',
+              }),
             (error) => settle(admissionFromError(error)),
           );
       }),
@@ -834,8 +841,7 @@ export function useManagedChatControllerFromState({
       }
       if (
         !currentFacts.canCancel ||
-        currentFacts.summary?.capabilities.canCancel !== true ||
-        currentFacts.turnCancel.busy
+        currentFacts.summary?.capabilities.canCancel !== true
       ) {
         return Promise.resolve({ admission: 'rejected' });
       }
@@ -847,6 +853,9 @@ export function useManagedChatControllerFromState({
           });
         }
         return Promise.resolve({ admission: 'unknown' });
+      }
+      if (currentFacts.turnCancel.busy) {
+        return Promise.resolve({ admission: 'rejected' });
       }
       return new Promise((resolve) => {
         const signal = source.abort.signal;
@@ -937,66 +946,9 @@ export function useManagedChatControllerFromState({
           facts(owner).summary?.capabilities,
         );
       },
-      async submitPrompt(input: ComposerSubmit) {
-        const current = facts(owner).summary;
-        if (
-          !boundSessionId ||
-          !isCurrent(owner) ||
-          current?.capabilities.canSend !== true
-        ) {
-          return { admission: 'rejected' };
-        }
-        let encoded;
-        try {
-          encoded = await encodeManagedInput(
-            input.text,
-            input.images,
-            input.files,
-          );
-        } catch {
-          return { admission: 'rejected' };
-        }
-        if (!isCurrent(owner)) {
-          return { admission: 'rejected' };
-        }
-        try {
-          const admission = await owner.provider.submitPrompt(
-            boundSessionId,
-            {
-              text: input.text,
-              ...(encoded.some(
-                (block) =>
-                  block.type !== 'input_text' || block.text !== input.text,
-              )
-                ? { input: encoded }
-                : {}),
-            },
-            {
-              clientId: owner.clientId,
-              idempotencyKey: managedRequestId(),
-              signal: owner.abort.signal,
-            },
-          );
-          if (
-            !isCurrent(owner) ||
-            admission.sessionId !== boundSessionId ||
-            !admission.turnId ||
-            !admission.operationId
-          ) {
-            return { admission: 'unknown' };
-          }
-          void facts(owner)
-            .detail.refreshSummary()
-            .catch(() => undefined);
-          return {
-            admission: 'accepted',
-            turnId: admission.turnId,
-            operationId: admission.operationId,
-          };
-        } catch (error) {
-          return admissionFromError(error);
-        }
-      },
+      // Host submission owns durable outbox/slash/queue orchestration via
+      // ChatSurface.onComposerSubmit until outbox convergence lands.
+      submitPrompt: () => Promise.resolve({ admission: 'rejected' }),
       cancelTurn: (turnId) => cancelTurn(owner, turnId),
       submitApproval: (actionId, optionId) => {
         const action = facts(owner).selectedAction;
@@ -1036,7 +988,7 @@ export function useManagedChatControllerFromState({
       },
     });
     return { controller, onOperation, onTurn };
-  }, [cancelTurn, facts, isCurrent, owner, sendManagedActionResponse]);
+  }, [cancelTurn, facts, owner, sendManagedActionResponse]);
 
   useEffect(() => {
     owner.onOperation = bound.onOperation;

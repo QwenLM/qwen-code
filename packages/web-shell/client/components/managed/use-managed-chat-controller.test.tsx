@@ -1232,6 +1232,7 @@ describe('useManagedChatControllerFromState', () => {
     let blocked = false;
     let canCancel = true;
     const activeEventSignals = new Set<AbortSignal>();
+    const activeActionSignals = new Set<AbortSignal>();
     const provider = {
       storageKey: 'fixture:shared',
       getSession: vi.fn(async (id: string) => summary(id)),
@@ -1267,7 +1268,19 @@ describe('useManagedChatControllerFromState', () => {
         replayed: false,
       })),
       actions: {
-        listPending: vi.fn(async () => [childQuestion]),
+        listPending: vi.fn(
+          async (_sessionId: string, options?: { signal?: AbortSignal }) => {
+            if (options?.signal) {
+              activeActionSignals.add(options.signal);
+              options.signal.addEventListener(
+                'abort',
+                () => activeActionSignals.delete(options.signal!),
+                { once: true },
+              );
+            }
+            return [childQuestion];
+          },
+        ),
         respond: vi.fn(async (action, _response, options) => {
           options?.onAccepted?.({
             sessionId: action.sessionId,
@@ -1346,8 +1359,10 @@ describe('useManagedChatControllerFromState', () => {
       await flushReact();
 
       expect(controller).toBeDefined();
-      // Shared hooks keep exactly 1 live event subscription active (no second hook stack).
+      // Shared hooks keep exactly 1 live event stream and 1 pending-action
+      // polling scope active (no second hook stack).
       expect(activeEventSignals.size).toBe(1);
+      expect(activeActionSignals.size).toBe(1);
       expect(controller!.pendingQuestions.map((q) => q.id)).toEqual([
         'child-q-1',
       ]);
@@ -1407,6 +1422,196 @@ describe('useManagedChatControllerFromState', () => {
       expect(
         controller!.operations.find((op) => op.kind === 'cancel')?.state,
       ).toBe('established');
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it('rejects ended actions without stranding a pending op, coalesces concurrent cancels while turnCancel.busy is true, and forwards abort signals to actions.respond', async () => {
+    const approvalAction: ManagedAgentPendingAction = {
+      actionId: 'a-ended',
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      functionCallId: 'call-ended',
+      toolName: 'write_file',
+      inputRevision: 1,
+      policyRevision: 'hosted-tool-approval/1',
+      expiresAt: Date.now() + 600_000,
+      options: [
+        { id: 'allow', label: 'Allow' },
+        { id: 'deny', label: 'Deny' },
+      ],
+    };
+    const feed = stream();
+    let respondAttempt = 0;
+    let capturedAbortSignal: AbortSignal | undefined;
+    let resolveCancel!: (value: {
+      sessionId: string;
+      turnId: string;
+      operationId: string;
+    }) => void;
+    const provider = {
+      storageKey: 'fixture:shared-edge',
+      getSession: vi.fn(async (id: string) => summary(id)),
+      getTranscript: vi.fn(async () => ({ events: [], lastEventId: 0 })),
+      subscribeEvents: vi.fn(
+        (_sessionId: string, options: { signal: AbortSignal }) =>
+          feed.subscribe(options.signal),
+      ),
+      submitPrompt: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        turnId: 'turn-1',
+        operationId: 'prompt-1',
+      })),
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            sessionId: string;
+            turnId: string;
+            operationId: string;
+          }>((resolve) => {
+            resolveCancel = resolve;
+          }),
+      ),
+      queryCancelOperation: vi.fn(async () => ({
+        sessionId: 'session-1',
+        operationId: 'op-cancel-coalesce',
+        type: 'cancel' as const,
+        status: 'completed' as const,
+        admissionStage: 'java_durable' as const,
+        deliveryState: 'confirmed' as const,
+        replayed: false,
+      })),
+      actions: {
+        listPending: vi.fn(async () => [approvalAction]),
+        respond: vi.fn(async (_action, _response, options) => {
+          respondAttempt += 1;
+          if (respondAttempt === 1) {
+            throw Object.assign(new Error('Already expired'), {
+              code: 'action_expired',
+            });
+          }
+          capturedAbortSignal = options?.signal;
+          return new Promise<void>(() => {});
+        }),
+      },
+    } as unknown as ManagedAgentProvider;
+
+    let controller: SessionChatController | undefined;
+    function Host({ sessionId }: { sessionId: string }) {
+      const detail = useManagedSession(provider, 'client-1', sessionId);
+      const approvals = useManagedActions(
+        provider,
+        sessionId,
+        'client-1',
+        detail.summary?.capabilities.actions,
+        detail.events,
+        true,
+      );
+      const cancelObserverRef = useRef<ManagedTurnCancelObserver | undefined>(
+        undefined,
+      );
+      const observer = useMemo<ManagedTurnCancelObserver>(
+        () => ({
+          onAccepted: (a) => cancelObserverRef.current?.onAccepted?.(a),
+          onSettlement: (s) => cancelObserverRef.current?.onSettlement?.(s),
+          onError: (e) => cancelObserverRef.current?.onError?.(e),
+        }),
+        [],
+      );
+      const turnCancel = useManagedTurnCancel(
+        provider,
+        'client-1',
+        sessionId,
+        detail.summary,
+        true,
+        detail.refreshSummary,
+        observer,
+      );
+      controller = useManagedChatControllerFromState({
+        provider,
+        clientId: 'client-1',
+        sessionId,
+        detail,
+        pending: approvals,
+        turnCancel,
+        cancelObserverRef,
+        messages: [],
+        selectedAction: approvals.action,
+        retainExpiredActions: true,
+        canCancel: true,
+      });
+      return null;
+    }
+
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <Host sessionId="session-1" />
+            </I18nProvider>
+          </StrictMode>,
+        );
+      });
+      await flushReact();
+
+      // 1) Ended action (action_expired) settles as rejected with zero stuck
+      // pending op, so when the re-read still returns the action (replica miss)
+      // a subsequent retry is not permanently locked out.
+      const endedResult = await controller!.respondApproval('a-ended', 'allow');
+      await flushReact();
+      expect(endedResult.admission).toBe('rejected');
+      expect(controller!.operations.some((op) => op.state === 'pending')).toBe(
+        false,
+      );
+      expect(controller!.pendingApprovals.map((a) => a.id)).toEqual([
+        'a-ended',
+      ]);
+
+      // 2) Concurrent cancel calls coalesce onto live.waiters even after
+      // turnCancel.busy flips true during the in-flight request.
+      const firstCancel = controller!.cancel();
+      await flushReact();
+      const secondCancel = controller!.cancel();
+      expect(provider.cancel).toHaveBeenCalledTimes(1);
+      resolveCancel({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        operationId: 'op-cancel-coalesce',
+      });
+      const [firstOutcome, secondOutcome] = await Promise.all([
+        firstCancel,
+        secondCancel,
+      ]);
+      await flushReact();
+      expect(firstOutcome.admission).toBe('accepted');
+      expect(secondOutcome.admission).toBe('accepted');
+
+      // 3) Retry dispatches with an AbortSignal that aborts when switching
+      // sessions, settling the in-flight promise as unknown.
+      const inFlightApproval = controller!.respondApproval('a-ended', 'allow');
+      await flushReact();
+      expect(provider.actions!.respond).toHaveBeenCalledTimes(2);
+      expect(capturedAbortSignal).toBeDefined();
+      expect(capturedAbortSignal!.aborted).toBe(false);
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <Host sessionId="session-2" />
+            </I18nProvider>
+          </StrictMode>,
+        );
+      });
+      await flushReact();
+      expect(capturedAbortSignal!.aborted).toBe(true);
+      expect((await inFlightApproval).admission).toBe('unknown');
     } finally {
       await act(async () => root.unmount());
       container.remove();

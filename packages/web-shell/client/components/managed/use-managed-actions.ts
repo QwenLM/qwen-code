@@ -59,6 +59,13 @@ function endedAction(failure: unknown): boolean {
   return typeof code === 'string' && ENDED_ACTION_CODES.has(code);
 }
 
+export type ManagedActionRespondOutcome = 'responded' | 'ended' | 'skipped';
+
+export interface ManagedActionRespondOptions
+  extends ManagedAgentOperationObserver {
+  readonly signal?: AbortSignal;
+}
+
 export interface ManagedActionsState {
   actions: readonly ManagedAgentPendingAction[];
   /** The selected pending request; answered ones stay hidden while they settle. */
@@ -91,8 +98,8 @@ export interface ManagedActionsState {
   respond(
     action: ManagedAgentPendingAction,
     response: ManagedAgentActionResponse,
-    observer?: ManagedAgentOperationObserver,
-  ): Promise<boolean>;
+    options?: ManagedActionRespondOptions,
+  ): Promise<ManagedActionRespondOutcome>;
   /** Reads the pending approvals again now. */
   retry(): void;
 }
@@ -354,17 +361,17 @@ export function useManagedActions(
     async (
       requested: ManagedAgentPendingAction,
       response: ManagedAgentActionResponse,
-      observer?: ManagedAgentOperationObserver,
-    ): Promise<boolean> => {
-      if (current.current.owner !== owner) return false;
+      options?: ManagedActionRespondOptions,
+    ): Promise<ManagedActionRespondOutcome> => {
+      if (current.current.owner !== owner) return 'skipped';
       const key = managedActionKey(requested);
       const target = current.current.actions.find(
         (entry) =>
           managedActionKey(entry) === key && !current.current.answered.has(key),
       );
       const actionReader = current.current.reader;
-      if (!target || !actionReader) return false;
-      if (inFlight.current.get(key) === owner) return false;
+      if (!target || !actionReader) return 'skipped';
+      if (inFlight.current.get(key) === owner) return 'skipped';
       inFlight.current.set(key, owner);
       setSubmitting((current) => new Set(current).add(key));
       const isPending = () =>
@@ -389,13 +396,13 @@ export function useManagedActions(
           target.kind === 'question' && typeof submitted !== 'string'
             ? await questionResponseKey(target, submitted.answers)
             : `${target.actionId}:${submitted}`;
-        if (!isPending()) return false;
+        if (!isPending()) return 'skipped';
         await actionReader.respond(target, submitted, {
           clientId,
           idempotencyKey,
-          ...observer,
+          ...options,
         });
-        if (!isPending()) return false;
+        if (!isPending()) return 'skipped';
         setAnswered((current) => new Set(current).add(key));
         setAnswerErrors((current) => {
           const next = new Map(current);
@@ -408,7 +415,7 @@ export function useManagedActions(
           return next;
         });
         setRevision((value) => value + 1);
-        return true;
+        return 'responded';
       } catch (failure) {
         if (
           typeof failure === 'object' &&
@@ -445,7 +452,7 @@ export function useManagedActions(
             return next;
           });
           setRevision((value) => value + 1);
-          return true;
+          return 'ended';
         }
         setAnswered((current) => {
           const next = new Set(current);

@@ -50,14 +50,17 @@ session action isolation, or regressing Managed's durable outbox and layout:
 ## Scope
 
 - **`use-managed-actions.ts`:**
-  - Accept an optional third `observer?: ManagedAgentOperationObserver`
-    parameter on `respond` and forward it into `provider.actions.respond(...)`.
-  - Return `Promise<boolean>` (`true` when the response succeeded or a terminal
-    `endedAction` closed the card; `false` when early-returned as not pending
-    or already in flight; throws on retryable errors as before).
+  - Accept an optional third `options?: ManagedActionRespondOptions` parameter
+    (`ManagedAgentOperationObserver & { readonly signal?: AbortSignal }`) on
+    `respond` and forward it into `provider.actions.respond(...)`.
+  - Return `Promise<ManagedActionRespondOutcome>` (`'responded'` when the
+    response succeeded; `'ended'` when a terminal `endedAction` closed the card;
+    `'skipped'` when early-returned as not pending or already in flight; throws
+    on retryable errors as before).
 - **`chat-controller.ts`:**
-  - Key `pendingProjection.requests` by `${action.sessionId}:${action.actionId}`
-    so child sessions sharing an `actionId` never collide.
+  - Key `pendingProjection.requests`, `inFlightActionKeys`, and `hasLiveAction`
+    by `JSON.stringify([action.sessionId, action.actionId])` so child sessions
+    sharing an `actionId` never collide.
   - Pass `action.sessionId === deps.sessionId ? messages : []` into
     `toManagedPermissionRequest` so root messages never bleed into child-session
     approval previews.
@@ -76,10 +79,13 @@ session action isolation, or regressing Managed's durable outbox and layout:
     bare-`actionId` submission routing unambiguous by construction even when
     multiple child sessions share an `actionId`.
   - Route approval and question submissions through `pending.respond(action,
-response, observer)` so `useManagedActions` state (`submitting`,
-    `answerError`, `respondForbidden`, draft clearing, answered filtering) and
-    controller admission/settlement stay synchronized through one transport
-    call, accepting `action.sessionId` for child-session actions.
+response, { onAccepted, onSettlement, signal })` so `useManagedActions` state
+    (`submitting`, `answerError`, `respondForbidden`, draft clearing, answered
+    filtering) and controller admission/settlement stay synchronized through one
+    transport call, aborting on unmount/session switch and accepting
+    `action.sessionId` for child-session actions. Only `'responded'` counts as
+    admitted; `'ended'` and `'skipped'` settle as `'rejected'` so no unsettleable
+    pending op is left in `tracked`.
   - Preserve standalone `useManagedChatController({ provider, clientId,
 sessionId })` with identical public contract and strict admission semantics.
 - **`ChatSurface.tsx`:**
@@ -125,14 +131,17 @@ sessionId })` with identical public contract and strict admission semantics.
      and `useManagedTurnCancel` (persisted cancel intent + operation polling)
      without violating React's Rules of Hooks or altering the strict standalone
      3b contract.
-2. **Single transport call for action responses via `pending.respond(action, response, observer)`.**
+2. **Single transport call for action responses via `pending.respond(action, response, { onAccepted, onSettlement, signal })`.**
    - Keeps `useManagedActions`'s forbidden-session latch, error banner, draft
      clearing, and answered-key tracking synchronized with the controller's
-     intent ledger and operation settlement observations. When a test mock
-     `provider.actions.respond` resolves cleanly without invoking `onAccepted`,
+     intent ledger and operation settlement observations, while forwarding the
+     lifecycle abort signal. When a test mock `provider.actions.respond`
+     resolves cleanly (`'responded'`) without invoking `onAccepted`,
      `useManagedChatControllerFromState` treats the completed call as admitted
      (still never forging `established` without an `onSettlement` event), while
-     standalone `useManagedChatController` preserves its strict `unknown` rule.
+     terminal `'ended'` failures settle as `'rejected'` so no pending op is
+     stranded, and standalone `useManagedChatController` preserves its strict
+     `unknown` rule.
 3. **Retain expired actions in UI projection (`retainExpiredActions: true`) while disabling both permissions and questions and rejecting submission fail-closed.**
    - Preserves Managed's UX (showing `managed.question.expired` for questions
      and `managed.actions.expired` for permissions alongside disabled controls
