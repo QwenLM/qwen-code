@@ -141,8 +141,12 @@ public final class ExternalWorkspaceMaterializationStore {
             List<String> records = jdbc.queryForList("SELECT r.result_json FROM ma_workspace w"
                     + " JOIN ma_request_receipt r ON r.receipt_key = w.materialization_receipt_key"
                     + " AND r.tenant_id = w.tenant_id AND r.namespace = ? AND r.scope_kind = ?"
-                    + " JOIN ma_storage_owner o ON o.tenant_id = w.tenant_id AND o.storage_id = w.workspace_id"
-                    + " WHERE o.physical_id = ? AND w.tenant_id = ? AND w.state = 'ACTIVE' AND w.workspace_kind = 'ROOT'",
+                    + " JOIN ma_storage s ON s.tenant_id = w.tenant_id"
+                    + " AND s.storage_id = w.storage_id AND s.physical_id = ?"
+                    + " AND s.registration_state = 'REGISTERED'"
+                    + " JOIN ma_storage_owner o ON o.tenant_id = s.tenant_id"
+                    + " AND o.physical_id = s.physical_id AND o.storage_kind = s.storage_kind"
+                    + " WHERE w.tenant_id = ? AND w.state = 'ACTIVE' AND w.workspace_kind = 'ROOT'",
                     String.class, NAMESPACE.name(), ReceiptScope.TENANT.name(), owner, tenant);
             if (records.isEmpty()) {
                 return Optional.empty();

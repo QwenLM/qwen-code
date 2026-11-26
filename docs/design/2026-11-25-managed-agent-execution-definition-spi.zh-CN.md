@@ -92,7 +92,7 @@ public interface ManagedAgentDefinitionSource {
 }
 ```
 
-`PreRegistered` 是 MA 应用入口的选择类型，携带既有完整 `AgentDefinitionRequest`，不会传给宿主 Source。SPI preparation 允许缺省 `modelId`，此时 native Definition 不包含 `model` 字段；它将 `modelId`、`instructions`、`toolPolicy` 和 inline Skill 映射到 native Definition 字段。`approvalMode` 为 null 时保留预注册输入省略该字段的语义：native preparation 生成空 `permission_policy`，继续沿用正常默认继承，与显式指定 `"default"` 是不同输入。Extension Skill 与 Suite 的选择作为非敏感来源/材料引用保存在 metadata；本切片不自动导入或应用它们。sealed Skill JSON 使用显式 `inline`/`extension` 类型标识，以便回放持久化回执。
+`PreRegistered` 是 MA 应用入口的选择类型，携带既有完整 `AgentDefinitionRequest`，不会传给宿主 Source。SPI preparation 允许缺省 `modelId`，此时 native Definition 不包含 `model` 字段；它将 `modelId`、`instructions`、`toolPolicy` 和 inline Skill 映射到 native Definition 字段。Extension Skill 与 Suite 的选择作为非敏感来源/材料引用保存在 metadata；本切片不自动导入或应用它们。sealed Skill JSON 使用显式 `inline`/`extension` 类型标识，以便回放持久化回执。
 
 新的 `Current` 在只有一个注册的 Definition provider 时可以隐式选择；存在多个 provider 时必须显式给出 `Exact` 引用。`projectionDigest` 是宿主提供的精确输入身份，MA 另行计算 command digest 和 native Definition digest。本切片没有独立的 MCP Source。
 

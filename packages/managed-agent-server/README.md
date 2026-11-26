@@ -124,6 +124,8 @@ mvn -f server/pom.xml spring-boot:run
 For ordinary Spring Boot embedding, add `qwen-managed-agent-spring-boot-starter` and set `qwen.managed-agent.enabled=true`; no `@Import` or Qwen package scan is needed. Its default is disabled, so adding the dependency alone creates no Managed resources or controllers. `ManagedAgentConfiguration` remains available for explicit import; internal callbacks additionally import `ManagedAgentInternalConfiguration`. The standalone application also enables the public web configuration. Maven resolves the shared modules transitively. All four backend providers are optional runtime dependencies: an embedding host must explicitly add its chosen `com.alibaba:qwen-managed-agent-runtime-{local,ssh,external,static}` coordinates at the same version. Maven still resolves all four when building the standalone server, but does not propagate them to library consumers. The verification module is never installed or deployed. The standalone application YAML is excluded from the ordinary library JAR.
 
 Set `qwen.managed-agent.schema.initialize-enabled=false` to validate an existing deployment-managed catalog without executing DDL. Missing, partial and foreign catalogs still fail startup. Explicit imports and standalone deployments retain initialization by default. The embedded host can supply a `managedAgentDataSource` bean or configure `qwen.managed-agent.datasource.*`. The starter deliberately mounts neither the public/WebShell surface nor the internal callbacks. See the [starter design](../../docs/design/2026-11-25-managed-agent-spring-boot-starter.md) ([简体中文](../../docs/design/2026-11-25-managed-agent-spring-boot-starter.zh-CN.md)).
+For external-family providers, an embedded host can supply one `ExternalRuntimeClient` for same-process placement and one `WorkspacePhysicalTransport` through `RuntimeProviderDependencies`. They reach Workspace execution, publication and drain rather than only the provisioner's attestation calls. The transport is not selected by local-process, static or SSH providers, which retain their existing routing. Neither addition authorizes Workspace access, replaces a durable binding, or silently selects another provider.
+
 Runtime factories are discovered through `META-INF/services/com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory`. The default executable and operator artifacts include all four backend JARs. A library host can omit all backends when its Broker is disabled, or select a single provider. `runtime-broker.provisioner` supports `local-process`, `ssh-process`, `external-scratch`, `external-workspace` and `static`; existing built-in settings and persisted identities are unchanged. Only the selected factory validates its configuration and creates resources. Missing providers and duplicate kinds fail explicitly.
 
 Backend selection for embedding is ordinary Maven dependency selection. For example, a host using External Workspace adds `qwen-managed-agent-server` and `qwen-managed-agent-runtime-external` at the same version; no exclusions for Local, SSH or Static are needed. A host using Local+SSH adds both corresponding backend artifacts. Packaged availability and enabled configuration are separate: only the configured backend is initialized, with Local+SSH as the supported routing combination. The default standalone and operator artifacts continue to contain every backend. Selective standalone builds and archives are outside this change.
@@ -448,9 +450,10 @@ or delete has completed, returns its matching `RuntimeDrainReceipt` items. For
 session-isolated bindings, every binding must be RELEASED and every receipt must
 match its original binding; it never selects a latest binding and a
 `hasStoppedWriters()` flag alone is not sufficient. Pending or incomplete proof
-is not a stopped proof. Callers that allow only one binding require exactly one
-receipt instead of accepting a partial or ambiguous result. This Java read does
-not add an HTTP route or expose boot credentials.
+is not a stopped proof. A caller that permits exactly one binding must assert one
+matching receipt and reject every other count; a caller with multiple permitted
+bindings must reconcile all of them against the original operation. This Java
+read does not add an HTTP route or expose boot credentials.
 
 Turn input and cancellation are recorded in the same table as `submit_input`
 and `cancel` operations. Each is saved with its command, the same route reads

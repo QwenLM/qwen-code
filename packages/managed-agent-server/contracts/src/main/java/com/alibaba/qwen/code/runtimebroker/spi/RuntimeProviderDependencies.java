@@ -13,7 +13,7 @@ public interface RuntimeProviderDependencies {
         throw new IllegalStateException("Runtime binding repository is unavailable");
     }
 
-    /** Optional transport for external Runtime and Workspace operations; absence retains direct HTTP. */
+    /** Optional transport used only by external-family providers; other providers retain their existing routing. */
     public default Optional<WorkspacePhysicalTransport> externalRuntimeTransport() {
         return Optional.empty();
     }
