@@ -162,14 +162,29 @@ async function listTextAction(context: CommandContext, _args: string) {
     const caps: string[] = [];
     const mcpCount = ext.mcpServers ? Object.keys(ext.mcpServers).length : 0;
     if (mcpCount > 0) {
-      caps.push(t('{{count}} MCP servers', { count: String(mcpCount) }));
-    }
-    if (ext.skills && ext.skills.length > 0) {
-      caps.push(t('{{count}} skills', { count: String(ext.skills.length) }));
-    }
-    if (ext.commands && ext.commands.length > 0) {
+      const params = { count: String(mcpCount) };
       caps.push(
-        t('{{count}} commands', { count: String(ext.commands.length) }),
+        mcpCount === 1
+          ? t('{{count}} MCP server', params)
+          : t('{{count}} MCP servers', params),
+      );
+    }
+    const skillCount = ext.skills?.length ?? 0;
+    if (skillCount > 0) {
+      const params = { count: String(skillCount) };
+      caps.push(
+        skillCount === 1
+          ? t('{{count}} skill', params)
+          : t('{{count}} skills', params),
+      );
+    }
+    const commandCount = ext.commands?.length ?? 0;
+    if (commandCount > 0) {
+      const params = { count: String(commandCount) };
+      caps.push(
+        commandCount === 1
+          ? t('{{count}} command', params)
+          : t('{{count}} commands', params),
       );
     }
     const capsStr = caps.length > 0 ? ` [${caps.join(', ')}]` : '';

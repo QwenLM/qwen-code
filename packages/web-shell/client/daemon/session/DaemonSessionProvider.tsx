@@ -5766,8 +5766,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const modelServiceId =
             overrides?.modelServiceId ??
             createSessionRequestRef.current?.modelServiceId;
+          const startupConfig = overrides?.startupConfig;
           return DaemonSessionClient.createStandalone(client, {
-            ...(modelServiceId !== undefined ? { modelServiceId } : {}),
+            ...(startupConfig
+              ? { startupConfig }
+              : modelServiceId !== undefined
+                ? { modelServiceId }
+                : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
           }).then((owner) =>
             turnNotifications.remember(owner, { kind: 'standalone' }),

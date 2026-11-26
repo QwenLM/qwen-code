@@ -37061,6 +37061,67 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it.each(['none', 'low', undefined] as const)(
+    'uses startup configuration for standalone welcome reasoning %s',
+    async (selection) => {
+      const modelId = 'qwen3.8-max';
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = undefined;
+      mockConnection.sessionContext = { kind: 'standalone' };
+      mockConnection.capabilities = {
+        qwenCodeVersion: 'test',
+        features: ['standalone_sessions_v1', 'session_startup_config'],
+      };
+      mockConnection.currentModel = modelId;
+      mockConnection.models = [
+        {
+          id: modelId,
+          label: 'Qwen',
+          reasoningPreview: {
+            enabled: true,
+            effort: 'high',
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+            canDisable: true,
+          },
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+
+      renderApp();
+      await flush();
+      if (selection !== undefined) {
+        act(() => {
+          testState.latestChatEditorProps?.onSelectReasoningEffort?.(selection);
+        });
+      }
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+
+      const createOptions = mockSessionActions.createSession.mock.calls[0][0];
+      expect(createOptions).toMatchObject({
+        sessionContext: { kind: 'standalone' },
+      });
+      if (selection === undefined) {
+        expect(createOptions).not.toHaveProperty('startupConfig');
+      } else {
+        expect(createOptions).toHaveProperty('startupConfig', {
+          modelServiceId: modelId,
+          reasoningEffort: selection,
+        });
+        expect(createOptions).not.toHaveProperty('modelServiceId');
+      }
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+    },
+  );
+
   it('clears a stale welcome disable after reasoning becomes mandatory', async () => {
     const reasoningPreview = (canDisable: boolean) => ({
       enabled: true,
