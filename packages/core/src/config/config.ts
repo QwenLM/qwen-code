@@ -1859,17 +1859,19 @@ export interface ConfigParameters {
   allowPrivateNetworkHooks?: boolean;
   /**
    * Callback for persisting a permission rule to settings.
-   * Injected by the CLI layer; core uses this to write allow/ask/deny rules
-   * to project or user settings when the user clicks "Always Allow".
+   * Injected by the CLI layer to write allow/ask/deny rules for an approved
+   * tool call.
    *
    * @param scope - 'project' for workspace settings, 'user' for user settings.
    * @param ruleType - 'allow' | 'ask' | 'deny'.
    * @param rule - The raw rule string, e.g. "Bash(git *)" or "Edit".
+   * @param workspaceDir - The project root of the Config that owns the call.
    */
   onPersistPermissionRule?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
+    workspaceDir: string,
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
@@ -3424,11 +3426,7 @@ export class Config {
   private ignoredExtensionRules: string[] = [];
   private readonly allowedHttpHookUrls: string[];
   private readonly allowPrivateNetworkHooks: boolean;
-  private readonly onPersistPermissionRuleCallback?: (
-    scope: 'project' | 'user',
-    ruleType: 'allow' | 'ask' | 'deny',
-    rule: string,
-  ) => Promise<void>;
+  private readonly onPersistPermissionRuleCallback: ConfigParameters['onPersistPermissionRule'];
   private initialized: boolean = false;
   private initializationPromise?: Promise<void>;
   private initializationSucceeded = false;
@@ -6739,9 +6737,11 @@ export class Config {
         `with every request, which is the cost a rule exists to avoid. Add ` +
         `\`paths:\` to it, or move the content into the extension's context file.`,
     );
-    const extra = memoryContextWarning
-      ? [...ruleWarnings, memoryContextWarning]
-      : ruleWarnings;
+    const extra = [
+      ...ruleWarnings,
+      ...(memoryContextWarning ? [memoryContextWarning] : []),
+      ...(this.getHookSystem()?.getConfigWarnings() ?? []),
+    ];
     return extra.length > 0 ? [...this.warnings, ...extra] : this.warnings;
   }
 
@@ -9116,6 +9116,11 @@ export class Config {
           mcpServers[key] = {
             ...server,
             extensionName: extension.config.name,
+            ...(extension.artifactGeneration !== undefined
+              ? {
+                  extensionArtifactRevision: `${extension.id}:${extension.artifactGeneration}`,
+                }
+              : {}),
           };
         },
       );
@@ -13061,7 +13066,9 @@ export class Config {
     projection: SessionRestoreProjection | undefined,
   ): void {
     this.pendingSessionRestoreProjection = projection;
-    this.sessionRestoreRuntime = projection?.runtime;
+    this.sessionRestoreRuntime = projection
+      ? { ...projection.runtime, conversationStartTime: projection.startTime }
+      : undefined;
     this.restoredFileHistory = false;
   }
 
@@ -13547,7 +13554,11 @@ export class Config {
         rule: string,
       ) => Promise<void>)
     | undefined {
-    return this.onPersistPermissionRuleCallback;
+    const persist = this.onPersistPermissionRuleCallback;
+    return persist
+      ? (scope, ruleType, rule) =>
+          persist(scope, ruleType, rule, this.getProjectRoot())
+      : undefined;
   }
 
   // Check permission then register a lazy factory; its import runs on first use.

@@ -31,6 +31,7 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import {
   isGeneratedUiStateRecord,
+  isLifecycleUiTelemetryEvent,
   isTranscriptConversationRecord,
   prepareTranscriptRecords,
   selectActiveGeneratedUiStateRecordUuids,
@@ -90,6 +91,10 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import {
+  acquireSessionArchiveWriteLock,
+  advanceSessionArchiveGeneration,
+} from './session-archive-write-fence.js';
+import {
   moveSessionPrSidecar,
   readSessionPrsDetailed,
 } from './session-pr-service.js';
@@ -123,6 +128,8 @@ import {
   retainArtifactSnapshot,
 } from '../tools/artifact/artifact-snapshots.js';
 import {
+  getSessionTranscriptMaxLineBytes,
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
   type SelectiveSessionRestoreOptions,
@@ -3765,7 +3772,7 @@ export class SessionService {
       throw new SessionTranscriptChangedError();
     }
     const identity = physical.identities[0];
-    const maxBytes = MAX_TRANSCRIPT_READ_BYTES;
+    const maxBytes = SESSION_TRANSCRIPT_MAX_INDEX_BYTES;
     if (identity.size > maxBytes) {
       throw new SessionTranscriptTooLargeError(
         sessionId,
@@ -3780,7 +3787,83 @@ export class SessionService {
         (process.platform === 'win32' ? 0 : (fs.constants.O_NOFOLLOW ?? 0)),
     );
     const records: ChatRecord[] = [];
+    let firstRecordMeta: { cwd: string; version: string } | undefined;
     let complete = true;
+    const maxRetainedEstimateBytes =
+      artifactLibraryMaxRetainedEstimateBytesForTest ??
+      ARTIFACT_LIBRARY_MAX_RETAINED_ESTIMATE_BYTES;
+    const maxLineBytes = getSessionTranscriptMaxLineBytes();
+    let estimatedRetainedBytes = 0;
+    const processLine = (rawLine: Buffer): void => {
+      const trimmedBuf =
+        rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+          ? rawLine.subarray(0, rawLine.length - 1)
+          : rawLine;
+      const line = trimmedBuf.toString('utf8');
+      if (!line.trim()) return;
+      const parsed = jsonl.parseLineTolerantWithIntegrity<ChatRecord>(
+        line,
+        identity.filePath,
+      );
+      complete &&= parsed.complete;
+      for (const record of parsed.records) {
+        firstRecordMeta ??= {
+          cwd: record.cwd,
+          version: record.version,
+        };
+        if (isSessionArtifactRecord(record)) {
+          estimatedRetainedBytes += 256 + line.length * 2;
+          if (estimatedRetainedBytes > maxRetainedEstimateBytes) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              identity.size,
+              maxRetainedEstimateBytes,
+              {
+                dimension: 'artifact_library',
+                measuredBytes: estimatedRetainedBytes,
+              },
+            );
+          }
+          records.push(record);
+        } else {
+          // Keep only chain-identity fields for non-artifact records so
+          // large transcripts do not retain message/tool-result bodies
+          // in memory while verifying history continuity.
+          estimatedRetainedBytes +=
+            256 +
+            ((record.uuid?.length ?? 0) +
+              (record.parentUuid?.length ?? 0) +
+              (record.sessionId?.length ?? 0) +
+              (record.timestamp?.length ?? 0) +
+              (record.type?.length ?? 0) +
+              (record.subtype?.length ?? 0)) *
+              2;
+          if (estimatedRetainedBytes > maxRetainedEstimateBytes) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              identity.size,
+              maxRetainedEstimateBytes,
+              {
+                dimension: 'artifact_library',
+                measuredBytes: estimatedRetainedBytes,
+              },
+            );
+          }
+          records.push({
+            uuid: record.uuid,
+            parentUuid: record.parentUuid,
+            sessionId: record.sessionId,
+            timestamp: record.timestamp,
+            type: record.type,
+            ...(record.subtype !== undefined
+              ? { subtype: record.subtype }
+              : {}),
+            cwd: firstRecordMeta.cwd,
+            version: firstRecordMeta.version,
+          });
+        }
+      }
+    };
     try {
       const stats = await handle.stat();
       if (
@@ -3796,19 +3879,54 @@ export class SessionService {
         autoClose: false,
       });
       try {
-        const lines = readline.createInterface({ input, crlfDelay: Infinity });
-        try {
-          for await (const line of lines) {
-            if (!line.trim()) continue;
-            const parsed = jsonl.parseLineTolerantWithIntegrity<ChatRecord>(
-              line,
-              identity.filePath,
-            );
-            complete &&= parsed.complete;
-            records.push(...parsed.records);
+        let pending: Buffer[] = [];
+        let pendingLength = 0;
+        for await (const chunk of input) {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          let lineStart = 0;
+          while (lineStart < buffer.length) {
+            const lineEnd = buffer.indexOf(0x0a, lineStart);
+            if (lineEnd === -1) break;
+            const currentLine = buffer.subarray(lineStart, lineEnd);
+            const totalLineLength = pendingLength + currentLine.length;
+            if (totalLineLength > maxLineBytes) {
+              throw new SessionTranscriptTooLargeError(
+                sessionId,
+                identity.size,
+                maxLineBytes,
+                { dimension: 'line', measuredBytes: totalLineLength },
+              );
+            }
+            const rawLine =
+              pendingLength > 0
+                ? Buffer.concat([...pending, currentLine], totalLineLength)
+                : currentLine;
+            processLine(rawLine);
+            pending = [];
+            pendingLength = 0;
+            lineStart = lineEnd + 1;
           }
-        } finally {
-          lines.close();
+          if (lineStart < buffer.length) {
+            const tail = buffer.subarray(lineStart);
+            const nextPendingLength = pendingLength + tail.length;
+            if (nextPendingLength > maxLineBytes) {
+              throw new SessionTranscriptTooLargeError(
+                sessionId,
+                identity.size,
+                maxLineBytes,
+                { dimension: 'line', measuredBytes: nextPendingLength },
+              );
+            }
+            pending.push(tail);
+            pendingLength = nextPendingLength;
+          }
+        }
+        if (pendingLength > 0) {
+          const rawLine =
+            pending.length === 1
+              ? pending[0]!
+              : Buffer.concat(pending, pendingLength);
+          processLine(rawLine);
         }
       } finally {
         input.destroy();
@@ -3828,6 +3946,7 @@ export class SessionService {
       );
     }
     this.assertMaintainableSessionUnchanged(sessionId, physical);
+    artifactLibraryRetainedRecordsHookForTest?.(records);
     const { messages, gaps } = this.reconstructHistory(records, {
       detectGaps: true,
     });
@@ -4879,6 +4998,17 @@ export class SessionService {
     return removed;
   }
 
+  private async acquireArchiveWriteLock(activePath: string) {
+    try {
+      return await acquireSessionArchiveWriteLock(activePath);
+    } catch (error) {
+      // The lock is a sibling of the transcript: if its directory has not
+      // been created, there is no active or archived session to mutate.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }
+
   async archiveSessions(
     sessionIds: string[],
     options: ArchiveSessionsOptions = {},
@@ -4890,8 +5020,17 @@ export class SessionService {
     const errors: Array<{ sessionId: string; error: Error }> = [];
 
     for (const sessionId of [...new Set(sessionIds)]) {
+      let lock:
+        | Awaited<ReturnType<typeof acquireSessionArchiveWriteLock>>
+        | undefined;
       try {
         if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+          notFound.push(sessionId);
+          continue;
+        }
+        const activePath = this.getSessionFilePath(sessionId, 'active');
+        lock = await this.acquireArchiveWriteLock(activePath);
+        if (!lock) {
           notFound.push(sessionId);
           continue;
         }
@@ -4922,6 +5061,8 @@ export class SessionService {
           await options.assertStorageUnchanged?.();
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+          lock.assertHeld();
+          advanceSessionArchiveGeneration(activePath);
           this.removeFileIfExists(active.filePath);
           this.transcriptReader.invalidateLastUserPromptAt(sessionId);
           try {
@@ -4990,6 +5131,8 @@ export class SessionService {
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+        lock.assertHeld();
+        advanceSessionArchiveGeneration(activePath);
         try {
           fs.renameSync(sourcePath, targetPath);
           this.transcriptReader.invalidateLastUserPromptAt(sessionId);
@@ -5014,6 +5157,8 @@ export class SessionService {
           sessionId,
           error: error instanceof Error ? error : new Error(String(error)),
         });
+      } finally {
+        await lock?.release();
       }
     }
 
@@ -5037,6 +5182,7 @@ export class SessionService {
   private async retitleIfCollidesWithActive(
     sessionId: string,
     archivedFilePath: string,
+    assertArchiveLockHeld: () => void,
   ): Promise<void> {
     // The archived row can be named only by its sidecar after a transcript
     // rebuild; the collision check must see that name too, or unarchiving
@@ -5060,7 +5206,14 @@ export class SessionService {
     if (!activeTitles.has(normalizedTitle)) return;
     const baseName = normalizeDerivedBranchTitle(currentTitle) ?? currentTitle;
     const uniqueTitle = await computeUniqueBranchTitle(baseName, this);
-    await this.renameSession(sessionId, uniqueTitle, 'auto', 'archived');
+    await this.renameSessionInternal(
+      sessionId,
+      uniqueTitle,
+      'auto',
+      'archived',
+      undefined,
+      assertArchiveLockHeld,
+    );
   }
 
   async unarchiveSessions(
@@ -5074,7 +5227,20 @@ export class SessionService {
     const errors: Array<{ sessionId: string; error: Error }> = [];
 
     for (const sessionId of [...new Set(sessionIds)]) {
+      let lock:
+        | Awaited<ReturnType<typeof acquireSessionArchiveWriteLock>>
+        | undefined;
       try {
+        if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+          notFound.push(sessionId);
+          continue;
+        }
+        const activePath = this.getSessionFilePath(sessionId, 'active');
+        lock = await this.acquireArchiveWriteLock(activePath);
+        if (!lock) {
+          notFound.push(sessionId);
+          continue;
+        }
         const snapshot =
           await this.resolveMaintainableSessionSnapshot(sessionId);
         const location = snapshot.location;
@@ -5102,6 +5268,8 @@ export class SessionService {
           await options.assertStorageUnchanged?.();
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+          lock.assertHeld();
+          advanceSessionArchiveGeneration(activePath);
           this.removeFileIfExists(archived.filePath);
           this.transcriptReader.invalidateLastUserPromptAt(sessionId);
           try {
@@ -5170,7 +5338,13 @@ export class SessionService {
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
-        await this.retitleIfCollidesWithActive(sessionId, sourcePath);
+        await this.retitleIfCollidesWithActive(
+          sessionId,
+          sourcePath,
+          lock.assertHeld,
+        );
+        lock.assertHeld();
+        advanceSessionArchiveGeneration(activePath);
         try {
           fs.renameSync(sourcePath, targetPath);
           this.transcriptReader.invalidateLastUserPromptAt(sessionId);
@@ -5195,6 +5369,8 @@ export class SessionService {
           sessionId,
           error: error instanceof Error ? error : new Error(String(error)),
         });
+      } finally {
+        await lock?.release();
       }
     }
 
@@ -5268,7 +5444,7 @@ export class SessionService {
     titleSource: TitleSource = 'manual',
     archiveState: SessionArchiveState = 'active',
   ): Promise<boolean> {
-    return this.renameSessionInternal(
+    return this.renameSessionWithArchiveLock(
       sessionId,
       title,
       titleSource,
@@ -5286,13 +5462,41 @@ export class SessionService {
       assertCanMutate?: () => void;
     } = {},
   ): Promise<boolean> {
-    return this.renameSessionInternal(
+    return this.renameSessionWithArchiveLock(
       sessionId,
       title,
       titleSource,
       expectedLocation,
       options,
     );
+  }
+
+  private async renameSessionWithArchiveLock(
+    sessionId: string,
+    title: string,
+    titleSource: TitleSource,
+    archiveState: SessionArchiveState,
+    lifecycleOptions?: {
+      assertStorageUnchanged?: () => void | Promise<void>;
+      assertCanMutate?: () => void;
+    },
+  ): Promise<boolean> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return false;
+    const activePath = this.getSessionFilePath(sessionId, 'active');
+    const lock = await this.acquireArchiveWriteLock(activePath);
+    if (!lock) return false;
+    try {
+      return await this.renameSessionInternal(
+        sessionId,
+        title,
+        titleSource,
+        archiveState,
+        lifecycleOptions,
+        lock.assertHeld,
+      );
+    } finally {
+      await lock.release();
+    }
   }
 
   private async renameSessionInternal(
@@ -5304,6 +5508,7 @@ export class SessionService {
       assertStorageUnchanged?: () => void | Promise<void>;
       assertCanMutate?: () => void;
     },
+    assertArchiveLockHeld?: () => void,
   ): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
@@ -5372,6 +5577,7 @@ export class SessionService {
       };
       await lifecycleOptions?.assertStorageUnchanged?.();
       lifecycleOptions?.assertCanMutate?.();
+      assertArchiveLockHeld?.();
       if (physicalSnapshot) {
         this.assertMaintainableSessionUnchanged(sessionId, physicalSnapshot);
       }
@@ -6251,12 +6457,8 @@ function remapSystemPayloadForFork(
     const payload = record.systemPayload as
       | { uiEvent?: Record<string, unknown> }
       | undefined;
-    if (
-      payload?.uiEvent?.['event.name'] === 'request_lifecycle' ||
-      payload?.uiEvent?.['event.name'] === 'tool_lifecycle' ||
-      payload?.uiEvent?.['event.name'] === 'hook_lifecycle'
-    ) {
-      const event = payload.uiEvent;
+    if (isLifecycleUiTelemetryEvent(payload?.uiEvent)) {
+      const event = payload!.uiEvent!;
       return {
         ...payload,
         uiEvent: {
@@ -6310,11 +6512,11 @@ function isForkSideRecord(record: ChatRecord): boolean {
 }
 
 /**
- * Transcript size cap shared by the library mutation read and the
- * best-effort first-open seed's size gate. It bounds the library mutation
- * read; for the seed it declines to seed an oversized conversation-less
- * transcript. The load funnel's own parse is the load and is not bounded
- * by this cap — the seed's size gate runs after that read.
+ * Transcript size cap for the best-effort first-open artifact summary seed's
+ * size gate: it declines to seed an oversized conversation-less transcript.
+ * The library mutation read streams and strips non-artifact bodies under
+ * `SESSION_TRANSCRIPT_MAX_INDEX_BYTES`, and the load funnel's own parse is not
+ * bounded by this cap — the seed's size gate runs after that read.
  */
 const MAX_TRANSCRIPT_READ_BYTES = 64 * 1024 * 1024;
 
@@ -6454,13 +6656,8 @@ export function replayUiTelemetryFromConversation(
       | UiTelemetryRecordPayload
       | undefined;
     const uiEvent = payload?.uiEvent;
-    if (
-      uiEvent &&
-      uiEvent['event.name'] !== 'request_lifecycle' &&
-      uiEvent['event.name'] !== 'tool_lifecycle' &&
-      uiEvent['event.name'] !== 'hook_lifecycle'
-    ) {
-      uiTelemetryService.addEvent(uiEvent as UiEvent, sessionId);
+    if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
+      uiTelemetryService.addReplayedEvent(uiEvent as UiEvent, sessionId);
     }
   }
 
@@ -6501,4 +6698,23 @@ export function normalizeDerivedBranchTitle(
     .replace(/(\S)\(\d+\)$/, '$1')
     .trim();
   return normalized || undefined;
+}
+
+export const ARTIFACT_LIBRARY_MAX_RETAINED_ESTIMATE_BYTES = 128 * 1024 * 1024;
+
+let artifactLibraryRetainedRecordsHookForTest:
+  | ((records: readonly ChatRecord[]) => void)
+  | undefined;
+let artifactLibraryMaxRetainedEstimateBytesForTest: number | undefined;
+
+export function setArtifactLibraryRetainedRecordsHookForTest(
+  hook: ((records: readonly ChatRecord[]) => void) | undefined,
+): void {
+  artifactLibraryRetainedRecordsHookForTest = hook;
+}
+
+export function setArtifactLibraryMaxRetainedEstimateBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  artifactLibraryMaxRetainedEstimateBytesForTest = maxBytes;
 }

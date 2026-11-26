@@ -9,6 +9,8 @@ import {
   hostedApprovalResumeShapeRefusal,
   hostedCommandStepResumeShapeRefusal,
 } from './hosted-action-parking.js';
+import { hostedConfigScopedOwnerId } from './hosted-hook-session.js';
+import { hostedDurableMcpOwnerId } from './hosted-mcp-session.js';
 
 describe('hostedApprovalResumeShapeRefusal', () => {
   const broker = {};
@@ -21,13 +23,79 @@ describe('hostedApprovalResumeShapeRefusal', () => {
     ).toBeUndefined();
   });
 
-  it('names Hooks before MCP, and both before the tool owner', () => {
+  const configOwner = {
+    broker: {
+      runtimeSessionId: hostedConfigScopedOwnerId(
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: 'session' },
+        1,
+      ),
+    },
+  };
+  const activationOwner = {
+    broker: { runtimeSessionId: 'hooks-activation-0' },
+  };
+
+  it('admits Hooks only on a config-scoped Hook owner', () => {
     expect(
-      hostedApprovalResumeShapeRefusal({ hooks: {}, mcp: {} }, undefined),
-    ).toBe('hooks');
+      hostedApprovalResumeShapeRefusal(
+        { ...files, hooks: configOwner },
+        broker,
+      ),
+    ).toBeUndefined();
     expect(
-      hostedApprovalResumeShapeRefusal({ ...files, mcp: {} }, broker),
-    ).toBe('mcp');
+      hostedApprovalResumeShapeRefusal(
+        { ...files, hooks: activationOwner },
+        broker,
+      ),
+    ).toBe('hooks_activation_owner');
+  });
+
+  const mcpOwner = {
+    broker: {
+      runtimeSessionId: hostedDurableMcpOwnerId(
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: 'session' },
+        undefined,
+      ),
+    },
+  };
+
+  it('admits MCP on a durable or config-scoped owner, and Hooks that borrow it', () => {
+    for (const mcp of [mcpOwner, configOwner])
+      expect(
+        hostedApprovalResumeShapeRefusal({ ...files, mcp }, broker),
+      ).toBeUndefined();
+    expect(
+      hostedApprovalResumeShapeRefusal(
+        { ...files, mcp: mcpOwner, hooks: mcpOwner },
+        broker,
+      ),
+    ).toBeUndefined();
+    // An MCP Session with settings but no configuration rows takes the
+    // latest Hook execution's owner, which may be activation-scoped.
+    expect(
+      hostedApprovalResumeShapeRefusal(
+        { ...files, mcp: activationOwner, hooks: activationOwner },
+        broker,
+      ),
+    ).toBe('mcp_activation_owner');
+    expect(
+      hostedApprovalResumeShapeRefusal(
+        { ...files, mcp: mcpOwner, hooks: activationOwner },
+        broker,
+      ),
+    ).toBe('hooks_activation_owner');
+  });
+
+  it('names the MCP owner before the Hook owner, and both before the tool owner', () => {
+    expect(
+      hostedApprovalResumeShapeRefusal(
+        { hooks: activationOwner, mcp: activationOwner },
+        undefined,
+      ),
+    ).toBe('mcp_activation_owner');
+    expect(
+      hostedApprovalResumeShapeRefusal({ hooks: activationOwner }, undefined),
+    ).toBe('hooks_activation_owner');
   });
 
   it('refuses a Session with no tool owner to resume through', () => {

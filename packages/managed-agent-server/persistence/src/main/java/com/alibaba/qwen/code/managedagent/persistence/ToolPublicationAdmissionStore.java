@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
@@ -90,7 +91,7 @@ public final class ToolPublicationAdmissionStore {
     }
 
     public JsonNode commitReceipt(JsonNode key, String publicationId, String writerToken,
-            CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            CommitTransactionRequest request, RuntimeLifecycleAuthority authority) {
         require(request != null && text(key, "workspaceId").equals(request.workspaceId()),
                 "Receipt Workspace conflicts");
         String scope = scope(key);

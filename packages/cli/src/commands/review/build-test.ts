@@ -38,6 +38,7 @@
 //     never file "the build timed out" as a Critical against a PR.
 
 import type { CommandModule } from 'yargs';
+import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -51,29 +52,42 @@ import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   boxedRunLeftContainer,
+  closeGuestSessionSync,
   containerCommand,
   containerCommandEnv,
   containerName,
   containerPathFor,
+  describeExecutionBoundary,
+  executeViaGuestBridgeSync,
+  guestCommandEnv,
   handOffRefused,
-  killContainer,
-  sandboxPolicy,
   mountRootFor,
+  reapContainer,
+  reapVmWorker,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeIsRootless,
   runtimeClientEnv,
+  sandboxPolicy,
   sandboxVerdict,
+  trustInputFromPlan,
   type CommandKind,
-  type SandboxPolicy,
   type ContainerRuntime,
+  type ReviewExecutionBoundary,
+  type ReviewTeardownStatus,
+  type ReviewTrustInput,
+  type SandboxPolicy,
 } from './lib/sandboxed-exec.js';
 import {
   DEFAULT_COMMAND_TIMEOUT_S,
   DEFAULT_WHOLE_CALL_BUDGET_S,
 } from './lib/build-budget.js';
 import { failingFilesOf } from './lib/failing-files.js';
-import { npmToolchainAdapter, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
+import {
+  lockfileInstaller,
+  npmToolchainAdapter,
+  TEST_COMMAND_RE,
+} from './lib/npm-toolchain.js';
 import {
   selectToolchainAdapter,
   type ReviewToolchainAdapter,
@@ -154,6 +168,8 @@ export interface CommandResult {
    * a full deadline in the next call.
    */
   clamped?: boolean;
+  /** Verified container teardown status when a boxed run was interrupted or timed out. */
+  teardownStatus?: ReviewTeardownStatus;
 }
 
 export interface BuildTestReport {
@@ -284,6 +300,8 @@ export interface BuildTestReport {
     /** The plan file's mtimeMs, rounded — the per-round discriminator. */
     plan?: number;
   };
+  /** Structured execution boundary metadata (trust class, backend, escalations, teardown). */
+  executionBoundary?: ReviewExecutionBoundary;
 }
 
 /** Output kept per command: the head and tail, which is where a failure names itself. */
@@ -619,13 +637,14 @@ function containerised(
   cwd: string,
   kind: CommandKind,
   heapMb: number | undefined,
+  trustContext?: ReviewTrustInput,
 ): {
   file: string;
   args: string[];
   name: string;
   runtime: ContainerRuntime;
 } | null {
-  const verdict = sandboxVerdict();
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
   if (verdict.kind !== 'container') return null;
   const tmpDir = mountRootFor(cwd);
   if (tmpDir === null) return null;
@@ -675,11 +694,24 @@ function containerised(
   };
 }
 
+export interface MicrovmBuildSession {
+  sessionId: string;
+  socketPath: string;
+  initialized: boolean;
+  installed: boolean;
+  /** Whether the session-bound close frame was acknowledged intact. */
+  closeStatus?: 'clean' | 'partial' | 'failed';
+  /** Why cleanup could not be verified (e.g. guest peer protocol skew). */
+  closeReason?: string;
+}
+
 export function run(
   command: string,
   cwd: string,
   timeoutMs: number,
   kind: CommandKind = 'test',
+  trustContext?: ReviewTrustInput,
+  vmSession?: MicrovmBuildSession,
 ): CommandResult {
   const started = Date.now();
   // spawnSync validates `timeout` as an unsigned integer: the adapters'
@@ -696,7 +728,86 @@ export function run(
   // because `npm ci` runs `prepare`, which is the whole-project build on many
   // repos.
   const heapMb = kind === 'test' ? undefined : declaredBuildHeapMb(cwd);
-  const boxed = containerised(command, cwd, kind, heapMb);
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
+  if (verdict.kind === 'microvm') {
+    const guestEnv = guestCommandEnv(kind, heapMb);
+    const useReuse = Boolean(vmSession?.initialized);
+    const bridgeResult = executeViaGuestBridgeSync(verdict.socketPath, {
+      command,
+      kind,
+      timeoutMs: deadlineMs,
+      env: guestEnv,
+      ...(useReuse ? {} : { workspaceDir: cwd }),
+      ...(vmSession
+        ? {
+            workspaceSessionId: vmSession.sessionId,
+            workspaceMode: useReuse ? 'reuse' : 'replace',
+          }
+        : {}),
+    });
+    let markerFault = false;
+    if (vmSession && !bridgeResult.timedOut && !bridgeResult.protocolError) {
+      vmSession.initialized = true;
+      if (kind === 'install') {
+        // Verify the installer's real completeness marker inside the guest
+        // session (never on the host worktree, which is not mounted RW).
+        const marker =
+          lockfileInstaller(cwd) === 'pnpm'
+            ? '.modules.yaml'
+            : '.package-lock.json';
+        const markerCheck = executeViaGuestBridgeSync(verdict.socketPath, {
+          command: `test -f node_modules/${marker}`,
+          kind: 'test',
+          timeoutMs: Math.min(5_000, deadlineMs),
+          env: guestCommandEnv('test'),
+          workspaceSessionId: vmSession.sessionId,
+          workspaceMode: 'reuse',
+        });
+        markerFault =
+          markerCheck.timedOut || Boolean(markerCheck.protocolError);
+        vmSession.installed =
+          markerCheck.ok &&
+          !markerCheck.timedOut &&
+          !markerCheck.protocolError &&
+          markerCheck.exitCode === 0;
+      }
+    }
+    let teardownStatus: ReviewTeardownStatus | undefined;
+    if (bridgeResult.timedOut || bridgeResult.protocolError || markerFault) {
+      teardownStatus = verdict.workerPidFile
+        ? reapVmWorker({
+            pidFile: verdict.workerPidFile,
+            expectedExeTokens: [verdict.backend],
+          }).status
+        : 'partial';
+    }
+    const raw =
+      `${bridgeResult.stdout}${bridgeResult.stderr}` +
+      (bridgeResult.protocolError
+        ? `${bridgeResult.stdout || bridgeResult.stderr ? '\n' : ''}[microvm-bridge ${verdict.backend}] ${bridgeResult.protocolError}\n`
+        : '');
+    const failingFiles = failingFilesOf(raw, cwd);
+    const heapExhausted = bridgeResult.exitCode !== 0 && heapBannerIn(raw);
+    const spawnError = bridgeResult.timedOut
+      ? undefined
+      : bridgeResult.protocolError
+        ? 'EPROTO'
+        : undefined;
+    return {
+      command,
+      exitCode: bridgeResult.protocolError ? null : bridgeResult.exitCode,
+      seconds: Math.round((Date.now() - started) / 1000),
+      timedOut: bridgeResult.timedOut,
+      output: trimOutput(raw),
+      deadlineMs,
+      ...(failingFiles.length > 0 ? { failingFiles } : {}),
+      ...(heapExhausted ? { heapExhausted } : {}),
+      ...(bridgeResult.signal ? { signal: bridgeResult.signal } : {}),
+      ...(spawnError ? { spawnError } : {}),
+      ...(teardownStatus !== undefined ? { teardownStatus } : {}),
+    };
+  }
+  const boxed = containerised(command, cwd, kind, heapMb, trustContext);
   const r = boxed
     ? spawnSync(boxed.file, boxed.args, {
         cwd,
@@ -740,11 +851,12 @@ export function run(
           env: directRunEnv(cwd, heapMb),
         },
       );
+  let teardownStatus: ReviewTeardownStatus | undefined;
   if (boxed && boxedRunLeftContainer(r.status)) {
     // The deadline killed the CLIENT; the container outlives it — see the
-    // `--name` comment in `containerCommand`. Reach the daemon instead, then
-    // report the timeout exactly as before.
-    killContainer(boxed.runtime, boxed.name);
+    // `--name` comment in `containerCommand`. Reach the daemon and verify the
+    // container stopped, then record the teardown result.
+    teardownStatus = reapContainer(boxed.runtime, boxed.name).status;
   }
   // `spawnSync` sets `error.code === 'ETIMEDOUT'` when the deadline fired — that is
   // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
@@ -774,6 +886,7 @@ export function run(
     ...(heapExhausted ? { heapExhausted } : {}),
     ...(signal ? { signal } : {}),
     ...(spawnError ? { spawnError } : {}),
+    ...(teardownStatus !== undefined ? { teardownStatus } : {}),
   };
 }
 
@@ -1110,7 +1223,11 @@ function refusedReport(why: string): BuildTestReport {
  * one at a time in a function with several. There is exactly one place a
  * report can reach a caller, so the conversion belongs there.
  */
-function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
+function runBuildTestUnguarded(
+  args: BuildTestArgs,
+  trustContext: ReviewTrustInput | undefined = trustInputFromPlan(args.plan),
+  vmSession?: MicrovmBuildSession,
+): BuildTestReport {
   // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
   // rejecting it; NaN defeats every budget-floor comparison and reaches
   // spawnSync as an invalid deadline — ERR_OUT_OF_RANGE with no report.
@@ -1127,6 +1244,10 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
   }
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
+  // `trustContext` is passed in from `runBuildTest`, which read it BEFORE this
+  // function executes anything. The plan lives under the container-visible
+  // temp mount, so re-reading it after the build would let a reviewed command
+  // rewrite its own trust report.
   const runIdentity: {
     sha?: string;
     root: string;
@@ -1225,6 +1346,12 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
       );
     }
   }
+  const initialVerdict = sandboxVerdict(
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
   const runArgs = {
     root,
     changedFiles,
@@ -1234,16 +1361,26 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
     buildOnly: args.buildOnly,
     budget: args.budget,
     previous,
-    exec: args.exec ?? run,
+    ...(vmSession ? { installComplete: () => vmSession.installed } : {}),
+    exec:
+      args.exec ??
+      ((cmd: string, cwd: string, timeoutMs: number, kind?: CommandKind) =>
+        run(cmd, cwd, timeoutMs, kind, trustContext, vmSession)),
   };
   // BEFORE anything is executed or handed off. Under `review.sandbox: required`
-  // with no container runtime answering, this phase must produce no build/test
-  // evidence rather than produce it by running the reviewed repository's code
-  // unsandboxed. It sits here and not at the spawn because one route never
-  // reaches a spawn at all: a repo this adapter cannot scope is handed to the
-  // AGENT's own shell (`unsupportedReport`), which would otherwise run the
-  // install and the suite with nothing consulted.
-  const refusal = refuseUnsandboxedPhase(root);
+  // or `tiered` with no eligible runtime answering, this phase must produce no
+  // build/test evidence rather than produce it by running the reviewed
+  // repository's code unsandboxed. It sits here and not at the spawn because
+  // one route never reaches a spawn at all: a repo this adapter cannot scope is
+  // handed to the AGENT's own shell (`unsupportedReport`), which would
+  // otherwise run the install and the suite with nothing consulted.
+  const refusal = refuseUnsandboxedPhase(
+    root,
+    initialVerdict,
+    undefined,
+    undefined,
+    trustContext,
+  );
   if (refusal && args.resume) {
     // THROW on a continuation, never return. The handler writes whatever this
     // returns to `--out`, which on a resume is the very report the call was
@@ -1332,7 +1469,18 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
         'and give each command a deadline it can actually meet.',
     };
   }
-  return { ...adapter.run(runArgs), run: runIdentity };
+  try {
+    return { ...adapter.run(runArgs), run: runIdentity };
+  } finally {
+    if (vmSession?.initialized) {
+      const closed = closeGuestSessionSync(
+        vmSession.socketPath,
+        vmSession.sessionId,
+      );
+      vmSession.closeStatus = closed.ok ? 'clean' : 'partial';
+      vmSession.closeReason = closed.reason;
+    }
+  }
 }
 
 export const buildTestCommand: CommandModule = {
@@ -1459,13 +1607,38 @@ export function resumeWouldDestroyReport(
   return resume && handOffRefused(report.toolchain, policy);
 }
 
+function aggregateTeardownStatus(
+  report: BuildTestReport,
+  closeStatus?: 'clean' | 'partial' | 'failed',
+): ReviewTeardownStatus {
+  const cmds = [
+    ...(report.install ? [report.install] : []),
+    ...report.build,
+    ...report.test,
+  ];
+  const statuses = [
+    ...cmds
+      .map((c) => c.teardownStatus)
+      .filter((s): s is ReviewTeardownStatus => s !== undefined),
+    ...(closeStatus !== undefined ? [closeStatus] : []),
+  ];
+  if (statuses.includes('failed')) return 'failed';
+  if (statuses.includes('partial')) return 'partial';
+  if (statuses.includes('clean')) return 'clean';
+  return 'not-applicable';
+}
+
 export function applyHandOffPolicy(
   report: BuildTestReport,
   policy: SandboxPolicy = sandboxPolicy(),
 ): BuildTestReport {
+  const trigger =
+    policy === 'required' || policy === 'tiered'
+      ? `review.sandbox is "${policy}"`
+      : 'QWEN_REVIEW_FORCE_HARDWARE=1';
   return handOffRefused(report.toolchain, policy)
     ? refusedReport(
-        `review.sandbox is "required" and no toolchain adapter could scope ` +
+        `${trigger} and no toolchain adapter could scope ` +
           `this repository, so the only remaining route was to hand its ` +
           `install, build and test commands to an agent shell this policy ` +
           `cannot contain`,
@@ -1474,7 +1647,18 @@ export function applyHandOffPolicy(
 }
 
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
-  const report = runBuildTestUnguarded(args);
+  const trustContext = trustInputFromPlan(args.plan);
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
+  const vmSession: MicrovmBuildSession | undefined =
+    !args.exec && verdict.kind === 'microvm'
+      ? {
+          sessionId: `bt-${randomBytes(6).toString('hex')}`,
+          socketPath: verdict.socketPath,
+          initialized: false,
+          installed: false,
+        }
+      : undefined;
+  const report = runBuildTestUnguarded(args, trustContext, vmSession);
   // The THIRD continuation exit, and the one the invariant had not reached.
   // "A continuation must never answer with a FRESH report" is enforced by a
   // throw at the refusal gate and at `!adapter`; this conversion was added
@@ -1491,11 +1675,41 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   if (resumeWouldDestroyReport(report, args.resume === true)) {
     throw new Error(
       `refusing to continue this run: this repository's toolchain cannot be ` +
-        `scoped, and review.sandbox is now "required", so continuing would ` +
+        `scoped, and review.sandbox is now "${sandboxPolicy()}", so continuing would ` +
         `replace the report at ${args.out} with a refusal that records no run ` +
         `identity — killing the resume chain. Re-run without --resume under ` +
         `the new policy.`,
     );
   }
-  return applyHandOffPolicy(report);
+  const finalReport = applyHandOffPolicy(report);
+  const teardownStatus = aggregateTeardownStatus(
+    finalReport,
+    vmSession?.closeStatus,
+  );
+  const mountable = mountRootFor(resolve(args.worktree)) !== null;
+  const effectiveBackend =
+    finalReport.toolchain === 'refused'
+      ? 'refused'
+      : verdict.kind === 'microvm'
+        ? verdict.backend
+        : verdict.kind === 'container' && mountable
+          ? 'container'
+          : 'direct';
+  const boundaryNote =
+    teardownStatus === 'failed'
+      ? verdict.kind === 'microvm'
+        ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
+        : 'container teardown verification failed — a timed-out container may still be running'
+      : teardownStatus === 'partial' && verdict.kind === 'microvm'
+        ? `microVM (${verdict.backend}) teardown or guest session cleanup could not be fully verified${vmSession?.closeReason ? `: ${vmSession.closeReason}` : ''}`
+        : verdict.kind === 'container' && !mountable
+          ? 'tree is not under a review temp dir, so commands ran directly rather than in a container'
+          : undefined;
+  const executionBoundary = describeExecutionBoundary({
+    backend: effectiveBackend,
+    trustContext,
+    teardownStatus,
+    ...(boundaryNote !== undefined ? { note: boundaryNote } : {}),
+  });
+  return { ...finalReport, executionBoundary };
 }

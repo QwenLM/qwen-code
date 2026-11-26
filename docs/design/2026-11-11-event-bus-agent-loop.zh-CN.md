@@ -2,7 +2,7 @@
 
 [English](2026-11-11-event-bus-agent-loop.md) | [简体中文](2026-11-11-event-bus-agent-loop.zh-CN.md)
 
-- **状态**：PR 1–3 已合入（#16935 原语、#16938 handler、#16949 流式评估）；PR 4（headless opt-in 设置）已在 #16994 合入；从统一 loop 的 PR 5c 起，同一设置下 AgentCore 的轮次也跑在内核上。headless 现在默认使用内核。ACP、两个 TUI 和 AgentCore 默认使用共享 loop 的过程式路径。
+- **状态**：PR 1–3 已合入（#16935 原语、#16938 handler、#16949 流式评估）；PR 4（headless opt-in 设置）已在 #16994 合入；从统一 loop 的 PR 5c 起，同一设置下 AgentCore 的轮次也跑在内核上。headless 和 Ink TUI 现在默认使用内核。ACP、OpenTUI 和 AgentCore 默认使用共享 loop 的过程式路径。
 - **日期**：2026-11-11，基于 `origin/main` `da270e434957`。
 - **关联**：
   - [Unified agent loop](2026-10-23-unified-agent-loop.zh-CN.md) —— 本设计对其做内部架构升级的已批准设计；跟踪 issue #15327，#15343 批准，headless 已在 #15369 合入，ACP 模型轮已在 #15509 合入；
@@ -166,7 +166,7 @@ signal 中止时，适配器发布一次 `loop.cancelled`。Conversation 在独�
 3. **PR 3 —— 流式派发评估（可选，独立门控）。** preview 在流仍在运行时执行 `tool_use` 块。main 在轮结束后跑批次，且审批按批排序；流式派发改变审批时机与输出交错。此切片先写下 parity 差异并取得明确决定；架构移植本身不依赖它。
 4. **PR 4 —— headless opt-in。** 新增 `experimental.eventBusAgentLoop` 设置（环境变量覆盖 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`，由 `Config.isEventBusAgentLoopEnabled(surface)` 读取），让共享循环路径传入 `useEventBus`。该环境变量与 unified 一样按入口强制开关——`1` 开、`0` 关、或 `surface=0/1` 列表。headless 最先接线；AgentCore 和 OpenTUI 在统一循环迁移的后续阶段接入。该标志只在完整共享循环运行处（`runAgentLoop`）生效；仍直接使用 `runModelRound` 的入口不受影响。适配器经 `debugLogger` 记录一条 `[EVENT_BUS]` 执行标记，因此开启 `QWEN_DEBUG_LOG_FILE` 后，一次 run 走哪条路径可由调试日志证明而非假设。在该阶段，内核需要主动开启。按当前共享 loop 的默认值，将此设置设为 `true` 会让 headless、ACP、两个 TUI 和 AgentCore 使用内核。两个开关的按入口解析见 `2026-11-12-loop-rollout-switches.md`（#17045 B 块）。
 5. **取消与有界收尾**（#17045 K 块）。`loop.cancelled` 和*取消*一节所述的收尾上限；`loop.output` 从词汇表中删除。
-6. **内核的默认值**（#17045 第 4 步）。每个入口各自把内核改为默认开启，即翻转它在 `EVENT_BUS_SURFACE_DEFAULTS` 中的一项，前提是它的共享 loop 已默认开启，并且：两个设置都开启的 nightly 组自该入口的第 3 步以及第 5 项合入以来连续通过 7 晚；对 AgentCore 和 ACP，Managed 任务在两个设置都开启时通过。在过程式路径仍保留期间，`QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=<surface>=0` 可以让一个入口切回。headless 是第一个默认开启内核的入口。
+6. **内核的默认值**（#17045 第 4 步）。每个入口各自把内核改为默认开启，即翻转它在 `EVENT_BUS_SURFACE_DEFAULTS` 中的一项，前提是它的共享 loop 已默认开启，并且：两个设置都开启的 nightly 组自该入口的第 3 步以及第 5 项合入以来连续通过 7 晚；对 AgentCore 和 ACP，Managed 任务在两个设置都开启时通过。在过程式路径仍保留期间，`QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=<surface>=0` 可以让一个入口切回。headless 是第一个默认开启内核的入口，Ink TUI 是第二个。
 7. **后续 —— surface 收敛**继续在 unified-agent-loop 计划下进行（TUI、OpenTUI、AgentCore、speculation、Hosted）。总线让循环级挂接（hooks、Mods、保护、录制）成为单点，这正是该计划的既定目标；这里不排任何 surface 工作。
 
 ## 测试

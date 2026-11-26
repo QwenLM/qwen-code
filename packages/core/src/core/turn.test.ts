@@ -363,6 +363,43 @@ describe('Turn', () => {
       );
     });
 
+    it('forwards retractToolCallsOnRetry to the chat send options', async () => {
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      await run([textChunk('Hello')]);
+
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        'test-model',
+        expect.objectContaining({
+          config: { abortSignal: expect.any(AbortSignal) },
+        }),
+        'prompt-id-1',
+        undefined,
+        {
+          retractToolCallsOnRetry: true,
+        },
+      );
+    });
+
     it('forwards isExplicitRetry and isSessionTurn to the chat send options', async () => {
       // client.ts passes the explicit-Retry flag as Turn's 10th positional
       // argument and ledger membership as the 11th; pin both slots so a

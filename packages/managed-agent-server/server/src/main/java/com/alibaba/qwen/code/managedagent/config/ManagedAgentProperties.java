@@ -1,8 +1,11 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import jakarta.annotation.PostConstruct;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -41,7 +44,7 @@ import java.util.regex.Pattern;
 @Setter
 public class ManagedAgentProperties
         implements EnvironmentAware,
-                com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings {
+                ManagedAgentSettings {
     private static final Logger LOG = LoggerFactory.getLogger(
             ManagedAgentProperties.class);
 
@@ -127,8 +130,8 @@ public class ManagedAgentProperties
         return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
                 && "session".equals(runtimeBroker.getBoundSessionIsolationClass())
                 && (runtimeBroker.isDurableLocalProcess()
-                        && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
-                || com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(runtimeBroker.getProvisioner())
+                        && RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                || RuntimeProviderKinds.SSH_PROCESS.equals(runtimeBroker.getProvisioner())
                         && !runtimeBroker.getSsh().getNodes().isEmpty()
                         && "session".equals(runtimeBroker.getIsolationClass()));
     }
@@ -140,7 +143,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class ModelOption
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .ModelOption {
         private String modelId;
         private String label;
@@ -317,7 +320,7 @@ public class ManagedAgentProperties
         if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceId())) {
             sessionStore.setWorkspaceId(runtimeBroker.getWorkspaceId());
         } else if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceCwd())
-                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(provisioner)) {
+                && RuntimeProviderKinds.LOCAL_PROCESS.equals(provisioner)) {
             sessionStore.setWorkspaceId(EmbeddedRuntimeBroker.workspaceId(runtimeBroker));
         }
     }
@@ -402,7 +405,7 @@ public class ManagedAgentProperties
                     + " a suffix-less number binds as seconds, so write 300s rather than 300000");
         }
         String mode = harness.getApprovalMode();
-        boolean sshFiles = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS
+        boolean sshFiles = RuntimeProviderKinds.SSH_PROCESS
                 .equals(runtimeBroker.getProvisioner())
                 && !runtimeBroker.getSsh().getNodes().isEmpty()
                 && "session".equals(runtimeBroker.getIsolationClass())
@@ -419,7 +422,7 @@ public class ManagedAgentProperties
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
                         || !sshFiles && !isExternalWorkspaceFilesConfigured()
-                        && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                        && (!RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
                                 && runtimeBroker.getWorkspaceCreationRoot().isBlank()
@@ -439,7 +442,7 @@ public class ManagedAgentProperties
             throw new IllegalStateException("Bound-Session isolation must be session or workspace");
         }
         if ("workspace".equals(boundSessionIsolation)
-                && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                && (!RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !runtimeBroker.isDurableLocalProcess()
                         || runtimeBroker.isChildWorkspacesEnabled())) {
             throw new IllegalStateException("Workspace-isolated bound Sessions require a durable"
@@ -504,7 +507,7 @@ public class ManagedAgentProperties
             // A merge runs once the child Session is closed (#13753 I2), and
             // only a durable local-process Broker can close one.
             if (!runtimeBroker.isEnabled()
-                    || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                    || !RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                     || !"session".equals(runtimeBroker.getIsolationClass())
                     || !runtimeBroker.isDurableLocalProcess()
                     || (runtimeBroker.getWorkspaceMounts().isEmpty()
@@ -540,7 +543,7 @@ public class ManagedAgentProperties
             return false;
         }
         try {
-            new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
+            new RuntimeProviderRegistry()
                     .require(runtimeBroker.getProvisioner())
                     .validate(this);
             return harness.getApprovalMode() != null
@@ -552,7 +555,7 @@ public class ManagedAgentProperties
 
     public void validateRuntimeProvider() {
         if (runtimeBroker.isEnabled()) {
-            new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
+            new RuntimeProviderRegistry()
                     .validateSelected(this);
         }
     }
@@ -683,7 +686,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class Harness
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Harness {
+            implements ManagedAgentSettings.Harness {
         private final HarnessPool pool = new HarnessPool();
 
         private boolean enabled;
@@ -721,7 +724,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class HarnessPool
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .HarnessPool {
         private boolean enabled;
         private String discovery = "static";
@@ -735,7 +738,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class HarnessInstance
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .HarnessInstance {
         private String instanceId = "";
         private String baseUrl = "";
@@ -744,7 +747,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class SessionStore
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .SessionStore {
         private boolean enabled;
         private String baseUrl = "";
@@ -758,7 +761,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class ClientFiles
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .ClientFiles {
         private boolean enabled;
         private int queueDepth = 32;
@@ -805,7 +808,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class ToolPublication
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .ToolPublication {
         private boolean enabled;
         private String ossEndpoint = "";
@@ -833,7 +836,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class SessionResources
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .SessionResources {
         private boolean enabled;
         private String ossKeyPrefix = "session-resources/";
@@ -854,7 +857,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class ManagedExtensions
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .ManagedExtensions {
         private boolean enabled;
         private String mode = "linux-cgroup";
@@ -865,7 +868,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class Extensions
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Extensions {
+            implements ManagedAgentSettings.Extensions {
         private boolean enabled;
         private boolean selfServiceEnabled;
         private boolean runtimeSkillImportEnabled;
@@ -878,7 +881,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class Artifacts
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Artifacts {
+            implements ManagedAgentSettings.Artifacts {
         private boolean enabled;
         private boolean publishOriginal;
         private boolean publishPreview;
@@ -893,7 +896,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class Dispatch
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Dispatch {
+            implements ManagedAgentSettings.Dispatch {
         // No typed scan-delay field. The deployed default comes from
         // application.yml (`dispatch.scan-delay: '1s'`); the same
         // "${...scan-delay:1s}" fallback is repeated by four @Scheduled
@@ -918,7 +921,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class Events
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Events {
+            implements ManagedAgentSettings.Events {
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration pollInterval = Duration.ofSeconds(5);
         @DurationUnit(ChronoUnit.SECONDS)
@@ -948,7 +951,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class RuntimeBroker
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .RuntimeBroker {
         // A class of its own, which the configuration metadata, and so the
         // configuration reference, leaves out unless marked nested.
@@ -963,7 +966,7 @@ public class ManagedAgentProperties
         private boolean allowNonLoopback;
         private String token = "";
         private Map<String, String> providerOptions = Map.of();
-        private String provisioner = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS;
+        private String provisioner = RuntimeProviderKinds.LOCAL_PROCESS;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration v3ResultWindow = Duration.ofMinutes(30);
         private String workspaceId = "";
@@ -1017,7 +1020,7 @@ public class ManagedAgentProperties
         @Getter
         @Setter
         public static class Retention
-                implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                implements ManagedAgentSettings
                         .RuntimeBroker.Retention {
             private boolean enabled;
             @DurationUnit(ChronoUnit.DAYS)
@@ -1041,7 +1044,7 @@ public class ManagedAgentProperties
         @Getter
         @Setter
         public static class McpParking
-                implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                implements ManagedAgentSettings
                         .RuntimeBroker.McpParking {
             private boolean enabled;
             @DurationUnit(ChronoUnit.MILLIS)
@@ -1060,7 +1063,7 @@ public class ManagedAgentProperties
         }
 
         public record WorkspaceMount(String tenantId, String storageId, String root)
-                implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                implements ManagedAgentSettings
                         .RuntimeBroker.WorkspaceMount {}
     }
 
@@ -1068,7 +1071,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class Automation
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Automation {
+            implements ManagedAgentSettings.Automation {
         private boolean enabled = true;
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration scanDelay = Duration.ofSeconds(10);
@@ -1087,7 +1090,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class Channels
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Channels {
+            implements ManagedAgentSettings.Channels {
         // No typed scan-delay field. The deployed default comes from
         // application.yml (`channels.scan-delay: '30s'`); the same
         // "${...channels.scan-delay:30s}" fallback drives
@@ -1109,7 +1112,7 @@ public class ManagedAgentProperties
     @Getter
     @Setter
     public static class EventTransport
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+            implements ManagedAgentSettings
                     .EventTransport {
         private boolean enabled;
         // The RocketMQ proxy gRPC endpoint (e.g. "host:8081").

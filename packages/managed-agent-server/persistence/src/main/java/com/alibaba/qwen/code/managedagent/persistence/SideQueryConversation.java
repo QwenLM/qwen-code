@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels.Prefix;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -8,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Objects;
@@ -38,7 +40,7 @@ final class SideQueryConversation {
         }
         try {
             return (ObjectNode) JSON.readTree(rows.getFirst());
-        } catch (java.io.IOException | ClassCastException error) {
+        } catch (IOException | ClassCastException error) {
             throw corrupt();
         }
     }
@@ -98,11 +100,11 @@ final class SideQueryConversation {
                         throw corrupt();
                     }
                     scannedBytes += row.bytes().length;
-                    if (scannedBytes > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.MAX_MODEL_REQUEST_BYTES) {
+                    if (scannedBytes > ManagedSessionStoreModels.MAX_MODEL_REQUEST_BYTES) {
                         throw corrupt();
                     }
                     if (row.revision() != nextRevision++ || !JournalStoreRows.sha256(row.bytes()).equals(row.digest())
-                            || !java.util.Objects.equals(previous, row.previous())) {
+                            || !Objects.equals(previous, row.previous())) {
                         throw corrupt();
                     }
                     previous = row.commit();
@@ -110,7 +112,7 @@ final class SideQueryConversation {
                         JsonNode event;
                         try {
                             event = JSON.readTree(line);
-                        } catch (java.io.IOException error) {
+                        } catch (IOException error) {
                             throw corrupt();
                         }
                         if (event == null) {
@@ -143,7 +145,7 @@ final class SideQueryConversation {
                     after = row.revision();
                 }
             }
-            if (!java.util.Objects.equals(previous, digest)) {
+            if (!Objects.equals(previous, digest)) {
                 throw corrupt();
             }
             state.put("journalRevision", revision);
