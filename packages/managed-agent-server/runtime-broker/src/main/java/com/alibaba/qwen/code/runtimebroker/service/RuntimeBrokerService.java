@@ -301,8 +301,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 executionRepository, provisioner, transport, bindingProvisioning, executionRecovery,
                 executionDispatcher, sessionRelease, this.brokerOwnerId, this.operationLeaseDuration,
                 clock, closed, this::newBindingRenewal);
-        this.harnessLifecycle = new RuntimeHarnessLifecycle(
-                provisioner, bindingRepository, drainCoordinator, closed);
+        this.harnessLifecycle = new RuntimeHarnessLifecycle(provisioner,
+                bindingRepository, drainCoordinator, closed, this::resolveScope, this::provisionRequest);
         this.observationCoordinator = new RuntimeObservationCoordinator(sessionResolver, bindingRegistry,
                 bindingProvisioning, bindingRepository, sessionRepository, provisioner, transport,
                 executionRecovery, this.brokerOwnerId, clock, closed);
@@ -377,17 +377,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     /** 只读查询可信会话对应的当前 Workspace 绑定，不分配也不预热运行时。 */
     public CompletionStage<RuntimeBindingRecord> findBindingForHarnessSession(
             String tenantId, String harnessSessionId) {
-        requireOpen(closed);
-        String harnessId = BrokerValues.requireId(
-                harnessSessionId, "harnessSessionId");
-        return resolveScope(harnessId, false, null).thenApply(scope -> {
-            if (!scope.getTenantId().equals(tenantId)) {
-                throw conflict("runtime_session_conflict",
-                        "Harness Session belongs to another tenant");
-            }
-            return bindingRepository.findLatestForRequest(
-                    provisionRequest(scope, harnessId));
-        });
+        return harnessLifecycle.findBindingForHarnessSession(tenantId, harnessSessionId);
     }
 
     public CompletionStage<RuntimeScope> capabilities(
