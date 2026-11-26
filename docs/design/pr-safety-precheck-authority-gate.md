@@ -276,7 +276,10 @@ onward a dump command is admitted. Widening that bound would trade directly agai
 the latency fix, so it is disclosed and pinned by a boundary test instead. The
 `cat <(…)` restoration is limited to the historical `env` forms; `cat <(printenv)`,
 `cat <(set)`, `cat <(export -p)`, `cat <(declare -x)`, and non-cat commands remain
-admitted. These are coverage gaps, not safety claims.
+admitted. Attached values and option combinations such as `cat <(env -uNAME)`,
+`cat <(env --unset=NAME)`, `cat <(env -0 -u NAME)`, and `cat <(env -u A -u B)`
+are also admitted; the helper recognizes only the single separated option forms
+listed above. These are coverage gaps, not safety claims.
 
 ## Constraints
 
