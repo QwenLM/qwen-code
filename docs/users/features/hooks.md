@@ -1862,7 +1862,7 @@ sys.exit(0)
 
 ### Example 4: A Repeated-Call Guard
 
-Qwen Code does not judge whether the model is looping. This PreToolUse hook reminds the model after the same call three times in a row within a turn and ends the turn at six. A new turn starts a fresh count. The hook skips calls without a `prompt_id`.
+Qwen Code does not judge whether the model is looping. This `PreToolUse` hook reminds the model after three consecutive identical calls in a turn and requests a stop on the sixth. The [shared agent loop](#hook-output-structure) ends the turn after the batch. Legacy loops can continue. The hook keeps a separate count for each `prompt_id` and skips calls that lack one.
 
 **repeat_guard.py**
 
@@ -1870,6 +1870,7 @@ Qwen Code does not judge whether the model is looping. This PreToolUse hook remi
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 
@@ -1879,19 +1880,27 @@ if not prompt_id:
     sys.exit(0)
 
 key = hashlib.sha256(
-    json.dumps([prompt_id, data["tool_name"], data["tool_input"]], sort_keys=True).encode()
+    json.dumps([data["tool_name"], data["tool_input"]], sort_keys=True).encode()
 ).hexdigest()
+session_key = hashlib.sha256(data["session_id"].encode()).hexdigest()
 state_path = os.path.join(
-    tempfile.gettempdir(), f"qwen-repeat-guard-{data['session_id']}.json"
+    tempfile.gettempdir(), f"qwen-repeat-guard-{session_key}.sqlite3"
 )
-try:
-    with open(state_path) as f:
-        state = json.load(f)
-except (OSError, ValueError):
-    state = {}
-count = state.get("count", 0) + 1 if state.get("key") == key else 1
-with open(state_path, "w") as f:
-    json.dump({"key": key, "count": count}, f)
+
+with sqlite3.connect(state_path) as db:
+    # Serialize the read and update across concurrent hook processes.
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("""CREATE TABLE IF NOT EXISTS streaks (
+        prompt_id TEXT PRIMARY KEY, call_key TEXT NOT NULL, count INTEGER NOT NULL
+    )""")
+    previous = db.execute(
+        "SELECT call_key, count FROM streaks WHERE prompt_id = ?", (prompt_id,)
+    ).fetchone()
+    count = previous[1] + 1 if previous and previous[0] == key else 1
+    db.execute(
+        "INSERT OR REPLACE INTO streaks (prompt_id, call_key, count) VALUES (?, ?, ?)",
+        (prompt_id, key, count),
+    )
 
 if count >= 6:
     print(json.dumps({
