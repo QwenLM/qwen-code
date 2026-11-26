@@ -2167,6 +2167,8 @@ export default {
   '[{{label}}] failed: {{error}}': '[{{label}}] a échoué : {{error}}',
   'Loading suggestions...': 'Chargement des suggestions...',
   'Open the memory manager.': 'Ouvrir le gestionnaire de mémoire.',
+  'Print the combined memory content the session carries.':
+    'Affiche le contenu mémoire combiné que la session transporte.',
   'Save a durable memory to the memory system.':
     'Enregistrer une mémoire durable dans le système de mémoire.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':

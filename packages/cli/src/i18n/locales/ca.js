@@ -2109,6 +2109,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Obre el gestor de memòria.',
+  'Print the combined memory content the session carries.':
+    'Imprimeix el contingut de memòria combinat que porta la sessió.',
   'Save a durable memory to the memory system.':
     'Desa una memòria duradora al sistema de memòria.',
   'Ask a quick side question without affecting the main conversation':

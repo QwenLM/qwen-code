@@ -2064,6 +2064,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Den Speicher-Manager öffnen.',
+  'Print the combined memory content the session carries.':
+    'Gibt den kombinierten Speicherinhalt aus, den die Sitzung trägt.',
   'Save a durable memory to the memory system.':
     'Eine dauerhafte Erinnerung im Speichersystem speichern.',
   'Open MCP management dialog': 'MCP-Verwaltungsdialog öffnen',

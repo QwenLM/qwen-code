@@ -462,7 +462,6 @@ export const legacyFilenames = [
   'useSessionSearchInput',
   'useSettingsCommand',
   'useShellHistory',
-  'useShowMemoryCommand',
   'useSkillsManagerDialog',
   'useSlashCompletion',
   'useStateAndRef',

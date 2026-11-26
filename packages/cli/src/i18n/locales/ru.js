@@ -2068,6 +2068,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Открыть менеджер памяти.',
+  'Print the combined memory content the session carries.':
+    'Выводит объединённое содержимое памяти, которое несёт сессия.',
   'Save a durable memory to the memory system.':
     'Сохранить долгосрочную память в системе памяти.',
   Tools: 'Инструменты',
