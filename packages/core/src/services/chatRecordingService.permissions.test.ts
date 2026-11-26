@@ -181,6 +181,134 @@ describe.skipIf(process.platform === 'win32')(
       expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
     });
 
+    it('keeps appending after an oversized first record that merely names the owner marker', async () => {
+      const oversized = JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text: `session_execution_engine and a literal \\u005f escape ${'y'.repeat(1100 * 1024)}`,
+            },
+          ],
+        },
+      });
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, `${oversized}\n`, { mode: 0o600 });
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'next' }] },
+        }),
+      ).resolves.toBeUndefined();
+
+      const lines = fs
+        .readFileSync(transcriptPath, 'utf8')
+        .trimEnd()
+        .split('\n');
+      expect(lines).toHaveLength(2);
+      for (const line of lines) expect(() => JSON.parse(line)).not.toThrow();
+    });
+
+    it('does not treat nested JSON in an oversized message as ownership evidence', async () => {
+      const embedded = JSON.stringify({
+        subtype: 'session_execution_engine',
+        systemPayload: { version: 1, engine: 'managed' },
+      });
+      const oversized = JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: `${embedded} ${'z'.repeat(1100 * 1024)}` }],
+        },
+      });
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, `${oversized}\n`, { mode: 0o600 });
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'next' }] },
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('refuses an oversized first record whose shape cannot be decided', async () => {
+      // Not a shape this writer produces (its records lead with `type` within
+      // the first few hundred bytes), so the classification cannot rule out an
+      // ownership record: fail closed instead of appending to a transcript of
+      // unknown ownership.
+      const undecidable = `{"text":"${'x'.repeat(1100 * 1024)}`;
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, `${undecidable}\n`, { mode: 0o600 });
+      const original = fs.readFileSync(transcriptPath, 'utf8');
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'must not append',
+        }),
+      ).rejects.toThrow(/ownership could not be verified/);
+
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+    });
+
+    it('still refuses an oversized first record that is an ownership record', async () => {
+      const oversizedOwner = JSON.stringify({
+        uuid: 'owner-record',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-01-01T00:00:00.000Z',
+        type: 'system',
+        provenance: 'system',
+        cwd: projectDir,
+        version: 'test',
+        gitBranch: null,
+        subtype: 'session_execution_engine',
+        systemPayload: { version: 1, engine: 'managed' },
+        padding: 'p'.repeat(1100 * 1024),
+      });
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, `${oversizedOwner}\n`, { mode: 0o600 });
+      const original = fs.readFileSync(transcriptPath, 'utf8');
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'must not append',
+        }),
+      ).rejects.toThrow(/ownership record exceeds the read bound/);
+
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+    });
+
+    it('still refuses an oversized ownership record whose subtype is JSON-escaped', async () => {
+      const oversizedOwner = JSON.stringify({
+        uuid: 'owner-record',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-01-01T00:00:00.000Z',
+        type: 'system',
+        provenance: 'system',
+        cwd: projectDir,
+        version: 'test',
+        gitBranch: null,
+        subtype: 'session_execution_engine',
+        systemPayload: { version: 1, engine: 'managed' },
+        padding: 'p'.repeat(1100 * 1024),
+      }).replace(
+        '"subtype":"session_execution_engine"',
+        '"subtype":"session\\u005fexecution\\u005fengine"',
+      );
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, `${oversizedOwner}\n`, { mode: 0o600 });
+
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'must not append',
+        }),
+      ).rejects.toThrow(/ownership record exceeds the read bound/);
+    });
+
     it('refuses a directory at the transcript path', async () => {
       fs.mkdirSync(transcriptPath, { recursive: true });
 

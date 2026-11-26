@@ -1019,6 +1019,54 @@ describe('Managed Session log recording', () => {
     await restored.closeSessionWriter();
   });
 
+  it('refuses unverifiable ownership before taking the writer lease', async () => {
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    await mkdir(path.dirname(transcriptPath), { recursive: true });
+    const before = `${JSON.stringify({
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'session_execution_engine',
+      cwd: projectDir,
+      version: 'test',
+      systemPayload: { version: 2, engine: 'legacy' },
+    })}\n${JSON.stringify({
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      cwd: projectDir,
+      version: 'test',
+      message: { role: 'user', parts: [{ text: 'existing' }] },
+    })}\n`;
+    await writeFile(transcriptPath, before);
+
+    const config = managedConfig();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow(
+      'ownership could not be verified',
+    );
+    expect(await readFile(transcriptPath, 'utf8')).toBe(before);
+
+    // The failed activation must not leave the lease held: a later writer can
+    // still take it.
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir: runtimeDir,
+      sessionId: SESSION_ID,
+      transcriptPath,
+      processKind: 'acp',
+      qwenVersion: 'test',
+    });
+    await lease.release();
+  });
+
   it('derives navigation turns from the Managed log with the physical builder semantics', async () => {
     const config = await start(managedConfig());
     const recorder = config.getChatRecordingService()!;

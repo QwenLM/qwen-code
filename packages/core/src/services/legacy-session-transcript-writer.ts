@@ -103,6 +103,138 @@ function readFromFd(fd: number, length: number, position: number): Buffer {
   return buffer.subarray(0, offset);
 }
 
+type FirstLineShape = 'owner' | 'ordinary' | 'unknown';
+
+const OWNER_SUBTYPES = new Set([
+  EXECUTION_ENGINE_SUBTYPE,
+  MANAGED_HEADER_SUBTYPE,
+]);
+
+/** Reads a JSON string starting at `start` (its opening quote). */
+function readJsonStringAt(
+  text: string,
+  start: number,
+): { value: string; next: number } | undefined {
+  let escaped = false;
+  for (let i = start + 1; i < text.length; i++) {
+    const char = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char !== '"') continue;
+    try {
+      return {
+        value: JSON.parse(text.slice(start, i + 1)) as string,
+        next: i + 1,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** Returns the index just past a JSON value, or undefined when truncated. */
+function skipJsonValue(text: string, start: number): number | undefined {
+  const first = text[start];
+  if (first === '"') return readJsonStringAt(text, start)?.next;
+  if (first === '{' || first === '[') {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < text.length; i++) {
+      const char = text[i];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (inString) {
+        if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === '{' || char === '[') depth++;
+      else if (char === '}' || char === ']') {
+        depth--;
+        if (depth === 0) return i + 1;
+      }
+    }
+    return undefined;
+  }
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (char === ',' || char === '}' || char === ']' || /\s/.test(char)) {
+      return i;
+    }
+  }
+  return undefined;
+}
+
+function skipJsonWhitespace(text: string, start: number): number {
+  let i = start;
+  while (i < text.length && /\s/.test(text[i])) i++;
+  return i;
+}
+
+/**
+ * Classifies a record whose first line is too large to scan in full.
+ *
+ * Only top-level keys are inspected. Engine-written records serialize `type`
+ * and, for owner records, `subtype` before any large payload (`message` or
+ * `systemPayload`), so the decision fits inside the head window even when the
+ * record body does not. A marker substring inside a message body or a nested
+ * object is never ownership evidence.
+ */
+function classifyTruncatedFirstLine(prefix: string): FirstLineShape {
+  // `\s` consumes a leading byte-order mark as well.
+  let index = skipJsonWhitespace(prefix, 0);
+  if (prefix[index] !== '{') return 'unknown';
+  index = skipJsonWhitespace(prefix, index + 1);
+  while (index < prefix.length) {
+    const char = prefix[index];
+    if (char === '}') return 'ordinary';
+    if (char === ',') {
+      index = skipJsonWhitespace(prefix, index + 1);
+      continue;
+    }
+    if (char !== '"') return 'unknown';
+    const key = readJsonStringAt(prefix, index);
+    if (!key) return 'unknown';
+    index = skipJsonWhitespace(prefix, key.next);
+    if (prefix[index] !== ':') return 'unknown';
+    index = skipJsonWhitespace(prefix, index + 1);
+    if (key.value === 'subtype') {
+      if (prefix[index] !== '"') return 'unknown';
+      const value = readJsonStringAt(prefix, index);
+      if (!value) return 'unknown';
+      return OWNER_SUBTYPES.has(value.value) ? 'owner' : 'ordinary';
+    }
+    if (key.value === 'type') {
+      if (prefix[index] !== '"') return 'unknown';
+      const value = readJsonStringAt(prefix, index);
+      if (!value) return 'unknown';
+      if (value.value !== 'system') return 'ordinary';
+      index = skipJsonWhitespace(prefix, value.next);
+      continue;
+    }
+    if (key.value === 'message' || key.value === 'systemPayload') {
+      // The record's payload starts before any ownership subtype; owner
+      // records serialize `subtype` first.
+      return 'ordinary';
+    }
+    const next = skipJsonValue(prefix, index);
+    if (next === undefined) return 'unknown';
+    index = skipJsonWhitespace(prefix, next);
+  }
+  return 'unknown';
+}
+
 function ownerEvidenceFromFd(
   fd: number,
   stats: BigIntStats,
@@ -139,18 +271,22 @@ function ownerEvidenceFromFd(
       newline < 0
         ? firstLine.toString('utf8')
         : firstLine.subarray(0, newline).toString('utf8');
-    const ownerShaped =
-      completeFirstLine.includes(EXECUTION_ENGINE_SUBTYPE) ||
-      completeFirstLine.includes(MANAGED_HEADER_SUBTYPE) ||
-      completeFirstLine.includes('\\u');
     if (newline < 0) {
-      // The whole first line exceeds even the extended bound. Only an
-      // owner-shaped line is evidence of another engine; an oversized
-      // ordinary legacy record must not block recording.
-      if (ownerShaped) {
+      // The whole first line exceeds even the extended bound. Decide from its
+      // top-level fields: a marker inside a message body or nested object is
+      // not ownership evidence, while an owner record still serializes its
+      // `subtype` before any large payload.
+      const shape = classifyTruncatedFirstLine(completeFirstLine);
+      if (shape === 'owner') {
         throw new SessionExecutionEngineError(
           sessionId,
           'ownership record exceeds the read bound',
+        );
+      }
+      if (shape === 'unknown') {
+        throw new SessionExecutionEngineError(
+          sessionId,
+          'ownership could not be verified',
         );
       }
       return;
