@@ -2659,7 +2659,6 @@ export const AppContainer = (props: AppContainerProps) => {
     retryLastPrompt,
     handleApprovalModeChange,
     activePtyId,
-    loopDetectionConfirmationRequest,
     pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
@@ -4203,7 +4202,6 @@ export const AppContainer = (props: AppContainerProps) => {
       !pendingLlmHistoryItems.some((item) => item.type === 'error') &&
       !shellConfirmationRequest &&
       !confirmationRequest &&
-      !loopDetectionConfirmationRequest &&
       !isPermissionsDialogOpen &&
       settingInputRequests.length === 0 &&
       config.getApprovalMode() !== ApprovalMode.PLAN
@@ -4292,7 +4290,6 @@ export const AppContainer = (props: AppContainerProps) => {
     followupSuggestionsEnabled,
     shellConfirmationRequest,
     confirmationRequest,
-    loopDetectionConfirmationRequest,
     isPermissionsDialogOpen,
     settingInputRequests,
   ]);
@@ -4432,7 +4429,6 @@ export const AppContainer = (props: AppContainerProps) => {
     !!providerUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
-    !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
     isStatusLineDialogOpen ||
@@ -4914,7 +4910,6 @@ export const AppContainer = (props: AppContainerProps) => {
     turnCancelledRef,
     authPending: isAuthDialogOpen || isAuthenticating,
     shellConfirmationPending: !!shellConfirmationRequest,
-    loopDetectionPending: !!loopDetectionConfirmationRequest,
     startupApprovalPending:
       isFolderTrustDialogOpen ||
       isMcpApprovalDialogOpen ||
@@ -5476,7 +5471,6 @@ export const AppContainer = (props: AppContainerProps) => {
       providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
-      loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
       commandCancellationBlocked,
@@ -5629,7 +5623,6 @@ export const AppContainer = (props: AppContainerProps) => {
       providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
-      loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
       commandCancellationBlocked,

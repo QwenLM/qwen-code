@@ -2,6 +2,8 @@
 
 [English](tool-exploration-convergence.md) | [简体中文](tool-exploration-convergence.zh-CN.md)
 
+Superseded by [remove loop detection](2026-11-25-remove-loop-detection.md): the reminder was removed.
+
 ## Problem and scope
 
 Issue #13321 requests an actionable convergence point when diverse discovery calls succeed without advancing a deliverable. The adaptive default tool-call cap permits useful diverse calls past its soft threshold. This proposal adds a reminder at that threshold; it does not add a new halt, infer task intent, force writes, or change permissions. Repeated execution failures and their operator rollout policy in #10887 remain separate.

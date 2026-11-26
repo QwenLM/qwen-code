@@ -290,7 +290,7 @@ public class HarnessPlacementStoreTest {
     }
 
     @Test
-    void cleanSealedSuspensionReleasesPlacementBeforeLeaseExpiry() {
+    void cleanSealedSuspensionCanReplaceAnAssignmentThatNeverAcquiredAWriter() {
         var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
         tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(owner),
                 new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L)));
@@ -324,11 +324,24 @@ public class HarnessPlacementStoreTest {
                 .containsEntry("wake_seal_parked_prompt_id", "prompt-1")
                 .containsEntry("wake_seal_parked_approval_revision", 7L)
                 .containsEntry("gmt_modified", sealedModified);
-        var successor = tx.execute(status -> placements.takeover(TENANT, SESSION, owner, "pod-b", "boot-b"));
-        assertThat(successor.epoch()).isEqualTo(owner.epoch() + 1);
+        var missed = tx.execute(status -> placements.takeover(TENANT, SESSION, owner, "pod-a", "boot-a"));
+        assertThat(missed.epoch()).isEqualTo(owner.epoch() + 1);
+        var successor = tx.execute(status -> placements.takeover(TENANT, SESSION, missed, "pod-b", "boot-b"));
+        assertThat(successor.epoch()).isEqualTo(missed.epoch() + 1);
         assertThat(successor.instanceId()).isEqualTo("pod-b");
+        assertThat(jdbc.queryForMap("SELECT writer_generation, wake_seal_revision, gmt_modified FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, SESSION))
+                .containsEntry("writer_generation", 1L)
+                .containsEntry("wake_seal_revision", 1L)
+                .containsEntry("gmt_modified", sealedModified);
+        var grant = tx.execute(status -> store.acquireWriter(TENANT, SESSION, token(successor),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-b", 60_000L)));
+        assertThat(grant.writerGeneration()).isEqualTo(2);
         assertThat(tx.execute(status -> store.releaseOwnership(TENANT, SESSION, token(owner), request))
                 .equals(release)).isTrue();
+        assertThatThrownBy(() -> tx.execute(status -> placements.takeover(TENANT, SESSION, successor, "pod-c", "boot-c")))
+                .isInstanceOf(ManagedAgentException.class).extracting("code").isEqualTo("harness_owner_still_live");
+        assertThat(placements.get(TENANT, SESSION)).isEqualTo(successor);
     }
 
     @Test

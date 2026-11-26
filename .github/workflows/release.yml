@@ -592,7 +592,9 @@ jobs:
         run: '.release-workflow/.github/scripts/run-release-docker-integration.sh'
 
       - name: 'Remove job-owned release containers'
-        if: "${{ always() && runner.environment == 'self-hosted' }}"
+        # The helper script is checked out by a later step, so a failed build
+        # leaves it absent; skip instead of failing the job with exit 127.
+        if: "${{ always() && runner.environment == 'self-hosted' && hashFiles('.release-workflow/.github/scripts/run-release-docker-integration.sh') != '' }}"
         env:
           RELEASE_CONTAINER_OWNER: '${{ github.run_id }}-${{ github.run_attempt }}-release'
         run: '.release-workflow/.github/scripts/run-release-docker-integration.sh cleanup'

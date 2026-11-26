@@ -26,13 +26,17 @@ import {
   type HostedWorkspaceBrokerOptions,
   HostedWorkspaceBrokerRejection,
 } from '../hosted-workspace-broker.js';
-import { hostedRuntimeSessionId } from '../hosted-workspace-tool-turn.js';
+import {
+  hostedRuntimeSessionId,
+  HostedToolRecoveryRequiredError,
+} from '../hosted-workspace-tool-turn.js';
 import type { HostedSession } from './session-state.js';
 import { unsettledPromptId } from './wake-recovery.js';
 
 export function liftRecoveryBlock(session: HostedSession): void {
   session.blocked = false;
   session.recoveryReason = undefined;
+  session.runtimeRecoveryPromptId = undefined;
   session.recoveryCancelPromptId = undefined;
   session.cleanupBlocked = false;
 }
@@ -51,11 +55,28 @@ export function blockRecovery(
   storeFailure: string | undefined,
 ): void {
   session.blocked = true;
+  session.runtimeRecoveryPromptId = undefined;
   session.recoveryReason =
     storeFailure ??
     (session.managed.authority.writesStopped
       ? session.recoveryReason
       : undefined);
+}
+
+export function blockOnTurnRecovery(
+  session: HostedSession,
+  promptId: string,
+  cause: unknown,
+): void {
+  if (
+    !session.blocked &&
+    cause instanceof HostedToolRecoveryRequiredError &&
+    cause.cause instanceof HostedWorkspaceBrokerRejection &&
+    (cause.cause.code === 'runtime_session_not_found' ||
+      cause.cause.code === 'runtime_reconciliation_required')
+  )
+    session.runtimeRecoveryPromptId = promptId;
+  session.blocked = true;
 }
 
 /**

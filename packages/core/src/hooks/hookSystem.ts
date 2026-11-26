@@ -24,6 +24,7 @@ import type {
   DefaultHookOutput,
   HookPhase,
   FileChangeEvent,
+  UserPromptSource,
 } from './types.js';
 import { createHookOutput, PermissionMode, HookEventName } from './types.js';
 import type {
@@ -385,11 +386,13 @@ export class HookSystem {
     prompt: string,
     signal?: AbortSignal,
     submittedPrompt?: string,
+    source?: UserPromptSource,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
       prompt,
       signal,
       submittedPrompt,
+      source,
     );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
