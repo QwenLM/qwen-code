@@ -11685,10 +11685,21 @@ describe('qwen-triage verify Java toolchain', () => {
       expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
       expect(envValue(sdkJavaWorkflow, name)).toBe(pin);
     }
-    for (const name of ['TEMURIN_VERSION', 'TEMURIN_SHA256', 'TEMURIN_URL']) {
+    for (const name of [
+      'TEMURIN_VERSION',
+      'TEMURIN_SHA256_X64',
+      'TEMURIN_SHA256_AARCH64',
+    ]) {
       const pin = envValue(consumer, name);
       expect(pin).toBeTruthy();
       expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
+    }
+    // The pool advertises both architectures on the same runners, so both
+    // workflows must pick the JDK from the host instead of the label.
+    for (const text of [consumer, mavenRepoProducerWorkflow]) {
+      expect(text).toContain('uname -m');
+      expect(text).toContain("temurin_arch='x64'");
+      expect(text).toContain("temurin_arch='aarch64'");
     }
   });
 
