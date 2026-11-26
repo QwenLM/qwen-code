@@ -76,12 +76,16 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // The schema-version narrowing capture adds a further 8 bytes.
 // Including the merged ChatSurface inputs, local builds and the CI merge tree
 // both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
-// Merged main through 62b0d73b72 plus session scheduled-task UI copy (EN/ZH-CN
-// catalogs + TurnOutputs live status label) measures 2,157,886 renderer JS
-// bytes and 2,434,847 CSS bytes on 2026-11-22 with the same third-party input
-// mix and passing forbidden-input guard. Keep the house margins derived from
-// one measurement: warning = measurement + 713, hard ceiling = measurement + 1,713.
-const MEASURED_DOCUMENT_RUNTIME_BYTES = 2_157_886;
+// Main CI then measured 2,156,327 on a0dced748e (run 45741862667), 2,156,357
+// after #18437, 2,156,880 after #18009 and 2,157,683 after #18140 (build job
+// 139890640548 on run 45814470900), which crossed the old 2,157,286 ceiling.
+// #18140 adds nine sidebar and workspace-hooks keys to the EN and ZH-CN
+// catalogs; the export entry inlines the whole table (see above), so none of
+// that PR's component code reaches the document entry and the forbidden-input
+// guard still passes. Independent same-toolchain A/B builds measured the
+// scheduled-task branch transcript renderer at 2,160,446 bytes locally, so
+// retain the house warning and hard-ceiling margins of 713 and 1,713 bytes.
+const MEASURED_DOCUMENT_RUNTIME_BYTES = 2_160_446;
 const DOCUMENT_RUNTIME_WARNING_BYTES = MEASURED_DOCUMENT_RUNTIME_BYTES + 713;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
@@ -213,8 +217,8 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = MEASURED_DOCUMENT_RUNTIME_BYTES + 713;
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,
 // including the metadata checks: 2,155,023 bytes with ChatSurface merged.
-// The latest measured shared tree re-tracks this ceiling to 2,159,599,
-// which is 1,713 bytes above its 2,157,886-byte measurement, and stays coupled
+// The latest measured shared tree re-tracks this ceiling to 2,162,159,
+// which is 1,713 bytes above its 2,160,446-byte measurement, and stays coupled
 // to the warning threshold instead of becoming an independent literal.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 
