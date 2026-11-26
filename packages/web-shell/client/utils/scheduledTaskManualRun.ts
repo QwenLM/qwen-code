@@ -15,6 +15,7 @@ export type ScheduledTaskRunPrompt = (
   sessionId: string | null,
   workspaceCwd?: string,
   isStale?: () => boolean,
+  beforeDispatch?: () => void | Promise<void>,
 ) => void | Promise<void>;
 
 export interface ScheduledTaskManualRunErrorHandlers {
@@ -102,6 +103,21 @@ export async function runScheduledTaskManually(
         fresh.sessionId ?? null,
         task.workspaceCwd,
         () => !current(),
+        async () => {
+          const candidates = (
+            await actions.listScheduledTasks(task.workspaceId)
+          ).filter(
+            (candidate) =>
+              candidate.id === fresh.id &&
+              (candidate.sessionId ?? null) === (fresh.sessionId ?? null),
+          );
+          if (candidates.length !== 1 || !candidates[0].enabled) {
+            throw new DOMException(
+              t('scheduledTasks.error.runFailed'),
+              'AbortError',
+            );
+          }
+        },
       );
       // Delete can win a replay wait, but an owner switch after admission
       // does not make the already-admitted run unrecordable.

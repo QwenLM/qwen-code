@@ -1600,6 +1600,7 @@ describe('ScheduledTasksDialog run now', () => {
       'sess-9',
       undefined,
       expect.any(Function),
+      expect.any(Function),
     );
   });
 
@@ -1629,6 +1630,7 @@ describe('ScheduledTasksDialog run now', () => {
       'sess-9',
       undefined,
       expect.any(Function),
+      expect.any(Function),
     );
   });
 
@@ -1643,6 +1645,7 @@ describe('ScheduledTasksDialog run now', () => {
       'legacy',
       null,
       undefined,
+      expect.any(Function),
       expect.any(Function),
     );
   });
@@ -1726,6 +1729,7 @@ describe('ScheduledTasksDialog run now', () => {
       'do it',
       'sess-9',
       undefined,
+      expect.any(Function),
       expect.any(Function),
     );
     expect(actions.runScheduledTask).not.toHaveBeenCalled(); // no phantom record
@@ -1870,6 +1874,7 @@ describe('ScheduledTasksDialog run now', () => {
         'survivor prompt',
         'another-session',
         undefined,
+        expect.any(Function),
         expect.any(Function),
       );
       expect(actions.runScheduledTask).toHaveBeenCalledWith(

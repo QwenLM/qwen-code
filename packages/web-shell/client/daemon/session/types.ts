@@ -491,8 +491,8 @@ export interface SendPromptOptions {
   onAdmissionStarted?: () => void;
   /** Caller-generated key used to deduplicate retried prompt admissions. */
   idempotencyKey?: string;
-  /** Revalidates the caller before every HTTP attempt, including client recovery. */
-  beforeDispatch?: (clientId: string | undefined) => void;
+  /** Client-only revalidation, awaited before every HTTP attempt including recovery. */
+  beforeDispatch?: (clientId: string | undefined) => void | Promise<void>;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"

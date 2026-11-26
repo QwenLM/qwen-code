@@ -59641,11 +59641,16 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       return Promise.resolve();
     });
     let stale = false;
+    const beforeTaskDispatch = vi.fn(async () => undefined);
     let settlement!: Promise<unknown>;
     await act(async () => {
-      settlement = run('unbound', null, undefined, () => stale).catch(
-        (error) => error,
-      );
+      settlement = run(
+        'unbound',
+        null,
+        undefined,
+        () => stale,
+        beforeTaskDispatch,
+      ).catch((error) => error);
       await vi.waitFor(() =>
         expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1),
       );
@@ -59656,8 +59661,12 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       onAdmissionStarted: expect.any(Function),
     });
 
+    await expect(callbacks.beforeDispatch()).resolves.toBeUndefined();
+    expect(beforeTaskDispatch).toHaveBeenCalledOnce();
     stale = true;
-    expect(callbacks.beforeDispatch).toThrow(/before prompt admission/);
+    await expect(callbacks.beforeDispatch()).rejects.toThrow(
+      /before prompt admission/,
+    );
     expect(callbacks.onAdmissionStarted).toThrow(/before prompt admission/);
     await expect(settlement).resolves.toEqual(expect.any(Error));
   });
@@ -59698,11 +59707,16 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       rerender({});
     });
     let stale = false;
+    const beforeTaskDispatch = vi.fn(async () => undefined);
     let settlement!: Promise<unknown>;
     act(() => {
-      settlement = run('manual detached', null, undefined, () => stale).catch(
-        (error) => error,
-      );
+      settlement = run(
+        'manual detached',
+        null,
+        undefined,
+        () => stale,
+        beforeTaskDispatch,
+      ).catch((error) => error);
     });
     await act(async () => {
       await vi.waitFor(() => {
@@ -59725,8 +59739,12 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     });
     const beforeDetachedDispatch = sendOptions[0]?.beforeDetachedDispatch;
     expect(beforeDetachedDispatch).toEqual(expect.any(Function));
+    await expect(beforeDetachedDispatch?.()).resolves.toBeUndefined();
+    expect(beforeTaskDispatch).toHaveBeenCalledOnce();
     stale = true;
-    expect(beforeDetachedDispatch).toThrow(/before prompt admission/);
+    await expect(beforeDetachedDispatch?.()).rejects.toThrow(
+      /before prompt admission/,
+    );
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     await expect(settlement).resolves.toEqual(expect.any(Error));
   });

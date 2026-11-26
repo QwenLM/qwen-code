@@ -769,16 +769,19 @@ export class DaemonSessionClient {
    * `turn_complete` / `turn_error` SSE event. Callers that need final turn
    * results should use `prompt()` or manage SSE terminal events themselves.
    * `beforeDispatch` can reject a stale caller before each HTTP attempt,
-   * including the retry after client registration recovery.
+   * including the retry after client registration recovery. An asynchronous
+   * caller revalidation must settle before the request is sent.
    */
   async submitPrompt(
     req: PromptRequest,
     signal?: AbortSignal,
-    beforeDispatch?: (clientId: string | undefined) => void,
+    beforeDispatch?: (clientId: string | undefined) => void | Promise<void>,
   ): Promise<NonBlockingPromptAccepted> {
-    const accepted = await this.withClientIdSelfHeal(() => {
+    const accepted = await this.withClientIdSelfHeal(async () => {
       signal?.throwIfAborted();
-      beforeDispatch?.(this.clientId);
+      if (beforeDispatch) {
+        await beforeDispatch(this.clientId);
+      }
       return this.client.promptNonBlocking(
         this.sessionId,
         req,

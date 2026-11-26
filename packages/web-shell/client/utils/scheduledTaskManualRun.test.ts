@@ -174,6 +174,7 @@ describe('runScheduledTaskManually owner matching', () => {
         'session-a',
         '/workspace/a',
         expect.any(Function),
+        expect.any(Function),
       );
       expect(onError).not.toHaveBeenCalled();
     },
@@ -225,12 +226,81 @@ describe('runScheduledTaskManually owner matching', () => {
       'session-a',
       '/workspace/a',
       expect.any(Function),
+      expect.any(Function),
     );
     expect(actions.runScheduledTask).toHaveBeenCalledWith(
       'shared-id',
       'ws-a',
       'session-a',
     );
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { crossClientDeleted: true, expectedRecordings: 0 },
+    { crossClientDeleted: false, expectedRecordings: 1 },
+  ])(
+    'revalidates a recurring task before dispatch (crossClientDeleted=$crossClientDeleted)',
+    async ({ crossClientDeleted, expectedRecordings }) => {
+      const task = makeTask();
+      const actions = {
+        listScheduledTasks: vi
+          .fn()
+          .mockResolvedValueOnce([task])
+          .mockResolvedValueOnce(crossClientDeleted ? [] : [task]),
+        runScheduledTask: vi.fn().mockResolvedValue(task),
+        assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+      };
+      const onRunPrompt = vi.fn(async (...args: unknown[]) => {
+        const beforeDispatch = args[4] as
+          | (() => void | Promise<void>)
+          | undefined;
+        await beforeDispatch?.();
+      });
+      const onError = vi.fn();
+
+      await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+        reload: vi.fn(),
+        onError,
+        isStale: () => false,
+      });
+
+      expect(actions.listScheduledTasks).toHaveBeenCalledTimes(2);
+      expect(actions.listScheduledTasks).toHaveBeenNthCalledWith(2, 'ws-a');
+      expect(actions.runScheduledTask).toHaveBeenCalledTimes(
+        expectedRecordings,
+      );
+      if (crossClientDeleted) {
+        expect(onError).toHaveBeenCalledOnce();
+      } else {
+        expect(onError).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('does not re-list a consumed one-shot before prompt dispatch', async () => {
+    const task = makeTask({ recurring: false });
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValueOnce([task]),
+      runScheduledTask: vi.fn().mockResolvedValue(task),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    const onRunPrompt = vi.fn(async (...args: unknown[]) => {
+      const beforeDispatch = args[4] as
+        | (() => void | Promise<void>)
+        | undefined;
+      await beforeDispatch?.();
+    });
+    const onError = vi.fn();
+
+    await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+      reload: vi.fn(),
+      onError,
+    });
+
+    expect(actions.listScheduledTasks).toHaveBeenCalledOnce();
+    expect(actions.runScheduledTask).toHaveBeenCalledOnce();
+    expect(onRunPrompt).toHaveBeenCalledOnce();
     expect(onError).not.toHaveBeenCalled();
   });
 });

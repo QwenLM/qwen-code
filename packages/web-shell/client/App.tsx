@@ -9791,7 +9791,15 @@ export function App({
       boundSessionId: string | null,
       workspaceCwd?: string,
       taskIsStale?: () => boolean,
-    ) => runTaskManually(prompt, boundSessionId, workspaceCwd, taskIsStale),
+      beforeTaskDispatch?: () => void | Promise<void>,
+    ) =>
+      runTaskManually(
+        prompt,
+        boundSessionId,
+        workspaceCwd,
+        taskIsStale,
+        beforeTaskDispatch,
+      ),
     onError: (error, fallback) => reportError(error, t(fallback), true),
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
@@ -14101,8 +14109,10 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
         source?: 'mcp-app';
         isCurrent?: () => boolean;
-        beforeDispatch?: (clientId: string | undefined) => void;
-        beforeDetachedDispatch?: (clientId: string | undefined) => void;
+        beforeDispatch?: (clientId: string | undefined) => void | Promise<void>;
+        beforeDetachedDispatch?: (
+          clientId: string | undefined,
+        ) => void | Promise<void>;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: (admission: { promptId: string }) => void;
         onCancelledBeforeAdmission?: () => void;
@@ -19633,6 +19643,7 @@ export function App({
     timer?: ReturnType<typeof setTimeout>;
     owner?: { isCurrent(): boolean };
     taskIsStale?: () => boolean;
+    beforeTaskDispatch?: () => void | Promise<void>;
   } | null>(null);
   const clearPendingBoundRun = useCallback((sessionId: string) => {
     const cur = pendingBoundRunRef.current;
@@ -19659,7 +19670,11 @@ export function App({
   // admission, reject so the caller skips recording a run that never reached the
   // session.
   const enqueueManualRun = useCallback(
-    (prompt: string, taskIsStale?: () => boolean): Promise<void> =>
+    (
+      prompt: string,
+      taskIsStale?: () => boolean,
+      beforeTaskDispatch?: () => void | Promise<void>,
+    ): Promise<void> =>
       new Promise<void>((resolve, reject) => {
         const assertRunnable = () => {
           if (taskIsStale?.()) {
@@ -19668,6 +19683,11 @@ export function App({
               'AbortError',
             );
           }
+        };
+        const beforeTaskHttpDispatch = async () => {
+          assertRunnable();
+          await beforeTaskDispatch?.();
+          assertRunnable();
         };
         try {
           assertRunnable();
@@ -19695,8 +19715,8 @@ export function App({
                 beforeAdmission: async () => {
                   assertRunnable();
                 },
-                beforeDispatch: assertRunnable,
-                beforeDetachedDispatch: assertRunnable,
+                beforeDispatch: beforeTaskHttpDispatch,
+                beforeDetachedDispatch: beforeTaskHttpDispatch,
                 onAdmissionStarted: assertRunnable,
               }
             : {}),
@@ -19763,7 +19783,11 @@ export function App({
     // Resolves at prompt admission (see enqueueManualRun); the switch-timeout was
     // cleared above, so a long turn can't trip it. Recording happens in the
     // dialog once this resolves.
-    enqueueManualRun(pending.prompt, pending.taskIsStale).then(
+    enqueueManualRun(
+      pending.prompt,
+      pending.taskIsStale,
+      pending.beforeTaskDispatch,
+    ).then(
       () => pending.resolve(),
       (error: unknown) => pending.reject(error),
     );
@@ -19776,11 +19800,12 @@ export function App({
       // workspace's conversation would name the wrong one.
       workspaceCwd?: string,
       taskIsStale?: () => boolean,
+      beforeTaskDispatch?: () => void | Promise<void>,
     ): Promise<void> => {
       showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
-        return enqueueManualRun(prompt, taskIsStale);
+        return enqueueManualRun(prompt, taskIsStale, beforeTaskDispatch);
       }
       // A newer bound run supersedes an older one still waiting on the latch;
       // reject the old promise so its caller doesn't record a dropped run.
@@ -19797,6 +19822,7 @@ export function App({
           resolve,
           reject,
           taskIsStale,
+          beforeTaskDispatch,
         };
         pendingBoundRunRef.current = pending;
         loadSidebarSession(sessionId, workspaceCwd)

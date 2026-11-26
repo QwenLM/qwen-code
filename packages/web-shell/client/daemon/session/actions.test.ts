@@ -479,8 +479,9 @@ describe('sendDetachedPrompt client registration recovery', () => {
       const { actions } = createActionsHarness();
       const onAdmissionStarted = vi.fn();
       const onAdmitted = vi.fn();
-      const beforeDetachedDispatch = vi.fn((clientId?: string) => {
+      const beforeDetachedDispatch = vi.fn(async (clientId?: string) => {
         guardedClientIds.push(clientId);
+        await Promise.resolve();
         if (stale) {
           throw new DOMException('Task deleted before retry', 'AbortError');
         }

@@ -493,6 +493,7 @@ describe('useSessionScheduledTasks', () => {
       'session-1',
       '/workspace/cron-example',
       expect.any(Function),
+      expect.any(Function),
     );
     expect(sdkMock.workspaceActions.runScheduledTask).toHaveBeenCalledWith(
       'd-run',
@@ -710,6 +711,7 @@ describe('useSessionScheduledTasks', () => {
       taskB.prompt,
       'session-2',
       undefined,
+      expect.any(Function),
       expect.any(Function),
     );
 

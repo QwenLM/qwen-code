@@ -4351,6 +4351,66 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('waits for asynchronous revalidation before retrying admission', async () => {
+    let releaseResume!: (response: Response) => void;
+    const resume = new Promise<Response>((resolve) => {
+      releaseResume = resolve;
+    });
+    let releaseRevalidation!: () => void;
+    const revalidation = new Promise<void>((resolve) => {
+      releaseRevalidation = resolve;
+    });
+    let promptCalls = 0;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/resume')) return resume;
+      if (req.url.endsWith('/prompt')) {
+        promptCalls++;
+        return promptCalls === 1
+          ? invalidClientIdResponse()
+          : jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const beforeDispatch = vi.fn(async (clientId: string | undefined) => {
+      if (clientId === 'client-2') await revalidation;
+    });
+    const pending = session.submitPrompt(
+      { prompt: [{ type: 'text', text: 'hi' }] },
+      undefined,
+      beforeDispatch,
+    );
+
+    await vi.waitFor(() =>
+      expect(calls.some((call) => call.url.endsWith('/resume'))).toBe(true),
+    );
+    releaseResume(
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-2',
+        state: {},
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(beforeDispatch).toHaveBeenCalledWith('client-2'),
+    );
+    expect(calls.filter((call) => call.url.endsWith('/prompt'))).toHaveLength(
+      1,
+    );
+    releaseRevalidation();
+    await expect(pending).resolves.toEqual({
+      promptId: 'p-1',
+      lastEventId: 0,
+    });
+    expect(calls.filter((call) => call.url.endsWith('/prompt'))).toHaveLength(
+      2,
+    );
+  });
+
   it.each(['cancel', 'owner', 'client', 'unchanged', 'no-guard'] as const)(
     'revalidates admission after client recovery: %s',
     async (change) => {
