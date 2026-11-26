@@ -146,7 +146,8 @@ class HttpRuntimeTransportTest {
     private void externalAttestation(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         server.createContext(ManagedContextProtocol.ATTEST_PATH, exchange -> {
             captured.set(exchange.getRequestBody().readAllBytes());
-            byte[] body = JsonCodec.encode(ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed)));
+            byte[] body = JsonCodec.encode(ManagedContextProtocol.attestationResponse(
+                    ManagedContextProtocol.boot(request, seed).toWire()));
             exchange.getResponseHeaders().set("Cache-Control", "no-store");
             exchange.getResponseHeaders().set("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, body.length);
@@ -465,7 +466,7 @@ class HttpRuntimeTransportTest {
         var remoteLease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:2"),
                 seed.getToken(), seed.getLeaseId(), seed.getEpoch());
         reply.set(json(200, JsonCodec.encode(ManagedContextProtocol.attestationResponse(
-                ManagedContextProtocol.boot(request, seed)))));
+                ManagedContextProtocol.boot(request, seed).toWire()))));
         routed.attest(remoteLease, request, seed).toCompletableFuture().get(2, TimeUnit.SECONDS);
         assertEquals(ManagedContextProtocol.ATTEST_PATH, capturedPath.get());
         assertEquals(URI.create("http://127.0.0.1:2/"), remoteLease.getEndpoint());
@@ -476,12 +477,12 @@ class HttpRuntimeTransportTest {
         var request = ManagedContextProtocolTest.request();
         var seed = ManagedContextProtocolTest.seed();
         var boot = ManagedContextProtocol.boot(request, seed);
-        reply.set(json(200, JsonCodec.encode(ManagedContextProtocol.attestationResponse(boot))));
+        reply.set(json(200, JsonCodec.encode(ManagedContextProtocol.attestationResponse(boot.toWire()))));
         droppedResponses.set(1);
         assertEquals(request.getStorageId(), transport.attest(contextLease(seed), request, seed)
                 .toCompletableFuture().get(2, TimeUnit.SECONDS).getStorageId());
         assertEquals(2, requestCount.get());
-        assertEquals(JSON.valueToTree(ManagedContextProtocol.attestationRequest(boot)),
+        assertEquals(JSON.valueToTree(ManagedContextProtocol.attestationRequest(boot.toWire())),
                 JSON.readTree(captured.get()));
         assertEquals("Bearer " + seed.getToken(), capturedAuthorization.get());
         assertEquals(seed.getLeaseId(), capturedHeaders.get().getFirst("X-Qwen-Managed-Lease-Id"));
@@ -556,7 +557,7 @@ class HttpRuntimeTransportTest {
         RuntimeProvisionRequest request = ManagedContextProtocolTest.request();
         RuntimeProvisionSeed seed = ManagedContextProtocolTest.seed();
         RuntimeLease lease = contextLease(seed);
-        Map<String, Object> boot = ManagedContextProtocol.boot(request, seed);
+        Map<String, Object> boot = ManagedContextProtocol.boot(request, seed).toWire();
         Map<String, Object> proof = ManagedContextProtocol.attestationResponse(boot);
         reply.set(json(200, JsonCodec.encode(proof)));
         assertEquals(request.getStorageId(), transport.attest(lease, request, seed)

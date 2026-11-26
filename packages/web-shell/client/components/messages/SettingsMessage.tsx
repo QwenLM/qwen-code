@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -264,6 +265,7 @@ function scopeHintKey(
   setting: DaemonSettingDescriptor,
   scope: Scope,
 ): 'settings.modifiedIn' | 'settings.alsoModifiedIn' | undefined {
+  if (setting.key === 'general.displayLanguage') return undefined;
   const otherHasValue =
     scope === 'workspace'
       ? setting.values.user !== undefined
@@ -725,6 +727,7 @@ export function SettingsMessage({
   initialCategory,
   workspaceSettingsWritable = true,
 }: SettingsMessageProps) {
+  const settingsId = useId();
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
   const notifications = useBrowserNotificationSettings();
@@ -751,7 +754,8 @@ export function SettingsMessage({
     const visibleSettings = settings.filter(
       (setting) =>
         !HIDDEN_SETTING_KEYS.has(setting.key) &&
-        !LIVE_SETTING_KEYS.has(setting.key),
+        !LIVE_SETTING_KEYS.has(setting.key) &&
+        (scope === 'user' || setting.key !== 'general.displayLanguage'),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({
@@ -991,7 +995,10 @@ export function SettingsMessage({
     </Select>
   );
 
-  const renderSettingControl = (setting: DaemonSettingDescriptor) => {
+  const renderSettingControl = (
+    setting: DaemonSettingDescriptor,
+    unsetBadgeId: string | undefined,
+  ) => {
     const value = resolveValue(setting, scope);
     const isBusy = busyKey === setting.key;
     // User-scope settings are editable (this PR enables user-scope writes); the
@@ -1071,12 +1078,17 @@ export function SettingsMessage({
 
     if (setting.type === 'boolean') {
       const checked = value === true;
+      const unsetToggleValue =
+        value === undefined ? setting.unsetToggleValue : undefined;
       return (
         <Switch
           checked={checked}
           disabled={disabled}
-          onCheckedChange={(next) => handleSetValue(setting.key, next)}
+          onCheckedChange={(next) =>
+            handleSetValue(setting.key, unsetToggleValue ?? next)
+          }
           aria-label={formatSettingLabel(setting, t)}
+          aria-describedby={unsetBadgeId}
         />
       );
     }
@@ -1393,6 +1405,11 @@ export function SettingsMessage({
                           );
                           const hintKey = scopeHintKey(setting, scope);
                           const hasScopeValue = scopeHasValue(setting, scope);
+                          const unsetBadgeId =
+                            setting.type === 'boolean' &&
+                            resolveValue(setting, scope) === undefined
+                              ? `${settingsId}-unset-${setting.key}`
+                              : undefined;
                           const scopeHint = hintKey
                             ? t(hintKey, {
                                 scope: t(
@@ -1419,13 +1436,17 @@ export function SettingsMessage({
                                         ? t('settings.scope.workspace')
                                         : t('settings.scope.user')}
                                     </Badge>
+                                  ) : unsetBadgeId ? (
+                                    <Badge id={unsetBadgeId} variant="outline">
+                                      {t('settings.value.unset')}
+                                    </Badge>
                                   ) : undefined
                                 }
                                 control={
                                   busyKey === setting.key ? (
                                     <Spinner />
                                   ) : (
-                                    renderSettingControl(setting)
+                                    renderSettingControl(setting, unsetBadgeId)
                                   )
                                 }
                               />

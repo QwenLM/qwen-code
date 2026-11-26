@@ -188,6 +188,9 @@ beforeAll(async () => {
       // / IDE-launcher environments.
       '--workspace',
       REPO_ROOT,
+      // This fixture creates fresh children to exercise unrelated route
+      // contracts, whose setup must remain deterministic on loaded CI hosts.
+      '--no-load-admission',
       '--initialize-timeout-ms',
       String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
@@ -503,6 +506,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_git_log_exclude_refs',
       'workspace_git_worktrees',
       'workspace_git_check_ignore',
+      'workspace_input_history',
       'workspace_mcp_restart',
       'session_recap',
       'session_mod_rows',

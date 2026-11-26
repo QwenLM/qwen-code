@@ -36,7 +36,12 @@ import type {
   ManagedAgentSessionPhase,
 } from './managed-agent-provider.js';
 import { toManagedPermissionRequest } from './managed-approval.js';
-import { canonicalQuestionAnswers } from './managed-question-response.js';
+import {
+  canonicalQuestionAnswers,
+  MAX_MANAGED_QUESTION_TEXT_LENGTH,
+} from './managed-question-response.js';
+
+export { MAX_MANAGED_QUESTION_TEXT_LENGTH };
 
 type OperationState = ChatOperation['state'];
 
@@ -121,7 +126,6 @@ export interface ManagedChatControllerDeps {
 }
 
 export const MANAGED_QUESTION_SUBMIT_OPTION_ID = 'submit';
-export const MAX_MANAGED_QUESTION_TEXT_LENGTH = 8192;
 
 export function mapManagedPhase(
   phase: ManagedAgentSessionPhase,
@@ -182,6 +186,10 @@ export function toManagedQuestionPermissionRequest(
           description: option.description ?? '',
         })),
         multiSelect: question.multiple,
+        required: question.required,
+        allowText: question.allowText,
+        maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
+        multilineText: true,
       })),
     },
     // Managed question actions carry no dismiss wire variant (sending a string
@@ -554,7 +562,6 @@ export function createManagedChatController(
     let matched = false;
     for (const entry of tracked) {
       if (entry.backendOperationId !== event.operationId) continue;
-      if (isTerminalOperation(entry.state)) continue;
       matched = true;
       applyState(entry, next);
     }
@@ -569,7 +576,6 @@ export function createManagedChatController(
   const settleByTurnId = (event: ManagedTurnSettlement): void => {
     for (const entry of tracked) {
       if (entry.boundTurnId !== event.turnId) continue;
-      if (isTerminalOperation(entry.state)) continue;
       applyState(entry, projectTurnOutcomeForKind(entry.kind, event.outcome));
     }
     // A turn id is unknown until submit's transport response arrives, so tag
@@ -588,9 +594,10 @@ export function createManagedChatController(
       event.outcome === 'resolved' ? 'established' : 'failed';
     for (const entry of tracked) {
       if (entry.boundActionId !== event.actionId) continue;
-      if (isTerminalOperation(entry.state)) continue;
       applyState(entry, next);
     }
+    // Only keep an early buffer entry while this action itself is in flight;
+    // cross-attempt isolation is independently enforced by dispatchSequence.
     if (inFlightActionIds.has(event.actionId)) {
       bufferedActionOutcome.set(event.actionId, {
         outcome: event.outcome,
@@ -730,7 +737,6 @@ export function createManagedChatController(
         action.kind,
         action.inputRevision,
         action.policyRevision,
-        action.expiresAt,
         request,
       ]);
       const previous = pendingProjection?.requests.get(action.actionId);

@@ -246,7 +246,7 @@ class SshRuntimeInteropTest {
                 bindings.releaseOperation(saved.getBindingId(), "setup", saved.getOperationGeneration());
                 launch = request("ensure", Map.of("resourceId", handle.getValue().get("resourceId"),
                         "bindingId", saved.getBindingId(), "bindingGeneration", saved.getGeneration(),
-                        "boot", ManagedContextProtocol.boot(request, seed), "identity", storage.registration().get("identity"),
+                        "boot", ManagedContextProtocol.boot(request, seed).toWire(), "identity", storage.registration().get("identity"),
                         "marker", storage.registration().get("marker"), "expectedQwenVersion", storage.registration().get("qwenVersion"),
                         "workerEntry", node.qwenEntry(), "launch", true));
             }
@@ -680,7 +680,8 @@ class SshRuntimeInteropTest {
             var seed = new RuntimeProvisionSeed((String) boot.get("provisionRequestId"), (String) boot.get("runtimeInstanceId"),
                     (String) boot.get("runtimeIncarnation"), (String) boot.get("leaseId"), ((Number) boot.get("epoch")).longValue(), (String) boot.get("token"));
             var placement = new RuntimeProvisionRequest(scope, "harness", com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS, (String) boot.get("storageId"));
-            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), ManagedContextProtocol.ready(ready, boot),
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
+                    ManagedContextProtocol.ready(ready, ManagedContextProtocol.parseBoot(boot)).url(),
                     seed.getToken(), seed.getLeaseId(), seed.getEpoch());
             manager.register(lease, node);
             await(new HttpRuntimeTransport(manager::resolveEndpoint).attest(lease, placement, seed));

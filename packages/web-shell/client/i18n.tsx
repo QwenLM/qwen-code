@@ -313,7 +313,6 @@ const EN: Messages = {
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
-  'managed.question.title': 'Answer the questions',
   'managed.actions.title': 'Pending requests',
   'managed.actions.root': 'This session',
   'managed.actions.child': (v) => `Child session · ${v?.session}`,
@@ -1861,7 +1860,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'daemon.usage.dailyTokensTitle': 'tokens',
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
-  'daemon.usage.dailySessionsSub': 'active session counts per day',
+  'daemon.usage.dailySessionsSub': 'runs ended per day',
   'delete.cannotCurrent':
     'Cannot delete the current session while it is running.',
   'delete.mayStillBeRunning':

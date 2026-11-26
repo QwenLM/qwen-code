@@ -19,6 +19,18 @@ import java.util.Set;
 public final class RuntimeToolMeasurements {
     public static final String FIELD = "diagnostics";
 
+    public record Metadata(Object protocolVersion, Object executionProtocol,
+            Object measurements, Object resultDigest) {
+        public Map<String, Object> wireValue() {
+            Map<String, Object> wire = new LinkedHashMap<>();
+            wire.put("protocolVersion", protocolVersion);
+            wire.put("executionProtocol", executionProtocol);
+            wire.put("measurements", measurements);
+            wire.put("resultDigest", resultDigest);
+            return BrokerValues.immutableMap(wire);
+        }
+    }
+
     private RuntimeToolMeasurements() {}
 
     public static boolean selected(Map<String, Object> reference) {
@@ -72,17 +84,13 @@ public final class RuntimeToolMeasurements {
             JsonNode measured = node.get("measurements");
             ManagedToolMeasurements.requireMeasurements(measured);
         }
-        Map<String, Object> metadata = new LinkedHashMap<>();
-        metadata.put("protocolVersion", 4);
-        metadata.put("executionProtocol", protocol);
-        metadata.put("measurements", measurements);
-        metadata.put("resultDigest", value);
+        Metadata metadata = new Metadata(4, protocol, measurements, value);
         Map<String, Object> combined = new LinkedHashMap<>(result);
-        combined.put(FIELD, BrokerValues.immutableMap(metadata));
+        combined.put(FIELD, metadata.wireValue());
         return BrokerValues.immutableMap(combined);
     }
 
-    public static Map<String, Object> metadata(Map<String, Object> result) {
+    public static Metadata metadata(Map<String, Object> result) {
         Object raw = result.get(FIELD);
         if (!(raw instanceof Map<?, ?> map)
                 || !map.keySet()
@@ -98,9 +106,8 @@ public final class RuntimeToolMeasurements {
                     "Original measured result is unavailable.",
                     false);
         }
-        @SuppressWarnings("unchecked")
-        Map<String, Object> metadata = (Map<String, Object>) map;
-        return metadata;
+        return new Metadata(map.get("protocolVersion"), map.get("executionProtocol"),
+                map.get("measurements"), map.get("resultDigest"));
     }
 
     public static String canonical(JsonNode node) {

@@ -14,6 +14,7 @@ import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 
 vi.mock('../hooks/useMessageDeletion', () => ({
   useMessageDeletion: (...args: unknown[]) => {
+    observed.deletionCalls += 1;
     observed.deletionArgs = args;
     return observed.deletion;
   },
@@ -27,9 +28,19 @@ const observed = vi.hoisted(() => ({
     | import('../hooks/useMessageDeletion').MessageDeletionControls
     | undefined,
   deletionArgs: [] as unknown[],
+  deletionCalls: 0,
+  requiredHistoryCalls: 0,
+  optionalHistoryCalls: 0,
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
-  useDaemonHistoryNavigationStore: () => observed.store,
+  useDaemonHistoryNavigationStore: () => {
+    observed.requiredHistoryCalls += 1;
+    return observed.store;
+  },
+  useOptionalDaemonHistoryNavigationStore: () => {
+    observed.optionalHistoryCalls += 1;
+    return observed.store;
+  },
 }));
 vi.mock('../daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'session' }),
@@ -94,7 +105,13 @@ let container: HTMLDivElement | undefined;
 afterEach(() => {
   act(() => root?.unmount());
   root = undefined;
+  observed.store = undefined;
+  observed.props = undefined;
   observed.deletion = undefined;
+  observed.deletionArgs = [];
+  observed.deletionCalls = 0;
+  observed.requiredHistoryCalls = 0;
+  observed.optionalHistoryCalls = 0;
   container?.remove();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -527,5 +544,102 @@ describe('TranscriptViewport', () => {
     });
     expect(store.getViewportSnapshot().pages.size).toBe(0);
     expect(observed.props?.messages).toBe(live);
+  });
+
+  it('degrades to live MessageList without daemon hooks when no DaemonSessionProvider is mounted', () => {
+    observed.store = undefined;
+    const ref = createRef<MessageListHandle>();
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <TranscriptViewport
+          ref={ref}
+          messages={live}
+          sourceSessionId="managed-1"
+          pendingApproval={null}
+          sessionKey="managed-1"
+          loadingTranscript={false}
+          isResponding={false}
+          hasOlderHistory
+          onLoadOlderHistory={vi.fn()}
+        />,
+      ),
+    );
+    expect(
+      container.querySelector('[data-history-viewport="live"]'),
+    ).not.toBeNull();
+    expect(observed.optionalHistoryCalls).toBeGreaterThan(0);
+    expect(observed.requiredHistoryCalls).toBe(0);
+    expect(observed.deletionCalls).toBe(0);
+    expect(observed.props?.messages).toBe(live);
+    expect(observed.props?.deletion).toBeUndefined();
+    expect(observed.props?.hookStatisticsSessionId).toBe('managed-1');
+    expect(observed.props?.mcpAppSessionId).toBe('managed-1');
+    expect(ref.current?.scrollToMessage('any')).toBe(true);
+  });
+
+  it('skips daemon navigation and deletion entirely when sessionViewportEnabled is false even with an active store', async () => {
+    const store = createDaemonTurnNavigationStore({
+      captureLiveBoundary: () => ({
+        beforeRecordId: 'live',
+        reachable: true,
+        isCurrent: () => true,
+      }),
+    });
+    const client: DaemonTurnNavigationClient = {
+      owner: {},
+      getTurnIndexPage: vi.fn().mockResolvedValue({
+        v: 1,
+        sessionId: 'daemon-session',
+        snapshot: 'snap',
+        totalTurns: 5,
+        start: 0,
+        turns: Array.from({ length: 5 }, (_, ordinal) => ({
+          ordinal,
+          turnId: `turn-${ordinal}`,
+          kind: 'prompt' as const,
+          label: `turn ${ordinal}`,
+        })),
+      }),
+      getTranscriptPage: vi.fn(),
+      materializeTranscriptEvents: () => ({
+        blocks: [],
+        nextBlockOrdinal: 1,
+        encounteredRecordIds: [],
+      }),
+    };
+    store.configure({ sessionId: 'daemon-session', supported: true, client });
+    await vi.waitFor(() =>
+      expect(store.getSnapshot().mode).not.toBe('loading'),
+    );
+    observed.store = store;
+    const ref = createRef<MessageListHandle>();
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <TranscriptViewport
+          ref={ref}
+          sessionViewportEnabled={false}
+          messages={live}
+          pendingApproval={null}
+          sessionKey="managed-in-full-shell"
+          loadingTranscript={false}
+          isResponding={false}
+        />,
+      ),
+    );
+    expect(
+      container.querySelector('[data-history-viewport="live"]'),
+    ).not.toBeNull();
+    expect(observed.optionalHistoryCalls).toBe(0);
+    expect(observed.requiredHistoryCalls).toBe(0);
+    expect(observed.deletionCalls).toBe(0);
+    expect(observed.props?.messages).toBe(live);
+    expect(observed.props?.deletion).toBeUndefined();
+    expect(ref.current?.scrollToMessage('any')).toBe(true);
   });
 });

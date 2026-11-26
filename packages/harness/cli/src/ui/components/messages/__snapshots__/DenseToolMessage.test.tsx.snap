@@ -1,0 +1,160 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`DenseToolMessage > Toggleable Diff View (Alternate Buffer) > renders inline diff while alternate buffer rendering is disabled 1`] = `
+" ▪ test-tool(Test description)
+   └ Accepted test.ts
+
+      1 -old line
+      1 +new line
+"
+`;
+
+exports[`DenseToolMessage > Toggleable Diff View (Alternate Buffer) > shows diff content by default when NOT in alternate buffer mode 1`] = `
+" ▪ test-tool(Test description)
+   └ Accepted test.ts
+
+      1 -old line
+      1 +new line
+"
+`;
+
+exports[`DenseToolMessage > Visual Regression > matches SVG snapshot for a Rejected tool call 1`] = `
+" - Read(Reading important.txt)
+   └ Rejected by user
+"
+`;
+
+exports[`DenseToolMessage > Visual Regression > matches SVG snapshot for an Accepted file edit with diff stats 1`] = `
+" ▪ edit(Editing test.ts)
+   └ Accepted test.ts (+1, -1)
+
+      1 -old
+      1 +new
+"
+`;
+
+exports[`DenseToolMessage > does not render result rail for error status without resultDisplay 1`] = `
+" x test-tool(Test description)
+"
+`;
+
+exports[`DenseToolMessage > does not render result rail if resultDisplay is missing 1`] = `
+" ▫ test-tool(Test description)
+"
+`;
+
+exports[`DenseToolMessage > flattens newlines in string results 1`] = `
+" ▪ test-tool(Test description)
+   └ Line 1 Line 2
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for Edit tool using confirmationDetails 1`] = `
+" ? Edit(Test description)
+   └ Confirming styles.scss
+
+      1 -body { color: blue; }
+      1 +body { color: red; }
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for Errored Edit tool 1`] = `
+" x Edit(Test description)
+   └ Failed styles.scss (+1, -1)
+
+      1 -old line
+      1 +new line
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for Rejected Edit tool 1`] = `
+" - Edit(Test description)
+   └ Rejected styles.scss (+1, -1)
+
+      1 -old line
+      1 +new line
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for Rejected Edit tool with confirmationDetails and diffStat 1`] = `
+" - Edit(Test description)
+   └ Rejected styles.scss (+1, -1)
+
+      1 -body { color: blue; }
+      1 +body { color: red; }
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for Rejected WriteFile tool 1`] = `
+" - Write(Test description)
+   └ Rejected config.json
+
+      1 -old content
+      1 +new content
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for WriteFile tool 1`] = `
+" ▪ Write(Test description)
+   └ Accepted config.json (+1, -1)
+
+      1 -old content
+      1 +new content
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for a successful string result 1`] = `
+" ▪ test-tool(Test description)
+   └ Success result
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for error status with string message 1`] = `
+" x test-tool(Test description)
+   └ Error occurred
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for file diff results with stats 1`] = `
+" ▪ test-tool(Test description)
+   └ Accepted test.ts (+15, -6)
+
+      1 -old line
+      1 +diff content
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for glob results 1`] = `
+" ▪ test-tool(Test description)
+   └ Found 1 matching file(s)
+
+     src/a.ts
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for grep results 1`] = `
+" ▪ test-tool(Test description)
+   └ Found 2 matches
+
+     file1.ts:10: match 1
+     file2.ts:20: match 2
+"
+`;
+
+exports[`DenseToolMessage > renders correctly for todo updates 1`] = `
+" ▪ test-tool(Test description)
+   └ Todos updated
+"
+`;
+
+exports[`DenseToolMessage > renders generic output message for unknown object results 1`] = `
+" ▪ test-tool(Test description)
+   └ Returned (possible empty result)
+"
+`;
+
+exports[`DenseToolMessage > truncates long string results 1`] = `
+" ▪ test-tool(Test description)
+   └ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA…
+"
+`;

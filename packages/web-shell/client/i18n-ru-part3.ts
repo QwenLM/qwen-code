@@ -16,7 +16,7 @@ export const RU_PART3: Record<
   'daemon.usage.dailyTokensTitle': 'токены',
   'daemon.usage.dailyTokensSub': 'сумма токенов за день',
   'daemon.usage.dailySessionsTitle': 'сессии',
-  'daemon.usage.dailySessionsSub': 'активные сессии по дням',
+  'daemon.usage.dailySessionsSub': 'завершённые запуски по дням',
   'delete.cannotCurrent':
     'Нельзя удалить текущую сессию, пока она выполняется.',
   'delete.mayStillBeRunning':

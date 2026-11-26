@@ -247,6 +247,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `workspace_file_read`). The advertised upload byte cap is surfaced via
   // `limits.maxWorkspaceFileUploadBytes`.
   workspace_file_upload: { since: 'v1' },
+  turn_skill_file_snapshot: { since: 'v1' },
+  turn_skill_session_effects_check: { since: 'v1' },
+  turn_extension_store_lease: { since: 'v1' },
+  session_retire_if_idle: { since: 'v1' },
   // Qualified-only deletion of regular files in trusted local workspaces.
   workspace_file_delete: { since: 'v1' },
   workspace_directory_create: { since: 'v1' },
@@ -374,6 +378,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_git_worktrees: { since: 'v1' },
   // Read-only, bounded Git ignore classification for per-turn file summaries.
   workspace_git_check_ignore: { since: 'v1' },
+  // Workspace-scoped composer prompt and shell input history (`GET`/`POST`
+  // `/workspace/input-history` and `/workspaces/:workspace/input-history`),
+  // auto-recorded from admitted prompts, mid-turn messages, and shell runs so
+  // desktop and mobile Web Shell sessions share history per workspace.
+  workspace_input_history: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live

@@ -5,6 +5,8 @@
  */
 
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { isHostedConfigScopedOwner } from './hosted-hook-session.js';
+import { isHostedDurableMcpOwner } from './hosted-mcp-session.js';
 import type {
   HostedActionOptions,
   HostedApprovalSettings,
@@ -15,17 +17,19 @@ export type HostedContinuationCaptureRefusal =
   | 'not_native_batch'
   | 'todo_batch'
   | 'no_runtime'
-  | 'shell_profile'
-  | 'hooks'
-  | 'mcp'
+  | 'team_lead_profile'
+  | 'hooks_activation_owner'
+  | 'hooks_memory_batch'
+  | 'hook_unsettled'
+  | 'mcp_activation_owner'
   | 'unsupported_tool'
   | 'undigested_call'
   | 'plan_oversize';
 
 /** Why cold recovery cannot resume an approval wait on this Session shape. */
 export type HostedApprovalResumeShapeRefusal =
-  | 'hooks'
-  | 'mcp'
+  | 'mcp_activation_owner'
+  | 'hooks_activation_owner'
   | 'no_tool_owner';
 
 /** Why cold recovery cannot resume a command-step wait on this Session shape. */
@@ -47,7 +51,8 @@ export type HostedActionParkRefusal =
   | 'no_continuation'
   | 'original_prompt_missing'
   | 'approval_selection_unavailable'
-  | 'approval_mode_allows';
+  | 'approval_mode_allows'
+  | 'mcp_not_parkable';
 
 export interface HostedActionParkRegistration {
   readonly promptId: string;
@@ -61,21 +66,50 @@ export interface HostedActionParkRegistration {
 }
 
 /**
+ * The owner terms a saved native batch needs on a Hooks or MCP Session. Park
+ * teardown keeps, and the next load recomputes, only a durable MCP owner and a
+ * config-scoped one; any other owner's Runtime session may be released and
+ * its id never recomputed. A Hook owner that borrows the MCP broker is the
+ * MCP owner itself.
+ */
+export function hostedNativeOwnerRefusal(owners: {
+  readonly mcp?: string;
+  readonly hooks?: string;
+}): 'mcp_activation_owner' | 'hooks_activation_owner' | undefined {
+  if (
+    owners.mcp !== undefined &&
+    !isHostedDurableMcpOwner(owners.mcp) &&
+    !isHostedConfigScopedOwner(owners.mcp)
+  )
+    return 'mcp_activation_owner';
+  if (
+    owners.hooks !== undefined &&
+    owners.hooks !== owners.mcp &&
+    !isHostedConfigScopedOwner(owners.hooks)
+  )
+    return 'hooks_activation_owner';
+  return undefined;
+}
+
+/**
  * The Session-shape terms cold recovery requires before it resumes an
  * approval continuation. Park eligibility reads the same terms, so a wait
  * never parks on a shape whose recovery would refuse it.
  */
 export function hostedApprovalResumeShapeRefusal(
   session: {
-    readonly hooks?: unknown;
-    readonly mcp?: unknown;
+    readonly hooks?: { readonly broker: { readonly runtimeSessionId: string } };
+    readonly mcp?: { readonly broker: { readonly runtimeSessionId: string } };
     readonly toolProfile?: string;
     readonly memory?: unknown;
   },
   brokerOptions: unknown,
 ): HostedApprovalResumeShapeRefusal | undefined {
-  if (session.hooks) return 'hooks';
-  if (session.mcp) return 'mcp';
+  const owner = hostedNativeOwnerRefusal({
+    mcp: session.mcp?.broker.runtimeSessionId,
+    hooks: session.hooks?.broker.runtimeSessionId,
+  });
+  if (owner) return owner;
   if (!((session.toolProfile && brokerOptions) || session.memory))
     return 'no_tool_owner';
   return undefined;

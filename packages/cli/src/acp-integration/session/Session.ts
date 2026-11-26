@@ -12,6 +12,7 @@ import {
   createTranscriptExecutionLifecycleUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
+import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
@@ -58,7 +59,6 @@ import {
   type StructuredError,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
-import { buildSyntheticToolResponseParts } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
@@ -92,6 +92,8 @@ import {
   hasUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
 } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
+import { runUserPromptSubmit } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit.js';
+import { getChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   appendAsyncHookContextPart,
   drainAsyncHookContextPart,
@@ -356,6 +358,8 @@ import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { applyPermissionRequestHookUpdates } from '@qwen-code/qwen-code-core/core/permission-helpers.js';
+import { isAutoEditApproved } from '@qwen-code/qwen-code-core/core/permissionFlow.js';
 import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -396,6 +400,7 @@ import {
   DAEMON_ATTACHMENT_CONTEXT_META_KEY,
   IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -448,8 +453,13 @@ import {
   type AcpModTurn,
   parseAcpModRow,
 } from './acp-mod-session.js';
+import { modsWanted } from '../../services/display-translation-mod.js';
 import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
+import {
+  isRepetitiveToolCallsError,
+  REPETITIVE_TOOL_CALLS_HINT,
+} from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -819,6 +829,8 @@ type RunToolResult = {
    * boundary, such as Goal checkpoints and workspace-agent hand-offs.
    */
   terminateTurn?: boolean;
+  /** A tool hook returned `continue: false`: the turn ends, with this reason. */
+  hookStopReason?: string;
   /**
    * Hook additionalContext of a code-mode nested call. Its parts are a value
    * for the exec script, so the parent exec delivers this to the model.
@@ -1122,9 +1134,6 @@ const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
 // returning (the shell tool on user cancel) instead of throwing.
 const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
   'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.';
-const USER_PROMPT_BLOCKED_TOOL_RESULT =
-  'A UserPromptSubmit hook blocked this tool result from reaching the model. Do not rerun the tool to get it.';
-
 type ManagedConversationBinding = {
   expectation: BridgeConversationDirectoryExpectation;
   assertIdentity: () => Promise<void>;
@@ -1347,6 +1356,19 @@ function modelStreamError(error: StructuredError): unknown {
       ...(error.requestId ? { requestId: error.requestId } : {}),
     })
   );
+}
+
+function repetitiveToolCallsRequestError(
+  errorMessage: string,
+): RequestError | undefined {
+  if (!isRepetitiveToolCallsError(errorMessage)) return undefined;
+  const message = errorMessage.includes(REPETITIVE_TOOL_CALLS_HINT)
+    ? errorMessage
+    : errorMessage + REPETITIVE_TOOL_CALLS_HINT;
+  return new RequestError(-32603, message, {
+    errorKind: 'repetitive_tool_calls',
+    details: message,
+  });
 }
 
 function createLoopDetectedTurnError(
@@ -1769,6 +1791,7 @@ type DrainedMidTurnMessage =
       kind: 'structured';
       content: ContentBlock[];
       displayText: string;
+      queueOnly?: true;
       attachmentReferences?: SessionAttachmentReference[];
     };
 
@@ -2079,6 +2102,9 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               item['displayText'],
               willPersistReferences,
             ),
+            ...(item['queueOnly'] === true && getInvocationContext()
+              ? { queueOnly: true }
+              : {}),
             ...(attachmentReferences ? { attachmentReferences } : {}),
           },
         ];
@@ -5498,8 +5524,8 @@ export class Session implements SessionContext {
    * wider than anything reported from here (it covers prompts still waiting in
    * the FIFO, which the child cannot see).
    */
-  collectActiveWorkHolds(): ActiveWorkHoldV1[] {
-    if (this.disposed) return [];
+  collectActiveWorkHolds(includeDisposed = false): ActiveWorkHoldV1[] {
+    if (this.disposed && !includeDisposed) return [];
     const holds: ActiveWorkHoldV1[] = [];
     for (const agentId of this.config
       .getBackgroundTaskRegistry()
@@ -5893,7 +5919,7 @@ export class Session implements SessionContext {
     // without them keeps none, whatever the settings say later.
     return {
       status:
-        !this.modsInstalled && this.settings.merged.experimental?.mods
+        !this.modsInstalled && modsWanted(this.settings)
           ? 'unanswered'
           : 'unhooked',
     };
@@ -6002,6 +6028,7 @@ export class Session implements SessionContext {
     const daemonPromptId = this.getRewindDaemonPromptId(promptId);
 
     llmClient.truncateHistory(apiTruncateIndex);
+    if (!recorder) this.mods?.rewindLiveTranslationRows(promptId);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
     // Rewinding discards the timeline the active-todo reminder described:
@@ -7022,14 +7049,26 @@ export class Session implements SessionContext {
       }
       return completedResult;
     } catch (error) {
-      promptFailureMessage =
-        error instanceof Error ? error.message : String(error);
+      promptFailureMessage = getErrorMessage(error);
       if (error instanceof SessionWriterError) {
         throw new RequestError(error.rpcCode, error.message, {
           errorKind: error.errorKind,
         });
       }
       rejectedByLoopProtection = isLoopDetectedTurnError(error);
+      // Preserve error.cause (e.g. UND_ERR_SOCKET: other side closed) across
+      // ACP JSON-RPC; raw Error instances lose their cause when the SDK maps
+      // them to Internal error with only error.message in data.details.
+      if (
+        !(error instanceof RequestError) &&
+        error instanceof Error &&
+        error.cause !== undefined &&
+        promptFailureMessage !== error.message
+      ) {
+        throw new RequestError(-32603, promptFailureMessage, {
+          details: promptFailureMessage,
+        });
+      }
       throw error;
     } finally {
       const proposalTurn = responseCapture.goalProposalTurn;
@@ -7895,7 +7934,10 @@ export class Session implements SessionContext {
                   // `/clear` swaps in a new Goal runtime under this
                   // long-lived Session; without this the goal-state
                   // subscription stays on the disposed instance.
-                  startNewSession: () => this.rebindGoalRuntimeForNewSession(),
+                  startNewSession: () => {
+                    this.mods?.invalidateTools();
+                    this.rebindGoalRuntimeForNewSession();
+                  },
                 },
                 this.slashCommandPolicy,
               );
@@ -7993,17 +8035,8 @@ export class Session implements SessionContext {
               );
             }
 
-            // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
             const hooksEnabled = !this.config.getDisableAllHooks?.();
             const messageBus = this.config.getMessageBus?.();
-            // A runtime continuation is machine-generated, not a user
-            // submission — the same reason `isContinue` is exempt. Firing
-            // the hook on one is also unrecoverable: a block returns before
-            // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
-            // branch, which re-queues the identical continuation. Nothing in
-            // that cycle can change the goal state, so it spins — no model
-            // call, one persisted transcript record per lap — until someone
-            // pauses or clears the goal.
             const isRuntimeContinuation = goalTurn?.origin === 'runtime';
             const isFreshUserTurn =
               !isRetry &&
@@ -8032,10 +8065,17 @@ export class Session implements SessionContext {
                   )
                 ? lastStrippedId
                 : undefined;
-            // Channel markers cover both automated and human messages. Keep
-            // that class excluded until its producers distinguish them; see
-            // docs/design/daemon-user-prompt-submit-provenance.md.
+            // Channel prompts still omit the submitted_prompt provenance field.
             const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
+            const isNewUserPrompt =
+              isFreshUserTurn &&
+              (channelTurn
+                ? getChannelWorkflowOrigin()?.userInitiated === true
+                : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false);
+            const hookSubmittedPrompt =
+              isUserSubmissionTurn && submittedPrompt.trim().length > 0
+                ? submittedPrompt
+                : undefined;
             // `experimental.unifiedAgentLoop`: a prompt sends its model rounds
             // through `LlmClient` on the shared agent loop's round: a fresh
             // prompt, a channel's or a Goal turn's included, as a UserQuery,
@@ -8074,21 +8114,11 @@ export class Session implements SessionContext {
             // guard or reminder can run twice.
             const sharedToolBatch = sharedModelRound;
             let promptAdmission: UserPromptAdmission | undefined;
-            // A continue, a restore or a runtime continuation runs no
-            // UserPromptSubmit hook.
-            if (
-              sharedModelRound &&
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              !isRuntimeContinuation
-            ) {
+            if (sharedModelRound && isNewUserPrompt) {
               promptAdmission = await this.config
                 .getLlmClient()
                 .admitUserPrompt(promptText, promptId, {
-                  submittedPrompt:
-                    isUserSubmissionTurn && submittedPrompt.trim().length > 0
-                      ? submittedPrompt
-                      : undefined,
+                  submittedPrompt: hookSubmittedPrompt,
                   signal: pendingSend.signal,
                 });
               if (promptAdmission.blocked) {
@@ -8125,45 +8155,16 @@ export class Session implements SessionContext {
                 });
                 return { stopReason: 'end_turn' };
               }
-            } else if (
-              !sharedModelRound &&
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              !isRuntimeContinuation &&
-              hooksEnabled &&
-              messageBus &&
-              this.config.hasHooksForEvent?.('UserPromptSubmit')
-            ) {
-              const response = await messageBus.request<
-                HookExecutionRequest,
-                HookExecutionResponse
-              >(
-                {
-                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
-                  owner: captureHookExecutionOwner(this.config),
-                  eventName: 'UserPromptSubmit',
-                  input: {
-                    prompt: promptText,
-                    ...(isUserSubmissionTurn &&
-                    submittedPrompt.trim().length > 0
-                      ? { submitted_prompt: submittedPrompt }
-                      : {}),
-                  },
-                  signal: pendingSend.signal,
-                },
-                MessageBusType.HOOK_EXECUTION_RESPONSE,
+            } else if (isNewUserPrompt) {
+              const decision = await runUserPromptSubmit(
+                this.config,
+                promptText,
+                hookSubmittedPrompt,
+                pendingSend.signal,
               );
-              const hookOutput = response.output
-                ? createHookOutput('UserPromptSubmit', response.output)
-                : undefined;
-
-              if (
-                hookOutput?.isBlockingDecision() ||
-                hookOutput?.shouldStopExecution()
-              ) {
-                // Hook blocked the prompt - send notification to UI and return
+              if (decision?.blockReason !== undefined) {
                 await this.messageEmitter.emitAgentMessage(
-                  userPromptBlockedNotice(hookOutput?.getEffectiveReason()),
+                  userPromptBlockedNotice(decision.blockReason),
                 );
                 return { stopReason: 'end_turn' };
               }
@@ -8175,7 +8176,7 @@ export class Session implements SessionContext {
               // the same reason as there — but never when the prompt resolved
               // to no parts, where the append is the only thing keeping the
               // request non-empty (`toParts` rejects an empty array).
-              const additionalContext = hookOutput?.getAdditionalContext();
+              const additionalContext = decision?.additionalContext;
               if (additionalContext) {
                 const alreadyDelivered =
                   parts.length > 0 &&
@@ -8262,9 +8263,11 @@ export class Session implements SessionContext {
                     .getSnapshots()
                     .at(-1);
                   if (latestSnapshot) {
-                    this.config
-                      .getChatRecordingService()
-                      ?.recordFileHistorySnapshot(latestSnapshot);
+                    const recorder = this.config.getChatRecordingService();
+                    if (recorder)
+                      recorder.recordFileHistorySnapshot(latestSnapshot);
+                    else if (latestSnapshot.promptId === promptId)
+                      this.mods?.recordLiveTranslationCheckpoint(promptId);
                   }
                 } catch (e) {
                   debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
@@ -8868,6 +8871,9 @@ export class Session implements SessionContext {
                       ...(roundType === SendMessageType.UserQuery && {
                         workflowModeEligible,
                         promptAdmission,
+                        ...(!isNewUserPrompt && {
+                          skipUserPromptSubmit: true as const,
+                        }),
                         // Recall searches the user's words, as the current
                         // path does, not the resolved files and notices
                         // `parts` carries.
@@ -8884,7 +8890,6 @@ export class Session implements SessionContext {
                         ...(historyPromptId !== undefined && {
                           historyPromptId,
                         }),
-                        ...(promptAdmission && { promptAdmission }),
                       }),
                       ...(goalTurn &&
                         !goalPermitReleasedByClient &&
@@ -9067,9 +9072,9 @@ export class Session implements SessionContext {
                               continue;
                             }
 
-                            this.messageEmitter.emitMessage(
+                            this.emitModelText(
                               part.text,
-                              'assistant',
+                              responseStream,
                               part.thought,
                             );
                             if (!part.thought) {
@@ -9114,6 +9119,7 @@ export class Session implements SessionContext {
                             resp.type === StreamEventType.MODEL_FALLBACK ||
                             !resp.isContinuation
                           ) {
+                            this.mods?.settleModelText(responseStream, false);
                             rewindChannelDeliveryResponseBlock(
                               channelDeliveryResponseBlock,
                               channelDeliveryCheckpoint,
@@ -9140,6 +9146,12 @@ export class Session implements SessionContext {
                       streamFailed = true;
                       throw error;
                     } finally {
+                      this.mods?.settleModelText(
+                        responseStream,
+                        !streamFailed &&
+                          !pendingSend.signal.aborted &&
+                          !responseInterrupt.signal.aborted,
+                      );
                       await finalizeToolCallPreparations(
                         preparationTracker,
                         streamFailed || pendingSend.signal.aborted,
@@ -9413,6 +9425,7 @@ export class Session implements SessionContext {
       return pushCount !== undefined && pushCount <= pushCountBefore;
     };
     let attempt: ModelResponseFacts = newModelResponseFacts();
+    const modelTextAttempt = {};
     // The user-content push a response answers. A continuation
     // sends another request within the round, and its response
     // starts its own facts, capture and usage, as a new send
@@ -9497,6 +9510,7 @@ export class Session implements SessionContext {
             modelOverride: round.modelOverride,
             stopPolicies: round.stopPolicies,
             toolCallPreparations: true,
+            retractToolCallsOnRetry: true,
             ...round.options,
           },
         },
@@ -9548,11 +9562,7 @@ export class Session implements SessionContext {
                 if (!event.value) break;
                 // A background response is shown once it ended.
                 if (!responseCapture.backgroundResponse) {
-                  void this.messageEmitter.emitMessage(
-                    event.value,
-                    'assistant',
-                    false,
-                  );
+                  void this.emitModelText(event.value, modelTextAttempt);
                 }
                 responseCapture.agentOutput.appendText(event.value);
                 appendChannelDeliveryResponseText(
@@ -9562,11 +9572,7 @@ export class Session implements SessionContext {
                 break;
               case LlmEventType.Thought:
                 if (event.text) {
-                  void this.messageEmitter.emitMessage(
-                    event.text,
-                    'assistant',
-                    true,
-                  );
+                  void this.emitModelText(event.text, modelTextAttempt, true);
                 }
                 break;
               case LlmEventType.ToolCallPreparation:
@@ -9596,6 +9602,7 @@ export class Session implements SessionContext {
                   event.isContinuation === true;
                 responseCapture.agentOutput.restartAttempt(continuation);
                 if (!continuation) {
+                  this.mods?.settleModelText(modelTextAttempt, false);
                   rewindChannelDeliveryResponseBlock(
                     channelDeliveryResponseBlock,
                     channelDeliveryCheckpoint,
@@ -9634,14 +9641,17 @@ export class Session implements SessionContext {
                 loopStop = event.value;
                 break;
               case LlmEventType.UserPromptSubmitBlocked:
-                // A tool-result round runs UserPromptSubmit too.
                 await this.messageEmitter.emitAgentMessage(
                   userPromptBlockedNotice(event.value.reason),
                 );
                 break;
               case LlmEventType.HookSystemMessage:
                 await emitResponseUsage();
-                await this.messageEmitter.emitAgentMessage(event.value);
+                if (event.isStopReason) {
+                  await this.messageEmitter.emitStopHookNotice(event.value);
+                } else {
+                  await this.messageEmitter.emitAgentMessage(event.value);
+                }
                 break;
               case LlmEventType.StopHookLoop:
                 await emitResponseUsage();
@@ -9669,10 +9679,7 @@ export class Session implements SessionContext {
     } catch (error) {
       streamFailed = true;
       if (!cutForInput()) {
-        // A round that threw before its request pushed the
-        // message, such as on a tool-result round whose
-        // UserPromptSubmit hook timed out, keeps it as the stops
-        // below do.
+        // Keep an unsent round's message as the stops below do.
         if (requestUnsent()) {
           if (signal.aborted) {
             markApiHistoryPrompt(message, responseCapture.turnId);
@@ -9688,6 +9695,10 @@ export class Session implements SessionContext {
         };
       }
     } finally {
+      this.mods?.settleModelText(
+        modelTextAttempt,
+        !streamFailed && !signal.aborted && !cutForInput() && !responseOpened,
+      );
       round.onModelStarted?.();
       pushed =
         (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) >
@@ -9725,35 +9736,6 @@ export class Session implements SessionContext {
     }
     if (roundStop === 'user_prompt_blocked') {
       this.todoStopGuard.suspend();
-      // A tool-result round the hook blocked closes its calls
-      // with the block, not with the results it withheld from
-      // the model, nor with the repair's "retry if needed".
-      const blockedCalls = (message.parts ?? []).flatMap(
-        ({ functionResponse }) =>
-          functionResponse?.id
-            ? [
-                {
-                  callId: functionResponse.id,
-                  name: functionResponse.name ?? '',
-                },
-              ]
-            : [],
-      );
-      // Input taken with the results, already shown as
-      // delivered, stays in history with the closed calls, as a
-      // stopped tool run keeps it.
-      if (!pushed && blockedCalls.length > 0) {
-        this.#getCurrentChat().addHistory({
-          role: 'user',
-          parts: [
-            ...buildSyntheticToolResponseParts(
-              blockedCalls,
-              USER_PROMPT_BLOCKED_TOOL_RESULT,
-            ),
-            ...(message.parts ?? []).filter((part) => !part.functionResponse),
-          ],
-        });
-      }
       return { ended: { stopReason: 'end_turn' } };
     }
     if (
@@ -10027,7 +10009,7 @@ export class Session implements SessionContext {
     this.todoStopGuard.pauseForTrustedRetry();
 
     const errorStatus = getErrorStatus(error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = getErrorMessage(error);
     const quota = subscriptionQuotaFromError(error);
     const hookSystem = this.config.getHookSystem?.();
     if (
@@ -10037,7 +10019,10 @@ export class Session implements SessionContext {
     ) {
       hookSystem
         .fireStopFailureEvent(
-          classifyApiError({ message: errorMessage, status: errorStatus }),
+          classifyApiError(
+            { message: errorMessage, status: errorStatus },
+            error,
+          ),
           errorMessage,
         )
         .catch((err) => {
@@ -10060,7 +10045,8 @@ export class Session implements SessionContext {
         subscriptionQuota: quota,
       });
     }
-    throw error;
+
+    throw repetitiveToolCallsRequestError(errorMessage) ?? error;
   }
 
   async #handleStopHookLoop(
@@ -10375,15 +10361,15 @@ export class Session implements SessionContext {
           await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
         }
 
-        if (
-          stopOutput?.isBlockingDecision() ||
-          stopOutput?.shouldStopExecution()
-        ) {
+        if (stopOutput?.isBlockingDecision()) {
           externalReason = stopOutput.getEffectiveReason();
           stopHookIterationCount++;
           stopHookReasons = [...stopHookReasons, externalReason];
           stopHookCount = response.stopHookCount ?? 1;
         } else {
+          if (stopOutput?.shouldStopExecution() && stopOutput.stopReason) {
+            await this.messageEmitter.emitStopHookNotice(stopOutput.stopReason);
+          }
           // Bounded: the guard's TODO_STOP_GUARD_MAX_ATTEMPTS caps total guard
           // continuations, and after exhaustion a non-blocking allow exits the
           // loop (!externalReason && !guardContinuation), so the reset cannot
@@ -10595,6 +10581,7 @@ export class Session implements SessionContext {
       let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
       const streamStartTime = Date.now();
       let streamFailed = false;
+      const modelTextAttempt = {};
       let guardForThisSend = nextGuardContinuation;
       let preserveGuardOnSkippedSend = false;
       let messageForPreservation = nextMessage;
@@ -10974,11 +10961,7 @@ export class Session implements SessionContext {
                 !options.responseCapture?.backgroundResponse ||
                 part.thought
               ) {
-                this.messageEmitter.emitMessage(
-                  part.text,
-                  'assistant',
-                  part.thought,
-                );
+                this.emitModelText(part.text, modelTextAttempt, part.thought);
               }
               if (!part.thought) {
                 options.responseCapture?.agentOutput.appendText(part.text);
@@ -11019,6 +11002,7 @@ export class Session implements SessionContext {
               response.type === StreamEventType.MODEL_FALLBACK ||
               !response.isContinuation
             ) {
+              this.mods?.settleModelText(modelTextAttempt, false);
               rewindChannelDeliveryResponseBlock(
                 channelDeliveryResponseBlock,
                 channelDeliveryCheckpoint,
@@ -11069,12 +11053,11 @@ export class Session implements SessionContext {
         }
         this.todoStopGuard.pauseForTrustedRetry();
         const errorStatus = getErrorStatus(error);
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        const errorType = classifyApiError({
-          message: errorMessage,
-          status: errorStatus,
-        });
+        const errorMessage = getErrorMessage(error);
+        const errorType = classifyApiError(
+          { message: errorMessage, status: errorStatus },
+          error,
+        );
         const hookSystem = this.config.getHookSystem?.();
         if (
           !this.config.getDisableAllHooks?.() &&
@@ -11090,8 +11073,14 @@ export class Session implements SessionContext {
         if (errorStatus === 429) {
           throw new RequestError(429, 'Rate limit exceeded. Try again later.');
         }
-        throw error;
+        throw repetitiveToolCallsRequestError(errorMessage) ?? error;
       } finally {
+        this.mods?.settleModelText(
+          modelTextAttempt,
+          !streamFailed &&
+            !pendingSend.signal.aborted &&
+            !responseInterrupt.signal.aborted,
+        );
         try {
           await finalizeToolCallPreparations(
             preparationTracker,
@@ -11390,6 +11379,15 @@ export class Session implements SessionContext {
     return this.disposed;
   }
 
+  private emitModelText(
+    text: string,
+    attempt: object,
+    thought = false,
+  ): Promise<void> {
+    this.mods?.observeModelText(text, thought, attempt);
+    return this.messageEmitter.emitMessage(text, 'assistant', thought);
+  }
+
   async sendUpdate(update: SessionUpdate): Promise<void> {
     const execution = backgroundTurnContext.getStore();
     const deferredToolUpdate =
@@ -11450,6 +11448,16 @@ export class Session implements SessionContext {
       this.clearActiveTodoPlanRevision();
     }
     try {
+      if (
+        projectedUpdate.sessionUpdate === 'tool_call' &&
+        projectedUpdate._meta?.['parentToolCallId'] === undefined
+      ) {
+        // The visible root tool card closes the preceding reply or thought.
+        this.mods?.observeRootToolCall(
+          projectedUpdate.toolCallId,
+          projectedUpdate._meta?.['phase'] === 'preparing',
+        );
+      }
       await this.client.sessionUpdate(params);
     } catch (error) {
       if (
@@ -11983,6 +11991,7 @@ export class Session implements SessionContext {
           // model-availability ledger like the LlmClient/Turn path. The
           // background-notification executor opts out (isSessionTurn: false).
           isSessionTurn: options.isSessionTurn ?? true,
+          retractToolCallsOnRetry: true,
           ...(ledgerTurnKey !== promptId ? { ledgerTurnKey } : {}),
           ...(historyPromptId !== undefined
             ? { promptId: historyPromptId }
@@ -12162,10 +12171,8 @@ export class Session implements SessionContext {
    * queued for the next continuation rather than drained into a turn that is
    * already over.
    *
-   * Channel turns and requested channel deliveries keep the loop alive for
-   * their final tool-free response; ending on the tool batch would return or
-   * submit an empty response because only a tool-free response is committed
-   * as the channel final.
+   * Channels normally need a final tool-free response for delivery. A hook
+   * stop ends the turn even when a channel is waiting for that response.
    */
   async #endTurnAfterToolRun(
     toolRun: RunToolResult,
@@ -12175,11 +12182,11 @@ export class Session implements SessionContext {
   ): Promise<boolean> {
     // Loop protection keeps its own stop path, with the telemetry and the
     // context message that go with it, so it wins a batch that trips both.
+    const hookStop = toolRun.hookStopReason;
     if (
-      toolRun.terminateTurn !== true ||
       toolRun.loopDetected ||
-      channelTurn ||
-      hasChannelDelivery
+      (hookStop === undefined &&
+        (toolRun.terminateTurn !== true || channelTurn || hasChannelDelivery))
     ) {
       return false;
     }
@@ -12192,6 +12199,15 @@ export class Session implements SessionContext {
       goalTurn.endingToolCallId = toolRun.parts.findLast(
         (part) => part.functionResponse?.id,
       )?.functionResponse?.id;
+    }
+    if (hookStop !== undefined) {
+      try {
+        await this.messageEmitter.emitStopHookNotice(hookStop);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to emit tool hook stop notice: ${this.#formatError(error)}`,
+        );
+      }
     }
     return true;
   }
@@ -13111,7 +13127,7 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       preserveFallbackOnAbort?: boolean;
       prefix?: string;
-      /** Also ends resolution, which then falls back to the message text. */
+      /** Limits attachment resolution while preserving unsent input. */
       deadline?: AbortSignal;
     } = {},
   ): Promise<Part[]> {
@@ -13187,6 +13203,54 @@ export class Session implements SessionContext {
         displayText,
         options.prefix,
       );
+      // Only live input admission can start a prompt hook.
+      if (
+        !abortSignal.aborted &&
+        options.deadline === undefined &&
+        (message.kind !== 'structured' || !message.queueOnly)
+      ) {
+        let decision;
+        try {
+          decision = await runUserPromptSubmit(
+            this.config,
+            message.kind === 'text'
+              ? message.message
+              : message.content
+                  .flatMap((block) =>
+                    block.type === 'text' ? [block.text] : [],
+                  )
+                  .join(' '),
+            undefined,
+            abortSignal,
+          );
+          abortSignal.throwIfAborted();
+        } catch (error) {
+          if (abortSignal.aborted) {
+            // The host already settled these queue IDs. The finalizer keeps
+            // the unsent input without starting another hook check.
+            const unsent = messages.slice(index);
+            for (const item of unsent)
+              this.earlyDrainedMidTurnMessages.add(item);
+            this.midTurnRecoveredMessages.unshift(...unsent);
+            return parts;
+          }
+          await this.messageEmitter.emitAgentMessage(
+            userPromptBlockedNotice(this.#formatError(error)),
+          );
+          continue;
+        }
+        if (decision?.blockReason !== undefined) {
+          await this.messageEmitter.emitAgentMessage(
+            userPromptBlockedNotice(decision.blockReason),
+          );
+          continue;
+        }
+        if (decision?.additionalContext) {
+          built.push(
+            createUserPromptSubmitContextPart(decision.additionalContext),
+          );
+        }
+      }
       const recorder = this.config.getChatRecordingService();
       if (message.kind === 'structured' && message.attachmentReferences) {
         const everyAttachmentBlockHasAReference =
@@ -13937,9 +14001,9 @@ export class Session implements SessionContext {
                         const candidate = resp.value.candidates[0];
                         for (const part of candidate.content?.parts ?? []) {
                           if (!part.text) continue;
-                          this.messageEmitter.emitMessage(
+                          this.emitModelText(
                             part.text,
-                            'assistant',
+                            responseStream,
                             part.thought,
                           );
                           if (!part.thought) {
@@ -13982,6 +14046,7 @@ export class Session implements SessionContext {
                           resp.type === StreamEventType.MODEL_FALLBACK ||
                           !resp.isContinuation
                         ) {
+                          this.mods?.settleModelText(responseStream, false);
                           rewindChannelDeliveryResponseBlock(
                             channelDeliveryResponseBlock,
                             channelDeliveryCheckpoint,
@@ -14008,6 +14073,10 @@ export class Session implements SessionContext {
                     streamFailed = true;
                     throw error;
                   } finally {
+                    this.mods?.settleModelText(
+                      responseStream,
+                      !streamFailed && !ac.signal.aborted,
+                    );
                     try {
                       await finalizeToolCallPreparations(
                         preparationTracker,
@@ -14102,6 +14171,7 @@ export class Session implements SessionContext {
                 `[${item.source} error] ${msg}`,
               );
             } finally {
+              await this.#keepUnsentEarlyMidTurnInput(ac.signal);
               this.config.endAutomaticActiveTodoWorkChain(promptId);
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
@@ -15141,6 +15211,7 @@ export class Session implements SessionContext {
           reason: PromptResponse['stopReason'],
           partial = false,
         ): Promise<void> => {
+          await this.#keepUnsentEarlyMidTurnInput(ac.signal);
           if (responseSegmentEmitted && !responseTurnComplete) {
             try {
               await this.#emitBackgroundNotificationResponse(
@@ -15416,11 +15487,7 @@ export class Session implements SessionContext {
                   for (const part of candidate.content?.parts ?? []) {
                     if (!part.text) continue;
                     if (part.thought) {
-                      await this.messageEmitter.emitMessage(
-                        part.text,
-                        'assistant',
-                        true,
-                      );
+                      await this.emitModelText(part.text, responseStream, true);
                     } else {
                       responseText += part.text;
                       messageDisplay?.addChunk(part.text);
@@ -15446,6 +15513,12 @@ export class Session implements SessionContext {
                   resp.type === StreamEventType.RETRY ||
                   resp.type === StreamEventType.MODEL_FALLBACK
                 ) {
+                  if (
+                    resp.type === StreamEventType.MODEL_FALLBACK ||
+                    !resp.isContinuation
+                  ) {
+                    this.mods?.settleModelText(responseStream, false);
+                  }
                   await finalizeToolCallPreparations(
                     preparationTracker,
                     true,
@@ -15464,6 +15537,10 @@ export class Session implements SessionContext {
               streamFailed = true;
               throw error;
             } finally {
+              this.mods?.settleModelText(
+                responseStream,
+                !streamFailed && !ac.signal.aborted,
+              );
               try {
                 await finalizeToolCallPreparations(
                   preparationTracker,
@@ -15687,6 +15764,8 @@ export class Session implements SessionContext {
         ? undefined
         : (item.structured?.description ?? item.structured?.commandLabel));
     const label = rawLabel ? truncateNotificationLabel(rawLabel) : undefined;
+    if (text && !partial && !signal.aborted)
+      this.mods?.rememberCompletedReply(text);
     const update: SessionUpdate = {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
@@ -16771,6 +16850,9 @@ export class Session implements SessionContext {
       stopAfterPermissionCancel: batch.stopAfterPermissionCancel,
       ...(toolLoopState.loopDetected ? { loopDetected: true } : {}),
       ...(batch.stop === 'tool_ended_turn' ? { terminateTurn: true } : {}),
+      ...(batch.hookStopReason !== undefined
+        ? { hookStopReason: batch.hookStopReason }
+        : {}),
       repeatedToolFailureBatch: {
         complete: batch.results.length === requests.length,
         observations,
@@ -19108,6 +19190,7 @@ export class Session implements SessionContext {
             }
           };
 
+          let approvedHookPermissionUpdates: unknown[] | undefined;
           if (
             !autoModeAllowed &&
             needsConfirmation(
@@ -19238,6 +19321,9 @@ export class Session implements SessionContext {
               ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
+                  let hookSuppliedApproval =
+                    pmForcedAsk ||
+                    !isAutoEditApproved(approvalMode, confirmationDetails);
                   if (planShellDecision.classification !== 'not-applicable') {
                     const approval = await validatePlanModeShellApproval({
                       config: this.config,
@@ -19415,6 +19501,18 @@ export class Session implements SessionContext {
                             this.config,
                           )
                         );
+                      hookSuppliedApproval =
+                        !replacementAllowed &&
+                        needsConfirmation(
+                          'ask',
+                          replacementApprovalMode,
+                          policyToolName,
+                        ) &&
+                        (replacementFlow.pmForcedAsk ||
+                          !isAutoEditApproved(
+                            replacementApprovalMode,
+                            replacementDetails,
+                          ));
                       if (
                         replacementAllowed &&
                         replacementApprovalMode === ApprovalMode.AUTO
@@ -19438,6 +19536,9 @@ export class Session implements SessionContext {
                         }
                         if (classified.outcome.kind === 'blocked') {
                           return reject(classified.outcome.errorMessage);
+                        }
+                        if (classified.outcome.kind === 'approved') {
+                          hookSuppliedApproval = false;
                         }
                         updateAutoModeFallback(
                           classified.outcome,
@@ -19507,6 +19608,10 @@ export class Session implements SessionContext {
                       );
                     }
                   }
+                  if (hookHandled && hookSuppliedApproval) {
+                    approvedHookPermissionUpdates =
+                      hookResult.updatedPermissions;
+                  }
                 } else {
                   return earlyErrorResponse(
                     new Error(
@@ -19530,9 +19635,7 @@ export class Session implements SessionContext {
             if (
               !requiresUserInteraction &&
               !pmForcedAsk &&
-              approvalMode === ApprovalMode.AUTO_EDIT &&
-              (confirmationDetails.type === 'edit' ||
-                confirmationDetails.type === 'info')
+              isAutoEditApproved(approvalMode, confirmationDetails)
             ) {
               // Auto-approve, skip requestPermission.
             } else if (!hookHandled) {
@@ -19984,6 +20087,16 @@ export class Session implements SessionContext {
           }
           const staleTodoPlanApproval = await cancelStaleTodoPlanApproval();
           if (staleTodoPlanApproval) return staleTodoPlanApproval;
+          if (approvedHookPermissionUpdates?.length) {
+            await applyPermissionRequestHookUpdates(
+              approvedHookPermissionUpdates,
+              this.config,
+              activeToolAbortSignal,
+            );
+            const persistenceCancellation =
+              cancelBeforeExecutionIfAborted(toolName);
+            if (persistenceCancellation) return persistenceCancellation;
+          }
 
           const continuedAgentId =
             toolName === ToolNames.SEND_MESSAGE &&
@@ -20624,8 +20737,10 @@ export class Session implements SessionContext {
               );
             }
 
-            // If hook indicates to stop, return an error response
-            if (postHookResult.shouldStop) {
+            // If hook indicates to stop, return an error response. Calls run
+            // outside the shared batch keep that behavior for a
+            // `continue: false` too.
+            if (postHookResult.shouldStop || postHookResult.endsTurn) {
               this.#stopMovedShell(this.movableShells.get(callId));
               const stopMessage =
                 postHookResult.stopReason ||

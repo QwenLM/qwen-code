@@ -49,7 +49,7 @@ public interface SessionAdmissionStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest,
-            com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig, String memoryStoreId) {
+            SessionModelConfig modelConfig, String memoryStoreId) {
         if (memoryStoreId != null) {
             throw new UnsupportedOperationException("Session memory is unavailable");
         }

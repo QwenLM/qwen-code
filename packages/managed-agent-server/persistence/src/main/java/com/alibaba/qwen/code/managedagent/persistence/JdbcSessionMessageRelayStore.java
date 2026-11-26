@@ -8,6 +8,9 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -102,7 +105,7 @@ public class JdbcSessionMessageRelayStore
      * the awaiting queue; commands never — their pass ends at answered. */
     public List<PendingMessage> findPendingMessages(String workerId, long now,
             int limit) {
-        List<PendingMessage> page = new java.util.ArrayList<>(jdbc.query(
+        List<PendingMessage> page = new ArrayList<>(jdbc.query(
                 HANDOVER_SQL, this::pending, "session_message", now, now,
                 workerId, limit));
         page.addAll(jdbc.query(AWAITING_SQL, this::pending, now, now,
@@ -112,8 +115,8 @@ public class JdbcSessionMessageRelayStore
         return page;
     }
 
-    private PendingMessage pending(java.sql.ResultSet result, int row)
-            throws java.sql.SQLException {
+    private PendingMessage pending(ResultSet result, int row)
+            throws SQLException {
         return new PendingMessage(result.getString("tenant_id"),
                 result.getString("session_id"), result.getString("record_id"),
                 result.getString("domain"),

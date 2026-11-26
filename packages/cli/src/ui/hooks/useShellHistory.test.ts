@@ -10,91 +10,82 @@ import { useShellHistory } from './useShellHistory.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import * as crypto from 'node:crypto';
+import type { Storage } from '@qwen-code/qwen-code-core';
+import { appendShellHistoryFile } from '../../utils/shell-history-file.js';
+import {
+  _resetCleanupFunctionsForTest,
+  runExitCleanup,
+} from '../../utils/cleanup.js';
 
-vi.mock('fs/promises', () => ({
-  readFile: vi.fn(),
-  writeFile: vi.fn(),
-  mkdir: vi.fn(),
+const testDoubles = vi.hoisted(() => ({
+  realAppend: undefined as typeof appendShellHistoryFile | undefined,
+  error: vi.fn(),
 }));
-vi.mock('os');
-vi.mock('crypto');
-vi.mock('fs', async (importOriginal) => {
-  const actualFs = await importOriginal<typeof import('fs')>();
+
+vi.mock('../../utils/shell-history-file.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/shell-history-file.js')>();
+  testDoubles.realAppend = actual.appendShellHistoryFile;
   return {
-    ...actualFs,
-    mkdirSync: vi.fn(),
-  };
-});
-vi.mock('@qwen-code/qwen-code-core', () => {
-  class Storage {
-    getProjectTempDir(): string {
-      return path.join('/test/home/', '.qwen', 'tmp', 'mocked_hash');
-    }
-    getHistoryFilePath(): string {
-      return path.join(
-        '/test/home/',
-        '.qwen',
-        'tmp',
-        'mocked_hash',
-        'shell_history',
-      );
-    }
-  }
-  return {
-    isNodeError: (err: unknown): err is NodeJS.ErrnoException =>
-      typeof err === 'object' && err !== null && 'code' in err,
-    createDebugLogger: () => ({
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    }),
-    Storage,
+    ...actual,
+    appendShellHistoryFile: vi.fn(actual.appendShellHistoryFile),
   };
 });
 
-const MOCKED_PROJECT_ROOT = '/test/project';
-const MOCKED_HOME_DIR = '/test/home';
-const MOCKED_PROJECT_HASH = 'mocked_hash';
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  isNodeError: (err: unknown): err is NodeJS.ErrnoException =>
+    typeof err === 'object' && err !== null && 'code' in err,
+  createDebugLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: testDoubles.error,
+  }),
+  Storage: class {},
+}));
 
-const MOCKED_HISTORY_DIR = path.join(
-  MOCKED_HOME_DIR,
-  '.qwen',
-  'tmp',
-  MOCKED_PROJECT_HASH,
-);
-const MOCKED_HISTORY_FILE = path.join(MOCKED_HISTORY_DIR, 'shell_history');
+const PROJECT_ROOT = '/test/project';
+let historyFilePath: string;
+let historyStorage: Storage;
+let scratchDir: string;
+
+function useTestShellHistory() {
+  return useShellHistory(PROJECT_ROOT, historyStorage);
+}
+
+async function readPersistedHistory(): Promise<string[]> {
+  return JSON.parse(await fs.readFile(historyFilePath, 'utf8')) as string[];
+}
+
+async function expectPersistedHistory(expected: string[]) {
+  await waitFor(async () => {
+    expect(await readPersistedHistory()).toEqual(expected);
+  });
+}
 
 describe('useShellHistory', () => {
-  const mockedFs = vi.mocked(fs);
-  const mockedOs = vi.mocked(os);
-  const mockedCrypto = vi.mocked(crypto);
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    _resetCleanupFunctionsForTest();
+    scratchDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-tui-shell-history-'),
+    );
+    historyFilePath = path.join(scratchDir, 'shell_history');
+    historyStorage = {
+      getHistoryFilePath: () => historyFilePath,
+    } as unknown as Storage;
+  });
 
-  beforeEach(() => {
-    vi.resetAllMocks();
-
-    mockedFs.readFile.mockResolvedValue('');
-    mockedFs.writeFile.mockResolvedValue(undefined);
-    mockedFs.mkdir.mockResolvedValue(undefined);
-    mockedOs.homedir.mockReturnValue(MOCKED_HOME_DIR);
-
-    const hashMock = {
-      update: vi.fn().mockReturnThis(),
-      digest: vi.fn().mockReturnValue(MOCKED_PROJECT_HASH),
-    };
-    mockedCrypto.createHash.mockReturnValue(hashMock as never);
+  afterEach(async () => {
+    await fs.rm(scratchDir, { recursive: true, force: true });
   });
 
   it('should initialize and read the history file from the correct path', async () => {
-    mockedFs.readFile.mockResolvedValue('cmd1\ncmd2');
-    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+    await fs.writeFile(historyFilePath, 'cmd1\ncmd2');
+    const { result } = renderHook(() => useTestShellHistory());
 
     await waitFor(() => {
-      expect(mockedFs.readFile).toHaveBeenCalledWith(
-        MOCKED_HISTORY_FILE,
-        'utf-8',
-      );
+      expect(result.current.history).toEqual(['cmd2', 'cmd1']);
     });
 
     let command: string | null = null;
@@ -107,15 +98,19 @@ describe('useShellHistory', () => {
   });
 
   it('should handle a nonexistent history file gracefully', async () => {
-    const error = new Error('File not found') as NodeJS.ErrnoException;
-    error.code = 'ENOENT';
-    mockedFs.readFile.mockRejectedValue(error);
+    const existingFile = path.join(scratchDir, 'existing-history');
+    await fs.writeFile(existingFile, 'existing');
+    const existingStorage = {
+      getHistoryFilePath: () => existingFile,
+    } as unknown as Storage;
+    const { result, rerender } = renderHook(
+      ({ storage }) => useShellHistory(PROJECT_ROOT, storage),
+      { initialProps: { storage: existingStorage } },
+    );
+    await waitFor(() => expect(result.current.history).toEqual(['existing']));
 
-    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
-
-    await waitFor(() => {
-      expect(mockedFs.readFile).toHaveBeenCalled();
-    });
+    rerender({ storage: historyStorage });
+    await waitFor(() => expect(result.current.history).toEqual([]));
 
     let command: string | null = null;
     act(() => {
@@ -123,26 +118,217 @@ describe('useShellHistory', () => {
     });
 
     expect(command).toBe(null);
+    await expect(fs.access(historyFilePath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('serializes rapid additions on the real write path', async () => {
+    await fs.writeFile(historyFilePath, 'seed');
+    const append = vi.mocked(appendShellHistoryFile);
+    let releaseFirst!: () => void;
+    const firstWaiting = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    append.mockImplementationOnce(async (file, command) => {
+      await firstWaiting;
+      return testDoubles.realAppend!(file, command);
+    });
+    const { result } = renderHook(() => useTestShellHistory());
+    await waitFor(() => expect(result.current.history).toEqual(['seed']));
+
+    act(() => result.current.addCommandToHistory('first'));
+    await waitFor(() => expect(append).toHaveBeenCalledTimes(1));
+    act(() => result.current.addCommandToHistory('second'));
+    try {
+      expect(append).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseFirst();
+      await waitFor(() => expect(append).toHaveBeenCalledTimes(2));
+      await Promise.allSettled(append.mock.results.map((entry) => entry.value));
+    }
+    await expectPersistedHistory(['seed', 'first', 'second']);
+  });
+
+  it('does not block a different file while one append is pending', async () => {
+    await fs.writeFile(historyFilePath, 'seed-a');
+    const otherFile = path.join(scratchDir, 'other_history');
+    await fs.writeFile(otherFile, 'seed-b');
+    const otherStorage = {
+      getHistoryFilePath: () => otherFile,
+    } as unknown as Storage;
+    const append = vi.mocked(appendShellHistoryFile);
+    let releaseFirst!: () => void;
+    const firstWaiting = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    append.mockImplementationOnce(async (file, command) => {
+      await firstWaiting;
+      return testDoubles.realAppend!(file, command);
+    });
+    const { result, rerender, unmount } = renderHook(
+      ({ storage }: { storage: Storage }) =>
+        useShellHistory(PROJECT_ROOT, storage),
+      { initialProps: { storage: historyStorage } },
+    );
+    await waitFor(() => expect(result.current.history).toEqual(['seed-a']));
+    try {
+      act(() => result.current.addCommandToHistory('first-a'));
+      await waitFor(() => expect(append).toHaveBeenCalledOnce());
+
+      rerender({ storage: otherStorage });
+      await waitFor(() => expect(result.current.history).toEqual(['seed-b']));
+      act(() => result.current.addCommandToHistory('second-b'));
+      await waitFor(async () => {
+        expect(JSON.parse(await fs.readFile(otherFile, 'utf8'))).toEqual([
+          'seed-b',
+          'second-b',
+        ]);
+      });
+    } finally {
+      releaseFirst();
+      unmount();
+    }
+    await expectPersistedHistory(['seed-a', 'first-a']);
+  });
+
+  it('logs asynchronous append failures without an unhandled rejection', async () => {
+    await fs.writeFile(historyFilePath, 'ordinary file');
+    historyFilePath = path.join(historyFilePath, 'shell_history');
+    const { result } = renderHook(() => useTestShellHistory());
+    await waitFor(() =>
+      expect(testDoubles.error).toHaveBeenCalledWith(
+        'Error reading history:',
+        expect.any(Error),
+      ),
+    );
+
+    act(() => result.current.addCommandToHistory('cannot persist'));
+    await waitFor(() =>
+      expect(testDoubles.error).toHaveBeenCalledWith(
+        'Error writing shell history:',
+        expect.any(Error),
+      ),
+    );
+  });
+
+  it('drains queued writes during exit even after the hook unmounts', async () => {
+    await fs.writeFile(historyFilePath, 'seed');
+    const append = vi.mocked(appendShellHistoryFile);
+    let releaseFirst!: () => void;
+    const firstWaiting = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    append.mockImplementationOnce(async (file, command) => {
+      await firstWaiting;
+      return testDoubles.realAppend!(file, command);
+    });
+    const { result, unmount } = renderHook(() => useTestShellHistory());
+    await waitFor(() => expect(result.current.history).toEqual(['seed']));
+    act(() => result.current.addCommandToHistory('before exit'));
+    await waitFor(() => expect(append).toHaveBeenCalledTimes(1));
+    unmount();
+
+    let completed = false;
+    const cleanup = runExitCleanup({
+      _testPerFnTimeoutMs: 50,
+      _testOverallTimeoutMs: 200,
+    }).then(() => {
+      completed = true;
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(completed).toBe(false);
+    } finally {
+      releaseFirst();
+      await cleanup;
+    }
+    await expect(readPersistedHistory()).resolves.toEqual([
+      'seed',
+      'before exit',
+    ]);
+  });
+
+  it('drains a second file appended while exit cleanup is running', async () => {
+    const firstFile = historyFilePath;
+    const secondFile = path.join(scratchDir, 'second-shell-history');
+    await fs.writeFile(firstFile, 'seed-a');
+    await fs.writeFile(secondFile, 'seed-b');
+    const append = vi.mocked(appendShellHistoryFile);
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstWaiting = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondWaiting = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    append
+      .mockImplementationOnce(async (file, command) => {
+        await firstWaiting;
+        return testDoubles.realAppend!(file, command);
+      })
+      .mockImplementationOnce(async (file, command) => {
+        await secondWaiting;
+        return testDoubles.realAppend!(file, command);
+      });
+    const first = renderHook(() => useTestShellHistory());
+    await waitFor(() =>
+      expect(first.result.current.history).toEqual(['seed-a']),
+    );
+    act(() => first.result.current.addCommandToHistory('command-a'));
+    await waitFor(() => expect(append).toHaveBeenCalledOnce());
+    first.unmount();
+
+    let completed = false;
+    const cleanup = runExitCleanup({
+      _testPerFnTimeoutMs: 1000,
+      _testOverallTimeoutMs: 2000,
+    }).then(() => {
+      completed = true;
+    });
+    try {
+      historyFilePath = secondFile;
+      const second = renderHook(() => useTestShellHistory());
+      await waitFor(() =>
+        expect(second.result.current.history).toEqual(['seed-b']),
+      );
+      act(() => second.result.current.addCommandToHistory('command-b'));
+      await waitFor(() => expect(append).toHaveBeenCalledTimes(2));
+
+      releaseFirst();
+      await append.mock.results[0]!.value;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(completed).toBe(false);
+      releaseSecond();
+      await cleanup;
+      second.unmount();
+    } finally {
+      releaseFirst();
+      releaseSecond();
+      await cleanup;
+    }
+    expect(JSON.parse(await fs.readFile(firstFile, 'utf8'))).toEqual([
+      'seed-a',
+      'command-a',
+    ]);
+    expect(JSON.parse(await fs.readFile(secondFile, 'utf8'))).toEqual([
+      'seed-b',
+      'command-b',
+    ]);
   });
 
   it('should add a command and write to the history file', async () => {
-    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+    await fs.writeFile(historyFilePath, 'existing');
+    const { result } = renderHook(() => useTestShellHistory());
 
-    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.history).toEqual(['existing']));
 
     act(() => {
       result.current.addCommandToHistory('new_command');
     });
 
-    await waitFor(() => {
-      expect(mockedFs.mkdir).toHaveBeenCalledWith(MOCKED_HISTORY_DIR, {
-        recursive: true,
-      });
-      expect(mockedFs.writeFile).toHaveBeenCalledWith(
-        MOCKED_HISTORY_FILE,
-        JSON.stringify(['new_command']), // Written to file oldest-first.
-      );
-    });
+    await expectPersistedHistory(['existing', 'new_command']);
 
     let command: string | null = null;
     act(() => {
@@ -153,25 +339,22 @@ describe('useShellHistory', () => {
 
   it('should preserve multi-line commands after reloading history', async () => {
     const multiLineCommand = 'for f in a b; do\n  echo "$f"\ndone';
+    await fs.writeFile(historyFilePath, 'existing');
 
-    const { result, unmount } = renderHook(() =>
-      useShellHistory(MOCKED_PROJECT_ROOT),
-    );
-    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+    const { result, unmount } = renderHook(() => useTestShellHistory());
+    await waitFor(() => expect(result.current.history).toEqual(['existing']));
 
     act(() => {
       result.current.addCommandToHistory(multiLineCommand);
     });
 
-    await waitFor(() => expect(mockedFs.writeFile).toHaveBeenCalled());
-    const writtenContent = mockedFs.writeFile.mock.calls[0][1] as string;
+    await expectPersistedHistory(['existing', multiLineCommand]);
     unmount();
 
-    mockedFs.readFile.mockResolvedValue(writtenContent);
-    const { result: reloaded } = renderHook(() =>
-      useShellHistory(MOCKED_PROJECT_ROOT),
+    const { result: reloaded } = renderHook(() => useTestShellHistory());
+    await waitFor(() =>
+      expect(reloaded.current.history).toEqual([multiLineCommand, 'existing']),
     );
-    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalledTimes(2));
 
     let command: string | null = null;
     act(() => {
@@ -181,10 +364,12 @@ describe('useShellHistory', () => {
   });
 
   it('should load JSON history files in newest-first order', async () => {
-    mockedFs.readFile.mockResolvedValue(JSON.stringify(['cmd1', 'cmd2']));
-    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+    await fs.writeFile(historyFilePath, JSON.stringify(['cmd1', 'cmd2']));
+    const { result } = renderHook(() => useTestShellHistory());
 
-    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(result.current.history).toEqual(['cmd2', 'cmd1']),
+    );
 
     let command: string | null = null;
     act(() => {
@@ -199,11 +384,13 @@ describe('useShellHistory', () => {
   });
 
   it('should navigate history correctly with previous/next commands', async () => {
-    mockedFs.readFile.mockResolvedValue('cmd1\ncmd2\ncmd3');
-    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+    await fs.writeFile(historyFilePath, 'cmd1\ncmd2\ncmd3');
+    const { result } = renderHook(() => useTestShellHistory());
 
     // Wait for history to be loaded: ['cmd3', 'cmd2', 'cmd1']
-    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(result.current.history).toEqual(['cmd3', 'cmd2', 'cmd1']),
+    );
 
     let command: string | null = null;
 
@@ -246,60 +433,47 @@ describe('useShellHistory', () => {
   });
 
   it('should not add empty or whitespace-only commands to history', async () => {
-    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
-    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+    await fs.writeFile(historyFilePath, 'existing');
+    const { result } = renderHook(() => useTestShellHistory());
+    await waitFor(() => expect(result.current.history).toEqual(['existing']));
 
     act(() => {
       result.current.addCommandToHistory('   ');
+      result.current.addCommandToHistory('sentinel');
     });
 
-    expect(mockedFs.writeFile).not.toHaveBeenCalled();
+    await expectPersistedHistory(['existing', 'sentinel']);
   });
 
   it('should truncate history to MAX_HISTORY_LENGTH (100)', async () => {
     const oldCommands = Array.from({ length: 120 }, (_, i) => `old_cmd_${i}`);
-    mockedFs.readFile.mockResolvedValue(oldCommands.join('\n'));
+    await fs.writeFile(historyFilePath, oldCommands.join('\n'));
 
-    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
-    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+    const { result } = renderHook(() => useTestShellHistory());
+    await waitFor(() => expect(result.current.history).toHaveLength(120));
 
     act(() => {
       result.current.addCommandToHistory('new_cmd');
     });
 
-    // Wait for the async write to happen and then inspect the arguments.
-    await waitFor(() => expect(mockedFs.writeFile).toHaveBeenCalled());
-
-    // The hook stores history newest-first.
-    // Initial state: ['old_cmd_119', ..., 'old_cmd_0']
-    // After adding 'new_cmd': ['new_cmd', 'old_cmd_119', ..., 'old_cmd_21'] (100 items)
-    // Written to file (reversed): ['old_cmd_21', ..., 'old_cmd_119', 'new_cmd']
-    const writtenContent = mockedFs.writeFile.mock.calls[0][1] as string;
-    const writtenHistory = JSON.parse(writtenContent) as string[];
-
-    expect(writtenHistory.length).toBe(100);
-    expect(writtenHistory[0]).toBe('old_cmd_21'); // New oldest command
-    expect(writtenHistory[99]).toBe('new_cmd'); // Newest command
+    await waitFor(() => expect(result.current.history).toHaveLength(100));
+    await expectPersistedHistory([...oldCommands.slice(21), 'new_cmd']);
   });
 
   it('should move an existing command to the top when re-added', async () => {
-    mockedFs.readFile.mockResolvedValue('cmd1\ncmd2\ncmd3');
-    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+    await fs.writeFile(historyFilePath, 'cmd1\ncmd2\ncmd3');
+    const { result } = renderHook(() => useTestShellHistory());
 
     // Initial state: ['cmd3', 'cmd2', 'cmd1']
-    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(result.current.history).toEqual(['cmd3', 'cmd2', 'cmd1']),
+    );
 
     act(() => {
       result.current.addCommandToHistory('cmd1');
     });
 
-    // After re-adding 'cmd1': ['cmd1', 'cmd3', 'cmd2']
-    // Written to file (reversed): ['cmd2', 'cmd3', 'cmd1']
-    await waitFor(() => expect(mockedFs.writeFile).toHaveBeenCalled());
-
-    const writtenContent = mockedFs.writeFile.mock.calls[0][1] as string;
-    const writtenHistory = JSON.parse(writtenContent) as string[];
-
-    expect(writtenHistory).toEqual(['cmd2', 'cmd3', 'cmd1']);
+    await expectPersistedHistory(['cmd2', 'cmd3', 'cmd1']);
+    expect(result.current.history).toEqual(['cmd1', 'cmd3', 'cmd2']);
   });
 });

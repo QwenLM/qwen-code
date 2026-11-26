@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
@@ -12,10 +14,10 @@ import java.util.Map;
 
 public interface ManagedWorkspaceRegistry {
     public static void requireSessionVisibility(
-            com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord session,
+            StoreModels.SessionRecord session,
             String actorId, ManagedWorkspaceRegistry workspaces) {
         if (session.ownerOnly() && !workspaces.isSessionOwner(session.tenantId(), actorId, session.sessionId())) {
-            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+            throw new ManagedAgentException(
                     404, "session_not_found", "The Session was not found.");
         }
     }

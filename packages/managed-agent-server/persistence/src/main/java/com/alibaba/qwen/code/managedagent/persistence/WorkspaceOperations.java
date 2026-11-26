@@ -4,17 +4,20 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 final class WorkspaceOperations {
     enum Kind {
@@ -40,7 +43,7 @@ final class WorkspaceOperations {
     }
 
     static String hash(String... fields) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(fields);
+        return ManagedSchemaKeys.key(fields);
     }
 
     Map<String, Object> find(Kind kind, String id, boolean lock) {
@@ -101,7 +104,7 @@ final class WorkspaceOperations {
 
     static List<Map<String, Object>> rows(JdbcTemplate jdbc, String sql, Object... arguments) {
         return jdbc.query(sql, (row, index) ->
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), arguments);
+                ManagedSchemaRows.read(row), arguments);
     }
 
     static Map<String, Object> values(Object... fields) {
@@ -169,16 +172,16 @@ final class WorkspaceOperations {
     }
 
     static void requireState(Kind kind, String state) {
-        java.util.Set<String> allowed = switch (kind) {
-            case WORKSPACE_RECOVERY -> java.util.Set.of("CAPTURING", "VERIFYING", "SEALED", "VERIFIED", "INVALIDATED");
-            case WORKSPACE_OPERATOR_RECOVERY -> java.util.Set.of("PREPARED", "ATTESTED", "COMPLETED");
-            case STORAGE_MIGRATION -> java.util.Set.of("RETIRING", "RETIRED", "PREPARING", "PREPARED", "COMPLETED", "ABORTED", "INVALIDATED");
-            case WORKSPACE_RETIREMENT -> java.util.Set.of("DRAINING", "PLATFORM_CLEANED", "RELEASED");
-            case CHILD_WORKSPACE -> java.util.Set.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY,
+        Set<String> allowed = switch (kind) {
+            case WORKSPACE_RECOVERY -> Set.of("CAPTURING", "VERIFYING", "SEALED", "VERIFIED", "INVALIDATED");
+            case WORKSPACE_OPERATOR_RECOVERY -> Set.of("PREPARED", "ATTESTED", "COMPLETED");
+            case STORAGE_MIGRATION -> Set.of("RETIRING", "RETIRED", "PREPARING", "PREPARED", "COMPLETED", "ABORTED", "INVALIDATED");
+            case WORKSPACE_RETIREMENT -> Set.of("DRAINING", "PLATFORM_CLEANED", "RELEASED");
+            case CHILD_WORKSPACE -> Set.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY,
                     JdbcChildWorkspaceStore.MERGING, JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED,
                     JdbcChildWorkspaceStore.MERGED, JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.DISCARDING,
                     JdbcChildWorkspaceStore.DISCARDED, JdbcChildWorkspaceStore.FAILED, JdbcChildWorkspaceStore.BLOCKED);
-            case SESSION_WORKTREE -> java.util.Set.of("PREPARING", "READY", "FAILED", "BLOCKED", "REMOVING", "REMOVED");
+            case SESSION_WORKTREE -> Set.of("PREPARING", "READY", "FAILED", "BLOCKED", "REMOVING", "REMOVED");
         };
         if (!allowed.contains(state)) {
             throw new IllegalArgumentException("Unknown state for Workspace operation " + kind);
@@ -189,12 +192,12 @@ final class WorkspaceOperations {
         requireState(kind, from);
         requireState(kind, to);
         boolean allowed = from.equals(to) || switch (kind) {
-            case WORKSPACE_RECOVERY -> "CAPTURING".equals(from) && java.util.Set.of("SEALED", "INVALIDATED").contains(to)
+            case WORKSPACE_RECOVERY -> "CAPTURING".equals(from) && Set.of("SEALED", "INVALIDATED").contains(to)
                     || "VERIFYING".equals(from) && "VERIFIED".equals(to);
             case WORKSPACE_OPERATOR_RECOVERY -> "PREPARED".equals(from) && "ATTESTED".equals(to)
                     || "ATTESTED".equals(from) && "COMPLETED".equals(to);
-            case STORAGE_MIGRATION -> !java.util.Set.of("COMPLETED", "ABORTED").contains(from)
-                    && (java.util.Set.of("ABORTED", "INVALIDATED").contains(to)
+            case STORAGE_MIGRATION -> !Set.of("COMPLETED", "ABORTED").contains(from)
+                    && (Set.of("ABORTED", "INVALIDATED").contains(to)
                     || "RETIRING".equals(from) && "RETIRED".equals(to)
                     || "RETIRED".equals(from) && "PREPARING".equals(to)
                     || "PREPARING".equals(from) && "PREPARED".equals(to)
@@ -215,7 +218,7 @@ final class WorkspaceOperations {
                 throw new IllegalStateException("Workspace operation payload version is invalid");
             }
             return JSON.convertValue(document.path("data"), MAP);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Workspace operation payload is invalid", error);
         }
     }
@@ -223,7 +226,7 @@ final class WorkspaceOperations {
     private static String decodeKey(String value) {
         try {
             return JSON.readTree(value).path("workKey").asText();
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Workspace work identity is invalid", error);
         }
     }
@@ -248,7 +251,7 @@ final class WorkspaceOperations {
     private static String encode(Object value) {
         try {
             return JSON.writeValueAsString(value);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Workspace operation payload cannot be encoded", error);
         }
     }

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionAdmissionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -81,8 +82,8 @@ public class ManagedAgentTraceService {
             String predecessor = body.path("predecessorChildRunId").isTextual() ? body.path("predecessorChildRunId").asText() : null;
             item.putNull("predecessorTaskId");
             if (predecessor != null && !predecessor.equals(target.get().recordId())) {
-                String previousTask = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.taskId(
-                        com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", predecessor));
+                String previousTask = ManagedExtensionProjection.taskId(
+                        ManagedExtensionProjection.recordKey(sessionId, "child_run", predecessor));
                 try {
                     var previous = records.findTaskTargetByRecord(tenant, sessionId, "child_run", predecessor);
                     if (previous.isPresent() && "child_agent".equals(previous.get().kind())) {

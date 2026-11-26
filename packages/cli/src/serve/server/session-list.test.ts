@@ -13,7 +13,11 @@ import {
   GROUP_COLOR_OPTIONS,
 } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  resetSessionTranscriptIndexCacheForTest,
+  setSessionTranscriptCooperativeReadBudgetForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { createWorktreeSessionMarkerExclusive } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { writeWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
@@ -100,6 +104,7 @@ describe('merged session catalog pagination', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    resetSessionTranscriptIndexCacheForTest();
     abortHarness.controller = undefined;
     abortHarness.beforeRead = undefined;
     await fs.rm(directory, { recursive: true, force: true });
@@ -271,6 +276,30 @@ describe('merged session catalog pagination', () => {
       ).rejects.toThrow();
     },
   );
+
+  it('keeps prompt-time reads O(1) above the legacy 256 MiB limit', async () => {
+    const session = summary(0);
+    await persist(session);
+    const chats = path.join(
+      runtimeBaseDir,
+      'projects',
+      workspaceCwd.replace(/[^a-zA-Z0-9]/g, '-'),
+      'chats',
+    );
+    const file = path.join(chats, `${session.sessionId}.jsonl`);
+    await fs.truncate(file, 257 * 1024 * 1024);
+
+    let scannedLines = 0;
+    setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+      scannedLines += 1;
+    });
+    const snapshot = await new SessionService(workspaceCwd, {
+      runtimeBaseDir,
+    }).getLastUserPromptAt(session.sessionId);
+
+    expect(snapshot).toBeUndefined();
+    expect(scannedLines).toBe(0);
+  });
 
   it('sorts archived sessions by their archived question time, not activity', async () => {
     const sessions = [summary(0), summary(1), summary(2)];
