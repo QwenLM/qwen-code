@@ -244,6 +244,18 @@ export async function withWorktreeArchiveMove<T>(
   sourceState: 'active' | 'archived',
   move: () => Promise<T>,
 ): Promise<T> {
+  // With no sidecar to inspect, enter the archive-exclusive coordinator before
+  // the next session in the same batch maps to its own asynchronous work.
+  if (
+    !fs.existsSync(
+      service.getWorktreeSessionPathForArchiveState(sessionId, 'active'),
+    ) &&
+    !fs.existsSync(
+      service.getWorktreeSessionPathForArchiveState(sessionId, 'archived'),
+    )
+  ) {
+    return move();
+  }
   const otherState: 'active' | 'archived' =
     sourceState === 'active' ? 'archived' : 'active';
   const lockKeys = new Set<string>();

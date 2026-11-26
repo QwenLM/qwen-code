@@ -2348,6 +2348,41 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     await expect(pending).resolves.toMatchObject({ removed: [sessionId] });
   });
 
+  it('preserves the synchronous coordinator prefix for archive without a sidecar', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440090';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const coordinator = new SessionArchiveCoordinator();
+
+    const pending = archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: cleanupBridge(),
+      coordinator,
+    });
+
+    expect(() => coordinator.assertNotTransitioning(sessionId)).toThrow(
+      SessionArchivingError,
+    );
+    await expect(pending).resolves.toMatchObject({ archived: [sessionId] });
+  });
+
+  it('preserves the synchronous coordinator prefix for unarchive without a sidecar', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440091';
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    const coordinator = new SessionArchiveCoordinator();
+
+    const pending = unarchiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      coordinator,
+    });
+
+    expect(() => coordinator.assertNotTransitioning(sessionId)).toThrow(
+      SessionArchivingError,
+    );
+    await expect(pending).resolves.toMatchObject({ unarchived: [sessionId] });
+  });
+
   it('keeps worktree content and binding across archive and unarchive', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440089';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
