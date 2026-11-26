@@ -94,7 +94,7 @@ export class ManagedExtensionProcessOwners {
     if (
       (mode === 'linux-cgroup' && process.platform !== 'linux') ||
       (mode === 'developer-process-group' &&
-        (process.platform !== 'darwin' || !options.ledger))
+        (!['darwin', 'linux'].includes(process.platform) || !options.ledger))
     )
       throw new Error('Extension process mode is unavailable on this Runtime.');
     if (options.directory) {
