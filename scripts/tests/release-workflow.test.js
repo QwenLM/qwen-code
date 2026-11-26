@@ -1307,8 +1307,15 @@ describe('release workflow', () => {
             number: 15672,
             url: 'https://github.example/QwenLM/qwen-code/issues/15672',
             labels: [{ name: 'type/bug' }, { name: 'status/ready-for-agent' }],
-            author: { login: 'github-actions[bot]' },
+            author: { login: 'app/github-actions' },
             title: 'Release Failed for v1.2.3 on 2026-10-26',
+          },
+          {
+            number: 15673,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15673',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-10-27',
           },
         ]),
       );
@@ -1350,8 +1357,12 @@ describe('release workflow', () => {
         expect(result.status, result.stderr).toBe(0);
         const calls = readFileSync(ghLog, 'utf8');
         expect(calls).toContain('issue comment 15672');
+        expect(calls).toContain('issue comment 15673');
         expect(calls).toContain(
           'issue close 15672 --repo QwenLM/qwen-code --reason not planned',
+        );
+        expect(calls).toContain(
+          'issue close 15673 --repo QwenLM/qwen-code --reason not planned',
         );
         expect(calls).not.toContain('issue create');
         // One absent label must not abort the remaining removals or the close.
