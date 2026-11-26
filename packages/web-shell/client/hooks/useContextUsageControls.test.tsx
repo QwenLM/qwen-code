@@ -267,7 +267,9 @@ describe('useContextUsageControls', () => {
     expect(h.onBeforeCompress.mock.invocationCallOrder[0]).toBeLessThan(
       h.sendPrompt.mock.invocationCallOrder[0],
     );
-    expect(h.sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress');
+    expect(h.sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress', {
+      suppressInputHistory: true,
+    });
     expect(h.getContextUsage).not.toHaveBeenCalled();
     expect(h.controls.compressing).toBe(true);
     expect(h.controls.canCompress).toBe(false);
@@ -359,7 +361,9 @@ describe('useContextUsageControls', () => {
     expect(h.sendPrompt).not.toHaveBeenCalled();
     expect(h.onBeforeCompress).not.toHaveBeenCalled();
     act(() => void h.controls.compress());
-    expect(h.sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress');
+    expect(h.sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress', {
+      suppressInputHistory: true,
+    });
   });
 
   it('does not submit through a callback after unmount', async () => {
