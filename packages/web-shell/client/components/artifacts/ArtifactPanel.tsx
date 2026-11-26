@@ -630,10 +630,14 @@ interface ArtifactPanelProps {
   confirmedCancelledSessionTaskIds?: ReadonlySet<string>;
   hasLiveDurableScheduledSnapshot?: boolean;
   hasLiveSessionScheduledSnapshot?: boolean;
-  onCancelSessionScheduledTask?: (taskId: string) => Promise<boolean>;
+  onCancelSessionScheduledTask?: (
+    taskId: string,
+    source?: 'cron' | 'wakeup',
+  ) => Promise<boolean>;
   onSessionScheduledTaskStopped?: (
     taskId: string,
     sourceSessionId?: string,
+    source?: 'cron' | 'wakeup',
   ) => void;
   onDurableScheduledTaskDeleted?: (
     id: string,

@@ -4852,6 +4852,43 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(promptRequests).toEqual(['client-1', 'client-2']);
   });
 
+  it('does not invoke beforeDispatch after a synchronous caller abort(null) even when clientId changes', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(202, { promptId: 'unexpected', lastEventId: 0 }),
+    );
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const preAborted = new AbortController();
+    preAborted.abort(null);
+    const skippedGuard = vi.fn();
+    await expect(
+      session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'already aborted' }] },
+        preAborted.signal,
+        skippedGuard,
+      ),
+    ).rejects.toBeNull();
+    expect(skippedGuard).not.toHaveBeenCalled();
+
+    const caller = new AbortController();
+    const beforeDispatch = vi.fn(() => {
+      (
+        session as unknown as { session: { clientId: string } }
+      ).session.clientId = 'client-2';
+      caller.abort(null);
+    });
+    await expect(
+      session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'aborted in guard' }] },
+        caller.signal,
+        beforeDispatch,
+      ),
+    ).rejects.toBeNull();
+    expect(beforeDispatch).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(0);
+  });
+
   it('retries a worktree prompt only after matching durable reattachment', async () => {
     let promptCalls = 0;
     const { fetch } = recordingFetch((req) => {

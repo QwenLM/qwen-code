@@ -1444,10 +1444,10 @@ export function ScheduledTasksDialog({
           formWorkspaceId,
         );
       }
+      onTaskMutated?.();
       if (!mountedRef.current) return;
       resetForm();
       await reload();
-      onTaskMutated?.();
     } catch (err) {
       if (!mountedRef.current) return;
       setFormError(err instanceof Error ? err.message : String(err));

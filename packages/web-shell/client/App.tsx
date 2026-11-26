@@ -511,7 +511,10 @@ import {
 } from './hooks/useSessionScheduledTasks';
 import { useSubSessionTasks } from './hooks/useSubSessionTasks';
 import { extractErrorDetail } from './utils/errorDetail';
-import { createScheduledTaskCancellation } from './utils/scheduledTaskManualRun';
+import {
+  createScheduledTaskCancellation,
+  isScheduledTaskCancellation,
+} from './utils/scheduledTaskManualRun';
 import {
   getSendWorkspace,
   parseSendCommand,
@@ -946,8 +949,7 @@ interface SendPromptOptionsWithRetry {
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
   idempotencyKey?: string;
-  beforeDispatch?: (clientId: string | undefined) => void;
-  beforeDetachedDispatch?: (clientId: string | undefined) => void;
+  beforeDispatch?: (clientId: string | undefined) => void | Promise<void>;
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
@@ -9840,6 +9842,9 @@ export function App({
   const sessionScheduledTasks = useSessionScheduledTasks({
     sessionId: connection.sessionId,
     workspaceId: scheduledTaskWorkspaceTarget.workspaceId,
+    workspaceCwd: scheduledTaskWorkspaceTarget.resolvable
+      ? activeWorkspaceCwd
+      : undefined,
     connected: connection.status === 'connected' && !managedMode,
     durableEnabled:
       projectFeaturesAvailable &&
@@ -9861,18 +9866,17 @@ export function App({
         taskIsStale,
         beforeTaskDispatch,
       ),
-    onError: (error, fallback) => reportError(error, t(fallback), true),
+    onError: (error, fallback) =>
+      reportScheduledTaskError(error, fallback, true),
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
   const matchesCurrentScheduledTaskScope = useCallback(
-    (
-      task: Parameters<typeof sessionScheduledTasks.confirmDurableDeletion>[0],
-    ) =>
+    (task: { id: string; workspaceId?: string; sessionId?: string | null }) =>
       scheduledTaskWorkspaceTarget.resolvable &&
       task.sessionId === connection.sessionId &&
-      (task.workspaceId ?? scheduledTaskWorkspaceTarget.workspaceId ?? null) ===
+      (task.workspaceId ?? null) ===
         (scheduledTaskWorkspaceTarget.workspaceId ?? null),
-    [scheduledTaskWorkspaceTarget, connection.sessionId, sessionScheduledTasks],
+    [scheduledTaskWorkspaceTarget, connection.sessionId],
   );
   const openSessionScheduledTaskDetail = useCallback(
     (entry: SessionScheduledTask) => {
@@ -13959,6 +13963,27 @@ export function App({
       pushToast('error', message);
     },
     [pushToast, t],
+  );
+  // Scheduled-task manual runs already suppress internal target-replacement
+  // cancellations before reaching onError; non-cancellation AbortErrors
+  // (revalidation failures) and consumed one-shot warnings must stay visible.
+  const reportScheduledTaskError = useCallback(
+    (error: unknown, fallback: string, includeErrorContext = false) => {
+      if (isAbortError(error)) {
+        const message = isScheduledTaskCancellation(error)
+          ? fallback
+          : error instanceof Error &&
+              error.message &&
+              !error.message.startsWith(fallback)
+            ? `${fallback}: ${error.message}`
+            : fallback;
+        console.error('[web-shell]', message, error);
+        pushToast('error', message);
+        return;
+      }
+      reportError(error, fallback, includeErrorContext);
+    },
+    [pushToast, reportError],
   );
   // Drop any details association pointing at one of these children. Shared by
   // the panel archive path and the read-site check so every route that retires
@@ -27229,20 +27254,14 @@ export function App({
                       autofixPrWatchesAvailable={prWatchesAvailable}
                       isTaskDeleted={(task) =>
                         matchesCurrentScheduledTaskScope(task) &&
-                        sessionScheduledTasks.isDurableTaskDeletionConfirmed({
-                          ...task,
-                          workspaceId:
-                            scheduledTaskWorkspaceTarget.workspaceId,
-                        })
+                        sessionScheduledTasks.isDurableTaskDeletionConfirmed(
+                          task,
+                        )
                       }
                       onTaskMutated={sessionScheduledTasks.refresh}
                       onTaskDeleted={(task) => {
                         if (!matchesCurrentScheduledTaskScope(task)) return;
-                        sessionScheduledTasks.confirmDurableDeletion({
-                          ...task,
-                          workspaceId:
-                            scheduledTaskWorkspaceTarget.workspaceId,
-                        });
+                        sessionScheduledTasks.confirmDurableDeletion(task);
                       }}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
@@ -27284,7 +27303,9 @@ export function App({
                           },
                         );
                       }}
-                      onError={reportError}
+                      onError={(error, fallback) =>
+                        reportScheduledTaskError(error, fallback, true)
+                      }
                     />
                   </div>
                 </div>

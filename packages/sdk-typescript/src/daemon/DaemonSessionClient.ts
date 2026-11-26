@@ -808,9 +808,9 @@ export class DaemonSessionClient {
     beforeDispatch?: (clientId: string | undefined) => void | Promise<void>,
   ): Promise<NonBlockingPromptAccepted> {
     const accepted = await this.withClientIdSelfHeal(async () => {
-      signal?.throwIfAborted();
       let guardedClientId: string | undefined;
       do {
+        if (signal?.aborted) throw signal.reason;
         guardedClientId = this.clientId;
         if (beforeDispatch && signal) {
           // A signal must also settle an asynchronous caller guard before the
@@ -823,7 +823,7 @@ export class DaemonSessionClient {
           await beforeDispatch(guardedClientId);
         }
       } while (guardedClientId !== this.clientId);
-      signal?.throwIfAborted();
+      if (signal?.aborted) throw signal.reason;
       return this.client.promptNonBlocking(
         this.sessionId,
         req,
@@ -924,11 +924,13 @@ export class DaemonSessionClient {
     operation: () => Promise<T> | T,
     signal: AbortSignal,
   ): Promise<T> {
+    if (signal.aborted) {
+      throw signal.reason;
+    }
     let onAbort: (() => void) | undefined;
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => reject(signal.reason);
-      if (signal.aborted) onAbort();
-      else signal.addEventListener('abort', onAbort, { once: true });
+      signal.addEventListener('abort', onAbort, { once: true });
     });
     aborted.catch(() => {});
     try {

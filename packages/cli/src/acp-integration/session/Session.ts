@@ -1845,7 +1845,6 @@ interface CronQueueItem {
   source: 'cron' | 'loop';
   taskId?: string;
   taskSessionId?: string | null;
-  runId?: string;
   firedAt?: number;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
@@ -12791,7 +12790,6 @@ export class Session implements SessionContext {
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         ...(job.id ? { taskId: job.id } : {}),
         taskSessionId: job.boundSessionId ?? null,
-        ...(job.runId ? { runId: job.runId } : {}),
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
         ...(job.delivery ? { delivery: job.delivery } : {}),
         ...(job.todoWorkChainId
@@ -12955,7 +12953,6 @@ export class Session implements SessionContext {
         source: 'cron',
         ...(job.id ? { taskId: job.id } : {}),
         taskSessionId: job.boundSessionId ?? null,
-        ...(job.runId ? { runId: job.runId } : {}),
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
       });
       void this.#drainCronQueue();

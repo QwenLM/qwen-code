@@ -60,6 +60,7 @@ let latest: SessionScheduledTasksResult | null = null;
 interface HarnessProps {
   sessionId?: string;
   workspaceId?: string;
+  workspaceCwd?: string;
   connected?: boolean;
   durableEnabled?: boolean;
   activityKey?: string;
@@ -71,6 +72,7 @@ function Harness(props: HarnessProps) {
   latest = useSessionScheduledTasks({
     sessionId: props.sessionId,
     workspaceId: props.workspaceId,
+    workspaceCwd: props.workspaceCwd,
     connected: props.connected ?? true,
     durableEnabled: props.durableEnabled ?? true,
     activityKey: props.activityKey ?? '',
@@ -1513,4 +1515,92 @@ describe('useSessionScheduledTasks', () => {
       else expect(latest?.taskStatusById.get('d-mutation-read')).toBe('paused');
     },
   );
+
+  it('surfaces post-admission recording failures even after the UI scope changes', async () => {
+    const task = durableTask({ id: 'record-fail-after-switch' });
+    let rejectRecord!: (error: Error) => void;
+    const pendingRecord = new Promise<void>((_resolve, reject) => {
+      rejectRecord = reject;
+    });
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([task]);
+    sdkMock.workspaceActions.runScheduledTask.mockReturnValueOnce(
+      pendingRecord,
+    );
+    onRunPrompt.mockResolvedValue(undefined);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      workspaceCwd: '/work/secondary',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+    const entry = latest!.tasks[0] as SessionDurableScheduledTask;
+
+    let running!: Promise<void>;
+    await act(async () => {
+      running = latest!.runDurableTask(entry);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(sdkMock.workspaceActions.runScheduledTask).toHaveBeenCalledOnce(),
+    );
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      task.prompt,
+      task.sessionId,
+      '/work/secondary',
+      expect.any(Function),
+      expect.any(Function),
+    );
+
+    renderHarness({
+      sessionId: 'session-2',
+      workspaceId: 'ws-1',
+      workspaceCwd: '/work/secondary',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => {
+      rejectRecord(new Error('disk full'));
+      await running;
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'disk full' }),
+      'Failed to record the run',
+    );
+  });
+
+  it('does not treat a primary undefined workspaceId deletion as matching a secondary workspace', async () => {
+    const task = durableTask({ id: 'shared-id', sessionId: 'session-1' });
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([task]);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-secondary',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+
+    await act(async () => {
+      latest?.confirmDurableDeletion({
+        id: 'shared-id',
+        sessionId: 'session-1',
+        workspaceId: undefined,
+      });
+    });
+
+    expect(latest?.tasks).toHaveLength(1);
+    expect(
+      latest?.isDurableTaskDeletionConfirmed({
+        id: 'shared-id',
+        sessionId: 'session-1',
+        workspaceId: undefined,
+      }),
+    ).toBe(false);
+    expect(
+      latest?.isDurableTaskDeletionConfirmed({
+        id: 'shared-id',
+        sessionId: 'session-1',
+        workspaceId: 'ws-secondary',
+      }),
+    ).toBe(false);
+  });
 });

@@ -11,7 +11,10 @@ import {
 import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { DAEMON_APPROVAL_MODES } from './test/sidebarHarness';
-import { isScheduledTaskCancellation } from './utils/scheduledTaskManualRun';
+import {
+  createScheduledTaskCancellation,
+  isScheduledTaskCancellation,
+} from './utils/scheduledTaskManualRun';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
 const messageListScrollToMessage = vi.hoisted(() =>
   vi.fn((_messageId: string, _callId?: string) => true),
@@ -903,6 +906,8 @@ const {
       listScheduledTasks: vi.fn(),
       updateScheduledTask: vi.fn(),
       deleteScheduledTask: vi.fn(),
+      runScheduledTask: vi.fn(),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
       deleteModel: vi.fn().mockResolvedValue(undefined),
       unarchiveSession: vi.fn().mockResolvedValue(undefined),
       controlGoal: vi.fn().mockResolvedValue({
@@ -1239,6 +1244,7 @@ const {
           workspaceId?: string;
           sessionId?: string | null;
         }) => void;
+        onError?: (error: unknown, fallback: string) => void;
       } | null,
       latestPrWatchesProps: null as {
         onRunPrompt?: (
@@ -3092,6 +3098,7 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
         pendingInteractionCount?: number;
       };
       currentSessionSchedulingAvailable?: boolean;
+      onError?: (error: unknown, fallback: string) => void;
     }) => {
       testState.latestScheduledTasksProps = props;
       return React.createElement('div');
@@ -8010,6 +8017,264 @@ describe('task activity key', () => {
     });
     expect(mockSessionActions.getTasks).toHaveBeenCalled();
     expect(mockWorkspace.client.sessionTasks).not.toHaveBeenCalled();
+  });
+
+  it('surfaces consumed one-shot and recurring revalidation AbortErrors through App toasts', async () => {
+    const oneShotTask = {
+      id: 'durable:oneshot-toast',
+      name: 'One-shot toast',
+      cron: '0 9 * * *',
+      prompt: 'One-shot prompt',
+      recurring: false,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    const recurringTask = {
+      ...oneShotTask,
+      id: 'durable:recurring-toast',
+      name: 'Recurring toast',
+      prompt: 'Recurring prompt',
+      recurring: true,
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.workspaceCwd = '/tmp/project';
+    testState.messages = [
+      {
+        id: 'seed-task',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'call-1',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 9 * * *',
+              prompt: 'Recurring prompt',
+              recurring: true,
+              durable: true,
+            },
+            resultDisplay: {
+              id: recurringTask.id,
+              humanSchedule: 'Daily at 09:00',
+              recurring: true,
+              durable: true,
+            },
+          },
+        ],
+      },
+    ];
+    const onToast = vi.fn();
+    let recurringRevalidationRead = false;
+    mockWorkspaceActions.listScheduledTasks.mockImplementation(async () =>
+      recurringRevalidationRead ? [] : [oneShotTask, recurringTask],
+    );
+    mockWorkspaceActions.runScheduledTask.mockResolvedValue(oneShotTask);
+    mockSessionActions.loadSession.mockResolvedValue(undefined);
+    mockSessionActions.sendPrompt
+      .mockRejectedValueOnce(
+        createScheduledTaskCancellation('Bound run target was replaced'),
+      )
+      .mockImplementationOnce(async (_prompt: string, options: unknown) => {
+        recurringRevalidationRead = true;
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+        };
+        await opts.beforeDispatch?.();
+      });
+
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      onToast,
+    });
+    const findRow = (label: string) =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-testid="environment-scheduled-task"]',
+        ),
+      ).find((el) => el.textContent?.includes(label));
+    await vi.waitFor(async () => {
+      await flush();
+      expect(findRow('One-shot toast')).toBeDefined();
+      expect(findRow('Recurring toast')).toBeDefined();
+    });
+
+    await act(async () => {
+      findRow('One-shot toast')
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Run now"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'scheduledTasks.error.oneShotConsumedButFailed',
+      ),
+    );
+    expect(
+      onToast.mock.calls.some(([, msg]) =>
+        String(msg).includes('Bound run target was replaced'),
+      ),
+    ).toBe(false);
+
+    onToast.mockClear();
+    await act(async () => {
+      findRow('Recurring toast')
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Run now"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'scheduledTasks.error.runFailed',
+      ),
+    );
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+
+    onToast.mockClear();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      testState.latestScheduledTasksProps?.onError?.(
+        createScheduledTaskCancellation('Bound run runtime was replaced'),
+        'Dialog consumed warning',
+      );
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith('error', 'Dialog consumed warning'),
+    );
+  });
+
+  it('preserves secondary workspaceCwd on EnvironmentPanel manual run and isolates primary deletion scope', async () => {
+    const secondaryTask = {
+      id: 'shared-task-id',
+      name: 'Secondary bound task',
+      cron: '0 9 * * *',
+      prompt: 'Secondary task prompt',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/work/primary',
+      workspaces: [
+        {
+          id: 'ws-primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'ws-secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.workspaceCwd = '/work/secondary';
+    testState.messages = [
+      {
+        id: 'seed-secondary',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'call-sec',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 9 * * *',
+              prompt: 'Secondary task prompt',
+              recurring: true,
+              durable: true,
+            },
+            resultDisplay: {
+              id: secondaryTask.id,
+              humanSchedule: 'Daily at 09:00',
+              recurring: true,
+              durable: true,
+            },
+          },
+        ],
+      },
+    ];
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([secondaryTask]);
+    mockWorkspaceActions.runScheduledTask.mockResolvedValue(secondaryTask);
+    mockSessionActions.loadSession.mockResolvedValue(undefined);
+    mockSessionActions.sendPrompt.mockImplementation(
+      async (_prompt: string, options: unknown) => {
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+          onAdmitted?: (admission: { promptId: string }) => void;
+        };
+        await opts.beforeDispatch?.();
+        opts.onAdmitted?.({ promptId: 'p-sec-1' });
+      },
+    );
+
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+    });
+    const envRow = () =>
+      container.querySelector('[data-testid="environment-scheduled-task"]');
+    await vi.waitFor(async () => {
+      await flush();
+      expect(envRow()).not.toBeNull();
+    });
+
+    mockSessionActions.loadSession.mockClear();
+    await act(async () => {
+      envRow()
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Run now"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({
+          workspaceCwd: '/work/secondary',
+          sessionContext: { kind: 'workspace', cwd: '/work/secondary' },
+        }),
+      ),
+    );
+
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const primarySameIdTask = {
+      id: secondaryTask.id,
+      sessionId: 'session-1',
+      workspaceId: undefined,
+    };
+    await act(async () => {
+      testState.latestScheduledTasksProps?.onTaskDeleted?.(primarySameIdTask);
+    });
+    await flush();
+    expect(
+      testState.latestScheduledTasksProps?.isTaskDeleted?.(primarySameIdTask),
+    ).toBe(false);
+    expect(
+      testState.latestScheduledTasksProps?.isTaskDeleted?.({
+        id: secondaryTask.id,
+        sessionId: 'session-1',
+        workspaceId: 'ws-secondary',
+      }),
+    ).toBe(false);
   });
 
   it.each([
@@ -15633,6 +15898,11 @@ beforeEach(() => {
   mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
   mockWorkspaceActions.updateScheduledTask.mockReset();
   mockWorkspaceActions.deleteScheduledTask.mockReset();
+  mockWorkspaceActions.runScheduledTask.mockReset();
+  mockWorkspaceActions.assertScheduledTaskOwnerSelection.mockReset();
+  mockWorkspaceActions.assertScheduledTaskOwnerSelection.mockResolvedValue(
+    undefined,
+  );
   mockWorkspaceActions.deleteModel.mockReset();
   mockWorkspaceActions.deleteModel.mockResolvedValue(undefined);
   mockMcp.initialize.mockClear();

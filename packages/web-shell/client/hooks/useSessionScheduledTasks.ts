@@ -176,6 +176,7 @@ function toSessionEntry(
 export function useSessionScheduledTasks(options: {
   sessionId: string | undefined;
   workspaceId: string | undefined;
+  workspaceCwd?: string;
   connected: boolean;
   durableEnabled: boolean;
   /**
@@ -193,6 +194,7 @@ export function useSessionScheduledTasks(options: {
   const {
     sessionId,
     workspaceId,
+    workspaceCwd,
     connected,
     durableEnabled,
     activityKey,
@@ -457,8 +459,15 @@ export function useSessionScheduledTasks(options: {
       setManualRunActive(true);
       markBusy(entry, true);
       try {
+        const resolvedWorkspaceCwd = entry.task.workspaceCwd ?? workspaceCwd;
         await runScheduledTaskManually(
-          { ...entry.task, workspaceId: entry.workspaceId ?? workspaceId },
+          {
+            ...entry.task,
+            workspaceId: entry.workspaceId ?? workspaceId,
+            ...(resolvedWorkspaceCwd !== undefined
+              ? { workspaceCwd: resolvedWorkspaceCwd }
+              : {}),
+          },
           workspaceActions,
           onRunPrompt,
           t,
@@ -466,7 +475,6 @@ export function useSessionScheduledTasks(options: {
             reload: refresh,
             onError: (error, fallback) => {
               if (
-                sameScope() &&
                 !confirmedDeletedDurableTaskKeysRef.current.has(deletedTaskKey)
               ) {
                 onError(error, fallback);
@@ -495,19 +503,22 @@ export function useSessionScheduledTasks(options: {
       refresh,
       t,
       workspaceActions,
+      workspaceCwd,
       workspaceId,
     ],
   );
 
   const confirmDurableDeletion = useCallback(
     (task: { id: string; workspaceId?: string; sessionId?: string | null }) => {
-      if (!owner.isCurrent() || !durableEnabled || task.sessionId !== sessionId)
+      if (
+        !owner.isCurrent() ||
+        !durableEnabled ||
+        task.sessionId !== sessionId ||
+        (task.workspaceId ?? null) !== (workspaceId ?? null)
+      )
         return;
       durableReqRef.current += 1;
-      const key = JSON.stringify([
-        task.workspaceId ?? workspaceId ?? null,
-        task.id,
-      ]);
+      const key = JSON.stringify([task.workspaceId ?? null, task.id]);
       confirmedDeletedDurableTaskKeysRef.current.add(key);
       setConfirmedDeletedDurableTaskKeys(
         new Set(confirmedDeletedDurableTaskKeysRef.current),
@@ -717,8 +728,9 @@ export function useSessionScheduledTasks(options: {
       sessionId?: string | null;
     }) =>
       task.sessionId === sessionId &&
+      (task.workspaceId ?? null) === (workspaceId ?? null) &&
       confirmedDeletedDurableTaskKeysRef.current.has(
-        JSON.stringify([task.workspaceId ?? workspaceId ?? null, task.id]),
+        JSON.stringify([task.workspaceId ?? null, task.id]),
       ),
     confirmedCancelledSessionTaskIds,
     confirmSessionCancellation,
