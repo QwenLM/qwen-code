@@ -254,3 +254,117 @@ test('git mode chip is hidden when workspace is not a git repo', async ({
   // Git mode chip should not be visible (falls back to regular branch indicator)
   await expect(page.locator('[data-testid="git-mode-chip"]')).toHaveCount(0);
 });
+
+for (const { status, expectedTone } of [
+  { status: 'conflicted', expectedTone: 'error' },
+  { status: 'rebase', expectedTone: 'warning' },
+  { status: 'detached', expectedTone: 'warning' },
+  { status: 'dirty', expectedTone: 'accent' },
+] as const) {
+  test(`keeps compact ${status} git badge visible in narrow desktop toolbar`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(
+      `/e2e/git-status-bar-harness.html?width=360&status=${status}`,
+    );
+
+    const chip = page.locator('[data-testid="git-mode-chip"]');
+    await expect(chip).toBeVisible({ timeout: 10_000 });
+    await expect(chip).toHaveAttribute('data-compact', 'true');
+
+    const dot = chip.locator('[data-tone]');
+    await expect(dot).toHaveAttribute('data-tone', expectedTone);
+    await expect(dot).toBeVisible();
+
+    const display = await dot.evaluate((el) => getComputedStyle(el).display);
+    expect(display).toBe('block');
+
+    const box = await dot.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.width).toBeGreaterThanOrEqual(7);
+    expect(box!.height).toBeGreaterThanOrEqual(7);
+
+    const labelDisplay = await chip
+      .locator('[data-compact="true"]')
+      .evaluateAll((els) => {
+        const textEl = els.find((el) => el.textContent?.trim().length);
+        return textEl ? getComputedStyle(textEl).display : null;
+      });
+    expect(labelDisplay).toBe('none');
+
+    await chip.click();
+    const popover = page.locator('[data-slot="popover-content"]');
+    await expect(popover).toBeVisible({ timeout: 5_000 });
+    await popover.getByRole('radio', { name: /Worktree/ }).click();
+    await expect(popover).not.toBeVisible();
+    await expect(chip).toHaveAttribute('data-git-mode', 'worktree');
+  });
+}
+
+test('progressively adapts git status details by available toolbar width without overlap', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  // Wide tier: full branch label + inline status indicators, no overlap.
+  await page.goto('/e2e/git-status-bar-harness.html?width=900&status=rich');
+  const chip = page.locator('[data-testid="git-mode-chip"]');
+  const label = chip.locator('[data-web-shell-git-branch-label]');
+  const modeBtn = page.getByRole('button', { name: 'Approval mode' });
+  await expect(chip).toBeVisible({ timeout: 10_000 });
+  await expect(label).toBeVisible();
+  await expect(chip).toContainText('feat/compact-git-status');
+  await expect(chip).toContainText('Rebasing');
+  await expect
+    .poll(() =>
+      chip
+        .locator('[data-tone]')
+        .evaluate((el) => getComputedStyle(el).display),
+    )
+    .toBe('none');
+  const wideChipBox = (await chip.boundingBox())!;
+  const wideModeBox = (await modeBtn.boundingBox())!;
+  expect(wideChipBox.x + wideChipBox.width).toBeLessThanOrEqual(wideModeBox.x);
+
+  // Medium tier: branch label + severity dot, verbose indicators collapsed.
+  await page.goto('/e2e/git-status-bar-harness.html?width=700&status=rich');
+  await expect(chip).toBeVisible({ timeout: 10_000 });
+  await expect(chip).not.toHaveAttribute('data-compact', 'true');
+  await expect(label).toBeVisible();
+  expect(await label.evaluate((el) => getComputedStyle(el).display)).not.toBe(
+    'none',
+  );
+  await expect(chip).toContainText('feat/compact-git-status');
+  await expect(chip).not.toContainText('Rebasing');
+  const mediumDot = chip.locator('[data-tone]');
+  await expect(mediumDot).toBeVisible();
+  expect(await mediumDot.evaluate((el) => getComputedStyle(el).display)).toBe(
+    'block',
+  );
+  const mediumDotBox = (await mediumDot.boundingBox())!;
+  expect(mediumDotBox.width).toBeGreaterThanOrEqual(7);
+  expect(mediumDotBox.height).toBeGreaterThanOrEqual(7);
+  const mediumChipBox = (await chip.boundingBox())!;
+  const mediumModeBox = (await modeBtn.boundingBox())!;
+  expect(mediumChipBox.x + mediumChipBox.width).toBeLessThanOrEqual(
+    mediumModeBox.x,
+  );
+
+  // Narrow tier: 28px icon + severity dot, label hidden, no overlap.
+  await page.goto('/e2e/git-status-bar-harness.html?width=360&status=rich');
+  await expect(chip).toHaveAttribute('data-compact', 'true');
+  expect(await label.evaluate((el) => getComputedStyle(el).display)).toBe(
+    'none',
+  );
+  const narrowDot = chip.locator('[data-tone]');
+  await expect(narrowDot).toBeVisible();
+  const narrowChipBox = (await chip.boundingBox())!;
+  const narrowNextBox = (await page
+    .locator('[data-testid="harness-composer"] button')
+    .nth(2)
+    .boundingBox())!;
+  expect(narrowChipBox.x + narrowChipBox.width).toBeLessThanOrEqual(
+    narrowNextBox.x,
+  );
+});

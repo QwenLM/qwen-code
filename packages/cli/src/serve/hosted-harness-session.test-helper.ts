@@ -220,7 +220,7 @@ const state = vi.hoisted(() => ({
       modelSelection?: { modelId: string; revision: number };
       modelConfig?: import('./hosted-model-config.js').HostedModelConfigReader;
       memory?: import('./hosted-memory-session.js').HostedMemorySession;
-      recallUserInput?: boolean;
+      userPrompt?: boolean;
       setLoopClassifier?: (
         classify:
           | import('./hosted-loop-session.js').HostedLoopClassifier

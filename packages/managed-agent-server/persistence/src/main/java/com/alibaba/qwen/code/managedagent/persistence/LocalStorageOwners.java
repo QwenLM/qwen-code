@@ -128,12 +128,20 @@ final class LocalStorageOwners {
                 + " WHERE mount_host_id = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", identity.hostId());
         for (var owner : owners) {
             String root = (String) owner.get("mount_root");
-            if (!key.equals(owner.get("physical_id")) && root != null
+            if (!samePhysicalRef(owner.get("physical_id"), key)
+                    && root != null
                     && (contains(root, identity.root()) || contains(identity.root(), root))) {
                 throw new RuntimeBrokerException(409, "storage_overlapping_roots",
                         "Workspace directory overlaps an existing physical owner.", false);
             }
         }
+    }
+
+    /** The column is VARBINARY, but queryForList hands an identifier back as text on MySQL. */
+    private static boolean samePhysicalRef(Object stored, String key) {
+        return stored instanceof byte[] bytes
+                ? java.util.Arrays.equals(bytes, key.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                : key.equals(stored);
     }
 
     private static boolean contains(String root, String candidate) {

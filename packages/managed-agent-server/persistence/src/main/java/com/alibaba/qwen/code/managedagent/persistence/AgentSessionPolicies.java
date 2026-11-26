@@ -197,12 +197,10 @@ final class AgentSessionPolicies {
                 AgentDefinitionCompiler.compile(revision.definitionJson(),
                         workspaceBound, approvalMode, definitionToolProfiles,
                         definitionModels);
-        Map<String, Object> content = storeRows.readMap(revision.definitionJson());
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
-                compiled.toolProfile(), content.containsKey("hook_catalog"),
-                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty(),
-                AgentDefinitionExtensions.skills(content.get("skills"), true));
+                compiled.toolProfile(), compiled.hookCatalogPresent(),
+                !compiled.mcpServers().isEmpty(), compiled.skills());
     }
 
     boolean hasMcpServers(SessionRecord session) {
@@ -505,9 +503,7 @@ final class AgentSessionPolicies {
                         Integer.class,
                         ManagedSchemaKeys.identity(sessionId),
                         ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
-                        ManagedSchemaKeys
-                                .identity(
-                                        excludingOperationId == null ? "" : excludingOperationId));
+                        excludingOperationId == null ? "" : excludingOperationId);
         return (commands != null && commands > 0)
                 || (operations != null && operations > 0);
     }
