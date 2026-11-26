@@ -97,7 +97,7 @@ sealed 分支不要求 writer lease 尚未到期：sealed incarnation 和 genera
 
 两个分支都写入相同的 release resource、domain record 和 resource reference，然后在同一事务内把 placement 改为 `RELEASED`。所有 SQL 仍按 tenant 限定并参数化。过期 owner 不能释放更新的 epoch 或 generation，旧的精确重试也只能返回原 receipt。
 
-`JdbcHarnessPlacementStore.takeover` 和 `HarnessPoolConnector.select` 无需修改。已释放 placement 本来就会触发重新选择，现有 receipt 加 sealed-head 证明已经允许在 lease 到期前完成 CAS。
+已释放的 placement 会触发池重新选择。`JdbcHarnessPlacementStore.takeover` 使用 release receipt 和 sealed head 推进 placement epoch 时，在同一事务内结束已封存 writer 的租约。该更新保留 head 的修改时间和 wake 戳。若选中的成员始终未获取 writer，另一个成员可以凭已到期的租约和已释放的 activation 接管。新 epoch 成功获取 writer 后会建立新租约，围栏后续接管。
 
 ## 7. 失败与竞态语义
 
@@ -121,6 +121,7 @@ sealed 分支不要求 writer lease 尚未到期：sealed incarnation 和 genera
 - `packages/managed-agent-server/server/.../ManagedSessionStoreController.java`：与 wake dispatch 一起公告能力位。
 - `packages/managed-agent-server/persistence/.../JournalStoreRows.java`：在加锁 head 行上暴露 `wake_seal_revision`。
 - `packages/managed-agent-server/persistence/.../JournalWriterLifecycle.java`：clean-sealed release 分支。
+- `packages/managed-agent-server/persistence/.../JdbcHarnessPlacementStore.java` 在接管使用 release receipt 时结束已封存 writer 的租约。
 
 ### TypeScript Store 客户端与 Harness
 
@@ -140,6 +141,7 @@ sealed 分支不要求 writer lease 尚未到期：sealed incarnation 和 genera
 - 覆盖能力关闭行为、bare-seal 拒绝、陈旧 wake revision、错误 generation/token/proof、滞后 activation 和跨 tenant 凭证；这些都不得写 receipt 或改变 placement/head 状态。
 - 在 H2 和选定的 MySQL 8.4 用例上证明精确重放、冲突操作拒绝、回滚原子性和过期 writer 围栏；保留现有 takeover-CAS 覆盖。
 - 证明 release 保留 wake、background 和 parked-Turn 证书；后继 acquire 只按当前语义清除它们一次。
+- 将已释放的 placement 分配给一个始终未获取 writer 的成员。验证第二个成员能立即接管，且新租约能阻止第三个成员接管。
 - 注入 release 响应丢失和 seal 后失败；验证以相同请求体重试，不重复 quiesce、activation release 或 seal。
 - 使用真实 Harness 进程 A、B 和 MySQL 8.4 验收干净空闲挂起，保持 A 健康且旧 lease 未到期。Action park 通过新 epoch 冷恢复单测和覆盖所有结局的真实进程 replacement 场景验证。健康双成员 Action-parked soak 是后续工作，不作为本切片已获得的证据。
 - 运行聚焦 TypeScript 与 Java 检查、仓库要求的根 build/typecheck/bundle，完整 Java/MySQL/Hosted profile 留 CI。
@@ -149,6 +151,7 @@ sealed 分支不要求 writer lease 尚未到期：sealed incarnation 和 genera
 - 不支持或 bare-seal 的挂起行为与之前完全一致。
 - 受支持的干净挂起写入一条持久 release receipt，留下 `RELEASED + SEALED` 状态，且不改变 wake/park 证书。
 - A 健康且旧 writer lease 未到期时，B 能取得下一个 placement epoch。
+- 释放后从未获取 writer 的分配可以重新接管，无需等待原租约的截止时间。
 - 状态转换后，A 不能 commit、renew、seal 或释放 B 的资源。
 - 取消、Allow、Deny、模式切换和到期保持现有行为；Allow 恰好执行一次，Deny 零次。
 - 已完成的 quiesce、activation release 或 seal 不会因 release 重试而重复。
@@ -156,6 +159,6 @@ sealed 分支不要求 writer lease 尚未到期：sealed incarnation 和 genera
 
 ## 11. 成本与后续
 
-每次受支持的挂起增加一次 quiesce 更新和 release receipt 写入。sealed release 分支有意避免第二次 head 更新。发布测量必须比较这些写入和额外冷启动抖动与节省的 Harness/续约资源，以及立即改派的价值。
+每次受支持的挂起增加一次 quiesce 更新和 release receipt 写入。sealed release 分支保留原 head。使用回执接管时，事务在原有 head 锁下更新旧租约。发布测量必须比较这些写入和额外冷启动抖动与节省的 Harness/续约资源，以及立即改派的价值。
 
 [离池 placement 回收器](2026-11-26-managed-departed-placement-reaper.zh-CN.md)处理历史挂起行和 seal 与 release 之间的崩溃，且不会从 bare sealed head 推断 release receipt。另需一项真实进程 soak，在两个池成员都保持健康时完成 Action-parked Allow/Deny 接管；干净释放切片不声称已具备这项集成证据。
