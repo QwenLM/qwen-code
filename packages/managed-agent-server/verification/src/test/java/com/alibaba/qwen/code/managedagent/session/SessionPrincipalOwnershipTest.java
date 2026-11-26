@@ -59,6 +59,75 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
+    void originalSubmissionKeyFindsOnlyItsOriginalTurn() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            var turn = f.service.submitTurn(OWNER, "submit-1", id,
+                    List.of(new com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock("text", "private")));
+            assertThat(turn.operationId()).isNotEqualTo("submit-1").startsWith("op_");
+
+            var recovered = f.service.findPublicTurnByIdempotencyKey(OWNER, id, "submit-1").orElseThrow();
+
+            assertThat(recovered.turnId()).isEqualTo(turn.turnId());
+            assertThat(recovered.sessionId()).isEqualTo(id);
+            assertThat(recovered.status()).isEqualTo("accepted");
+            assertThat(f.service.findPublicTurnByIdempotencyKey(OWNER, id, turn.operationId())).isEmpty();
+            assertThat(f.service.findPublicTurnByIdempotencyKey(OWNER, id, "missing-key")).isEmpty();
+            assertThat(f.count("ma_turn")).isEqualTo(1);
+            assertThat(f.count("ma_operation")).isEqualTo(1);
+        });
+    }
+
+    @Test
+    void originalSubmissionLookupKeepsItsScopeAndRejectsAnonymousActors() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            var input = List.of(new com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock("text", "private"));
+            f.service.submitTurn(OWNER, "submit-1", id, input);
+            var foreign = SessionPrincipal.of("tenant", "user", "actor-B");
+            String foreignId = f.create(foreign, "foreign-create");
+            f.service.submitTurn(foreign, "foreign-submit", foreignId, input);
+            String otherId = f.create(OWNER, "other-create");
+
+            assertThatThrownBy(() -> f.service.findPublicTurnByIdempotencyKey(null, id, "submit-1"))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("actor_required"));
+            denied(() -> f.service.findPublicTurnByIdempotencyKey(foreign, id, "submit-1"));
+            denied(() -> f.service.findPublicTurnByIdempotencyKey(foreign, id, "foreign-submit"));
+            assertThatThrownBy(() -> f.service.findPublicTurnByIdempotencyKey(OWNER, otherId, "submit-1"))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
+            assertThatThrownBy(() -> f.service.findPublicTurnByIdempotencyKey(OWNER, id, " "))
+                    .isInstanceOf(ManagedAgentException.class);
+            assertThat(f.count("ma_turn")).isEqualTo(2);
+        });
+    }
+
+    @Test
+    void originalSubmissionLookupChecksReadAuthorityBeforeReturningEmpty() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            var foreign = SessionPrincipal.of("tenant", "user", "actor-B");
+
+            denied(() -> f.service.findPublicTurnByIdempotencyKey(foreign, id, "missing-key"));
+            f.jdbc.update("UPDATE ma_session SET status='DELETED', deleted_at=1 WHERE session_id=?", id);
+            denied(() -> f.service.findPublicTurnByIdempotencyKey(OWNER, id, "missing-key"));
+            assertThat(f.count("ma_turn")).isZero();
+        });
+    }
+
+    @Test
+    void originalSubmissionLookupReturnsEmptyOnlyToTheAuthorizedReader() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            assertThat(f.service.findPublicTurnByIdempotencyKey(OWNER, id, "missing-key")).isEmpty();
+        });
+    }
+
+    @Test
     void absentPrincipalCannotWriteByBorrowingTheDurableOwner() {
         var f = new Fixture();
         f.tx.executeWithoutResult(status -> {

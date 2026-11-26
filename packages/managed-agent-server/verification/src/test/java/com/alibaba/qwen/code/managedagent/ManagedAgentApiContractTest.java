@@ -260,6 +260,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellRecoveryRecheckRequest.class, List.of("WebShellRecoveryRecheckRequest")),
                     entry(PublicCommandOperation.class,
                             List.of("PublicCommandOperation")),
+                    entry(ApiModels.PublicSessionCloseProof.class,
+                            List.of("PublicSessionCloseProof")),
                     entry(SessionCapabilities.class,
                             List.of("SessionCapabilities")),
                     entry(PublicList.class, List.of("PublicSessionList",

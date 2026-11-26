@@ -15,6 +15,11 @@ public interface RuntimeProviderFactory {
     public default void validate(ManagedAgentSettings settings) {
     }
 
+    /** Configuration-only validation with optional host-provided dependencies; no host probes or resource creation. */
+    public default void validate(ManagedAgentSettings settings, RuntimeProviderDependencies dependencies) {
+        validate(settings);
+    }
+
     /** The caller owns and closes the returned provider. Clean up partial creation on failure. */
     public RuntimeProvisioner create(ManagedAgentSettings settings, RuntimeTransport transport,
             RuntimeProviderDependencies dependencies);

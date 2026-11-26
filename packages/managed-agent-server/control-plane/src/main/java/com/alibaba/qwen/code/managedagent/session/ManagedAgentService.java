@@ -1826,6 +1826,26 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         return publicTurnOf(session, turnId);
     }
 
+    public Optional<PublicTurn> findPublicTurnByIdempotencyKey(SessionPrincipal principal,
+            String sessionId, String idempotencyKey) {
+        if (principal == null) {
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required");
+        }
+        validateIdempotencyKey(idempotencyKey);
+        SessionRecord session = requireReadableSession(principal, sessionId);
+        StoreModels.CommandRecord command = store.findCommand(principal.tenantId(), SUBMIT,
+                idempotencyKey).orElse(null);
+        if (command == null) {
+            return Optional.empty();
+        }
+        requireReplayGrant(command, session, principal, principal.userId());
+        if (command.turnId() == null) {
+            return Optional.empty();
+        }
+        return Optional.of(publicTurnOf(session, command.turnId()));
+    }
+
     public PublicTurn getPublicTurn(SessionPrincipal principal,
             String sessionId, String turnId) {
         return getPublicTurn(principal == null ? null : principal.tenantId(),

@@ -98,15 +98,36 @@ public class ManagedAgentConfiguration {
     public com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFiles managedLocalWorkspaceFiles() {
         return new com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess();
     }
-    @org.springframework.context.annotation.Bean(destroyMethod = "close")
     public com.alibaba.qwen.code.runtimebroker.spi.SshConnections managedSshConnections(ManagedAgentProperties properties) {
+        return managedSshConnections(properties, null);
+    }
+
+    @org.springframework.context.annotation.Bean(destroyMethod = "close")
+    public com.alibaba.qwen.code.runtimebroker.spi.SshConnections managedSshConnections(ManagedAgentProperties properties,
+            @org.springframework.lang.Nullable com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime) {
         if (!com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties)
                 .includes(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS)) {
             return null;
         }
         var registry = new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry();
-        registry.validateSelected(properties);
+        registry.validateSelected(properties, externalDependencies(externalRuntime, null));
         return registry.ssh().createConnections(java.net.URI.create(properties.getToolPublication().getServiceBaseUrl()));
+    }
+
+    private static com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies externalDependencies(
+            com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime,
+            com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport externalRuntimeTransport) {
+        return new com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies() {
+            @Override
+            public java.util.Optional<com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient> externalRuntime() {
+                return java.util.Optional.ofNullable(externalRuntime);
+            }
+
+            @Override
+            public java.util.Optional<com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport> externalRuntimeTransport() {
+                return java.util.Optional.ofNullable(externalRuntimeTransport);
+            }
+        };
     }
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository managedChannelRoutes(
@@ -141,7 +162,19 @@ public class ManagedAgentConfiguration {
     }
 
     public ManagedAgentConfiguration(ManagedAgentProperties properties) {
-        properties.validateRuntimeProvider();
+        this(properties, null);
+    }
+
+    public ManagedAgentConfiguration(ManagedAgentProperties properties,
+            @org.springframework.lang.Nullable com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime) {
+        this(properties, externalRuntime, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public ManagedAgentConfiguration(ManagedAgentProperties properties,
+            @org.springframework.lang.Nullable com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime,
+            @org.springframework.lang.Nullable com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport externalRuntimeTransport) {
+        properties.validateRuntimeProvider(externalDependencies(externalRuntime, externalRuntimeTransport));
         BrokerSecurity.checkPublicationTransport(properties, new java.util.ArrayList<>());
     }
 

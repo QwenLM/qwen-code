@@ -11,6 +11,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
@@ -62,7 +64,12 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
 
     public ExternalWorkspaceProvisioner(ExternalRuntimeClient client, ExternalStorageRegistry registry,
             String providerId, Duration startupTimeout) {
-        super(client, providerId, startupTimeout);
+        this(client, registry, providerId, startupTimeout, new HttpRuntimeTransport());
+    }
+
+    public ExternalWorkspaceProvisioner(ExternalRuntimeClient client, ExternalStorageRegistry registry,
+            String providerId, Duration startupTimeout, RuntimeTransport transport) {
+        super(client, providerId, startupTimeout, transport);
         this.registry = Objects.requireNonNull(registry, "registry");
         this.client = client;
         this.provider = providerId;

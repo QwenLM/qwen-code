@@ -64,6 +64,10 @@ follow-up decomposition extracts the new surface.
 
 - Receipt-helper extraction acceptance requires the source-size gate and the exact-receipt acknowledgement tests (`RuntimeSshAcknowledgementTest` and `RuntimeBrokerServiceTest`) in CI. The extraction changes method ownership, preserving the comparison body and acknowledgement locking.
 
+## Harness lifecycle extraction (2026-11-26)
+
+The existing drained-stop and Harness lifecycle delegation methods move from `RuntimeBrokerService` to its package-private `RuntimeHarnessLifecycle` collaborator, keeping the same public methods and the original `RuntimeDrainCoordinator` ownership. The facade ceiling lowers from 1977 to 1976. The global ceiling and other class pins are unchanged.
+
 ## Follow-up
 
 - As each remaining large class is decomposed, lower its ceiling (or prune it) and lower `GLOBAL_MAX_LINES`; the structure-review ledger's acceptance criterion is met when no class exceeds the agreed ratchet.

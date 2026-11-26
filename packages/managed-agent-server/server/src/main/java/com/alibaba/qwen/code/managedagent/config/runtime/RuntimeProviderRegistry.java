@@ -68,7 +68,7 @@ public final class RuntimeProviderRegistry {
     public RuntimeProvisioner create(String kind, ManagedAgentSettings settings, RuntimeTransport transport,
             RuntimeProviderDependencies dependencies) {
         RuntimeProviderFactory factory = require(kind);
-        factory.validate(settings);
+        factory.validate(settings, dependencies);
         RuntimeProvisioner provider = factory.create(settings, transport, dependencies);
         if (!kind.equals(provider.kind())) {
             provider.close();
@@ -78,8 +78,12 @@ public final class RuntimeProviderRegistry {
     }
 
     public void validateSelected(ManagedAgentSettings settings) {
+        validateSelected(settings, RuntimeProviderDependencies.NONE);
+    }
+
+    public void validateSelected(ManagedAgentSettings settings, RuntimeProviderDependencies dependencies) {
         for (String kind : RuntimeBackendSelection.from(settings).kinds().stream().sorted().toList()) {
-            require(kind).validate(settings);
+            require(kind).validate(settings, dependencies);
         }
     }
 

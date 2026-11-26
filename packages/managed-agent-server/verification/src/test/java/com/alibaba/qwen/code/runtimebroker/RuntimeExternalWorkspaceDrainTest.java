@@ -74,6 +74,23 @@ class RuntimeExternalWorkspaceDrainTest {
     }
 
     @Test
+    void closeReceiptsReadTheExactSessionBindings() {
+        try (var fixture = new Fixture()) {
+            fixture.acquireAndExecute();
+            fixture.service.requestHarnessDrain("tenant", "harness");
+            fixture.drain();
+
+            var receipts = fixture.service.drainHarnessReceipts("tenant", "harness")
+                    .toCompletableFuture().join();
+
+            assertEquals(1, receipts.size());
+            assertEquals(fixture.binding().getDrainReceipt(), receipts.getFirst());
+            assertTrue(receipts.getFirst().matches(fixture.binding()));
+            assertEquals(RuntimeBindingRecord.State.RELEASED, fixture.binding().getState());
+        }
+    }
+
+    @Test
     void refusedDetachEscalatesOnlyAfterAckAndPersistsBeforeStoppedSessionRelease() {
         try (var fixture = new Fixture()) {
             fixture.acquireAndExecute();

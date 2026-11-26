@@ -130,6 +130,43 @@ class ExternalWorkspaceMaterializationTest {
     }
 
     @Test
+    void readsTheExistingWorkspaceByItsActualPhysicalKey() {
+        store.materialize("tenant", "workspace", "Name", "owner-user", "key-a");
+        register("tenant", "healthy");
+        store.materialize("tenant", "healthy", "Healthy", "owner-user", "key-b");
+
+        var stored = store.findByPhysicalKey("tenant", "provider", "tenant-workspace");
+
+        assertThat(stored).isPresent().get().satisfies(receipt -> {
+            assertThat(receipt.workspaceId()).isEqualTo("workspace");
+            assertThat(receipt.ownerActorId()).isEqualTo("owner-user");
+            assertThat(receipt.workspaceGeneration()).isEqualTo(1);
+            assertThat(receipt.storageId()).isEqualTo("workspace");
+        });
+        assertThat(store.findByPhysicalKey("tenant", "provider", "tenant-healthy")).isPresent().get()
+                .extracting(ExternalWorkspaceMaterializationStore.Receipt::workspaceId).isEqualTo("healthy");
+        assertThat(store.findByPhysicalKey("tenant", "provider", "another-key")).isEmpty();
+        assertThat(store.findByPhysicalKey("other-tenant", "provider", "tenant-workspace")).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(2);
+    }
+
+    @Test
+    void resolvesThePhysicalWorkspaceWhenItsOwnerReferencesAnotherAlias() {
+        store.materialize("tenant", "workspace", "Name", "owner-user", "key");
+        jdbc.update("UPDATE ma_storage_owner SET storage_id = 'another-alias'");
+
+        var stored = store.findByPhysicalKey("tenant", "provider", "tenant-workspace");
+
+        assertThat(stored).isPresent().get().satisfies(receipt -> {
+            assertThat(receipt.workspaceId()).isEqualTo("workspace");
+            assertThat(receipt.storageId()).isEqualTo("workspace");
+            assertThat(receipt.ownerActorId()).isEqualTo("owner-user");
+        });
+        assertThat(store.findByPhysicalKey("other-tenant", "provider", "tenant-workspace")).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isOne();
+    }
+
+    @Test
     void receiptInsertFailureRollsBackWorkspaceAndGrant() {
         var storage = jdbc.queryForMap("SELECT * FROM ma_storage");
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");

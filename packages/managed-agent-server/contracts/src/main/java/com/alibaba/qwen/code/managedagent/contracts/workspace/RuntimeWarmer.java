@@ -1,9 +1,11 @@
 package com.alibaba.qwen.code.managedagent.contracts.workspace;
 
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
@@ -50,6 +52,10 @@ public interface RuntimeWarmer {
     public default CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
         return CompletableFuture.failedFuture(
                 new UnsupportedOperationException("Workspace close is unavailable"));
+    }
+
+    public default CompletionStage<List<RuntimeDrainReceipt>> drainHarnessReceipts(String tenantId, String sessionId) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("Drain receipts are unavailable"));
     }
 
     public default CompletionStage<Void> drainWorkspaceResources(String tenantId, String sessionId,
