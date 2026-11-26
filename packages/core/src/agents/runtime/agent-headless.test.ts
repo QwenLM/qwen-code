@@ -3276,41 +3276,6 @@ describe('subagent.ts', () => {
           mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
         ).toBe(65_536);
       });
-
-      it('marks a sticky escalation as recovery-owned on the next round (legacy loop)', async () => {
-        // Pinned to the legacy agent-core loop: this PR's fix lives on that
-        // path only; the default shared-loop path is not covered here.
-        vi.spyOn(Config.prototype, 'isUnifiedAgentLoopEnabled').mockReturnValue(
-          false,
-        );
-        const { config, toolConfig } = await setupWriteFile();
-        mockSendMessageStream
-          .mockImplementationOnce(async () =>
-            streamOf<object>(
-              { type: 'retry', maxOutputTokensEscalated: 65_536 },
-              writeCall('call_write_complete', {
-                file_path: '/tmp/sticky-escalation.txt',
-                content: 'hello',
-              }),
-              partsChunk([], 'STOP'),
-            ),
-          )
-          .mockImplementation(async () =>
-            streamOf(partsChunk([{ text: 'done' }], 'STOP')),
-          );
-        await runAgent(config, { tools: toolConfig });
-
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
-        expect(
-          mockSendMessageStream.mock.calls[0][1].config.maxOutputTokens,
-        ).toBeUndefined();
-        expect(
-          mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
-        ).toBe(65_536);
-        expect(mockSendMessageStream.mock.calls[1][4]).toEqual({
-          maxOutputTokensFromRecovery: true,
-        });
-      });
     });
 
     describe('on the shared agent loop and its event-bus kernel', () => {

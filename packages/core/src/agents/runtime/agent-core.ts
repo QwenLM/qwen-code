@@ -1283,10 +1283,6 @@ export class AgentCore {
               DEFAULT_QWEN_MODEL,
             messageParams,
             promptId,
-            undefined,
-            stickyMaxOutputTokens !== undefined
-              ? { maxOutputTokensFromRecovery: true }
-              : undefined,
           );
         // The request (and any send-time compaction) runs partly before the
         // stream is returned and partly while it is iterated; both belong to

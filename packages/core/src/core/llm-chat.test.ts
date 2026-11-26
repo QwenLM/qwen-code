@@ -78,11 +78,6 @@ import {
   normalizeModelToolCallIds,
 } from './toolCallIdUtils.js';
 import {
-  clampOutputTokensToWindow,
-  DEFAULT_TOKEN_LIMIT,
-  OUTPUT_TOKEN_CEILING,
-} from './tokenLimits.js';
-import {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
@@ -128,6 +123,7 @@ import {
   estimateContentTokens,
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
+import { clampOutputTokensToWindow } from './tokenLimits.js';
 import {
   EMPTY_AUTO_MEMORY_CATALOG,
   findLatestAutoMemorySnapshot,
@@ -15843,32 +15839,10 @@ describe('LlmChat', async () => {
       ).toBe(1);
     }
 
-    it('does not recover when the request sets maxOutputTokens', async () => {
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        makeStream([makeChunk([{ text: 'user-capped output' }], 'MAX_TOKENS')]),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'gemini-pro',
-        {
-          message: 'essay',
-          config: { maxOutputTokens: 1024 },
-        },
-        'request-max-output-tokens',
-      );
-      const events: StreamEvent[] = [];
-      for await (const event of stream) {
-        events.push(event);
-      }
-
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledOnce();
-      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
-        false,
-      );
-      expect(chat.getLastModelMessageText()).toBe('user-capped output');
-    });
-
-    it('recovers when maxOutputTokens carries a prior automatic escalation', async () => {
+    // The default shared agent loop re-sends a subagent's sticky escalation
+    // as a plain request maxOutputTokens with no extra send options; recovery
+    // must still run for it, as it does on main.
+    it('recovers when the request maxOutputTokens carries an earlier escalation limit', async () => {
       const streams = [
         makeStream([makeChunk([{ text: 'first' }], 'MAX_TOKENS')]),
         makeStream([makeChunk([{ text: ' second' }], 'STOP')]),
@@ -15882,8 +15856,6 @@ describe('LlmChat', async () => {
         'gemini-3-pro',
         { message: 'essay', config: { maxOutputTokens: 64_000 } },
         'automatic-sticky-max-output-tokens',
-        undefined,
-        { maxOutputTokensFromRecovery: true },
       );
       const events: StreamEvent[] = [];
       for await (const event of stream) events.push(event);
@@ -15898,162 +15870,6 @@ describe('LlmChat', async () => {
         ),
       ).toBe(true);
       expect(chat.getLastModelMessageText()).toBe('first second');
-    });
-
-    describe('prepared request replay', () => {
-      const PREPARED_KEYS = [
-        'allowPersistentRetry',
-        'completedToolCallIds',
-        'contextPrefixLength',
-        'history',
-        'promptTokensForClamp',
-        'providerPin',
-        'request',
-        'routeSelector',
-      ];
-
-      function routeReplayToTestModel() {
-        const routeConfig = {
-          model: 'test-model',
-          authType: AuthType.USE_GEMINI,
-        };
-        mockGeneratorConfig();
-        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
-          resolveForModel: vi.fn().mockResolvedValue({
-            model: 'test-model',
-            contentGenerator: mockContentGenerator,
-            contentGeneratorConfig: routeConfig,
-          }),
-        } as unknown as ReturnType<Config['getBaseLlmClient']>);
-        return routeConfig;
-      }
-
-      async function replayAgainstMaxTokens(saved: LlmPreparedRequest) {
-        const streams = [
-          makeStream([makeChunk([{ text: 'first' }], 'MAX_TOKENS')]),
-          makeStream([makeChunk([{ text: ' second' }], 'STOP')]),
-        ];
-        let callIndex = 0;
-        vi.mocked(mockContentGenerator.generateContentStream).mockReset();
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () => streams[callIndex++]!);
-        const replayChat = newChat();
-        const events: StreamEvent[] = [];
-        for await (const event of await replayChat.sendPreparedMessageStream(
-          saved,
-          'replay-capture',
-          new AbortController().signal,
-        ))
-          events.push(event);
-        return { events, replayChat };
-      }
-
-      async function captureAndReplay(config?: GenerateContentConfig) {
-        routeReplayToTestModel();
-        let saved: LlmPreparedRequest | undefined;
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockResolvedValueOnce(
-          makeStream([makeChunk([{ text: 'captured' }], 'STOP')]),
-        );
-        await drain(
-          await chat.sendMessageStream(
-            'test-model',
-            { message: 'essay', ...(config ? { config } : {}) },
-            'replay-capture',
-            undefined,
-            {
-              onPreparedRequest: async (prepared) => {
-                saved = prepared;
-              },
-            },
-          ),
-        );
-        return { saved: saved!, ...(await replayAgainstMaxTokens(saved!)) };
-      }
-
-      function existingSchemaSnapshot(
-        maxOutputTokens: number,
-      ): LlmPreparedRequest {
-        const routeConfig = routeReplayToTestModel();
-        return {
-          request: {
-            model: 'test-model',
-            contents: [userText('essay')],
-            config: { maxOutputTokens },
-          },
-          history: [userText('essay')],
-          completedToolCallIds: [],
-          routeSelector: `${AuthType.USE_GEMINI}:test-model`,
-          providerPin: llmPreparedProviderPin(routeConfig),
-          promptTokensForClamp: 15,
-          allowPersistentRetry: true,
-        };
-      }
-
-      it('recovers from MAX_TOKENS when the saved cap is the automatic clamp', async () => {
-        const { saved, events, replayChat } = await captureAndReplay();
-
-        expect(Object.keys(saved).sort()).toEqual(PREPARED_KEYS);
-        expect(saved.request.config.maxOutputTokens).toBeGreaterThan(0);
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        expect(
-          events.some((event) => event.type === StreamEventType.RETRY),
-        ).toBe(true);
-        expect(replayChat.getLastModelMessageText()).toContain('second');
-      });
-
-      it('keeps a caller-set maxOutputTokens as a user cap on replay', async () => {
-        const { saved, events, replayChat } = await captureAndReplay({
-          maxOutputTokens: 1024,
-        });
-
-        expect(Object.keys(saved).sort()).toEqual(PREPARED_KEYS);
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledOnce();
-        expect(
-          events.some((event) => event.type === StreamEventType.RETRY),
-        ).toBe(false);
-        expect(replayChat.getLastModelMessageText()).toBe('first');
-      });
-
-      it('honors a caller cap in an existing-schema snapshot', async () => {
-        const { events, replayChat } = await replayAgainstMaxTokens(
-          existingSchemaSnapshot(1024),
-        );
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledOnce();
-        expect(
-          events.some((event) => event.type === StreamEventType.RETRY),
-        ).toBe(false);
-        expect(replayChat.getLastModelMessageText()).toBe('first');
-      });
-
-      it('recovers an existing-schema snapshot saved at the automatic escalation limit', async () => {
-        const { events, replayChat } = await replayAgainstMaxTokens(
-          existingSchemaSnapshot(
-            clampOutputTokensToWindow(
-              OUTPUT_TOKEN_CEILING,
-              DEFAULT_TOKEN_LIMIT,
-              15,
-            ),
-          ),
-        );
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        expect(
-          events.some((event) => event.type === StreamEventType.RETRY),
-        ).toBe(true);
-        expect(replayChat.getLastModelMessageText()).toContain('second');
-      });
     });
 
     it('commits an ordinary STOP when returned before provider EOF', async () => {
@@ -23203,8 +23019,6 @@ describe('LlmChat', async () => {
           'gemini-3-pro',
           { message: 'continue', config: { maxOutputTokens: 65_536 } },
           'failed-recovery-thought',
-          undefined,
-          { maxOutputTokensFromRecovery: true },
         );
         const events = await collectStreamWithFakeTimers(stream, 30_000);
 

@@ -849,8 +849,6 @@ export interface LlmChatSendOptions {
   preparedRequest?: LlmPreparedRequest;
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
-  /** The request maxOutputTokens came from this chat's prior escalation. */
-  maxOutputTokensFromRecovery?: boolean;
   /**
    * This send is an explicit user Retry. The model-availability ledger treats
    * it as a turn boundary so a retry re-probes fallbacks the failed attempt
@@ -4280,34 +4278,6 @@ export class LlmChat {
     const contextWindowForClamp =
       cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
     let promptTokensForClamp = 0;
-    // A replayed request carries the first send's automatic clamp (or the
-    // automatic escalation limit) in params.config.maxOutputTokens. Recompute
-    // both from the saved prompt estimate: a matching value is automatic and
-    // must not disable MAX_TOKENS recovery; any other value is a caller cap.
-    // Known limit: the snapshot does not persist who set the value, so a
-    // caller cap exactly equal to one of these automatic limits replays as
-    // automatic and may be raised by recovery.
-    const savedRequest = options?.preparedRequest;
-    const savedMaxOutputTokens = savedRequest
-      ? params.config?.maxOutputTokens
-      : undefined;
-    const replaysAutomaticOutputLimit =
-      savedRequest !== undefined &&
-      savedMaxOutputTokens !== undefined &&
-      [defaultOutputCeiling(model), OUTPUT_TOKEN_CEILING].some(
-        (ceiling) =>
-          clampOutputTokensToWindow(
-            ceiling,
-            contextWindowForClamp,
-            savedRequest.promptTokensForClamp,
-          ) === savedMaxOutputTokens,
-      );
-    const userOutputCeiling: number | undefined =
-      (replaysAutomaticOutputLimit
-        ? undefined
-        : params.config?.maxOutputTokens) ??
-      cgConfigForThresholds?.samplingParams?.max_tokens ??
-      parsedEnvMaxTokensForClamp;
 
     const previousGenerationConfig = options?.preparedRequest
       ? this.generationConfig
@@ -5148,9 +5118,13 @@ export class LlmChat {
         // Max output tokens escalation: when no user/env override is set and
         // the model hits MAX_TOKENS, retry once with the escalated limit.
         let maxTokensEscalated = false;
+        const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
+          process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+        );
         const hasUserMaxTokensOverride =
-          userOutputCeiling !== undefined &&
-          !options?.maxOutputTokensFromRecovery;
+          (cgConfig?.samplingParams?.max_tokens !== undefined &&
+            cgConfig?.samplingParams?.max_tokens !== null) ||
+          parsedEnvMaxTokens !== undefined;
         // params.config.maxOutputTokens is set by the first-send clamp; the
         // outputCeiling fallback is defensive and should not fire in practice.
         const effectiveInitialMaxOutputTokens =
