@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.runtimebroker.http;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
@@ -37,11 +36,13 @@ class RuntimeBrokerHttpExecutorTest {
                 fixture.connect();
             }
             await().atMost(5, TimeUnit.SECONDS).until(() -> fixture.executor.getQueue().size() == 64);
-            try (Socket rejected = fixture.openSocket()) {
+            try (Socket rejected = new Socket()) {
+                fixture.connectSocket(rejected);
                 try {
-                    writeRequest(rejected);
+                    // The HTTP dispatcher submits a connection once it is readable.
+                    rejected.getOutputStream().write('P');
                 } catch (SocketException reset) {
-                    // The peer can reset the connection before the request body is written.
+                    // The rejection can race with the write. Verify the disconnect below.
                 }
                 assertDisconnected(rejected);
             }
@@ -54,8 +55,7 @@ class RuntimeBrokerHttpExecutorTest {
             for (Socket accepted : fixture.sockets) {
                 assertResponse(accepted);
             }
-            try (Socket next = fixture.openSocket()) {
-                writeRequest(next);
+            try (Socket next = fixture.open()) {
                 assertResponse(next);
             }
         }
@@ -74,16 +74,6 @@ class RuntimeBrokerHttpExecutorTest {
             assertTrue(fixture.executor.awaitTermination(5, TimeUnit.SECONDS));
             verify(fixture.service).close();
         }
-    }
-
-    private static void writeRequest(Socket socket) throws IOException {
-        byte[] payload = BODY.getBytes(StandardCharsets.UTF_8);
-        String request = "POST " + PATH + " HTTP/1.1\r\nHost: localhost\r\n"
-                + "Authorization: Bearer secret\r\n"
-                + "Content-Type: application/json\r\nCache-Control: no-store\r\n"
-                + "Content-Length: " + payload.length + "\r\nConnection: close\r\n\r\n";
-        socket.getOutputStream().write(request.getBytes(StandardCharsets.UTF_8));
-        socket.getOutputStream().write(payload);
     }
 
     private static void assertDisconnected(Socket socket) throws Exception {
@@ -135,21 +125,30 @@ class RuntimeBrokerHttpExecutorTest {
         }
 
         private void connect() throws Exception {
-            Socket socket = openSocket();
-            sockets.add(socket);
-            writeRequest(socket);
+            sockets.add(open());
         }
 
-        private Socket openSocket() throws Exception {
+        private Socket open() throws Exception {
             Socket socket = new Socket();
             try {
-                socket.connect(new InetSocketAddress("127.0.0.1", server.getBaseUri().getPort()), 5000);
-                socket.setSoTimeout(5000);
+                connectSocket(socket);
+                byte[] payload = BODY.getBytes(StandardCharsets.UTF_8);
+                String request = "POST " + PATH + " HTTP/1.1\r\nHost: localhost\r\n"
+                        + "Authorization: Bearer secret\r\n"
+                        + "Content-Type: application/json\r\nCache-Control: no-store\r\n"
+                        + "Content-Length: " + payload.length + "\r\nConnection: close\r\n\r\n";
+                socket.getOutputStream().write(request.getBytes(StandardCharsets.UTF_8));
+                socket.getOutputStream().write(payload);
                 return socket;
             } catch (Exception failure) {
                 socket.close();
                 throw failure;
             }
+        }
+
+        private void connectSocket(Socket socket) throws Exception {
+            socket.connect(new InetSocketAddress("127.0.0.1", server.getBaseUri().getPort()), 5000);
+            socket.setSoTimeout(5000);
         }
 
         @Override

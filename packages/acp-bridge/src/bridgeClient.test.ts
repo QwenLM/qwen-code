@@ -4358,6 +4358,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           messageId: 'internal',
           displayText: '<realtime_delegation />',
           content: [{ type: 'text', text: '<realtime_delegation />' }],
+          queueOnly: true,
         },
         {
           messageId: 'anonymous-ui',
@@ -4934,6 +4935,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           messageId: 'internal',
           displayText: '<realtime_delegation />',
           content: [{ type: 'text', text: '<realtime_delegation />' }],
+          queueOnly: true,
         },
       ],
       hasQueuedPrompt: false,

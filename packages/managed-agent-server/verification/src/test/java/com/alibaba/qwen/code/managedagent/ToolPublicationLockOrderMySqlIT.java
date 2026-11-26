@@ -441,7 +441,7 @@ class ToolPublicationLockOrderMySqlIT {
                                             }
                                             Object value = call.invoke(statement, values);
                                             if (afterSnapshot != null && call.getName().startsWith("execute")
-                                                    && sql.contains(" FROM ma_output_capture WHERE scope_key = ?")
+                                                    && sql.contains(" FROM ma_output_capture WHERE scope_ref = ?")
                                                     && !sql.contains("FOR UPDATE") && snapshotRead.compareAndSet(false, true)) {
                                                 afterSnapshot.run();
                                             }

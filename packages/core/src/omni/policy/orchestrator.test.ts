@@ -457,6 +457,43 @@ describe('runFixedPolicies', () => {
     ]);
   });
 
+  it('reports the fixed-policy hook stop and keeps the successful derivative', async () => {
+    mockTool(async (request) => ({
+      ...(await imageResult(request)),
+      hookStopReason: 'finished processing',
+    }));
+    const report = vi.fn(() => true);
+    const { records, deliveries } = await run(makePolicy(), {
+      onHookStop: report,
+    });
+    expect(report).toHaveBeenCalledWith('finished processing');
+    expectSucceededOnce(records);
+    expect(deliveries[0]?.sha256).toBe(sha256Of(DEGRADED_BYTES));
+  });
+
+  it('reports a stop from a failed policy call and preserves its original error', async () => {
+    mockTool(async () => ({
+      ...failedResult('conversion failed'),
+      hookStopReason: 'no more conversions',
+    }));
+    const report = vi.fn(() => true);
+    const { records } = await run(makePolicy(), { onHookStop: report });
+    expect(report).toHaveBeenCalledWith('no more conversions');
+    expectFailed(records, 'conversion failed');
+  });
+
+  it('uses the configured failure handling for a stop outside a tool call', async () => {
+    mockTool(async (request) => ({
+      ...(await imageResult(request)),
+      hookStopReason: 'stopped policy',
+    }));
+    const { records } = await run();
+    expectFailed(records, 'stopped policy');
+    await expect(run(makePolicy({ onFailure: 'abort' }))).rejects.toThrow(
+      'stopped policy',
+    );
+  });
+
   it('reuses a degradation-cache hit without invoking the tool', async () => {
     const degradedSha = sha256Of(DEGRADED_BYTES);
     const objectPath = await plantObject(degradedSha, DEGRADED_BYTES);

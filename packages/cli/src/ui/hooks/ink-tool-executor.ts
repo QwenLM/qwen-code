@@ -38,6 +38,7 @@ export function createInkToolExecutor(
   modelOverride: string | undefined,
   onSettled: (calls: InteractiveToolCall[]) => void | Promise<void>,
   schedulerHold?: Promise<void>,
+  abandoned?: AbortSignal,
 ): AgentLoopToolExecutor {
   return {
     run: (requests, signal, hooks) => {
@@ -46,7 +47,7 @@ export function createInkToolExecutor(
       );
       if (launched.length === 0) return Promise.resolve([]);
       return new Promise<AgentLoopSettledCall[]>((resolve) => {
-        schedule(launched, signal, modelOverride, async (calls) => {
+        const onBatchComplete = async (calls: InteractiveToolCall[]) => {
           const settledCalls = calls.flatMap((call): AgentLoopSettledCall[] =>
             call.status === 'success' ||
             call.status === 'error' ||
@@ -81,7 +82,8 @@ export function createInkToolExecutor(
             })
             .then(() => resolve(settledCalls));
           await schedulerHold?.catch(() => {});
-        });
+        };
+        schedule(launched, signal, modelOverride, onBatchComplete, abandoned);
       });
     },
   };

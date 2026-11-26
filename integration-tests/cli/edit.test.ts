@@ -141,12 +141,13 @@ describe('edit', () => {
     const rig = new TestRig();
     await rig.setup('should insert a multi-line block of text');
     const fileName = 'insert_block.js';
-    const originalContent = 'function hello() {\n  // INSERT_CODE_HERE\n}';
-    const newBlock = "console.log('hello');\n  console.log('world');";
-    const expectedContent = `function hello() {\n  ${newBlock}\n}`;
+    const placeholder = '  // INSERT_CODE_HERE';
+    const originalContent = `function hello() {\n${placeholder}\n}`;
+    const newBlock = "  console.log('hello');\n  console.log('world');";
+    const expectedContent = `function hello() {\n${newBlock}\n}`;
     rig.createFile(fileName, originalContent);
 
-    const prompt = `In ${fileName}, replace "// INSERT_CODE_HERE" with:\n${newBlock}`;
+    const prompt = `In ${fileName}, replace the entire line "${placeholder}" with:\n${newBlock}`;
     const result = await rig.run(prompt);
 
     const foundToolCall = await rig.waitForToolCall('edit');

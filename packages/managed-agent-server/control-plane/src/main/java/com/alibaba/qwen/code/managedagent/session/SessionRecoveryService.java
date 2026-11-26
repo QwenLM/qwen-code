@@ -191,11 +191,15 @@ public class SessionRecoveryService {
             // A suspension that certified its background holds may leave a
             // live projected run and an owed cleanup behind: those ARE the
             // certified work, and the pull plus the next drain-only load
-            // converge them. Only the seal at this exact revision proves it.
-            boolean backgroundCertified = sealStamped && head.wakeSealBackground();
+            // converge them. A parked wake-started Turn's own owed cleanup is
+            // certified the same way: it has no Turn row, and the wake scan
+            // resumes it at its due time. Only the seal at this exact revision
+            // proves either.
+            boolean holdsCertified = sealStamped
+                    && (head.wakeSealBackground() || head.wakeSealParkedWake());
             if ("released".equals(head.activationPhase()) && (wakeProven || sealStamped)
                     && !recovery.hasUnsettledWork(session.tenantId(), session.sessionId(),
-                            backgroundCertified)) {
+                            holdsCertified)) {
                 return view("ready", "ready", turn, true, false, false);
             }
         }

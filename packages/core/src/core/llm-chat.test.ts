@@ -78,10 +78,13 @@ import {
   getApiHistoryPromptId,
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { buildCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
+import { postProcessSummary } from '../services/postCompactAttachments.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
 import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
+import { StreamInactivityTimeoutError } from './stream-guards.js';
 import {
   bindRetryWaitObserver,
   runWithRetryWaitObserver,
@@ -340,6 +343,33 @@ describe('LlmChat', async () => {
   let chat: LlmChat;
   let mockConfig: Config;
   const config: GenerateContentConfig = {};
+
+  it('omits an inherited transcript hint in a chat without its recorder', () => {
+    const hint = buildCompactionTranscriptHint('/parent/session.jsonl');
+    const summary = postProcessSummary('Earlier summary', hint);
+    const parentHistory: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'Startup prelude' }, { text: summary }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: `This literal example should survive: ${hint}` }],
+      },
+    ];
+    const child = new LlmChat(mockConfig, {}, parentHistory);
+
+    expect(child.getHistory()[0].parts).toEqual([
+      { text: 'Startup prelude' },
+      { text: postProcessSummary('Earlier summary') },
+    ]);
+    expect(child.getHistory()[2]).toEqual(parentHistory[2]);
+    expect(parentHistory[0].parts?.[1].text).toBe(summary);
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -5052,6 +5082,42 @@ describe('LlmChat', async () => {
       expect(infoOf(events[0]).originalTokenCountIsEstimated).toBe(false);
       expect(events[1]?.type).toBe(StreamEventType.RETRY);
       expect(events[1]).not.toHaveProperty('retryInfo');
+      expect(hasChunkText(events, 'answer after compact')).toBe(true);
+    });
+
+    it('reactively compresses and retries once after a Kimi longer-than-context-length error', async () => {
+      const compressedHistory = [
+        userText('summary'),
+        modelText('ack'),
+        userText('latest'),
+      ];
+      const expectedRequestContents = structuredClone(compressedHistory);
+      const compressSpy = reactiveCompaction(1_347_344, compressedHistory);
+      mockRequests(
+        new Error(
+          "400 The input (1347344 tokens) is longer than the model's context length (1048576 tokens).",
+        ),
+        textStream('answer after compact'),
+      );
+
+      const events = await sendCollect(
+        'latest',
+        'prompt-id-reactive-compact-kimi',
+      );
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      const reactiveOpts = compressSpy.mock.calls[1][1];
+      expect(reactiveOpts.force).toBe(true);
+      expect(reactiveOpts.trigger).toBe('auto');
+      expect(reactiveOpts.originalTokenCount).toBe(1_347_344);
+      expect(reactiveOpts.precomputedEffectiveTokens).toBe(1_347_344);
+      expect(reactiveOpts.observedServerCeiling).toBe(1_048_576);
+      expect(reactiveOpts.observedServerCeilingKind).toBe('total');
+      expectStreamCalls(2);
+      expect(requestAt(1).contents).toEqual(expectedRequestContents);
+      expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      expect(infoOf(events[0]).originalTokenCountIsEstimated).toBe(false);
+      expect(events[1]?.type).toBe(StreamEventType.RETRY);
       expect(hasChunkText(events, 'answer after compact')).toBe(true);
     });
 
@@ -11625,6 +11691,104 @@ describe('LlmChat', async () => {
         });
       });
 
+      describe('inactivity timeout while tool-call arguments are open', () => {
+        const toolArgumentStall = (toolName = 'structured_output') =>
+          new StreamInactivityTimeoutError(180_000, 280, 190_000, toolName);
+
+        it.each([
+          { toolName: 'structured_output', expectedName: 'structured_output' },
+          { toolName: 'example HTTP_STATUS/429', expectedName: null },
+        ])(
+          'replays once, then propagates for $toolName',
+          async ({ toolName, expectedName }) => {
+            vi.useFakeTimers();
+            streamMock().mockImplementation(() =>
+              Promise.resolve(streamThenThrow([], toolArgumentStall(toolName))),
+            );
+            const { caughtError } = await drainTimed(
+              await send('test', 'prompt-tool-argument-stall-replay'),
+              30_000,
+            );
+            expect(caughtError).toBeInstanceOf(StreamInactivityTimeoutError);
+            expect(caughtError).toMatchObject({
+              openToolCallName: expectedName,
+            });
+            expectStreamCalls(2);
+            expectWarned('Transport stream retry not taken', {
+              retryDecision: 'tool_argument_stall_exhausted',
+            });
+          },
+        );
+
+        it('propagates a stall whose tool name resembles a context error', async () => {
+          vi.useFakeTimers();
+          const error = toolArgumentStall('context_length_exceeded');
+          const compress = mockCompressOnce(
+            noop(),
+            compressed(135_000, 40_000, [...summaryAck(), userText('test')]),
+          );
+          mockStreamsOnce(
+            streamThenThrow([], error),
+            streamThenThrow([], error),
+            streamOf(textChunk('unexpected retry', 'STOP')),
+          );
+
+          const { caughtError } = await drainTimed(
+            await send('test', 'prompt-tool-argument-stall-context-name'),
+            30_000,
+          );
+
+          expectStreamCalls(2);
+          expect(compress).toHaveBeenCalledOnce();
+          expect(caughtError).toBe(error);
+        });
+
+        it('keeps an annotated timeout in the transport retry path with model fallback configured', async () => {
+          vi.useFakeTimers();
+          vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['backup']);
+          const error = Object.assign(toolArgumentStall(), { status: 429 });
+          streamMock().mockImplementation(() =>
+            Promise.resolve(streamThenThrow([], error)),
+          );
+
+          const { caughtError } = await drainTimed(
+            await send('test', 'prompt-tool-argument-stall-fallback'),
+            30_000,
+          );
+
+          expectStreamCalls(2);
+          expect(caughtError).toBe(error);
+          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Fallback chain skipped: primary error is not fallback-eligible',
+            ),
+          );
+        });
+
+        it('continues once after delivered text, then propagates', async () => {
+          vi.useFakeTimers();
+          let call = 0;
+          streamMock().mockImplementation(() =>
+            Promise.resolve(
+              streamThenThrow(
+                [textChunk(`Writing the segment now ${call++}. `)],
+                toolArgumentStall(),
+              ),
+            ),
+          );
+          const { events, caughtError } = await drainTimed(
+            await send('test', 'prompt-tool-argument-stall-continue'),
+            30_000,
+          );
+          expect(caughtError).toBeInstanceOf(StreamInactivityTimeoutError);
+          expectStreamCalls(2);
+          expect(continuations(events)).toHaveLength(1);
+          expectWarned('Transport stream retry not taken', {
+            retryDecision: 'tool_argument_stall_exhausted',
+          });
+        });
+      });
+
       it('does not continue a cut that delivered a functionCall', async () => {
         // A user turn between a functionCall and its functionResponse is a
         // sequence providers reject; the scheduler's repair path owns it.
@@ -12050,6 +12214,179 @@ describe('LlmChat', async () => {
           ),
         ).toHaveLength(0);
         expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+      });
+
+      it('replays a cut after thought and functionCall when retractToolCallsOnRetry is set', async () => {
+        vi.useFakeTimers();
+        const { record, target } = recording();
+        mockStreamsOnce(
+          cutAfter([
+            modelChunk([{ text: 'Choosing a tool…', thought: true }]),
+            modelChunk([fnCall('read_file', { path: '/tmp/a.ts' }, 'call_1')]),
+          ]),
+          streamOf(
+            modelChunk(
+              [fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2')],
+              'STOP',
+            ),
+          ),
+        );
+        const stream = await target.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-replay',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        const retries = eventsOfType(events, StreamEventType.RETRY);
+        expect(retries).toEqual([
+          {
+            type: StreamEventType.RETRY,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+          },
+        ]);
+        expectStreamCalls(2);
+        // Only the recovered tool call survives in history and durable recording.
+        const modelTurns = target
+          .getHistory()
+          .filter((entry) => entry.role === 'model');
+        expect(modelTurns).toHaveLength(1);
+        expect(modelTurns[0].parts).toEqual([
+          fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2'),
+        ]);
+        expect(record).toHaveBeenCalledTimes(1);
+        expect(record.mock.calls[0][0].message).toEqual([
+          fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2'),
+        ]);
+        expectWarned('Transport stream retry scheduled', {
+          retryDecision: 'retry',
+        });
+      });
+
+      it('does not replay a cut with visible text plus functionCall under retractToolCallsOnRetry', async () => {
+        vi.useFakeTimers();
+        mockStream(
+          cutAfter([
+            textChunk('Let me check that file. '),
+            modelChunk([fnCall('read_file', { path: '/tmp/a.ts' }, 'call_1')]),
+          ]),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-visible-text',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        await expect(drain(stream)).rejects.toThrow('terminated');
+        expectStreamCalls(1);
+        expectWarned('Transport stream retry not taken', {
+          retryDecision: 'skipped_after_content',
+        });
+      });
+
+      it('exhausts replay budget and persists final partial tool call under retractToolCallsOnRetry', async () => {
+        vi.useFakeTimers();
+        const { record, target } = recording();
+        let seq = 0;
+        streamMock().mockImplementation(() =>
+          Promise.resolve(
+            cutAfter([
+              modelChunk([{ text: 'Thinking…', thought: true }]),
+              modelChunk([
+                fnCall('read_file', { path: '/tmp/a.ts' }, `call_${++seq}`),
+              ]),
+            ]),
+          ),
+        );
+        const stream = await target.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-exhausted',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        const { events, caughtError } = await collecting;
+        expect(caughtError).toBeInstanceOf(Error);
+        expect((caughtError as Error).message).toContain('terminated');
+        expectStreamCalls(3);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+        expectWarned('Transport stream retry not taken', {
+          retryDecision: 'exhausted',
+        });
+        expect(record).toHaveBeenCalledTimes(1);
+        expect(
+          target
+            .getHistory()
+            .at(-1)
+            ?.parts?.some((part) => part.functionCall?.id === 'call_3'),
+        ).toBe(true);
+      });
+
+      it('replays a cut after an unsigned thoughtSignature-only part and functionCall under retractToolCallsOnRetry', async () => {
+        vi.useFakeTimers();
+        mockStreamsOnce(
+          cutAfter([
+            modelChunk([{ text: 'Thinking…', thought: true }]),
+            modelChunk([{ thoughtSignature: 'sig-opaque-1' } as Part]),
+            modelChunk([fnCall('read_file', { path: '/tmp/a.ts' }, 'call_1')]),
+          ]),
+          streamOf(
+            modelChunk(
+              [fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2')],
+              'STOP',
+            ),
+          ),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-thought-signature-only',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(1);
+        expectStreamCalls(2);
+      });
+
+      it('logs exhausted when retractToolCallsOnRetry spends its replay budget on terminal-finish tool-call cuts', async () => {
+        vi.useFakeTimers();
+        streamMock().mockImplementation(() =>
+          Promise.resolve(
+            cutAfter([
+              modelChunk(
+                [fnCall('read_file', { path: '/tmp/a.ts' }, 'call_stop')],
+                'STOP',
+              ),
+            ]),
+          ),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-stop-exhausted',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        const { events, caughtError } = await collecting;
+        expect(caughtError).toBeInstanceOf(Error);
+        expectStreamCalls(3);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+        expectWarned('Transport stream retry not taken', {
+          retryDecision: 'exhausted',
+        });
       });
     });
 

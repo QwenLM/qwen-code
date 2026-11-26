@@ -5,24 +5,33 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityRea
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.io.IOException;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.function.Function;
 
 final class LocalStorageOwners {
     static final String SESSION_AUTHORITY_SQL = "SELECT 1 FROM ma_session WHERE tenant_id = ? AND workspace_storage_id = ? AND is_resource_gc_completed = FALSE LIMIT 1";
-    static final String RUNTIME_AUTHORITY_SQL = "SELECT 1 FROM ma_runtime_binding WHERE storage_alias_key = ?"
+    static final String RUNTIME_AUTHORITY_SQL = "SELECT 1 FROM ma_runtime_binding WHERE tenant_id = ? AND storage_id = ?"
             + " AND (binding_state NOT IN ('FAILED', 'RELEASED')"
             + " OR (binding_state = 'FAILED' AND is_provision_seeded = TRUE)) LIMIT 1";
-    static final String OPERATION_AUTHORITY_SQL = "SELECT 1 FROM ma_operation WHERE storage_key = ?"
+    static final String OPERATION_AUTHORITY_SQL = "SELECT 1 FROM ma_operation WHERE tenant_id = ? AND storage_id = ?"
             + " AND ((operation_kind IN ('WORKSPACE_RECOVERY', 'WORKSPACE_OPERATOR_RECOVERY', 'STORAGE_MIGRATION')"
             + " AND state IN ('CAPTURING', 'VERIFYING', 'PREPARED', 'ATTESTED', 'RETIRING', 'RETIRED', 'PREPARING', 'INVALIDATED'))"
             + " OR (operation_kind = 'WORKSPACE_UPLOAD' AND state = 'RUNNING')"
@@ -32,7 +41,7 @@ final class LocalStorageOwners {
                     JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.BLOCKED, JdbcChildWorkspaceStore.FAILED) + "'))) LIMIT 1";
     static final String HEAD_AUTHORITY_SQL = "SELECT /*! STRAIGHT_JOIN */ 1 FROM ma_session s USE INDEX (idx_ma_session_storage_scope)"
             + " JOIN ma_session_head h ON h.tenant_id = s.tenant_id AND h.harness_session_id = s.session_id"
-            + " AND s.session_scope_key IS NOT NULL"
+            + " AND s.is_publication_retention_registered = 1"
             + " JOIN ma_workspace w ON w.tenant_id = s.tenant_id AND w.workspace_id = h.workspace_id"
             + " WHERE s.tenant_id = ? AND s.workspace_storage_id IS NULL AND s.is_resource_gc_completed = FALSE"
             + " AND h.head_kind = 'MANAGED_SESSION' AND w.tenant_id = ? AND w.storage_id = ? LIMIT 1";
@@ -41,7 +50,8 @@ final class LocalStorageOwners {
     }
 
     static String physicalKey(StorageIdentityReader.Identity identity) {
-        return ManagedSchemaKeys.key(identity.device().matches("[0-9a-f]{32}") ? "local-storage/2" : "local-storage/1",
+        return ManagedIdentityRefs.ref(ManagedIdentityRefs.PHYSICAL_REF_BYTES,
+                identity.device().matches("[0-9a-f]{32}") ? "local-storage/2" : "local-storage/1",
                 identity.hostId(), identity.device(), identity.inode(), identity.birthTime());
     }
 
@@ -52,7 +62,7 @@ final class LocalStorageOwners {
                 Identity legacy = identities.readLegacy(root);
                 if (current.hostId().equals(legacy.hostId()) && current.inode().equals(legacy.inode())
                         && current.birthTime().equals(legacy.birthTime())
-                        && !jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ?"
+                        && !jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE physical_id = ?"
                                 + " AND mount_root = ? AND mount_host_id = ? AND mount_device = ?"
                                 + " AND mount_inode = ? AND mount_birth_time = ?", Integer.class,
                                 physicalKey(legacy), legacy.root(), legacy.hostId(), legacy.device(),
@@ -77,10 +87,9 @@ final class LocalStorageOwners {
     static void verifyHistory(JdbcTemplate jdbc, ObjectMapper json, StorageIdentityReader identities,
             String tenantId, String storageId, boolean probe) {
         var migrations = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'"
-                + " AND tenant_id = ? AND storage_key = ? AND state = 'COMPLETED'"
+                + " AND tenant_id = ? AND storage_id = ? AND state = 'COMPLETED'"
                 + " AND (phase IS NULL OR phase <> 'IDENTITY_REATTESTATION') ORDER BY gmt_modified DESC LIMIT 1",
-                (row, index) -> WorkspaceOperations.operation(row), tenantId,
-                RuntimeAdmissionFences.storageAliasKey(tenantId, storageId));
+                (row, index) -> WorkspaceOperations.operation(row), tenantId, storageId);
         if (!migrations.isEmpty()) {
             Identity expected;
             try {
@@ -115,16 +124,24 @@ final class LocalStorageOwners {
     static void requireNonOverlapping(JdbcTemplate jdbc, StorageIdentityReader.Identity identity) {
         WorkspaceStorageKindGuard.lockDomain(jdbc, "local-storage-host/" + identity.hostId());
         String key = physicalKey(identity);
-        var owners = jdbc.queryForList("SELECT storage_key, mount_root FROM ma_storage_owner"
+        var owners = jdbc.queryForList("SELECT physical_id, mount_root FROM ma_storage_owner"
                 + " WHERE mount_host_id = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", identity.hostId());
         for (var owner : owners) {
             String root = (String) owner.get("mount_root");
-            if (!key.equals(owner.get("storage_key")) && root != null
+            if (!samePhysicalRef(owner.get("physical_id"), key)
+                    && root != null
                     && (contains(root, identity.root()) || contains(identity.root(), root))) {
                 throw new RuntimeBrokerException(409, "storage_overlapping_roots",
                         "Workspace directory overlaps an existing physical owner.", false);
             }
         }
+    }
+
+    /** The column is VARBINARY, but queryForList hands an identifier back as text on MySQL. */
+    private static boolean samePhysicalRef(Object stored, String key) {
+        return stored instanceof byte[] bytes
+                ? java.util.Arrays.equals(bytes, key.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                : key.equals(stored);
     }
 
     private static boolean contains(String root, String candidate) {
@@ -136,14 +153,14 @@ final class LocalStorageOwners {
     }
 
     private static Map<String, Object> alias(JdbcTemplate jdbc, String tenant, String storage, String lock) {
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE alias_key = ?" + lock,
-                RuntimeAdmissionFences.storageAliasKey(tenant, storage));
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE tenant_id = ? AND storage_id = ?" + lock,
+                tenant, storage);
         if (rows.isEmpty()) {
             return null;
         }
         var row = rows.getFirst();
         if (!tenant.equals(row.get("tenant_id")) || !storage.equals(row.get("storage_id"))
-                || !java.util.Set.of("LOCAL", "UNREGISTERED").contains(row.get("storage_kind"))) {
+                || !Set.of("LOCAL", "UNREGISTERED").contains(row.get("storage_kind"))) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return row;
@@ -157,18 +174,18 @@ final class LocalStorageOwners {
         String clause = lock ? " FOR UPDATE" : "";
         var alias = alias(jdbc, tenant, storage, clause);
         requireOwner(jdbc, alias, clause);
-        return (String) alias.get("physical_key");
+        return (String) alias.get("physical_id");
     }
 
     static Map<String, Object> requireOwner(JdbcTemplate jdbc, Map<String, Object> alias, String lock) {
         if (alias == null || !"LOCAL".equals(alias.get("storage_kind"))
-                || !java.util.Set.of("REGISTERED", "RETIRING").contains(alias.get("registration_state"))
-                || !(alias.get("physical_key") instanceof String physical)) {
+                || !Set.of("REGISTERED", "RETIRING").contains(alias.get("registration_state"))
+                || !(alias.get("physical_id") instanceof String physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT physical_id, storage_kind, mount_state FROM ma_storage_owner WHERE physical_id = ?"
                 + lock, physical);
-        if (owners.size() != 1 || !physical.equals(owners.getFirst().get("storage_key"))
+        if (owners.size() != 1 || !physical.equals(owners.getFirst().get("physical_id"))
                 || !"LOCAL".equals(owners.getFirst().get("storage_kind"))) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -179,47 +196,55 @@ final class LocalStorageOwners {
             throw new IllegalStateException("Physical recovery requires a transaction");
         }
         var source = alias(jdbc, tenant, storage, false);
-        if (source == null || !(source.get("physical_key") instanceof String physical)) {
+        if (source == null || !(source.get("physical_id") instanceof String physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        String sourceAlias = RuntimeAdmissionFences.storageAliasKey(tenant, storage);
-        // Lock the aliases through alias_key, in alias_key order, before the
-        // scan below reaches their primary records: storage admission locks an
-        // alias record before its primary record (WorkspaceMigrationAdmission
-        // .owner), and two recoveries of aliases sharing this storage take
-        // them in one order. On a pooled DataSource the list comes from a
-        // committed read (committedRead) rather than this transaction's
-        // snapshot; on the single-connection offline entry it is that
-        // transaction's first snapshot instead. An alias registered after that
-        // read is locked by the scan alone, which never locks its alias record;
-        // a recovery of another alias that already saw it can then deadlock
-        // with this one.
-        java.util.List<String> listed = committedRead(jdbc, current -> current.queryForList(
-                "SELECT alias_key FROM ma_storage WHERE physical_key = ? ORDER BY alias_key LIMIT 129", String.class, physical),
+        String[] sourceAlias = {tenant, storage};
+        // Lock the aliases through (tenant_id, storage_id), in (tenant_id,
+        // storage_id) order, before the scan below reaches their primary
+        // records: storage admission locks an alias record before its primary
+        // record (WorkspaceMigrationAdmission.owner), and two recoveries of
+        // aliases sharing this storage take them in one order. On a pooled
+        // DataSource the list comes from a committed read (committedRead)
+        // rather than this transaction's snapshot; on the single-connection
+        // offline entry it is that transaction's first snapshot instead. An
+        // alias registered after that read is locked by the scan alone, which
+        // never locks its alias record; a recovery of another alias that
+        // already saw it can then deadlock with this one.
+        List<String[]> listed = committedRead(jdbc, current -> current.query(
+                "SELECT tenant_id, storage_id FROM ma_storage WHERE physical_id = ? ORDER BY tenant_id, storage_id LIMIT 129",
+                (row, index) -> new String[] {row.getString("tenant_id"), row.getString("storage_id")}, physical),
                 "Physical recovery alias list is unavailable");
-        var known = new java.util.TreeSet<String>(listed);
+        var known = new TreeSet<String[]>(
+                Comparator.comparing((String[] alias) -> alias[0]).thenComparing(alias -> alias[1]));
+        known.addAll(listed);
         known.add(sourceAlias);
-        // A range read of the alias index, which yields alias_key order. The
-        // index is forced so this is never a table scan, and physical_key is
-        // read so it is never a scan of the whole alias index either, which a
-        // covering read becomes once the list is as long as the estimated row
-        // count, locking every gap of the index.
-        jdbc.queryForList("SELECT alias_key, physical_key FROM ma_storage /*! FORCE INDEX (uk_ma_storage_business_key) */"
-                + " WHERE alias_key IN (" + String.join(", ", java.util.Collections.nCopies(known.size(), "?"))
-                + ") ORDER BY alias_key FOR UPDATE", known.toArray());
+        // A range read of the alias unique index, which yields (tenant_id,
+        // storage_id) order. The index is forced so this is never a table scan,
+        // and physical_id is read so it is never a scan of the whole alias
+        // index either, which a covering read becomes once the list is as long
+        // as the estimated row count, locking every gap of the index.
+        List<Object> locks = new ArrayList<>();
+        for (String[] alias : known) {
+            locks.add(alias[0]);
+            locks.add(alias[1]);
+        }
+        jdbc.queryForList("SELECT tenant_id, storage_id, physical_id FROM ma_storage /*! FORCE INDEX (uk_ma_storage_business_key) */"
+                + " WHERE (tenant_id, storage_id) IN (" + String.join(", ", Collections.nCopies(known.size(), "(?, ?)"))
+                + ") ORDER BY tenant_id, storage_id FOR UPDATE", locks.toArray());
         // Through the physical index: a table scan, which the optimizer picks
         // when one storage holds most rows, would lock other storages' primary
         // records in id order and cross another recovery's alias locks.
-        var aliases = jdbc.query("SELECT alias_key, tenant_id, storage_id, storage_kind FROM ma_storage"
-                + " /*! FORCE INDEX (idx_ma_storage_physical) */ WHERE physical_key = ? ORDER BY alias_key LIMIT 129 FOR UPDATE",
-                (row, index) -> new String[] {row.getString("alias_key"), row.getString("tenant_id"), row.getString("storage_id"), row.getString("storage_kind")}, physical);
-        if (aliases.size() > 128 || aliases.stream().noneMatch(candidate -> sourceAlias.equals(candidate[0]))) {
-            throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409, "storage_alias_inventory_limit",
+        var aliases = jdbc.query("SELECT tenant_id, storage_id, storage_kind FROM ma_storage"
+                + " /*! FORCE INDEX (idx_ma_storage_physical) */ WHERE physical_id = ? ORDER BY tenant_id, storage_id LIMIT 129 FOR UPDATE",
+                (row, index) -> new String[] {row.getString("tenant_id"), row.getString("storage_id"), row.getString("storage_kind")}, physical);
+        if (aliases.size() > 128 || aliases.stream().noneMatch(candidate ->
+                sourceAlias[0].equals(candidate[0]) && sourceAlias[1].equals(candidate[1]))) {
+            throw new RuntimeBrokerException(409, "storage_alias_inventory_limit",
                     "Physical recovery alias inventory is incomplete or exceeds 128 aliases.", false);
         }
         for (var candidate : aliases) {
-            if (!candidate[0].equals(RuntimeAdmissionFences.storageAliasKey(candidate[1], candidate[2]))
-                    || !"LOCAL".equals(candidate[3])) {
+            if (!"LOCAL".equals(candidate[2])) {
                 throw WorkspaceExecutionStore.unavailable();
             }
         }
@@ -230,15 +255,15 @@ final class LocalStorageOwners {
         // a committed, nonlocking read (committedRead) sees authorities without reversing binding locks.
         committedRead(jdbc, current -> {
             for (var candidate : aliases) {
-                if (sourceAlias.equals(candidate[0])) {
+                if (sourceAlias[0].equals(candidate[0]) && sourceAlias[1].equals(candidate[1])) {
                     continue;
                 }
-                if (exists(current, SESSION_AUTHORITY_SQL, candidate[1], candidate[2])
-                        || exists(current, RUNTIME_AUTHORITY_SQL, candidate[0])
-                        || exists(current, OPERATION_AUTHORITY_SQL, candidate[0])) {
+                if (exists(current, SESSION_AUTHORITY_SQL, candidate[0], candidate[1])
+                        || exists(current, RUNTIME_AUTHORITY_SQL, candidate[0], candidate[1])
+                        || exists(current, OPERATION_AUTHORITY_SQL, candidate[0], candidate[1])) {
                     throw uncovered();
                 }
-                if (exists(current, HEAD_AUTHORITY_SQL, candidate[1], candidate[1], candidate[2])) {
+                if (exists(current, HEAD_AUTHORITY_SQL, candidate[0], candidate[0], candidate[1])) {
                     throw uncovered();
                 }
             }
@@ -257,16 +282,16 @@ final class LocalStorageOwners {
      * another maintenance entry on a sibling alias can commit beside it, and the later
      * transactions of the recovery recheck its boundary on fresh snapshots.
      */
-    private static <T> T committedRead(JdbcTemplate jdbc, java.util.function.Function<JdbcTemplate, T> read, String failure) {
-        var source = java.util.Objects.requireNonNull(jdbc.getDataSource());
-        if (source instanceof org.springframework.jdbc.datasource.SingleConnectionDataSource) {
+    private static <T> T committedRead(JdbcTemplate jdbc, Function<JdbcTemplate, T> read, String failure) {
+        var source = Objects.requireNonNull(jdbc.getDataSource());
+        if (source instanceof SingleConnectionDataSource) {
             return read.apply(jdbc);
         }
         try (var connection = source.getConnection()) {
             connection.setAutoCommit(true);
             connection.setReadOnly(true);
-            return read.apply(new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true)));
-        } catch (java.sql.SQLException error) {
+            return read.apply(new ManagedSchemaJdbcTemplate(new SingleConnectionDataSource(connection, true)));
+        } catch (SQLException error) {
             throw new IllegalStateException(failure, error);
         }
     }
@@ -275,8 +300,8 @@ final class LocalStorageOwners {
         return !jdbc.queryForList(sql, Integer.class, arguments).isEmpty();
     }
 
-    private static com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException uncovered() {
-        return new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409, "storage_alias_authority_uncovered",
+    private static RuntimeBrokerException uncovered() {
+        return new RuntimeBrokerException(409, "storage_alias_authority_uncovered",
                 "Another storage alias retains authority outside this recovery source cut.", false);
     }
 }

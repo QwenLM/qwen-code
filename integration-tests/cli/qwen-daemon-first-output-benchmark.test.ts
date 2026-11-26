@@ -414,6 +414,9 @@ async function spawnBenchmarkDaemon(
       '127.0.0.1',
       '--workspace',
       workspace,
+      // The benchmark measures first-output latency, not the host-load
+      // gate; a shared runner's real load must not pause session creation.
+      '--no-load-admission',
       '--max-sessions',
       '0',
     ],

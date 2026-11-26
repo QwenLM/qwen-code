@@ -21,7 +21,7 @@ final class McpOwners {
             RuntimeScope scope, String harnessId, String runtimeSessionId) {
         RuntimeSessionRecord owner = runtimeSessionId == null ? null
                 : sessions.findHistorical(scope.getTenantId(), harnessId,
-                        BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"));
+                        BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId"));
         if (runtimeSessionId != null && owner == null) {
             throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is unavailable.");
         }

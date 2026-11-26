@@ -357,7 +357,9 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   setLastCachedContentTokenCount: vi.fn(),
   reset: vi.fn(),
   resetSession: vi.fn(),
+  setSessionStartTime: vi.fn(),
   addEvent: vi.fn(),
+  addReplayedEvent: vi.fn(),
 }));
 const mockLogMemoryRecallDelivery = vi.hoisted(() => vi.fn());
 const mockInteractionTelemetry = vi.hoisted(() => ({
@@ -1237,6 +1239,41 @@ describe('Gemini Client (client.ts)', () => {
       return { freshClient, firstChat };
     };
 
+    it('binds the clock to the resumed conversation after successful initialization', async () => {
+      const data = resumedSession([])!;
+      const start = '2020-02-03T04:05:06.000Z';
+      data.conversation.startTime = start;
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue(data);
+      mockUiTelemetryService.setSessionStartTime.mockClear();
+
+      await initializedClient();
+
+      expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledWith(
+        new Date(start),
+        'test-session-id',
+      );
+    });
+
+    it('binds the retained selective-restore conversation clock separately from the run', async () => {
+      const start = '2019-05-06T07:08:09.000Z';
+      restoreFromRuntime({
+        apiHistory: [],
+        uiTelemetryEvents: [],
+        conversationStartTime: start,
+      });
+      mockUiTelemetryService.setSessionStartTime.mockClear();
+
+      await initializedClient();
+
+      expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledWith(
+        new Date(start),
+        'test-session-id',
+      );
+    });
+
     it('keeps the restored tool boundary through startup reminder refresh', async () => {
       const result = content('user', fnResponse('update_goal', {}, 'ended'));
       restoreFromRuntime({
@@ -1319,9 +1356,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(
         mockConfig.getToolRegistry().syncReviewedDeclarations,
       ).toHaveBeenCalledWith(apiHistory);
-      const { resetSession, addEvent } = uiTelemetryService;
+      const { resetSession, addReplayedEvent } = uiTelemetryService;
       expect(resetSession).toHaveBeenCalledWith('test-session-id');
-      expect(addEvent).toHaveBeenCalledWith(uiEvent, 'test-session-id');
+      // Projected history is replayed, so it must not reach the live counters
+      // that cross-session usage persists.
+      expect(addReplayedEvent).toHaveBeenCalledWith(uiEvent, 'test-session-id');
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
       expect(skill.restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(
         apiHistory,
@@ -13701,6 +13740,34 @@ Other open files:
         );
       });
 
+      it('passes retractToolCallsOnRetry to the Turn constructor and preserves it across stop-policy continuations', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        let turnCall = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          turnCall += 1;
+          return textTurn(turnCall === 1 ? 'first' : 'continued');
+        });
+        let policyCalls = 0;
+        const stopPolicy = {
+          continueAt: vi.fn(async () => {
+            policyCalls += 1;
+            return policyCalls === 1 ? [{ text: 'keep going' }] : undefined;
+          }),
+        };
+
+        await run([{ text: 'acp turn' }], 'session########8', {
+          type: SendMessageType.UserQuery,
+          retractToolCallsOnRetry: true,
+          stopPolicies: [stopPolicy],
+        });
+
+        expect(mockTurnConstructorFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnConstructorFn.mock.calls[0]?.[12]).toBe(true);
+        expect(mockTurnConstructorFn.mock.calls[1]?.[12]).toBe(true);
+      });
+
       it('excludes a concurrent side query and its unflagged continuation', async () => {
         retryChat({
           stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
@@ -14336,6 +14403,42 @@ Other open files:
             'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
         });
       });
+
+      it.each([false, true])(
+        'ends the turn and shows stopReason when a Stop hook returns continue: false without a block (goal permit: %s)',
+        async (withGoal) => {
+          const goal = withGoal ? installGoalRuntime() : undefined;
+          installMessageBus(
+            vi.fn().mockResolvedValue({
+              output: { continue: false, stopReason: 'Build is red.' },
+              stopHookCount: 1,
+            }),
+            'Stop',
+          );
+          notDoneChat();
+          mockTurnRunFn.mockReturnValue(textTurn('not done'));
+
+          const events = await run(
+            [{ text: 'Hi' }],
+            'prompt-stop-continue-false',
+            goal
+              ? {
+                  type: SendMessageType.UserQuery,
+                  goalPermit: goal.permit,
+                  goalTurnKey: 'goal-runtime:turn-1',
+                }
+              : undefined,
+          );
+
+          expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
+          expect(events).not.toContainEqual(stopHookLoop);
+          expect(events).toContainEqual({
+            type: LlmEventType.HookSystemMessage,
+            value: 'Build is red.',
+            isStopReason: true,
+          });
+        },
+      );
 
       it('gives a blocking Stop hook continuation a fresh per-turn tool-call budget', async () => {
         // First Stop check blocks (like a /goal "not met" verdict); the
@@ -15079,22 +15182,14 @@ Other open files:
         });
       });
 
-      it("gives a tool-result request's hook the send's signal", async () => {
+      it("gives UserPromptSubmit the user query's signal", async () => {
         const mockMessageBus = promptSubmitBus({ output: undefined });
         const controller = new AbortController();
 
         await run(
-          [
-            {
-              functionResponse: {
-                id: 'call-1',
-                name: 'read_file',
-                response: { output: 'body' },
-              },
-            },
-          ],
-          'prompt-tool-result-signal',
-          { type: SendMessageType.ToolResult },
+          [{ text: 'read the file' }],
+          'user-prompt-signal',
+          { type: SendMessageType.UserQuery },
           controller.signal,
         );
 
@@ -15215,11 +15310,9 @@ Other open files:
           );
           await admittedSend(admission, 'prompt-continued');
 
-          // The continuation re-spreads the send options and keeps its
-          // existing UserPromptSubmit run.
           expect(
             submitCalls(bus).map(([request]) => request.input.prompt),
-          ).toEqual(['/deploy prod', 'Please continue.']);
+          ).toEqual(['/deploy prod']);
           expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
         });
 
@@ -15257,81 +15350,27 @@ Other open files:
           expect(mockTurnRunFn).toHaveBeenCalledOnce();
         });
 
-        it('applies an admission on a Retry instead of running the hook again', async () => {
-          const bus = promptSubmitBus({ output: undefined });
-          mockTurnRunFn.mockReturnValue(textTurn('ok'));
-          vi.spyOn(
-            client,
-            'stripOrphanedUserEntriesFromHistory',
-          ).mockReturnValue([]);
-          const admission = await client.admitUserPrompt(
-            'try again',
-            'prompt-retried',
-          );
-
-          await admittedSend(
-            admission,
-            'prompt-retried',
-            SendMessageType.Retry,
-          );
-
-          expect(submitCalls(bus)).toHaveLength(1);
-          expect(mockTurnRunFn).toHaveBeenCalledOnce();
-        });
-
-        it('puts back the attempt a Retry stripped when its admission is blocked', async () => {
-          promptSubmitBus({
-            output: { decision: 'block', reason: 'not this one' },
-          });
-          const attempt: Content = {
-            role: 'user',
-            parts: [{ text: 'try again' }],
-          };
-          vi.spyOn(
-            client,
-            'stripOrphanedUserEntriesFromHistory',
-          ).mockReturnValue([attempt]);
-          const addHistory = vi
-            .spyOn(client.getChat(), 'addHistory')
-            .mockImplementation(() => {});
-          const admission = await client.admitUserPrompt(
-            'try again',
-            'prompt-retry-blocked',
-          );
-
-          const events = await admittedSend(
-            admission,
-            'prompt-retry-blocked',
-            SendMessageType.Retry,
-          );
-
-          expect(events).toContainEqual(
-            expect.objectContaining({
-              type: LlmEventType.UserPromptSubmitBlocked,
-            }),
-          );
-          expect(addHistory).toHaveBeenCalledWith(attempt);
-          expect(mockTurnRunFn).not.toHaveBeenCalled();
-        });
-
-        it('rejects an admission on a send that is not a UserQuery or a Retry', async () => {
-          promptSubmitBus({ output: undefined });
-          const admission = await client.admitUserPrompt(
-            '/deploy prod',
-            'prompt-tool-result',
-          );
-
-          await expect(
-            admittedSend(
-              admission,
+        it.each([SendMessageType.ToolResult, SendMessageType.Retry])(
+          'rejects an admission on a %s send',
+          async (type) => {
+            promptSubmitBus({ output: undefined });
+            vi.spyOn(
+              client,
+              'stripOrphanedUserEntriesFromHistory',
+            ).mockReturnValue([]);
+            const admission = await client.admitUserPrompt(
+              '/deploy prod',
               'prompt-tool-result',
-              SendMessageType.ToolResult,
-            ),
-          ).rejects.toThrow(
-            'UserPromptSubmit admission does not match this prompt',
-          );
-          expect(mockTurnRunFn).not.toHaveBeenCalled();
-        });
+            );
+
+            await expect(
+              admittedSend(admission, 'prompt-tool-result', type),
+            ).rejects.toThrow(
+              'UserPromptSubmit admission does not match this prompt',
+            );
+            expect(mockTurnRunFn).not.toHaveBeenCalled();
+          },
+        );
 
         it('rejects an admission issued by another client', async () => {
           promptSubmitBus({ output: undefined });
@@ -15891,16 +15930,6 @@ Other open files:
           type: SendMessageType.UserQuery,
           submittedPrompt: 42 as unknown as string,
         },
-        {
-          name: 'non-user ToolResult value',
-          type: SendMessageType.ToolResult,
-          submittedPrompt: 'must not propagate',
-        },
-        {
-          name: 'non-user Hook value',
-          type: SendMessageType.Hook,
-          submittedPrompt: 'must not propagate',
-        },
       ])(
         'omits submitted prompt for $name',
         async ({ type, submittedPrompt }) => {
@@ -15914,6 +15943,31 @@ Other open files:
           expect(mockMessageBus.request.mock.calls[0][0].input).toEqual({
             prompt: 'model prompt',
           });
+        },
+      );
+
+      it.each<SendMessageOptions>([
+        { type: SendMessageType.ToolResult },
+        { type: SendMessageType.Hook },
+        { type: SendMessageType.Retry },
+        { type: SendMessageType.UserQuery, skipUserPromptSubmit: true },
+        { type: SendMessageType.UserQuery, submittedByMod: 'example' },
+      ])(
+        'sends internal input without evaluating UserPromptSubmit (%o)',
+        async (options) => {
+          const bus = promptSubmitBus({
+            output: { decision: 'block', reason: 'just for user input' },
+          });
+          vi.spyOn(
+            client,
+            'stripOrphanedUserEntriesFromHistory',
+          ).mockReturnValue([]);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          await run([{ text: 'internal input' }], 'prompt-internal', options);
+
+          expect(bus.request).not.toHaveBeenCalled();
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
         },
       );
 
@@ -16148,7 +16202,7 @@ Other open files:
         expectRestored(steer);
       });
 
-      it('restores an attached ToolResult steer when UserPromptSubmit blocks it', async () => {
+      it('restores an attached carrier when UserPromptSubmit blocks a user query', async () => {
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
         const activeSpanSpy = vi
           .spyOn(telemetryIndex, 'getActiveInteractionSpan')
@@ -16161,7 +16215,10 @@ Other open files:
         });
         const steer = steerCarrier();
 
-        await steerRun('prompt-attached-steer-blocked', steer.options);
+        await steerRun('prompt-attached-steer-blocked', {
+          ...steer.options,
+          type: SendMessageType.UserQuery,
+        });
 
         expect(mockTurnRunFn).not.toHaveBeenCalled();
         expectRestored(steer);
@@ -16189,10 +16246,10 @@ Other open files:
         );
         const steer = steerCarrier();
 
-        await steerRun(
-          'prompt-attached-steer-blocked-concurrent-push',
-          steer.options,
-        );
+        await steerRun('prompt-attached-steer-blocked-concurrent-push', {
+          ...steer.options,
+          type: SendMessageType.UserQuery,
+        });
 
         expect(mockTurnRunFn).not.toHaveBeenCalled();
         expectRestored(steer);
@@ -16215,7 +16272,7 @@ Other open files:
           run(
             [{ text: 'tool result plus steer' }],
             'prompt-attached-steer-cancelled-in-hook',
-            steer.options,
+            { ...steer.options, type: SendMessageType.UserQuery },
             controller.signal,
           ),
         ).rejects.toThrow('cancelled during hook');
@@ -16251,10 +16308,10 @@ Other open files:
         const steer = steerCarrier();
 
         await expect(
-          steerRun(
-            'prompt-attached-steer-rollback-concurrent-push',
-            steer.options,
-          ),
+          steerRun('prompt-attached-steer-rollback-concurrent-push', {
+            ...steer.options,
+            type: SendMessageType.UserQuery,
+          }),
         ).rejects.toThrow('setup failed after push rollback');
 
         expectRestored(steer);
@@ -16390,7 +16447,7 @@ Other open files:
         expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
       });
 
-      it('ends an attached ToolResult interaction when UserPromptSubmit throws', async () => {
+      it('ends a user query interaction when UserPromptSubmit throws', async () => {
         vi.spyOn(telemetryIndex, 'getActiveInteractionSpan').mockReturnValue(
           {} as never,
         );
@@ -16403,14 +16460,14 @@ Other open files:
         );
 
         await expect(
-          run([{ text: 'tool result' }], 'prompt-tool-result-hook-error', {
-            type: SendMessageType.ToolResult,
+          run([{ text: 'user query' }], 'prompt-hook-error', {
+            type: SendMessageType.UserQuery,
           }),
         ).rejects.toThrow('sensitive hook error');
 
         expect(mockTurnRunFn).not.toHaveBeenCalled();
         expect(endSpanSpy).toHaveBeenCalledWith('error', {
-          promptId: 'prompt-tool-result-hook-error',
+          promptId: 'prompt-hook-error',
           errorMessage: 'UserPromptSubmit hook failed',
           errorType: 'Error',
         });

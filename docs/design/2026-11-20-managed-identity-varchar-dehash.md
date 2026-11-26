@@ -4,8 +4,10 @@
 
 ## Status and scope
 
-- Status: **proposal**. No code or schema is changed by this document. Implementation
-  requires its own change, baseline reproduction, and MySQL evidence.
+- Status: **in progress (core migration landed, pending full CI verification)**.
+  The mixed identity representation is maintainer-approved; DDL, production SQL,
+  and verification fixtures have been de-hashed. Local focused H2 and dual
+  Checkstyle pass; MySQL, full H2, and performance evidence remain pending CI.
 - Revision (2026-11-20): a follow-up survey of the hash keys that duplicate another unique
   key in their own table corrected the `workspace_id` budget and added constraints for
   receipts, operations, Session hash columns and read leases, then decided the three
@@ -490,3 +492,209 @@ Query rules:
 - Production tenant/actor injection: confirm the decimal-string contract and the
   maximum digit count across deployments before fixing `VARCHAR(36)`.
 - Whether any external platform id can exceed 512 chars (residual compaction case).
+
+## 2026-11-21 implementation supplement (maintainer-approved)
+
+### Mixed identity representation
+
+Simple identities (tenant/session/actor and similar) use bounded `VARCHAR` with
+explicit `utf8mb4_0900_bin`. Overly wide or polymorphic cross-table identities no
+longer duplicate many nullable raw columns; they use a **reversible canonical
+readable reference**. This is not SHA-256 and loses no component information.
+Every index is accepted at **<= 3072 bytes**, and encoded length is fail-closed.
+
+`ManagedIdentityRef` encodes:
+
+```text
+v1|<component-count>|<component>|...
+component := "-" | <utf8-byte-length>:<escaped-payload>
+```
+
+- A null component encodes as `-`; an empty string encodes as `0:`.
+- Payloads are percent-escaped UTF-8 bytes; only ASCII alphanumerics and
+  `. _ ~ : -` remain literal.
+- Decoding strictly validates version, arity, lengths, canonical escapes, and
+  UTF-8 well-formedness, and rejects non-canonical encodings.
+- `encode(maximumBytes, components...)` enforces the final ASCII byte budget
+  before writing.
+
+### Table-level decisions
+
+- `ma_session` gains a monotonic boolean
+  `is_publication_retention_registered`, set by the publication-retention
+  CONTROL upsert; the former `session_scope_key IS NOT NULL` filters use this
+  marker. The old hash columns are dropped in the full atomic cluster.
+- `ma_operation` gains raw `scope_kind/scope_id`; cross-table references use
+  `operation_ref`. Tenant-addressed operation uniqueness is preserved by the
+  same reference mechanism, so no extra `tenant_operation_id` generated column
+  is needed.
+- `ma_resource_ref` owners are polymorphic and use a non-null `owner_ref`; the
+  resource side prefers raw `(tenant_id, session_id, resource_id)` and falls
+  back to `resource_ref` when too wide.
+- Runtime request/scope use `request_id/scope_id` canonical references while
+  authoritative tables keep raw components for validation;
+  `ma_tool_execution.runtime_session_key` is a single-value hash and is replaced
+  directly by raw `runtime_session_id`.
+- Delivery gains `source_scope_id`; channel segments gain raw `delivery_id`;
+  `ma_delivery.source_record_key` has no production consumer and has been
+  removed.
+- The synthetic child-Session actor uses the bounded derived ID
+  `ChildActorId.of(parentSessionId)`: `c:` plus the first 32 hex characters of
+  the parent Session id's UTF-8 SHA-256 (34 characters), keeping the 36-character
+  actor budget; persistence and control-plane share the same derivation.
+- Preserve `receipt_key`, workspace/storage generated identities,
+  extension/automation/CSI protocol-derived IDs, content/commit/token digests,
+  and binary payloads.
+
+### Current checkpoint
+
+Completed and verified:
+
+- tenant/actor 36-character/code-point admission boundaries;
+- the `ma_session` publication-retention registration marker and four filter
+  migrations;
+- conversion of all baseline `tenant_id`/`session_id` columns (including the
+  session-family columns) to `VARCHAR(36)/VARCHAR(64)` under the table-default
+  PAD SPACE collation with uniform trailing-space rejection at admission (see
+  the 2026-11-22 final policy below, which supersedes the NO PAD proposal);
+- Runtime Broker identity binding that distinguishes text from bytes by JDBC
+  parameter type;
+- the `ManagedIdentityRef` codec and its unit tests;
+- removal of `ma_delivery.source_record_key` and projection synchronization;
+- the bounded synthetic child-Session actor (`ChildActorId`) and related
+  regression fixes;
+- H2 schema/catalog/projection, core business/session/retention/side-query/
+  client-files/channel/workspace/SSH stores, and the failing Runtime Broker
+  regression suites;
+- both Checkstyle executions;
+- the canonical readable reference layer (`operation_ref`/`scope_ref`/`owner_ref`,
+  `request_id`/`scope_id`) replacing the identity-hash key columns, and the
+  cross-table SQL/lock-order migration;
+- admission-time canonical-reference budget validation (RuntimeScope and
+  RuntimeProvisionRequest construction, journal command and owner refs), so an
+  over-budget tuple is a named 4xx at the boundary rather than a raw INSERT or
+  replay error;
+- column-bounded Harness/Runtime Session admission (`VARCHAR(64)`/`VARCHAR(128)`);
+- Tier B identity columns `resource_id`/`record_id`/`child_run_id`/
+  `execution_call_id` `VARCHAR(256)`;
+- the duplicate-index cleanup (dropped `idx_ma_operation_target_raw` and
+  `idx_ma_resource_scope_page`) and the resource-GC page index path;
+- the retention-registration marker row decode and the byte-bounded recovery
+  work-key guard.
+
+Remaining: complete MySQL 8.4 type/collation/index-width gates and
+race/performance evidence (no local MySQL; pending CI), the full H2 suite (did
+not finish within the 10-minute local budget), SQL performance benchmarks, and
+TypeScript consumer synchronization. Canonical `*_ref`, `record_resource_id`
+and `ma_runtime_stage.execution_call_id` stay `VARBINARY` by design, not as
+outstanding conversions.
+
+## 2026-11-22 final policy (supersedes the earlier NO PAD proposal)
+
+This section records the maintainer-approved policy that has landed. It
+supersedes the earlier "NO PAD / `utf8mb4_0900_bin` / byte-exact trailing-space
+equality" proposal above, and the interim decision to keep actor columns at
+`VARBINARY(144)`.
+
+### Collation and trailing spaces
+
+- All column-level `COLLATE utf8mb4_0900_bin` clauses were removed; identity
+  columns inherit the table default `utf8mb4_bin` (PAD SPACE).
+- Uniform policy: **every identity admission rejects trailing spaces**
+  (`requireActor` and
+  `requireBindingId/requireOperationId/requireShortId/requireWorkspaceId/requireStorageId/requireInstanceId/requireWorkerOwner`).
+  Because admission never lets a trailing space into the system, PAD SPACE
+  folding cannot occur for a legal identity.
+- Exact equality "including trailing spaces" is now guaranteed by admission,
+  not by collation; case sensitivity is still provided by `utf8mb4_bin`. The
+  earlier trailing-space-distinction tests became trailing-space-rejection
+  tests; case-distinction tests are preserved.
+
+### Actor columns
+
+- Raw-actor (≤36 UTF-16 units) authorization/idempotency key columns are uniformly
+  `VARCHAR(36)`: ma_user_message, ma_user_message_command, ma_workspace_access,
+  ma_schedule, ma_client_files_binding, plus the existing
+  ma_session.creator/owner_actor_key, ma_operation, ma_session_record, extension,
+  delivery, memory_store, and session_worktree columns.
+- `ma_channel_instance.actor_id` is `VARCHAR(512)` (adapter contract
+  `@Size(max=512)`, register rejects trailing spaces). The binary/text actor
+  split is gone.
+
+### Tier A conversions completed
+
+- Operation family + `publication_command_id` `VARCHAR(128)`
+  (`uk_ma_publication_operation` 3136→1600B); short minted IDs `VARCHAR(64)`
+  (`decision_receipt_id` 128); action/run/channel/route/artifact/publication/
+  capture/task/stream/instance/creation/worker-owner `VARCHAR(128)`; `memory_id`
+  `VARCHAR(256)`; `slot_key`/`occurrence_key` `VARCHAR(144)`; workspace/storage/
+  extension split registry 128 / runtime 512 / storage 256.
+- Canonical refs, digests, ciphertext, object keys, and `source_key` stay
+  `VARBINARY`.
+
+### Cross-engine note
+
+- H2 2.3.232 measures `VARCHAR(n)` in UTF-16 units, while MySQL measures code
+  points. Actor admission caps the length at 36 UTF-16 units so the value fits
+  both engines. Boundary tests accept 36 BMP characters or 18 supplementary-plane
+  characters and reject one more of either.
+
+### Still outstanding
+
+- Tier B core identities (`resource_id`/`record_id`/`child_run_id`/
+  `execution_call_id`) shipped `VARCHAR(256)`; residual Tier B/C identities and
+  their admission/index design remain.
+- The earlier wenshao blockers are resolved: the record_id 1024B prefix
+  (dropped), the Action owner_ref retirement leak (shared three-component owner
+  ref), Hook width (128-char admission) and PAD SPACE (uniform trailing-space
+  rejection), and the N9 schema gate zero-row match. N7 `lockPlacementDomain`
+  lock ordering is implemented; its MySQL deadlock/race evidence is pending CI.
+- Semantic merge conflict with #18048; full H2 and MySQL 8.4 gates/races/
+  performance pending CI.
+
+## 2026-11-23 follow-up: mixed-type identity joins
+
+MySQL compares a `VARCHAR` with a `VARBINARY` operand as binary strings. When the
+binary value probes the `VARBINARY` column's index, the lookup is unaffected. When a
+binary value probes a `VARCHAR` column's index, that column drops out of the index
+lookup: the join keeps only the leading tenant/Session prefix and scans every row
+under it. Constants are unaffected, including `byte[]` binds against `VARCHAR`
+columns, and so is an outer row that a unique key resolves to a single constant row.
+Measured on MySQL 8.4 with the V1 DDL:
+
+| Join                                                                                                            | Before                                                                                     | After                                     |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------- |
+| `ma_resource.resource_id = ma_session_record.record_resource_id` (MCP refs, model contexts on the Session list) | prefix `(tenant_id, session_id)`; 50 records × 20k resources took 2.8 s                    | full `uk_ma_resource_id`, 2.7 ms          |
+| `ma_operation.operation_id = ma_artifact.result_id` (artifact pages)                                            | every `TOOL_RESULT_PROJECTION` row was read before the page                                | single-row lookups per artifact           |
+| `CAST(target_id AS BINARY(512)) = CAST(binding_id AS BINARY(512))` (recovery candidates)                        | the `idx_ma_operation_target` lookup was lost and every operator recovery was materialized | covering `idx_ma_operation_target` lookup |
+
+Decisions:
+
+- `ma_session_record.record_resource_id` becomes `VARCHAR(256)` and
+  `ma_artifact.result_id` becomes `VARCHAR(128)`, the widths of the identities
+  they reference (`ma_resource.resource_id`, `ma_operation.operation_id`). Every
+  writer stores an id that already exists in the referenced column, so no accepted
+  value is lost. This supersedes the earlier statement that `record_resource_id`
+  stays `VARBINARY`.
+- `ma_operation.target_id` stays `VARBINARY(512)`: it is polymorphic (Turn, binding,
+  storage, Workspace, item and execution targets) and as `VARCHAR(512)` it would push
+  `uk_ma_operation_request` past 3072 bytes. Joins keep the binary side as the
+  probed side (`binaryIdentity`), and the one join that probes a `VARCHAR` key with
+  it (cancel evidence → `ma_turn`) converts the target to text instead.
+- Columns that are never compared with a `VARCHAR` column keep their type in this
+  change: canonical refs (by design), `ma_runtime_stage` (separate dehash
+  follow-up), `turn_id` in receipts, Session records and tool executions, and the
+  checkpoint/admission/terminal/side-query input resource ids. Converting the last
+  group would also need tighter admission bounds.
+- A `CAST(column AS BINARY(n))` comparison against a parameter is a byte-exact
+  guard under PAD SPACE, not a type conversion, and stays. Each guarded column also
+  needs a plain equality so the index applies. The settled-child-run check in the
+  Runtime retention guard had lost its `record_key` lookup and kept `domain` and
+  `record_id` only inside the casts, scanning every record of the parent Session
+  (5k records: 3 ms, growing with the Session); with the plain equalities it is a
+  unique-key lookup.
+
+Acceptance: `IdentityJoinScaleMySqlIT` asserts the full resource key, a bounded
+artifact page, the `idx_ma_operation_target` probe and the full record key of the
+settled-child-run check on MySQL; schema gates and the affected H2 suites stay
+green.

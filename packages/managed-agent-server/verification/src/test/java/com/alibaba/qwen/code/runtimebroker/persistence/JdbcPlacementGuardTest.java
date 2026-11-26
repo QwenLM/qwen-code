@@ -243,7 +243,7 @@ class JdbcPlacementGuardTest {
             }
             execute("UPDATE ma_runtime_binding SET binding_state = ?, attestation_generation = ? WHERE binding_id = ?",
                     state.name(), attested, created.getBindingId());
-            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_key = ?",
+            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_id = ?",
                     JdbcRepositorySupport.requestKey(request));
             nextId = "candidate";
             return new RuntimeBindingRecord(created.getBindingId(), request, seed, created.getGeneration(), state,

@@ -1,0 +1,241 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`SettingsDialog > CodeMode setting > offers localized modes and shows the remote default when unset in 'en' 1`] = `
+" Settings ·  User Settings   Project Settings
+──────────────────────────────────────────────────────────────────────────────────────────
+ Stored in ~/.qwen/settings.json. Lower priority than Project settings.
+ ────────────────────────────────────────────────────────────────────────────────────────
+  codeMode.mode
+ ────────────────────────────────────────────────────────────────────────────────────────
+  ❯ Code Mode                  Only
+    Respond to Shell Commands  false
+    Default Permission Mode    Default
+    AGENTS.md Excludes
+
+ Requires service availability. Default inherits local or remote settings; Off disables
+ CodeMode; On keeps direct tools; Only routes supported tools through scripts.
+
+ Tab/←→ switch · ↑↓ navigate · Enter toggle · Esc back
+"
+`;
+
+exports[`SettingsDialog > CodeMode setting > offers localized modes and shows the remote default when unset in 'zh-CN' 1`] = `
+" 设置 ·  用户设置   项目设置
+──────────────────────────────────────────────────────────────────────────────────────────
+ 存储于 ~/.qwen/settings.json。优先级低于项目设置。
+ ────────────────────────────────────────────────────────────────────────────────────────
+  codeMode.mode
+ ────────────────────────────────────────────────────────────────────────────────────────
+  ❯ Code Mode     仅 CodeMode
+
+ 受服务端总开关控制。默认沿用本地或远端设置；关闭停用，开启保留直接调用，仅 CodeMode
+ 通过脚本调用支持的工具。重启后生效。
+
+ Tab/←→ 切换 · ↑↓ 导航 · Enter 切换 · Esc 返回
+"
+`;
+
+exports[`SettingsDialog > P1 bilingual layout matrix > matches the 'en' settings layout at 60 columns 1`] = `
+" Settings ·  User Settings   Project Settings
+────────────────────────────────────────────────────────────
+ Stored in ~/.qwen/settings.json. Lower priority than
+ Project settings.
+ ──────────────────────────────────────────────────────────
+  Search to filter
+ ──────────────────────────────────────────────────────────
+  ❯ Project Auto Memory             false
+    User Auto Memory                false
+    Prompt Suggestions              true
+    Dream                           false
+    Respond to Shell Commands       false
+    Vim Mode                        false
+    Default Permission Mode         Default
+    Enable Auto Update              true
+    Enable Plan Mode                true
+    Display Language                English*
+    Inline Thinking                 Full
+    Max Turns Per Run               1,000
+    Escape Pasted @ Symbols         false
+    Show Shortcuts Hint             true
+    Always Copy Full Response       false
+    Load Memory From Additional D…  false
+    Folder Trust                    true
+    Use Proxy Environment Variabl…  true
+  ▼ Use OSC 52 Paste                false
+
+ Automatically save and load reusable information for the
+ current project. When unset, the QCS rollout default a…
+
+ Tab/←→ switch · ↑↓ navigate · Enter toggle · Esc back
+"
+`;
+
+exports[`SettingsDialog > P1 bilingual layout matrix > matches the 'en' settings layout at 80 columns 1`] = `
+" Settings ·  User Settings   Project Settings
+────────────────────────────────────────────────────────────────────────────────
+ Stored in ~/.qwen/settings.json. Lower priority than Project settings.
+ ──────────────────────────────────────────────────────────────────────────────
+  Search to filter
+ ──────────────────────────────────────────────────────────────────────────────
+  ❯ Project Auto Memory                      false
+    User Auto Memory                         false
+    Prompt Suggestions                       true
+    Dream                                    false
+    Respond to Shell Commands                false
+    Vim Mode                                 false
+    Default Permission Mode                  Default
+    Enable Auto Update                       true
+    Enable Plan Mode                         true
+    Display Language                         English*
+    Inline Thinking                          Full
+    Max Turns Per Run                        1,000
+    Escape Pasted @ Symbols                  false
+    Show Shortcuts Hint                      true
+    Always Copy Full Response                false
+    Load Memory From Additional Directories  false
+    Folder Trust                             true
+    Use Proxy Environment Variables          true
+  ▼ Use OSC 52 Paste                         false
+
+ Automatically save and load reusable information for the current project. When
+  unset, the QCS rollout default applies.
+
+ Tab/←→ switch · ↑↓ navigate · Enter toggle · Esc back
+"
+`;
+
+exports[`SettingsDialog > P1 bilingual layout matrix > matches the 'en' settings layout at 120 columns 1`] = `
+" Settings ·  User Settings   Project Settings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Stored in ~/.qwen/settings.json. Lower priority than Project settings.
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Search to filter
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯ Project Auto Memory                      false
+    User Auto Memory                         false
+    Prompt Suggestions                       true
+    Dream                                    false
+    Respond to Shell Commands                false
+    Vim Mode                                 false
+    Default Permission Mode                  Default
+    Enable Auto Update                       true
+    Enable Plan Mode                         true
+    Display Language                         English*
+    Inline Thinking                          Full
+    Max Turns Per Run                        1,000
+    Escape Pasted @ Symbols                  false
+    Show Shortcuts Hint                      true
+    Always Copy Full Response                false
+    Load Memory From Additional Directories  false
+    Folder Trust                             true
+    Use Proxy Environment Variables          true
+  ▼ Use OSC 52 Paste                         false
+
+ Automatically save and load reusable information for the current project. When unset, the QCS rollout default applies.
+
+
+ Tab/←→ switch · ↑↓ navigate · Enter toggle · Esc back
+"
+`;
+
+exports[`SettingsDialog > P1 bilingual layout matrix > matches the 'zh-CN' settings layout at 60 columns 1`] = `
+" 设置 ·  用户设置   项目设置
+────────────────────────────────────────────────────────────
+ 存储于 ~/.qwen/settings.json。优先级低于项目设置。
+ ──────────────────────────────────────────────────────────
+  搜索设置
+ ──────────────────────────────────────────────────────────
+  ❯ 项目自动记忆                false
+    用户自动记忆                false
+    提示词建议                  true
+    记忆整理                    false
+    响应 Shell 命令             false
+    Vim 模式                    false
+    默认权限模式                默认
+    启用自动更新                true
+    启用计划模式                true
+    界面语言                    简体中文*
+    内联显示思考                完整
+    单次运行最大轮数            1,000
+    转义粘贴内容中的 @ 符号     false
+    显示快捷键提示              true
+    始终复制完整回复            false
+    从附加目录加载记忆          false
+    文件夹信任                  true
+    使用代理环境变量            true
+  ▼ 使用 OSC 52 粘贴            false
+
+ 自动保存和加载当前项目可复用的信息；未设置时使用 QCS
+ 灰度默认值。
+
+ Tab/←→ 切换 · ↑↓ 导航 · Enter 切换 · Esc 返回
+"
+`;
+
+exports[`SettingsDialog > P1 bilingual layout matrix > matches the 'zh-CN' settings layout at 80 columns 1`] = `
+" 设置 ·  用户设置   项目设置
+────────────────────────────────────────────────────────────────────────────────
+ 存储于 ~/.qwen/settings.json。优先级低于项目设置。
+ ──────────────────────────────────────────────────────────────────────────────
+  搜索设置
+ ──────────────────────────────────────────────────────────────────────────────
+  ❯ 项目自动记忆                false
+    用户自动记忆                false
+    提示词建议                  true
+    记忆整理                    false
+    响应 Shell 命令             false
+    Vim 模式                    false
+    默认权限模式                默认
+    启用自动更新                true
+    启用计划模式                true
+    界面语言                    简体中文*
+    内联显示思考                完整
+    单次运行最大轮数            1,000
+    转义粘贴内容中的 @ 符号     false
+    显示快捷键提示              true
+    始终复制完整回复            false
+    从附加目录加载记忆          false
+    文件夹信任                  true
+    使用代理环境变量            true
+  ▼ 使用 OSC 52 粘贴            false
+
+ 自动保存和加载当前项目可复用的信息；未设置时使用 QCS 灰度默认值。
+
+
+ Tab/←→ 切换 · ↑↓ 导航 · Enter 切换 · Esc 返回
+"
+`;
+
+exports[`SettingsDialog > P1 bilingual layout matrix > matches the 'zh-CN' settings layout at 120 columns 1`] = `
+" 设置 ·  用户设置   项目设置
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 存储于 ~/.qwen/settings.json。优先级低于项目设置。
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  搜索设置
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯ 项目自动记忆                false
+    用户自动记忆                false
+    提示词建议                  true
+    记忆整理                    false
+    响应 Shell 命令             false
+    Vim 模式                    false
+    默认权限模式                默认
+    启用自动更新                true
+    启用计划模式                true
+    界面语言                    简体中文*
+    内联显示思考                完整
+    单次运行最大轮数            1,000
+    转义粘贴内容中的 @ 符号     false
+    显示快捷键提示              true
+    始终复制完整回复            false
+    从附加目录加载记忆          false
+    文件夹信任                  true
+    使用代理环境变量            true
+  ▼ 使用 OSC 52 粘贴            false
+
+ 自动保存和加载当前项目可复用的信息；未设置时使用 QCS 灰度默认值。
+
+
+ Tab/←→ 切换 · ↑↓ 导航 · Enter 切换 · Esc 返回
+"
+`;
