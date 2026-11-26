@@ -4,6 +4,7 @@ import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { ToolNames } from '../tool-names.js';
+import { isCodeModeEnabled, ToolMode } from '../code-mode.js';
 import { cloneApiHistory } from '../../utils/api-history-metadata.js';
 import {
   getStartupContextLength,
@@ -72,19 +73,22 @@ export function resolveForkExecutionAllowedTools(
   advertisedToolNames: readonly string[],
   requestedToolNames: readonly string[] | undefined,
 ): string[] | undefined {
+  // display_image is main-session-only, so an explicit list must never keep
+  // it executable, whether or not the parent advertises it.
+  const executableToolNames = requestedToolNames?.filter(
+    (name) => name !== ToolNames.DISPLAY_IMAGE,
+  );
   if (!advertisedToolNames.includes(ToolNames.DISPLAY_IMAGE)) {
-    return requestedToolNames ? [...requestedToolNames] : undefined;
+    return executableToolNames;
   }
 
-  // display_image is main-session-only. "Unrestricted" (undefined) minus
-  // display_image cannot be written as a finite allowlist, so fail closed to
-  // deny-all instead of returning undefined — that would hand the fork
-  // unrestricted execution, including the very tool this strips. Every live
-  // caller passes a concrete list (buildForkExecutionAllowlist always returns
-  // an array); DisplayImageInvocation.execute() also enforces this locally.
-  return (
-    requestedToolNames?.filter((name) => name !== ToolNames.DISPLAY_IMAGE) ?? []
-  );
+  // "Unrestricted" (undefined) minus display_image cannot be written as a
+  // finite allowlist, so fail closed to deny-all instead of returning
+  // undefined — that would hand the fork unrestricted execution, including
+  // the very tool this strips. Every live caller passes a concrete list
+  // (buildForkExecutionAllowlist always returns an array);
+  // DisplayImageInvocation.execute() also enforces this locally.
+  return executableToolNames ?? [];
 }
 
 /**
@@ -311,6 +315,8 @@ export function buildForkedMessages(
   assistantMessage: Content,
   executionAllowedTools?: readonly string[],
   promptHint?: string,
+  nestedExecutionAllowedTools?: readonly string[],
+  toolMode?: ToolMode,
 ): Content[] {
   const toolUseParts =
     assistantMessage.parts?.filter((part) => part.functionCall) || [];
@@ -358,7 +364,13 @@ export function buildForkedMessages(
     parts: [
       ...toolResultParts,
       {
-        text: buildChildMessage(directive, executionAllowedTools, promptHint),
+        text: buildChildMessage(
+          directive,
+          executionAllowedTools,
+          promptHint,
+          nestedExecutionAllowedTools,
+          toolMode,
+        ),
       },
     ],
   };
@@ -411,14 +423,38 @@ export function buildChildMessage(
   directive: string,
   executionAllowedTools?: readonly string[],
   promptHint?: string,
+  nestedExecutionAllowedTools?: readonly string[],
+  toolMode?: ToolMode,
 ): string {
+  // Under either code mode the gate admits exec ahead of the allowlist check
+  // (and tool_search in CodeModeOnly), so the sentence must name them rather
+  // than claim the list bounds every call.
+  const codeModeAlwaysAdmitted =
+    toolMode === ToolMode.CodeModeOnly
+      ? `${ToolNames.EXEC} and ${ToolNames.TOOL_SEARCH}`
+      : ToolNames.EXEC;
   const executionRestriction =
-    executionAllowedTools === undefined
-      ? ''
-      : executionAllowedTools.length === 0
-        ? `\n\nTOOL EXECUTION RESTRICTION:
+    nestedExecutionAllowedTools !== undefined &&
+    (nestedExecutionAllowedTools.length > 0 ||
+      (executionAllowedTools?.length ?? 0) > 0)
+      ? `\n\nTOOL EXECUTION RESTRICTION:
+${
+  toolMode === ToolMode.CodeModeOnly
+    ? `You may call exec and, when declared, tool_search. Ordinary tools are reachable only inside exec; other declared direct-only control tools must also match this allowlist: ${JSON.stringify(executionAllowedTools ?? [])}.`
+    : `You may call exec and declared tools matched by this direct-call allowlist: ${JSON.stringify(executionAllowedTools ?? [])}.`
+}
+Inside exec, only these exact nested tool names are permitted: ${JSON.stringify(nestedExecutionAllowedTools)}.
+A nested allowance alone does not authorize a direct call; direct calls must satisfy the mode and direct-call allowlist above.`
+      : executionAllowedTools === undefined
+        ? ''
+        : executionAllowedTools.length === 0
+          ? `\n\nTOOL EXECUTION RESTRICTION:
 You may not execute any tools, even though tool declarations remain visible. Do not attempt tool calls.`
-        : `\n\nTOOL EXECUTION RESTRICTION:
+          : isCodeModeEnabled(toolMode)
+            ? `\n\nTOOL EXECUTION RESTRICTION:
+You may execute only tools matched by this allowlist: ${JSON.stringify(executionAllowedTools)} — except ${codeModeAlwaysAdmitted}, which the active code mode always admits.
+Other visible tool declarations are unavailable to you. Do not call them.`
+            : `\n\nTOOL EXECUTION RESTRICTION:
 You may execute only tools matched by this allowlist: ${JSON.stringify(executionAllowedTools)}.
 Other visible tool declarations are unavailable to you. Do not call them.`;
   const profileGuidance = promptHint

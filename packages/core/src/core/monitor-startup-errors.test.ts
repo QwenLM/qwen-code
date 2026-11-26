@@ -14,6 +14,7 @@ import { makeFakeConfig } from '../test-utils/config.js';
 import type { ToolCallEvent } from '../telemetry/types.js';
 import { QwenLogger } from '../telemetry/qwen-logger/qwen-logger.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { ExecTool } from '../tools/exec.js';
 import { MonitorTool } from '../tools/monitor.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -40,7 +41,7 @@ function setup(
   failure: 'capacity' | 'sandbox' = 'capacity',
 ) {
   const config = makeFakeConfig({
-    codeModeOnly,
+    toolMode: codeModeOnly ? ToolMode.CodeModeOnly : ToolMode.Direct,
     approvalMode: ApprovalMode.YOLO,
     chatRecording: false,
     targetDir: '/tmp',

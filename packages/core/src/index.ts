@@ -860,6 +860,7 @@ export {
 } from './code-mode/tool-call-runtime.js';
 export {
   getToolExposure,
+  isCodeModeEnabled,
   isCodeModeToolCallAllowed,
   ToolMode,
   type ToolExposure,

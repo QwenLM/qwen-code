@@ -402,9 +402,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.tools.listDirectory.enabled': '启用 ListDirectory',
   'settings.description.tools.listDirectory.enabled':
     '启用内置 list_directory 工具。默认关闭；当它被显式列入 coreTools 白名单（--core-tools / tools.core）时会自动启用。',
-  'settings.label.tools.codeModeOnly': '仅代码模式（实验性）',
-  'settings.description.tools.codeModeOnly':
-    '普通工具只通过隔离的 exec JavaScript 工具暴露给模型。直接控制类工具仍然可用。在 safe 和 bare 模式下忽略。',
+  'settings.label.tools.mode': '工具模式（实验性）',
+  'settings.description.tools.mode':
+    '选择工具向模型暴露的方式。Direct 使用普通工具调用；Code Mode 额外提供隔离的 exec JavaScript 工具；Code Mode Only 仅通过 exec 暴露普通工具。safe 和 bare 模式始终使用 Direct。容器执行时，Code Mode 会警告并使用直接工具，Code Mode Only 则被拒绝。SSH 工作区会警告并将两种代码模式回退为 Direct。Code Mode Only 通过顶层 tool_search 按需发现 schema，再通过 exec 调用；跳过预算预加载与启动工具清单。tools.eager 会减少初始 exec 声明，当前范围无法搜索时则保留所有允许工具的签名。Hybrid 模式下，AgentCore 不会将仍被 tools.eager 隐藏的工具加入嵌套绑定；未授予 exec 的智能体白名单会收窄嵌套绑定。继承或显式授予 exec 会保留其他规则允许的所有普通代码模式工具绑定。执行白名单只要提及任一 MCP 工具，就会进一步将 MCP 绑定限制为匹配的精确名称或服务器模式。',
   'settings.label.tools.todoWrite.enabled': '启用 Todo Write',
   'settings.description.tools.todoWrite.enabled':
     '启用内置 todo_write 工具及其系统提示词引导。',
@@ -793,9 +793,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.tools.listDirectory.enabled': 'Включить ListDirectory',
   'settings.description.tools.listDirectory.enabled':
     'Включить встроенный инструмент list_directory. По умолчанию выключен; включается автоматически, если явно в белом списке coreTools (--core-tools / tools.core).',
-  'settings.label.tools.codeModeOnly': 'Только режим кода (экспериментально)',
-  'settings.description.tools.codeModeOnly':
-    'Обычные инструменты доступны модели только через изолированный exec JavaScript. Инструменты прямого управления остаются. Игнорируется в режимах safe и bare.',
+  'settings.label.tools.mode': 'Режим инструментов (экспериментально)',
+  'settings.description.tools.mode':
+    'Выбирает, как инструменты предоставляются модели. Direct использует обычные вызовы инструментов; Code Mode дополнительно предоставляет изолированный инструмент exec JavaScript; Code Mode Only предоставляет обычные инструменты только через exec. Режимы safe и bare всегда используют Direct. При выполнении в контейнере Code Mode предупреждает и использует прямые инструменты, а Code Mode Only отклоняется. Рабочие области SSH предупреждают и используют Direct для обоих режимов кода. Code Mode Only обнаруживает отложенные схемы через tool_search верхнего уровня и вызывает их через exec; пропускает предзагрузку по бюджету и стартовые каталоги инструментов. tools.eager сокращает начальное описание exec; если поиск недоступен в текущей области, exec включает все разрешённые сигнатуры. В режиме Hybrid AgentCore не включает инструменты, всё ещё скрытые tools.eager, во вложенные привязки; белые списки агентов без exec сужают вложенные привязки. Наследование или явная выдача exec сохраняет все иначе допущенные обычные привязки инструментов, вызываемых в режиме кода. Белый список выполнения, упоминающий любой инструмент MCP, дополнительно ограничивает привязки MCP точными именами или шаблонами серверов.',
   'settings.label.tools.todoWrite.enabled': 'Включить Todo Write',
   'settings.description.tools.todoWrite.enabled':
     'Включить встроенный инструмент todo_write и его подсказку в системном промпте.',

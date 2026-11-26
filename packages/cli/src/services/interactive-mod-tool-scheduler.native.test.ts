@@ -227,7 +227,7 @@ describe('interactive Mod adapter with the real native scheduler', () => {
     'keeps nested Code Mode approval visible (Mods=%s)',
     async (mods) => {
       const config = makeFakeConfig({
-        codeModeOnly: true,
+        toolMode: 'code_mode_only',
         approvalMode: ApprovalMode.DEFAULT,
         interactive: true,
         chatRecording: false,

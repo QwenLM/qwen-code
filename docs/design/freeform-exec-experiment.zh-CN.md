@@ -12,7 +12,7 @@ Code mode 当前将 exec 暴露为接收含 `source` 字段的 JSON 对象的函
 ## 设计
 
 通过 `tools.freeform` 将 exec 切换为接收文本的 Responses custom tool。
-该配置只有在 `tools.codeModeOnly` 为 true 且当前模型的 `wireApi` 为
+该配置只有在 `tools.mode` 为 `code_mode_only` 且当前模型的 `wireApi` 为
 `"responses"` 时生效。其他工具和默认行为仍使用 function tool。
 Responses 转换器将完成的 custom 输入映射为内部 `{ source }`，保留调度器校验、
 权限、运行时执行、工具调用显示和记录方式。启用时，适配器将 exec 历史回传为配对的
@@ -30,7 +30,7 @@ Responses 转换器将完成的 custom 输入映射为内部 `{ source }`，保�
 用户只应在确认接口支持
 [Responses Custom Tools](https://developers.openai.com/api/docs/guides/function-calling#custom-tools)
 时启用配置。
-当 `tools.codeModeOnly` 为 false 时，`tools.freeform` 会被保存但不生效。
+当 `tools.mode` 为 `direct` 或 `code_mode` 时，`tools.freeform` 会被保存但不生效。
 
 ## 验证与验收
 

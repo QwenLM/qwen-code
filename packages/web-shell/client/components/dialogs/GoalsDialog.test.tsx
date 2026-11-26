@@ -1120,14 +1120,19 @@ describe('GoalsDialog', () => {
 
     await act(async () => {
       releases.get('sess-1')?.();
-      await Promise.resolve();
     });
-    expect(clear(0)?.disabled).toBe(false);
+    // reload() can settle across a macrotask under load, so wait for the
+    // button to re-enable rather than flushing a fixed microtask count.
+    await vi.waitFor(() => {
+      expect(clear(0)?.disabled).toBe(false);
+    });
     expect(clear(1)?.disabled).toBe(true);
 
     await act(async () => {
       releases.get('sess-2')?.();
-      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(clear(1)?.disabled).toBe(false);
     });
   });
 

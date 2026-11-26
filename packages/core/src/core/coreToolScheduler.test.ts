@@ -16899,6 +16899,7 @@ describe('CoreToolScheduler activation wiring', () => {
     toolResult?: ToolResult;
     containerExecution?: boolean;
     withheldFromConfig?: boolean;
+    toolMode?: 'direct' | 'code_mode' | 'code_mode_only';
   };
 
   /** The single read_file request most activation cases schedule. */
@@ -16937,6 +16938,7 @@ describe('CoreToolScheduler activation wiring', () => {
           {
             getExecutionEnvironment: () =>
               opts.containerExecution ? {} : undefined,
+            getToolMode: () => opts.toolMode,
             addInlineAnnouncedSkillKeys,
             ...(opts.withheldFromConfig
               ? {
@@ -16967,6 +16969,22 @@ describe('CoreToolScheduler activation wiring', () => {
       responseText: () => getResponseText(completedCall()),
     };
   }
+
+  it('uses the declared invocation surface for nested CodeModeOnly skill activation', async () => {
+    const { responseText, completedCall } = await runWithSkillManager(
+      {
+        matchAndActivateByPaths: vi.fn().mockResolvedValue(['tsx-helper']),
+        skillToolPresent: true,
+        toolMode: 'code_mode_only',
+      },
+      { ...readRequest('/proj/src/App.tsx'), source: 'code_mode' },
+    );
+    expect(completedCall().status).toBe('success');
+    expect(responseText()).toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
+    expect(responseText()).not.toContain('via the Skill tool');
+  });
 
   /** runWithSkillManager (App.tsx read) whose activation yields tsx-helper. */
   async function runTsxActivation(
@@ -17031,7 +17049,9 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(matchAndActivateByPaths).toHaveBeenCalledWith(['/proj/src/App.tsx']);
     expect(completedCall().status).toBe('success');
     expect(responseText()).toContain('tsx-helper');
-    expect(responseText()).toContain('became available via the Skill tool');
+    expect(responseText()).toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
   });
 
   it('stays silent when SkillTool is registered but was never declared', async () => {
@@ -17047,7 +17067,9 @@ describe('CoreToolScheduler activation wiring', () => {
       });
 
     expect(completedCall().status).toBe('success');
-    expect(responseText()).not.toContain('became available via the Skill tool');
+    expect(responseText()).not.toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
     expect(responseText()).not.toContain('tsx-helper');
     // The half that starves the parent: moving this call outside the gate
     // (text still inside) passes everything else, yet the orchestrator's
@@ -17066,7 +17088,9 @@ describe('CoreToolScheduler activation wiring', () => {
       });
     expect(matchAndActivateByPaths).toHaveBeenCalledWith(['/proj/src/App.tsx']);
     expect(completedCall().status).toBe('success');
-    expect(responseText()).not.toContain('became available via the Skill tool');
+    expect(responseText()).not.toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
     expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
   });
 
@@ -17080,7 +17104,9 @@ describe('CoreToolScheduler activation wiring', () => {
         declaredHasSkillTool: true,
       });
 
-    expect(responseText()).toContain('became available via the Skill tool');
+    expect(responseText()).toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
     // …and the announcement IS consumed, so the parent does not repeat it;
     // the pair makes the negative assertion above mean "not consumed".
     expect(addInlineAnnouncedSkillKeys).toHaveBeenCalled();

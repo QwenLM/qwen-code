@@ -21,6 +21,7 @@ import {
 } from '../../config/settingsSchema.js';
 import {
   getDialogSettingKeys,
+  getEffectiveValue,
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
@@ -237,10 +238,10 @@ function buildSettingsResponse(
     const def = getSettingDefinition(key);
     if (!def) continue;
 
-    const mergedEffective = getNestedProperty(
-      loaded.merged as Record<string, unknown>,
-      key,
-    );
+    const mergedEffective =
+      key === 'tools.mode'
+        ? getEffectiveValue(key, {}, loaded.merged)
+        : getNestedProperty(loaded.merged as Record<string, unknown>, key);
     const userVal = getNestedProperty(
       loaded.user.settings as Record<string, unknown>,
       key,
