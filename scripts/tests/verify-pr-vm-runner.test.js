@@ -25,6 +25,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  fetchRoundInputFromSocket,
+  materializeTwoOidWorktrees,
+  startLoopbackToUdsBridge,
+} from '../../scripts/verify-pr-vm-channel.mjs';
+import {
   ACK,
   GREETING,
   startCollectorServer,
@@ -34,6 +39,7 @@ import {
   inspectPidState,
   writeExecutionRecordAndBoundary,
 } from '../../scripts/verify-pr-vm-lifecycle.mjs';
+import { reapedPid } from './reaped-pid.js';
 import {
   buildAliyunAgentSandboxPlan,
   buildAliyunProviderPlan,
@@ -430,7 +436,7 @@ describe('verify-pr-vm-runner backend launch plans', () => {
       trustedInputDigest: SHA('5'),
       kernelDigest: SHA('6'),
       rootfsDigest: SHA('7'),
-      workerPid: 999911,
+      workerPid: reapedPid(),
       workerExe: '/firecracker-v1.18.0-aarch64',
       workerExitEvidence: 'absent',
     });
@@ -440,7 +446,7 @@ describe('verify-pr-vm-runner backend launch plans', () => {
       artifactDir: vault,
       verifyLivePid: true,
     });
-    expect(fin.ok).toBe(true);
+    expect(fin.ok, fin.errors?.join('\n')).toBe(true);
 
     const chk = spawnSync(
       process.execPath,
@@ -458,7 +464,7 @@ describe('verify-pr-vm-runner backend launch plans', () => {
       ],
       { encoding: 'utf8' },
     );
-    expect(chk.status).toBe(0);
+    expect(chk.status, chk.stderr).toBe(0);
     expect(chk.stdout).toMatch(/ok: verdict=merge-ready/);
   });
 });
@@ -1920,5 +1926,400 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
     expect(cliOut.errors.join('\n')).toMatch(
       /timed out waiting for firecracker worker pid file/,
     );
+  });
+
+  it('wires 3-port guest channel (collector 52 + input 53 + model proxy 54) end to end and blocks input socket tampering', async () => {
+    const root = mkdtempSync('/tmp/qc-orch-3port-');
+    tmpDirs.push(root);
+
+    // 1. Multi-port plan validation and port collision refusal
+    expect(() =>
+      buildFirecrackerLaunchPlan({
+        runId: 'col01',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/fc',
+        jailerBin: '/opt/jailer',
+        vsockPort: 52,
+        inputVsockPort: 52,
+      }),
+    ).toThrow(/collides/);
+    expect(() =>
+      buildVfkitLaunchPlan({
+        runId: 'col02',
+        vfkitBin: '/opt/vfkit',
+        seatbeltProfile: '/opt/sb',
+        pocDir: root,
+        socketDir: join(root, 's'),
+        kernelPath: join(root, 'k'),
+        initramfsPath: join(root, 'k'),
+        rootfsPath: join(root, 'w'),
+        guestLogPath: join(root, 'g'),
+        pidFile: join(root, 'p'),
+        homeDir: join(root, 'h'),
+        tmpDir: root,
+        vsockPort: 52,
+        inputVsockPort: 53,
+        modelVsockPort: 53,
+      }),
+    ).toThrow(/collides/);
+
+    // 2. Real two-OID fixture repo for roundInput bundling + A/B execution
+    const repoDir = join(root, 'repo');
+    mkdirSync(repoDir);
+    const runGit = (args) => {
+      const r = spawnSync('git', args, { cwd: repoDir, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(r.stderr || r.stdout);
+      return r.stdout.trim();
+    };
+    runGit(['init', '--quiet', '-b', 'main']);
+    runGit(['config', 'user.email', 't@example.com']);
+    runGit(['config', 'user.name', 'T']);
+    writeFileSync(join(repoDir, 'sum.mjs'), 'export const f = () => 0;\n');
+    writeFileSync(
+      join(repoDir, 'sum.test.mjs'),
+      "import assert from 'node:assert/strict';\nimport { f } from './sum.mjs';\nassert.equal(f(), 1);\n",
+    );
+    runGit(['add', '.']);
+    runGit(['commit', '-q', '-m', 'base']);
+    const baseOid = runGit(['rev-parse', 'HEAD']);
+    writeFileSync(join(repoDir, 'sum.mjs'), 'export const f = () => 1;\n');
+    runGit(['add', 'sum.mjs']);
+    runGit(['commit', '-q', '-m', 'head']);
+    const headOid = runGit(['rev-parse', 'HEAD']);
+
+    const ctx = writeHostContext(root, {
+      baseRefOid: baseOid,
+      headRefOid: headOid,
+      trustClassification: {
+        prTrust: 'external',
+        executionClass: 'hardware-isolated',
+        escalationReasons: ['external-author'],
+        headRefOid: headOid,
+      },
+    });
+    const kernel = join(root, 'k');
+    const golden = join(root, 'golden');
+    const work = join(root, 'work');
+    writeFileSync(kernel, 'k');
+    writeFileSync(golden, 'r');
+    writeFileSync(work, 'r');
+
+    // Pre-flight refusal when plan lacks inputVsockPath or headRefOid mismatches
+    const noInPort = await runHardwareRound({
+      ...ctx,
+      launcherDir: join(root, 'l-noin'),
+      vaultDir: join(root, 'v-noin'),
+      approvedRoots: [root],
+      plan: buildVfkitLaunchPlan({
+        runId: 'ni01',
+        vfkitBin: '/opt/vfkit',
+        seatbeltProfile: '/opt/sb',
+        pocDir: root,
+        socketDir: join(root, 's-ni'),
+        kernelPath: kernel,
+        initramfsPath: kernel,
+        rootfsPath: work,
+        guestLogPath: join(root, 'g'),
+        pidFile: join(root, 'p'),
+        homeDir: join(root, 'h'),
+        tmpDir: root,
+      }),
+      sourceKernelPath: kernel,
+      sourceRootfsPath: golden,
+      roundInput: { repoDir },
+    });
+    expect(noInPort.ok).toBe(false);
+    expect(noInPort.errors.join('\n')).toMatch(/requires plan\.inputVsockPath/);
+
+    const badOid = await runHardwareRound({
+      ...ctx,
+      launcherDir: join(root, 'l-bad'),
+      vaultDir: join(root, 'v-bad'),
+      approvedRoots: [root],
+      plan: buildVfkitLaunchPlan({
+        runId: 'bo01',
+        vfkitBin: '/opt/vfkit',
+        seatbeltProfile: '/opt/sb',
+        pocDir: root,
+        socketDir: join(root, 's-bo'),
+        kernelPath: kernel,
+        initramfsPath: kernel,
+        rootfsPath: work,
+        guestLogPath: join(root, 'g'),
+        pidFile: join(root, 'p'),
+        homeDir: join(root, 'h'),
+        tmpDir: root,
+        inputVsockPort: 53,
+        modelVsockPort: 54,
+      }),
+      sourceKernelPath: kernel,
+      sourceRootfsPath: golden,
+      roundInput: { repoDir, headRefOid: 'e'.repeat(40) },
+    });
+    expect(badOid.ok).toBe(false);
+    expect(badOid.errors.join('\n')).toMatch(/must match the host context/);
+
+    // Bundle creation failure leaves no unrevoked token.json in launcherDir
+    const lBadBundle = join(root, 'l-badbundle');
+    const badBundle = await runHardwareRound({
+      ...ctx,
+      launcherDir: lBadBundle,
+      vaultDir: join(root, 'v-badbundle'),
+      approvedRoots: [root],
+      plan: buildVfkitLaunchPlan({
+        runId: 'bb01',
+        vfkitBin: '/opt/vfkit',
+        seatbeltProfile: '/opt/sb',
+        pocDir: root,
+        socketDir: join(root, 's-bb'),
+        kernelPath: kernel,
+        initramfsPath: kernel,
+        rootfsPath: work,
+        guestLogPath: join(root, 'g'),
+        pidFile: join(root, 'p'),
+        homeDir: join(root, 'h'),
+        tmpDir: root,
+        inputVsockPort: 53,
+      }),
+      sourceKernelPath: kernel,
+      sourceRootfsPath: golden,
+      roundInput: { repoDir: join(root, 'nonexistent-repo') },
+    });
+    expect(badBundle.ok).toBe(false);
+    expect(badBundle.errors.join('\n')).toMatch(/round-input-rejected/);
+    expect(existsSync(join(lBadBundle, 'token.json'))).toBe(false);
+
+    // 3. Full 3-port clean round: input-server (53) -> guest fetch + A/B ->
+    //    loopback bridge -> model-proxy UDS (54) -> collector (52) -> finalize
+    const realKey = 'sk-host-only-3port';
+    const upstream = http.createServer((req, res) => {
+      if (req.headers.authorization !== `Bearer ${realKey}`) {
+        res.writeHead(401).end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"choices":[{"message":{"content":"ok"}}]}');
+    });
+    await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+    const sockDir = join(root, 's3');
+    mkdirSync(sockDir);
+    const plan3 = buildVfkitLaunchPlan({
+      runId: 'tp01',
+      vfkitBin: '/opt/vfkit',
+      seatbeltProfile: '/opt/sb',
+      pocDir: root,
+      socketDir: sockDir,
+      kernelPath: kernel,
+      initramfsPath: kernel,
+      rootfsPath: work,
+      guestLogPath: join(root, 'g3.log'),
+      pidFile: join(root, 'p3.pid'),
+      homeDir: join(root, 'h3'),
+      tmpDir: root,
+      inputVsockPort: 53,
+      modelVsockPort: 54,
+    });
+    expect(plan3.argv).toContain(
+      `virtio-vsock,port=53,socketURL=${plan3.inputVsockPath}`,
+    );
+    expect(plan3.argv).toContain(
+      `virtio-vsock,port=54,socketURL=${plan3.modelVsockPath}`,
+    );
+
+    try {
+      const okRes = await runHardwareRound({
+        ...ctx,
+        launcherDir: join(root, 'l3'),
+        vaultDir: join(root, 'v3'),
+        approvedRoots: [root],
+        plan: plan3,
+        sourceKernelPath: kernel,
+        sourceRootfsPath: golden,
+        roundInput: { repoDir },
+        modelProxy: {
+          baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
+          apiKey: realKey,
+          maxRequests: 2,
+        },
+        launchBackend: async ({
+          proxyInfo,
+          inputSocketPath,
+          collectorSocketPath,
+        }) => {
+          expect(proxyInfo.socketPath).toBe(plan3.modelVsockPath);
+          const guestWork = join(root, 'guest-3p');
+          const fetched = await fetchRoundInputFromSocket({
+            socketPath: inputSocketPath,
+            outDir: guestWork,
+          });
+          expect(JSON.stringify(fetched.manifest)).not.toContain(realKey);
+          expect(fetched.manifest.modelProxy.token).toBe(proxyInfo.token);
+          const mat = materializeTwoOidWorktrees({
+            bundlePath: fetched.bundlePath,
+            baseRefOid: fetched.manifest.baseRefOid,
+            headRefOid: fetched.manifest.headRefOid,
+            baseDir: join(guestWork, 'base'),
+            headDir: join(guestWork, 'head'),
+          });
+          const baseRun = spawnSync(process.execPath, ['sum.test.mjs'], {
+            cwd: mat.baseDir,
+          });
+          const headRun = spawnSync(process.execPath, ['sum.test.mjs'], {
+            cwd: mat.headDir,
+          });
+          expect(baseRun.status).not.toBe(0);
+          expect(headRun.status).toBe(0);
+
+          const bridge = await startLoopbackToUdsBridge({
+            upstreamSocketPath: proxyInfo.socketPath,
+          });
+          try {
+            const resp = await fetch(
+              `http://127.0.0.1:${bridge.port}${fetched.manifest.modelProxy.basePath}/chat/completions`,
+              {
+                method: 'POST',
+                headers: {
+                  authorization: `Bearer ${fetched.manifest.modelProxy.token}`,
+                },
+                body: '{"messages":[]}',
+              },
+            );
+            expect(resp.status).toBe(200);
+          } finally {
+            await bridge.close();
+          }
+
+          const worker = spawn(
+            process.execPath,
+            ['-e', 'setTimeout(()=>{},60000)'],
+            { stdio: 'ignore' },
+          );
+          void sendRoundFiles(
+            collectorSocketPath,
+            Buffer.concat([
+              makeFrame('H', 'report-v1'),
+              makeWholeFile('verdict.txt', 'merge-ready\n'),
+              makeWholeFile(
+                'assertions.json',
+                '{"pass":1,"fail":0,"total":1}\n',
+              ),
+              makeWholeFile(
+                'report.md',
+                `merge-ready · 1 passed · 0 failed · 1 total · ${headOid}\n\n## Methodology\n\n**Boundary.** vfkit 3-port.\n`,
+              ),
+              makeBinaryFile('evidence/01-ab.png', PNG_BYTES),
+              makeFrame('R'),
+            ]),
+          );
+          return {
+            workerPid: worker.pid,
+            workerExe: process.execPath,
+            expectedExeTokens: ['node'],
+            child: worker,
+          };
+        },
+      });
+      expect(okRes.errors).toEqual([]);
+      expect(okRes.ok).toBe(true);
+      expect(okRes.inputServerStats).toEqual({
+        servedManifest: 1,
+        servedBundle: 1,
+        rejectedRevoked: 0,
+        rejectedBudget: 0,
+        rejectedInvalid: 0,
+        rejectedBusy: 0,
+      });
+      expect(okRes.modelProxyStats.acceptedRequests).toBe(1);
+      expect(existsSync(plan3.inputVsockPath)).toBe(false);
+      expect(existsSync(plan3.modelVsockPath)).toBe(false);
+      expect(existsSync(plan3.hostVsockPath)).toBe(false);
+      expect(existsSync(sockDir)).toBe(false);
+      const execRec = JSON.parse(
+        readFileSync(okRes.executionRecordPath, 'utf8'),
+      );
+      expect(execRec.trustedInputDigest).toBe(okRes.trustedInputDigest);
+    } finally {
+      upstream.close();
+    }
+
+    // 4. Replacing inputVsockPath with another UDS socket mid-round fails
+    //    teardown closed and preserves the replacement socket intact.
+    const work4 = join(root, 'work4');
+    writeFileSync(work4, 'r');
+    const sockDir4 = join(root, 's4');
+    mkdirSync(sockDir4);
+    const plan4 = buildVfkitLaunchPlan({
+      runId: 'tp02',
+      vfkitBin: '/opt/vfkit',
+      seatbeltProfile: '/opt/sb',
+      pocDir: root,
+      socketDir: sockDir4,
+      kernelPath: kernel,
+      initramfsPath: kernel,
+      rootfsPath: work4,
+      guestLogPath: join(root, 'g4.log'),
+      pidFile: join(root, 'p4.pid'),
+      homeDir: join(root, 'h4'),
+      tmpDir: root,
+      inputVsockPort: 53,
+    });
+    let victimInput = null;
+    try {
+      const tamRes = await runHardwareRound({
+        ...ctx,
+        launcherDir: join(root, 'l4'),
+        vaultDir: join(root, 'v4'),
+        approvedRoots: [root],
+        plan: plan4,
+        sourceKernelPath: kernel,
+        sourceRootfsPath: golden,
+        roundInput: { repoDir },
+        launchBackend: async ({ inputSocketPath, collectorSocketPath }) => {
+          unlinkSync(inputSocketPath);
+          victimInput = createServer((s) => s.end('input-victim-ok'));
+          await new Promise((resolve, reject) => {
+            victimInput.once('error', reject);
+            victimInput.listen(inputSocketPath, resolve);
+          });
+          const worker = spawn(
+            process.execPath,
+            ['-e', 'setTimeout(()=>{},60000)'],
+            { stdio: 'ignore' },
+          );
+          void sendRoundFiles(
+            collectorSocketPath,
+            Buffer.concat([
+              makeFrame('H', 'report-v1'),
+              makeWholeFile('verdict.txt', 'merge-ready\n'),
+              makeWholeFile(
+                'assertions.json',
+                '{"pass":1,"fail":0,"total":1}\n',
+              ),
+              makeWholeFile(
+                'report.md',
+                `merge-ready · 1 passed · 0 failed · 1 total · ${headOid}\n\n## Methodology\n\n**Boundary.** vfkit.\n`,
+              ),
+              makeBinaryFile('evidence/01-ab.png', PNG_BYTES),
+              makeFrame('R'),
+            ]),
+          );
+          return {
+            workerPid: worker.pid,
+            workerExe: process.execPath,
+            expectedExeTokens: ['node'],
+            child: worker,
+          };
+        },
+      });
+      expect(tamRes.ok).toBe(false);
+      expect(tamRes.teardownStatus).toBe('failed');
+      expect(tamRes.boundaryPath).toBeNull();
+      expect(tamRes.errors).toContain('input-socket-identity-changed');
+      expect(existsSync(plan4.inputVsockPath)).toBe(true);
+    } finally {
+      if (victimInput) {
+        await new Promise((done) => victimInput.close(() => done()));
+      }
+    }
   });
 });

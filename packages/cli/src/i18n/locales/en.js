@@ -1184,8 +1184,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
   'List all configured hooks': 'List all configured hooks',
+  'No hooks were loaded.': 'No hooks were loaded.',
+  'skipped (unsupported args)': 'skipped (unsupported args)',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}': 'A hook stopped the turn: {{reason}}',
   'Loading hooks...': 'Loading hooks...',
   'Error loading hooks:': 'Error loading hooks:',
   'Press Escape to close': 'Press Escape to close',
@@ -2628,6 +2631,8 @@ export default {
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
+  'Save the context window for the current model.':
+    'Save the context window for the current model.',
   'body loaded': 'body loaded',
   memory: 'memory',
   '{{region}} configuration updated successfully.':

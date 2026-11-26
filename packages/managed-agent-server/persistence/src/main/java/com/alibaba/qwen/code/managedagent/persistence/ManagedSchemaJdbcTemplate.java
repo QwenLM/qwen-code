@@ -13,6 +13,7 @@ import javax.sql.DataSource;
 import java.sql.ParameterMetaData;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.Map;
 
@@ -41,7 +42,7 @@ public class ManagedSchemaJdbcTemplate extends JdbcTemplate {
 
     @Override
     protected <T> RowMapper<T> getSingleColumnRowMapper(Class<T> requiredType) {
-        if (requiredType == java.sql.Timestamp.class) {
+        if (requiredType == Timestamp.class) {
             return (row, index) -> requiredType.cast(ManagedSchemaTime.timestamp(row, 1));
         }
         return super.getSingleColumnRowMapper(requiredType);
@@ -56,7 +57,7 @@ public class ManagedSchemaJdbcTemplate extends JdbcTemplate {
             @Override
             protected void doSetValue(PreparedStatement statement, int index, Object value)
                     throws SQLException {
-                if (value instanceof java.sql.Timestamp timestamp) {
+                if (value instanceof Timestamp timestamp) {
                     super.doSetValue(statement, index, timestamp.getTime());
                     return;
                 }

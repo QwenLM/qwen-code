@@ -48,11 +48,11 @@ public class SessionRecoveryService {
 
     public SessionRecovery query(String tenantId, String actorId, String sessionId) {
         SessionRecord session = sessions.requireReadableSession(tenantId, actorId, sessionId);
-        return inspect(session, actorId);
+        return inspect(session, actorId, false);
     }
 
     SessionRecovery projection(SessionRecord session, String actorId) {
-        SessionRecovery recovery = inspect(session, actorId);
+        SessionRecovery recovery = inspect(session, actorId, false);
         return "turn_active".equals(recovery.reasonCode()) ? null : recovery;
     }
 
@@ -127,7 +127,8 @@ public class SessionRecoveryService {
     }
 
     private SessionRecovery targetRecovery(SessionRecord session, String actorId, String turnId) {
-        SessionRecovery recovery = query(session.tenantId(), actorId, session.sessionId());
+        SessionRecord current = sessions.requireReadableSession(session.tenantId(), actorId, session.sessionId());
+        SessionRecovery recovery = inspect(current, actorId, true);
         if (!turnId.equals(recovery.turnId())) {
             throw new ManagedAgentException(409,
                     "recovery_target_changed", "The Session's recovery Turn has changed.");
@@ -135,7 +136,7 @@ public class SessionRecoveryService {
         return recovery;
     }
 
-    private SessionRecovery inspect(SessionRecord session, String actorId) {
+    private SessionRecovery inspect(SessionRecord session, String actorId, boolean includeActiveHarnessEvidence) {
         TurnRecord turn = latest(session);
         boolean operator = operator(session, actorId);
         boolean active = turn != null && ACTIVE.contains(turn.status());
@@ -161,6 +162,13 @@ public class SessionRecoveryService {
         }
         if (active && !recoveryIntent(turn)) {
             return view("recovering", "turn_active", turn, false, false, cancel);
+        }
+        if (active && !includeActiveHarnessEvidence) {
+            boolean recheck = operator && recheckIntent(turn);
+            if (recovery.hasNativeTerminal(session.tenantId(), session.sessionId(), turn.turnId())) {
+                return view("recovering", "turn_settlement_pending", turn, false, recheck, cancel);
+            }
+            return view("awaiting_evidence", "recovery_evidence_unavailable", turn, false, recheck, cancel);
         }
         // The persistent suspension proof (docs/design/2026-11-18-managed-
         // suspension-recovery-view.md): the view follows durable state, never

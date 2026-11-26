@@ -72,7 +72,7 @@ Managed Agent 尚未发布首个正式版本，其 schema 策略也体现了这�
 
 - 释放符合条件的空闲 Session 的 Session 级资源，不取消输入，也不丢失历史。
 - 下一次请求、wake 输入或 lifecycle 操作到来时，重新打开已干净挂起的 Session。挂起失败应表现为需要恢复的工作，不能静默重新打开结果未知的写者。
-- 不新增受支持的配置项，也不做能力协商；Harness 和控制面一起发布、一起升级。唯一的覆盖手段是下文所述仅供测试使用的空闲时长。
+- ~~不新增受支持的配置项，也不做能力协商~~；Harness 和控制面一起发布、一起升级。唯一的覆盖手段是下文所述仅供测试使用的空闲时长。（这是第一阶段的原始约束；[挂起 placement 释放补充设计](2026-11-26-managed-suspension-placement-release.zh-CN.md)为混版安全新增了 writer-grant 能力位，但仍不新增配置项。）
 - 定义目标架构（一个在请求之间不持有任何 Session 的 Harness），以及通往它的各个步骤的边界。
 
 第一阶段的非目标：
@@ -80,7 +80,7 @@ Managed Agent 尚未发布首个正式版本，其 schema 策略也体现了这�
 - 重新设计 journal 恢复。第一阶段在启用挂起前测量当前成本；成本门槛不通过时，先做针对性的 load 改进。第二阶段消除 MCP/Hook 重连部分，不会消除所有随历史增长的恢复成本。
 - 把 wake 调度器、审批等待或观察循环移出 Harness。第一阶段中需要这些的 Session 保持常驻。
 - 在没有证据表明现有协议无法满足故障验收门槛时，照搬早先提案的 Store park 事务或修改写租约协议。
-- 释放被挂起 Session 的 placement。
+- ~~释放被挂起 Session 的 placement~~（已由[挂起 placement 释放补充设计](2026-11-26-managed-suspension-placement-release.zh-CN.md)取代；pull 调度仍另行设计）。
 
 ## 目标架构
 

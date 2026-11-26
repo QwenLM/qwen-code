@@ -1150,8 +1150,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
+  'No hooks were loaded.': '未加载任何 Hook。',
+  'skipped (unsupported args)': '已跳过（不支持 args）',
   // Hooks - Dialog
   Hooks: 'Hook',
+  'A hook stopped the turn: {{reason}}': 'Hook 已结束本轮对话：{{reason}}',
   'Loading hooks...': '正在加载 Hook...',
   'Error loading hooks:': '加载 Hook 出错：',
   'Press Escape to close': '按 Escape 关闭',
@@ -2111,6 +2114,8 @@ export default {
     '对话太长？用 /compress 总结历史，释放上下文。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     '显示上下文窗口使用情况明细。使用 "/context detail" 查看逐项明细。',
+  'Save the context window for the current model.':
+    '保存当前模型的上下文窗口。',
 
   // ============================================================================
   // Exit Screen / Stats

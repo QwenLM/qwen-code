@@ -71,7 +71,7 @@ public final class ManagedCsiFilesProtocol {
     public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> storage, Map<String, Object> authority) {
         var value = new LinkedHashMap<String, Object>(Map.of("type", "boot", "version", authority == null ? 4 : 5,
-                "managedCsi", PROTOCOL, "identity", identity(request), "context", ManagedContextProtocol.boot(request, seed),
+                "managedCsi", PROTOCOL, "identity", identity(request), "context", ManagedContextProtocol.boot(request, seed).toWire(),
                 "storage", BrokerValues.immutableMap(storage)));
         if (authority != null) {
             validateAuthority(authority);

@@ -513,10 +513,10 @@ export function setNestedPropertyForce(
 
 export function setNestedPropertySafe(
   obj: Record<string, unknown>,
-  path: string,
+  path: string | readonly string[],
   value: unknown,
 ): void {
-  const keys = path.split('.');
+  const keys = typeof path === 'string' ? path.split('.') : [...path];
   // Refuse prototype-chain segments (see pathHasUnsafeSegment).
   if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
@@ -540,9 +540,10 @@ export function setNestedPropertySafe(
 
 export function deleteNestedPropertySafe(
   obj: Record<string, unknown>,
-  path: string,
+  path: string | readonly string[],
 ): void {
-  const keys = path.split('.');
+  const keys = typeof path === 'string' ? path.split('.') : [...path];
+  if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
   if (!lastKey) return;
 

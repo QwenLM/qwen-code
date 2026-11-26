@@ -38,6 +38,7 @@ function Harness({
   onFileTagClick,
   parseUserMessageContent,
   followupState,
+  onAcceptFollowup,
   sessionId,
   atWorkspaceCwd,
   composerScopeKey,
@@ -68,6 +69,7 @@ function Harness({
     shownAt: number;
     suggestion: string | null;
   };
+  onAcceptFollowup?: UseComposerCoreOptions['onAcceptFollowup'];
   sessionId?: string;
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
@@ -100,6 +102,7 @@ function Harness({
     onFileTagClick,
     parseUserMessageContent,
     followupState,
+    onAcceptFollowup,
     sessionId,
     atWorkspaceCwd,
     composerScopeKey,
@@ -134,6 +137,7 @@ async function mount({
   onFileTagClick,
   parseUserMessageContent,
   followupState,
+  onAcceptFollowup,
   sessionId,
   atWorkspaceCwd,
   composerScopeKey,
@@ -164,6 +168,7 @@ async function mount({
     shownAt: number;
     suggestion: string | null;
   };
+  onAcceptFollowup?: UseComposerCoreOptions['onAcceptFollowup'];
   sessionId?: string;
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
@@ -206,6 +211,7 @@ async function mount({
             onFileTagClick={onFileTagClick}
             parseUserMessageContent={parseUserMessageContent}
             followupState={followupState}
+            onAcceptFollowup={onAcceptFollowup}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
             composerScopeKey={currentComposerScopeKey}
@@ -291,7 +297,7 @@ afterEach(() => {
   for (let index = localStorage.length - 1; index >= 0; index--) {
     const key = localStorage.key(index);
     if (
-      key === 'qwen-web-shell-command-history' ||
+      key?.startsWith('qwen-web-shell-command-history') ||
       key?.startsWith('qwen-web-shell-history') ||
       key?.startsWith('qwen-web-shell-session-draft:') ||
       key?.startsWith('qwen-web-shell-pending-task-draft:')
@@ -4988,18 +4994,87 @@ describe('composer draft attachment races', () => {
   });
 });
 
-describe('useComposerCore prepareSubmit gate', () => {
-  function pressEnter() {
-    container!.querySelector('.cm-content')!.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: 'Enter',
-        code: 'Enter',
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-  }
+function pressEnter() {
+  container!.querySelector('.cm-content')!.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
 
+describe('useComposerCore follow-up submission', () => {
+  const followupState = {
+    isVisible: true,
+    shownAt: 0,
+    suggestion: 'inspect the orders table',
+  };
+
+  it.each([
+    { name: 'photo.png', type: 'image/png', text: '', method: 'Enter' },
+    { name: 'notes.txt', type: 'text/plain', text: '', method: 'Enter' },
+    { name: 'photo.png', type: 'image/png', text: 'inspect', method: 'button' },
+  ])(
+    'submits $name via $method with only the draft text',
+    async ({ name, type, text, method }) => {
+      const onAcceptFollowup = vi.fn();
+      const { onSubmit } = await mount({ followupState, onAcceptFollowup });
+      act(() => {
+        latest!.setText(text);
+        latest!.ingestFiles([new File(['contents'], name, { type })]);
+      });
+      await waitForImageIngestion();
+      const { pastedImages, pastedFiles } = latest!;
+      expect(pastedImages.length + pastedFiles.length).toBe(1);
+
+      act(() => {
+        if (method === 'Enter') pressEnter();
+        else latest!.submitText();
+      });
+
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0]!.slice(0, 3)).toEqual([
+        text,
+        pastedImages.length ? pastedImages : undefined,
+        pastedFiles.length ? pastedFiles : undefined,
+      ]);
+      expect(onAcceptFollowup).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the suggestion unaccepted if Enter is pressed during attachment ingestion', async () => {
+    const onAcceptFollowup = vi.fn();
+    const { onSubmit } = await mount({ followupState, onAcceptFollowup });
+
+    act(() => {
+      latest!.ingestFiles([
+        new File(['contents'], 'notes.txt', { type: 'text/plain' }),
+      ]);
+      pressEnter();
+    });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onAcceptFollowup).not.toHaveBeenCalled();
+    await waitForImageIngestion();
+  });
+
+  it('accepts and submits a visible suggestion with Enter in an empty draft', async () => {
+    const onAcceptFollowup = vi.fn();
+    const { onSubmit } = await mount({ followupState, onAcceptFollowup });
+
+    act(() => pressEnter());
+
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0]![0]).toBe(followupState.suggestion);
+    expect(onAcceptFollowup).toHaveBeenCalledExactlyOnceWith('enter', {
+      skipOnAccept: true,
+    });
+  });
+});
+
+describe('useComposerCore prepareSubmit gate', () => {
   function deferredPrepare() {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

@@ -34,7 +34,12 @@ vi.mock('../../daemon/availability-context.js', () => ({
   useDaemonAvailability: () => harness.availability,
   useDaemonAvailabilityController: () => undefined,
 }));
+const workspaceClient = vi.hoisted(() => ({
+  workspaceByCwd: vi.fn(),
+}));
+
 vi.mock('../../daemon/workspace/DaemonWorkspaceProvider.js', () => ({
+  useDaemonWorkspace: () => ({ actions: harness, client: workspaceClient }),
   useDaemonWorkspaceActions: () => harness,
 }));
 vi.mock('../../daemon/session/DaemonSessionProvider.js', () => ({

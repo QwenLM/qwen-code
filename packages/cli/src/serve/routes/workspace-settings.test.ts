@@ -1815,3 +1815,89 @@ describe('Web Shell worktree default setting', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 });
+
+describe('Web Shell worktree retention setting', () => {
+  it('serves its integer default and preserves a workspace zero', async () => {
+    const { app } = makeApp({
+      userSettings: { worktree: { maxRetained: 15 } },
+      workspaceSettings: { worktree: { maxRetained: 0 } },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'worktree.maxRetained',
+        type: 'integer',
+        default: 15,
+        values: { effective: 0, user: 15, workspace: 0 },
+      }),
+    );
+  });
+
+  it.each([
+    ['user', 0],
+    ['workspace', 1],
+  ] as const)('accepts a %s integer override', async (scope, value) => {
+    const { app, persistSetting } = makeApp();
+    const response = await request(app).post('/workspace/settings').send({
+      scope,
+      key: 'worktree.maxRetained',
+      value,
+    });
+    expect(response.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+      'worktree.maxRetained',
+      value,
+    );
+  });
+
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1', null])(
+    'rejects invalid retention count %s without persisting it',
+    async (value) => {
+      const { app, persistSetting } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'worktree.maxRetained',
+        value,
+      });
+      expect(response.status).toBe(400);
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('unset boolean settings', () => {
+  it('serves the unset toggle value when the schema has no default', async () => {
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    const descriptor = response.body.settings.find(
+      (setting: { key: string }) =>
+        setting.key === 'experimental.unifiedAgentLoop',
+    );
+    // With no stored value and no schema default, a host needs the schema's
+    // unset toggle value to know what the first flip means: the setting's
+    // per-surface default keeps ACP/headless/TUIs on the shared loop, so the
+    // first flip must not read as "off".
+    expect(descriptor).toMatchObject({
+      type: 'boolean',
+      unsetToggleValue: true,
+      values: {},
+    });
+    expect(descriptor.default).toBeUndefined();
+  });
+
+  it('omits unsetToggleValue when the schema does not declare one', async () => {
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    const descriptor = response.body.settings.find(
+      (setting: { key: string }) =>
+        setting.key === 'worktree.defaultForNewSessions',
+    );
+    expect(descriptor).toBeDefined();
+    expect(descriptor).not.toHaveProperty('unsetToggleValue');
+  });
+});

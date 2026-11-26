@@ -1504,6 +1504,10 @@ export interface DaemonWorktreeInfo {
    * not re-list pre-session work. Absent when unknown.
    */
   baseBranch?: string;
+  /** An owned checkout removed after capturing its retained snapshot. */
+  worktreeRemoved?: { archiveKey: string };
+  /** True only after a matching archive pair passed strict validation. */
+  canRestore?: boolean;
 }
 
 /** Result of `POST /session/:id/worktree-branch` ("Create branch here"). */
@@ -4449,8 +4453,10 @@ export type DaemonUsageRange = 'today' | 'week' | 'month';
 export interface DaemonUsageDashboardTotals {
   totalTokens: number;
   inputTokens: number;
+  /** Output tokens with reasoning counted once, so input + output = total. */
   outputTokens: number;
   cachedTokens: number;
+  /** Raw reasoning count; most providers already include it in outputTokens. */
   thoughtsTokens: number;
   requests: number;
   sessions: number;
@@ -4477,10 +4483,11 @@ export interface DaemonUsageSkillCall {
   count: number;
 }
 
-/** One day's totals for the daily charts. Mirrors core's `UsageDailyPoint`. */
+/** Tokens plus ended-run counts for daily charts. Mirrors `UsageDailyPoint`. */
 export interface DaemonUsageDailyPoint {
   date: string;
   tokens: number;
+  /** Runs ended on this date, which can differ from their request-token day. */
   sessions: number;
 }
 
@@ -4505,7 +4512,7 @@ export interface DaemonUsageDashboard {
   models: DaemonUsageModelShare[];
   /** Skill invocations for the range, sorted by count desc. */
   skills: DaemonUsageSkillCall[];
-  /** Per-day tokens + sessions across the range window. */
+  /** Per-day tokens + ended-run counts across the range window. */
   daily: DaemonUsageDailyPoint[];
   /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
   heatmap: Record<string, DaemonUsageHeatmapDay>;
@@ -4789,6 +4796,12 @@ export interface DaemonSettingDescriptor {
   description?: string;
   requiresRestart: boolean;
   default: unknown;
+  /**
+   * The value a host writes when it toggles a boolean that has no stored
+   * value and no schema default, mirroring `unsetToggleValue` in the CLI
+   * settings dialogs. Absent when the schema does not declare one.
+   */
+  unsetToggleValue?: boolean;
   options?: ReadonlyArray<{ value: string | number; label: string }>;
   values: {
     effective: unknown;
