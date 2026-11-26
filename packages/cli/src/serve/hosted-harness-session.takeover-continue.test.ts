@@ -37,6 +37,7 @@ import { createHash } from 'node:crypto';
 import supertest from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import * as hostedHistory from './hosted-file-history.js';
+import * as modelRecovery from './hosted-model-recovery.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { type ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
@@ -53,6 +54,72 @@ import * as stdio from '../utils/stdioHelpers.js';
 
 describe('Hosted Harness Runtime turn takeover', () => {
   useRuntimeTakeover();
+
+  it.each([
+    [404, 'runtime_session_not_found'],
+    [503, 'runtime_reconciliation_required'],
+  ])(
+    'continues the resident prompt after a %s %s Broker park and a transient read failure',
+    async (status, code) => {
+      const { server, clientId } = await parkToolTurn(
+        true,
+        FILE_PROFILE,
+        true,
+        new HostedWorkspaceBrokerRejection(status, code),
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+      const load = () =>
+        headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+          managedSessionStore: store(),
+          toolProfile: FILE_PROFILE,
+          driveRuntimeRecovery: true,
+        });
+      vi.spyOn(
+        modelRecovery,
+        'findHostedCommittedModelOutput',
+      ).mockRejectedValueOnce(new Error('transient pre-drive read failure'));
+      const refused = await load();
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_turn_recovery_required');
+      const loaded = await load();
+      expect(loaded.status).toBe(200);
+      expect(loaded.body.clientId).toBe(clientId);
+      expect(loaded.body.recoveryRequired).toBeUndefined();
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { phase: string; checkpointId: string; activationId: string };
+      expect(recovery.phase).toBe('results_ready');
+      const continued = await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(continued.status).toBe(200);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(state.model).toHaveBeenCalledTimes(2);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+        204,
+      );
+    },
+  );
 
   it('keeps the adopted lease when a continue meets the recovery-blocked Session', async () => {
     await parkToolTurn();
@@ -116,6 +183,116 @@ describe('Hosted Harness Runtime turn takeover', () => {
       supertest(server).delete(`/session/${SESSION_ID}`),
     ).expect(204);
     expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('redrives an admitted continuation after its next tool loses the Broker', async () => {
+    const refusal = new HostedWorkspaceBrokerRejection(
+      404,
+      'runtime_session_not_found',
+    );
+    const { server, clientId } = await parkToolTurn(
+      true,
+      FILE_PROFILE,
+      true,
+      refusal,
+    );
+    const result = {
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never;
+    const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+    execute.mockResolvedValue(result);
+    const load = () =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        toolProfile: FILE_PROFILE,
+        driveRuntimeRecovery: true,
+      });
+    const loaded = await load();
+    expect(loaded.status).toBe(200);
+    const first = loaded.body._meta['qwen.daemon.managedRuntimeRecovery'] as {
+      checkpointId: string;
+      activationId: string;
+    };
+    const continueWith = (proof: typeof first) =>
+      headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: proof.checkpointId,
+          activationId: proof.activationId,
+        });
+    const nextExecution = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const nextCall = {
+      ...CALL,
+      callId: 'call-2',
+      args: { file_path: 'b.txt', content: 'y' },
+    };
+    const prepare = vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare');
+    prepare.mockClear().mockResolvedValue(nextExecution);
+    execute.mockRejectedValueOnce(refusal);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockRejectedValueOnce(
+      refusal,
+    );
+    state.model.mockImplementationOnce(
+      async ({ toolTurn, signal }) =>
+        toolTurn!.execute(
+          [nextCall],
+          [
+            {
+              functionCall: {
+                id: nextCall.callId,
+                name: nextCall.name,
+                args: nextCall.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        ) as never,
+    );
+    expect((await continueWith(first)).status).toBe(200);
+    const status = () =>
+      headers(supertest(server).get(`/session/${SESSION_ID}/status`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+    await vi.waitFor(
+      async () => {
+        expect((await status()).body).toMatchObject({
+          recoveryBlocked: true,
+          hasActivePrompt: false,
+        });
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const second = await load();
+    expect(second.status).toBe(200);
+    const proof = second.body._meta[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as typeof first;
+    expect(proof).toMatchObject({ phase: 'results_ready' });
+    expect(proof.checkpointId).not.toBe(first.checkpointId);
+    expect(second.body.recoveryRequired).toBeUndefined();
+    expect((await continueWith(proof)).status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        expect((await status()).body).toMatchObject({
+          recoveryBlocked: false,
+          hasActivePrompt: false,
+        });
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    expect(state.model).toHaveBeenCalledTimes(3);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
   });
 
   it('keeps the owed lease when a fresh prompt exits recovery-blocked', async () => {

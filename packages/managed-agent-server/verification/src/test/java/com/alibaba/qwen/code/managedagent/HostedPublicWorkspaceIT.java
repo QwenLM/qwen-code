@@ -1144,13 +1144,15 @@ class HostedPublicWorkspaceIT {
                 SELECT wake_seal_background FROM ma_session_head
                 WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'
                 """, Integer.class, tenant, session)).isEqualTo(1);
-        assertThat(workspace.resolve("park-background-finished")).doesNotExist();
+        Path finished = workspace.resolve("park-background-finished");
+        assertThat(finished).doesNotExist();
 
         decideParkedShellAfterReplacement(session, turn, workspace, parked);
 
         Files.createFile(workspace.resolve("park-background-release"));
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
-            assertThat(Files.readString(workspace.resolve("park-background-finished"))).isEqualTo("once\n");
+            assertThat(finished).exists();
+            assertThat(Files.readString(finished)).isEqualTo("once\n");
             var run = HostedGateTestSupport.extensionRecord(jdbc, tenant, session, "child_run");
             assertThat(run.at("/run/state").asText()).isEqualTo("settled");
         });
@@ -1242,14 +1244,16 @@ class HostedPublicWorkspaceIT {
                   AND prompt_id = ? AND record_kind = 'ACTION' AND state = 'requested'
                 """, String.class, tenant, session, prompt);
         var action = new HostedParkedAction(prompt, actionId, ((Number) parked.get().get("writer_generation")).longValue());
-        assertThat(workspace.resolve("park-proof.txt")).doesNotExist();
+        Path effect = workspace.resolve("park-proof.txt");
+        assertThat(effect).doesNotExist();
 
         replaceParkingHarness();
         allowParkedAction(session, action, "run_shell_command");
 
         await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
             assertThat(modelFailure.get()).isNull();
-            assertThat(Files.readString(workspace.resolve("park-proof.txt"))).isEqualTo("once\n");
+            assertThat(effect).exists();
+            assertThat(Files.readString(effect)).isEqualTo("once\n");
             assertParkedActionSettled(session, action);
             assertWakeTurnCompleted(session, prompt);
             if ("channel".equals(source)) {
@@ -2375,7 +2379,8 @@ class HostedPublicWorkspaceIT {
         Path worker = cli;
         if (detachedParking) {
             worker = temporary.resolve("parking-worker.mjs");
-            Files.writeString(worker, "process.env.QWEN_MANAGED_HOOK_CGROUP_ROOT="
+            Files.writeString(worker, "process.env.QWEN_MANAGED_RUNTIME_OBSERVATION='1'; "
+                    + "process.env.QWEN_MANAGED_HOOK_CGROUP_ROOT="
                     + json.writeValueAsString(hookRoot.toString())
                     + "; process.argv[1]=" + json.writeValueAsString(cli.toString())
                     + "; await import(" + json.writeValueAsString(cli.toUri().toString()) + ");\n");

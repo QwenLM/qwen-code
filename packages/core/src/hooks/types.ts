@@ -937,6 +937,13 @@ export interface PostToolBatchOutput extends HookOutput {
 export interface UserPromptSubmitInput extends HookInput {
   prompt: string;
   submitted_prompt?: string;
+  /** The session that sent this prompt from another session. */
+  source?: UserPromptSource;
+}
+
+export interface UserPromptSource {
+  session_id: string;
+  cwd: string;
 }
 
 /**

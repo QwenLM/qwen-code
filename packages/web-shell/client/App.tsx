@@ -1791,7 +1791,11 @@ export interface WebShellProps {
    * mobile CSS reordering to take effect.
    */
   mobileWelcomeFooterMiddle?: boolean;
-  /** Parse user-message text into display parts such as chips. */
+  /**
+   * Parse user-message text into display parts such as chips. Desktop composer
+   * drafts also use this parser to restore inline chips when its parts preserve
+   * the complete original text.
+   */
   parseUserMessageContent?: UserMessageContentParser;
   /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
   renderUserMessageContent?: UserMessageContentRenderer;
