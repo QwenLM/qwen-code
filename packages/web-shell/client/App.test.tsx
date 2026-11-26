@@ -8123,7 +8123,7 @@ describe('task activity key', () => {
     await vi.waitFor(() =>
       expect(onToast).toHaveBeenCalledWith(
         'error',
-        'scheduledTasks.error.oneShotConsumedButFailed',
+        'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
       ),
     );
     expect(
@@ -8140,10 +8140,7 @@ describe('task activity key', () => {
       await Promise.resolve();
     });
     await vi.waitFor(() =>
-      expect(onToast).toHaveBeenCalledWith(
-        'error',
-        'scheduledTasks.error.runFailed',
-      ),
+      expect(onToast).toHaveBeenCalledWith('error', 'Failed to record the run'),
     );
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
 
@@ -60943,6 +60940,53 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     expect(isScheduledTaskCancellation(result)).toBe(true);
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('blocks an unbound manual run from dispatching after switching away from the initiating session', async () => {
+    mockConnection.sessionId = 'session-a';
+    mockConnection.workspaceCwd = '/tmp/project';
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    const revalidation = deferred<void>();
+    const rawOptions: Array<{ beforeDispatch?: () => void | Promise<void> }> =
+      [];
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      (_prompt: string, options: unknown) => {
+        rawOptions.push(
+          options as { beforeDispatch?: () => void | Promise<void> },
+        );
+        return new Promise<void>(() => {});
+      },
+    );
+
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = run(
+        'unbound scheduled task',
+        null,
+        undefined,
+        () => false,
+        () => revalidation.promise,
+      );
+      pending.catch(() => {});
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(rawOptions[0]?.beforeDispatch).toBeDefined());
+
+    const guard = Promise.resolve(rawOptions[0]!.beforeDispatch!());
+    guard.catch(() => {});
+
+    // Switch to another session while the unbound task's revalidation is in flight.
+    mockConnection.sessionId = 'session-b';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    revalidation.resolve();
+
+    await expect(guard).rejects.toSatisfy(isScheduledTaskCancellation);
   });
 
   it('does not apply the catch-up timeout while restore is pending', async () => {

@@ -102,6 +102,7 @@ class CronListInvocation extends BaseToolInvocation<
     const live = new Map(
       scheduler
         .list()
+        .filter((job) => job.durable)
         .map((job) => [
           JSON.stringify([job.boundSessionId ?? null, job.id]),
           job,

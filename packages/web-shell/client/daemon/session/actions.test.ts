@@ -453,6 +453,43 @@ describe('sendPrompt admission notices', () => {
     expect(onAdmitted).not.toHaveBeenCalled();
   });
 
+  it('does not append a deferred optimistic user bubble after switching to another session before admission resolves', async () => {
+    const sessionA = createMockSession('session-a');
+    const sessionB = createMockSession('session-b');
+    const admission = createDeferred<{
+      promptId: string;
+      lastEventId: number;
+    }>();
+    sessionA.submitPrompt.mockImplementationOnce(
+      async (_req, _signal, beforeDispatch) => {
+        await beforeDispatch?.('client-a');
+        return admission.promise;
+      },
+    );
+    const onAdmitted = vi.fn();
+    const h = createActionsHarness({ session: sessionA });
+
+    const pending = h.actions.sendPrompt('Scheduled prompt for A', {
+      beforeDispatch: async () => {},
+      onAdmitted,
+    });
+    await vi.waitFor(() =>
+      expect(sessionA.submitPrompt).toHaveBeenCalledOnce(),
+    );
+
+    // User switches to session B before session A's POST /prompt returns 202.
+    h.sessionRef.current = sessionB as unknown as DaemonSessionClient;
+    admission.resolve({ promptId: 'p-a', lastEventId: 1 });
+    await vi.waitFor(() =>
+      expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({ promptId: 'p-a' }),
+    );
+    expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    h.activePromptsRef.current
+      .get('session-a')
+      ?.resolve?.({ stopReason: 'end_turn' });
+    await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+  });
+
   it('keeps notices for MCP App errors before admission starts', async () => {
     const session = createMockSession('session-a');
     const error = new Error('Admission preparation failed');

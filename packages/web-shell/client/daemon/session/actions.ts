@@ -1588,10 +1588,20 @@ export function createDaemonSessionActions({
         }
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
         const guardedBeforeDispatch = options?.beforeDispatch
-          ? async (clientId: string | undefined) => {
+          ? (clientId: string | undefined): void | Promise<void> => {
               beforeDispatchFailed = false;
               try {
-                await options.beforeDispatch!(clientId);
+                const result = options.beforeDispatch!(clientId);
+                if (
+                  result &&
+                  typeof (result as Promise<void>).then === 'function'
+                ) {
+                  return (result as Promise<void>).catch((error: unknown) => {
+                    beforeDispatchFailed = true;
+                    throw error;
+                  });
+                }
+                return result;
               } catch (error) {
                 beforeDispatchFailed = true;
                 throw error;
@@ -1675,7 +1685,11 @@ export function createDaemonSessionActions({
             return { ...current, clientId };
           });
         }
-        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+        if (
+          sessionRef.current === session &&
+          shouldAppendOptimisticMessage &&
+          !optimisticMessageAppended
+        ) {
           store.appendLocalUserMessage(
             text,
             displayedImages,

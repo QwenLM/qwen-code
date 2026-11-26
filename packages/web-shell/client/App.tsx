@@ -9867,7 +9867,7 @@ export function App({
         beforeTaskDispatch,
       ),
     onError: (error, fallback) =>
-      reportScheduledTaskError(error, fallback, true),
+      reportScheduledTaskError(error, t(fallback), true),
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
   const matchesCurrentScheduledTaskScope = useCallback(
@@ -9895,6 +9895,16 @@ export function App({
   notifyScheduledTaskMutatedRef.current = (task) => {
     if (task && !matchesCurrentScheduledTaskScope(task)) return;
     sessionScheduledTasks.refresh();
+  };
+  const confirmDurableTaskDeletedRef = useRef(
+    (task: { id: string; workspaceId?: string; sessionId?: string | null }) => {
+      if (!matchesCurrentScheduledTaskScope(task)) return;
+      sessionScheduledTasks.confirmDurableDeletion(task);
+    },
+  );
+  confirmDurableTaskDeletedRef.current = (task) => {
+    if (!matchesCurrentScheduledTaskScope(task)) return;
+    sessionScheduledTasks.confirmDurableDeletion(task);
   };
   const openSessionScheduledTaskDetail = useCallback(
     (entry: SessionScheduledTask) => {
@@ -14454,10 +14464,20 @@ export function App({
         });
         let beforeDetachedDispatchRejected = false;
         const wrappedBeforeDetachedDispatch = opts?.beforeDetachedDispatch
-          ? async (clientId: string | undefined) => {
+          ? (clientId: string | undefined): void | Promise<void> => {
               beforeDetachedDispatchRejected = false;
               try {
-                await opts.beforeDetachedDispatch!(clientId);
+                const result = opts.beforeDetachedDispatch!(clientId);
+                if (
+                  result &&
+                  typeof (result as Promise<void>).then === 'function'
+                ) {
+                  return (result as Promise<void>).catch((error: unknown) => {
+                    beforeDetachedDispatchRejected = true;
+                    throw error;
+                  });
+                }
+                return result;
               } catch (error) {
                 beforeDetachedDispatchRejected = true;
                 throw error;
@@ -14632,10 +14652,20 @@ export function App({
       };
       let beforeDispatchRejected = false;
       const wrappedBeforeDispatch = opts?.beforeDispatch
-        ? async (clientId: string | undefined) => {
+        ? (clientId: string | undefined): void | Promise<void> => {
             beforeDispatchRejected = false;
             try {
-              await opts.beforeDispatch!(clientId);
+              const result = opts.beforeDispatch!(clientId);
+              if (
+                result &&
+                typeof (result as Promise<void>).then === 'function'
+              ) {
+                return (result as Promise<void>).catch((error: unknown) => {
+                  beforeDispatchRejected = true;
+                  throw error;
+                });
+              }
+              return result;
             } catch (error) {
               beforeDispatchRejected = true;
               throw error;
@@ -20185,7 +20215,21 @@ export function App({
       showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
-        return enqueueManualRun(prompt, taskIsStale, beforeTaskDispatch);
+        const activeLogicalKey = getLogicalSessionKey(
+          connectionRef.current.sessionId,
+          connectionRef.current.workspaceCwd,
+        );
+        return enqueueManualRun(
+          prompt,
+          taskIsStale,
+          beforeTaskDispatch,
+          activeLogicalKey !== undefined
+            ? {
+                runtimeClient: workspace.client,
+                logicalSessionKey: activeLogicalKey,
+              }
+            : undefined,
+        );
       }
       // A newer bound run supersedes an older one still waiting on the latch;
       // reject the old promise so its caller doesn't record a dropped run.
@@ -27341,10 +27385,9 @@ export function App({
                       onTaskMutated={(task) =>
                         notifyScheduledTaskMutatedRef.current(task)
                       }
-                      onTaskDeleted={(task) => {
-                        if (!matchesCurrentScheduledTaskScope(task)) return;
-                        sessionScheduledTasks.confirmDurableDeletion(task);
-                      }}
+                      onTaskDeleted={(task) =>
+                        confirmDurableTaskDeletedRef.current(task)
+                      }
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current

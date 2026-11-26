@@ -2944,7 +2944,6 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(source ? { source } : {}),
       });
       return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
-      return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
     },
     async controlSessionWorkflowTask(
       sessionId,
