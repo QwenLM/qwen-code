@@ -250,7 +250,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
                 primaryProvisioner instanceof ExternalWorkspaceAcquisitionVerifier verifier ? verifier
                         : ignored -> CompletableFuture.failedFuture(
                                 com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
-        WorkspacePhysicalTransport workerTransport = dependencies.externalRuntimeTransport().orElse(http);
+        WorkspacePhysicalTransport workerTransport =
+                com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds.isExternal(
+                                broker.getProvisioner())
+                        ? dependencies.externalRuntimeTransport().orElse(http)
+                        : http;
         RuntimeTransport transport = workspaces == null ? workerTransport
                 : new WorkspaceRuntimeTransport(workerTransport, workspaces, workspaceExecutionStore,
                         bindingRepository, sessionRepository, workspaceVerifier::verifyAcquisition);

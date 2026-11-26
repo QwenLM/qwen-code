@@ -1833,7 +1833,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     "A trusted actor is required");
         }
         validateIdempotencyKey(idempotencyKey);
-        SessionRecord session = store.requireSession(principal.tenantId(), sessionId);
+        SessionRecord session = requireReadableSession(principal, sessionId);
         StoreModels.CommandRecord command = store.findCommand(principal.tenantId(), SUBMIT,
                 idempotencyKey).orElse(null);
         if (command == null) {

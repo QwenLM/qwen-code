@@ -53,23 +53,11 @@ class EmbeddedRuntimeBrokerTest {
         settings.setProvisioner("external-workspace");
         settings.setIsolationClass("session");
         settings.setExternalProviderId("provider");
-        settings.setWorkspaceId("da-session");
+        settings.setWorkspaceId("workspace-session");
         settings.setWorkspaceCwd("/worker/workspace");
         properties.getHarness().setEnabled(true);
         properties.getToolPublication().setEnabled(true);
-        var source = new JdbcDataSource();
-        source.setURL("jdbc:h2:mem:embedded-transport-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        var bindings = new JdbcRuntimeBindingRepository(source,
-                new AesGcmSecretProtector("test", new byte[32]));
-        try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(mock(ManagedAgentStore.class), properties, bindings,
-                new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source),
-                mock(JdbcWorkspaceExecutionStore.class), mock(com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore.class),
-                mock(com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore.class),
-                new org.springframework.jdbc.core.JdbcTemplate(source),
-                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source), null,
-                mock(ExternalRuntimeClient.class), transport)) {
+        try (EmbeddedRuntimeBroker broker = transportBroker(properties, transport)) {
             var actual = ReflectionTestUtils.getField(broker.service(), "transport");
             assertThat(actual).isInstanceOf(com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeTransport.class);
             assertThat(ReflectionTestUtils.getField(actual, "delegate")).isSameAs(transport);
@@ -80,6 +68,24 @@ class EmbeddedRuntimeBrokerTest {
     private static java.util.stream.Stream<com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport> externalTransports() {
         return java.util.stream.Stream.of(mock(com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport.class),
                 mock(HttpRuntimeTransport.class));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"static", "local-process"})
+    void externalTransportDoesNotReplaceNonExternalProviderTransport(String provisioner)
+            throws Exception {
+        var properties = properties();
+        properties.getRuntimeBroker().setProvisioner(provisioner);
+        if ("local-process".equals(provisioner)) {
+            properties.getRuntimeBroker().setWorkspaceId("");
+        }
+        var transport = mock(com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport.class);
+        try (EmbeddedRuntimeBroker broker = transportBroker(properties, transport)) {
+            var actual = ReflectionTestUtils.getField(broker.service(), "transport");
+            assertThat(ReflectionTestUtils.getField(actual, "delegate"))
+                    .isNotSameAs(transport).isInstanceOf(HttpRuntimeTransport.class);
+        }
+        org.mockito.Mockito.verifyNoInteractions(transport);
     }
 
     @Test
@@ -714,6 +720,24 @@ class EmbeddedRuntimeBrokerTest {
                 new JdbcRuntimeSessionRepository(source),
                 new JdbcToolExecutionRepository(source),
                 mock(JdbcWorkspaceExecutionStore.class));
+    }
+
+    private static EmbeddedRuntimeBroker transportBroker(ManagedAgentProperties properties,
+            com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport transport) {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:embedded-transport-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        return new EmbeddedRuntimeBroker(mock(ManagedAgentStore.class), properties, bindings,
+                new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source),
+                mock(JdbcWorkspaceExecutionStore.class),
+                mock(com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore.class),
+                mock(com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore.class),
+                new org.springframework.jdbc.core.JdbcTemplate(source),
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source), null,
+                mock(ExternalRuntimeClient.class), transport);
     }
 
     private static ManagedAgentProperties properties() throws Exception {

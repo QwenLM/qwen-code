@@ -56,9 +56,9 @@ Managed catalog 与宿主业务 catalog 不同。其表结构和应用账号由�
 
 扩展归档存储由 `ManagedAgentConfiguration` 导入，不再单独注册到 server 的全局自动配置索引。现有工厂方法继续以参数注入 `ManagedAgentProperties`，并通过 `@ConditionalOnMissingBean` 优先使用宿主自备的 `ExtensionArchiveStorage`；不再依赖该配置注册属性 Bean 前就会求值的类级 `@ConditionalOnBean`。设置 `qwen.managed-agent.enabled=false` 时，Starter 不导入 `ManagedAgentConfiguration`，也不创建 Managed 资源。
 
-宿主可提供唯一的 `ExternalRuntimeClient` Bean，选择同进程的外部 Runtime placement；`RuntimeProviderDependencies.externalRuntime()` 以 `Optional` 暴露该端口。注入客户端后，不再要求外部 provider URL/token；没有客户端时保留既有校验与 HTTP 行为。宿主还可经 `RuntimeProviderDependencies.externalRuntimeTransport()` 提供外部 Worker 的 `WorkspacePhysicalTransport`，缺省仍是 `HttpRuntimeTransport`。该传输同时进入外层 Workspace 执行链和外部 Shell publication，而不只用于 provisioner 的 attest。publication 操作属于同一 `RuntimeTransport` 端口；实现不必继承 `HttpRuntimeTransport`，缺省显式返回不支持。二者都不创建业务身份或替代 Workspace 授权；传输不负责资源分配，必须沿用原 boot/lease 与 attest，不能把资源已分配当作 Worker READY。
+宿主可提供唯一的 `ExternalRuntimeClient` Bean，选择同进程的外部 Runtime placement；`RuntimeProviderDependencies.externalRuntime()` 以 `Optional` 暴露该端口。注入客户端后，不再要求外部 provider URL/token；没有客户端时保留既有校验与 HTTP 行为。宿主还可经 `RuntimeProviderDependencies.externalRuntimeTransport()` 提供外部 Worker 的 `WorkspacePhysicalTransport`，缺省仍是 `HttpRuntimeTransport`。该传输只供 external Runtime 家族的 provisioner 使用，local、static 和 SSH provisioner 保留原先选择的传输。在 external Workspace 执行中，该传输同时进入外层 Workspace 执行链和外部 Shell publication，而不只用于 provisioner 的 attest。publication 操作属于同一 `RuntimeTransport` 端口；实现不必继承 `HttpRuntimeTransport`，缺省显式返回不支持。二者都不创建业务身份或替代 Workspace 授权；传输不负责资源分配，必须沿用原 boot/lease 与 attest，不能把资源已分配当作 Worker READY。
 
-`ExternalWorkspaceMaterializationStore.findByPhysicalKey` 按已注册存储身份回查租户下的活跃根 Workspace。宿主在决定是否注册新 alias 前，可以先取回原 Workspace、generation、storage alias 及 owner 回执。该查询不改变所有权或执行状态；关联不存在时返回空回执，有歧义时拒绝，两种结果都不能用于重复注册同一存储。schema 基线新增可空的 `ma_workspace.materialization_receipt_key`，精确定位自身 Workspace 的 Receipt，而不是读取整份租户 Receipt；非 materialized Workspace 保持空值。
+`ExternalWorkspaceMaterializationStore.findByPhysicalKey` 按已注册存储身份回查租户下的活跃根 Workspace。宿主在决定是否注册新 alias 前，可以先取回原 Workspace、generation、storage alias 及 owner 回执。该查询不改变所有权或执行状态；关联不存在时返回空回执，有歧义时拒绝，两种结果都不能用于重复注册同一存储。schema 基线新增可空的 `ma_workspace.materialization_receipt_key`，精确定位自身 Workspace 的 Receipt，而不是读取整份租户 Receipt；非 materialized Workspace 保持空值。此处直接更新尚未正式发布前的 V1 基线，不提供存量 catalog 的就地升级路径；开发 catalog 按既有重建与校验策略处理。
 
 ## 验证
 

@@ -94,15 +94,36 @@ class SessionPrincipalOwnershipTest {
             assertThatThrownBy(() -> f.service.findPublicTurnByIdempotencyKey(null, id, "submit-1"))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("actor_required"));
             denied(() -> f.service.findPublicTurnByIdempotencyKey(foreign, id, "submit-1"));
-            assertThatThrownBy(() -> f.service.findPublicTurnByIdempotencyKey(foreign, id, "foreign-submit"))
-                    .isInstanceOfSatisfying(ManagedAgentException.class,
-                            error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
+            denied(() -> f.service.findPublicTurnByIdempotencyKey(foreign, id, "foreign-submit"));
             assertThatThrownBy(() -> f.service.findPublicTurnByIdempotencyKey(OWNER, otherId, "submit-1"))
                     .isInstanceOfSatisfying(ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
             assertThatThrownBy(() -> f.service.findPublicTurnByIdempotencyKey(OWNER, id, " "))
                     .isInstanceOf(ManagedAgentException.class);
             assertThat(f.count("ma_turn")).isEqualTo(2);
+        });
+    }
+
+    @Test
+    void originalSubmissionLookupChecksReadAuthorityBeforeReturningEmpty() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            var foreign = SessionPrincipal.of("tenant", "user", "actor-B");
+
+            denied(() -> f.service.findPublicTurnByIdempotencyKey(foreign, id, "missing-key"));
+            f.jdbc.update("UPDATE ma_session SET status='DELETED', deleted_at=1 WHERE session_id=?", id);
+            denied(() -> f.service.findPublicTurnByIdempotencyKey(OWNER, id, "missing-key"));
+            assertThat(f.count("ma_turn")).isZero();
+        });
+    }
+
+    @Test
+    void originalSubmissionLookupReturnsEmptyOnlyToTheAuthorizedReader() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            assertThat(f.service.findPublicTurnByIdempotencyKey(OWNER, id, "missing-key")).isEmpty();
         });
     }
 
