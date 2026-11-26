@@ -10,7 +10,7 @@
 
 受 bearer token 保护的私有 Harness status 路由允许不带 attachment ID 读取常驻 Session。如果提供了 ID，仍必须匹配。Java SDK 提供对应的无 attachment 读取。external Workspace 没有本地 attachment 时，控制面使用该读取；Harness 池只查询持久化记录中的活跃 owner，不改投其他成员。Session 不常驻时不提供实时证据。读取失败或证据不匹配不能放行发送。原有的持久化证明、精确 prompt 匹配和活跃 Turn 闸门保持不变。
 
-读取不会加载 Session、延长其驻留或取得 writer。显式恢复 recheck、协调器回放、请求准入以及接管路径保持不变。另行调查其他 Java 实例仍存活时的接管行为。
+如果活跃 Turn 的原生终态已写入日志，恢复视图会显示等待结算。对于其他带恢复意图的活跃 Turn，可以读取 external runner 的实时证据。读取不会加载 Session、延长其驻留或取得 writer。显式恢复 recheck、协调器回放、请求准入以及接管路径保持不变。另行调查其他 Java 实例仍存活时的接管行为。
 
 ## 验收
 

@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.Rec
 import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecoveryActions;
@@ -162,6 +163,15 @@ public class SessionRecoveryService {
         }
         if (active && !recoveryIntent(turn)) {
             return view("recovering", "turn_active", turn, false, false, cancel);
+        }
+        if (active && observeUnattached) {
+            boolean recheck = operator && recheckIntent(turn);
+            if (recovery.hasNativeTerminal(session.tenantId(), session.sessionId(), turn.turnId())) {
+                return view("recovering", "turn_settlement_pending", turn, false, recheck, cancel);
+            }
+            if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())) {
+                return view("awaiting_evidence", "recovery_evidence_unavailable", turn, false, recheck, cancel);
+            }
         }
         // The persistent suspension proof (docs/design/2026-11-18-managed-
         // suspension-recovery-view.md): the view follows durable state, never

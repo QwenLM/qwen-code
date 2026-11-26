@@ -172,6 +172,7 @@ describe('settings presentation aliases', () => {
     );
     for (const id of [
       'builtin:chat-width',
+      'builtin:arrow-key-history',
       'builtin:browser-notifications',
       'builtin:live-setup',
       'builtin:local-control',

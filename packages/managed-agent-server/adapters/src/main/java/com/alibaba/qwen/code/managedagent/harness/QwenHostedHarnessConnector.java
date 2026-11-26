@@ -1014,7 +1014,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
         try {
             requireReadyForNewWork(tenant, session, false);
-            return client().runtimeSkillCandidates(extensionAttachment(tenant, session, false));
+            HarnessSessionRef ref = mcpManagementAttachment(tenant, session, false);
+            return client().runtimeSkillCandidates(ref);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -1025,7 +1026,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
         try {
             requireReadyForNewWork(tenant, session, false);
-            return client().runtimeSkillSnapshot(extensionAttachment(tenant, session, false), request);
+            HarnessSessionRef ref = mcpManagementAttachment(tenant, session, false);
+            return client().runtimeSkillSnapshot(ref, request);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -1038,7 +1040,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         try {
             requireReadyForNewWork(tenant, session, false);
             Map<String, Object> owner = (Map<String, Object>) request.get("owner");
-            return client().runtimeSkillArchive(extensionAttachment(tenant, session, false), (String) request.get("operationId"),
+            HarnessSessionRef ref = mcpManagementAttachment(tenant, session, false);
+            return client().runtimeSkillArchive(ref, (String) request.get("operationId"),
                     (String) request.get("preparationId"), (String) owner.get("bindingId"), (String) owner.get("generation"),
                     ((Number) request.get("offset")).longValue());
         } catch (HostedHarnessGenerationException error) {
@@ -1051,7 +1054,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         try {
             requireReadyForNewWork(tenantId, sessionId, false);
-            return client().applyExtensions(extensionAttachment(tenantId, sessionId, true), command);
+            HarnessSessionRef ref = extensionAttachment(tenantId, sessionId);
+            return client().applyExtensions(ref, command);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -1061,16 +1065,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public Map<String, Object> continueExtensionOperation(String tenantId, String sessionId, String operationId, boolean recoverPrevious) {
         try {
-            return client().continueExtensionOperation(extensionAttachment(tenantId, sessionId, true), operationId, recoverPrevious);
+            HarnessSessionRef ref = extensionAttachment(tenantId, sessionId);
+            return client().continueExtensionOperation(ref, operationId, recoverPrevious);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
         }
     }
 
-    private HarnessSessionRef extensionAttachment(String tenantId, String sessionId, boolean load) {
+    private HarnessSessionRef extensionAttachment(String tenantId, String sessionId) {
         HarnessSessionRef attached = attachments.get(attachmentKey(tenantId, sessionId));
-        if (attached == null && load) {
+        if (attached == null) {
             SessionRecord session = sessions.requireSession(tenantId, sessionId);
             createOrLoad(tenantId, sessionId, session.harnessBootId() != null, true);
             attached = attachments.get(attachmentKey(tenantId, sessionId));
@@ -1412,7 +1417,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             // A resident Harness refuses an ordinary load after the dispatcher loses its cache.
             doCreateOrLoad(tenantId, sessionId, true,
-                    session.workspace() != null || workspaceExecution.verifiedRecoveryEnabled(), true);
+                    sessionStore.isEnabled() || session.workspace() != null
+                            || workspaceExecution.verifiedRecoveryEnabled(), true);
             return attachments.get(key);
         };
         List<Map<String, Object>> answers = null;
@@ -2028,10 +2034,24 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (!alreadyHeld(error)) {
                 throw error;
             }
-            return load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly);
+            return load(session, passiveManagedRuntimeRecovery || canLoadResident(error, mcpManagementOnly),
+                    false, false, mcpManagementOnly);
         } catch (SessionCreationOutcomeUnknownException error) {
-            return load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly);
+            try {
+                return load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly);
+            } catch (DaemonHttpException conflict) {
+                if (passiveManagedRuntimeRecovery || !canLoadResident(conflict, mcpManagementOnly)) {
+                    throw conflict;
+                }
+                return load(session, true, false, false);
+            }
         }
+    }
+
+    private boolean canLoadResident(DaemonHttpException error, boolean mcpManagementOnly) {
+        return !mcpManagementOnly && sessionStore.isEnabled()
+                && error.getStatusCode() == 409
+                && "hosted_session_already_attached".equals(error.getErrorCode());
     }
 
     private HarnessSessionRef load(SessionRecord session,

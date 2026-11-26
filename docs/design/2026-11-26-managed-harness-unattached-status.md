@@ -10,7 +10,7 @@ For external runners behind multiple Managed Agent Java instances, the recovery 
 
 The private, bearer-authenticated Harness status route accepts a missing attachment ID for a resident Session. Supplied IDs still need to match. The Java SDK exposes the same read without an attachment. For an external Workspace without a local attachment, the control plane uses that read; a pool goes only to the persisted active owner, not to another member. A missing resident Session is not live evidence. Failed or mismatched evidence does not grant readiness. Existing durable proofs, exact prompt targeting and active Turn guards remain in force.
 
-No read loads a Session, refreshes its residency or acquires a writer. Explicit recovery recheck, coordinator replay, admission, and takeover keep their existing paths. A later investigation can cover takeover while a different Java instance is still live.
+An active Turn with a journaled native terminal reports settlement pending. For other active Turns with recovery intent, the external runner can supply live evidence. No read loads a Session, refreshes its residency or acquires a writer. Explicit recovery recheck, coordinator replay, admission, and takeover keep their existing paths. A later investigation can cover takeover while a different Java instance is still live.
 
 ## Acceptance
 
