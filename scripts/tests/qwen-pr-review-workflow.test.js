@@ -128,7 +128,7 @@ describe('qwen pr review runner routing', () => {
     expect(runsOn).not.toContain('ecs-agent');
     // A fork pull_request_target payload never reaches the persistent pool:
     // the PR's own install/build runs in this job, and `off` containment on
-    // a shared host exposes CI_BOT_PAT + the model key AND persists whatever
+    // a shared host exposes GitHub credentials AND persists whatever
     // a postinstall plants. Comment/dispatch triggers keep the pool (no fork
     // payload); the sandbox preflight is their fail-closed backstop.
     expect(runsOn).toContain(
@@ -145,6 +145,27 @@ describe('qwen pr review runner routing', () => {
     expect(setupNode.if).toContain(
       "(github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)",
     );
+  });
+
+  it('keeps privileged credentials away from the review agent', () => {
+    const review = parse(workflow).jobs['review-pr'].steps.find(
+      (step) => step.id === 'review',
+    );
+    expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.GITHUB_TOKEN');
+    expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.CI_BOT_PAT');
+    expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.CI_BOT_PAT');
+    expect(review.env.SECURITY_GITHUB_TOKEN).toContain(
+      "github.event.pull_request.head.repo.full_name != github.repository",
+    );
+    expect(review.run).toContain('UPSTREAM_API_KEY="$OPENAI_API_KEY"');
+    expect(review.run).toContain('OPENAI_API_KEY="${PROXY_TOKEN}"');
+    expect(review.run).toContain('env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN');
+    const invocation = review.run.slice(
+      review.run.indexOf('timeout --kill-after=10s "${attempt_timeout}s"'),
+    );
+    expect(invocation).not.toContain('UPSTREAM_API_KEY');
+    expect(review.run).toContain('/usr/bin/docker run --detach');
+    expect(review.run).toContain("if [ \"$FORK_LIFECYCLE_REVIEW\" = 'true' ]");
   });
 
   it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {

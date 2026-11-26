@@ -1,0 +1,64 @@
+const http = require('node:http');
+const { Readable } = require('node:stream');
+
+const base = new URL(process.env.UPSTREAM_BASE_URL);
+const basePath = base.pathname.replace(/\/+$/, '');
+const token = process.env.PROXY_TOKEN;
+const server = http.createServer(async (req, res) => {
+  const incoming = new URL(req.url || '/', 'http://127.0.0.1');
+  if (req.method === 'GET' && incoming.pathname === '/__health') {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('ok');
+    return;
+  }
+  const target = new URL(base.origin);
+  let path = incoming.pathname;
+  if (path.startsWith('/v1/')) path = path.slice(3);
+  if (basePath && basePath !== '/') path = `${basePath}${path}`;
+  target.pathname = path;
+  target.search = incoming.search;
+  if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
+    res.writeHead(403);
+    res.end();
+    return;
+  }
+  if (req.headers.authorization !== `Bearer ${token}`) {
+    res.writeHead(401);
+    res.end();
+    return;
+  }
+  const headers = new Headers(req.headers);
+  headers.delete('host');
+  headers.delete('content-length');
+  headers.set('authorization', `Bearer ${process.env.UPSTREAM_API_KEY}`);
+  const controller = new AbortController();
+  let timer = setTimeout(() => controller.abort(), 600_000);
+  try {
+    const upstream = await fetch(target, {
+      method: 'POST', headers, body: req, duplex: 'half', signal: controller.signal,
+    });
+    res.writeHead(upstream.status, Object.fromEntries(
+      [...upstream.headers].filter(([key]) => !['content-encoding', 'content-length', 'connection', 'transfer-encoding'].includes(key)),
+    ));
+    if (!upstream.body) {
+      clearTimeout(timer);
+      res.end();
+      return;
+    }
+    clearTimeout(timer);
+    const body = Readable.fromWeb(upstream.body);
+    body.on('data', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => controller.abort(), 600_000);
+    });
+    body.on('end', () => clearTimeout(timer));
+    body.on('error', () => res.destroy());
+    res.on('close', () => { clearTimeout(timer); controller.abort(); });
+    body.pipe(res);
+  } catch {
+    clearTimeout(timer);
+    if (!res.headersSent) res.writeHead(502);
+    res.end();
+  }
+});
+server.listen(8080, '0.0.0.0');

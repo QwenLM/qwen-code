@@ -1239,8 +1239,11 @@ jobs:
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          # A fork lifecycle PR is sent to hosted; explicitly select the
+          # GitHub Actions token rather than trusting repo-wide token defaults.
+          SECURITY_GITHUB_TOKEN: "${{ (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository) && secrets.GITHUB_TOKEN || secrets.CI_BOT_PAT }}"
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           # Review model, plus the canary split that sends a PR-number slice
           # of reviews to a second model. All three arrive as variables so a
@@ -1315,6 +1318,7 @@ jobs:
           # the body is plain bash the runner never templates. See the
           # workflow-expression-length test in
           # scripts/tests/qwen-pr-review-workflow.test.js.
+          FORK_LIFECYCLE_REVIEW: "${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository }}"
           EVENT_NAME: '${{ github.event_name }}'
           EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
@@ -1408,10 +1412,10 @@ jobs:
           # and the wait spans a ceding watcher's TERM-immune wind-down
           # (<= 15s) so the group KILL it owes lands before the step exits
           # (R30-1).
-          trap '[ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
+          trap '[ -z "${OPENAI_PROXY_CONTAINER:-}" ] || /usr/bin/docker rm -f "$OPENAI_PROXY_CONTAINER" >/dev/null 2>&1 || true; [ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
-            fail "CI_BOT_PAT secret is required for Qwen PR review."
+            fail "The review GitHub credential is required."
           fi
           if [ -z "${OPENAI_API_KEY:-}" ]; then
             fail "REVIEW_OPENAI_API_KEY secret is required for Qwen PR review."
@@ -1422,6 +1426,7 @@ jobs:
           if ! command -v qwen >/dev/null 2>&1; then
             fail "qwen CLI is required on the review runner."
           fi
+          GH_TOKEN="$SECURITY_GITHUB_TOKEN"
 
           # shellcheck disable=SC2016
           # Shared by the proxy bypass below and the cohort notice, so the
@@ -1984,6 +1989,28 @@ jobs:
           fi
           export OPENAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY
           REVIEW_ENDPOINT_HOST="$(openai_base_host)"
+          if [ "$FORK_LIFECYCLE_REVIEW" = 'true' ]; then
+            # Keep the real model key outside the PR agent's PID namespace;
+            # same-uid children can otherwise read /proc/<parent>/environ.
+            # Only network-publish it on the disposable hosted VM.
+            PROXY_TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            OPENAI_PROXY_CONTAINER="qwen-review-openai-${GITHUB_RUN_ID}-${RANDOM}"
+            /usr/bin/docker run --detach --rm --name "$OPENAI_PROXY_CONTAINER" \
+              --publish "127.0.0.1::8080" \
+              --env PROXY_TOKEN --env UPSTREAM_API_KEY="$OPENAI_API_KEY" \
+              --env UPSTREAM_BASE_URL="$OPENAI_BASE_URL" \
+              --volume "${GITHUB_WORKSPACE}/.github/scripts/ci/review-openai-proxy.cjs:/proxy.cjs:ro" \
+              --entrypoint node node:22-bookworm-slim \
+              /proxy.cjs >/dev/null
+            OPENAI_PROXY_PORT="$(/usr/bin/docker port "$OPENAI_PROXY_CONTAINER" 8080/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
+            [ "$OPENAI_PROXY_PORT" ] || fail 'The model proxy did not publish a loopback port.'
+            OPENAI_PROXY_HEALTH="$(curl --retry 10 --retry-connrefused --retry-delay 1 --noproxy '*' -fsS "http://127.0.0.1:${OPENAI_PROXY_PORT}/__health")"
+            [ "$OPENAI_PROXY_HEALTH" = 'ok' ] || fail 'The model proxy health check failed.'
+            OPENAI_BASE_URL="http://127.0.0.1:${OPENAI_PROXY_PORT}"
+            OPENAI_API_KEY="${PROXY_TOKEN}"
+            unset REVIEW_API_KEY_CANARY REVIEW_BASE_URL_CANARY
+            export OPENAI_API_KEY OPENAI_BASE_URL
+          fi
           # The run's own record of which cohort served this review: the model
           # is not carried anywhere else a later comparison could read it (the
           # cost ledger has tokens, not a model), so a rollout that cannot be
@@ -2168,7 +2195,11 @@ jobs:
             GITHUB_ENV="$PROXY_BIN/decoy.github-env" \
             GITHUB_OUTPUT="$PROXY_BIN/decoy.github-output" \
             GITHUB_STEP_SUMMARY="$PROXY_BIN/decoy.github-step-summary" \
-            timeout --kill-after=10s "${attempt_timeout}s" qwen \
+            timeout --kill-after=10s "${attempt_timeout}s" \
+              env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL \
+              -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_CACHE_URL -u ACTIONS_RUNTIME_URL \
+              -u REVIEW_API_KEY_CANARY -u REVIEW_BASE_URL_CANARY \
+              qwen \
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
