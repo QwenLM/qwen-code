@@ -82,6 +82,20 @@ async function submit(): Promise<void> {
 }
 
 describe('WorkspaceRenameDialog', () => {
+  it('selects the current display name when the dialog opens', async () => {
+    await render(
+      <WorkspaceRenameDialog
+        workspace={workspace}
+        busy={false}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(input().value).toBe('API');
+    expect(input().selectionStart).toBe(0);
+    expect(input().selectionEnd).toBe('API'.length);
+  });
+
   it('starts from the current display name and disables save until it changes', async () => {
     const onSubmit = vi.fn();
     await render(
