@@ -78,17 +78,18 @@ select_apt_mirror() {
   fi
 }
 
-# Applies the probe to the sandbox build: exports BUILD_SANDBOX_FLAGS with the
-# selected APT_MIRROR build arg (preserving any flags already set, e.g. the CI
-# sandbox label) and logs the decision. A no-op selection leaves the flags
-# untouched so the Dockerfile keeps its built-in deb.debian.org source.
+# A runner can pin its sandbox apt mirror. Probe only when no mirror is set.
 apply_apt_mirror() {
-  local apt_mirror
-  apt_mirror="$(select_apt_mirror)"
-  if [ -n "${apt_mirror}" ]; then
-    export BUILD_SANDBOX_FLAGS="${BUILD_SANDBOX_FLAGS:-} --build-arg APT_MIRROR=${apt_mirror}"
-    echo "apt mirror: ${apt_mirror} (probe measured deb.debian.org as slower)"
+  local apt_mirror="${APT_MIRROR:-}"
+  if [ -n "$apt_mirror" ]; then
+    echo "apt mirror: $apt_mirror (configured by runner)"
   else
-    echo "apt mirror: deb.debian.org (probe found no faster mirror)"
+    apt_mirror="$(select_apt_mirror)"
+    if [ -z "$apt_mirror" ]; then
+      echo "apt mirror: deb.debian.org (probe kept the default)"
+      return 0
+    fi
+    echo "apt mirror: $apt_mirror (selected by probe)"
   fi
+  export BUILD_SANDBOX_FLAGS="${BUILD_SANDBOX_FLAGS:-} --build-arg APT_MIRROR=${apt_mirror}"
 }
