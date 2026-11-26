@@ -12,6 +12,7 @@ import prompts from 'prompts';
 import stripAnsi from 'strip-ansi';
 import { t } from '../../i18n/index.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { isInteractiveTerminal } from '../../ui/utils/terminal-buffer.js';
 
 /**
  * Requests consent from the user to perform an action, by reading a Y/n
@@ -48,6 +49,35 @@ export async function requestChoicePluginNonInteractive(
 
   if (plugins.length === 0) {
     throw new Error(t('No plugins available in this marketplace.'));
+  }
+
+  // A select menu needs a terminal on both ends. Under a pipe it is not inert:
+  // `readline.emitKeypressEvents` works on any stream (only `setRawMode` is
+  // TTY-gated), so a stray newline submits whichever plugin is highlighted,
+  // and at EOF the prompt is left unsettled so the install silently no-ops.
+  // A redirected stdout hides the menu while the process waits for a keypress
+  // nobody can see. Refuse up front — unlike the y/n consent prompt, where
+  // `echo y |` is a real answer — and let the caller's catch turn it into a
+  // non-zero exit. `isInteractiveTerminal` also classifies a CI lane that
+  // hands the CLI a pty as non-interactive, which a bare isTTY check does not.
+  // Known limitation: `| tee` echoes the menu and is answerable, but it is
+  // indistinguishable from a plain redirect here, so that path is refused too.
+  // `isInteractiveTerminal` defaults its first argument to stdout's TTY, so
+  // pass a strict boolean: an undefined stdin must not inherit stdout's answer.
+  const stdinIsTerminal = isInteractiveTerminal(
+    process.stdin.isTTY === true,
+    process.env,
+  );
+  const stdoutIsTerminal = isInteractiveTerminal(
+    process.stdout.isTTY === true,
+    process.env,
+  );
+  if (!stdinIsTerminal || !stdoutIsTerminal) {
+    throw new Error(
+      t(
+        'Selecting a plugin from a marketplace needs an interactive terminal. Run `qwen extensions install <source> --consent` to install non-interactively.',
+      ),
+    );
   }
 
   // Build choices for prompts select
