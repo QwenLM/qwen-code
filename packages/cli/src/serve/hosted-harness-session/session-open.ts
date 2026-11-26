@@ -1502,6 +1502,20 @@ export function registerHostedSessionOpenRoutes({
         error(res, 409, 'hosted_session_closing');
         return;
       }
+      if (
+        resident.runtimeRecoveryPromptId === parked &&
+        resident.recoveredTurn === parked &&
+        resident.active === undefined &&
+        !resident.managed.authority.writesStopped &&
+        !resident.cleanupBlocked &&
+        resident.recoveryCancelPromptId === undefined &&
+        unsettledPromptId(resident) === parked &&
+        recovery.phase === 'results_ready' &&
+        recovery.checkpointId ===
+          resident.managed.authority.latestCheckpoint?.checkpointId &&
+        recovery.activationId === resident.managed.activation.activationId
+      )
+        liftRecoveryBlock(resident);
       refusedAdoptions.delete(sessionId);
       sendAttachment(res, sessionId, resident, recovery);
       return;

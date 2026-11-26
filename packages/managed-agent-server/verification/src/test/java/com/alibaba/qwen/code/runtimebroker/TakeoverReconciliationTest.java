@@ -52,6 +52,29 @@ class TakeoverReconciliationTest {
     }
 
     @Test
+    void statusSettlesExecutionThatWasStillRunningDuringAdoption() throws Exception {
+        Fixture fixture = new Fixture();
+        ToolExecutionRecord original = fixture.execution("running", ToolExecutionRecord.State.EXECUTING);
+        try (RuntimeBrokerService broker = fixture.broker(reference -> fixture.lookups.size() == 1
+                ? CompletableFuture.completedFuture(Map.of("state", "executing")) : settled())) {
+            fixture.acquire(broker);
+            assertEquals(ToolExecutionRecord.State.EXECUTING, fixture.executions
+                    .findByExecutionCallId(original.getExecutionCallId()).getState());
+            ToolExecutionRecord result = broker.getExecution(original.getHarnessSessionId(),
+                    original.getRuntimeSessionId(), original.getExecutionCallId()).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            assertEquals(2, fixture.lookups.size());
+            assertEquals(ToolExecutionRecord.State.SETTLED, result.getState());
+            assertEquals(Map.of("executionStatus", "success", "output", "original result"), result.getResult());
+            assertEquals(original.getVersion() + 1, result.getVersion());
+            assertEquals(original.getDispatchOwner(), result.getDispatchOwner());
+            assertEquals(original.getDispatchGeneration(), result.getDispatchGeneration());
+            assertTrue(fixture.unexpectedTransportCalls.isEmpty(), fixture.unexpectedTransportCalls.toString());
+            assertTrue(fixture.unexpectedRepositoryCalls.isEmpty(), fixture.unexpectedRepositoryCalls.toString());
+        }
+    }
+
+    @Test
     void expiredDispatchesSettleDirectlyFromOriginalRuntimeEvidence() throws Exception {
         Fixture fixture = new Fixture();
         ToolExecutionRecord original = fixture.execution("expired", ToolExecutionRecord.State.EXECUTING,

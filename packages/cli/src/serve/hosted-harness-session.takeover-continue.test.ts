@@ -54,6 +54,57 @@ import * as stdio from '../utils/stdioHelpers.js';
 describe('Hosted Harness Runtime turn takeover', () => {
   useRuntimeTakeover();
 
+  it('continues the resident prompt after recovering the original Broker result', async () => {
+    const { server, clientId } = await parkToolTurn(
+      true,
+      FILE_PROFILE,
+      true,
+      new HostedWorkspaceBrokerRejection(404, 'runtime_session_not_found'),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(loaded.status).toBe(200);
+    expect(loaded.body.clientId).toBe(clientId);
+    expect(loaded.body.recoveryRequired).toBeUndefined();
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { phase: string; checkpointId: string; activationId: string };
+    expect(recovery.phase).toBe('results_ready');
+    const continued = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    expect(state.model).toHaveBeenCalledTimes(2);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
+  });
+
   it('keeps the adopted lease when a continue meets the recovery-blocked Session', async () => {
     await parkToolTurn();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({

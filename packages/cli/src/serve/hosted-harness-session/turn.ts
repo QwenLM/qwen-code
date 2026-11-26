@@ -99,6 +99,7 @@ import {
 } from '../hosted-workflow-turn.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from '../hosted-workspace-broker.js';
 import {
@@ -1180,6 +1181,7 @@ export async function executeHostedTurn(
   try {
     await running.finally(() => {
       void toolTurn?.close().catch((cause: unknown) => {
+        session.runtimeRecoveryPromptId = undefined;
         session.blocked = true;
         writeStderrLineSafe(
           'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
@@ -1753,8 +1755,17 @@ export function registerHostedPromptRoute({
         settled = true;
       } catch (cause) {
         if (monitorWakeNeedsRecovery(cause)) {
-          if (admitted) session.blocked = true;
-          else if (!res.headersSent)
+          if (admitted) {
+            if (
+              !session.blocked &&
+              cause instanceof HostedToolRecoveryRequiredError &&
+              cause.cause instanceof HostedWorkspaceBrokerRejection &&
+              (cause.cause.code === 'runtime_session_not_found' ||
+                cause.cause.code === 'runtime_reconciliation_required')
+            )
+              session.runtimeRecoveryPromptId = promptId;
+            session.blocked = true;
+          } else if (!res.headersSent)
             error(res, 503, 'hosted_mcp_recovery_required');
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,

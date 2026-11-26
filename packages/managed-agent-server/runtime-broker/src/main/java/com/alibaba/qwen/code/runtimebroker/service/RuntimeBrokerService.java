@@ -1206,8 +1206,17 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             }
             return executionState.unknownWhenAdmissionClosed(
                     bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
-                            .thenApply(context -> executionState.requireExecution(context,
-                                    executionId)),
+                            .thenCompose(context -> {
+                                ToolExecutionRecord current = executionState.requireExecution(context, executionId);
+                                // Adoption may have checked while the tool was still running.
+                                if (current.getState() == ToolExecutionRecord.State.EXECUTING
+                                        && current.getDispatchOwner() != null
+                                        && !brokerOwnerId.equals(current.getDispatchOwner())) {
+                                    return executionReconciler.reconcileInContext(context, current, true, true)
+                                            .thenApply(ExecutionReconciliation::getRecord);
+                                }
+                                return CompletableFuture.completedFuture(current);
+                            }),
                     harnessSessionId, runtimeSessionId, executionId);
         }));
     }

@@ -33,6 +33,7 @@ import { unsettledPromptId } from './wake-recovery.js';
 export function liftRecoveryBlock(session: HostedSession): void {
   session.blocked = false;
   session.recoveryReason = undefined;
+  session.runtimeRecoveryPromptId = undefined;
   session.recoveryCancelPromptId = undefined;
   session.cleanupBlocked = false;
 }
@@ -51,6 +52,7 @@ export function blockRecovery(
   storeFailure: string | undefined,
 ): void {
   session.blocked = true;
+  session.runtimeRecoveryPromptId = undefined;
   session.recoveryReason =
     storeFailure ??
     (session.managed.authority.writesStopped
