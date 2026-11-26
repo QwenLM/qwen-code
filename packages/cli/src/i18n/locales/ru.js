@@ -795,8 +795,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': 'Управлять хуками Qwen Code',
   'List all configured hooks': 'Показать все настроенные хуки',
+  'No hooks were loaded.': 'Ни один хук не был загружен.',
+  'skipped (unsupported args)': 'пропущен (параметр args не поддерживается)',
   // Hooks - Dialog
   Hooks: 'Хуки',
+  'A hook stopped the turn: {{reason}}': 'Хук остановил ход: {{reason}}',
   'Loading hooks...': 'Загрузка хуков...',
   'Error loading hooks:': 'Ошибка загрузки хуков:',
   'Press Escape to close': 'Нажмите Escape для закрытия',

@@ -5248,10 +5248,14 @@ class QwenHostedHarnessConnectorTest {
                 "default", "hosted-workspace-mcp/1", "a".repeat(64));
         List<Map<String, Object>> skills = List.of(Map.of("name", "review", "description", "Review", "body", "Read the diff."));
         JdbcManagedAgentDefinitionStore definitions = mock(JdbcManagedAgentDefinitionStore.class);
-        when(definitions.pinnedContent(session)).thenReturn(Map.of("skills", skills,
+        when(definitions.pinnedContent(session)).thenReturn(Map.of(
+                "model", Map.of("id", "configured"),
+                "instructions", "Review carefully.", "skills", skills,
                 "mcp_servers", List.of(Map.of("server_id", "docs", "server_revision", 1, "definition_digest", "b".repeat(64))),
                 "hook_catalog", Map.of("catalog_id", "review", "catalog_revision", 2, "definition_digest", "c".repeat(64))));
         JdbcManagedSessionStore resources = mock(JdbcManagedSessionStore.class);
+        when(resources.publishAgentInstructions("tenant-a", "workspace-a", SESSION_ID, "Review carefully."))
+                .thenReturn(new ToolResultResourceRef("instructions", "managed-agent-instructions", 1, 100, "e".repeat(64)));
         when(resources.publishAgentSkills("tenant-a", "workspace-a", SESSION_ID, skills))
                 .thenReturn(new ToolResultResourceRef("skills", "managed-agent-skills", 1, 100, "d".repeat(64)));
         JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
@@ -5280,7 +5284,13 @@ class QwenHostedHarnessConnectorTest {
                 .containsEntry("hookCatalog", created.get("hookCatalog"));
         assertThat(new ObjectMapper().valueToTree(created).at("/agentDefinition/skillsRef/kind").asText())
                 .isEqualTo("managed-agent-skills");
+        assertThat(new ObjectMapper().valueToTree(created).at("/agentDefinition/model/id").asText())
+                .isEqualTo("configured");
+        assertThat(new ObjectMapper().valueToTree(created).at("/agentDefinition/instructionsRef/kind").asText())
+                .isEqualTo("managed-agent-instructions");
+        verify(resources, times(1)).publishAgentInstructions("tenant-a", "workspace-a", SESSION_ID, "Review carefully.");
         verify(resources, times(1)).publishAgentSkills("tenant-a", "workspace-a", SESSION_ID, skills);
+        verify(definitions, times(2)).pinnedContent(session);
     }
 
     private static ManagedAgentProperties properties() {

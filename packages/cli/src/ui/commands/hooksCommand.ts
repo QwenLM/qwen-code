@@ -42,7 +42,7 @@ const debugLogger = createDebugLogger('HOOKS_COMMAND');
 async function reloadHooksFromSettings(
   config: Config,
   settings: LoadedSettings,
-): Promise<void> {
+): Promise<Error | undefined> {
   const hookSystem = config.getHookSystem();
   if (!hookSystem) {
     return;
@@ -91,10 +91,11 @@ async function reloadHooksFromSettings(
     const paths = systemScopes
       .map((scope) => settings.forScope(scope).path)
       .join(', ');
-    throw new Error(
+    return new Error(
       `System settings could not be read (${paths}); hooks from them are unchanged, and other hook edits were applied.`,
     );
   }
+  return undefined;
 }
 
 /**
@@ -186,6 +187,14 @@ const listCommand: SlashCommand = {
     const totalHooks = configHooks.length + sessionHooks.length + withheldCount;
 
     if (totalHooks === 0) {
+      const warnings = hookSystem.getConfigWarnings();
+      if (warnings.length > 0) {
+        return {
+          type: 'message',
+          messageType: 'warning',
+          content: [t('No hooks were loaded.'), ...warnings].join('\n'),
+        };
+      }
       return {
         type: 'message',
         messageType: 'info',
@@ -336,7 +345,18 @@ export const hooksCommand: SlashCommand = {
       const { config, settings } = context.services;
       if (config) {
         try {
-          await reloadHooksFromSettings(config, settings);
+          const systemReloadError = await reloadHooksFromSettings(
+            config,
+            settings,
+          );
+          for (const warning of config.getHookSystem()?.getConfigWarnings() ??
+            []) {
+            context.ui.addItem(
+              { type: MessageType.WARNING, text: warning },
+              Date.now(),
+            );
+          }
+          if (systemReloadError) throw systemReloadError;
         } catch (error) {
           // The menu still opens on the hooks loaded so far.
           debugLogger.warn(`Failed to reload hooks for /hooks: ${error}`);

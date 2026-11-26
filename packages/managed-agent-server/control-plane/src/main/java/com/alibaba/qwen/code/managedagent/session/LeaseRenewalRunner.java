@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Set;
@@ -31,7 +33,7 @@ public final class LeaseRenewalRunner implements AutoCloseable {
     public LeaseRenewalRunner(String owner, String threadName) {
         // The owner lands in VARCHAR(128) claim/dispatch columns; refuse a
         // PAD SPACE fold of another holder's identity at the boundary.
-        this.owner = com.alibaba.qwen.code.runtimebroker.BrokerValues
+        this.owner = BrokerValues
                 .requireWorkerOwner(owner, "owner");
         Objects.requireNonNull(threadName, "threadName");
         this.renewals = Executors.newSingleThreadScheduledExecutor(task -> {

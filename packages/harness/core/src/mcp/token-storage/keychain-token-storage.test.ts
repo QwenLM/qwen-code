@@ -1,0 +1,288 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { KeychainTokenStorage } from './keychain-token-storage.js';
+import type { OAuthCredentials } from './types.js';
+import {
+  KeychainService,
+  resetKeychainSelection,
+} from '../../services/keychainService.js';
+import { coreEvents } from '../../utils/events.js';
+import { KEYCHAIN_TEST_PREFIX } from '../../services/keychainTypes.js';
+
+describe('KeychainTokenStorage', () => {
+  let storage: KeychainTokenStorage;
+  const mockServiceName = 'service-name';
+  let storageState: Map<string, string>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetKeychainSelection();
+    storage = new KeychainTokenStorage(mockServiceName);
+    storageState = new Map();
+
+    // Use stateful spies to verify logic behaviorally
+    vi.spyOn(KeychainService.prototype, 'getPassword').mockImplementation(
+      async (account) => storageState.get(account) ?? null,
+    );
+    vi.spyOn(KeychainService.prototype, 'setPassword').mockImplementation(
+      async (account, value) => {
+        storageState.set(account, value);
+      },
+    );
+    vi.spyOn(KeychainService.prototype, 'deletePassword').mockImplementation(
+      async (account) => storageState.delete(account),
+    );
+    vi.spyOn(KeychainService.prototype, 'findCredentials').mockImplementation(
+      async () =>
+        Array.from(storageState.entries()).map(([account, password]) => ({
+          account,
+          password,
+        })),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const validCredentials = {
+    serverName: 'test-server',
+    token: {
+      accessToken: 'access-token',
+      tokenType: 'Bearer',
+      expiresAt: Date.now() + 3600000,
+    },
+    updatedAt: Date.now(),
+  } as OAuthCredentials;
+
+  describe('with keychain available', () => {
+    beforeEach(() => {
+      vi.spyOn(KeychainService.prototype, 'isAvailable').mockResolvedValue(
+        true,
+      );
+    });
+
+    it('should store and retrieve credentials correctly', async () => {
+      await storage.setCredentials(validCredentials);
+      const retrieved = await storage.getCredentials('test-server');
+
+      expect(retrieved?.token.accessToken).toBe('access-token');
+      expect(retrieved?.serverName).toBe('test-server');
+    });
+
+    it('should return null if no credentials are found', async () => {
+      expect(await storage.getCredentials('missing')).toBeNull();
+    });
+
+    it('returns expired credentials too, as the plaintext storage does', async () => {
+      const expiredCreds = {
+        ...validCredentials,
+        token: { ...validCredentials.token, expiresAt: Date.now() - 1000 },
+      };
+      await storage.setCredentials(expiredCreds);
+
+      expect(await storage.getCredentials('test-server')).toMatchObject({
+        token: expiredCreds.token,
+      });
+      expect((await storage.getAllCredentials()).get('test-server')).toMatchObject({
+        token: expiredCreds.token,
+      });
+    });
+
+    it('deleting credentials that are not there is not an error', async () => {
+      await expect(storage.deleteCredentials('missing')).resolves.toBeUndefined();
+    });
+
+    it('should throw if stored data is corrupted JSON', async () => {
+      storageState.set('bad-server', 'not-json');
+      await expect(storage.getCredentials('bad-server')).rejects.toThrow(
+        /Failed to parse/,
+      );
+    });
+
+    it('should list servers and filter internal keys', async () => {
+      await storage.setCredentials(validCredentials);
+      await storage.setCredentials({
+        ...validCredentials,
+        serverName: 'server2',
+      });
+      storageState.set(`${KEYCHAIN_TEST_PREFIX}internal`, '...');
+      storageState.set('__secret__key', '...');
+
+      const servers = await storage.listServers();
+      expect(servers).toEqual(['test-server', 'server2']);
+    });
+
+    it('should handle getAllCredentials with individual parse errors', async () => {
+      await storage.setCredentials(validCredentials);
+      storageState.set('bad', 'not-json');
+      const emitFeedbackSpy = vi.spyOn(coreEvents, 'emitFeedback');
+
+      const result = await storage.getAllCredentials();
+      expect(result.size).toBe(1);
+      expect(emitFeedbackSpy).toHaveBeenCalled();
+    });
+
+    it('should aggregate errors in clearAll', async () => {
+      storageState.set('s1', '...');
+      storageState.set('s2', '...');
+
+      // Aggregating a system error (rejection)
+      vi.spyOn(KeychainService.prototype, 'deletePassword')
+        .mockResolvedValueOnce(true)
+        .mockRejectedValueOnce(new Error('system fail'));
+
+      await expect(storage.clearAll()).rejects.toThrow(
+        /Failed to clear some credentials: system fail/,
+      );
+
+      // An entry already gone is not a failure.
+      vi.spyOn(KeychainService.prototype, 'deletePassword')
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+
+      await expect(storage.clearAll()).resolves.toBeUndefined();
+    });
+
+    it('should manage secrets with prefix independently', async () => {
+      await storage.setSecret('key1', 'val1');
+      await storage.setCredentials(validCredentials);
+
+      expect(await storage.getSecret('key1')).toBe('val1');
+      expect(await storage.listSecrets()).toEqual(['key1']);
+      expect(await storage.listServers()).not.toContain('key1');
+    });
+  });
+
+  describe('unavailability handling', () => {
+    beforeEach(() => {
+      vi.spyOn(KeychainService.prototype, 'isAvailable').mockResolvedValue(
+        false,
+      );
+      vi.spyOn(KeychainService.prototype, 'getPassword').mockRejectedValue(
+        new Error('Keychain is not available'),
+      );
+      vi.spyOn(KeychainService.prototype, 'setPassword').mockRejectedValue(
+        new Error('Keychain is not available'),
+      );
+      vi.spyOn(KeychainService.prototype, 'deletePassword').mockRejectedValue(
+        new Error('Keychain is not available'),
+      );
+      vi.spyOn(KeychainService.prototype, 'findCredentials').mockRejectedValue(
+        new Error('Keychain is not available'),
+      );
+    });
+
+    it.each([
+      { method: 'getCredentials', args: ['s'] },
+      { method: 'setCredentials', args: [validCredentials] },
+      { method: 'deleteCredentials', args: ['s'] },
+      { method: 'clearAll', args: [] },
+    ])(
+      '$method should propagate unavailability error',
+      async ({ method, args }) => {
+        await expect(
+          (
+            storage as unknown as Record<
+              string,
+              (...args: unknown[]) => Promise<unknown>
+            >
+          )[method](...args),
+        ).rejects.toThrow('Keychain is not available');
+      },
+    );
+
+    it.each([
+      { method: 'listServers' },
+      { method: 'getAllCredentials' },
+      { method: 'listSecrets' },
+    ])('$method should emit feedback and return empty', async ({ method }) => {
+      const emitFeedbackSpy = vi.spyOn(coreEvents, 'emitFeedback');
+      expect(
+        await (storage as unknown as Record<string, () => Promise<unknown>>)[
+          method
+        ](),
+      ).toEqual(method === 'getAllCredentials' ? new Map() : []);
+      expect(emitFeedbackSpy).toHaveBeenCalledWith(
+        'error',
+        expect.any(String),
+        expect.any(Error),
+      );
+    });
+  });
+
+  describe('lossless account keys', () => {
+    function legacyAccountOf(serverName: string): string {
+      return serverName.replace(/[^a-zA-Z0-9-_.]/g, '_');
+    }
+
+    const personal = {
+      ...validCredentials,
+      serverName: '语雀个人|0123456789abcdef',
+    };
+    const team = {
+      ...validCredentials,
+      serverName: '语雀团队|0123456789abcdef',
+    };
+
+    it('stores two non-ASCII names with the same identity separately', async () => {
+      await storage.setCredentials(personal);
+      await storage.setCredentials(team);
+
+      expect(storageState.size).toBe(2);
+      expect(
+        (await storage.getCredentials(personal.serverName))?.serverName,
+      ).toBe(personal.serverName);
+      expect((await storage.getCredentials(team.serverName))?.serverName).toBe(
+        team.serverName,
+      );
+    });
+
+    it('clearing one does not delete the other', async () => {
+      await storage.setCredentials(personal);
+      await storage.setCredentials(team);
+
+      await storage.deleteCredentials(personal.serverName);
+
+      expect(await storage.getCredentials(personal.serverName)).toBeNull();
+      expect((await storage.getCredentials(team.serverName))?.serverName).toBe(
+        team.serverName,
+      );
+    });
+
+    it('migrates a legacy sanitized account of the same identity', async () => {
+      const legacyAccount = legacyAccountOf(personal.serverName);
+      storageState.set(legacyAccount, JSON.stringify(personal));
+
+      const migrated = await storage.getCredentials(personal.serverName);
+
+      expect(migrated?.serverName).toBe(personal.serverName);
+      expect(storageState.has(legacyAccount)).toBe(false);
+      expect(
+        storageState.has(
+          `~${Buffer.from(personal.serverName, 'utf8').toString('base64url')}`,
+        ),
+      ).toBe(true);
+    });
+
+    it('never returns another identity from a collided legacy account', async () => {
+      const legacyAccount = legacyAccountOf(personal.serverName);
+      expect(legacyAccount).toBe(
+        legacyAccountOf(team.serverName),
+      );
+      storageState.set(legacyAccount, JSON.stringify(team));
+
+      expect(await storage.getCredentials(personal.serverName)).toBeNull();
+
+      await storage.deleteCredentials(personal.serverName);
+      expect(storageState.has(legacyAccount)).toBe(true);
+    });
+  });
+});

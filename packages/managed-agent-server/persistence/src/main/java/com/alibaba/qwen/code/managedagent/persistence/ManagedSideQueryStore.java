@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
 import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels;
@@ -10,6 +11,9 @@ import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSideQueries;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
@@ -17,16 +21,21 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptS
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -203,8 +212,8 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
 
     @Override
     public Claim claim(String tenant, String session, String id, String instance, String boot) {
-        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireInstanceId(instance, "claimInstanceId");
-        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(boot, "claimBootId");
+        BrokerValues.requireInstanceId(instance, "claimInstanceId");
+        BrokerValues.requireShortId(boot, "claimBootId");
         lockRoot(tenant, session);
         Row row = read(tenant, session, id, true);
         authorize(tenant, row.actor(), session, true);
@@ -221,11 +230,11 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
 
     private JdbcJournalPacks packs;
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     void setSessionResources(
-            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings,
-            org.springframework.beans.factory.ObjectProvider<
-                    com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore> objects) {
+            ManagedAgentSettings settings,
+            ObjectProvider<
+                    ToolPublicationObjectStore> objects) {
         if (settings != null) {
             this.packs = new JdbcJournalPacks(jdbc, objects.getIfAvailable(), settings);
         }
@@ -540,7 +549,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         if ("DELETED".equals(visible.status()) || visible.deletedAt() != null) {
             throw error(404, "session_not_found");
         }
-        com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.requireSessionVisibility(visible, actor, workspaces);
+        ManagedWorkspaceRegistry.requireSessionVisibility(visible, actor, workspaces);
         if (visible.workspace() != null ? !workspaces.canRead(tenant, actor, visible.workspace().getWorkspaceId())
                 : !workspaces.isSessionOwner(tenant, actor, session)) {
             throw error(404, "session_not_found");
@@ -556,7 +565,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
                 : workspaces.accessOf(session.tenantId(), actor, session.workspace().getWorkspaceId()).canCreate()
                     && sessionQueries.hasExecutionRegistryFacts(session.tenantId(), session.sessionId())
                     && ("qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null)
-                    && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF
+                    && WorkspaceExecutionProfile.CONTEXT_CONFIG_REF
                             .equals(session.workspace().getContextConfigRef());
     }
 
@@ -661,7 +670,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
             if (root == null || !root.isObject()) {
                 throw error(409, "side_query_input_conflict");
             }
-            var required = new java.util.HashSet<String>();
+            var required = new HashSet<String>();
             required.add(manifest.resourceId());
             if ("qwen-side-query-input/1".equals(root.path("format").asText())) {
                 var parts = root.path("parts");
@@ -669,7 +678,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
                         || root.path("byteLength").asLong() > ManagedSessionStoreModels.MAX_MODEL_REQUEST_BYTES) {
                     throw error(409, "side_query_input_conflict");
                 }
-                var bytes = new java.io.ByteArrayOutputStream();
+                var bytes = new ByteArrayOutputStream();
                 for (var ref : parts) {
                     String id = ref.path("resourceId").asText();
                     if (!input.resourceIds().contains(id)) {
@@ -690,10 +699,10 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
                     throw error(409, "side_query_input_conflict");
                 }
             }
-            if (!required.equals(new java.util.HashSet<>(input.resourceIds()))) {
+            if (!required.equals(new HashSet<>(input.resourceIds()))) {
                 throw error(409, "side_query_input_conflict");
             }
-        } catch (java.io.IOException invalid) {
+        } catch (IOException invalid) {
             throw error(409, "side_query_input_conflict");
         }
     }
@@ -748,7 +757,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     private String encode(Object value) {
         try {
             return json.writeValueAsString(value);
-        } catch (java.io.IOException invalid) {
+        } catch (IOException invalid) {
             throw new IllegalStateException(invalid);
         }
     }
@@ -756,7 +765,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     private <T> T decode(String value, Class<T> type) {
         try {
             return json.readValue(value, type);
-        } catch (java.io.IOException invalid) {
+        } catch (IOException invalid) {
             throw new IllegalStateException(invalid);
         }
     }
@@ -764,7 +773,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     private <T> T decode(String value, TypeReference<T> type) {
         try {
             return json.readValue(value, type);
-        } catch (java.io.IOException invalid) {
+        } catch (IOException invalid) {
             throw new IllegalStateException(invalid);
         }
     }

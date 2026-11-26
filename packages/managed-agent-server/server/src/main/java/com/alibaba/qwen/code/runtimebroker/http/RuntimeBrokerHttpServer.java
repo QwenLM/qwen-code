@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.http;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.ExecutionReconciliation;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -253,7 +254,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 }
                 complete(exchange, service.capabilitiesContext(sessionId, lifecycleAuthority(exchange)), value -> {
                     var scope = value.scope();
-                    Map<String, Object> result = new java.util.LinkedHashMap<>(Map.of(
+                    Map<String, Object> result = new LinkedHashMap<>(Map.of(
                             "protocolVersion", 1, "harnessSessionId", sessionId,
                             "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
                                     "workspaceGeneration", scope.getWorkspaceGeneration(),
@@ -829,7 +830,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         if (strict && (!"execution request".equals(context)
                 || body.containsKey("inputBytesBase64") || body.containsKey("toolDefinitionBytesBase64"))) {
             try {
-                com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory.readObject(bytes);
+                ManagedCheckpointHistory.readObject(bytes);
             } catch (RuntimeException invalid) {
                 throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Execution JSON is invalid", false);
             }
