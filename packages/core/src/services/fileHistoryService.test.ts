@@ -162,7 +162,10 @@ describe('FileHistoryService', () => {
       const file = join(projectDir, 'a.ts');
       const parent = join(projectDir, '..');
       const list: Array<[string, string]> = [
-        ['a dot segment', `${parent}${sep}.${sep}${basename(projectDir)}${sep}a.ts`],
+        [
+          'a dot segment',
+          `${parent}${sep}.${sep}${basename(projectDir)}${sep}a.ts`,
+        ],
       ];
       if (process.platform === 'win32') {
         list.push(['forward slashes', file.split(sep).join('/')]);
