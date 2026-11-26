@@ -3786,6 +3786,15 @@ export function useComposerCore(
     }
   }, [isTouchComposer, mobileText]);
 
+  const getFollowupCompletionForSubmit = (text: string) => {
+    const followup = followupStateRef.current;
+    return followup?.isVisible &&
+      pastedImagesRef.current.length === 0 &&
+      pastedFilesRef.current.length === 0
+      ? getFollowupCompletion(text, followup.suggestion)
+      : null;
+  };
+
   // Lives in the render scope (not the editor-creation effect) so the mobile
   // textarea backend, which never instantiates an EditorView, can reuse the
   // exact same submit pipeline with `view === null`.
@@ -3809,20 +3818,11 @@ export function useComposerCore(
         ? getInlineComposerTagPlacements(view)
         : [];
     const editorText = view ? view.state.doc.toString() : mobileTextRef.current;
-    const followup = followupStateRef.current;
-    // A folded paste leaves the draft empty, which is the state the follow-up
-    // completion submits from, so the suggestion would become the message with
-    // the paste along as an attachment. The paste wins while a card waits.
-    const foldedPastePending = pastedFilesRef.current.some(
-      (file) => file.text !== undefined,
-    );
     const followupCompletion =
       textOverride === undefined &&
       !suppressFollowupCompletion &&
-      inlineTags.length === 0 &&
-      !foldedPastePending &&
-      followup?.isVisible
-        ? getFollowupCompletion(editorText, followup.suggestion)
+      inlineTags.length === 0
+        ? getFollowupCompletionForSubmit(editorText)
         : null;
     const sourceText = textOverride ?? followupCompletion ?? editorText;
     // Slash-command completions stay editable on touch before a deliberate submit.
@@ -4309,26 +4309,21 @@ export function useComposerCore(
             return true;
           }
           const submitDraft = (target: EditorView) => {
-            const followup = followupStateRef.current;
-            const hasInlineTags = hasInlineComposerTags(target);
-            const followupCompletion = hasInlineTags
+            if (submitPreparingRef.current || submitGuardsBlock()) return true;
+            const followupCompletion = hasInlineComposerTags(target)
               ? null
-              : getFollowupCompletion(
-                  target.state.doc.toString(),
-                  followup?.suggestion,
-                );
-            if (followup?.isVisible && followupCompletion) {
+              : getFollowupCompletionForSubmit(target.state.doc.toString());
+            if (followupCompletion) {
               onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
               return submitText(target, followupCompletion);
             }
             return submitText(target);
           };
+          if (!prepareSubmitRef.current) return submitDraft(view);
           // Refuse before arming the finalizer: a submit the guards would
           // reject must leave a live capture recording, as it did before
           // finalization existed.
-          if (!prepareSubmitRef.current || submitGuardsBlock()) {
-            return submitDraft(view);
-          }
+          if (submitGuardsBlock()) return true;
           const identity = composerIdentityRef.current;
           // CodeMirror commands are synchronous; the finalization runs in the
           // background and the key is consumed so no newline is inserted.
