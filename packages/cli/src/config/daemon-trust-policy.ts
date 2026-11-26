@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import { ideContextStore } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { parseJsoncObject } from '../utils/jsonc-editor.js';
+import { stripUtf8Bom } from './execution-sandbox-settings.js';
 import {
   getSystemDefaultsPath,
   getSystemSettingsPath,
@@ -186,9 +187,17 @@ async function readJsonObjectOnce(
 
   try {
     const raw = await fs.readFile(filePath, 'utf8');
+    // `parseJsoncObject` already strips exactly one leading U+FEFF internally
+    // (`jsonc-editor.ts`, `parseJsoncObject`), and the primary CLI reads the
+    // same `trustedFolders.json` through it untouched
+    // (`trustedFolders.ts`, `readTrustedFoldersFile`). Pre-stripping here too
+    // would tolerate two leading BOMs where the CLI rejects the file, so the
+    // daemon could route a workspace as trusted that the CLI reports as
+    // untrusted. The settings arm parses with `JSON.parse`, which has no such
+    // internal strip, so only that arm strips one BOM.
     const parsed: unknown = allowTrailingComma
       ? parseJsoncObject(raw)
-      : JSON.parse(stripJsonComments(raw));
+      : JSON.parse(stripJsonComments(stripUtf8Bom(raw)));
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
