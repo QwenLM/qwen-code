@@ -1333,17 +1333,68 @@ interface ComposerReferenceDraft {
   tags: WebShellComposerTag[];
 }
 
+type StoredComposerReferenceDraft = ComposerReferenceDraft & {
+  customInlineRanges?: Array<Pick<InlineTagPlacement, 'start' | 'end'>>;
+};
+
 const REFERENCE_DRAFT_PREFIX = '\0qwen-file-draft:1:';
 
-function validDraftReferences(draft: ComposerReferenceDraft) {
+function validDraftReferences(
+  draft: ComposerReferenceDraft,
+  allowFiles = true,
+  allowCustom = false,
+) {
   return draft.inlineTags.filter(
     ({ start, end, tag }) =>
       start >= 0 &&
       end > start &&
       end <= draft.text.length &&
-      tag.kind === 'file' &&
+      (tag.kind === 'file' ? allowFiles : allowCustom) &&
       draft.text.slice(start, end) === getComposerTagSerialized(tag),
   );
+}
+
+function restoreCustomDraftReferences(
+  draft: StoredComposerReferenceDraft,
+  parser: UserMessageContentParser | undefined,
+): ComposerReferenceDraft {
+  const ranges = draft.customInlineRanges;
+  // CodeMirror normalizes CR line endings before applying decorations.
+  if (
+    !parser ||
+    draft.text.includes('\r') ||
+    (ranges !== undefined && (!Array.isArray(ranges) || ranges.length === 0))
+  )
+    return draft;
+  const parts = parseUserMessageContentSafely(
+    draft.text,
+    parser,
+    '[WebShell] failed to parse composer draft content',
+    { requireSourcePreservation: true },
+  );
+  if (!parts) return draft;
+
+  const fileReferences = validDraftReferences(draft);
+  const inlineTags = [...draft.inlineTags];
+  let end = 0;
+  for (const part of parts) {
+    const start = end;
+    end +=
+      part.type === 'text'
+        ? part.text.length
+        : getComposerTagSerialized(part.tag).length;
+    if (part.type !== 'tag' || part.tag.kind === 'file' || end === start)
+      continue;
+    if (
+      ranges &&
+      !ranges.some((range) => range?.start === start && range.end === end)
+    )
+      continue;
+    if (fileReferences.some((file) => file.start < end && file.end > start))
+      continue;
+    inlineTags.push({ start, end, tag: part.tag });
+  }
+  return { ...draft, inlineTags };
 }
 
 function hoistInlineDraftReferences(
@@ -1373,6 +1424,7 @@ function hoistInlineDraftReferences(
 function loadComposerDraftData(
   storageKey: string | undefined,
   moveInlineToTop = false,
+  parser?: UserMessageContentParser,
 ): ComposerReferenceDraft | null {
   if (!storageKey) return null;
   const shared = findComposerDraftSession(storageKey)?.content;
@@ -1396,12 +1448,21 @@ function loadComposerDraftData(
         Array.isArray(saved.tags) &&
         saved.tags.every(isValidComposerTag)
       ) {
-        const draft = saved as ComposerReferenceDraft;
-        if (!moveInlineToTop) return draft;
-        return hoistInlineDraftReferences(draft);
+        const draft: StoredComposerReferenceDraft = {
+          ...saved,
+          inlineTags: saved.inlineTags.filter(
+            ({ tag }: InlineTagPlacement) => tag.kind === 'file',
+          ),
+        };
+        return moveInlineToTop
+          ? hoistInlineDraftReferences(draft)
+          : restoreCustomDraftReferences(draft, parser);
       }
     }
-    return { text, inlineTags: [], tags: [] };
+    return restoreCustomDraftReferences(
+      { text, inlineTags: [], tags: [] },
+      parser,
+    );
   } catch {
     return null;
   }
@@ -1414,13 +1475,15 @@ function loadComposerDraft(storageKey: string | undefined): string | null {
 function saveComposerDraft(
   storageKey: string | undefined,
   text: string,
-  references?: Omit<ComposerReferenceDraft, 'text'>,
+  references?: Omit<StoredComposerReferenceDraft, 'text'>,
 ): void {
   if (!storageKey) return;
   try {
     if (
       references &&
-      (references.inlineTags.length || references.tags.length)
+      (references.inlineTags.length ||
+        references.tags.length ||
+        (text && references.customInlineRanges))
     ) {
       localStorage.setItem(
         storageKey,
@@ -2264,9 +2327,10 @@ export function useComposerCore(
       }
       if (!key) return;
       const content = readDraftContentRef.current();
+      const parser = parseUserMessageContentRef.current;
       const stored =
         !viewRef.current && !isTouchComposer
-          ? loadComposerDraftData(key)
+          ? loadComposerDraftData(key, false, parser)
           : null;
       const session = getComposerDraftSession(
         key,
@@ -2274,9 +2338,11 @@ export function useComposerCore(
           ? {
               ...content,
               text: stored.text,
-              inlineTags: persistFileReferencesRef.current
-                ? stored.inlineTags
-                : [],
+              inlineTags: validDraftReferences(
+                stored,
+                persistFileReferencesRef.current,
+                Boolean(parser),
+              ),
             }
           : content,
         draftAttachmentStore,
@@ -2772,22 +2838,36 @@ export function useComposerCore(
     setComposerTagsState(next);
     publishDraftContentRef.current();
   }, []);
-  function referenceDraft(view: EditorView | null) {
-    if (!persistFileReferencesRef.current) return undefined;
+  function referenceDraft(
+    view: EditorView | null,
+  ): Omit<StoredComposerReferenceDraft, 'text'> | undefined {
+    const persistFiles = persistFileReferencesRef.current;
+    const persistCustom = view && parseUserMessageContentRef.current;
+    if (!persistFiles && !persistCustom) return undefined;
+    const inlineTags = view ? getInlineComposerTagPlacements(view) : [];
     return {
-      inlineTags: view
-        ? getInlineComposerTagPlacements(view).filter(
-            ({ tag }) => tag.kind === 'file',
-          )
+      inlineTags: persistFiles
+        ? inlineTags.filter(({ tag }) => tag.kind === 'file')
         : [],
-      tags: composerTagsRef.current.filter((tag) => tag.kind === 'file'),
+      tags: persistFiles
+        ? composerTagsRef.current.filter((tag) => tag.kind === 'file')
+        : [],
+      customInlineRanges: persistCustom
+        ? inlineTags
+            .filter(({ tag }) => tag.kind !== 'file')
+            .map(({ start, end }) => ({ start, end }))
+        : undefined,
     };
   }
   const referenceEffects = useCallback(
     (draft: ComposerReferenceDraft | null) => {
       return (
-        persistFileReferencesRef.current && draft
-          ? validDraftReferences(draft)
+        draft
+          ? validDraftReferences(
+              draft,
+              persistFileReferencesRef.current,
+              Boolean(parseUserMessageContentRef.current),
+            )
           : []
       ).map(({ start, end, tag }) =>
         addInlineTagEffect.of({
@@ -4669,6 +4749,8 @@ export function useComposerCore(
 
     const initialReferenceDraft = loadComposerDraftData(
       draftIdentityRef.current.storageKey,
+      false,
+      parseUserMessageContentRef.current,
     );
     const initialDraft = initialReferenceDraft?.text ?? '';
     const state = EditorState.create({
@@ -4989,6 +5071,7 @@ export function useComposerCore(
     const storedReferenceDraft = loadComposerDraftData(
       composerDraftStorageKey,
       isTouchComposer && persistFileReferencesRef.current,
+      isTouchComposer ? undefined : parseUserMessageContentRef.current,
     );
     const storedDraft = storedReferenceDraft?.text ?? null;
     const resolvingUnscopedDraft =
@@ -5020,7 +5103,7 @@ export function useComposerCore(
         : [];
     composerTagsRef.current = nextTags;
     setComposerTags(nextTags);
-    if (view) {
+    if (view && !adoptUnscopedInMemoryDraft) {
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: nextText },
         effects: [
@@ -5029,7 +5112,7 @@ export function useComposerCore(
         ],
         selection: { anchor: nextText.length },
       });
-    } else {
+    } else if (!view) {
       setMobileText(nextText);
     }
     restoreDraftAttachments(composerDraftStorageKey);

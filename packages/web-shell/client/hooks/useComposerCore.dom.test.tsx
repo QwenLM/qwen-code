@@ -353,6 +353,105 @@ describe('useComposerCore tooltip portal', () => {
   });
 });
 
+describe('custom inline draft tags', () => {
+  const tag = {
+    id: 'orders',
+    value: 'Orders',
+    kind: 'custom-reference',
+    serialized: '<ref:orders>',
+  };
+  const parseUserMessageContent: UserMessageContentParser = (content) =>
+    content
+      .split(/(<ref:orders>)/)
+      .map((text) =>
+        text === tag.serialized ? { type: 'tag', tag } : { type: 'text', text },
+      );
+
+  it('restores only the inserted occurrence after saving, and preserves a literal-only draft', async () => {
+    const options = { sessionId: 'custom-inline', parseUserMessageContent };
+    await mount(options);
+    act(() => {
+      latest!.setText(`literal ${tag.serialized} and `);
+      latest!.addTags([{ ...tag, metadata: { unavailable: BigInt(1) } }], {
+        placement: 'inline',
+      });
+      latest!.insertText(' afterward');
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    const original = latest!.getText();
+    const storageKey = getSessionDraftKey(options.sessionId);
+    expect(localStorage.getItem(storageKey)).toContain(original);
+
+    act(() => root!.unmount());
+    container!.remove();
+    await mount(options);
+    expect(latest!.getText()).toBe(original);
+    const editor = container!.querySelector('.cm-content')!;
+    expect(editor.textContent).toContain(
+      `literal ${tag.serialized} and Orders`,
+    );
+    const remove = editor.querySelector<HTMLButtonElement>(
+      '[aria-label="Remove Orders"]',
+    )!;
+    act(() => {
+      remove.click();
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    const remaining = latest!.getText();
+    expect(remaining.split(tag.serialized)).toHaveLength(2);
+    act(() => root!.unmount());
+    container!.remove();
+    await mount(options);
+    expect(latest!.getText()).toBe(remaining);
+    expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
+  });
+
+  it('hydrates legacy drafts on mount and session switch without covering a saved file tag', async () => {
+    const before = `look at ${tag.serialized}`;
+    const after = `${tag.serialized} and ${tag.serialized}`;
+    localStorage.setItem(getSessionDraftKey('custom-legacy'), before);
+    localStorage.setItem(
+      getSessionDraftKey('mixed-legacy'),
+      '\0qwen-file-draft:1:' +
+        JSON.stringify({
+          text: after,
+          inlineTags: [
+            {
+              start: 0,
+              end: tag.serialized.length,
+              tag: { ...tag, kind: 'file' },
+            },
+          ],
+          tags: [],
+        }),
+    );
+    const mounted = await mount({
+      sessionId: 'custom-legacy',
+      parseUserMessageContent,
+      persistFileReferences: true,
+    });
+    expect(latest!.getText()).toBe(before);
+    expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([tag]);
+    mounted.switchSession('mixed-legacy', undefined);
+    expect(latest!.getText()).toBe(after);
+    expect(
+      getInlineComposerTags(latest!.viewRef.current!).map((item) => item.kind),
+    ).toEqual(['file', tag.kind]);
+  });
+
+  it('keeps a legacy draft editable when the parser changes the source', async () => {
+    const sessionId = 'custom-lossy-parser';
+    const text = `keep this ${tag.serialized}`;
+    localStorage.setItem(getSessionDraftKey(sessionId), text);
+    await mount({
+      sessionId,
+      parseUserMessageContent: () => [{ type: 'tag', tag }],
+    });
+    expect(latest!.getText()).toBe(text);
+    expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
+  });
+});
+
 describe('useComposerCore history and drafts', () => {
   it.each([
     ['panel', 'ArrowUp', false],
