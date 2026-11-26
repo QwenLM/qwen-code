@@ -430,6 +430,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Map<String, Object>> installPublisher(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> publisher, Long writerGeneration) {
+        if (confined(session)) {
+            throw WorkspaceExecutionProfile.confinementDenied();
+        }
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -441,6 +444,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Void> detachPublisher(
             RuntimeLease lease, RuntimeSession session, Long writerGeneration) {
+        if (confined(session)) {
+            throw WorkspaceExecutionProfile.confinementDenied();
+        }
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
         }

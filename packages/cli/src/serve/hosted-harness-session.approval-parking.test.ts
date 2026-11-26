@@ -1183,6 +1183,11 @@ describe('idle suspension', () => {
       expect(requested).toHaveLength(1);
       expect(requested[0].payload['requestId']).toBe(requestId);
       expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      if (confined) {
+        expect(
+          HostedWorkspaceBroker.prototype.workspaceContext,
+        ).not.toHaveBeenCalled();
+      }
       // The reloaded resident suspends on its own; let it go before the next
       // test reads the shared wake stamps.
       await vi.waitFor(

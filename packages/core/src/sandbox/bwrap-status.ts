@@ -43,6 +43,9 @@ export function parseBwrapStatus(
         return false;
       }
     });
+  const unconfirmed: SandboxStatus = payloadExitObserved
+    ? { state: 'unconfirmed', payloadExitObserved: true }
+    : { state: 'unconfirmed' };
   if (
     wire
       .trim()
@@ -58,14 +61,11 @@ export function parseBwrapStatus(
         }
       })
   ) {
-    return payloadExitObserved
-      ? { state: 'unconfirmed', payloadExitObserved: true }
-      : { state: 'unconfirmed' };
+    return unconfirmed;
   }
   try {
     const lines = wire.trim().split('\n');
-    if (lines.length !== 2)
-      return { state: 'unconfirmed', payloadExitObserved };
+    if (lines.length !== 2) return unconfirmed;
     const initial = JSON.parse(lines[0]) as Record<string, unknown>;
     const final = JSON.parse(lines[1]) as Record<string, unknown>;
     const pid = initial['child-pid'];
@@ -85,5 +85,5 @@ export function parseBwrapStatus(
   } catch {
     // A partial or incompatible status stream cannot prove successful exec.
   }
-  return { state: 'unconfirmed', payloadExitObserved };
+  return unconfirmed;
 }

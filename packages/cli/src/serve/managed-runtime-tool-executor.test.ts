@@ -59,6 +59,7 @@ import {
   type ManagedShellCapturePublisher,
   type ManagedShellCaptureSink,
   type ManagedToolReference,
+  type ManagedToolResultPayload,
   type ManagedToolSet,
 } from './managed-runtime-tool-executor.js';
 
@@ -982,7 +983,9 @@ describe('confined Shell executor', () => {
 
   function executor(
     gate = Promise.resolve(),
-    confinedShell = vi.fn(async () => success),
+    confinedShell = vi.fn(
+      async (): Promise<ManagedToolResultPayload | undefined> => success,
+    ),
   ) {
     return new ManagedToolExecutor(
       async ({ sessionId }) => {
@@ -1034,6 +1037,38 @@ describe('confined Shell executor', () => {
       true,
     );
     expect(launch).not.toHaveBeenCalled();
+  });
+
+  it('allows handback after a proven pre-execution failure', async () => {
+    const result = {
+      executionStatus: 'not_started' as const,
+      responseParts: [],
+    };
+    const runtime = executor(
+      undefined,
+      vi.fn(async () => result),
+    );
+
+    await expect(
+      runtime.execute(reference, 'run_shell_command', input),
+    ).resolves.toEqual(result);
+    expect(runtime.closeConfinedSessionAdmission(reference.sessionId)).toBe(
+      true,
+    );
+  });
+
+  it('blocks handback while launch completion is unknown', async () => {
+    const runtime = executor(
+      undefined,
+      vi.fn(async () => undefined),
+    );
+
+    await expect(
+      runtime.execute(reference, 'run_shell_command', input),
+    ).rejects.toBeInstanceOf(ManagedMcpToolUnknownError);
+    expect(runtime.closeConfinedSessionAdmission(reference.sessionId)).toBe(
+      false,
+    );
   });
 });
 

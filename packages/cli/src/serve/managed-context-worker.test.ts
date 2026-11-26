@@ -416,6 +416,7 @@ describe('confined Shell Worker', () => {
 
     const rejected = [
       { command: 'pwd', is_background: true },
+      { command: 'pwd', is_background: 'false' },
       { command: 'pwd', cwd: '.' },
       {},
       { command: '  ' },

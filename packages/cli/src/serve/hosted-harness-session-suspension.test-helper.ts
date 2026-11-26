@@ -72,7 +72,7 @@ function mockApprovalTurn(promptId = PROMPT_ID, confined = false): void {
         name: confined ? 'run_shell_command' : 'write_file',
         callId: 'park-original-call',
         args: confined
-          ? { command: 'pwd' }
+          ? { command: 'pwd', is_background: false }
           : { file_path: 'notes.txt', content: 'hello' },
         isClientInitiated: false,
         prompt_id: promptId,

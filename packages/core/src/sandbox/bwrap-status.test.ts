@@ -73,13 +73,13 @@ describe('bwrap execution receipts', () => {
   // review round 2).
   it.each([
     ['', undefined],
-    ['{ "child-pid": 120 }\n', false],
+    ['{ "child-pid": 120 }\n', undefined],
     ['{ "exit-code": 0 }\n', true],
     ['{ "child-pid": 120 }\n{ "exit-code": 0 }', undefined],
     ['{ "child-pid": 120 }\n{ "exit-code": 42 }\n', true],
     ['{ "child-pid": 120 }\n{ "exit-code": 0 }\n{ "exit-code": 0 }\n', true],
-    ['null\nnull\n', false],
-    ['[]\n[]\n', false],
+    ['null\nnull\n', undefined],
+    ['[]\n[]\n', undefined],
     ['x'.repeat(16385), undefined],
   ])(
     'does not infer execution from missing, truncated or conflicting evidence: %s',

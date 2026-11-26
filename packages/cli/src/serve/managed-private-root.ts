@@ -88,15 +88,15 @@ export async function runPrivateRootShell(
     (matched) => matched.every(Boolean),
     () => false,
   );
-  if (!available)
-    return {
-      executionStatus: 'not_started',
-      responseParts: [],
-      error: {
-        type: CONFINEMENT_UNAVAILABLE,
-        message: 'Private-root confinement is unavailable.',
-      },
-    };
+  const unavailable: ManagedToolResultPayload = {
+    executionStatus: 'not_started',
+    responseParts: [],
+    error: {
+      type: CONFINEMENT_UNAVAILABLE,
+      message: 'Private-root confinement is unavailable.',
+    },
+  };
+  if (!available) return unavailable;
   try {
     const { executePrivateRootBwrap } = await import(
       '@qwen-code/qwen-code-core/sandbox/private-root-bwrap.js'
@@ -115,8 +115,27 @@ export async function runPrivateRootShell(
       signal,
     );
     const result = await handle.result;
-    if (result.sandboxStatus.state !== 'confirmed') return undefined;
-    const { exitCode } = result.sandboxStatus;
+    const status = result.sandboxStatus;
+    if (
+      status.state === 'unconfirmed' &&
+      status.payloadExitObserved === false
+    ) {
+      return unavailable;
+    }
+    if (
+      status.state === 'interrupted' &&
+      result.aborted &&
+      result.executionMethod === 'none' &&
+      handle.pid === undefined
+    ) {
+      return {
+        executionStatus: 'not_started',
+        responseParts: [],
+        error: { message: 'Shell was cancelled before execution.' },
+      };
+    }
+    if (status.state !== 'confirmed') return undefined;
+    const { exitCode } = status;
     return {
       executionStatus: exitCode === 0 ? 'success' : 'error',
       responseParts: [{ type: 'text', text: result.output }],

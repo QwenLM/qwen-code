@@ -3562,7 +3562,7 @@ export class HostedWorkspaceToolTurn {
    */
   private async fetchWorkspaceContext(signal: AbortSignal): Promise<void> {
     const slot = this.context;
-    if (!slot) return;
+    if (this.confined || !slot) return;
     try {
       const files = await waitForTurn(this.broker.workspaceContext(), signal);
       // `''` means "the Workspace has none", so an aborted turn must not
@@ -5043,7 +5043,8 @@ export class HostedWorkspaceToolTurn {
           // deliberate refusals below keep their texts otherwise.
           if (
             this.confined &&
-            (args['is_background'] !== undefined ||
+            ((Object.hasOwn(args, 'is_background') &&
+              args['is_background'] !== false) ||
               args['extension_context'] !== undefined)
           )
             validationError = denied(CONFINEMENT_DENIED);

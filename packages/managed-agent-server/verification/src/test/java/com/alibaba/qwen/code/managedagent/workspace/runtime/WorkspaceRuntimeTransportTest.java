@@ -203,6 +203,27 @@ class WorkspaceRuntimeTransportTest {
     }
 
     @Test
+    void confinedSessionsRefusePublisherChangesBeforeContactingTheWorker() {
+        var scope = new RuntimeScope("tenant", "workspace", "7", "/workspace",
+                WorkspaceExecutionProfile.PRIVATE_ROOT_CAPABILITY_DIGEST, "session");
+        var session = new RuntimeSession("harness", "turn", "continuation", scope);
+        var lease = new RuntimeLease("runtime", URI.create("http://127.0.0.1:1"), "token", "lease", 1);
+        var http = mock(HttpRuntimeTransport.class);
+        var ownership = mock(JdbcWorkspaceExecutionStore.class);
+        var bindings = mock(RuntimeBindingRepository.class);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, ignored -> null);
+
+        assertThatThrownBy(() -> transport.installPublisher(lease, session, Map.of(), 1L))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_runtime_confinement_denied"));
+        assertThatThrownBy(() -> transport.detachPublisher(lease, session, 1L))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_runtime_confinement_denied"));
+        verifyNoInteractions(http, ownership, bindings, sessions);
+    }
+
+    @Test
     void confinedReleaseNeedsPhysicalProofOnlyWhenAnInstallationCanStillBeOwed() {
         var scope = new RuntimeScope("tenant", "workspace", "7", "/workspace",
                 WorkspaceExecutionProfile.PRIVATE_ROOT_CAPABILITY_DIGEST, "session");
