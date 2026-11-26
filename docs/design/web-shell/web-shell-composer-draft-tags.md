@@ -14,6 +14,8 @@ For a desktop composer with a host parser, extend the existing draft envelope wi
 
 Older drafts lack the range array. Recover references the parser recognizes at positions outside existing structured file chips. File chips keep their saved positions and metadata. If the parser cannot reconstruct a chip, its source remains editable. Open composers sharing a draft continue to use the positions from the live editor.
 
+For drafts of at least 64 Ki UTF-16 code units, show the text and any saved file chips first. Run the host parser after the first rendering opportunity, then add the recognized host chips in one editor transaction. A session switch applies its active draft once. While parsing is pending, map saved ranges through document edits and keep them when saving. A submit initiated before the parser runs resolves the pending references so their annotations are included.
+
 This change covers the desktop inline composer. The touch textarea continues using its existing draft behavior.
 
 ## Acceptance criteria
@@ -22,3 +24,4 @@ This change covers the desktop inline composer. The touch textarea continues usi
 - Type the same serialized reference as ordinary text and insert it separately as a chip. After reload, only the inserted reference appears as a chip.
 - Open a legacy draft with host references and a saved file chip. Recognized host references recover without overlapping the file chip. A missing parser or output that changes the source leaves the host text editable.
 - Switch between two sessions with separate drafts and verify their chip positions follow the active draft.
+- Open a large draft or switch into it. The first frame shows the text and saved file chips. Host chips appear in a single later update. If the user edits and immediately switches or closes the editor, the next restore preserves the edit and the surviving chip positions.

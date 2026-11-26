@@ -8,6 +8,7 @@ import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
 import {
   type ComposerSubmitCommit,
+  addInlineTagEffect,
   clearComposerDraftIfMatches,
   captureComposerDraftGuard,
   getInlineComposerTags,
@@ -450,6 +451,129 @@ describe('custom inline draft tags', () => {
     expect(latest!.getText()).toBe(text);
     expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
   });
+
+  it('restores large drafts after the first frame and decorates each reference once', async () => {
+    vi.useFakeTimers({
+      toFake: ['requestAnimationFrame', 'cancelAnimationFrame'],
+    });
+    const parser = vi.fn(parseUserMessageContent);
+    const text = `${tag.serialized} ${tag.serialized}\n${'draft\n'.repeat(12_000)}`;
+    localStorage.setItem(
+      getSessionDraftKey('large'),
+      '\0qwen-file-draft:1:' +
+        JSON.stringify({
+          text,
+          tags: [],
+          inlineTags: [
+            {
+              start: 0,
+              end: tag.serialized.length,
+              tag: { ...tag, kind: 'file' },
+            },
+          ],
+          customInlineRanges: [
+            {
+              start: tag.serialized.length + 1,
+              end: tag.serialized.length * 2 + 1,
+            },
+          ],
+        }),
+    );
+    const mounted = await mount({
+      sessionId: 'small',
+      parseUserMessageContent: parser,
+      persistFileReferences: true,
+    });
+    const view = latest!.viewRef.current!;
+    const update = vi.spyOn(view, 'update');
+    const addedKinds = () =>
+      update.mock.calls.flatMap(([transactions]) =>
+        transactions.flatMap((transaction) =>
+          transaction.effects.flatMap((effect) =>
+            effect.is(addInlineTagEffect) ? [effect.value.tag.kind] : [],
+          ),
+        ),
+      );
+
+    mounted.switchSession('large', undefined);
+    expect(latest!.getText()).toBe(text);
+    expect(view.state.selection.main.anchor).toBe(text.length);
+    expect(addedKinds()).toEqual(['file']);
+    act(() => {
+      vi.advanceTimersToNextFrame();
+    });
+    expect(parser).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersToNextFrame();
+    });
+    expect(parser).toHaveBeenCalledExactlyOnceWith(text);
+    expect(addedKinds()).toEqual(['file', tag.kind]);
+    expect(view.state.selection.main.anchor).toBe(text.length);
+    expect(latest!.getText()).toBe(text);
+    update.mockRestore();
+  });
+
+  it.each(['switch', 'unmount'])(
+    'preserves a pending chip range when editing immediately before %s',
+    async (action) => {
+      vi.useFakeTimers({
+        toFake: ['requestAnimationFrame', 'cancelAnimationFrame'],
+      });
+      const parser = vi.fn(parseUserMessageContent);
+      const sessionId = 'pending';
+      const text = `${tag.serialized} \n${'draft\n'.repeat(12_000)}`;
+      localStorage.setItem(
+        getSessionDraftKey(sessionId),
+        '\0qwen-file-draft:1:' +
+          JSON.stringify({
+            text,
+            tags: [],
+            inlineTags: [],
+            customInlineRanges: [{ start: 0, end: tag.serialized.length }],
+          }),
+      );
+      const mounted = await mount({
+        sessionId,
+        parseUserMessageContent: parser,
+      });
+      act(() => {
+        latest!.viewRef.current!.dispatch({
+          changes: { from: 0, insert: `literal ${tag.serialized} and ` },
+          userEvent: 'input.type',
+        });
+      });
+      const edited = latest!.getText();
+      if (action === 'switch') {
+        mounted.switchSession('other', undefined);
+        expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
+      } else {
+        act(() => root!.unmount());
+        container!.remove();
+      }
+      act(() => {
+        vi.advanceTimersToNextFrame();
+        vi.advanceTimersToNextFrame();
+      });
+      expect(parser).not.toHaveBeenCalled();
+
+      if (action === 'switch') {
+        mounted.switchSession(sessionId, undefined);
+      } else {
+        await mount({ sessionId, parseUserMessageContent: parser });
+      }
+      expect(latest!.getText()).toBe(edited);
+      act(() => {
+        vi.advanceTimersToNextFrame();
+        vi.advanceTimersToNextFrame();
+      });
+      expect(parser).toHaveBeenCalledExactlyOnceWith(edited);
+      expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([tag]);
+      expect(container!.querySelector('.cm-content')!.textContent).toContain(
+        `literal ${tag.serialized} and Orders`,
+      );
+    },
+  );
 });
 
 describe('useComposerCore history and drafts', () => {
