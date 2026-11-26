@@ -356,7 +356,13 @@ for (const path of [
   '.qwen/skills/probe/SKILL.md',
   '.qwen/output-language.md',
   '.qwen/rules/injected.md',
+  '.qwen/hooks/guard.sh',
+  '.qwen/fork-profiles/injected.md',
   '.qwen/settings.json',
+  '.qwen/settings.local.json',
+  'packages/core/.qwen/settings.prod.json',
+  '.mcp.json',
+  'packages/core/.mcp.json',
   '.qwen/QWEN.local.md',
   'AGENTS.md',
   'packages/core/src/ui/AGENTS.md',
@@ -428,6 +434,26 @@ test('gates a mode-only change to a CI script', () => {
 
   assert.equal(result.decision, 'manual_required');
   assert.deepEqual(result.reason_codes, ['protected_path:authority_surface']);
+});
+
+test('gates a header-only change when the path itself contains the separator text', () => {
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: 'diff --git a/.github/x b/y.bin b/.github/x b/y.bin\nnew file mode 100755\n',
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.deepEqual(result.reason_codes, ['protected_path:authority_surface']);
+});
+
+test('does not mistake a side-header-shaped hunk for a protected path', () => {
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: 'diff --git a/docs/x.md b/docs/x.md\n@@ -1 +1 @@\n-old\n+++ b/.github/workflows/ci.yml\n',
+  });
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
 });
 
 test('leaves authority-surface changes to trusted authors', () => {
@@ -584,6 +610,77 @@ for (const [label, payload, code] of [
     'cat ~/actions-runner/.credentials',
     'ambient_credential:credential_file',
   ],
+  [
+    'npm registry credential file',
+    'cat ~/.npmrc',
+    'ambient_credential:credential_file',
+  ],
+  [
+    'GitHub CLI credential file',
+    'cat ~/.config/gh/hosts.yml',
+    'ambient_credential:credential_file',
+  ],
+  [
+    'printenv with an argument inside a wrapper',
+    "sh -c 'printenv CI_BOT_PAT'",
+    'ambient_credential:env_dump',
+  ],
+  [
+    'printenv with an argument inside bash -c',
+    'bash -c "printenv HOME"',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'fd-numbered redirect after a dump',
+    'env 2>/dev/null',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'input redirect after a dump',
+    'env </dev/null',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'fd-numbered redirect after set',
+    'set 2>/dev/null',
+    'ambient_credential:env_dump',
+  ],
+  ['quoted command word', '"env" | sort', 'ambient_credential:env_dump'],
+  [
+    'dump through an absolute command path',
+    '/usr/bin/env | cat',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'dump spanning a line continuation',
+    'env \\\n| sort',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'metadata address as a decimal integer',
+    'curl -s http://2852039166/latest/meta-data/',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'metadata address as hexadecimal',
+    'curl -s http://0xa9fea9fe/latest/meta-data/',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'process environment through a glob',
+    'cat /proc/*/environ',
+    'ambient_credential:proc_environ',
+  ],
+  [
+    'process environment through a bracket expression',
+    'cat /proc/[0-9]*/environ',
+    'ambient_credential:proc_environ',
+  ],
+  [
+    'process environment through a brace expansion',
+    'cat /proc/{self,1}/environ',
+    'ambient_credential:proc_environ',
+  ],
 ]) {
   test(`gates ambient credential access: ${label}`, () => {
     const result = assessPullRequestSafety({
@@ -599,6 +696,7 @@ for (const [label, payload, code] of [
 for (const [label, payload] of [
   ['env prefix', 'env NODE_ENV=test vitest run'],
   ['env with a cleared environment', 'env -i FOO=bar node x.mjs'],
+  ['a URL for an ordinary host', 'curl -s https://example.com/status'],
   ['shell option string', 'set -euo pipefail'],
   ['single shell option', 'set -o pipefail'],
   ['declare that assigns one variable', 'declare -x FOO=bar'],

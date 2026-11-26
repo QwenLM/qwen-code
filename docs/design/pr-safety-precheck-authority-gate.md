@@ -94,18 +94,20 @@ instructions, yields `protected_path:authority_surface`.
 
 Directory prefixes: `.github/`, `.agents/`, `scripts/`, `.qwen/skills/`,
 `.qwen/commands/`, `.qwen/agents/`, `.qwen/workflows/`, `.qwen/extensions/`,
-`.qwen/scripts/`, `.qwen/rules/`.
+`.qwen/scripts/`, `.qwen/rules/`, `.qwen/hooks/`, `.qwen/fork-profiles/`.
 
 File names at any depth, because context files load hierarchically:
 `AGENTS.md`, `QWEN.md`, `QWEN.local.md`, `CLAUDE.md`, `package.json`,
-`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.mjs`.
-
-Exact paths: `.qwen/settings.json` and `.qwen/output-language.md`.
+`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.mjs`,
+`.mcp.json`. Settings variants follow the repository's own self-modification
+glob at any depth: `.qwen/settings.json` and `.qwen/settings.<variant>.json`.
+Exact paths: `.qwen/output-language.md`.
 
 Paths are derived from the diff, the only path source the workflow supplies.
-`---` and `+++` headers carry one unambiguous path each, so deletions, renames
-and paths containing spaces are covered; the `diff --git` header additionally
-covers mode-only changes, which emit no side headers.
+Side headers (`---` and `+++`) are recognized only outside hunks, so example
+diff content cannot manufacture a protected path. Mode-only and binary changes
+rely on their `--git` header, accepted from the split whose normalized halves
+agree even when the path itself contains ` b/`.
 
 Git quotes a path containing a tab, a newline or, with `core.quotePath`, a
 non-ASCII byte. A quoted `.github/...` no longer matches a prefix test, so the
@@ -118,13 +120,18 @@ The source itself is the signal; no sink pairing is required.
 
 | Reason code                          | Matches                                                                                                                                                                                                                                                                                                                                              |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ambient_credential:cloud_metadata`  | `100.100.100.200`, `169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.goog`                                                                                                                                                                                                                                  |
-| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>[/task/<tid>]/environ`                                                                                                                                                                                                                                                                                      |
+| `ambient_credential:cloud_metadata`  | The listed literal hosts, plus URLs whose parser-normalized host is one of those addresses: integer, hexadecimal, and other `inet_aton` spellings count too                                                                                                                                                                                          |
+| `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>[/task/<tid>]/environ`, plus glob `*`, bracket `[...]*` and brace `{self,1}` pid forms                                                                                                                                                                                                                      |
 | `ambient_credential:env_dump`        | `env`, `env -0`, `env --null`, bare `set`, bare `export`, `export -p`, bare `declare`/`typeset` and their `-x`/`-p` forms, in command position followed by a pipe, redirect, separator or end of line; `printenv`; a dump command inside `bash/sh/zsh/dash -c '…'`, including combined flags such as `-lc` and flags preceding `-c` such as `--norc` |
-| `ambient_credential:credential_file` | `.aws/credentials`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, and `.credentials` **only at a path boundary**                                                                                                                                                                               |
+| `ambient_credential:credential_file` | `.aws/credentials`, `.npmrc`, `.config/gh/hosts.yml`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, and `.credentials` **only at a path boundary**                                                                                                                                             |
 
 These run over the PR title, body and added lines, so an instruction carried
 only by the body is caught even when the diff is a single harmless docs file.
+`printenv` takes no terminator either bare or wrapped in shell `-c`; its arguments
+are not option grammar. Other dump verbs accept input redirects and redirects
+with a file descriptor (`2>/dev/null`), quoted or absolute-path command words,
+and line continuations. That is a broader but still enumerated shape list, not a
+claim to recognize every shell program.
 
 Two boundaries keep the rules from gating ordinary work. The dump commands share
 one terminator lookahead, applied once **outside** their alternation in both the
@@ -255,7 +262,7 @@ content rules, as before. Only a missing head SHA still fails closed for them.
 
 ## Validation plan
 
-- Unit suite: `node --test .github/scripts/pr-safety-precheck.test.mjs`.
+- Unit and workflow suites: `node --test .github/scripts/pr-safety-precheck.test.mjs .github/scripts/pr-safety-precheck.workflow.test.mjs`. The latter also asserts that removing the witness byte, changing the comparator, or dropping the fail-closed assignment breaks the corresponding case.
 - Real payloads: run the script against the captured title, body and diff of
   #18362 and #18364 and require `manual_required`.
 - Mutation witness: remove each new rule in a temporary copy of the module and
@@ -287,7 +294,7 @@ content rules, as before. Only a missing head SHA still fails closed for them.
 
 ## Verified results (2026-11-26)
 
-- Unit suite: 124 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 157 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout
@@ -305,7 +312,7 @@ content rules, as before. Only a missing head SHA still fails closed for them.
   `ambient_credential:cloud_metadata`, `ambient_credential:env_dump`.
 - #18364: `ambient_credential:cloud_metadata`,
   `ambient_credential:proc_environ`.
-- Mutation witness: 34 arms, all killed, none skipped, plus an unmutated control
+- Mutation witness: 47 arms, all killed, none skipped, plus an unmutated control
   that must stay green. The harness mirrors the repository layout in its temp
   dir, because the workflow-contract test reads the workflow through a relative
   URL — without the mirror that case reds in every arm for a missing file, and a

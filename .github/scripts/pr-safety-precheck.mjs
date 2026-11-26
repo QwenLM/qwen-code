@@ -38,6 +38,8 @@ const PROTECTED_DIR_PREFIXES = [
   '.qwen/extensions/',
   '.qwen/scripts/',
   '.qwen/rules/',
+  '.qwen/hooks/',
+  '.qwen/fork-profiles/',
 ];
 // Context files load hierarchically, so a nested copy steers the agent too.
 // QWEN.local.md is the project-local slot the memory loader appends; both it
@@ -56,9 +58,11 @@ const PROTECTED_FILE_NAMES = new Set([
   'pnpm-workspace.yaml',
   '.npmrc',
   '.pnpmfile.mjs',
+  '.mcp.json',
 ]);
+// Mirror autoMode's settings variant glob, not just the default filename.
+const PROTECTED_SETTINGS_PATH = /(?:^|\/)\.qwen\/settings(?:\.[^/]+)?\.json$/;
 const PROTECTED_FILE_PATHS = new Set([
-  '.qwen/settings.json',
   // Selected independently of the context-file loader: the CLI prefers a
   // project's output-language file and appends it through
   // getExtensionContextFilePaths(), so it reaches the system prompt too.
@@ -76,21 +80,20 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   ],
   [
     'ambient_credential:proc_environ',
-    /\/proc\/(?:self|thread-self|\d+|\$\$|\$\{?\w+\}?)(?:\/task\/(?:\d+|\$\$|\$\{?\w+\}?))?\/environ/,
+    /\/proc\/(?:self|thread-self|\d+|\$\$|\$\{?\w+\}?|\*|\[[\w-]+\]\*|\{[^}/]+\})(?:\/task\/(?:\d+|\$\$|\$\{?\w+\}?|\*|\[[\w-]+\]\*|\{[^}/]+\}))?\/environ/,
   ],
-  // Every shape that prints the whole environment. The dump commands share one
-  // terminator lookahead, applied once outside their alternation: an operator, a
-  // closing paren (so `$(env)` works), end of line, or a quote that closes the
-  // wrapper and is followed by the same — that last case is what reaches a dump
-  // placed after the first command of a `-c` string (`bash -c "cd repo; env"`).
-  // `printenv` needs no terminator since it has no option grammar. An assignment
-  // prefix is allowed because `env FOO=bar` with no utility is itself a dump,
-  // while `env FOO=bar cmd` still stops at the utility. Flags may precede `-c`.
-  // Remaining disclosed gaps: option grammar such as `env -u NAME`, and command
-  // prefixes outside the anchor set such as `time env` or `command env`.
+  // Shell dump forms this rule enumerates, not every possible shell. A dump
+  // command followed by an operator, closing paren, input/fd redirect, end of
+  // line, or a closing wrapper quote still counts when the redirect has a file
+  // descriptor before it. `printenv` has no option grammar, so its bare and `-c`
+  // forms take no terminator. Other commands keep it so `env FOO=bar cmd` and
+  // `set -euo pipefail` stay ordinary work. An assignment-only `env` is a dump.
+  // Optional path/quote prefixes cover `/usr/bin/env` and quoted command words;
+  // continuation is normalized before these patterns run. Disclosed residuals:
+  // option grammar such as `env -u NAME` and prefixes such as `time env`.
   [
     'ambient_credential:env_dump',
-    /(?:^|[;&|`]|\$\(|(?<![\w$])\()\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>)]|$)|["'](?=\s*(?:[|;&>)]|$)))|(?:^|[;&|`]|\$\(|(?<![\w$])\()\s*printenv\b|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*(?:=\S+)?\s+)*-[a-z]*c[a-z]*\s*["']\s*(?:env(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|printenv\b|export(?:\s+-p)?|set|(?:declare|typeset)(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$))/m,
+    /(?:^|[;&|`]|\$\(|(?<![\w$])\()\s*(?:\/[\w.-]+)*\/?["'\\]?(?:env\b(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export\b(?:\s+-p)?|set\b|(?:declare|typeset)\b(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&<>)]|\d*[<>]|$)|["'](?=\s*(?:[|;&<>)]|\d*[<>]|$)))|(?:^|[;&|`]|\$\(|(?<![\w$])\()\s*(?:\/[\w.-]+)*\/?["'\\]?printenv\b|\b(?:bash|sh|zsh|dash)\s+(?:--?[A-Za-z][\w-]*(?:=\S+)?\s+)*-[a-z]*c[a-z]*\s*["']\s*(?:printenv\b|(?:env\b(?:\s+(?:-0|--null))?(?:\s+[A-Za-z_]\w*=\S+)*|export\b(?:\s+-p)?|set\b|(?:declare|typeset)\b(?:\s+-\w*[xp]\w*)?)(?=\s*(?:[|;&>]|["']|$)))/m,
   ],
   // `.credentials` needs a boundary that admits every spelling of a file read
   // — bare, quoted (including a markdown code span's backtick), or after a
@@ -101,9 +104,32 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   // ungated.
   [
     'ambient_credential:credential_file',
-    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'`])\.credentials\b/,
+    /\.aws\/credentials|\.npmrc\b|\.config\/gh\/hosts\.ya?ml|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'`])\.credentials\b/,
   ],
 ];
+
+const METADATA_HOSTNAMES = new Set([
+  '100.100.100.200',
+  '169.254.169.254',
+  '169.254.170.2',
+  '[fd00:ec2::254]',
+  'metadata.google.internal',
+  'metadata.goog',
+]);
+
+// The URL parser already implements inet_aton: integer, hexadecimal and
+// short-form hostnames normalize to their dotted IPv4 form. Comparing the
+// normalized host avoids enumerating spellings separately.
+function hasCloudMetadataHost(text) {
+  for (const match of text.matchAll(/https?:\/\/[^\s"'`<>\])}]+/gi)) {
+    try {
+      if (METADATA_HOSTNAMES.has(new URL(match[0]).hostname)) return true;
+    } catch {
+      // A malformed URL is not a usable metadata host match.
+    }
+  }
+  return false;
+}
 
 const SECRET_VALUE_PATTERNS = [
   ['secret_value:private_key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
@@ -171,19 +197,42 @@ function diffPath(raw) {
   return unquoted.replace(/^[ab]\//, '');
 }
 
-// `---`/`+++` carry one unambiguous path each, so they cover deletions, renames
-// and paths containing spaces. The `diff --git` header also covers mode-only
-// changes, which emit no side headers.
+// A `--git` header is accepted only when comparing every possible split yields
+// two equal halves; the first ` b/` is not necessarily a separator when a path
+// itself contains that sequence. Mode-only and binary changes have no side
+// headers, so this header is their only path source.
+function diffHeaderPath(line) {
+  const header = line.slice('diff --git '.length);
+  for (
+    let i = header.lastIndexOf('b/');
+    i > 0;
+    i = header.lastIndexOf('b/', i - 1)
+  ) {
+    const left = header.slice(0, header[i - 1] === '"' ? i - 2 : i - 1);
+    const right = header.slice(header[i - 1] === '"' ? i - 1 : i);
+    if (diffPath(left) === diffPath(right)) return diffPath(right);
+  }
+  return null;
+}
+
+// `---`/`+++` carry one unambiguous path each, but only outside hunks: a
+// diff-illustrating line inside a hunk can have the same prefix.
 function changedPaths(diffText) {
   const paths = new Set();
+  let inHunk = false;
   for (const line of diffText.split('\n')) {
-    const header = /^diff --git .*? ("?b\/.+)$/.exec(line);
-    const side = /^(?:---|\+\+\+) (.+)$/.exec(line);
-    const rename = /^rename (?:from|to) (.+)$/.exec(line);
-    const raw = header?.[1] ?? side?.[1] ?? rename?.[1];
-    if (!raw) continue;
-    const path = diffPath(raw);
-    if (path !== '/dev/null') paths.add(path);
+    let path = null;
+    if (line.startsWith('diff --git ')) {
+      inHunk = false;
+      path = diffHeaderPath(line);
+    } else if (line.startsWith('@@ ')) {
+      inHunk = true;
+    } else if (!inHunk) {
+      const side = /^(?:---|\+\+\+) (.+)$/.exec(line);
+      const rename = /^rename (?:from|to) (.+)$/.exec(line);
+      if (side || rename) path = diffPath((side ?? rename)[1]);
+    }
+    if (path && path !== '/dev/null') paths.add(path);
   }
   return paths;
 }
@@ -191,6 +240,7 @@ function changedPaths(diffText) {
 function isProtectedPath(path) {
   return (
     PROTECTED_DIR_PREFIXES.some((prefix) => path.startsWith(prefix)) ||
+    PROTECTED_SETTINGS_PATH.test(path) ||
     PROTECTED_FILE_PATHS.has(path) ||
     PROTECTED_FILE_NAMES.has(path.slice(path.lastIndexOf('/') + 1))
   );
@@ -243,7 +293,12 @@ export function assessPullRequestSafety({
   const prText = `${pr?.title ?? ''}\n${pr?.body ?? ''}\n${addedText}`;
   checkPatterns(prText, SECRET_VALUE_PATTERNS, reasons);
   checkPatterns(prText, PROMPT_INJECTION_PATTERNS, reasons);
-  checkPatterns(prText, AMBIENT_CREDENTIAL_PATTERNS, reasons);
+  // Shell continuations make one command span a line boundary.
+  const shellText = prText.replace(/\\\r?\n/g, '');
+  checkPatterns(shellText, AMBIENT_CREDENTIAL_PATTERNS, reasons);
+  if (hasCloudMetadataHost(shellText)) {
+    addReason(reasons, 'ambient_credential:cloud_metadata');
+  }
 
   return {
     decision: reasons.length === 0 ? 'allow_triage' : 'manual_required',
