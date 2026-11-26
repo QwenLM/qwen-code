@@ -43,14 +43,19 @@ describe('main CI failure resolver', () => {
 
   it('runs only for a green main-side run', () => {
     // Pin the whole expression: an appended arm could admit pull-request
-    // runs, which say nothing about main.
+    // runs, which say nothing about main. The dispatch arm mirrors the
+    // reporter's: SDK Java runs on dispatch and schedule only, so without it
+    // that whole family never retires.
     expect(job.if).toBe(
       "${{ github.repository == 'QwenLM/qwen-code' && " +
         "github.event.workflow_run.conclusion == 'success' && " +
-        "github.event.workflow_run.head_branch == 'main' && " +
+        "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
-        'contains(fromJSON(\'["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]\'), github.event.workflow.name))) }}',
+        'contains(fromJSON(\'["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]\'), github.event.workflow.name)))) || ' +
+        "(github.event.workflow_run.event == 'workflow_dispatch' && " +
+        "github.event.workflow_run.head_branch == 'main' && " +
+        "github.event.workflow.name == 'SDK Java')) }}",
     );
     expect(yml.permissions).toEqual({ contents: 'read', issues: 'write' });
   });

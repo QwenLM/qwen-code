@@ -36,14 +36,18 @@ jobs:
     name: 'Retire resolved failure issues'
     # Same main-side events the reporter files from, restricted to green
     # conclusions. A pull-request run proves nothing about main and must not
-    # retire a main-side issue.
+    # retire a main-side issue. SDK Java publishes no push run, so its dispatch
+    # and schedule arms are its only chances to go green.
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'main' &&
+      ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name))) }}
+      contains(fromJSON('["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name)))) ||
+      (github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow.name == 'SDK Java')) }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     concurrency:
