@@ -53,6 +53,7 @@ import {
   type DaemonSessionAgentTaskStatus,
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
+  type DaemonSessionClient,
   type DaemonSessionSummary,
   type DaemonSessionContextStatus,
   type DaemonSessionContextUsageStatus,
@@ -102,6 +103,7 @@ import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
 import { DaemonAvailabilityContext } from './daemon/availability-context.js';
+import type { DaemonProductSessionContext } from './daemon/session/types';
 import { offlineDaemon } from './daemon/availability.test-fixtures.js';
 import { WebShellNavigationBoundary } from './navigation';
 import { HotkeySetter } from './live/HotkeySetter';
@@ -1058,7 +1060,12 @@ const {
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestSessionOverviewProps: null as {
-        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+        onOpenSession?: (
+          sessionId: string,
+          workspaceCwd?: string,
+          sessionContext?: DaemonProductSessionContext,
+          restoredSession?: DaemonSessionClient,
+        ) => void;
         onOpenSplit?: (sessionIds: string[]) => void;
         onCurrentSessionRemoved?: (session: {
           sessionId: string;
@@ -2602,7 +2609,12 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
   const React = await import('react');
   return {
     SessionOverviewPanel: (props: {
-      onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+      onOpenSession?: (
+        sessionId: string,
+        workspaceCwd?: string,
+        sessionContext?: DaemonProductSessionContext,
+        restoredSession?: DaemonSessionClient,
+      ) => void;
       onOpenSplit?: (sessionIds: string[]) => void;
       onCurrentSessionRemoved?: (session: {
         sessionId: string;
@@ -49258,6 +49270,45 @@ describe('App session callbacks', () => {
     } finally {
       window.history.replaceState(null, '', '/');
     }
+  });
+
+  it('hands a restored worktree client to the existing session load', async () => {
+    const restoredSession = {
+      sessionId: 'removed-session',
+      workspaceCwd: '/work/secondary',
+      clientId: 'restore-client',
+    } as unknown as DaemonSessionClient;
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    mockSessionActions.loadSession.mockClear();
+
+    await act(async () => {
+      testState.latestSessionOverviewProps?.onOpenSession?.(
+        'removed-session',
+        '/work/secondary',
+        undefined,
+        restoredSession,
+      );
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'removed-session',
+      {
+        workspaceCwd: '/work/secondary',
+        sessionContext: { kind: 'workspace', cwd: '/work/secondary' },
+        artifactCountHint: undefined,
+        restoredSession,
+      },
+    );
   });
 
   it('does not restore a folded split when opening a session from the Session Overview', async () => {
