@@ -36,7 +36,12 @@ import type {
   ManagedAgentSessionPhase,
 } from './managed-agent-provider.js';
 import { toManagedPermissionRequest } from './managed-approval.js';
-import { canonicalQuestionAnswers } from './managed-question-response.js';
+import {
+  canonicalQuestionAnswers,
+  MAX_MANAGED_QUESTION_TEXT_LENGTH,
+} from './managed-question-response.js';
+
+export { MAX_MANAGED_QUESTION_TEXT_LENGTH };
 
 type OperationState = ChatOperation['state'];
 
@@ -121,7 +126,6 @@ export interface ManagedChatControllerDeps {
 }
 
 export const MANAGED_QUESTION_SUBMIT_OPTION_ID = 'submit';
-export const MAX_MANAGED_QUESTION_TEXT_LENGTH = 8192;
 
 export function mapManagedPhase(
   phase: ManagedAgentSessionPhase,
@@ -185,6 +189,7 @@ export function toManagedQuestionPermissionRequest(
         required: question.required,
         allowText: question.allowText,
         maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
+        multilineText: true,
       })),
     },
     // Managed question actions carry no dismiss wire variant (sending a string

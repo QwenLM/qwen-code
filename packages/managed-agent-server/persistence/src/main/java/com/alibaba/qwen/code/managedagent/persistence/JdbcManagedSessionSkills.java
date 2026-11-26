@@ -1,20 +1,28 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Repository
 public class JdbcManagedSessionSkills
@@ -23,8 +31,8 @@ public class JdbcManagedSessionSkills
     private final ObjectMapper json;
     private final RequestDigests digests;
     private final JdbcManagedAgentDefinitionStore definitions;
-    @org.springframework.beans.factory.annotation.Autowired
-    @org.springframework.context.annotation.Lazy
+    @Autowired
+    @Lazy
     private JdbcManagedExtensionRecordStore resources;
 
     public JdbcManagedSessionSkills(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
@@ -36,7 +44,7 @@ public class JdbcManagedSessionSkills
     }
 
     public List<Map<String, Object>> fromLaunchReference(String tenant, String session,
-            com.fasterxml.jackson.databind.JsonNode ref) {
+            JsonNode ref) {
         if (ref.isNull()) {
             return null;
         }
@@ -48,7 +56,7 @@ public class JdbcManagedSessionSkills
             return AgentDefinitionExtensions.sessionSkills(json.readValue(resource.bytes(), new TypeReference<List<Map<String, Object>>>() { }));
         } catch (ManagedAgentException error) {
             throw inConflictVocabulary(error);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw conflict(error);
         }
     }
@@ -93,7 +101,7 @@ public class JdbcManagedSessionSkills
                 if (snapshot.containsKey("initialSelection")) {
                     requireCreationIntent(snapshot, json, digests, true);
                 } else {
-                    if (!snapshot.keySet().equals(java.util.Set.of("version", "skills", "serverLoop", "digest"))) {
+                    if (!snapshot.keySet().equals(Set.of("version", "skills", "serverLoop", "digest"))) {
                         throw conflict();
                     }
                     Map<String, Object> content = new LinkedHashMap<>();
@@ -109,7 +117,7 @@ public class JdbcManagedSessionSkills
                 requireCreationIntent(snapshot, json, digests, false);
                 return snapshot.get("skills") == null ? null : AgentDefinitionExtensions.sessionSkills(snapshot.get("skills"));
             }
-            if (!snapshot.keySet().equals(java.util.Set.of("version", "skills", "digest"))
+            if (!snapshot.keySet().equals(Set.of("version", "skills", "digest"))
                     || !Integer.valueOf(1).equals(snapshot.get("version"))) {
                 throw conflict();
             }
@@ -160,19 +168,19 @@ public class JdbcManagedSessionSkills
             Map<String, Object> command = requireCreationIntent(snapshot, json, digests, v3);
             String identity = tenant + ":" + session;
             if (!ManagedConfigInstall.derivedOperationId("managed-extension-initial:", identity).equals(command.get("operationId"))
-                    || !org.apache.commons.codec.digest.DigestUtils.sha256Hex("managed-extension-initial:" + identity).equals(command.get("actorKey"))) {
+                    || !DigestUtils.sha256Hex("managed-extension-initial:" + identity).equals(command.get("actorKey"))) {
                 throw conflict();
             }
             return command;
         } catch (ManagedAgentException error) {
             throw inConflictVocabulary(error);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw conflict(error);
         }
     }
 
     public void saveInitialSelection(String tenant, String session,
-            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> pins) {
+            List<ManagedExtensionPackages.Pin> pins) {
         String previous = creationJson(tenant, session);
         List<Map<String, Object>> skills = decode(previous, json, digests);
         boolean serverLoop = serverLoopMarker(previous, json);
@@ -181,7 +189,7 @@ public class JdbcManagedSessionSkills
         }
         String identity = tenant + ":" + session;
         Map<String, Object> command = Map.of("operationId", ManagedConfigInstall.derivedOperationId("managed-extension-initial:", identity),
-                "actorKey", org.apache.commons.codec.digest.DigestUtils.sha256Hex("managed-extension-initial:" + identity),
+                "actorKey", DigestUtils.sha256Hex("managed-extension-initial:" + identity),
                 "expectedRevision", 0, "extensions", json.convertValue(pins, new TypeReference<List<Map<String, Object>>>() { }));
         Map<String, Object> content = new LinkedHashMap<>();
         content.put("skills", skills);
@@ -199,16 +207,16 @@ public class JdbcManagedSessionSkills
                     value, tenant, session, previous) != 1) {
                 throw conflict();
             }
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException("Cannot save initial extension selection", error);
         }
     }
 
     private static Map<String, Object> requireCreationIntent(Map<String, Object> snapshot, ObjectMapper json,
             RequestDigests digests, boolean withServerLoop) {
-        java.util.Set<String> keys = withServerLoop
-                ? java.util.Set.of("version", "skills", "serverLoop", "initialSelection", "digest")
-                : java.util.Set.of("version", "skills", "initialSelection", "digest");
+        Set<String> keys = withServerLoop
+                ? Set.of("version", "skills", "serverLoop", "initialSelection", "digest")
+                : Set.of("version", "skills", "initialSelection", "digest");
         if (!snapshot.keySet().equals(keys)
                 || !(snapshot.get("initialSelection") instanceof Map<?, ?> raw)) {
             throw conflict();
@@ -218,7 +226,7 @@ public class JdbcManagedSessionSkills
         }
         @SuppressWarnings("unchecked")
         Map<String, Object> command = (Map<String, Object>) raw;
-        if (!command.keySet().equals(java.util.Set.of("operationId", "actorKey", "expectedRevision", "extensions"))
+        if (!command.keySet().equals(Set.of("operationId", "actorKey", "expectedRevision", "extensions"))
                 || !(command.get("operationId") instanceof String operation) || !operation.matches("[a-f0-9-]{36}")
                 || !(command.get("actorKey") instanceof String actor) || !actor.matches("[a-f0-9]{64}")
                 || !Integer.valueOf(0).equals(command.get("expectedRevision"))) {
@@ -265,7 +273,7 @@ public class JdbcManagedSessionSkills
                     value, tenant, session) != 1) {
                 throw conflict();
             }
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException("Cannot save Session Skills", error);
         }
     }

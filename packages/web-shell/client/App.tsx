@@ -917,6 +917,7 @@ function resolvePreparedSubmit(
 
 interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
+  suppressInputHistory?: boolean;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   bindBlockId?: string;
@@ -1033,6 +1034,7 @@ type CancelledRetryState =
       files?: PromptFile[];
       inputAnnotations?: DaemonInputAnnotation[];
       idempotencyKey?: string;
+      suppressInputHistory?: boolean;
       previousRetriedTurnErrorId: string | null;
       previousShowRetryHint: boolean;
     };
@@ -10051,6 +10053,7 @@ export function App({
   const lastSubmittedInputAnnotationsRef = useRef<
     DaemonInputAnnotation[] | undefined
   >(undefined);
+  const lastSubmittedSuppressInputHistoryRef = useRef(false);
   const lastSubmittedSourceVersionRef = useRef(
     composerSourceVersionRef.current,
   );
@@ -10070,6 +10073,7 @@ export function App({
     images?: PromptImage[];
     files?: PromptFile[];
     inputAnnotations?: DaemonInputAnnotation[];
+    suppressInputHistory?: boolean;
     owner: CancelledRetryOwner;
   } | null>(null);
   const [showRetryHint, setShowRetryHint] = useState(false);
@@ -10077,6 +10081,7 @@ export function App({
   showRetryHintRef.current = showRetryHint;
   const disarmSubmittedPromptRetry = useCallback(() => {
     lastSubmittedPromptRef.current = '';
+    lastSubmittedSuppressInputHistoryRef.current = false;
     lastSubmittedImagesRef.current = undefined;
     lastSubmittedFilesRef.current = undefined;
     lastSubmittedInputAnnotationsRef.current = undefined;
@@ -10121,6 +10126,8 @@ export function App({
       lastSubmittedImagesRef.current = failedRetry.images;
       lastSubmittedFilesRef.current = failedRetry.files;
       lastSubmittedInputAnnotationsRef.current = failedRetry.inputAnnotations;
+      lastSubmittedSuppressInputHistoryRef.current =
+        failedRetry.suppressInputHistory === true;
       lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
       retryableTurnErrorIdRef.current = retryableTurnError.id;
       retryableTurnErrorIdentityRef.current = { block: retryableTurnError };
@@ -10194,6 +10201,7 @@ export function App({
       snapshot: currentSnapshot,
     };
     lastSubmittedPromptRef.current = '';
+    lastSubmittedSuppressInputHistoryRef.current = false;
     lastSubmittedImagesRef.current = undefined;
     lastSubmittedFilesRef.current = undefined;
     lastSubmittedInputAnnotationsRef.current = undefined;
@@ -10292,6 +10300,8 @@ export function App({
       lastSubmittedImagesRef.current = state.images;
       lastSubmittedFilesRef.current = state.files;
       lastSubmittedInputAnnotationsRef.current = state.inputAnnotations;
+      lastSubmittedSuppressInputHistoryRef.current =
+        state.suppressInputHistory === true;
       lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
       retryableTurnErrorIdRef.current = renderedTurnError.id;
       retryableTurnErrorIdentityRef.current = { block: renderedTurnError };
@@ -13712,6 +13722,7 @@ export function App({
         skipPrepareSubmit?: boolean;
         skipSubmitBefore?: boolean;
         submittedPrompt?: string;
+        suppressInputHistory?: boolean;
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
@@ -13929,6 +13940,9 @@ export function App({
               ...(opts?.submittedPrompt !== undefined
                 ? { submittedPrompt: opts.submittedPrompt }
                 : {}),
+              ...(opts?.suppressInputHistory
+                ? { suppressInputHistory: true }
+                : {}),
               images,
               files,
               inputAnnotations:
@@ -14005,6 +14019,8 @@ export function App({
           preparedInputAnnotations.length > 0
             ? preparedInputAnnotations
             : undefined;
+        lastSubmittedSuppressInputHistoryRef.current =
+          opts?.suppressInputHistory === true;
         lastSubmittedSourceVersionRef.current =
           composerSourceVersionRef.current;
         retryableTurnErrorIdRef.current = null;
@@ -14077,6 +14093,7 @@ export function App({
         ...(opts?.submittedPrompt !== undefined
           ? { submittedPrompt: opts.submittedPrompt }
           : {}),
+        ...(opts?.suppressInputHistory ? { suppressInputHistory: true } : {}),
         ...(opts?.source ? { source: opts.source } : {}),
         images,
         files,
@@ -14616,6 +14633,11 @@ export function App({
       skipPrepareSubmit: true,
       idempotencyKey: retryIdempotencyKey,
       inputAnnotations: failed.inputAnnotations,
+      ...(lastSubmittedSuppressInputHistoryRef.current &&
+      lastSubmittedPromptRef.current === failed.text &&
+      lastSubmittedSourceVersionRef.current === failed.owner.sourceVersion
+        ? { suppressInputHistory: true }
+        : {}),
       onAdmissionStarted: () => {
         admissionStarted = true;
       },
@@ -16363,6 +16385,7 @@ export function App({
         await sendPrompt(command, undefined, undefined, {
           ownerRef: owner,
           suppressSessionTitle: true,
+          suppressInputHistory: true,
         });
       } catch (error) {
         if (owner.current.isCurrent()) {
@@ -16706,6 +16729,7 @@ export function App({
         (lastSubmittedFilesRef.current?.length ?? 0) > 0);
     if (retryableTurnError && previousIdentity && !identityMatches) {
       lastSubmittedPromptRef.current = '';
+      lastSubmittedSuppressInputHistoryRef.current = false;
       lastSubmittedImagesRef.current = undefined;
       lastSubmittedFilesRef.current = undefined;
       lastSubmittedInputAnnotationsRef.current = undefined;
@@ -19270,7 +19294,10 @@ export function App({
           admitted = true;
           resolve();
         };
-        sendPrompt(prompt, undefined, undefined, { onAdmitted: admit }).then(
+        sendPrompt(prompt, undefined, undefined, {
+          onAdmitted: admit,
+          suppressInputHistory: true,
+        }).then(
           () => {
             if (!admitted) {
               reject(new Error('Run was cancelled before it started'));
@@ -22236,6 +22263,7 @@ export function App({
         !matchesTurnErrorIdentity(currentRetryError, savedRetryErrorIdentity)
       ) {
         lastSubmittedPromptRef.current = '';
+        lastSubmittedSuppressInputHistoryRef.current = false;
         lastSubmittedImagesRef.current = undefined;
         lastSubmittedFilesRef.current = undefined;
         lastSubmittedInputAnnotationsRef.current = undefined;
@@ -22258,6 +22286,8 @@ export function App({
       const retryImages = lastSubmittedImagesRef.current;
       const retryFiles = lastSubmittedFilesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
+      const retrySuppressInputHistory =
+        lastSubmittedSuppressInputHistoryRef.current;
       const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
       const previousShowRetryHint = showRetryHintRef.current;
       const retryAttemptId = ++cancelledRetryAttemptRef.current;
@@ -22296,6 +22326,7 @@ export function App({
         retry: true,
         idempotencyKey: retryIdempotencyKey,
         inputAnnotations: retryInputAnnotations,
+        ...(retrySuppressInputHistory ? { suppressInputHistory: true } : {}),
         onAdmissionStarted: () => {
           admissionStarted = true;
         },
@@ -22322,6 +22353,7 @@ export function App({
             files: retryFiles,
             inputAnnotations: retryInputAnnotations,
             idempotencyKey: retryIdempotencyKey,
+            suppressInputHistory: retrySuppressInputHistory,
             previousRetriedTurnErrorId,
             previousShowRetryHint,
           });
@@ -22344,6 +22376,7 @@ export function App({
               files: retryFiles,
               inputAnnotations: retryInputAnnotations,
               idempotencyKey: retryIdempotencyKey,
+              suppressInputHistory: retrySuppressInputHistory,
               previousRetriedTurnErrorId,
               previousShowRetryHint,
             });
@@ -22365,6 +22398,7 @@ export function App({
               files: retryFiles,
               inputAnnotations: retryInputAnnotations,
               idempotencyKey: retryIdempotencyKey,
+              suppressInputHistory: retrySuppressInputHistory,
               previousRetriedTurnErrorId,
               previousShowRetryHint,
             });
@@ -22381,6 +22415,7 @@ export function App({
                 images: retryImages,
                 files: retryFiles,
                 inputAnnotations: retryInputAnnotations,
+                suppressInputHistory: retrySuppressInputHistory,
                 owner: retryOwner,
               };
             }
@@ -23176,6 +23211,7 @@ export function App({
       sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, undefined, {
         ownerRef: owner,
         suppressSessionTitle: true,
+        suppressInputHistory: true,
       })
         .then(() => {
           if (!owner.current.isCurrent()) return;

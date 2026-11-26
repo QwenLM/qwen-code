@@ -137,7 +137,7 @@ async function registryFixture(
   await installed.body?.cancel();
   return { registry, prepares: () => prepares, refusals: () => refusals };
 }
-it('registers a writer generation on a worker without the capability as a legacy publisher', async () => {
+it('fences Shell publisher replacement even without Runtime observation', async () => {
   const registry = new ManagedShellPublisherRegistry();
   const workerApp = express();
   registry.register(
@@ -172,17 +172,31 @@ it('registers a writer generation on a worker without the capability as a legacy
       },
     );
 
-  const installed = await install('a'.repeat(43), 1);
-  expect(installed.status).toBe(200);
-  expect(await installed.json()).not.toHaveProperty('observation');
-  // The generation is ignored, so a different descriptor still conflicts
-  // even at a newer generation, exactly as before the capability existed.
-  const replaced = await install('b'.repeat(43), 2);
-  expect(replaced.status).toBe(409);
-  await replaced.body?.cancel();
-  const invalid = await install('a'.repeat(43), 0);
-  expect(invalid.status).toBe(400);
-  await invalid.body?.cancel();
+  const expectInstall = async (
+    token: string,
+    writerGeneration: number | undefined,
+    status: number,
+  ) => {
+    const response = await install(token.repeat(43), writerGeneration);
+    expect(response.status).toBe(status);
+    if (status === 200)
+      expect(await response.json()).not.toHaveProperty('observation');
+    else await response.body?.cancel();
+  };
+  await expectInstall('a', undefined, 200);
+  await expectInstall('b', undefined, 409);
+  await expectInstall('a', 0, 400);
+  await expectInstall('a', 1, 200);
+  await expectInstall('b', 2, 200);
+  await expectInstall('b', 2, 200);
+  await expectInstall('a', 1, 409);
+  await expectInstall('a', undefined, 409);
+  expect(registry.detachSession('runtime-a', 1)).toBe(false);
+  expect(registry.detachSession('runtime-a')).toBe(false);
+  expect(registry.hasSession('runtime-a')).toBe(true);
+  expect(registry.detachSession('runtime-a', 2)).toBe(true);
+  await expectInstall('a', undefined, 409);
+  await expectInstall('a', 3, 200);
 });
 it.skipIf(process.platform === 'win32')(
   'settles a physically stopped foreground Shell when its original publisher is lost',

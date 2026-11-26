@@ -462,7 +462,10 @@ export class DefaultHookOutput implements HookOutput {
    * Get the effective reason for blocking or stopping
    */
   getEffectiveReason(): string {
-    return this.stopReason || this.reason || 'No reason provided';
+    for (const reason of [this.stopReason, this.reason]) {
+      if (typeof reason === 'string' && reason.trim()) return reason;
+    }
+    return 'No reason provided';
   }
 
   protected getRawAdditionalContext(): string | undefined {
