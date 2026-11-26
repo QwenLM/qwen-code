@@ -5510,6 +5510,151 @@ describe('LlmChat', async () => {
       },
     );
 
+    it.each([
+      ['mixed', false],
+      ['mixed', true],
+      ['uniform', false],
+      ['uniform', true],
+    ] as const)(
+      'keeps the visible PDF charge and fixed overhead across usage-less %s compression (retained: %s)',
+      async (source, retain) => {
+        mockGeneratorConfig({ enableCacheControl: false });
+        vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({});
+        const price = 4200;
+        vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+          imageTokenEstimate: price,
+        });
+        vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+          text: '<state_snapshot>Complete summary.</state_snapshot>',
+        } as never);
+        const counts = [];
+        for (const pdf of [false, true]) {
+          const media = pdf
+            ? { inlineData: { mimeType: 'application/pdf', data: 'JVBERg==' } }
+            : { text: '[document: application/pdf]' };
+          const owner = content('user', { text: 'Read.' }, media);
+          markApiHistoryPrompt(owner, 'read-pdf');
+          const history = retain
+            ? [
+                userText('x'.repeat(8_000)),
+                modelText('first'),
+                userText('again'),
+                modelText('second'),
+                owner,
+              ]
+            : [owner, modelText('x'.repeat(48_000))];
+          if (retain) markApiHistoryPrompt(history[3], 'prior-response');
+
+          const recordChatCompression = vi.fn();
+          const target = newChat({
+            history,
+            recorder: { recordChatCompression },
+          });
+          const fixed = 100_000;
+          const mixed = source === 'mixed';
+          target.seedResumeTokenCounts(
+            fixed + estimateContentTokens(history, price),
+            0,
+            true,
+            false,
+            mixed ? undefined : price,
+            undefined,
+            {
+              trailingEntries: 0,
+              mediaTokenCosts: mixed
+                ? history.map((e) => (e === owner && pdf ? [price] : []))
+                : undefined,
+            },
+          );
+          const before = target.getLastPromptTokenCount();
+          const info = await target.tryCompress(
+            'next-prompt',
+            false,
+            undefined,
+            { precomputedEffectiveTokens: 172_000 },
+          );
+          expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+          expect(info.originalTokenCount).toBe(before);
+          const saved = recordChatCompression.mock.lastCall![0];
+          expect(
+            saved.compressedHistory.some((e: Content) =>
+              e.parts?.some((p) => p.inlineData),
+            ),
+          ).toBe(retain && pdf);
+          if (retain && mixed && pdf) {
+            expect(saved.mediaTokenCosts.at(-1)).toEqual([price]);
+            const restored = newChat({
+              history: structuredClone(saved.compressedHistory),
+            });
+            restored.seedResumeTokenCounts(
+              saved.resumePromptTokenCount,
+              0,
+              true,
+              false,
+              undefined,
+              undefined,
+              { trailingEntries: 0, mediaTokenCosts: saved.mediaTokenCosts },
+            );
+            expect(restored.getLastPromptTokenCount()).toBe(
+              target.getLastPromptTokenCount(),
+            );
+            expect(target.getLastPromptTokenCount()).toBeLessThan(
+              saved.resumePromptTokenCount,
+            );
+          }
+          counts.push(target.getLastPromptTokenCount());
+          if (!pdf)
+            expect(counts[0]).toBe(
+              fixed + estimateContentTokens(target.getHistoryShallow(true)),
+            );
+        }
+        expect(counts[1]).toBe(counts[0]);
+      },
+    );
+
+    it.each(['uniform', 'mixed'])(
+      'includes turns added after a %s checkpoint in manual compression',
+      async (source) => {
+        mockGeneratorConfig({ enableCacheControl: false });
+        vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+          text: '<state_snapshot>Complete summary.</state_snapshot>',
+        } as never);
+        vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+          pdf: true,
+        });
+        const price = 4200;
+        const history = [
+          content(
+            'user',
+            { text: 'start' },
+            { inlineData: { mimeType: 'application/pdf', data: 'JVBERg==' } },
+          ),
+          modelText('ok'),
+        ];
+        const target = newChat({ history });
+        target.seedResumeTokenCounts(
+          estimateContentTokens(history, price),
+          0,
+          true,
+          false,
+          source === 'uniform' ? price : undefined,
+          undefined,
+          source === 'mixed'
+            ? { trailingEntries: 0, mediaTokenCosts: [[price], []] }
+            : undefined,
+        );
+        target.addHistory(userText('shell output '.repeat(4000)));
+        target.addHistory(modelText('received'));
+        const visible = estimateContentTokens(
+          target.getHistoryShallow(true),
+          price,
+        );
+        const info = await target.tryCompress('manual', true);
+        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        expect(info.originalTokenCount).toBe(visible);
+      },
+    );
+
     it('counts a pending validation note once across automatic cold compaction', async () => {
       mockGeneratorConfig({ enableCacheControl: false });
       const cold = vi

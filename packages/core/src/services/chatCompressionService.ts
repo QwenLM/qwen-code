@@ -402,6 +402,13 @@ export interface CompressOptions {
    * accounts for the latest model output.
    */
   originalTokenCount: number;
+  /** Estimate committed history on the same basis as its token anchor. */
+  checkpointHistory?: {
+    uniformlyPriced: boolean;
+    estimate: (history: Content[], imagePrice: number) => number;
+  };
+  /** Price a fully local candidate as the main request will send it. */
+  estimateRequestHistory?: (history: Content[], imagePrice: number) => number;
   /** Latest model output omitted by a provider prompt-only anchor. */
   unaccountedOutputTokens?: number;
   /**
@@ -1734,6 +1741,7 @@ export class ChatCompressionService {
     }
 
     let newTokenCount = originalHistoryTokenCount;
+    let projectedNewTokenCount: number | undefined;
     let historyImageTokenEstimate: number | undefined;
     let extraHistory: Content[] = [];
     let canCalculateNewTokenCount = false;
@@ -1965,32 +1973,40 @@ export class ChatCompressionService {
         // restoration/temporal context, not the retained tail, a second time.
         newTokenCount += restorationTokenCount;
       } else {
-        const estimatedOriginalVisibleTokenCount = estimateModelContentTokens(
+        const imagePrice = slimmingConfig.imageTokenEstimate;
+        const estimatePrevious =
+          opts.checkpointHistory?.estimate ?? estimateModelContentTokens;
+        const estimatedOriginalVisibleTokenCount = estimatePrevious(
           curatedHistory,
-          slimmingConfig.imageTokenEstimate,
+          imagePrice,
         );
-        const estimatedNewVisibleTokenCount = estimateModelContentTokens(
-          extraHistory,
-          slimmingConfig.imageTokenEstimate,
+        const estimatedNonVisibleTokenCount = Math.max(
+          0,
+          originalHistoryTokenCount - estimatedOriginalVisibleTokenCount,
         );
+        // A retained tail with an inherited remainder keeps its old charges.
+        // Uniform results are recorded at their durable media price and
+        // projected onto the live route when LlmChat installs the history.
+        const uniformPrice =
+          opts.checkpointHistory?.uniformlyPriced ||
+          !retainedTail.length ||
+          estimatedNonVisibleTokenCount === 0;
+        const estimatedNewVisibleTokenCount = (
+          uniformPrice ? estimateModelContentTokens : estimatePrevious
+        )(extraHistory, imagePrice);
         if (
           estimatedOriginalVisibleTokenCount > 0 &&
           estimatedNewVisibleTokenCount > 0
         ) {
-          const estimatedNonVisibleTokenCount = Math.max(
-            0,
-            originalHistoryTokenCount - estimatedOriginalVisibleTokenCount,
-          );
-          // Keep the API-reported system/tool/prompt remainder intact. The
-          // local estimator is only used for the visible conversation delta, so
-          // missing usage metadata cannot replace the authoritative total with
-          // a much smaller visible-history-only estimate.
           newTokenCount =
             estimatedNonVisibleTokenCount + estimatedNewVisibleTokenCount;
-          // With an inherited remainder the unchanged tail cancels out of the
-          // delta. Its images still carry their original, unknown charge.
-          if (!retainedTail.length || estimatedNonVisibleTokenCount === 0) {
-            historyImageTokenEstimate = slimmingConfig.imageTokenEstimate;
+          if (uniformPrice) {
+            historyImageTokenEstimate = imagePrice;
+            if (opts.estimateRequestHistory) {
+              projectedNewTokenCount =
+                estimatedNonVisibleTokenCount +
+                opts.estimateRequestHistory(extraHistory, imagePrice);
+            }
           }
           canCalculateNewTokenCount = true;
           config
@@ -2044,7 +2060,9 @@ export class ChatCompressionService {
             CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
         },
       };
-    } else if (newTokenCount > originalHistoryTokenCount) {
+    } else if (
+      (projectedNewTokenCount ?? newTokenCount) > originalHistoryTokenCount
+    ) {
       return {
         newHistory: null,
         info: {

@@ -5,6 +5,7 @@
  */
 
 import type {
+  Content,
   EmbedContentParameters,
   EmbedContentResponse,
   GenerateContentParameters,
@@ -35,11 +36,14 @@ import {
 } from '../utils/errors.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
-export type HistoryThoughtProjection = (thought: Part) => Part | undefined;
+export type HistoryThoughtProjection = (
+  thought: Part,
+  contentIndex: number,
+) => Part | undefined;
 export type HistoryThoughtRequest = Pick<
   GenerateContentParameters,
   'model' | 'config'
->;
+> & { contents: Content[] };
 
 /**
  * Interface abstracting the core content generation functionality.

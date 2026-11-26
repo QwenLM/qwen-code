@@ -877,7 +877,7 @@ export const userContentPushSnapshotKey = Symbol(
 
 interface LocalCountRoute {
   modalities?: InputModalities;
-  generator: ContentGenerator;
+  generator?: ContentGenerator;
   model: string;
   config?: GenerateContentConfig;
 }
@@ -1081,6 +1081,7 @@ interface TryCompressOptions {
    * bounds a side-query that resolves to the route that reported it (#13876).
    */
   requestRouteKey?: string;
+  requestModel?: string;
   /**
    * Delay writing the compression checkpoint until the caller has run any
    * post-compression guards that may roll the in-memory chat state back.
@@ -3064,11 +3065,19 @@ export class LlmChat {
     pending?: Content,
   ): Promise<void> {
     if (!this.compressionObserver && !this.chatRecordingService) return;
+    const mixedSource =
+      info.historyImageTokenEstimate === undefined
+        ? this.lastPromptTokenCountSource
+        : undefined;
     const payload = this.compressionRecord(
       info,
       history,
       info.summaryPrefixLength ?? history.length,
       pending,
+      mixedSource,
+      mixedSource
+        ? this.mixedHistoryReattachmentTokens(history, mixedSource)
+        : 0,
     );
     const { compressedHistory } = payload;
     if (this.compressionObserver) {
@@ -3424,6 +3433,24 @@ export class LlmChat {
     return tokens(selected) - tokens(other);
   }
 
+  private mixedHistoryReattachmentTokens(
+    history: Content[],
+    source: PromptTokenCountSource,
+  ): number {
+    if (!source.referenceCosts) return 0;
+    return this.mixedReattachmentTokens(
+      source,
+      selectReattachedImages(
+        [],
+        resolveCompactionTuning(this.config.getChatCompression?.())
+          .maxRecentImages,
+        history,
+        this.imagePayloadStore,
+      ),
+      this.config.getEffectiveInputModalities(),
+    );
+  }
+
   /**
    * Builds request contents for the content generator without deep-cloning the
    * whole chat history. This is an internal hot path: long sessions can make a
@@ -3577,6 +3604,7 @@ export class LlmChat {
     count: number,
     isEstimated = false,
     historyImageTokenEstimate?: number,
+    previousChat?: LlmChat,
   ): void {
     this.toolBudgetUsageAnchor = undefined;
     this.unaccountedContextSnapshots = new WeakSet<Part>();
@@ -3596,6 +3624,21 @@ export class LlmChat {
             estimateModelContentTokens(projected, local.imageTokenEstimate),
         );
       }
+    }
+    const previous = previousChat?.lastPromptTokenCountSource;
+    if (!local && previousChat && previous?.mediaCosts) {
+      copyHistoryMediaCosts(
+        previousChat.history,
+        this.history,
+        previous.mediaCosts,
+      );
+      this.lastPromptTokenCountSource.mediaCosts = previous.mediaCosts;
+      this.lastPromptTokenCountSource.catalogChanges = previous.catalogChanges;
+      // The previous chat's transient reattachments are absent from the new store.
+      this.lastPromptTokenCount = Math.max(
+        0,
+        count - (previous.referenceCosts?.reattached ?? 0),
+      );
     }
     this.lastOutputTokenCount = 0;
     this.lastCachedContentTokenCount = 0;
@@ -3718,11 +3761,15 @@ export class LlmChat {
     const generator =
       route?.generator ??
       this.config.getContentGenerator?.({ allowUninitialized: true });
-    const project = generator?.getHistoryThoughtProjection?.(
-      route ?? { model: this.config.getModel(), config: this.generationConfig },
-    );
+    const project = generator?.getHistoryThoughtProjection?.({
+      ...(route ?? {
+        model: this.config.getModel(),
+        config: this.generationConfig,
+      }),
+      contents: slimmedHistory,
+    });
     if (!project) return slimmedHistory;
-    return slimmedHistory.map((entry) =>
+    return slimmedHistory.map((entry, index) =>
       entry.role === 'model' && entry.parts
         ? {
             ...entry,
@@ -3731,7 +3778,7 @@ export class LlmChat {
               typeof part.text === 'string' &&
               !part.functionCall &&
               !part.functionResponse
-                ? (project(part) ?? [])
+                ? (project(part, index) ?? [])
                 : part,
             ),
           }
@@ -4007,27 +4054,79 @@ export class LlmChat {
     const originalTokenCountIsEstimated =
       originalTokenCountOverride?.isEstimated ??
       this.promptCountIsEstimateDerived();
-    const originalTokenCount =
-      originalTokenCountOverride?.count ??
-      (this.needsPromptOverheadEstimate()
-        ? estimateModelContentTokens(
-            this.getHistoryShallow(true),
-            resolveSlimmingConfig(this.config.getChatCompression())
-              .imageTokenEstimate,
-          )
-        : this.lastPromptTokenCount);
+    const checkpointSource = this.lastPromptTokenCountSource;
+    const checkpointCosts = checkpointSource.mediaCosts;
+    const local = checkpointSource.localHistory;
+    const requestRoute = options?.requestModel
+      ? {
+          model: options.requestModel,
+          config: {
+            ...this.generationConfig,
+            ...options.requestGenerationConfig,
+          },
+        }
+      : undefined;
+    const estimateRequestHistory = (history: Content[], price: number) =>
+      estimateModelContentTokens(
+        this.localRequestHistory(history, requestRoute),
+        price,
+      );
+    // sendMessageStream already supplies the admission count. Walk its
+    // committed history only if the service actually needs the visible delta.
+    let localVisible: number | undefined;
+    const estimateLocal = local
+      ? (history: Content[]) =>
+          (localVisible ??= estimateRequestHistory(
+            history,
+            local.imageTokenEstimate,
+          ))
+      : undefined;
+    const estimateMixed = checkpointCosts
+      ? (history: Content[], price: number) =>
+          estimateWithMediaCosts(history, price, checkpointCosts) +
+          this.mixedHistoryReattachmentTokens(history, checkpointSource)
+      : undefined;
+    let originalTokenCount =
+      originalTokenCountOverride?.count ?? this.lastPromptTokenCount;
+    if (!originalTokenCountOverride && this.needsPromptOverheadEstimate()) {
+      const history = this.getHistoryShallow(true);
+      const price = resolveSlimmingConfig(
+        this.config.getChatCompression(),
+      ).imageTokenEstimate;
+      if (local && estimateLocal) {
+        originalTokenCount = Math.max(
+          0,
+          local.tokenOffset + estimateLocal(history),
+        );
+      } else if (estimateMixed) {
+        originalTokenCount = Math.max(
+          originalTokenCount,
+          estimateMixed(history, price),
+        );
+      } else {
+        originalTokenCount = estimateModelContentTokens(history, price);
+      }
+    }
     debugLogger.debug(
       `[compaction] token-count provenance: prompt_id=${promptId}, ` +
         `originalTokenCount=${originalTokenCount}, ` +
         `estimated=${originalTokenCountIsEstimated}`,
     );
     const service = new ChatCompressionService();
+    let candidateVisible: number | undefined;
     const { newHistory, info } = await service.compress(this, {
       promptId,
       force,
       config: this.config,
       consecutiveFailures: this.consecutiveFailures,
       originalTokenCount,
+      estimateRequestHistory: (history, price) =>
+        (candidateVisible = estimateRequestHistory(history, price)),
+      checkpointHistory: estimateLocal
+        ? { uniformlyPriced: true, estimate: estimateLocal }
+        : estimateMixed
+          ? { uniformlyPriced: false, estimate: estimateMixed }
+          : undefined,
       unaccountedOutputTokens:
         !this.needsPromptOverheadEstimate() &&
         originalTokenCountOverride === undefined
@@ -4099,6 +4198,20 @@ export class LlmChat {
         info.newTokenCountIsEstimated,
         info.historyImageTokenEstimate,
       );
+      if (info.historyImageTokenEstimate === undefined && checkpointCosts) {
+        this.lastPromptTokenCountSource.mediaCosts = checkpointCosts;
+        this.lastPromptTokenCountSource.catalogChanges =
+          checkpointSource.catalogChanges;
+        if (checkpointSource.referenceCosts) {
+          this.lastPromptTokenCountSource.referenceCosts = {
+            priced: checkpointSource.referenceCosts.priced,
+            reattached: this.mixedHistoryReattachmentTokens(
+              newHistory,
+              checkpointSource,
+            ),
+          };
+        }
+      }
       // setLastPromptTokenCount re-keyed the fresh count to the ACTIVE
       // route, but in-send callers compress for the REQUEST route: the
       // session-token-limit gate reads by that key (client.ts's sole
@@ -4118,7 +4231,14 @@ export class LlmChat {
         // supersedes anything the request route retained.
         this.tokenCountsByRouteKey.delete(options.requestRouteKey);
       }
-      this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
+      const installed = this.lastPromptTokenCountSource.localHistory;
+      if (requestRoute && installed && candidateVisible !== undefined) {
+        this.lastPromptTokenCount = Math.max(
+          0,
+          installed.tokenOffset + candidateVisible,
+        );
+      }
+      this.telemetryService?.setLastPromptTokenCount(this.lastPromptTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
       // tripped.
@@ -4164,24 +4284,13 @@ export class LlmChat {
     const locallyPriced =
       !this.lastPromptTokenCount || localSource !== undefined;
     const refs = this.lastPromptTokenCountSource.referenceCosts;
-    const replayTokens = (history: Content[]) =>
-      refs
-        ? this.mixedReattachmentTokens(
-            this.lastPromptTokenCountSource,
-            selectReattachedImages(
-              [],
-              resolveCompactionTuning(this.config.getChatCompression?.())
-                .maxRecentImages,
-              history,
-              this.imagePayloadStore,
-            ),
-            this.config.getEffectiveInputModalities(),
-          )
-        : 0;
     const projectedBefore = locallyPriced
       ? this.localRequestHistory(beforeHistory)
       : beforeHistory;
-    const replayBefore = replayTokens(beforeHistory);
+    const replayBefore = this.mixedHistoryReattachmentTokens(
+      beforeHistory,
+      this.lastPromptTokenCountSource,
+    );
     const beforeEstimate =
       replayBefore +
       estimateWithMediaCosts(projectedBefore, imageTokenEstimate, mediaCosts);
@@ -4210,7 +4319,10 @@ export class LlmChat {
     const projectedAfter = locallyPriced
       ? this.localRequestHistory(afterHistory)
       : afterHistory;
-    const replayAfter = replayTokens(afterHistory);
+    const replayAfter = this.mixedHistoryReattachmentTokens(
+      afterHistory,
+      this.lastPromptTokenCountSource,
+    );
     const afterEstimate =
       replayAfter +
       estimateWithMediaCosts(projectedAfter, imageTokenEstimate, mediaCosts);
@@ -5071,6 +5183,7 @@ export class LlmChat {
               },
               precomputedEffectiveTokens: effectiveTokens,
               requestGenerationConfig: params.config,
+              requestModel: model,
               requestRouteKey,
               deferChatCompressionRecord: shouldForceFromHard,
               // Hard-rescue is force=true to bypass the cheap-gate breaker
@@ -6188,6 +6301,7 @@ export class LlmChat {
                       observedServerCeiling: contextOverflow.limitTokens,
                       observedServerCeilingKind: contextOverflow.limitKind,
                       requestGenerationConfig: params.config,
+                      requestModel: model,
                       requestRouteKey,
                       trigger: 'auto',
                       requestPayloadTooLarge: requestPayloadOverflow.isTooLarge,

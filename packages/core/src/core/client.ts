@@ -6848,6 +6848,7 @@ export class LlmClient {
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,
         info.historyImageTokenEstimate,
+        previousChat,
       );
       this.resetManagedAutoMemoryAfterCompression();
       // Re-send a full IDE context blob on the next regular message

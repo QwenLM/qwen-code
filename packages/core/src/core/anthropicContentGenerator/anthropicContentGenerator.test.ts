@@ -1737,19 +1737,23 @@ describe('AnthropicContentGenerator', () => {
           },
         ];
         const config = { thinkingConfig: { includeThoughts } };
+        const contents = [
+          userText('first'),
+          content('model', ...thoughts, { text: 'answer' }),
+          userText('second'),
+        ];
         const { generator, req } = await send(nativeCfg(model, { baseUrl }), {
-          contents: [
-            userText('first'),
-            content('model', ...thoughts, { text: 'answer' }),
-            userText('second'),
-          ],
+          contents,
           config,
         });
         const project = generator.getHistoryThoughtProjection({
           model,
           config,
+          contents,
         });
-        const projected = thoughts.flatMap((thought) => project(thought) ?? []);
+        const projected = thoughts.flatMap(
+          (thought) => project(thought, 1) ?? [],
+        );
         const replayed = (
           req.messages[1].content as Array<{
             type: string;
@@ -1765,6 +1769,52 @@ describe('AnthropicContentGenerator', () => {
           ]);
         expect(
           projected.map((part) => [part.text, part.thoughtSignature]),
+        ).toEqual(replayed);
+      },
+    );
+
+    it.each([
+      [NATIVE, 'claude-opus-4-6', ['latest']],
+      [DEEPSEEK, 'deepseek-v4-pro', ['older', 'latest']],
+    ] as const)(
+      'counts empty signed thoughts surviving merged assistant history on %s',
+      async (baseUrl, model, expected) => {
+        const signed = (thoughtSignature: string) => ({
+          thought: true,
+          text: '',
+          thoughtSignature,
+        });
+        const older = signed('older');
+        const latest = signed('latest');
+        const contents = [
+          userText('first'),
+          content('model', older, { text: 'first answer' }),
+          userText('second'),
+          content('model', latest),
+          modelText('second answer'),
+          userText('third'),
+          content('model', { thought: true, text: 'unsigned' }),
+        ];
+        const { generator, req } = await send(nativeCfg(model, { baseUrl }), {
+          model,
+          contents,
+        });
+        const project = generator.getHistoryThoughtProjection({
+          model,
+          contents,
+        });
+        const replayed = req.messages.flatMap(({ content }) =>
+          content
+            .filter(
+              (block) => block.type === 'thinking' && block.thinking === '',
+            )
+            .map((block) => block.signature),
+        );
+        expect(replayed).toEqual(expected);
+        expect(
+          [project(older, 1), project(latest, 3)].flatMap(
+            (part) => part?.thoughtSignature ?? [],
+          ),
         ).toEqual(replayed);
       },
     );

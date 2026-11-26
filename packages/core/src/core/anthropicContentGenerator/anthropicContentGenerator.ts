@@ -880,11 +880,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
   getHistoryThoughtProjection(
     request: HistoryThoughtRequest,
   ): HistoryThoughtProjection {
-    const { historyOptions } = this.getRequestThinking({
-      ...request,
-      contents: [],
-    });
-    return (part) => {
+    const { historyOptions } = this.getRequestThinking(request);
+    let replayedEmptyThoughtTurns: Set<number> | undefined;
+    return (part, contentIndex) => {
       const thought = normalizeAnthropicHistoryThought(
         part,
         historyOptions.demoteForeignThoughtToText,
@@ -896,6 +894,19 @@ export class AnthropicContentGenerator implements ContentGenerator {
             !hasThinkingSignature(thought.thoughtSignature)))
       )
         return undefined;
+      if (
+        thought?.thought &&
+        thought.text === '' &&
+        hasThinkingSignature(thought.thoughtSignature) &&
+        !historyOptions.injectThinkingOnToolUseTurns
+      ) {
+        replayedEmptyThoughtTurns ??=
+          this.converter.getReplayedEmptyThoughtTurns(
+            request.contents,
+            historyOptions,
+          );
+        if (!replayedEmptyThoughtTurns.has(contentIndex)) return undefined;
+      }
       return thought;
     };
   }

@@ -288,25 +288,48 @@ export class AnthropicContentConverter {
     this.enableCacheControl = enableCacheControl;
   }
 
-  convertLlmRequestToAnthropic(
-    request: GenerateContentParameters,
-    options: ConvertLlmRequestToAnthropicOptions = {},
-  ): {
-    system?: AnthropicTextBlockParam[] | string;
-    messages: AnthropicMessageParam[];
-  } {
+  getReplayedEmptyThoughtTurns(
+    contents: Content[],
+    options: ConvertLlmRequestToAnthropicOptions,
+  ): Set<number> {
+    const sourceTurns = new Map<AnthropicContentBlockParam, number>();
+    const messages = this.normalizeHistoryMessages(
+      contents,
+      options,
+      sourceTurns,
+    );
+    const replayed = new Set<number>();
+    for (const message of messages) {
+      if (!Array.isArray(message.content)) continue;
+      for (const block of message.content) {
+        const index = sourceTurns.get(block);
+        if (index !== undefined) replayed.add(index);
+      }
+    }
+    return replayed;
+  }
+
+  private normalizeHistoryMessages(
+    contents: ContentListUnion,
+    options: ConvertLlmRequestToAnthropicOptions,
+    sourceTurns?: Map<AnthropicContentBlockParam, number>,
+  ): AnthropicMessageParam[] {
     this.resetToolIdState();
     let messages: AnthropicMessageParam[] = [];
-
-    const systemText = this.extractTextFromContentUnion(
-      request.config?.systemInstruction,
-    );
-
-    this.processContents(
-      request.contents,
-      messages,
-      !!options.demoteForeignThoughtToText,
-    );
+    const entries = Array.isArray(contents)
+      ? contents
+      : contents
+        ? [contents]
+        : [];
+    for (const [index, content] of entries.entries()) {
+      const message = this.processContent(
+        content,
+        !!options.demoteForeignThoughtToText,
+        index,
+        sourceTurns,
+      );
+      if (message) messages.push(message);
+    }
 
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
@@ -350,7 +373,10 @@ export class AnthropicContentConverter {
     // deleted but had the identical effect of hiding the block from this
     // check).
     if (options.dropUnsignedAssistantThinking) {
-      messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
+      messages = this.dropUnsignedThinkingFromAssistantMessages(
+        messages,
+        !sourceTurns,
+      );
     }
     // Must run BEFORE dropEmptyTextThinkingBlocks: that pass computes
     // "the latest assistant message" once and skips stripping an
@@ -386,6 +412,21 @@ export class AnthropicContentConverter {
     if (options.ensureLeadingAssistantThinking) {
       ensureLeadingThinkingOnToolUseAssistantMessages(messages);
     }
+
+    return messages;
+  }
+
+  convertLlmRequestToAnthropic(
+    request: GenerateContentParameters,
+    options: ConvertLlmRequestToAnthropicOptions = {},
+  ): {
+    system?: AnthropicTextBlockParam[] | string;
+    messages: AnthropicMessageParam[];
+  } {
+    const systemText = this.extractTextFromContentUnion(
+      request.config?.systemInstruction,
+    );
+    const messages = this.normalizeHistoryMessages(request.contents, options);
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
     // per-call override when the caller (typically the generator) passes
@@ -620,31 +661,17 @@ export class AnthropicContentConverter {
     return llmResponse;
   }
 
-  private processContents(
-    contents: ContentListUnion,
-    messages: AnthropicMessageParam[],
-    demoteForeignThoughtToText: boolean,
-  ): void {
-    if (Array.isArray(contents)) {
-      for (const content of contents) {
-        this.processContent(content, messages, demoteForeignThoughtToText);
-      }
-    } else if (contents) {
-      this.processContent(contents, messages, demoteForeignThoughtToText);
-    }
-  }
-
   private processContent(
     content: ContentUnion | PartUnion,
-    messages: AnthropicMessageParam[],
     demoteForeignThoughtToText: boolean,
-  ): void {
+    index: number,
+    sourceTurns?: Map<AnthropicContentBlockParam, number>,
+  ): AnthropicMessageParam | undefined {
     if (typeof content === 'string') {
-      messages.push({
+      return {
         role: 'user',
         content: [{ type: 'text', text: content }],
-      });
-      return;
+      };
     }
 
     if (!this.isContentObject(content)) return;
@@ -669,13 +696,21 @@ export class AnthropicContentConverter {
           );
         }
         if (thought?.thought) {
-          contentBlocks.push({
+          const block = {
             type: 'thinking',
             thinking: thought.text || '',
             ...(typeof thought.thoughtSignature === 'string' && {
               signature: thought.thoughtSignature,
             }),
-          } as unknown as AnthropicContentBlockParam);
+          } as unknown as AnthropicContentBlockParam;
+          contentBlocks.push(block);
+          if (
+            sourceTurns &&
+            !thought.text &&
+            hasThinkingSignature(thought.thoughtSignature)
+          ) {
+            sourceTurns.set(block, index);
+          }
         } else if (thought?.text) {
           contentBlocks.push({ type: 'text', text: thought.text });
         }
@@ -730,8 +765,9 @@ export class AnthropicContentConverter {
           return 0;
         });
       }
-      messages.push({ role, content: contentBlocks });
+      return { role, content: contentBlocks };
     }
+    return undefined;
   }
 
   private createToolResultBlock(
@@ -1251,6 +1287,7 @@ export class AnthropicContentConverter {
 
   private dropUnsignedThinkingFromAssistantMessages(
     messages: AnthropicMessageParam[],
+    validateReplay: boolean,
   ): AnthropicMessageParam[] {
     const cleaned: AnthropicMessageParam[] = [];
     const isUnsignedThinking = (block: AnthropicContentBlockParam) => {
@@ -1299,7 +1336,7 @@ export class AnthropicContentConverter {
         continue;
       }
 
-      if (activeToolUseTurns.has(index)) {
+      if (validateReplay && activeToolUseTurns.has(index)) {
         throw new Error(
           'Cannot replay a tool-use turn that is still in progress because a ' +
             'thinking signature is missing. Start a new session to continue.',
