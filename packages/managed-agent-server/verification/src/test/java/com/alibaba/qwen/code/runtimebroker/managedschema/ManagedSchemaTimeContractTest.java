@@ -55,6 +55,7 @@ class ManagedSchemaTimeContractTest {
             "ma_schedule_occurrence=slot,next_retry_at,gmt_create,gmt_modified",
             "ma_client_files_binding=expires_at,gmt_create,gmt_modified",
             "ma_client_files_request=expires_at,gmt_create,gmt_modified",
+            "ma_terminal_ticket=expires_at,gmt_create",
             "ma_session_principal=gmt_create");
 
     @Test
@@ -81,7 +82,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(89, count);
+        assertEquals(91, count);
         assertAll(checks);
     }
 

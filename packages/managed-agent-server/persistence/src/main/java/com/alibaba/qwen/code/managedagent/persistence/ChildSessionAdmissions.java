@@ -6,14 +6,18 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -54,7 +58,7 @@ final class ChildSessionAdmissions {
     }
 
     static String childActorOf(String parentSessionId) {
-        return com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId.of(parentSessionId);
+        return ChildActorId.of(parentSessionId);
     }
 
     Admission insertChildSessionCommand(String tenantId,
@@ -80,7 +84,7 @@ final class ChildSessionAdmissions {
 
     Admission insertPublicChildSessionCommand(String tenantId, String parentSessionId,
             String idempotencyKey, String requestDigest, String title, List<Map<String, Object>> input,
-            String payloadDigest, StoreModels.SessionLineage lineage, com.fasterxml.jackson.databind.JsonNode snapshot) {
+            String payloadDigest, StoreModels.SessionLineage lineage, JsonNode snapshot) {
         return insertChildSession(tenantId, parentSessionId, idempotencyKey, requestDigest,
                 title, input, payloadDigest, lineage, null, snapshot);
     }
@@ -89,7 +93,7 @@ final class ChildSessionAdmissions {
             String parentSessionId, String idempotencyKey,
             String requestDigest, String title, List<Map<String, Object>> input,
             String payloadDigest, StoreModels.SessionLineage lineage,
-            String childCwdRelative, com.fasterxml.jackson.databind.JsonNode snapshot) {
+            String childCwdRelative, JsonNode snapshot) {
         BrokerValues.requireChildRunId(lineage.parentChildRunId(), "parentChildRunId");
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
@@ -247,7 +251,7 @@ final class ChildSessionAdmissions {
             SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
         }
         ManagedReceipts.insertCreation(jdbc, tenantId,
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, childActorOf(parentSessionId)),
+                ManagedWorkspaceRegistry.actorKey(tenantId, childActorOf(parentSessionId)),
                 idempotencyKey, requestDigest, sessionId, turnId, now);
         var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId)
                 : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
@@ -257,7 +261,7 @@ final class ChildSessionAdmissions {
                         .anyMatch(skill -> ManagedLoopSkill.NAME.equals(skill.get("name")));
         boolean parentServerLoop = creationSkills.serverLoopInjected(tenantId, parentSessionId);
         boolean childServerLoop = toolProfile == null && parentServerLoop;
-        java.util.Optional.ofNullable(ManagedLoopSkill.childCatalog(inheritedSkills, toolProfile, parentDefinitionHasLoop, parentServerLoop))
+        Optional.ofNullable(ManagedLoopSkill.childCatalog(inheritedSkills, toolProfile, parentDefinitionHasLoop, parentServerLoop))
                 .ifPresent(skills -> creationSkills.save(tenantId, sessionId, skills, childServerLoop));
         eventJournal.appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
@@ -337,7 +341,7 @@ final class ChildSessionAdmissions {
     List<WorkspaceCommand> findWorkspaceCommand(String tenantId,
             String actorId, String idempotencyKey) {
         ManagedReceipts.Receipt row = ManagedReceipts.creation(jdbc, tenantId,
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId), idempotencyKey);
+                ManagedWorkspaceRegistry.actorKey(tenantId, actorId), idempotencyKey);
         return row == null
                 ? List.of()
                 : List.of(

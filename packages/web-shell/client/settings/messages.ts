@@ -57,6 +57,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.scope.workspace': 'Workspace',
   'settings.value.on': 'ON',
   'settings.value.off': 'OFF',
+  'settings.value.unset': 'Not set',
   'settings.action.edit': 'Edit',
   'settings.action.select': 'Select',
   'settings.action.save': 'Save',
@@ -114,6 +115,11 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
+  'settings.arrowKeyHistory.label': 'Recall history with arrow keys',
+  'settings.arrowKeyHistory.description':
+    'Press Up or Down in the message box to recall previous prompts. Saved in this browser.',
+  'settings.arrowKeyHistory.disabledByHost':
+    'The host app has turned off arrow-key history recall.',
   'settings.label.ui.enableFollowupSuggestions': 'Enable Follow-up Suggestions',
   'settings.description.ui.enableFollowupSuggestions':
     'Show context-aware follow-up suggestions after a task completes. Press Tab or Right Arrow to insert, Enter to accept and submit.',
@@ -159,6 +165,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.scope.workspace': '工作区',
   'settings.value.on': '开',
   'settings.value.off': '关',
+  'settings.value.unset': '未设置',
   'settings.action.edit': '编辑',
   'settings.action.select': '选择',
   'settings.action.save': '保存',
@@ -216,6 +223,10 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.ui.chatWidth': '屏宽',
   'settings.description.ui.chatWidth':
     '纯前端的聊天内容宽度设置，保存在当前浏览器中。',
+  'settings.arrowKeyHistory.label': '用上下键寻回历史消息',
+  'settings.arrowKeyHistory.description':
+    '在消息输入框中按 ↑ 或 ↓ 可寻回历史消息。此设置保存在当前浏览器中。',
+  'settings.arrowKeyHistory.disabledByHost': '宿主应用已关闭方向键历史寻回。',
   'settings.option.ui.chatWidth.1000': '常规',
   'settings.option.ui.chatWidth.wide': '超宽',
   'settings.category.General': '通用',
@@ -492,7 +503,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '开启（默认）时，受信任 Git workspace 中的新 Web Shell 会话默认进入隔离 worktree：composer 缺省为 Worktree 模式，首条消息发送时创建 worktree。设为 false 则缺省使用当前分支。仅影响 Web Shell composer 的缺省值；显式模式选择与 daemon API 不变。',
   'settings.label.worktree.maxRetained': '保留的会话 Worktree 上限',
   'settings.description.worktree.maxRetained':
-    '每仓库最近 Web Shell 会话 worktree 的预留保留上限，目前尚未应用：按数量清扫与重开 chat 时恢复均未在此切片实现。删除 chat 仅在必须保留工作树状态时，于移除前创建快照；归档 chat 保留工作树及绑定。设为 0 将用于关闭按数量自动删除。不影响工具/agent worktree，它们保留现有清理语义。后续功能由 #17237 跟踪。',
+    '每个归属唯一的管理根保留最近相应数量的合规会话 worktree，默认 15。活跃及置顶会话不占删除候选配额。设为 0 只关闭自动清扫，不禁止显式恢复快照。归属不明、根重叠或配置不可读时保留；不顺带删除孤儿快照。不影响工具/agent worktree。',
 };
 
 export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
@@ -547,6 +558,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.scope.workspace': 'Рабочая область',
   'settings.value.on': 'ВКЛ',
   'settings.value.off': 'ВЫКЛ',
+  'settings.value.unset': 'Не задано',
   'settings.action.edit': 'Изменить',
   'settings.action.select': 'Выбрать',
   'settings.action.save': 'Сохранить',
@@ -605,6 +617,11 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.ui.chatWidth': 'Ширина чата',
   'settings.description.ui.chatWidth':
     'Ширина содержимого чата только на фронтенде. Хранится в этом браузере.',
+  'settings.arrowKeyHistory.label': 'История запросов по клавишам со стрелками',
+  'settings.arrowKeyHistory.description':
+    'Нажмите ↑ или ↓ в поле ввода, чтобы вернуть предыдущий запрос. Настройка сохраняется в этом браузере.',
+  'settings.arrowKeyHistory.disabledByHost':
+    'Основное приложение отключило вызов истории клавишами со стрелками.',
   'settings.label.ui.enableFollowupSuggestions':
     'Включить предложения следующих шагов',
   'settings.description.ui.enableFollowupSuggestions':
@@ -712,9 +729,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.description.ui.shellOutputMaxLines':
     'Максимум строк вывода shell, показываемых встроенно. 0 снимает лимит и показывает весь вывод; скрытые строки по-прежнему видны индикатором +N lines.',
   'settings.label.ui.disableWorkflowKeywordTrigger':
-    'Отключить срабатывание по слову Workflow',
+    'Отключить срабатывание Workflow по ключевым словам',
   'settings.description.ui.disableWorkflowKeywordTrigger':
-    'Если включено, слово `workflow` в запросе больше не мягко направляет ход к инструменту Workflow (индикатор `workflow active` в подвале тоже скрывается). Действует, только когда workflow включены.',
+    'Если настройка включена, запросы от человека с ключевыми словами `workflow` или `ultracode` больше не подсказывают модели использовать инструмент Workflow в текущем ходе. При включённой поддержке Workflow это действует в терминале, IDE, веб-интерфейсе и для сообщений SDK, явно помеченных как отправленные человеком. Обычные запросы в неинтерактивном режиме и автоматические сообщения не вызывают эту подсказку.',
   'settings.label.ui.showStatusInTitle': 'Статус в заголовке окна',
   'settings.description.ui.showStatusInTitle':
     'Показывать имя и статус сессии Qwen Code в заголовке окна терминала.',
@@ -729,7 +746,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.privacy.usageStatisticsEnabled':
     'Включить статистику использования',
   'settings.description.privacy.usageStatisticsEnabled':
-    'Включить сбор статистики использования.',
+    'Включить сбор статистики использования. Отключение этой настройки также останавливает обновление каталога models.dev.',
   'settings.label.fastModel': 'Быстрая модель',
   'settings.description.fastModel':
     'Модель для подсказок ввода и спекулятивного исполнения. Оставьте пустым, чтобы использовать основную. Более маленькая/быстрая модель (например qwen3-coder-flash) снижает задержку и стоимость.',
@@ -770,7 +787,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.tools.toolSearch.threshold':
     'Порог предзагрузки отложенных инструментов (%)',
   'settings.description.tools.toolSearch.threshold':
-    'Доля окна контекста при старте сессии на предзагрузку отложенных инструментов (встроенных пакетов и MCP). Если schema всех отложенных инструментов умещается в бюджет, они объявляются в начале сессии, а не по требованию, и первый вызов обходится без моста tool_search. 0 отключает предзагрузку по порогу: отложенные инструменты грузятся по требованию через мост ToolSearch + ToolCall.',
+    'Процент окна контекста, отведённый на предзагрузку обычных отложенных инструментов при запуске сессии, включая встроенные и MCP-инструменты. По умолчанию 0, поэтому предзагрузка по порогу отключена. Такие инструменты обычно доступны через стабильный мост ToolSearch + ToolCall, поэтому перед первым использованием требуется дополнительный вызов tool_search. Если задано N и схемы всех подходящих отложенных инструментов укладываются в N% окна контекста, инструменты объявляются сразу и доступны для прямых вызовов без обращения к мосту. В противном случае они остаются доступны через мост, пока оба его инструмента зарегистрированы. Инструменты, переведённые в отложенные через tools.eager, не участвуют в предзагрузке и остаются доступны по запросу, пока мост зарегистрирован. Если один из инструментов моста не зарегистрирован (значение false для tools.toolSearch.enabled отключает оба, а правило запрета tool_search или tool_call отключает один), модель не видит оставшиеся скрытыми инструменты и не может вызвать их через мост в этой сессии. В журнал записывается предупреждение. Эти правила работы моста и выдачи предупреждений относятся к режиму прямого вызова. В режиме CodeModeOnly схемы отложенных инструментов ищутся через tool_search верхнего уровня, а вызовы выполняются через exec. Предзагрузка отложенных инструментов и стартовые каталоги пропускаются. Настройка tools.eager также сокращает начальное описание exec. Если поиск недоступен в текущей области, описание exec включает сигнатуры всех разрешённых инструментов. В режиме прямого вызова инструменты остаются зарегистрированными, поэтому вызов по имени проходит обычную проверку и согласование. Даже при пороге 0 отложенные инструменты могут объявляться через tools.visible, проверку истории при каждом обновлении набора инструментов (включая возобновление сессии, обнаружение MCP, первый вход в режим планирования и изменение определений субагентов), резервную немедленную загрузку при неполном мосте и позднюю регистрацию ACP в демоне, которая явно раскрывает и закрепляет create_sub_session.',
   'settings.label.tools.webSearch.enabled': 'Включить WebSearch',
   'settings.description.tools.webSearch.enabled':
     'false отключает встроенный инструмент web_search. Автозапуск при старте требует, чтобы enabled, model и бэкенд только из переменных окружения оставались незаданными; при true автовывод разрешён, только если бэкенд только из переменных окружения тоже не задан, иначе модель нужно указать. Переопределение: ENABLE_WEB_SEARCH.',
@@ -798,7 +815,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Включить встроенный инструмент todo_write и его подсказку в системном промпте.',
   'settings.label.tools.workflowsEnabled': 'Динамический Workflow',
   'settings.description.tools.workflowsEnabled':
-    'Включить инструмент Workflow: модель может писать и запускать скрипт, оркестрирующий несколько субагентов параллельно. По умолчанию выключено; один запуск может породить много субагентов и токенов. QWEN_CODE_ENABLE_WORKFLOWS=1 и QWEN_CODE_DISABLE_WORKFLOWS=1 перекрывают настройку (запрет важнее). Не связано с видом «план и ревью» Session Workflow; чтобы слово «workflow» не направляло диалог, см. «Отключить срабатывание по слову Workflow».',
+    'Включить инструмент Workflow: модель может писать и запускать скрипт, оркестрирующий несколько субагентов параллельно. По умолчанию выключено; один запуск может породить много субагентов и токенов. QWEN_CODE_ENABLE_WORKFLOWS=1 и QWEN_CODE_DISABLE_WORKFLOWS=1 перекрывают настройку (запрет важнее). Не связано с видом «план и ревью» Session Workflow. Чтобы ключевые слова не направляли диалог, см. «Отключить срабатывание Workflow по ключевым словам».',
   'settings.label.tools.lspEnabled': 'LSP-интеллект кода',
   'settings.description.tools.lspEnabled':
     'Экспериментально. Включает LSP без `--experimental-lsp`: переход к определению, поиск ссылок, подсказки, символы, диагностика и code action. По умолчанию выключено. Серверы берутся из `.lsp.json` рабочей области или включённых расширений и работают с вашими правами; серверы из рабочей области требуют явного доверия к папке — включите `security.folderTrust.enabled` и доверьтесь папке либо пусть IDE сообщит, что рабочая область доверенная — иначе они пропускаются. При `tools.executionSandbox` запуск отклоняется; `--safe-mode`, `QWEN_CODE_SAFE_MODE=1` и `--bare` стартуют без LSP. QWEN_CODE_ENABLE_LSP=1 / QWEN_CODE_DISABLE_LSP=1 перекрывают настройку (запрет важнее); проектные `.env` и `settings.env` их задать не могут.',
@@ -823,7 +840,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Использовать node-pty для интерактивного shell. Если не задано, явный одноразовый prompt по умолчанию идёт через child_process; интерактивный и ввод-ориентированный режимы — через PTY.',
   'settings.label.policy.permissionStrategy': 'Стратегия согласования прав',
   'settings.description.policy.permissionStrategy':
-    'Как решать запросы прав при нескольких клиентах. first-responder — действует первый ответивший клиент; designated — решает только инициатор; consensus — нужно согласие N из M; local-only — решать могут только loopback-клиенты. Нужен перезапуск daemon.',
+    'Определяет, как обрабатываются запросы разрешений при нескольких подключённых клиентах. В режиме `first-responder` (по умолчанию) ответить может любой клиент, и учитывается первый ответ. В режиме `designated` решение принимает только клиент, отправивший исходный запрос. Если он анонимен, действует `first-responder`. Идентификатор клиента берётся из указанного самим клиентом заголовка `X-Qwen-Client-Id` без подтверждения владения (аутентификация по токену сопряжения пока не реализована). Поэтому видимый в SSE идентификатор `originatorClientId` не защищает от подмены инициатора другим клиентом с тем же идентификатором. В режиме `consensus` должны согласиться N из M голосующих. По умолчанию N=floor(M/2)+1. При M=2 нужно единогласие, а при большем чётном M требуется квалифицированное большинство (M=4 → 3, M=6 → 4). При M=2 и расхождении голосов запрос завершается только по заданному тайм-ауту, при отмене одним из голосующих или при отмене сессии. В режиме `local-only` принимать решение могут только клиенты с loopback-адресов. Удалённые клиенты по-прежнему могут отменить ожидающий запрос через специальный ответ `({outcome:"cancelled"})`. Отмена доступна при любой стратегии. Чтобы ограничить и отмену, запустите отдельный демон, привязанный к loopback-адресу. Настройка считывается при запуске демона и требует его перезапуска.',
   'settings.option.policy.permissionStrategy.first-responder':
     'Первый ответивший',
   'settings.option.policy.permissionStrategy.designated':
@@ -839,11 +856,11 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.experimental.sessionWorkflow':
     'Session Workflow: план и ревью',
   'settings.description.experimental.sessionWorkflow':
-    'Показывать DAG Session Workflow и представлять режим Plan как «план и ревью».',
+    'Включить граф зависимостей (DAG) Session Workflow в Web Shell демона и показывать режим Plan как «план и ревью». По умолчанию выключено. Метки Workflow, этапы подтверждения и визуализация доступны после включения. При обновлении списка дел ранее заданные активные зависимости сохраняются в любом режиме, даже если их нет в обновлении.',
   'settings.label.experimental.emitToolUseSummaries':
     'Сводки использования инструментов',
   'settings.description.experimental.emitToolUseSummaries':
-    'После каждой пачки инструментов генерировать короткую LLM-метку. Метка завершённой группы заменяет общий заголовок Tool × N; у принудительно раскрытых групп ниже показывается приглушённая строка ● <label>. Нужна настроенная быстрая модель.',
+    'После завершения каждой группы вызовов инструментов модель генерирует краткую метку. Для завершённой группы она заменяет заголовок `Tool × N`, а при принудительном раскрытии группы отображается под ней приглушённой строкой `● <label>`. Требуется настроенная быстрая модель. Метка генерируется параллельно со следующим вызовом API, чтобы скрыть задержку. Сейчас настройка влияет только на отображение в интерактивном CLI. Отправка сообщения `tool_use_summary` через SDK и в неинтерактивном режиме пока не подключена. Фабрика сообщений уже экспортируется. Настройку можно переопределить переменной окружения `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0` или `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=1`.',
   'settings.label.experimental.sessionWriterLease':
     'Включить аренду записи сессии ACP',
   'settings.description.experimental.sessionWriterLease':
@@ -890,4 +907,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Новые сессии по умолчанию в Worktree',
   'settings.description.worktree.defaultForNewSessions':
     'Если включено (по умолчанию), новые сессии Web Shell в доверенном Git workspace по умолчанию идут в изолированный worktree: композер по умолчанию в режиме Worktree, worktree создаётся при отправке первого сообщения. false — по умолчанию текущая ветка. Меняет только умолчание композера Web Shell; явный выбор режима и API daemon не затрагиваются.',
+  'settings.label.worktree.maxRetained': 'Лимит сохраняемых worktree',
+  'settings.description.worktree.maxRetained':
+    'Для каждого управляемого корня с уникальным владельцем сохраняйте до N самых недавних worktree для сеансов (по умолчанию N = 15). Активные и закреплённые сессии не входят в квоту на удаление. Значение 0 отключает только автоматическую очистку, но не явное восстановление снимков. При неясном владельце, перекрывающихся корнях или нечитаемой конфигурации состояние сохраняется. Сиротские снимки не удаляются. Рабочие деревья инструментов и агентов не затрагиваются.',
 };

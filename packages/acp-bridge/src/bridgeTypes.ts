@@ -1335,6 +1335,8 @@ export interface BridgeSessionSummary {
     branch: string;
     baseCommit?: string;
     baseBranch?: string;
+    worktreeRemoved?: { archiveKey: string };
+    canRestore?: boolean;
   };
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string; baseCommit?: string };
@@ -1526,6 +1528,13 @@ export interface BridgeClientRequestContext {
    */
   promptId?: string;
   /**
+   * Set at a client-facing prompt admission boundary, and by a sub-session
+   * launch that names its sending session.
+   */
+  userPrompt?: true;
+  /** The session that sent this prompt from another session. */
+  promptSource?: { sessionId: string; workspaceCwd: string };
+  /**
    * Internal originator for a daemon-owned mid-turn message promoted into the
    * normal prompt FIFO. It was authenticated when the message was enqueued, so
    * promotion may still deliver it after that client detaches; turn capabilities
@@ -1688,6 +1697,8 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
 export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
+export const DAEMON_USER_PROMPT_META_KEY = 'qwen.daemon.userPrompt';
+export const DAEMON_PROMPT_SOURCE_META_KEY = 'qwen.daemon.promptSource';
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 export const IMAGE_ONLY_PROMPT_TEXT = '[image]';

@@ -54,7 +54,8 @@ public final class ManagedSchemaContract {
                     "ma_schedule",
                     "ma_schedule_occurrence",
                     "ma_client_files_binding",
-                    "ma_client_files_request");
+                    "ma_client_files_request",
+                    "ma_terminal_ticket");
 
     private ManagedSchemaContract() {}
 

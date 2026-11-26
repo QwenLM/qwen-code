@@ -2,12 +2,16 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable;
 
@@ -26,14 +30,14 @@ final class WorkspaceAttachmentAuthorizer {
     }
 
     void authorizeAttachment(SessionRecord session, boolean cancellation,
-            boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
+            boolean actionResponse, RuntimeLifecycleAuthority authority,
             boolean legacyClose) {
         authorizeAttachment(session, cancellation, actionResponse, authority,
                 legacyClose, false);
     }
 
     void authorizeAttachment(SessionRecord session, boolean cancellation,
-            boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
+            boolean actionResponse, RuntimeLifecycleAuthority authority,
             boolean legacyClose, boolean committedStop) {
         boolean external = WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && store.isExternal(session.workspace());
         if (external && (!"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null)) {
@@ -43,17 +47,17 @@ final class WorkspaceAttachmentAuthorizer {
     }
 
     void authorizeAttachment(SessionRecord session, boolean cancellation,
-            boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
+            boolean actionResponse, RuntimeLifecycleAuthority authority,
             boolean legacyClose, boolean committedStop, boolean external) {
         ContextBinding binding = session.workspace();
         String expectedStatus = authority == null && !legacyClose ? "ACTIVE" : session.status();
         if (binding == null || !(legacyClose ? "CLOSING".equals(session.status()) : authority == null ? "ACTIVE".equals(session.status())
-                : java.util.List.of("CLOSING", "DELETING").contains(session.status()))
+                : List.of("CLOSING", "DELETING").contains(session.status()))
                 || session.deletedAt() != null || !executableAgent(session.agentId(), session.agentDefinitionDigest())
                 || !session.tenantId().equals(binding.getTenantId())
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         if (!cancellation && !committedStop && authority == null && !legacyClose) {
             requireWorktreeAncestorsReady(jdbc, session.tenantId(), session.sessionId());
@@ -148,43 +152,43 @@ final class WorkspaceAttachmentAuthorizer {
                 cancellation || committedStop ? new Object[] {session.tenantId(), session.sessionId()}
                         : new Object[] {executionActor, session.tenantId(), session.sessionId()});
         if (grants.size() != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         if (grants.getFirst() == 1) {
-            throw actionResponse ? com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailablePendingGrant() : com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw actionResponse ? WorkspaceExecutionStore.unavailablePendingGrant() : WorkspaceExecutionStore.unavailable();
         }
         if (grants.getFirst() != 2) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     private void requireWorktreeAncestorsReady(JdbcTemplate jdbc, String tenantId, String sessionId) {
-        java.util.Set<String> visited = new java.util.HashSet<>();
+        Set<String> visited = new HashSet<>();
         String current = sessionId;
         while (visited.add(current)) {
             JdbcSessionWorktreeStore.requireReady(store.worktreeFiles(), jdbc, tenantId, current);
             var parents = jdbc.query("SELECT parent_session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     (row, index) -> row.getString(1), tenantId, current);
             if (parents.size() != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if (parents.getFirst() == null) {
                 return;
             }
             current = parents.getFirst();
         }
-        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        throw WorkspaceExecutionStore.unavailable();
     }
 
     static String inheritedExecutionActor(JdbcTemplate jdbc, ContextBinding binding, String sessionId) {
-        java.util.Set<String> visited = new java.util.HashSet<>();
+        Set<String> visited = new HashSet<>();
         String current = sessionId;
         while (visited.add(current)) {
             var rows = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, parent_session_id, creator_actor_key,"
                     + " workspace_id, workspace_generation, workspace_storage_id FROM ma_session"
                     + " WHERE tenant_id = ? AND session_id = ?", binding.getTenantId(), current);
             if (rows.size() != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             var row = rows.getFirst();
             if (!binding.getTenantId().equals(row.get("tenant_id")) || !current.equals(row.get("session_id"))
@@ -192,18 +196,18 @@ final class WorkspaceAttachmentAuthorizer {
                     || !(row.get("workspace_generation") instanceof Number generation)
                     || binding.getWorkspaceGeneration() != generation.longValue()
                     || !binding.getStorageId().equals(row.get("workspace_storage_id"))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             String parent = (String) row.get("parent_session_id");
             if (parent == null) {
                 if (!(row.get("creator_actor_key") instanceof String actor)) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
                 return actor;
             }
             current = parent;
         }
-        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        throw WorkspaceExecutionStore.unavailable();
     }
 
     private String externalExecutionActor(ContextBinding binding, String sessionId) {

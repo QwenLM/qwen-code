@@ -840,6 +840,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_git_log_exclude_refs',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
+  'workspace_input_history',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -887,6 +888,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
@@ -976,6 +978,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_git_log_exclude_refs' &&
       f !== 'workspace_git_worktrees' &&
       f !== 'workspace_git_check_ignore' &&
+      f !== 'workspace_input_history' &&
       f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
@@ -1015,6 +1018,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
+      f !== 'session_worktree_restore_v1' &&
       f !== 'session_worktree_branch_v1' &&
       f !== 'session_worktree_handoff_v1' &&
       f !== 'voice_transcribe' &&
@@ -1035,6 +1039,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_git_log_exclude_refs',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
+  'workspace_input_history',
   'workspace_mcp_restart',
   'session_recap',
   'session_mod_rows',
@@ -1103,6 +1108,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
   'workspace_qualified_acp',
@@ -24922,7 +24928,8 @@ describe('createServeApp', () => {
           }),
         ]);
         expect(listSessionsSpy).toHaveBeenCalledTimes(1);
-        expect(readSidecar).toHaveBeenCalledTimes(1);
+        // Metadata stays cached; each later view revalidates the sidecar.
+        expect(readSidecar).toHaveBeenCalledTimes(2);
       } finally {
         listSessionsSpy.mockRestore();
         mockWt.readSidecar = undefined;
@@ -24975,7 +24982,9 @@ describe('createServeApp', () => {
           expect.objectContaining({ sessionId }),
         ]);
         expect(result.sessions[0]).not.toHaveProperty('worktree');
-        expect(mockWt.readSidecar).toHaveBeenCalledOnce();
+        // A historical missing checkout needs an ownership reread before
+        // considering its snapshot, but must not be enriched for this owner.
+        expect(mockWt.readSidecar).toHaveBeenCalledTimes(2);
         expect(mockWt.readMarkerLenient).toHaveBeenCalledOnce();
       } finally {
         mockWt.readSidecar = undefined;
@@ -54155,4 +54164,152 @@ describe('Deferred #17502 review pins (issue #17554, follow-up 4)', () => {
       { timeout: 5_000 },
     );
   }, 15_000);
+});
+
+it('auto-records prompt, mid-turn-message, and shell inputs into workspace input history', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-input-hist-'));
+  const home = path.join(root, 'home');
+  const workspace = path.join(root, 'workspace');
+  await fsp.mkdir(home, { recursive: true });
+  await fsp.mkdir(workspace, { recursive: true });
+  vi.stubEnv('QWEN_HOME', home);
+  const bridge = fakeBridge({
+    enqueueMidTurnImpl: (_sessionId, message, _context, messageId) =>
+      message === 'rejected mid turn'
+        ? { accepted: false }
+        : { accepted: true, messageId: messageId ?? 'mid-default' },
+    getMidTurnMessagesImpl: () => ({
+      messages: [],
+      settledMessageIds: ['replayed-id'],
+      promotedMessageIds: [],
+    }),
+  });
+  const app = createServeApp(
+    { ...baseOpts, token: 'tkn', workspace, enableSessionShell: true },
+    undefined,
+    { bridge },
+  );
+  try {
+    const created = await request(app)
+      .post('/session')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ cwd: workspace });
+    expect(created.status).toBe(200);
+    const sessionId = created.body.sessionId as string;
+
+    // 1. Prompt with submittedPrompt metadata records the user-typed original.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        prompt: [{ type: 'text', text: 'expanded file contents' }],
+        _meta: { 'qwen.submittedPrompt': 'check @src/a.ts' },
+      })
+      .expect(202);
+
+    // 2. Host-generated prompts explicitly opt out of composer history.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        prompt: [{ type: 'text', text: 'scheduled command' }],
+        suppressInputHistory: true,
+      })
+      .expect(202);
+
+    // 3. A normal prompt without optional metadata is still recorded.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ prompt: [{ type: 'text', text: 'normal user prompt' }] })
+      .expect(202);
+
+    // 4. Channel-marked prompt must NOT enter composer input history.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        prompt: [{ type: 'text', text: 'external channel message' }],
+        _meta: { 'qwen.channel.prompt': true },
+      })
+      .expect(202);
+
+    // 5. Mid-turn message records into prompt history.
+    await request(app)
+      .post(`/session/${sessionId}/mid-turn-message`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ message: '  follow up mid turn  ', messageId: 'fresh-id' })
+      .expect(200);
+    await request(app)
+      .post(`/session/${sessionId}/mid-turn-message`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ message: 'rejected mid turn' })
+      .expect(200)
+      .expect((response) => {
+        expect(response.body.accepted).toBe(false);
+      });
+    await request(app)
+      .post(`/session/${sessionId}/mid-turn-message`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        message: 'different text from the replayed id',
+        messageId: 'replayed-id',
+      })
+      .expect(200)
+      .expect((response) => {
+        expect(response.body).toEqual({
+          accepted: true,
+          messageId: 'replayed-id',
+        });
+      });
+
+    // 6. Shell command records into shell history.
+    await request(app)
+      .post(`/session/${sessionId}/shell`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ command: 'git status' })
+      .expect(200);
+
+    await vi.waitFor(async () => {
+      const promptHist = await request(app)
+        .get('/workspace/input-history?kind=prompt')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170');
+      expect(promptHist.status).toBe(200);
+      expect(promptHist.body.entries).toEqual([
+        'check @src/a.ts',
+        'normal user prompt',
+        'follow up mid turn',
+      ]);
+
+      const shellHist = await request(app)
+        .get('/workspace/input-history?kind=shell')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170');
+      expect(shellHist.status).toBe(200);
+      expect(shellHist.body.entries).toEqual(['git status']);
+    });
+  } finally {
+    await stopCreatedApps();
+    vi.unstubAllEnvs();
+    await fsp.rm(root, { recursive: true, force: true });
+  }
 });

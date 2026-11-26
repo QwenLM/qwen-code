@@ -9,8 +9,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -19,8 +21,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.sql.SQLException;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
@@ -30,7 +35,7 @@ import static com.alibaba.qwen.code.managedagent.persistence.WorkspaceRecoverySt
 
 /** Offline storage transition; public Session and journal evidence remain immutable. */
 public final class WorkspaceMigrationStore {
-    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final RecoveryWorker worker;
 
@@ -318,14 +323,14 @@ public final class WorkspaceMigrationStore {
                 }
                 check(!source.path("head").isNull(), "migration_member_uninitialized");
                 JsonNode transaction = reader.transaction(source, 1);
-                String genesis = new String(java.util.Base64.getDecoder().decode(text(transaction, "recordBytesBase64")),
+                String genesis = new String(Base64.getDecoder().decode(text(transaction, "recordBytesBase64")),
                         StandardCharsets.UTF_8);
                 String[] records = genesis.split("\n");
                 check(records.length == 2 && "session.create".equals(transaction.path("operation").asText()),
                         "migration_profile_unverified");
                 JsonNode header = parse(records[1]).path("managedSession");
                 JsonNode ref = header.path("definitionRef");
-                JsonNode definition = parse(java.util.Base64.getDecoder().decode(
+                JsonNode definition = parse(Base64.getDecoder().decode(
                         reader.resource(source, ref).path("bytesBase64").asText()));
                 check("managed".equals(definition.path("engine").asText())
                         && session.equals(definition.path("sessionId").asText())
@@ -350,14 +355,14 @@ public final class WorkspaceMigrationStore {
     // protect genesis and definition resources; locking Session/head rows on this connection
     // would reverse hot paths' Session-before-alias order.
     private void requireCommittedAdmissionState() {
-        try (var connection = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+        try (var connection = Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
             connection.setAutoCommit(true);
             connection.setReadOnly(true);
             var current = new ManagedSchemaJdbcTemplate(
-                    new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true));
+                    new SingleConnectionDataSource(connection, true));
             requireIdle(current);
             requireFilesProfiles(current);
-        } catch (java.sql.SQLException error) {
+        } catch (SQLException error) {
             throw new IllegalStateException("Migration admission check is unavailable", error);
         }
     }
@@ -465,7 +470,7 @@ public final class WorkspaceMigrationStore {
         try {
             return JSON.treeToValue(parse((String) row.get("source_registration_json")),
                     WorkspaceStorageGuard.RecoveryRegistration.class);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw failure("migration_identity_conflict");
         }
     }

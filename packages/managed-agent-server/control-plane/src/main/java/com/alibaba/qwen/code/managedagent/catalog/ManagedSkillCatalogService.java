@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -53,7 +54,7 @@ public class ManagedSkillCatalogService {
                 || WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
             return new WebShellSessionSkills(List.of());
         }
-        var visible = new java.util.ArrayList<>(skills.effective(session).stream()
+        var visible = new ArrayList<>(skills.effective(session).stream()
                 .filter(skill -> !Boolean.FALSE.equals(skill.get("user_invocable")))
                 .map(skill -> new WebShellSkill((String) skill.get("name"), (String) skill.get("description")))
                 .toList());

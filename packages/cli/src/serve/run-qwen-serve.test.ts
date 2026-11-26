@@ -7,6 +7,13 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { readWorktreeSessionStrict } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import {
+  configureRetention,
+  makeRetainedSession,
+  makeRetentionRepo,
+} from '../test-utils/worktree-session-retention-fixtures.js';
 import type { CliArgs } from '../config/config.js';
 import { QWEN_CODE_MANAGED_RUNTIME_ENV } from '../config/acp-channel-fallback.js';
 import { createHash, X509Certificate } from 'node:crypto';
@@ -6255,6 +6262,216 @@ describe('runQwenServe telemetry validation', () => {
       await handle.close();
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'waits for secondary retention filesystem work before workspace removal completes',
+    async () => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-secondary-retention-')),
+      );
+      const primary = path.join(tmpDir, 'primary');
+      fs.mkdirSync(primary);
+      const target = makeRetentionRepo(tmpDir, 'secondary');
+      configureRetention(target, 1);
+      const oldest = await makeRetainedSession(target, {
+        slug: 'secondary-retained-oldest',
+        dirty: true,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      await makeRetainedSession(target, {
+        slug: 'secondary-retained-newer',
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        env: target.runtime.env.effectiveEnv,
+        encoding: 'utf8',
+      }).trim();
+      const removalEntered = path.join(tmpDir, 'removal-entered');
+      const removalRelease = path.join(tmpDir, 'removal-release');
+      const releaseRemoval = () => fs.writeFileSync(removalRelease, 'release');
+      fs.writeFileSync(
+        path.join(tmpDir, 'git'),
+        `#!/bin/sh
+case " $* " in
+  *" worktree remove "*)
+    : > ${JSON.stringify(removalEntered)}
+    while [ ! -f ${JSON.stringify(removalRelease)} ]; do
+      sleep 0.01
+    done
+    ;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`,
+        { mode: 0o755 },
+      );
+      const savedEnv = (
+        [
+          'PATH',
+          'HOME',
+          'QWEN_RUNTIME_DIR',
+          'GIT_CONFIG_GLOBAL',
+          'GIT_CONFIG_SYSTEM',
+        ] as const
+      ).map((key) => [key, process.env[key]] as const);
+      // Late workspace registration must use the same runtime as the fixtures.
+      Object.assign(process.env, {
+        PATH: `${tmpDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        HOME: target.home,
+        QWEN_RUNTIME_DIR: target.runtime.sessionRuntimeBaseDir,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+      });
+      vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      vi.spyOn(
+        trustedFoldersRuntime,
+        'getWorkspaceTrustStatus',
+      ).mockReturnValue({
+        effective: { state: 'trusted' },
+      } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+      const createBridge = vi
+        .spyOn(acpBridge, 'createAcpSessionBridge')
+        .mockImplementation(() =>
+          Object.assign(makeRuntimeBridge(), {
+            getSessionSummary: target.runtime.bridge.getSessionSummary,
+          }),
+        );
+      const store = {
+        read: vi.fn().mockResolvedValue({
+          schemaVersion: 1,
+          primaryWorkspace: canonicalizeWorkspace(primary),
+          workspaces: [],
+        }),
+        add: vi.fn().mockResolvedValue(true),
+        removeByIds: vi.fn().mockResolvedValue(1),
+      } as unknown as WorkspaceRegistrationStore;
+      let retentionStopCalls = 0;
+      let retentionDrain: unknown;
+      const originalCreateServeApp = serverModule.createServeApp;
+      vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+        const app = originalCreateServeApp(...args);
+        const stop = app.locals['stopScheduledTaskKeepaliveForWorkspace'] as
+          | ((cwd: string) => Promise<void> | undefined)
+          | undefined;
+        app.locals['stopScheduledTaskKeepaliveForWorkspace'] = (
+          cwd: string,
+        ) => {
+          const stopped = stop?.(cwd);
+          if (cwd === canonicalizeWorkspace(target.repo)) {
+            retentionStopCalls += 1;
+            retentionDrain ??= stopped;
+          }
+          return stopped;
+        };
+        return app;
+      });
+      let deletion: Promise<Response> | undefined;
+      const handle = await qwenCore.Storage.runWithResolvedRuntimeBaseDir(
+        target.runtime.sessionRuntimeBaseDir,
+        () =>
+          runQwenServe(
+            {
+              port: 0,
+              hostname: '127.0.0.1',
+              mode: 'http-bridge',
+              workspace: primary,
+              token: 'retention-removal-token',
+              serveWebShell: false,
+            },
+            {
+              preheatBridge: false,
+              workspaceRegistrationStore: store,
+              daemonLogBaseDir: path.join(tmpDir, 'debug'),
+            },
+          ),
+      );
+      const headers = {
+        Authorization: 'Bearer retention-removal-token',
+        'Content-Type': 'application/json',
+      };
+      try {
+        const added = await fetch(`${handle.url}/workspaces`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ cwd: target.repo, persist: true }),
+        });
+        expect(added.status).toBe(201);
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`, { headers })
+        ).json()) as {
+          workspaces: Array<{ id: string; cwd: string; removable?: boolean }>;
+        };
+        const registration = capabilities.workspaces.find(
+          (workspace) => workspace.cwd === canonicalizeWorkspace(target.repo),
+        );
+        expect(registration).toMatchObject({ removable: true });
+        const bridgeIndex = createBridge.mock.calls.findIndex(
+          ([options]) =>
+            options.boundWorkspace === canonicalizeWorkspace(target.repo),
+        );
+        expect(bridgeIndex).toBeGreaterThanOrEqual(0);
+        const shutdown = vi.spyOn(
+          createBridge.mock.results[bridgeIndex]!.value,
+          'shutdown',
+        );
+        await vi.waitFor(
+          () => expect(fs.existsSync(removalEntered)).toBe(true),
+          { timeout: 3_000 },
+        );
+
+        deletion = fetch(
+          `${handle.url}/workspaces/${encodeURIComponent(registration!.id)}`,
+          {
+            method: 'DELETE',
+            headers,
+            body: JSON.stringify({ force: true }),
+          },
+        );
+        await vi.waitFor(() => expect(retentionStopCalls).toBeGreaterThan(0));
+        expect(retentionDrain).toBeInstanceOf(Promise);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(shutdown).not.toHaveBeenCalled();
+
+        releaseRemoval();
+        const removed = await deletion;
+        expect(removed.status).toBe(200);
+        await expect(removed.json()).resolves.toMatchObject({
+          removed: true,
+          workspaceId: registration!.id,
+          persistedRegistrationRemoved: true,
+        });
+        expect(shutdown).toHaveBeenCalledWith({ reason: 'workspace_removed' });
+        expect(fs.existsSync(oldest.worktreePath)).toBe(false);
+        const binding = await readWorktreeSessionStrict(oldest.sidecarPath);
+        expect(binding.state).toBe('valid');
+        if (binding.state === 'valid') {
+          const archiveKey = binding.session.worktreeRemoved?.archiveKey;
+          expect(archiveKey).toBeDefined();
+          expect(
+            fs.existsSync(
+              path.join(path.dirname(oldest.sidecarPath), archiveKey!),
+            ),
+          ).toBe(true);
+        }
+        const readded = await fetch(`${handle.url}/workspaces`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ cwd: target.repo, persist: true }),
+        });
+        expect(readded.status).toBe(201);
+      } finally {
+        releaseRemoval();
+        await deletion?.catch(() => undefined);
+        await handle.close();
+        for (const [key, value] of savedEnv) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    },
+  );
 
   it('kills a half-built dynamic bridge when async construction cleanup fails', async () => {
     tmpDir = fs.realpathSync(
@@ -24134,20 +24351,24 @@ describe('runQwenServe startup observability', () => {
       return true;
     });
 
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        serveWebShell: false,
-        allowOrigins: ['chrome-extension://qwen-test-extension'],
-      },
-      { bridge: makeFakeBridge() },
-    );
-
+    const previousClientMcpEnv = process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+    let handle: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
+      // The default-startup assertions exclude an unrelated host MCP opt-in.
+      delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+          allowOrigins: ['chrome-extension://qwen-test-extension'],
+        },
+        { bridge: makeFakeBridge() },
+      );
+
       expect(stdoutWrites).toEqual(
         expect.arrayContaining([
           expect.stringMatching(
@@ -24172,7 +24393,12 @@ describe('runQwenServe startup observability', () => {
         preheat: { status: 'external_bridge' },
       });
     } finally {
-      await handle.close();
+      await handle?.close();
+      if (previousClientMcpEnv === undefined) {
+        delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = previousClientMcpEnv;
+      }
     }
   });
 

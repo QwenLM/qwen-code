@@ -38,6 +38,7 @@ import type { ManagedInvocationObservation } from './managed-execution-diagnosti
  */
 const CARRIED_SYSTEM_SUBTYPES = new Set([
   'memory_catalog_snapshot',
+  'permission_context_snapshot',
   'slash_command',
   'at_command',
   'ui_telemetry',

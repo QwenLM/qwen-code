@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptN
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -29,6 +30,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -120,7 +122,7 @@ public class JdbcManagedActionStore
             int eventCount,
             byte[] bytes,
             Function<String, StoredResource> resources) {
-        apply(tenantId, workspaceId, sessionId, firstSequence, eventCount, bytes, resources, new java.util.HashMap<>());
+        apply(tenantId, workspaceId, sessionId, firstSequence, eventCount, bytes, resources, new HashMap<>());
     }
 
     void apply(String tenantId, String workspaceId, String sessionId, long firstSequence,
@@ -139,7 +141,7 @@ public class JdbcManagedActionStore
             jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
                     String.class, tenantId, sessionId);
             JsonNode envelope = event.deepCopy();
-            ((com.fasterxml.jackson.databind.node.ObjectNode) envelope).remove("subject");
+            ((ObjectNode) envelope).remove("subject");
             if (event.has("subject")) {
                 JsonNode subject = event.path("subject");
                 closed(subject, "type", "scopeId", "activationId", "epoch");

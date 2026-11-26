@@ -37,6 +37,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskPage;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscriptRequest;
+import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
@@ -51,6 +52,8 @@ import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -70,7 +73,7 @@ public class WebShellAgentController {
     private final SessionRecoveryService recovery;
     private ContextCompressionService compressions;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     void setCompressions(ContextCompressionService compressions) {
         this.compressions = compressions;
     }
@@ -185,7 +188,7 @@ public class WebShellAgentController {
     public ResponseEntity<SessionRecovery> recovery(TenantContext tenant,
             @Valid @RequestBody WebShellSessionRequest request) {
         SessionPrincipal principal = tenant.subjectPrincipal();
-        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
                 .body(principal == null
                         ? recovery.query(tenant.tenantId(),
                                 tenant.actorId(), request.sessionId())
@@ -318,18 +321,18 @@ public class WebShellAgentController {
                 ? service.createSession(tenant.requirePrincipal(),
                         request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input(),
-                        com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()), request.memoryStoreId())
+                        SessionModelConfig.parse(request.modelConfig()), request.memoryStoreId())
                 : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null, request.input(), selection,
                         request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins(), worktree,
-                        com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()), request.memoryStoreId()));
+                        SessionModelConfig.parse(request.modelConfig()), request.memoryStoreId()));
         return ResponseEntity.accepted().body(admission);
     }
 
     @PostMapping("/session-options/query")
     public ResponseEntity<WebShellSessionOptions> sessionOptions(TenantContext tenant,
             @Valid @RequestBody WebShellSessionOptionsRequest request) {
-        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
                 .body(service.queryWebShellSessionOptions(tenant.tenantId(),
                         tenant.requireActorId(), request.agentId()));
     }

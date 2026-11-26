@@ -47,6 +47,31 @@ describe('idle suspension', () => {
     return created.body.clientId as string;
   }
 
+  async function createPooledIdleSession(server: Server): Promise<string> {
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+        harnessPlacement: {
+          instanceId: 'pod-a',
+          bootId: BOOT_ID,
+          placementEpoch: 1,
+        },
+      })
+      .expect(200);
+    return created.body.clientId as string;
+  }
+
+  async function expectSuspended(server: Server, clientId: string) {
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  }
+
   const loadSession = (server: Server) =>
     headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
       managedSessionStore: store(),
@@ -76,6 +101,84 @@ describe('idle suspension', () => {
         { timeout: 5000 },
       );
       expect(state.wakeStamps).toEqual([{ pending: false, dueAt: 0 }]);
+    } finally {
+      state.wakeDispatch = false;
+    }
+  });
+
+  it('releases a pooled placement only after the clean wake seal', async () => {
+    state.wakeDispatch = true;
+    state.suspensionPlacementRelease = true;
+    try {
+      const server = await app(false, 'pod-a', true, { idleSuspendMs: 150 });
+      const clientId = await createPooledIdleSession(server);
+      await expectSuspended(server, clientId);
+
+      expect(state.ownershipTransitions).toEqual([
+        'quiesce',
+        'seal',
+        'release',
+      ]);
+      expect(state.ownershipQuiesces).toHaveLength(1);
+      expect(state.wakeStamps).toEqual([{ pending: false, dueAt: 0 }]);
+      expect(state.ownershipReleases).toHaveLength(1);
+      expect(state.ownershipReleases[0]).toMatchObject({
+        instanceId: 'pod-a',
+        bootId: BOOT_ID,
+        placementEpoch: 1,
+        operationId: expect.any(String),
+      });
+    } finally {
+      state.wakeDispatch = false;
+    }
+  });
+
+  it('keeps a pooled placement when the Store lacks the release capability', async () => {
+    state.wakeDispatch = true;
+    try {
+      const server = await app(false, 'pod-a', true, { idleSuspendMs: 150 });
+      const clientId = await createPooledIdleSession(server);
+      await expectSuspended(server, clientId);
+
+      expect(state.ownershipQuiesces).toHaveLength(0);
+      expect(state.ownershipReleases).toHaveLength(0);
+    } finally {
+      state.wakeDispatch = false;
+    }
+  });
+
+  it('retries only placement release with the identical operation and proof', async () => {
+    state.wakeDispatch = true;
+    state.suspensionPlacementRelease = true;
+    state.ownershipReleaseFault = async (_request, attempt) => {
+      if (attempt === 1) throw new Error('lost release acknowledgement');
+    };
+    let activationReleases = 0;
+    state.appendFault = async (_journal, records, append) => {
+      if (isActivationRelease(records)) activationReleases += 1;
+      await append(records);
+      return true;
+    };
+    try {
+      const server = await app(false, 'pod-a', true, {
+        idleSuspendMs: 100,
+        suspendRetryBaseMs: 5,
+        suspendRetryCap: 2,
+      });
+      const clientId = await createPooledIdleSession(server);
+      await expectSuspended(server, clientId);
+
+      expect(state.ownershipQuiesces).toHaveLength(1);
+      expect(state.wakeStamps).toHaveLength(1);
+      expect(activationReleases).toBe(1);
+      expect(state.ownershipReleases).toHaveLength(2);
+      expect(state.ownershipReleases[1]).toEqual(state.ownershipReleases[0]);
+      expect(state.ownershipTransitions).toEqual([
+        'quiesce',
+        'seal',
+        'release',
+        'release',
+      ]);
     } finally {
       state.wakeDispatch = false;
     }

@@ -5,9 +5,11 @@ import com.alibaba.qwen.code.managedagent.HostedGateTestSupport;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcHarnessPlacementStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -117,6 +119,15 @@ class HostedHarnessPoolMySqlIT {
         var credentials = new WriterCredentialPolicy(settings);
         String oldGrant = credentials.issue(tenantA, WORKSPACE, a1, original.instanceId(), original.bootId(), original.epoch());
         HostedHarnessClient firstClient = client(first);
+        var attachedEvidence = pool.inspectRecovery(tenantA, a1, null);
+        assertThat(attachedEvidence).isNotNull();
+        var unattachedEvidence = firstClient.getUnattachedStatus(a1, null).getRecovery();
+        assertThat(unattachedEvidence.getState()).isEqualTo(attachedEvidence.state());
+        assertThat(unattachedEvidence.isNextTurnAllowed()).isEqualTo(attachedEvidence.nextTurnAllowed());
+        assertThat(placements.get(tenantA, a1)).isEqualTo(original);
+        assertThat(http.send(HttpRequest.newBuilder(first.resolve("/session/" + a1 + "/status"))
+                .timeout(Duration.ofSeconds(2)).build(), HttpResponse.BodyHandlers.discarding()).statusCode())
+                .isEqualTo(401);
         assertThat(firstClient.readInstance().get("state")).isEqualTo("ACCEPTING");
         pool.drainInstance("pool-a", UUID.randomUUID().toString());
         await(() -> "DRAINED".equals(firstClient.readInstance().get("state")), 30);
@@ -156,6 +167,159 @@ class HostedHarnessPoolMySqlIT {
                 String.class, tenantA, a1)).isEqualTo("ACTIVE");
     }
 
+    @Test
+    @Timeout(120)
+    void cleanSuspensionLetsAHealthySuccessorTakeOverBeforeLeaseExpiry() throws Exception {
+        Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
+        assertThat(cli).isRegularFile();
+        URI first = startHarness(cli, "pool-a", 150L);
+        URI second = startHarness(cli, "pool-b", 60_000L);
+        spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class).run(
+                "--server.address=127.0.0.1", "--server.port=0",
+                "--spring.datasource.url=" + required("mysql.url"),
+                "--spring.datasource.username=" + required("mysql.user"),
+                "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
+                "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
+                "--spring.datasource.druid.max-active=4", "--spring.datasource.druid.max-wait=5000",
+                "--spring.datasource.druid.connect-properties.connectTimeout=5000",
+                "--spring.datasource.druid.connect-properties.socketTimeout=10000",
+                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.session-store.workspace-id=" + WORKSPACE,
+                "--qwen.managed-agent.session-store.binding-key=" + BINDING_KEY,
+                "--qwen.managed-agent.wake-dispatch.enabled=true",
+                "--qwen.managed-agent.harness.enabled=true", "--qwen.managed-agent.runtime-broker.enabled=false",
+                "--qwen.managed-agent.harness.token=" + TOKEN,
+                "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
+                "--qwen.managed-agent.harness.heartbeat-interval=PT0S",
+                "--qwen.managed-agent.harness.pool.enabled=true",
+                "--qwen.managed-agent.harness.pool.instances[0].instance-id=pool-a",
+                "--qwen.managed-agent.harness.pool.instances[0].base-url=" + first,
+                "--qwen.managed-agent.harness.pool.instances[1].instance-id=pool-b",
+                "--qwen.managed-agent.harness.pool.instances[1].base-url=" + second);
+        jdbc = spring.getBean(JdbcTemplate.class);
+        assertThat(jdbc.queryForObject("SELECT VERSION()", String.class)).startsWith("8.4.");
+        var settings = spring.getBean(ManagedAgentProperties.class);
+        settings.getSessionStore().setBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
+        var placements = spring.getBean(JdbcHarnessPlacementStore.class);
+        pool = (HarnessPoolConnector) HostedGateTestSupport.connectorOwning(
+                spring.getBean(HarnessConnector.class));
+        pool.refresh();
+        String tenant = UUID.randomUUID().toString();
+        String session = root(tenant);
+        pool.createOrLoad(tenant, session, false);
+        var original = placements.get(tenant, session);
+        assertThat(original.instanceId()).isEqualTo("pool-a");
+        var credentials = new WriterCredentialPolicy(settings);
+        String oldGrant = credentials.issue(tenant, WORKSPACE, session,
+                original.instanceId(), original.bootId(), original.epoch());
+
+        await(() -> "RELEASED".equals(placements.get(tenant, session).state()), 15);
+        assertThat(client(first).readInstance().get("state")).isEqualTo("ACCEPTING");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE tenant_id = ?"
+                + " AND session_id = ? AND domain = 'hosted_harness_release' AND record_id = 'placement:1'",
+                Integer.class, tenant, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE tenant_id = ?"
+                + " AND session_id = ? AND state = 'SEALED' AND wake_seal_revision = journal_revision",
+                Integer.class, tenant, session)).isEqualTo(1);
+        Long oldLease = jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session);
+
+        pool.createOrLoad(tenant, session, true);
+        var successor = placements.get(tenant, session);
+        assertThat(successor.instanceId()).isEqualTo("pool-b");
+        assertThat(successor.epoch()).isEqualTo(original.epoch() + 1);
+        assertThat(oldLease).isGreaterThan(System.currentTimeMillis());
+        assertThat(staleAcquire(tenant, session, original.bootId(), oldGrant)
+                .path("error").path("code").asText()).isEqualTo("writer_credential_invalid");
+        assertThat(client(first).readInstance().get("state")).isEqualTo("ACCEPTING");
+        assertThat(client(second).readInstance().get("state")).isEqualTo("ACCEPTING");
+        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session)).isEqualTo("ACTIVE");
+    }
+
+    @Test
+    @Timeout(180)
+    void refreshReapsAnExpiredCleanSuspensionWithoutOpeningTheSuccessor() throws Exception {
+        Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
+        assertThat(cli).isRegularFile();
+        URI first = startHarness(cli, "pool-a");
+        startSingleMemberPool("pool-a", first);
+        var store = spring.getBean(JdbcManagedSessionStore.class);
+        var placements = spring.getBean(JdbcHarnessPlacementStore.class);
+        var credentials = new WriterCredentialPolicy(spring.getBean(ManagedAgentProperties.class));
+        pool.refresh();
+        String tenant = UUID.randomUUID().toString();
+        String session = root(tenant);
+        pool.createOrLoad(tenant, session, false);
+        var owner = placements.get(tenant, session);
+        assertThat(owner.instanceId()).isEqualTo("pool-a");
+        String oldGrant = credentials.issue(tenant, WORKSPACE, session,
+                owner.instanceId(), owner.bootId(), owner.epoch());
+        Process departed = children.removeFirst();
+        departed.destroy();
+        if (!departed.waitFor(10, TimeUnit.SECONDS)) {
+            departed.destroyForcibly();
+            assertThat(departed.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        }
+        Long revision = jdbc.queryForObject("SELECT journal_revision FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session);
+        Integer generation = jdbc.queryForObject("SELECT writer_generation FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, session);
+        jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0, activation_phase = 'released',"
+                + " activation_head_revision = journal_revision WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        store.sealWriter(tenant, session, oldGrant, new ManagedSessionStoreModels.SealWriterRequest(
+                WORKSPACE, owner.bootId(), generation, new ManagedSessionStoreModels.WakeStamp(revision, false, 0)));
+        pool.close();
+        spring.close();
+
+        URI second = startHarness(cli, "pool-b");
+        startSingleMemberPool("pool-b", second);
+        placements = spring.getBean(JdbcHarnessPlacementStore.class);
+        pool.refresh();
+        var successor = placements.get(tenant, session);
+        assertThat(successor.instanceId()).isEqualTo("pool-b");
+        assertThat(successor.epoch()).isEqualTo(owner.epoch() + 1);
+        assertThat(pool.attachedSessions()).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE tenant_id = ?"
+                + " AND session_id = ? AND domain = 'hosted_harness_release'", Integer.class, tenant, session)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE tenant_id = ?"
+                + " AND session_id = ? AND state = 'SEALED' AND wake_seal_revision = journal_revision",
+                Integer.class, tenant, session)).isEqualTo(1);
+
+        pool.createOrLoad(tenant, session, true);
+        assertThat(pool.attachedSessions()).hasSize(1);
+        assertThat(staleAcquire(tenant, session, owner.bootId(), oldGrant)
+                .path("error").path("code").asText()).isEqualTo("writer_credential_invalid");
+    }
+
+    private void startSingleMemberPool(String instanceId, URI base) {
+        spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class).run(
+                "--server.address=127.0.0.1", "--server.port=0",
+                "--spring.datasource.url=" + required("mysql.url"),
+                "--spring.datasource.username=" + required("mysql.user"),
+                "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
+                "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
+                "--spring.datasource.druid.max-active=4", "--spring.datasource.druid.max-wait=5000",
+                "--spring.datasource.druid.connect-properties.connectTimeout=5000",
+                "--spring.datasource.druid.connect-properties.socketTimeout=10000",
+                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.session-store.workspace-id=" + WORKSPACE,
+                "--qwen.managed-agent.session-store.binding-key=" + BINDING_KEY,
+                "--qwen.managed-agent.wake-dispatch.enabled=true",
+                "--qwen.managed-agent.harness.enabled=true", "--qwen.managed-agent.runtime-broker.enabled=false",
+                "--qwen.managed-agent.harness.token=" + TOKEN,
+                "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
+                "--qwen.managed-agent.harness.heartbeat-interval=PT0S",
+                "--qwen.managed-agent.harness.pool.enabled=true",
+                "--qwen.managed-agent.harness.pool.instances[0].instance-id=" + instanceId,
+                "--qwen.managed-agent.harness.pool.instances[0].base-url=" + base);
+        jdbc = spring.getBean(JdbcTemplate.class);
+        var settings = spring.getBean(ManagedAgentProperties.class);
+        settings.getSessionStore().setBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
+        pool = (HarnessPoolConnector) HostedGateTestSupport.connectorOwning(
+                spring.getBean(HarnessConnector.class));
+    }
+
     private String root(String tenant) {
         String id = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id,"
@@ -186,6 +350,10 @@ class HostedHarnessPoolMySqlIT {
     }
 
     private URI startHarness(Path cli, String id) throws Exception {
+        return startHarness(cli, id, null);
+    }
+
+    private URI startHarness(Path cli, String id, Long idleSuspendMs) throws Exception {
         Path dir = Files.createDirectories(temporary.resolve(id));
         Path config = Files.createDirectory(dir.resolve(".qwen"));
         String model = "pool-idle-fixture";
@@ -211,6 +379,9 @@ class HostedHarnessPoolMySqlIT {
                 "QWEN_CODE_MODELS_DEV_REFRESH", "off"));
         environment.put("QWEN_CODE_SYSTEM_SETTINGS_PATH", dir.resolve("system-settings.json").toString());
         environment.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH", dir.resolve("system-defaults.json").toString());
+        if (idleSuspendMs != null) {
+            environment.put("QWEN_E2E_IDLE_SUSPEND_MS", idleSuspendMs.toString());
+        }
         Process process = builder.start();
         children.add(process);
         URI[] base = new URI[1];

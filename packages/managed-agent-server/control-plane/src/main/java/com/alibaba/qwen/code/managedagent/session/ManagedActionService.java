@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -153,7 +154,7 @@ public class ManagedActionService {
     }
 
     private String childCursorScope(String tenant, String session) {
-        return "children:" + org.apache.commons.codec.digest.DigestUtils.sha256Hex(tenant + "\u0000" + session) + ":";
+        return "children:" + DigestUtils.sha256Hex(tenant + "\u0000" + session) + ":";
     }
 
     private List<ManagedActionStore.ScopedAction> childPage(String tenant,

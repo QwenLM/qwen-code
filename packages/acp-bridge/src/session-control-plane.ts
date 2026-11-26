@@ -189,6 +189,8 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
+  DAEMON_PROMPT_SOURCE_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -1574,6 +1576,9 @@ function broadcastTurnComplete(
         ...(promptId ? { promptId } : {}),
         ...(branchPoint ? { branchPoint } : {}),
         ...(promptCancelled ? { promptCancelled } : {}),
+        ...(meta?.['qwen.promptBlocked'] === true
+          ? { promptBlocked: true }
+          : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
@@ -12278,6 +12283,15 @@ export function createSessionControlPlane(
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[SUBMITTED_PROMPT_META_KEY];
                   delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+                  meta[DAEMON_USER_PROMPT_META_KEY] =
+                    context?.userPrompt === true || isPromotedMidTurn;
+                  delete meta[DAEMON_PROMPT_SOURCE_META_KEY];
+                  if (context?.userPrompt === true && context.promptSource) {
+                    meta[DAEMON_PROMPT_SOURCE_META_KEY] = {
+                      sessionId: context.promptSource.sessionId,
+                      workspaceCwd: context.promptSource.workspaceCwd,
+                    };
+                  }
                   if (
                     typeof context?.submittedPrompt === 'string' &&
                     !isPromotedMidTurn &&

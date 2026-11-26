@@ -8,6 +8,7 @@ import type { Part } from '@google/genai';
 import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import { managedCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-command-id.js';
 import type { ManagedInvocationObservation } from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
@@ -115,6 +116,7 @@ import { extensionAgentsOf } from './configuration-routes.js';
 import { childAgentsOf, stopPublicChildSource } from './interaction-routes.js';
 import { compressionBusy, noteSessionActivity } from './lifecycle-routes.js';
 import {
+  blockOnTurnRecovery,
   blockRecovery,
   type HostedRuntimeOwnership,
   liftRecoveryBlock,
@@ -452,7 +454,9 @@ export async function executeHostedTurn(
       );
     if (attempt?.payload['state'] === 'started') {
       const activation = session.managed.activation;
-      const commandId = `${attempt.payload['attemptId']}:abandoned`;
+      const commandId = managedCommandId(
+        `${attempt.payload['attemptId']}:abandoned`,
+      );
       await authority.appendExecutionEvent(
         {
           operation: 'hostedModelAttempt',
@@ -974,7 +978,7 @@ export async function executeHostedTurn(
                   agentDefinition: session.agentDefinition,
                   modelConfig: session.modelConfig,
                   memory: session.memory,
-                  recallUserInput: authority
+                  userPrompt: authority
                     .eventsInSequenceRange(1, authority.committedSequence)
                     .some(
                       (event) =>
@@ -1177,6 +1181,7 @@ export async function executeHostedTurn(
   try {
     await running.finally(() => {
       void toolTurn?.close().catch((cause: unknown) => {
+        session.runtimeRecoveryPromptId = undefined;
         session.blocked = true;
         writeStderrLineSafe(
           'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
@@ -1750,7 +1755,7 @@ export function registerHostedPromptRoute({
         settled = true;
       } catch (cause) {
         if (monitorWakeNeedsRecovery(cause)) {
-          if (admitted) session.blocked = true;
+          if (admitted) blockOnTurnRecovery(session, promptId, cause);
           else if (!res.headersSent)
             error(res, 503, 'hosted_mcp_recovery_required');
           writeStderrLineSafe(

@@ -235,7 +235,7 @@ CREATE TABLE ma_session_head (
     wake_retry_at BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Earliest wake retry time in Unix epoch milliseconds.',
     wake_seal_revision BIGINT UNSIGNED COMMENT 'Journal revision at which a clean suspension sealed the head and certified its wake projection.',
     wake_seal_background TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether that seal also certified every unsettled run and cleanup debt as a verified background hold.',
-    wake_seal_parked_prompt_id VARCHAR(64) COMMENT 'Prompt identity of the Action-parked Turn certified by this seal.',
+    wake_seal_parked_prompt_id VARCHAR(128) COMMENT 'Prompt identity of the Action-parked Turn certified by this seal.',
     wake_seal_parked_until BIGINT UNSIGNED COMMENT 'Wake time of the Action-parked Turn certified by this seal.',
     wake_seal_parked_approval_revision BIGINT UNSIGNED COMMENT 'Approval selection revision certified for the Action-parked Turn.',
     wake_seal_parked_owner VARCHAR(8) COMMENT 'wake when the parked Turn is a wake-started Turn the wake-recovery scan resumes; NULL for a coordinator Turn row.',
@@ -447,7 +447,7 @@ CREATE TABLE ma_session_record (
     action_version BIGINT UNSIGNED COMMENT 'Version of the approval Action being addressed.',
     decision_receipt_id VARCHAR(128) COMMENT 'Stable receipt identity for the accepted approval decision.',
     decision_digest CHAR(64) COMMENT 'Digest of the accepted approval decision.',
-    prompt_id VARCHAR(64) COMMENT 'Stable prompt identity used for Harness submission and retry.',
+    prompt_id VARCHAR(128) COMMENT 'Stable prompt identity used for Harness submission and retry.',
     turn_id VARBINARY(512) COMMENT 'Turn identity within the Session.',
     options_json LONGTEXT COMMENT 'Serialized choices offered by a public approval Action.',
     CONSTRAINT ck_ma_record_kind CHECK ((CASE record_kind WHEN 'DOMAIN' THEN 6 WHEN 'ACTION' THEN 6 WHEN 'CONVERSATION' THEN 12 ELSE -1 END = CHAR_LENGTH(record_kind))),
@@ -1555,3 +1555,19 @@ CREATE TABLE ma_client_files_request (
 
 CREATE INDEX idx_ma_client_files_request_drain ON ma_client_files_request (tenant_id, session_id, state, id);
 CREATE INDEX idx_ma_client_files_request_expiry ON ma_client_files_request (state, expires_at);
+
+CREATE TABLE ma_terminal_ticket (
+    ticket_hash CHAR(64) NOT NULL COMMENT 'SHA-256 of the single-use terminal upgrade ticket, never the plaintext.',
+    tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) NOT NULL COMMENT 'Managed Session identity the ticket admits.',
+    terminal_id VARCHAR(256) NOT NULL COMMENT 'Terminal identity the ticket admits.',
+    binding_id VARCHAR(128) NOT NULL COMMENT 'Runtime binding identity admitted when the ticket was issued.',
+    binding_generation BIGINT UNSIGNED NOT NULL COMMENT 'Generation of the admitted Runtime binding.',
+    expires_at BIGINT UNSIGNED NOT NULL COMMENT 'Ticket deadline in Unix epoch milliseconds.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_terminal_ticket_business_key UNIQUE (ticket_hash),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_terminal_ticket_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Short-lived single-use terminal upgrade tickets, stored by hash only.';
+
+CREATE INDEX idx_ma_terminal_ticket_expiry ON ma_terminal_ticket (expires_at);

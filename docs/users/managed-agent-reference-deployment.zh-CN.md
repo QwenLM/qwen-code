@@ -2,17 +2,19 @@
 
 [English](managed-agent-reference-deployment.md) | [简体中文](managed-agent-reference-deployment.zh-CN.md)
 
-Managed Agent 参考分发产物仍处于实验阶段。首个已接受拓扑为：一台可信 Linux 主机上的单 Java 控制面及其嵌入式 Runtime Broker、一个 MySQL 数据库，以及一个兼容的 Qwen Hosted Harness。每个发布版本中的兼容性 manifest 是该版本的权威依据。
+本指南面向在一台可信 Linux 主机上安装、运行和升级实验版 Managed Agent 独立参考分发包的运维人员，包含使用 systemd 运行常驻服务的步骤。首版验收覆盖一个 Java 控制面实例及其嵌入式 Runtime Broker、一个 MySQL 数据库，以及一个兼容的 Qwen Hosted Harness。每个版本的验收范围以该版本的兼容性 manifest 为准。
 
 ## 选择部署档位
 
-每一档都建立在前一档之上：
+第 2 档在第 1 档的部署上开启 Workspace 工具。第 3 档指向独立的 Kubernetes Helm 部署。
 
-| 档位                     | 运行的内容                                                            | 新增的内容                                                                                                       |
-| ------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| 1. 纯文本 Hosted Session | 一台可信 Linux 主机上的 Java 控制面、一个 Hosted Harness 和 MySQL     | —                                                                                                                |
-| 2. local-process 工具    | 作用于 Workspace 的 Hosted 工具，例如文件访问，以及开启后的前台 Shell | 嵌入式 Runtime Broker、同一主机上的 Runtime worker、Runtime 凭据密钥、Runtime state 目录和一个已登记的 Workspace |
-| 3. Kubernetes            | 集群中的 API、Harness 和 MySQL                                        | 从源码构建的容器镜像，用 Helm chart 安装，不在本分发产物的验收范围内                                             |
+| 档位                     | 运行的内容                                                            | 新增的内容                                                                                                       | Harness pool |
+| ------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------ |
+| 1. 纯文本 Hosted Session | 一台可信 Linux 主机上的 Java 控制面、一个 Hosted Harness 和 MySQL     | —                                                                                                                | 关闭         |
+| 2. local-process 工具    | 作用于 Workspace 的 Hosted 工具，例如文件访问，以及开启后的前台 Shell | 嵌入式 Runtime Broker、同一主机上的 Runtime worker、Runtime 凭据密钥、Runtime state 目录和一个已登记的 Workspace | 关闭         |
+| 3. Kubernetes            | API 和两个 Harness 池成员运行在同一应用 Pod，MySQL 运行在集群中       | 从源码构建的容器镜像，用 Helm chart 安装，不在本分发产物的验收范围内                                             | 开启         |
+
+自定义部署需要使用多个 Harness 实例时，参见 [Harness pool 配置](managed-agent-configuration-reference.zh-CN.md#qwenmanaged-agentharnesspool)。
 
 即使目标是使用工具，也请从第 1 档开始。完成一个不调用工具的 Turn，能同时证明控制面、Harness、模型和数据库都已就绪；之后由第 2 档在同一部署上开启工具。
 
@@ -194,7 +196,7 @@ Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令�
 
 ## 第 3 档：Kubernetes
 
-[Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) 用你在已评审源码 revision 上构建的镜像，在一个 Pod 中安装签名认证的 Managed Agent API 和私有 Hosted Harness，并在持久卷上运行 MySQL 8.4。默认支持文本 Session；可选设置可开启可信单节点的 Workspace 文件和前台 Shell，以及 Managed WebShell 网关。它从源码安装，而不是从本压缩包安装，遵循自己的说明文档，也不扩大本分发产物的验收范围。K2 CSI 常驻 Workspace 曾是另一种独立部署，现已从 `managed-agent-server` 移除并归档至 [`packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident)。
+[Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) 用你在已评审源码 revision 上构建的镜像，在一个应用 Pod 中安装签名认证的 Managed Agent API 和由两个私有 Hosted Harness 组成的池，并在持久卷上运行 MySQL 8.4。默认支持文本 Session；可选设置可开启可信单节点的 Workspace 文件和前台 Shell，以及 Managed WebShell 网关。它从源码安装，而不是从本压缩包安装，遵循自己的说明文档，也不扩大本分发产物的验收范围。K2 CSI 常驻 Workspace 曾是另一种独立部署，现已从 `managed-agent-server` 移除并归档至 [`packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident)。
 
 ## 运维部署
 
@@ -314,4 +316,6 @@ Session 模型配置只在创建时写入，关闭或删除 Session 会保留相
 
 ## 范围边界
 
-该分发产物不认证多 Java 控制面、跨主机接管、公开 CSI、Kubernetes retirement、public Shell、v2 advertisement 或稳定生产支持。这些能力需要独立发布证据。
+MySQL 集成测试使用两个 Java 控制面实例，共享同一个 Session Store 和 Hosted Harness。测试覆盖首个 Turn 复用已有 attachment、取消原 Turn，以及从没有本地 attachment 的副本投递 Shell 审批决定。见[跨实例 attachment 恢复](https://github.com/QwenLM/qwen-code/pull/18433)。
+
+多副本部署需要在目标拓扑下验收路由。开启 Workspace 工具时，验收还需覆盖 Runtime Broker 和 Workspace 所有权。跨主机接管、公开 CSI、Kubernetes retirement、public Shell、v2 advertisement 和稳定生产支持各自需要发布验收证据。

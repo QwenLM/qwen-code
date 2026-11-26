@@ -137,6 +137,7 @@ async function parkToolTurn(
   retainOwnerOrCalls: boolean | Array<typeof CALL> = false,
   toolProfile = FILE_PROFILE,
   runtimeBinding = false,
+  brokerFailure?: Error,
 ) {
   // Callers pass either a retainOwner flag or the parked call list.
   const retainOwner = retainOwnerOrCalls === true;
@@ -185,6 +186,7 @@ async function parkToolTurn(
             ),
           ),
     );
+  if (brokerFailure) execute.mockRejectedValueOnce(brokerFailure);
   const server = await app(true);
   const created = await headers(supertest(server).post('/session')).send({
     sessionId: SESSION_ID,
@@ -230,10 +232,11 @@ async function parkToolTurn(
   await vi.waitFor(() => expect(execute).toHaveBeenCalled(), {
     timeout: settleTimeoutMs(),
   });
-  await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`)).set(
-    'X-Qwen-Client-Id',
-    created.body.clientId as string,
-  );
+  if (!brokerFailure)
+    await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId as string,
+    );
   await vi.waitFor(
     async () => {
       const status = await headers(

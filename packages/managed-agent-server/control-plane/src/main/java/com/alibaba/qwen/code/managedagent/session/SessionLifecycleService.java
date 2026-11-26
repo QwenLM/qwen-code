@@ -55,7 +55,7 @@ public class SessionLifecycleService {
     private final SessionLifecycleCoordinator coordinator;
     private RuntimeWarmer runtimeWarmer;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
         this.runtimeWarmer = runtimeWarmer;
     }
