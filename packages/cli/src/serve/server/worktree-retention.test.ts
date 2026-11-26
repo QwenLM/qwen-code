@@ -55,6 +55,7 @@ import {
 } from '../workspace-runtime-storage.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { SessionArchiveCoordinator } from './session-archive.js';
+import * as sessionListModule from './session-list.js';
 import { listWorkspaceSessionsForResponse } from './session-list.js';
 import {
   executeWorktreeCleanup,
@@ -1343,27 +1344,23 @@ describe('worktree retention with real repositories', () => {
       }) + '\n',
     );
 
-    // Prove the warm cache is still masking the new transcript before the
-    // sweep, so the post-sweep assertion below pins cache invalidation
-    // rather than a natural TTL expiry.
-    const cachedRead = await runWithWorkspaceRuntimeStorage(
-      target.runtime,
-      () =>
-        listWorkspaceSessionsForResponse(
-          listBridge,
-          target.repo,
-          { size: 20 },
-          {
-            paginateMerged: true,
-            mergeLive: false,
-            runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
-          },
-        ),
+    // Pin the sweep's cache invalidation directly rather than relying on the
+    // 2s persisted-list TTL, so this never depends on wall-clock speed.
+    const invalidateSpy = vi.spyOn(
+      sessionListModule,
+      'invalidateWorkspaceSessionListCache',
     );
-    expect(cachedRead.sessions.map((s) => s.sessionId)).not.toContain(extraId);
-
-    const outcome = await sweep(target);
-    expect(outcome.removed).toEqual([evicted.id]);
+    try {
+      const outcome = await sweep(target);
+      expect(outcome.removed).toEqual([evicted.id]);
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+        workspaceCwd: target.runtime.workspaceCwd,
+        archiveStates: ['active', 'archived'],
+      });
+    } finally {
+      invalidateSpy.mockRestore();
+    }
 
     const after = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
       listWorkspaceSessionsForResponse(
