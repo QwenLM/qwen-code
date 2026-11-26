@@ -73,7 +73,7 @@ export function mcpGatingEqual(a: McpGating, b: McpGating): boolean {
 
 /**
  * Recompute the connection-admission lists from the *current* settings. Runtime
- * edits to `mcp.allowed` / `mcp.excluded` take effect immediately, with two
+ * edits to `mcp.allowed` / `mcp.excluded` take effect immediately, with three
  * deliberate rules:
  *
  * - **`allowed` empty vs absent**: an absent `mcp.allowed` means "allow all"
@@ -86,6 +86,9 @@ export function mcpGatingEqual(a: McpGating, b: McpGating): boolean {
  *   narrow within the launch bound but never widen beyond it. With no settings
  *   allow-list, the boot bound applies in full. Without the flag (`bootAllowed`
  *   undefined), settings fully drive admission.
+ * - **CLI exclusions always apply**: names passed via `--disable-mcp-server`
+ *   (`bootExcluded`) are unioned into the settings-derived `mcp.excluded`, so a
+ *   settings edit can disable more servers but never re-enable those.
  *
  * The pending list is always recomputed per #4615 so a hot-reload never
  * connects an unapproved gated server.
@@ -95,11 +98,15 @@ export function recomputeMcpGating(
   assembled: Record<string, MCPServerConfig>,
   cwd: string,
   bootAllowed: readonly string[] | undefined,
+  bootExcluded: readonly string[] | undefined,
   isYolo: boolean,
 ): McpGating {
   // Preserve `[]` (deny-all); only an absent key yields `undefined` (allow-all).
   const settingsAllowed = settings.merged.mcp?.allowed?.filter(Boolean);
-  const excluded = settings.merged.mcp?.excluded?.filter(Boolean);
+  const settingsExcluded = settings.merged.mcp?.excluded?.filter(Boolean);
+  const excluded = bootExcluded?.length
+    ? [...new Set([...(settingsExcluded ?? []), ...bootExcluded])]
+    : settingsExcluded;
   let allowed = settingsAllowed;
   if (bootAllowed) {
     allowed = settingsAllowed
@@ -110,6 +117,22 @@ export function recomputeMcpGating(
     allowed,
     excluded: excluded && excluded.length > 0 ? excluded : undefined,
     pending: isYolo ? undefined : getPendingGatedMcpServers(assembled, cwd),
+  };
+}
+
+/**
+ * Admission lists for a bare/safe-mode Config: only the explicit, per-invocation
+ * CLI bounds (`--allowed-mcp-server-names`, `--disable-mcp-server`) apply; no
+ * settings-derived list and no `pending` (only never-gated top-tier servers can
+ * be present).
+ */
+export function bareSafeMcpGating(
+  bootAllowed: readonly string[] | undefined,
+  bootExcluded: readonly string[] | undefined,
+): McpGating {
+  return {
+    allowed: bootAllowed ? [...bootAllowed] : undefined,
+    excluded: bootExcluded ? [...bootExcluded] : undefined,
   };
 }
 
@@ -166,14 +189,23 @@ export function registerMcpHotReload(
     // mid-session (the same stranded-server class of bug this PR fixes at
     // boot, just reached through the gating list's SOURCE instead of the
     // mcpServers map). Only the CLI `--allowed-mcp-server-names` bound
-    // (explicit, per-invocation, not ambient state) still applies, mirroring
-    // topTierMcpServers' own treatment; `excluded`/`pending` are irrelevant
-    // once nothing but the never-gated top-tier servers can be present.
+    // and `--disable-mcp-server` lists (explicit, per-invocation, not ambient
+    // state) still apply, mirroring topTierMcpServers' own treatment;
+    // `pending` is irrelevant once nothing but the never-gated top-tier
+    // servers can be present.
     const bootAllowed = config.getCliAllowedMcpServerNames();
+    const bootExcluded = config.getCliExcludedMcpServerNames();
     const nextGating: McpGating =
       config.getBareMode() || config.isSafeMode()
-        ? { allowed: bootAllowed ? [...bootAllowed] : undefined }
-        : recomputeMcpGating(settings, next, cwd, bootAllowed, isYolo);
+        ? bareSafeMcpGating(bootAllowed, bootExcluded)
+        : recomputeMcpGating(
+            settings,
+            next,
+            cwd,
+            bootAllowed,
+            bootExcluded,
+            isYolo,
+          );
 
     const prevServers = config.getSettingsMcpServers();
     const prevGating = config.getMcpGating();
@@ -217,6 +249,9 @@ export function registerMcpHotReload(
     // hash (issue #6 in the hot-reload review). The dialog's `computePending`
     // is the authoritative filter; this is only the "re-evaluate" nudge. See
     // #4615.
+    // Not filtered by the exclusion list: the event is a name-less nudge, so
+    // suppressing it would also stop the dialog from dropping a stale entry.
+    // `useMcpApproval`'s `computePending` skips disabled servers itself.
     const promptable = getPromptableMcpServers(next, cwd);
 
     // Push the admission lists BEFORE reconcile — the discovery pass inside
