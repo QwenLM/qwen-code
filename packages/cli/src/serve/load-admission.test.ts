@@ -233,6 +233,9 @@ describe('createLoadAdmissionMonitor', () => {
     expect(first.loadRatio).toBe(1.25);
     expect(first.eventLoopLagP99Ms).toBe(42);
     expect(first.sampledAtMs).toBeGreaterThan(0);
+    // sampledAtMs is a public wire field carrying wall-clock epoch ms, not
+    // the monotonic uptime — pin it so a switch to the monotonic clock fails.
+    expect(first.sampledAtMs).toBe(Date.now());
     tick(1);
     expect(monitor.snapshot().sampledAtMs).toBeGreaterThan(first.sampledAtMs);
     monitor.dispose();
