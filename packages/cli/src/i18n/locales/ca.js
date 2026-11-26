@@ -2577,8 +2577,8 @@ export default {
     'Mou aquesta sessió a un directori de treball nou',
   'Fast context compression without AI. Strips old tool outputs and thinking parts.':
     "Compressió ràpida del context sense IA. Elimina sortides d'eines antigues i parts de pensament.",
-  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
-    'Copia al porta-retalls: resposta, codi (per llenguatge), LaTeX o Mermaid. N = N-èsim missatge més recent, índex = número de bloc',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest AI message with text, index = block number':
+    'Copia al porta-retalls: resposta, codi (per llenguatge), LaTeX o Mermaid. N = N-èsim missatge de la IA amb text més recent, índex = número de bloc',
   'Show working-tree change stats versus HEAD':
     "Mostra les estadístiques de canvis de l'arbre de treball respecte a HEAD",
   'Could not determine current working directory.':
