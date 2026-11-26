@@ -545,7 +545,23 @@ BODY
         '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "app/github-actions") ]'
     )"
     if [[ "${existing_issues}" == '[]' ]]; then
-      echo "No workflow-owned release-failure issue is open for ${release_version}; nothing to reconcile."
+      linked_issues="$(
+        gh issue list --repo "${GH_REPO}" \
+          --state open \
+          --search "\"${title_prefix}${release_version}\" in:title linked:pr" \
+          --limit 30 \
+          --json url,author,title \
+        | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
+          '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "app/github-actions") ]'
+      )"
+      if [[ "${linked_issues}" == '[]' ]]; then
+        echo "No workflow-owned release-failure issue is open for ${release_version}; nothing to reconcile."
+      else
+        while read -r linked_issue; do
+          [[ -z "${linked_issue}" ]] && continue
+          echo "::notice::$(jq -r '.url' <<< "${linked_issue}") was not reconciled because it is linked to a pull request."
+        done < <(jq -c '.[]' <<< "${linked_issues}")
+      fi
       exit 0
     fi
     while read -r existing_issue; do
@@ -553,7 +569,7 @@ BODY
       issue_number="$(jq -r '.number' <<< "${existing_issue}")"
       issue_url="$(jq -r '.url' <<< "${existing_issue}")"
       if (( $(jq -r '.assignees | length' <<< "${existing_issue}") > 0 )) || jq -e \
-        '(.labels // []) | map(.name) | any(. == "status/need-information" or . == "status/need-retesting")' \
+        '(.labels // []) | map(.name) | any(. == "autofix/in-progress" or . == "status/need-information" or . == "status/need-retesting")' \
         <<< "${existing_issue}" >/dev/null; then
         echo "::warning::${issue_url} looks maintainer-owned; leaving it open."
         continue

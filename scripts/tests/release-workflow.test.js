@@ -1428,7 +1428,7 @@ describe('release workflow', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'closes the workflow-owned failure issue once a later attempt succeeds',
+    'reconciles unadopted duplicates and reports linked-only matches',
     () => {
       const directory = mkdtempSync(join(tmpdir(), 'release-reconcile-'));
       const bin = join(directory, 'bin');
@@ -1482,6 +1482,13 @@ describe('release workflow', () => {
             linkedPr: true,
             title: 'Release Failed for v1.2.3 on 2026-10-31',
           },
+          {
+            number: 15678,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15678',
+            labels: [{ name: 'autofix/in-progress' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-11-01',
+          },
         ]),
       );
       writeFileSync(
@@ -1491,6 +1498,7 @@ describe('release workflow', () => {
           'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
           '  case "$*" in\n' +
           '    *-linked:pr*) jq -c \'map(select(.linkedPr != true))\' "$GH_ISSUES" ;;\n' +
+          '    *linked:pr*) jq -c \'map(select(.linkedPr == true))\' "$GH_ISSUES" ;;\n' +
           '    *) cat "$GH_ISSUES" ;;\n' +
           '  esac\n' +
           '  exit 0\n' +
@@ -1507,28 +1515,26 @@ describe('release workflow', () => {
         { mode: 0o755 },
       );
       try {
+        const environment = {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          GH_CALL_LOG: ghLog,
+          GH_ISSUES: issues,
+          GH_REPO: 'QwenLM/qwen-code',
+          RELEASE_TAG: 'v1.2.3',
+          DETAILS_URL: 'https://github.example/run/1',
+          RUN_ATTEMPT: '2',
+        };
         const result = spawnSync(
           'bash',
           [releaseStepScriptAbsolutePath, 'reconcile-failure'],
-          {
-            cwd: directory,
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              PATH: `${bin}:${process.env.PATH}`,
-              GH_CALL_LOG: ghLog,
-              GH_ISSUES: issues,
-              GH_REPO: 'QwenLM/qwen-code',
-              RELEASE_TAG: 'v1.2.3',
-              DETAILS_URL: 'https://github.example/run/1',
-              RUN_ATTEMPT: '2',
-            },
-          },
+          { cwd: directory, encoding: 'utf8', env: environment },
         );
         expect(result.status, result.stderr).toBe(0);
         const calls = readFileSync(ghLog, 'utf8');
-        for (const adopted of [15672, 15675, 15676, 15677]) {
+        for (const adopted of [15672, 15675, 15676, 15677, 15678]) {
           expect(calls).not.toContain(`issue comment ${adopted}`);
+          expect(calls).not.toContain(`issue edit ${adopted}`);
           expect(calls).not.toContain(`issue close ${adopted}`);
         }
         expect(calls).toContain('issue comment 15673');
@@ -1543,6 +1549,35 @@ describe('release workflow', () => {
         // One absent label must not abort the remaining removals or the close.
         expect(calls).toContain('--remove-label status/ready-for-agent');
         expect(calls).toContain('--remove-label autofix/in-progress');
+
+        writeFileSync(
+          issues,
+          JSON.stringify([
+            {
+              number: 15677,
+              url: 'https://github.example/QwenLM/qwen-code/issues/15677',
+              labels: [{ name: 'type/bug' }],
+              author: { login: 'app/github-actions' },
+              linkedPr: true,
+              title: 'Release Failed for v1.2.3 on 2026-10-31',
+            },
+          ]),
+        );
+        writeFileSync(ghLog, '');
+        const linkedOnly = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'reconcile-failure'],
+          { cwd: directory, encoding: 'utf8', env: environment },
+        );
+        expect(linkedOnly.status, linkedOnly.stderr).toBe(0);
+        expect(linkedOnly.stdout).toContain(
+          'https://github.example/QwenLM/qwen-code/issues/15677',
+        );
+        expect(linkedOnly.stdout).toContain('linked to a pull request');
+        expect(linkedOnly.stdout).not.toContain('nothing to reconcile');
+        const linkedCalls = readFileSync(ghLog, 'utf8');
+        expect(linkedCalls).not.toContain('issue comment 15677');
+        expect(linkedCalls).not.toContain('issue close 15677');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
