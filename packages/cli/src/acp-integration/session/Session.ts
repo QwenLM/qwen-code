@@ -80,6 +80,7 @@ import {
   isUserPromptSubmitContextPartText,
 } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import { runUserPromptSubmit } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit.js';
+import type { UserPromptSource } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { getChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   appendAsyncHookContextPart,
@@ -383,6 +384,7 @@ import {
   IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_USER_PROMPT_META_KEY,
+  DAEMON_PROMPT_SOURCE_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -682,6 +684,13 @@ function readDaemonInputAnnotations(
       !!item && typeof item === 'object' && !Array.isArray(item),
   );
   return annotations.length > 0 ? structuredClone(annotations) : undefined;
+}
+function readPromptSource(value: unknown): UserPromptSource | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { sessionId, workspaceCwd } = value as Record<string, unknown>;
+  return typeof sessionId === 'string' && typeof workspaceCwd === 'string'
+    ? { session_id: sessionId, cwd: workspaceCwd }
+    : undefined;
 }
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
@@ -7344,7 +7353,16 @@ export class Session implements SessionContext {
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
+            const delegatedPromptSource = readPromptSource(
+              promptMetadata?.[DAEMON_PROMPT_SOURCE_META_KEY],
+            );
+            const checkDelegatedPrompt =
+              delegatedPromptSource !== undefined &&
+              this.settings.merged.enableDelegatedPromptHooks === true;
+            // Opted-in delegated text enters message admission, where hooks
+            // can block it or add context before any model request.
             const isSlashInput =
+              !checkDelegatedPrompt &&
               !isContinue &&
               !isRestoreAskUserQuestion &&
               isSlashCommand(inputText);
@@ -7639,11 +7657,15 @@ export class Session implements SessionContext {
               isFreshUserTurn &&
               (channelTurn
                 ? getChannelWorkflowOrigin()?.userInitiated === true
-                : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false);
+                : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false &&
+                  (!delegatedPromptSource || checkDelegatedPrompt));
             const hookSubmittedPrompt =
               isUserSubmissionTurn && submittedPrompt.trim().length > 0
                 ? submittedPrompt
                 : undefined;
+            const hookSource = isUserSubmissionTurn
+              ? delegatedPromptSource
+              : undefined;
             // `experimental.unifiedAgentLoop`: a prompt sends its model rounds
             // through `LlmClient` on the shared agent loop's round: a fresh
             // prompt, a channel's or a Goal turn's included, as a UserQuery,
@@ -7687,6 +7709,7 @@ export class Session implements SessionContext {
                 .getLlmClient()
                 .admitUserPrompt(promptText, promptId, {
                   submittedPrompt: hookSubmittedPrompt,
+                  source: hookSource,
                   signal: pendingSend.signal,
                 });
               if (promptAdmission.blocked) {
@@ -7721,7 +7744,10 @@ export class Session implements SessionContext {
                     },
                   },
                 });
-                return { stopReason: 'end_turn' };
+                return {
+                  stopReason: 'end_turn',
+                  _meta: { 'qwen.promptBlocked': true },
+                };
               }
             } else if (isNewUserPrompt) {
               const decision = await runUserPromptSubmit(
@@ -7729,12 +7755,17 @@ export class Session implements SessionContext {
                 promptText,
                 hookSubmittedPrompt,
                 pendingSend.signal,
+                undefined,
+                hookSource,
               );
               if (decision?.blockReason !== undefined) {
                 await this.messageEmitter.emitAgentMessage(
                   userPromptBlockedNotice(decision.blockReason),
                 );
-                return { stopReason: 'end_turn' };
+                return {
+                  stopReason: 'end_turn',
+                  _meta: { 'qwen.promptBlocked': true },
+                };
               }
 
               // Add additional context from hooks to the request, wrapped in
