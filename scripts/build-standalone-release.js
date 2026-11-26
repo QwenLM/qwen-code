@@ -260,12 +260,16 @@ async function packageTarget({
 // native package version comes from. Only the build host's own platform
 // package is installed, so the installed tree cannot answer for the others.
 let pnpmLockedKeys;
-function readPnpmLockedVersion(packageName) {
+function readPnpmLockedKeys() {
   pnpmLockedKeys ??= Object.keys(
     parseYaml(fs.readFileSync(path.join(rootDir, 'pnpm-lock.yaml'), 'utf8'))
       ?.packages ?? {},
   );
-  const versions = pnpmLockedKeys
+  return pnpmLockedKeys;
+}
+
+function readPnpmLockedVersion(packageName) {
+  const versions = readPnpmLockedKeys()
     .filter((key) => key.startsWith(`${packageName}@`))
     .map((key) => key.slice(packageName.length + 1));
   // Two locked versions would leave the staged one ambiguous; fail instead.
@@ -300,21 +304,23 @@ function readClipboardPackageSpecs() {
 // host — the host's own node_modules only ever carries one platform's
 // prebuild, and getPty() resolves the platform package from node_modules at
 // runtime (#11872). Deriving the list from the root manifest keeps it in sync
-// when a platform pin is added (e.g. linux-arm64).
+// when a platform pin is added (e.g. linux-arm64). The staged version is the
+// root pin itself, not "the only locked one": packages/harness/core locks its
+// own node-pty wrapper, so the lock can carry more than one version.
 function readNodePtyPackageSpecs() {
   const rootPackage = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'),
   );
-  const packageNames = Object.keys(
-    rootPackage.optionalDependencies ?? {},
-  ).filter((packageName) => packageName.startsWith('@lydell/node-pty'));
+  const pins = Object.entries(rootPackage.optionalDependencies ?? {}).filter(
+    ([packageName]) => packageName.startsWith('@lydell/node-pty'),
+  );
 
-  return packageNames.map((packageName) => {
-    const version = readPnpmLockedVersion(packageName);
-    if (!version) {
+  return pins.map(([packageName, version]) => {
+    const spec = `${packageName}@${version}`;
+    if (!readPnpmLockedKeys().includes(spec)) {
       fail(`node-pty package version is not locked for ${packageName}`);
     }
-    return `${packageName}@${version}`;
+    return spec;
   });
 }
 

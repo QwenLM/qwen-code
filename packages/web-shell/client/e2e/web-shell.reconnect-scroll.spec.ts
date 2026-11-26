@@ -8,6 +8,81 @@ import {
   userTextEvent,
 } from './utils/mockDaemon';
 
+test('keeps the Mod-enabled transcript mounted during same-session epoch recovery', async ({
+  page,
+  baseURL,
+}) => {
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      userTextEvent('Write a long response', { id: 1 }),
+      assistantTextEvent(
+        Array.from(
+          { length: 100 },
+          (_, index) => `Paragraph ${index + 1}: historical reading material.`,
+        ).join('\n\n'),
+        { id: 2 },
+      ),
+      turnCompleteEvent('initial-prompt', { id: 3 }),
+    ],
+  });
+  scenario.capabilities.features.push('session_mod_rows');
+  const daemon = await installMockDaemon(page, scenario, { baseURL });
+  const modRowPath = `/session/${scenario.sessionId}/mod-row`;
+  await page.route(`**${modRowPath}`, (route) =>
+    route.fulfill({ json: { status: 'unhooked' } }),
+  );
+  let holdLoad = false;
+  let reloadStarted = false;
+  let resumeLoad = () => {};
+  const loadGate = new Promise<void>((resolve) => {
+    resumeLoad = resolve;
+  });
+  const loadPath = `/session/${scenario.sessionId}/load`;
+  await page.route(`**${loadPath}`, async (route) => {
+    if (holdLoad) {
+      reloadStarted = true;
+      await loadGate;
+    }
+    await route.fallback();
+  });
+
+  const initialModRow = page.waitForResponse((response) =>
+    response.url().endsWith(modRowPath),
+  );
+  await page.goto(`/session/${scenario.sessionId}`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: scenario.sessionId }),
+  );
+  await initialModRow;
+  const list = page.locator('[data-web-shell-message-list]');
+  await list.hover();
+  await page.mouse.wheel(0, -2000);
+  const bottomDistance = () =>
+    list.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+  await expect.poll(bottomDistance).toBeGreaterThan(1500);
+  await list.evaluate((el) => el.setAttribute('data-epoch-probe', 'mounted'));
+
+  holdLoad = true;
+  try {
+    await daemon.sendEvent({
+      v: 1,
+      type: 'state_resync_required',
+      data: { reason: 'epoch_reset' },
+    });
+    await expect.poll(() => reloadStarted).toBe(true);
+    await expect(list).toHaveAttribute('data-epoch-probe', 'mounted');
+    await expect.poll(bottomDistance).toBeGreaterThan(1500);
+  } finally {
+    resumeLoad();
+  }
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: scenario.sessionId }),
+  );
+  await expect(list).toHaveAttribute('data-epoch-probe', 'mounted');
+});
+
 for (const reading of ['before reconnect', 'during replay', 'at bottom']) {
   test(`preserves scroll follow ${reading} after SSE recovery @smoke`, async ({
     page,

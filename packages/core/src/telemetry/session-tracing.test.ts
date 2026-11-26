@@ -1096,6 +1096,23 @@ describe('session-tracing', () => {
       expect(llm.attributes['request_setup_ms']).toBe(300);
     });
 
+    it('endLLMRequestSpan leaves request build time out of sampling_ms', () => {
+      // duration_ms starts before the request is built; ttft_ms starts at
+      // its dispatch, so the build time sits between them.
+      const llm = runLLM({
+        success: true,
+        ttftMs: 200,
+        requestBuildMs: 150,
+        durationMs: 1000,
+        outputTokens: 650,
+      });
+
+      expect(llm.attributes['duration_ms']).toBe(1000);
+      expect(llm.attributes['sampling_ms']).toBe(650);
+      expect(llm.attributes['output_tokens_per_second']).toBe(1000);
+      expect(llm.attributes).not.toHaveProperty('request_build_ms');
+    });
+
     it('endLLMRequestSpan clamps sampling_ms to 0 when ttft exceeds duration (clock skew)', () => {
       const llm = runLLM({ success: true, ttftMs: 1500, durationMs: 1000 });
       // Math.max(0, 1000 - 1500): only when ttft > duration, i.e. clock
@@ -1325,6 +1342,17 @@ describe('session-tracing', () => {
       expectPhase(config, 50, 'request_preparation');
       expectPhase(config, 200, 'network_latency');
       expectPhase(config, 800, 'response_processing');
+    });
+
+    it('leaves request build time out of RESPONSE_PROCESSING', () => {
+      const config = createMockConfig();
+      runLLM(
+        { success: true, ...timing, requestBuildMs: 100, config },
+        'test-model',
+      );
+
+      expectPhase(config, 200, 'network_latency');
+      expectPhase(config, 700, 'response_processing');
     });
 
     it('skips metric recording when config is absent', () => {
@@ -2097,6 +2125,18 @@ describe('session-tracing', () => {
       expect(attrOf('hook', 'is_interrupt')).toBe(true);
 
       endToolSpan(toolSpan, { success: false, error: 'cancelled' });
+    });
+
+    it('records an interrupted hook wait without an error status', () => {
+      const hookSpan = startHookSpan({
+        hookEvent: 'PostToolUse',
+        toolName: 'Bash',
+      });
+      endHookSpan(hookSpan, { waitInterrupted: true });
+
+      expect(attrOf('hook', 'wait_interrupted')).toBe(true);
+      expect(attrOf('hook', 'error.type')).toBeUndefined();
+      expect(rec('hook')?.statuses).toHaveLength(0);
     });
 
     it('returns NOOP span when SDK is not initialized', () => {

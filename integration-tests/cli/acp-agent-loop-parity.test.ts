@@ -1029,33 +1029,48 @@ const allowOnce = () => ({
       }
     }, 120_000);
 
-    it('runs UserPromptSubmit on tool-result requests too, as other surfaces do', async () => {
-      const hookCalls: number[] = [];
+    it('runs UserPromptSubmit once per new message across tool-result requests', async () => {
+      const submitCalls: number[] = [];
+      const postCalls: number[] = [];
+      const results: number[] = [];
       const scenario: Scenario = {
-        name: 'UserPromptSubmit on tool results',
-        prompts: ['Read the readme.'],
-        settings: { hooks: hooks('UserPromptSubmit', 'count-prompts.mjs') },
-        prepare: (r) => {
-          r.createFile('readme.txt', 'readme body\n');
-          r.createFile(
-            'count-prompts.mjs',
-            [
-              "import { appendFileSync } from 'node:fs';",
-              "appendFileSync('prompt-hook-calls', 'x');",
-              'process.stdout.write("{}");',
-              '',
-            ].join('\n'),
-          );
+        name: 'UserPromptSubmit on new messages',
+        prompts: ['Read the two files.', 'Summarize them.'],
+        settings: {
+          hooks: {
+            ...hooks('UserPromptSubmit', 'count-prompts.mjs'),
+            ...hooks('PostToolUse', 'count-tools.mjs'),
+          },
         },
-        reply: (messages, dir, index) => {
-          if (index === 1) {
-            hookCalls.push(
-              readFileSync(join(dir, 'prompt-hook-calls'), 'utf8').length,
+        prepare: (r) => {
+          r.createFile('first.txt', 'first body\n');
+          r.createFile('second.txt', 'second body\n');
+          for (const name of ['prompts', 'tools']) {
+            r.createFile(`${name}.log`, '');
+            r.createFile(
+              `count-${name}.mjs`,
+              [
+                "import { appendFileSync } from 'node:fs';",
+                `appendFileSync('${name}.log', 'x');`,
+                'process.stdout.write("{}");',
+                '',
+              ].join('\n'),
             );
           }
-          return toolResults(messages) === 0
-            ? { toolCalls: [read(join(dir, 'readme.txt'), 'call_read')] }
-            : { content: 'It says readme body.' };
+        },
+        reply: (messages, dir, index) => {
+          submitCalls.push(
+            readFileSync(join(dir, 'prompts.log'), 'utf8').length,
+          );
+          postCalls.push(readFileSync(join(dir, 'tools.log'), 'utf8').length);
+          results.push(toolResults(messages));
+          if (index === 0)
+            return { toolCalls: [read(join(dir, 'first.txt'), 'call_first')] };
+          if (index === 1)
+            return {
+              toolCalls: [read(join(dir, 'second.txt'), 'call_second')],
+            };
+          return { content: 'Both files were read.' };
         },
       };
 
@@ -1063,46 +1078,42 @@ const allowOnce = () => ({
 
       expect(shared.updates).toEqual(current.updates);
       expect(kernel.updates).toEqual(current.updates);
-      // Hook calls by each run's second model request, the tool result's.
-      expect(hookCalls).toEqual([1, 2, 2]);
+      expect(submitCalls).toEqual([1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1, 2]);
+      expect(postCalls).toEqual([0, 1, 2, 2, 0, 1, 2, 2, 0, 1, 2, 2]);
+      expect(results).toEqual(postCalls);
     }, 120_000);
 
-    it('cancels a tool-result request whose UserPromptSubmit hook is still running', async () => {
+    it('cancels a fresh request whose UserPromptSubmit hook is still running', async () => {
       const scenario: Scenario = {
-        name: 'cancel during a tool-result hook',
+        name: 'cancel during user prompt admission',
         prompts: ['Read the readme.'],
         settings: { hooks: hooks('UserPromptSubmit', 'slow-hook.mjs') },
         cancelOnFile: 'hook-waiting',
         prepare: (r) => {
-          r.createFile('readme.txt', 'readme body\n');
           r.createFile(
             'slow-hook.mjs',
             [
               "import { writeFileSync } from 'node:fs';",
-              "let input = ''; for await (const chunk of process.stdin) input += chunk;",
-              // The tool-result request's hook has no prompt text.
-              'if (JSON.parse(input).prompt === "") {',
-              "  writeFileSync('hook-waiting', '');",
-              '  await new Promise((resolve) => setTimeout(resolve, 45_000));',
-              '}',
+              "writeFileSync('hook-waiting', '');",
+              'await new Promise((resolve) => setTimeout(resolve, 45_000));',
               'process.stdout.write("{}");',
               '',
             ].join('\n'),
           );
         },
-        reply: (messages, dir) =>
-          toolResults(messages) === 0
-            ? { toolCalls: [read(join(dir, 'readme.txt'), 'call_read')] }
-            : { content: 'It says readme body.' },
+        reply: () => ({ content: 'Model request was not expected.' }),
       };
 
-      for (const kernel of [false, true]) {
+      for (const [shared, kernel] of [
+        [false, false],
+        [true, false],
+        [true, true],
+      ]) {
         const started = Date.now();
-        const arm = await run(scenario, true, kernel);
-
+        const arm = await run(scenario, shared, kernel);
         expect(arm.stopReasons).toEqual(['cancelled']);
-        // The tool result never reached the model.
-        expect(arm.requests).toHaveLength(1);
+        expect(arm.requests).toHaveLength(0);
+        expect(arm.sharedRounds).toBe(0);
         expect(Date.now() - started).toBeLessThan(30_000);
       }
     }, 120_000);

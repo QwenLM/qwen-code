@@ -66,7 +66,7 @@
 
 ### guard 行与入口
 
-`ma_tenant_guard` 每个 `(tenant_key, guard_domain)` 一行，获取方式是先 `INSERT … ON DUPLICATE KEY UPDATE`，再 `SELECT … FOR UPDATE`。共有两个 domain：
+`ma_tenant_guard` 每个 `(tenant_id, guard_domain)` 一行，获取方式是先 `INSERT … ON DUPLICATE KEY UPDATE`，再 `SELECT … FOR UPDATE`。共有两个 domain：
 
 - `runtime_placement`（placement）。原语是 `JdbcRuntimeBindingRepository.lockPlacementDomain`，包装方法有 `JdbcWorkspaceLifecycleStore.lockPlacement`、`JournalFencing.lockPlacementBounded`、`WorkspaceMigrationAdmission.lockTenant` 和 `WorkspaceStorageKindGuard.lockDomain`。`lockTenant` 这个名字里写的是 "tenant"，实际锁的却是 placement 行。运维存储注册也使用这个 domain，用一个哨兵键（`external-storage-registration/1`）作为有意设置的跨租户锁；`LocalStorageOwners` 则按主机哨兵键（`local-storage-host/<hostId>`）加锁。
 - `output_publication`（publication）。原语是 `ToolPublicationRetentionStore.lockTenant`，`ToolPublicationStore` 和 `ToolPublicationAdmissionStore` 里各有带上限的本地包装方法。CSI retention root（`JdbcCsiFilesRetirementGuard.lockRetentionRoot` 和 `initializeRetentionRoot`）锁的也是同一行。

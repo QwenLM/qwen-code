@@ -51,6 +51,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/sessions/recovery',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery',
+  },
+  {
+    method: 'POST',
+    path: '/sessions/recovery/continue',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery/continue',
+  },
+  {
+    method: 'POST',
     path: '/sessions/catalog',
     attribution: 'handler_resolved',
     route: 'POST /sessions/catalog',
@@ -222,6 +234,18 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/mcp-app/tools/call',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/mcp-app/tools/call',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/retirements/:operationId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/retirements/:operationId',
+  },
+  {
+    method: 'PUT',
+    path: '/session/:id/retirements/:operationId',
+    attribution: 'handler_resolved',
+    route: 'PUT /session/:id/retirements/:operationId',
   },
   {
     method: 'GET',
@@ -453,6 +477,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/feedback',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/feedback',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/config-option',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/config-option',
@@ -462,6 +492,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/recap',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/recap',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/mod-row',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mod-row',
   },
   {
     method: 'POST',
@@ -848,6 +884,7 @@ export function resolveDaemonTelemetryRoute(
     if (req.method === 'POST') {
       if (
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/settings/vision-bridge' ||
         suffix === '/workspace/voice' ||
         suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||

@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageR
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.StorageAlias;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -81,7 +80,7 @@ public class ExternalStorageRegistrationTest {
                 .andReturn().getResponse().getContentAsString();
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         assertThat(owner.get("mount_state")).isEqualTo("UNVERIFIED");
-        assertThat(owner.get("holder_key")).isNull();
+        assertThat(owner.get("holder_id")).isNull();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding", Integer.class)).isZero();
         ManagedSchema.initialize(jdbc.getDataSource());
         var replay = new ExternalStorageRegistrationStore(jdbc, manager)
@@ -148,9 +147,8 @@ public class ExternalStorageRegistrationTest {
     @Test
     public void externalRegistrationCannotEnterLocalExecutionAndCannotAdoptLegacyAliases() {
         for (String kind : List.of("LOCAL", "UNREGISTERED")) {
-            String alias = RuntimeAdmissionFences.storageAliasKey("tenant", kind);
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?, ?, ?)",
-                    alias, RuntimeAdmissionFences.storageFenceKey("tenant"), RuntimeAdmissionFences.storageFenceKey(kind), "tenant", kind, kind);
+            jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, storage_kind) VALUES (?, ?, ?)",
+                    "tenant", kind, kind);
             assertThat(LocalStorageOwners.alias(jdbc, "tenant", kind, false).get("storage_kind")).isEqualTo(kind);
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, "tenant", kind);
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, "tenant", kind);
@@ -239,6 +237,53 @@ public class ExternalStorageRegistrationTest {
                     assertThat(error.getStatusCode()).isEqualTo(400);
                     assertThat(error.getCode()).isEqualTo("invalid_external_storage_registration");
                 });
+    }
+
+    @Test
+    public void batchStatesUseCanonicalAliasesForEachPageAndIgnoreDuplicateInputs() {
+        store.registerExternalStorage("tenant", "one", registration("provider", "one", "one", "/aliases/one"));
+        store.registerExternalStorage("tenant", "two", registration("provider", "two", "two", "/aliases/two"));
+        store.registerExternalStorage("other-tenant", "one", registration("other-provider", "one", "one", "/other/one"));
+        var trace = new StoreLockTrace(jdbc.getDataSource());
+        var reader = new ExternalStorageRegistrationStore(new ManagedSchemaJdbcTemplate(trace), manager);
+        assertThat(reader.states("tenant", List.of())).isEmpty();
+        assertThat(trace.events()).isEmpty();
+        assertThat(reader.states("tenant", List.of("one", "one", "missing")))
+                .containsOnlyKeys("one").containsEntry("one",
+                        new ExternalStorageRegistrationStore.RegistrationState(true, "provider", "one"));
+        assertThat(reader.states("tenant", List.of("two"))).containsOnlyKeys("two");
+        assertThat(reader.states("other-tenant", List.of("one", "two")))
+                .containsOnlyKeys("one").containsEntry("one",
+                        new ExternalStorageRegistrationStore.RegistrationState(true, "other-provider", "one"));
+        assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql)).hasSize(3).allSatisfy(sql -> assertThat(sql)
+                        .contains("s.tenant_id = ?", "s.storage_id in ("));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"alias", "tenant", "storage", "json", "revision", "owner", "mount", "retired"})
+    public void batchStatesIsolateCorruptOrMismatchedRegistrations(String corruption) {
+        store.registerExternalStorage("tenant", "good", registration("provider", "good", "good", "/aliases/good"));
+        store.registerExternalStorage("tenant", "bad", registration("provider", "bad", "bad", "/aliases/bad"));
+        switch (corruption) {
+            // The alias identity is the raw (tenant_id, storage_id) tuple now; the
+            // remaining alias-level drift is a physical mapping with no owner row.
+            case "alias" -> jdbc.update("UPDATE ma_storage SET physical_id = ? WHERE tenant_id = ? AND storage_id = ?",
+                    WorkspaceTestStorage.key("other-tenant", "bad"), "tenant", "bad");
+            case "tenant" -> jdbc.update("UPDATE ma_storage SET tenant_id = 'other-tenant' WHERE tenant_id = ? AND storage_id = ?", "tenant", "bad");
+            case "storage" -> jdbc.update("UPDATE ma_storage SET storage_id = 'other-storage' WHERE tenant_id = ? AND storage_id = ?", "tenant", "bad");
+            case "json" -> jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE tenant_id = ? AND storage_id = ?", "tenant", "bad");
+            case "revision" -> jdbc.update("UPDATE ma_storage SET registration_revision = 2 WHERE tenant_id = ? AND storage_id = ?", "tenant", "bad");
+            case "owner" -> jdbc.update("UPDATE ma_storage SET physical_id = ? WHERE tenant_id = ? AND storage_id = ?",
+                    registration("provider", "good", "good", "/aliases/good").identity().ownerKey(), "tenant", "bad");
+            case "mount" -> jdbc.update("UPDATE ma_storage_owner SET mount_root = '/changed' WHERE physical_id = ?",
+                    registration("provider", "bad", "bad", "/aliases/bad").identity().ownerKey());
+            case "retired" -> jdbc.update("UPDATE ma_storage SET registration_state = 'RETIRED' WHERE tenant_id = ? AND storage_id = ?", "tenant", "bad");
+            default -> throw new AssertionError(corruption);
+        }
+        assertThat(store.states("tenant", List.of("bad", "good", "bad"))).containsOnlyKeys("good");
+        assertThat(store.states("tenant", List.of("good"))).containsOnlyKeys("good");
+        assertThat(store.states("tenant", List.of("bad"))).isEmpty();
     }
 
     @Test

@@ -4,10 +4,25 @@
 
 ## 本次 PR 的当前范围
 
-下文所述的测试套件与写回锁拆分，已通过 #15128 和 #15254 合入 main。
-PR #15274 现在承载的是剩余的加固：缓存写回期间保留失败套件的状态、
-排除可变的解析器元数据，以及保持缓存播种尽力而为且故障可见。
-下文的历史锁设计作为背景，不代表本次 PR 新交付了一次锁范围迁移。
+测试套件与写回锁的拆分已通过 #15128 和 #15254 合入 main。
+PR #15274 引入了剩余加固：缓存写回期间保留
+失败套件状态、排除可变的解析器元数据，以及让缓存播种过程可观察。后续的
+#18065 进一步要求先安全重建 job 本地的仓库，再运行 Maven。宿主缓存复制
+仍是可选且可观察的优化，但必要的去别名、挂载及挂载检查、权限修复与
+Resolver/项目内部坐标清理不再采用尽力而为；它们失败时必须在 Maven 前
+停止。所需的 job 本地去别名、挂载检查、权限修复与清理必须成功。
+种子重建集中在 `.github/scripts/maven-cache-seed.sh`。reference 工作流始终构建
+自身 workflow checkout，并直接 source 其中的 helper。四个 SDK 调用点先检查本地
+helper；较早的不可变源码 checkout 若早于该辅助脚本，会按需获取由 `GITHUB_SHA`
+标识的工作流 revision 所对应的同一份 helper，而不是退化为不安全的
+宿主共享仓库。获取失败或缺少 helper 时仍须在 Maven 前停止。回退下载写入原子创建的 `mktemp` 文件，
+不写固定的、可能已经存在软链接或硬链接的输出路径。退出作用域内的 trap 尽力删除下载副本，
+覆盖获取失败及 seed 失败的路径；删除本身失败时保留原 step 状态，
+在输出通道可写时以 `::warning::` 注解标出残留路径，不删除 checkout 中的 helper。
+告警在子 shell 输出；关闭日志管道时，即使该子进程被 `SIGPIPE` 终止，
+主 step shell 仍会恢复已保存的状态。其他 source、seed、挂载及 prune 失败保持 fail-closed。复制前还会检查宿主源树的挂载；
+宿主源有挂载或无法检查其挂载时，跳过可选复制并使用干净的 job 本地仓库。获取工具的过程不改变
+被验证源码的不可变版本。下文的历史锁设计不代表本次 PR 又迁移了一次锁范围。
 
 数据库集成现仅运行 MySQL。下文原 MariaDB 集成站点的相关内容保留历史测量记录；其未变的锁、缓存写回和预算规则适用于保留的 MySQL 任务。参见[当前数据库验证范围](managed-runtime-broker-jdbc.zh-CN.md#数据库验证范围)。
 
@@ -99,14 +114,20 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 19:15 失败，Maven 一次都没启动 —— 约束它的是持锁时长，不是排队顺序。
 
 两次 Maven 运行本来就都从 job 本地仓库解析，不触碰宿主机共享状态。只有
-缓存写回会修改 `~/.m2`，因此只有写回取锁。种子复制（`cp -aln`）是只读且
-尽力而为的，放在取锁之前；它随后会从 job 本地副本中删除内部固定发布
+缓存写回会修改 `~/.m2`，因此只有写回取锁。宿主缓存复制（`cp -aln`）取锁前
+作为可选优化执行；跨设备或复制失败会冷启动到干净的本地仓库。job 本地
+仓库的安全重建不能视为尽力而为：它必须先解除别名、回收历史隔离目录、
+检查挂载边界并修复本地目录权限，才能让 Maven 继续。任一必要步骤失败都会
+在 Maven 前终止。仅本次新建的隔离目录删除失败时只告警，未删除的内容仍留在隔离目录。
+随后会从 job 本地副本中删除内部固定发布
 坐标，使不持锁的 `mvn install` 写入新的 inode，而不是穿透硬链接改写宿主机
 缓存。Maven 可能原地截断重写跟踪标记（`resolver-status.properties`、
 `*.lastUpdated`、`_remote.repositories`）、版本元数据及校验文件
 （`maven-metadata-*.xml*`）。播种时删除这些条目，以及 `*.tmp`、`*.part`
 和 `*.part.lock` 残留，使每个 job 在本地重新解析这些状态；这不假定所有
-Resolver 版本都会原地改写 inode。清理同样覆盖继承的可变状态：池上的
+Resolver 版本都会原地改写 inode。挂载边界无法检查、目录权限无法修复以及
+任何必要的 resolver/内部坐标清理失败，都会在 Maven 之前终止，而不是带着
+共享 inode 继续。清理同样覆盖继承的可变状态：池上的
 `RUNNER_TEMP` 跨 job 保留，上一个 job 遗留的单链接标记必须和本次播种建立的
 硬链接一并删除。宿主机缓存缺失保持安静，真正的复制失败才告警，因此该告警
 仍然表示播种失败。播种删除与持锁的宿主清理按任意深度匹配 `qwencode-sdk`
@@ -269,7 +290,25 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   会像内核一样让 `flock --wait` 一直阻塞到释放，因此队首不会循环、
   也不会被超过。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
-  pin 的是 source 该辅助脚本、test 通道的 9600 秒预算与 200 分钟上限、
+  钉住四个 SDK source 调用点逐字节一致，并要求 reference 构建直接 source checkout 内的 helper、
+  不提供下载回退。它直接检查真实的
+  `maven-cache-seed.sh` 的存在性检查、目录权限修复、挂载边界、保留或悬空的
+  隔离链接、回退清理及必要 prune 失败。本地与工作流 revision 都不能提供 helper 时，在 Maven 前停止；
+  source 或必要的 seed/守卫失败同样在 Maven 前停止。若本地已有 helper，
+  或成功按 revision 获取 helper，就会实际 source，并在私有夹具中形成温热的
+  硬链接缓存并调用 Maven。被验证源码的不可变版本不会被改变。下载使用新建的 `mktemp` 普通文件，
+  保留既有软链接或硬链接的目标字节；退出时尽力回收下载副本，覆盖获取和 seed 失败的
+  情况，输出通道可写时以 `::warning::` 注解标出残留路径；清理与告警输出的
+  I/O 失败均保留原 step 状态；告警子 shell 隔离了日志管道关闭引发的 `SIGPIPE`，使主 step shell 能恢复原状态；
+  权限拒绝用例由真实删除探测决定能否运行，而不是仅凭 uid 0 跳过；移除 DAC 能力的 root CI lane 仍会执行。
+  探测准备错误或非预期删除错误会显式失败，不会静默丢失覆盖。每个 `seed_helper` 步骤恰好只有一条 trap，且必须位于完整的缺失 helper 守卫（`if ... fi`）内部、`mktemp` 之后与 `curl` 之前；它被精确钉住为单操作数的 `${seed_helper}` 删除加告警子 shell 与原状态恢复，拒绝额外操作数与额外 trap。该 trap 是步骤内唯一的 `rm`/`unlink`，因此删除命令无法借变量别名隐藏目标；trap 之外唯一允许的 `find -delete` 是写回对宿主缓存的坐标清除，并逐字钉住该整条命令，使别名目标或对共享缓存的更大范围清除都无法通过。这是一条词法 pin：其他破坏性动词，以及同一动词的混淆拼写（转义或引号拆词，如 `r\m`、`-de'lete'`），都不在它的覆盖范围内。
+  本轮清理与 helper 缺失探针都将 `cwd` 和 `GITHUB_WORKSPACE` 指向私有夹具 workspace，使基于 `$PWD` 的删除目标无法触及真实 checkout；日志管道清理探针还以真实 checkout helper 的字节初始化夹具 workspace 副本，并核实该副本字节未被改变。
+  以目录作为删除对象，使清理失败不依赖 DAC 能力；无读端 FIFO 臂验证 `SIGPIPE` 不会终止主 shell 且保留原退出状态，普通可读 pipe 臂则断言唯一告警及残留路径。
+  其他 source、seed、挂载及 prune 失败保持 fail-closed；reference 构建直接 source checkout 内的 helper，不需要回退下载。
+  reference 测试钉住步骤级 YAML 属性（无 `continue-on-error`、`if`、`env` 或 `shell` 覆写）、开头的 `set -euo pipefail`、精确的 `self-hosted` 块以及后续仅由 `mvn` 组成的命令（无下载器或额外 shell 拼接）；同时在不从外部强制传 `-e` 的情况下运行完整步骤脚本，在预先创建 `.github/scripts`、仅缺 `maven-cache-seed.sh` 文件本身的私有 workspace 中，通过执行命令日志断言失败准确发生在 `source "${seed_helper}"` 且位于 Maven 之前，helper 文件未被创建、Maven 与下载器均未调用。
+  宿主源有挂载或挂载检查失败时，跳过可选复制并使用干净仓库；
+  必要的 job 本地挂载守卫失败仍须在 Maven 前停止。随后继续钉住 source 该辅助脚本、
+  test 通道的 9600 秒预算与 200 分钟上限、
   红色 leg 的 300 秒收紧、MariaDB 写回的 5400 秒预算与 310 分钟上限、
   两处的前导与写回尾部——除等待预算（含红色路径收紧）与辅助脚本的 tier
   参数外逐字节相同，比较前两侧都归一化延后的状态与阶段上报——两个 job
@@ -279,14 +318,18 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   两处写回 prune 都排除了内部坐标与解析器记账文件——
   `_remote.repositories`、`maven-metadata-*.xml*`、
   `resolver-status.properties`、`*.lastUpdated`、`*.part`、`*.part.lock` 与
-  `*.tmp`、写回在宿主侧按任意深度删除内部坐标、seed 的 prune 仍以
-  `2>/dev/null || true` 保持尽力而为、同时照旧删除它能删的去别名项、
-  该注解保持在 `INFRA_FAILURE_SIGNATURES` 之外、每个站点的 seed 与宿主清理
+  `*.tmp` 所命名的非目录 Resolver 与传输残留文件，会在每个播种 job-local
+  仓库和两处写回中被清除。合法的 Maven 构件目录不会仅因为目录名匹配这些
+  glob 就被删除；其中的 JAR 会保留，目录中的 Resolver 及传输残留文件则在
+  Maven 前删除；必要清理失败也必须在 Maven 使用不安全的本地目录之前停止。该注解保持在
+  `INFRA_FAILURE_SIGNATURES` 之外、每个站点的 seed 与宿主清理
   family glob 一致，以及每处写回 prune 保留全部显式坐标并加入模块 glob。
   故障分支覆盖 `flock` 缺失、`mkdir` 损坏、队列路径被占、锁路径是目录、
   `flock` 超时、`flock` 返回意外状态、宿主机缓存不可用、job 本地仓库缺失、
-  播种树中 prune 无法删除的条目——该情形下仍必须到达 Maven——以及复用的
-  job 本地仓库中继承的单链接 resolver 状态，prune 必须将其清除。
+  历史隔离目录或必要 prune 失败——这些情况下必须在 Maven 写入之前停止——
+  以及复用的 job 本地仓库中继承的单链接 resolver 状态，prune 必须将其清除。
+  仅本次新建的隔离目录回收失败仍是尽力而为并只告警；完整循环也必须回收
+  此前的隔离软链接，包括 `[ -e ]` 看不见的悬空链接。
   `.size-baseline` 条目在最后一次编辑后重新实测到工作流的尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
@@ -297,7 +340,13 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   200 分钟；MariaDB 写回站点保留 5400 秒和 310 分钟上限。test job 传入
   自己的 tier，MariaDB 站点默认 normal。两处都先让 Maven 套件从 job
   本地仓库跑完，再取锁。每个播种 job 本地仓库的 job 都会在运行 Maven
-  之前删除内部固定发布坐标。
+  之前删除内部固定发布坐标。宿主复制跨设备或失败时可以回退到干净的
+  联网仓库；宿主源有挂载或无法检查其挂载时同样跳过可选复制，仍可运行干净的
+  Maven 仓库；job 本地挂载边界无法检查、本地目录无法修复、历史隔离目录无法回收
+  或必要的 Resolver/内部坐标清理失败都必须在 Maven 之前停止。较早 SDK checkout 缺
+  helper 时，必须能够载入工作流 revision 的同一辅助文件，且不更改被验证的
+  不可变源码。仅本次创建的隔离目录允许尽力回收，未删除的剩余内容保留在
+  隔离目录中，并产生告警。
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。

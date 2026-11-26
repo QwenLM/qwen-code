@@ -218,7 +218,10 @@ function deletionOwner(
   };
 }
 
-function secondaryDeletion(locked: boolean) {
+function secondaryDeletion(
+  locked: boolean,
+  secondaryOverrides: Partial<DaemonSessionSummary> = {},
+) {
   connection.capabilities = {
     qwenCodeVersion: '1.2.3',
     features: ['multi_workspace_sessions', 'workspace_qualified_rest_core'],
@@ -229,6 +232,7 @@ function secondaryDeletion(locked: boolean) {
   const secondary = makeSession('same', {
     workspaceCwd: '/tmp/other',
     displayName: 'Secondary same ID',
+    ...secondaryOverrides,
   });
   const deleteSessionsData = vi.fn().mockResolvedValue({
     removed: ['same'],
@@ -575,6 +579,51 @@ describe('sidebar session selection', () => {
     expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
       'first',
       { isPinned: true },
+    );
+  });
+
+  it('grades "current" by workspace-qualified identity, not session id', async () => {
+    // The dialog compares session ids; the sidebar must not. A same-id row in
+    // another workspace is not the runtime this client would tear down, so a
+    // turn there does not block its Delete.
+    const { props } = secondaryDeletion(false, { hasActivePrompt: true });
+    // Both rows run a turn, so only the notion of "current" separates them.
+    active.sessions = [
+      makeSession('same', {
+        displayName: 'Primary same ID',
+        hasActivePrompt: true,
+      }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'same';
+    connection.workspaceCwd = '/tmp/project';
+    renderSidebar(props);
+    await expandSecondaryWorkspace();
+    expect(findSessionDeleteButton('Primary same ID').disabled).toBe(true);
+    const secondary = findSessionDeleteButton('Secondary same ID');
+    expect(secondary.disabled).toBe(false);
+    // The eligibility check must agree with the button: clicking it has to
+    // reach the confirmation, not be swallowed by an id-based "current".
+    act(() => click(secondary));
+    await flushSidebar();
+    expect(confirmDeleteButton()).toBeDefined();
+  });
+
+  it('blocks a same-id row in another workspace once it has background work', async () => {
+    // Background work blocks any row, so the identity distinction above must
+    // not turn into a blanket exemption for other workspaces.
+    const { props } = secondaryDeletion(false, {
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'idle',
+    });
+    connection.sessionId = 'same';
+    connection.workspaceCwd = '/tmp/project';
+    renderSidebar(props);
+    await expandSecondaryWorkspace();
+    const secondary = findSessionDeleteButton('Secondary same ID');
+    expect(secondary.disabled).toBe(true);
+    expect(secondary.getAttribute('title')).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
     );
   });
 

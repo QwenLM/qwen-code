@@ -320,9 +320,9 @@ class UnknownExecutionObservationTest {
         private Map<String, Object> runtimeStatus = Map.of("state", "unknown");
 
         @Override
-        public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session,
-                Map<String, Object> publisher) {
-            return CompletableFuture.completedFuture(null);
+        public CompletionStage<Map<String, Object>> installPublisher(RuntimeLease lease, RuntimeSession session,
+                Map<String, Object> publisher, Long writerGeneration) {
+            return CompletableFuture.completedFuture(Map.of());
         }
 
         @Override

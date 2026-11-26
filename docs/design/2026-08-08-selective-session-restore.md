@@ -856,7 +856,7 @@ fixing that ownership is not required for bounded hydration. Attribution is a
 separate process-global singleton that a target cannot safely apply and roll back
 while sibling sessions exist. Retain the projected attribution snapshot until the narrow
 non-throwing selective-restore finalizer that runs after the existing fallible
-Session setup and `installRewriter()`, but before the existing cron and command
+Session setup and `installMods()`, but before the existing cron and command
 startup. Any child path that still returns a restore failure therefore leaves
 attribution unchanged. This guarantee intentionally does not cover a
 #8691 public timeout whose underlying ACP restore later publishes successfully
@@ -941,7 +941,7 @@ Session constructor callback behind a new lifecycle gate, or claim to repair
 unrelated pre-existing cleanup edges.
 
 Add one narrow ACP-only selective-restore finalizer at the end of the successful
-setup sequence: invoke it after `session.installRewriter()` and before the
+setup sequence: invoke it after `session.installMods()` and before the
 existing `session.startCronScheduler()` and available-command timer. The
 finalizer is called exactly once, is synchronous, and does not throw. It performs
 only three selective-specific actions, each behind its own error boundary:

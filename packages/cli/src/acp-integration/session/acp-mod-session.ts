@@ -4,8 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { RequestError } from '@agentclientprotocol/sdk';
+import {
+  RequestError,
+  type ClientCapabilities,
+} from '@agentclientprotocol/sdk';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
+import {
+  MOD_ROWS_CLIENT_CAPABILITY,
+  type BridgeModRowAnswer,
+} from '@qwen-code/acp-bridge/status';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   StreamEventType,
@@ -15,11 +22,102 @@ import {
   LlmEventType,
   type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core/core/turn.js';
+import type {
+  ModAssistantMessageInput,
+  ModRenderSite,
+  ModThinkingInput,
+} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { ModSession, type ModTurn } from '../../services/mod-session.js';
+import {
+  displayTranslationTarget,
+  drawsTranslatedRows,
+  modsWanted,
+} from '../../services/display-translation-mod.js';
+import { AcpDisplayTranslationRows } from './acp-display-translation-rows.js';
 
 const debugLogger = createDebugLogger('MODS');
+
+// The rows a client may draw, with the kind of each prop a row is asked with.
+type AcpModRow = Pick<
+  ModAssistantMessageInput | ModThinkingInput,
+  'component' | 'props'
+>;
+const ROW_PROPS: Record<
+  AcpModRow['component'],
+  Record<string, 'string' | 'boolean'>
+> = {
+  AssistantMessage: { text: 'string', isFirstOfReply: 'boolean' },
+  Thinking: { text: 'string' },
+};
+
+// How long a client's ask waits: for the Mods to load, the rows ahead of it,
+// and its own render's 30 seconds.
+const ROW_ASK_TIMEOUT_MS = 60_000;
+
+/** The row sites an ACP client says it draws, of those a Mod may rewrite. */
+export function acpModRowSites(
+  capabilities: ClientCapabilities | undefined,
+): ModRenderSite[] {
+  const declared: unknown = capabilities?._meta?.[MOD_ROWS_CLIENT_CAPABILITY];
+  return Array.isArray(declared)
+    ? (Object.keys(ROW_PROPS) as ModRenderSite[]).filter((site) =>
+        declared.includes(site),
+      )
+    : [];
+}
+
+export function parseAcpModRow(
+  component: unknown,
+  props: unknown,
+): AcpModRow | undefined {
+  if (typeof component !== 'string')
+    throw RequestError.invalidParams(
+      { errorKind: 'invalid_mod_row' },
+      'Invalid Mod row component',
+    );
+  if (!Object.hasOwn(ROW_PROPS, component)) return undefined;
+  const site = component as AcpModRow['component'];
+  const kinds = ROW_PROPS[site];
+  if (
+    typeof props !== 'object' ||
+    props === null ||
+    Array.isArray(props) ||
+    Object.keys(props).length !== Object.keys(kinds).length ||
+    Object.entries(kinds).some(
+      ([key, kind]) =>
+        !Object.hasOwn(props, key) ||
+        typeof (props as Record<string, unknown>)[key] !== kind,
+    )
+  )
+    throw RequestError.invalidParams(
+      { errorKind: 'invalid_mod_row' },
+      `Invalid ${component} row props`,
+    );
+  return {
+    component: site,
+    props: props as AcpModRow['props'],
+  };
+}
+
+// Resolves once `promise` settles, or false once `signal` aborts first.
+async function settled(
+  promise: Promise<unknown>,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (signal.aborted) return false;
+  let onAbort!: () => void;
+  const aborted = new Promise<false>((resolve) => {
+    onAbort = () => resolve(false);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise.then(() => true), aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
 
 /** The notification each Mod log line reaches the client with. */
 export const MOD_LOG_NOTIFICATION = 'qwen/notify/session/mod-log';
@@ -41,6 +139,7 @@ export interface ModLogNotifier {
  */
 export class AcpModSession {
   private readonly session: ModSession;
+  private readonly translationRows?: AcpDisplayTranslationRows;
   private readonly loading: Promise<void>;
   private failure?: string;
 
@@ -49,16 +148,22 @@ export class AcpModSession {
     settings: LoadedSettings,
     sessionId: string,
     client: ModLogNotifier,
+    sites: readonly ModRenderSite[],
   ) {
+    if (displayTranslationTarget(settings) && drawsTranslatedRows(sites)) {
+      this.translationRows = new AcpDisplayTranslationRows(config);
+    }
     const send = (plugin: string, text: string) =>
       void client
         .extNotification(MOD_LOG_NOTIFICATION, { sessionId, plugin, text })
         .catch((error: unknown) =>
           debugLogger.debug(`Mod log not delivered: ${String(error)}`),
         );
+    // A client that draws rows is the desktop the Mods draw on.
     this.session = ModSession.create(config, settings, {
-      surface: null,
+      surface: sites.length ? 'desktop' : null,
       log: (entry, plugin) => send(plugin, entry.text),
+      sites: () => sites,
     })!;
     // Startup does not wait for the Mods; a prompt does. A close stops the
     // load through the Mod session's own lifetime.
@@ -71,36 +176,76 @@ export class AcpModSession {
     );
   }
 
-  /** The session's Mods, or none when the settings leave them off. */
+  /**
+   * The session's Mods, or none when the settings leave them off. `sites` are
+   * the rows the client draws.
+   */
   static create(
     config: Config,
     settings: LoadedSettings,
     sessionId: string,
     client: ModLogNotifier,
+    sites: readonly ModRenderSite[] = [],
   ): AcpModSession | undefined {
-    return settings.merged.experimental?.mods
-      ? new AcpModSession(config, settings, sessionId, client)
+    return modsWanted(settings)
+      ? new AcpModSession(config, settings, sessionId, client, sites)
       : undefined;
   }
 
   /** Waits for the shared load until this prompt is cancelled. */
   async admit(signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return;
-    let onAbort!: () => void;
-    const cancelled = new Promise<void>((resolve) => {
-      onAbort = () => resolve();
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-    try {
-      await Promise.race([this.loading, cancelled]);
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-    }
-    if (!signal.aborted && this.failure !== undefined)
+    if ((await settled(this.loading, signal)) && this.failure !== undefined)
       throw RequestError.internalError(
         undefined,
         `${ACP_MODS_FAILED} ${this.failure}`,
       );
+  }
+
+  /**
+   * Answers a row the client draws, asked with its site and the props it
+   * draws with; the envelope is the host's own.
+   */
+  async askRow(
+    component: unknown,
+    props: unknown,
+  ): Promise<BridgeModRowAnswer> {
+    const row = parseAcpModRow(component, props);
+    if (!row) return { status: 'unhooked' };
+    const signal = AbortSignal.timeout(ROW_ASK_TIMEOUT_MS);
+    if (!(await settled(this.loading, signal))) return { status: 'unanswered' };
+    if (this.failure !== undefined) return { status: 'unhooked' };
+    const authorization = this.session.canTranslateRow(row.component)
+      ? await this.translationRows?.authorize(row.component, row.props.text)
+      : undefined;
+    return this.session.askRow(row.component, row.props, signal, authorization);
+  }
+
+  recordLiveTranslationCheckpoint(promptId: string): void {
+    this.translationRows?.recordLiveCheckpoint(promptId);
+  }
+
+  rewindLiveTranslationRows(promptId: string): void {
+    this.translationRows?.rewindLiveRows(promptId);
+  }
+
+  observeModelText(text: string, thought: boolean, attempt: object): void {
+    const component = thought ? 'Thinking' : 'AssistantMessage';
+    if (this.session.canTranslateRow(component)) {
+      this.translationRows?.observe(text, component, attempt);
+    }
+  }
+
+  settleModelText(attempt: object, completed: boolean): void {
+    this.translationRows?.settleAttempt(attempt, completed);
+  }
+
+  observeRootToolCall(toolCallId: string, preparing: boolean): void {
+    this.translationRows?.observeRootToolCall(toolCallId, preparing);
+  }
+
+  rememberCompletedReply(text: string): void {
+    if (this.session.canTranslateRow('AssistantMessage'))
+      this.translationRows?.rememberCompleted('AssistantMessage', text);
   }
 
   /**
@@ -115,6 +260,10 @@ export class AcpModSession {
   ): AcpModTurn | undefined {
     const turn = this.session.startTurn(text, signal, abort, promptId);
     return turn ? new AcpModTurn(turn) : undefined;
+  }
+
+  invalidateTools(): void {
+    this.session.invalidateTools();
   }
 
   /** Ends the Mods' session after `/clear` gave the Config a new one. */

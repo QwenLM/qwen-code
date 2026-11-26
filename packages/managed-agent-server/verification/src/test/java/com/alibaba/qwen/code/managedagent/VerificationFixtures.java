@@ -69,7 +69,6 @@ public final class VerificationFixtures {
             com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy credentials) {
         return new JdbcManagedSessionStore(jdbc, records, actions,
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
-                new com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion(),
                 execution, sessions, objects, results, transport, credentials, null);
     }
 

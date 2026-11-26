@@ -100,7 +100,7 @@ describe('managed tool identities', () => {
       parseManagedToolInvocationReference({
         ...reference,
         promptId: 'p'.repeat(128),
-        callId: 'c'.repeat(512),
+        callId: 'c'.repeat(128),
         policyRevision: 'r'.repeat(256),
         invocationId: 'i'.repeat(128),
       }),
@@ -115,7 +115,7 @@ describe('managed tool identities', () => {
     { ...identity, sessionId: `${identity.sessionId}-agent-1` },
     { ...identity, promptId: '' },
     { ...identity, promptId: 'p'.repeat(129) },
-    { ...identity, callId: 'c'.repeat(513) },
+    { ...identity, callId: 'c'.repeat(129) },
     { ...identity, callId: 'call\0suffix' },
     { ...identity, capabilityDigest: 'A'.repeat(64) },
     { ...identity, capabilityDigest: 'a'.repeat(63) },

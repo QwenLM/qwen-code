@@ -4,7 +4,9 @@ import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
+import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,6 +24,7 @@ import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
@@ -79,7 +82,7 @@ class HostedPublicWorkspaceIT {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
-    private final String tenant = "g0-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     // Holds the model reply to a G0_CANCEL prompt so the test can cancel a running Turn.
@@ -89,12 +92,16 @@ class HostedPublicWorkspaceIT {
     private ServletWebServerApplicationContext spring;
     private HttpServer model;
     private Process harness;
+    private Process poolSuccessor;
+    private int poolSuccessorPort;
+    private IsolatedManagedSchemaMySqlTestDatabase poolDatabase;
     private JdbcTemplate jdbc;
     private int port;
     private Path decoy;
     private String node;
     private boolean approvals;
     private boolean shell;
+    private String parkedShellOutcome;
     private boolean definitionApproval;
     private String shellDecision = "allow";
     private boolean durableClose;
@@ -238,7 +245,7 @@ class HostedPublicWorkspaceIT {
             await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertThat(jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_runtime_session rs JOIN ma_runtime_binding rb ON rs.binding_id=rb.binding_id"
                             + " AND rs.runtime_generation=rb.runtime_generation WHERE rs.tenant_id=? AND rs.harness_session_id=?"
-                            + " AND rs.runtime_session_id=? AND rs.session_state='READY' AND rs.execution_storage_key IS NULL"
+                            + " AND rs.runtime_session_id=? AND rs.session_state='READY' AND rs.execution_storage_id IS NULL"
                             + " AND rb.binding_state='READY' AND rb.provisioner_kind='local-process'",
                     Integer.class, tenant, child, runtimeSession)).isEqualTo(1));
             originalBindings.put(child, jdbc.queryForObject(
@@ -280,7 +287,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(remaining.path(0).path("sessionId")).isEqualTo(first.path("sessionId"));
                 assertThat(root.resolve("question-A.txt")).doesNotExist();
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE tenant_id=? AND harness_session_id=?"
-                        + " AND runtime_session_id=? AND binding_id=? AND session_state='READY' AND execution_storage_key IS NULL",
+                        + " AND runtime_session_id=? AND binding_id=? AND session_state='READY' AND execution_storage_id IS NULL",
                         Integer.class, tenant, first.path("sessionId").asText(), runtimeSessions.get(first.path("sessionId").asText()),
                         originalBindings.get(first.path("sessionId").asText()))).isEqualTo(1);
             }
@@ -932,13 +939,183 @@ class HostedPublicWorkspaceIT {
         assertThat(modelRequests).hasSize(4);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"allow", "deny", "cancel", "mode-change", "expiry"})
+    @Timeout(150)
+    void publicChildrenShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql(String outcome) throws Exception {
+        shellApprovalSettlesAfterParking(outcome, true, true);
+    }
+
+    @ParameterizedTest(name = "publication={0}, outcome={1}")
+    @CsvSource({"false, allow", "false, deny", "true, allow", "true, deny"})
+    @Timeout(150)
+    void versionZeroShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql(boolean publication, String outcome)
+            throws Exception {
+        shellApprovalSettlesAfterParking(outcome, false, publication);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allow", "deny"})
+    @Timeout(120)
+    void healthyPoolHandsParkedShellActionToSuccessorBeforeLeaseExpiryOnMySql(String outcome) throws Exception {
+        poolDatabase = new IsolatedManagedSchemaMySqlTestDatabase();
+        poolSuccessorPort = reservePort();
+        shellApprovalSettlesAfterParking(outcome, true, true);
+    }
+
+    private void shellApprovalSettlesAfterParking(String outcome, boolean children, boolean publication) throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        parkedShellOutcome = outcome;
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        publicChildren = children;
+        shellLifecycleV2 = publication;
+        List<Path> roots = boot();
+        register("workspace-0", "storage-0");
+        String session = request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code", "input", List.of(),
+                        "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                "parked-shell", "actor", 202).path("id").asText();
+        String route = "/v1/agents/sessions/" + session;
+        assertThat(request("GET", route, null, null, "actor", 200)
+                .at("/capabilities/child_agents").asBoolean()).isEqualTo(children);
+        assertThat(jdbc.queryForObject("SELECT public_child_agents_version FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, session))
+                .isEqualTo(children ? 1 : 0);
+        String turn = request("POST", route + "/events",
+                Map.of("type", "agent.session.input.message",
+                        "input", List.of(Map.of("type", "input_text", "text", "G0_SHELL"))),
+                "parked-shell-turn", "actor", 202).path("turn_id").asText();
+        var parkedAction = new AtomicReference<HostedParkedAction>();
+        await().atMost(Duration.ofSeconds(35))
+                .failFast(() -> {
+                    if (modelFailure.get() != null) {
+                        throw new AssertionError("Model fixture failed", modelFailure.get());
+                    }
+                }).untilAsserted(() -> parkedAction.set(HostedParkedAction.read(jdbc, tenant, session, turn)));
+        HostedParkedAction parked = parkedAction.get();
+        Path proof = roots.getFirst().resolve("child/shell-proof.txt");
+        assertThat(proof).doesNotExist();
+        assertThat(modelRequests).hasSize(1);
+
+        var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
+        int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
+        int brokerPort = properties.getRuntimeBroker().getPort();
+        HarnessPlacementStore placements = poolDatabase == null ? null : spring.getBean(HarnessPlacementStore.class);
+        HarnessPlacementStore.Placement original = placements == null ? null : placements.get(tenant, session);
+        long oldLease = 0;
+        if (placements != null) {
+            assertThat(original).isNotNull();
+            assertThat(original.instanceId()).isEqualTo("pool-a");
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertThat(placements.get(tenant, session).state()).isEqualTo("RELEASED"));
+            oldLease = jdbc.queryForObject("""
+                    SELECT writer_lease_until FROM ma_session_head
+                    WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'
+                    """, Long.class, tenant, session);
+            assertThat(oldLease).isGreaterThan(System.currentTimeMillis());
+            assertPoolMembersAccepting(harnessPort);
+        } else {
+            long oldPid = harness.pid();
+            harness.destroyForcibly();
+            assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
+            Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
+            if (children && "allow".equals(outcome)) {
+                spring.close();
+                restarted = true;
+                startSpring(cli, roots, harnessPort, brokerPort);
+                assertThat(HostedParkedAction.read(jdbc, tenant, session, turn)).isEqualTo(parked);
+            }
+            startHarness(cli, harnessPort, brokerPort);
+            assertThat(harness.pid()).isNotEqualTo(oldPid);
+        }
+
+        String actionRoute = route + "/actions/" + parked.actionId();
+        switch (outcome) {
+            case "allow", "deny" -> {
+                JsonNode action = request("GET", actionRoute, null, null, "actor", 200);
+                assertThat(action.path("tool_name").asText()).isEqualTo("run_shell_command");
+                var decision = parked.response(action, outcome);
+                String operation = request("POST", actionRoute + "/responses", decision, "decision", "actor", 202)
+                        .path("id").asText();
+                if (placements != null) {
+                    await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+                        var successor = placements.get(tenant, session);
+                        assertThat(successor.instanceId()).isEqualTo("pool-b");
+                        assertThat(successor.epoch()).isEqualTo(original.epoch() + 1);
+                    });
+                    assertThat(oldLease).isGreaterThan(System.currentTimeMillis());
+                }
+                assertThat(request("POST", actionRoute + "/responses", decision, "decision", "actor", 202)
+                        .path("id").asText()).isEqualTo(operation);
+                await().atMost(Duration.ofSeconds(40)).untilAsserted(() ->
+                        assertThat(request("GET", route + "/operations/" + operation, null, null, "actor", 200)
+                                .at("/action_resolution/outcome").asText()).isEqualTo("decided"));
+            }
+            case "mode-change" -> request("POST", "/api/agent/web-shell/v1/session-approval/change",
+                    Map.of("sessionId", session, "idempotencyKey", "parked-yolo",
+                            "approvalMode", "yolo", "expectedRevision", 0), null, "actor", 200);
+            case "cancel" -> request("POST", route + "/events",
+                    Map.of("type", "agent.session.cancel", "turn_id", turn), "cancel", "actor", 202);
+            case "expiry" -> {
+                // The dispatch scan picks up the sealed Turn when the Action expires.
+            }
+            default -> throw new AssertionError(outcome);
+        }
+        boolean cancelled = List.of("cancel", "expiry").contains(outcome);
+        await().atMost(Duration.ofSeconds(55)).untilAsserted(() ->
+                parked.assertSettled(jdbc, tenant, session, turn,
+                        cancelled ? "CANCELLED" : "COMPLETED", cancelled ? "turn.cancelled" : "turn.completed"));
+        if (List.of("allow", "mode-change").contains(outcome)) {
+            assertThat(Files.readString(proof)).isEqualTo("once\n");
+            assertThat(jdbc.queryForObject("""
+                    SELECT COUNT(*) FROM ma_tool_execution
+                    WHERE harness_session_id = ? AND turn_id = ? AND execution_state = 'SETTLED'
+                    """, Integer.class, session, parked.promptId().getBytes(StandardCharsets.UTF_8))).isEqualTo(1);
+        } else {
+            assertThat(proof).doesNotExist();
+            if ("deny".equals(outcome)) {
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
+                        + " WHERE harness_session_id = ? AND turn_id = ?", Integer.class,
+                        session, parked.promptId().getBytes(StandardCharsets.UTF_8))).isZero();
+            }
+        }
+        if ("expiry".equals(outcome)) {
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_session_record WHERE tenant_id = ?"
+                    + " AND session_id = ? AND action_id = ?", String.class, tenant, session, parked.actionId()))
+                    .isEqualTo("expired");
+        }
+        assertThat(modelFailure.get()).isNull();
+        assertThat(modelRequests).hasSize(cancelled ? 1 : 2);
+        if (placements != null) {
+            assertPoolMembersAccepting(harnessPort);
+        }
+    }
+
+    private void assertPoolMembersAccepting(int harnessPort) {
+        assertThat(harness.isAlive()).isTrue();
+        assertThat(poolSuccessor.isAlive()).isTrue();
+        assertThat(harness.pid()).isNotEqualTo(poolSuccessor.pid());
+        assertPoolMemberAccepting(harnessPort, "pool-a");
+        assertPoolMemberAccepting(poolSuccessorPort, "pool-b");
+    }
+
+    private void assertPoolMemberAccepting(int memberPort, String instanceId) {
+        try (var client = HostedHarnessClient.builder().baseUri(URI.create("http://127.0.0.1:" + memberPort))
+                .bearerToken(TOKEN).capabilityDigest(DIGEST).heartbeatInterval(Duration.ZERO).build()) {
+            assertThat(client.capabilities().getInstanceId()).isEqualTo(instanceId);
+            assertThat(client.readInstance().get("state")).isEqualTo("ACCEPTING");
+        }
+    }
+
     private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
         var publications = jdbc.queryForList("SELECT publication_id FROM ma_output_capture"
                 + " WHERE tenant_id = ? AND session_id = ? AND capture_bytes = 1048576", String.class, tenant, session);
         assertThat(publications).hasSize(1);
         var output = jdbc.queryForList("SELECT o.capture_object_key AS object_key, o.byte_length, o.sha256,"
                 + " o.capture_state AS state, o.slot_key FROM ma_resource o JOIN ma_output_capture p"
-                + " ON p.scope_key = o.scope_key AND p.publication_id = o.publication_id"
+                + " ON p.scope_ref = o.scope_ref AND p.publication_id = o.publication_id"
                 + " WHERE p.tenant_id = ? AND p.session_id = ? AND o.capture_object_key IS NOT NULL", tenant, session);
         assertThat(output).as("the public Shell captured real stdout before deletion").isNotEmpty();
         boolean stdout = false;
@@ -1011,7 +1188,7 @@ class HostedPublicWorkspaceIT {
                 spring.getBean(EmbeddedRuntimeBroker.class), storeRelay);
         String trigger = "public_shell_" + UUID.randomUUID().toString().replace("-", "");
         if ("receipt-failure".equals(fault)) {
-            assertThat(tenant).matches("g0-[0-9a-f-]{36}");
+            assertThat(tenant).matches("[0-9a-f-]{36}");
             assertThat(session).matches("[0-9a-f-]{36}");
             jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON ma_session_journal_tx FOR EACH ROW BEGIN IF"
                     + " NEW.tenant_id = '" + tenant + "' AND NEW.session_id = '" + session + "'"
@@ -1160,7 +1337,7 @@ class HostedPublicWorkspaceIT {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                     + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
-                    + " AND execution_storage_key IS NOT NULL", Integer.class, binding)).isZero();
+                    + " AND execution_storage_id IS NOT NULL", Integer.class, binding)).isZero();
             assertThat(jdbc.queryForList("SELECT resource_id, sha256 FROM ma_resource WHERE tenant_id = ?"
                     + " AND session_id = ? ORDER BY resource_id", tenant, session)).containsAll(retained);
             assertThat(request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200).toString())
@@ -1329,6 +1506,11 @@ class HostedPublicWorkspaceIT {
         }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
+        if (poolDatabase != null) {
+            startHarness(cli, poolSuccessorPort, brokerPort, "pool-b");
+            assertPoolMembersAccepting(harnessPort);
+            ReflectionTestUtils.invokeMethod(connectorOwning(spring.getBean(HarnessConnector.class)), "refresh");
+        }
         return roots;
     }
 
@@ -1659,9 +1841,10 @@ class HostedPublicWorkspaceIT {
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) throws IOException {
         boolean mysql = System.getProperty("mysql.url") != null;
+        String databaseUrl = poolDatabase == null ? System.getProperty("mysql.url",
+                "jdbc:h2:mem:" + tenant + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE") : poolDatabase.url();
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
-                "--spring.datasource.url=" + System.getProperty("mysql.url",
-                        "jdbc:h2:mem:" + tenant + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"),
+                "--spring.datasource.url=" + databaseUrl,
                 "--spring.datasource.driver-class-name=" + (mysql ? "com.mysql.cj.jdbc.Driver" : "org.h2.Driver"),
                 "--spring.datasource.username=" + System.getProperty("mysql.user", "sa"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
@@ -1685,6 +1868,16 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.node-executable="
                         + (holdRuntimeStartup ? temporary.resolve("worker-barrier-node") : node),
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli));
+        if (poolDatabase != null) {
+            arguments.addAll(List.of(
+                    "--qwen.managed-agent.session-store.binding-key=pool-binding-key-0123456789abcdef0123456789abcdef",
+                    "--qwen.managed-agent.harness.heartbeat-interval=PT0S",
+                    "--qwen.managed-agent.harness.pool.enabled=true",
+                    "--qwen.managed-agent.harness.pool.instances[0].instance-id=pool-a",
+                    "--qwen.managed-agent.harness.pool.instances[0].base-url=http://127.0.0.1:" + harnessPort,
+                    "--qwen.managed-agent.harness.pool.instances[1].instance-id=pool-b",
+                    "--qwen.managed-agent.harness.pool.instances[1].base-url=http://127.0.0.1:" + poolSuccessorPort));
+        }
         if (holdRuntimeStartup) {
             arguments.addAll(List.of("--qwen.managed-agent.dispatch.scan-delay=10ms",
                     "--qwen.managed-agent.dispatch.retry-initial-delay=10ms",
@@ -1712,6 +1905,13 @@ class HostedPublicWorkspaceIT {
         if (shellLifecycleV2) {
             arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
                     "private-test-bucket", 1048576));
+        }
+        if (parkedShellOutcome != null) {
+            arguments.addAll(List.of("--qwen.managed-agent.action-parking.enabled=true",
+                    "--qwen.managed-agent.wake-dispatch.enabled=true"));
+            if ("expiry".equals(parkedShellOutcome)) {
+                arguments.add("--qwen.managed-agent.harness.approval-timeout=15s");
+            }
         }
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + (durableClose || definitionApproval || personalMemory));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
@@ -1836,7 +2036,12 @@ class HostedPublicWorkspaceIT {
     }
 
     private void startHarness(Path cli, int harnessPort, int brokerPort) throws Exception {
-        Path home = Files.createDirectories(temporary.resolve("home"));
+        startHarness(cli, harnessPort, brokerPort, poolDatabase == null ? null : "pool-a");
+    }
+
+    private void startHarness(Path cli, int harnessPort, int brokerPort, String instanceId) throws Exception {
+        boolean successor = "pool-b".equals(instanceId);
+        Path home = Files.createDirectories(temporary.resolve(successor ? "pool-b-home" : "home"));
         Path config = Files.createDirectories(home.resolve(".qwen"));
         String modelUrl = "http://127.0.0.1:" + model.getAddress().getPort() + "/v1";
         List<Map<String, Object>> models = new ArrayList<>(List.of(Map.of(
@@ -1851,7 +2056,7 @@ class HostedPublicWorkspaceIT {
                             "maxRetries", 0, "retryInitialDelayMs", 1, "retryMaxDelayMs", 1)));
         }
         Files.writeString(config.resolve("settings.json"), json.writeValueAsString(settings));
-        Path log = temporary.resolve("harness.log");
+        Path log = temporary.resolve(successor ? "pool-b.log" : "harness.log");
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(),
                 "serve", "--profile", "hosted-harness", "--http-bridge", "--hostname", "127.0.0.1", "--port",
                 Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
@@ -1866,8 +2071,15 @@ class HostedPublicWorkspaceIT {
             }
         }
         environment.putAll(Map.of("HOME", home.toString(), "USERPROFILE", home.toString(), "QWEN_HOME", config.toString(),
-                "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
+                "QWEN_RUNTIME_DIR", temporary.resolve(successor ? "pool-b-runtime" : "runtime").toString(),
+                "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
+        if (instanceId != null) {
+            environment.put("QWEN_HOSTED_HARNESS_INSTANCE_ID", instanceId);
+        }
+        if (parkedShellOutcome != null) {
+            environment.put("QWEN_E2E_IDLE_SUSPEND_MS", successor ? "60000" : "3000");
+        }
         if (shellLifecycleV2) {
             environment.remove("QWEN_HOSTED_LIFECYCLE_V2_PROFILES");
         } else {
@@ -1880,9 +2092,14 @@ class HostedPublicWorkspaceIT {
                 "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
             environment.put(name, temporary.resolve(name + ".json").toString());
         }
-        harness = builder.start();
+        Process process = builder.start();
+        if (successor) {
+            poolSuccessor = process;
+        } else {
+            harness = process;
+        }
         await().atMost(Duration.ofSeconds(30)).ignoreExceptions().untilAsserted(() -> {
-            if (!harness.isAlive()) {
+            if (!process.isAlive()) {
                 throw new AssertionError("Hosted Harness exited: " + Files.readString(log));
             }
             assertThat(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
@@ -1963,7 +2180,8 @@ class HostedPublicWorkspaceIT {
             if (!runShell && step == 3) {
                 assertThat(results.get(2).toString()).contains("after");
             }
-            if (runShell && shellFault == null && step >= 1 && "allow".equals(shellDecision)) {
+            if (runShell && shellFault == null && step >= 1 && "allow".equals(shellDecision)
+                    && !"deny".equals(parkedShellOutcome)) {
                 assertThat(results.getFirst().toString()).contains("G0_SHELL_STDOUT");
             }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
@@ -1977,7 +2195,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(results.getFirst().toString()).contains(questionChild + "-only")
                         .doesNotContain(("A".equals(questionChild) ? "B" : "A") + "-only");
             }
-            boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
+            boolean toolCall = publicChildren && !runShell ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
                     : step < (questionTurn ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
             if (publicChildQuestions) {
                 toolCall = step < 2 && (!publicParent || prompt.get().contains("G0_PUBLIC_QUESTIONS_PARENT"));
@@ -1999,7 +2217,7 @@ class HostedPublicWorkspaceIT {
                             : Map.of("command", "printf 'once\\n' >> " + marker + ".shell",
                                     "description", "Append the definition approval proof");
                 }
-                if (publicChildren) {
+                if (publicChildren && !runShell) {
                     name = publicParent ? "agent" : step == 0 ? "write_file" : "run_shell_command";
                     args = publicParent ? Map.of("description", "write two proofs", "prompt", "G0_PUBLIC_CHILD", "run_in_background", publicChildBackground)
                             : step == 0 ? Map.of("file_path", "public-child.txt", "content", "child-write")
@@ -2257,6 +2475,13 @@ class HostedPublicWorkspaceIT {
                         harness.waitFor(10, TimeUnit.SECONDS);
                     }
                 },
+                () -> {
+                    if (poolSuccessor != null) {
+                        poolSuccessor.descendants().forEach(ProcessHandle::destroyForcibly);
+                        poolSuccessor.destroyForcibly();
+                        assertThat(poolSuccessor.waitFor(10, TimeUnit.SECONDS)).isTrue();
+                    }
+                },
                 () -> { if (shellProbe != null) {
                     shellProbe.close();
                 } },
@@ -2274,6 +2499,9 @@ class HostedPublicWorkspaceIT {
                 } },
                 () -> { if (model != null) {
                     model.stop(0);
+                } },
+                () -> { if (poolDatabase != null) {
+                    poolDatabase.close();
                 } });
         for (var step : cleanup) {
             try {

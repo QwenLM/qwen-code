@@ -28,9 +28,11 @@ function renderWithMockedStats(metrics: SessionMetrics) {
       metrics,
       lastPromptTokenCount: 0,
       promptCount: 5,
+      userPromptCount: 5,
     },
     getPromptCount: () => 5,
     startNewPrompt: vi.fn(),
+    recordUserPrompt: vi.fn(),
     seedPromptCount: vi.fn(),
     startNewSession: vi.fn(),
   });

@@ -5,13 +5,18 @@ import {
   createRef,
   startTransition,
   Suspense,
+  type ComponentProps,
   type RefObject,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import {
+  createDaemonTranscriptState,
+  reduceDaemonTranscriptEvents,
+} from '@qwen-code/sdk/daemon';
 import type { Message, PermissionRequest } from '../adapters/types';
+import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
 import {
   WebShellCustomizationProvider,
-  type WebShellAssistantTurnFooterRenderInfo,
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
@@ -22,9 +27,12 @@ import {
 import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
+import { ModRowsProvider } from './messages/ModAssistantMessage';
+import { ModRowAsker, ModRowAskerContext } from './messages/mod-rows';
 
 const virtualizerTestState = vi.hoisted(() => ({
   getItemKeys: [] as Array<(index: number) => string | number>,
+  overscan: vi.fn(),
   itemSizeCache: new Map<string | number, number>(),
   resizeItem: vi.fn(),
   scrollToIndex: vi.fn(),
@@ -32,49 +40,50 @@ const virtualizerTestState = vi.hoisted(() => ({
 }));
 const messageItemTestState = vi.hoisted(() => ({
   toolArrays: [] as unknown[][],
+  renderActualToolGroup: false,
 }));
 
 // Mock the shared context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
 vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
-  return { CompactModeContext: createContext(false) };
+  return {
+    CompactModeContext: createContext(false),
+    TodoTimelineContext: createContext(new Map()),
+    TodoDetailContext: createContext(new Map()),
+  };
 });
-vi.mock('./MessageItem', async () => {
+vi.mock('./MessageItem', async (importOriginal) => {
   const React = await import('react');
   const { useWebShellCustomization } = await import('../customization');
+  const { MessageItem: ActualMessageItem } =
+    await importOriginal<typeof import('./MessageItem')>();
   return {
-    MessageItem: ({
-      message,
-      showAssistantActions,
-      assistantFooterAlwaysVisible,
-      showAssistantBranch,
-      onBranchSession,
-      branchRecordId,
-      isLocateFlashing,
-      assistantTurnFooterInfo,
-      sendFailed,
-      onRetrySend,
-      onEditUserMessage,
-      assistantFeedbackPromptId,
-    }: {
-      message: Message;
-      assistantFeedbackPromptId?: string;
-      showAssistantActions?: boolean;
-      assistantFooterAlwaysVisible?: boolean;
-      showAssistantBranch?: boolean;
-      onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
-      branchRecordId?: string;
-      isLocateFlashing?: boolean;
-      assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
-      sendFailed?: boolean;
-      onRetrySend?: () => void;
-      onEditUserMessage?: () => void;
-    }) => {
+    MessageItem: (props: ComponentProps<typeof ActualMessageItem>) => {
+      const { renderAssistantTurnFooter } = useWebShellCustomization();
+      if (
+        messageItemTestState.renderActualToolGroup &&
+        props.message.role === 'tool_group'
+      )
+        return React.createElement(ActualMessageItem, props);
+      const {
+        message,
+        showAssistantActions,
+        assistantFooterAlwaysVisible,
+        showAssistantBranch,
+        onBranchSession,
+        branchRecordId,
+        isLocateFlashing,
+        assistantTurnFooterInfo,
+        sendFailed,
+        sendFailedStatus,
+        onRetrySend,
+        onEditUserMessage,
+        assistantFeedbackPromptId,
+      } = props;
       if (message.role === 'tool_group') {
         messageItemTestState.toolArrays.push(message.tools);
       }
-      const { renderAssistantTurnFooter } = useWebShellCustomization();
       const assistantTurnFooter = assistantTurnFooterInfo
         ? renderAssistantTurnFooter?.(assistantTurnFooterInfo)
         : undefined;
@@ -87,6 +96,7 @@ vi.mock('./MessageItem', async () => {
           'data-feedback-prompt': assistantFeedbackPromptId,
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
+          'data-send-failed-status': sendFailedStatus,
           'data-timestamp': message.timestamp,
           'data-message-content':
             'content' in message ? message.content : undefined,
@@ -102,6 +112,12 @@ vi.mock('./MessageItem', async () => {
             message.role === 'tool_group'
               ? message.thoughts
                   ?.map((thought) => String(Boolean(thought.isStreaming)))
+                  .join('|')
+              : undefined,
+          'data-thought-parents':
+            message.role === 'tool_group'
+              ? message.thoughts
+                  ?.map((thought) => thought.parentToolCallId ?? '')
                   .join('|')
               : undefined,
         },
@@ -163,12 +179,15 @@ vi.mock('@tanstack/react-virtual', () => ({
     count,
     enabled,
     getItemKey,
+    overscan,
   }: {
     count: number;
     enabled: boolean;
     getItemKey: (index: number) => string | number;
+    overscan: number;
   }) => {
     virtualizerTestState.getItemKeys.push(getItemKey);
+    virtualizerTestState.overscan(overscan);
     const virtualItems =
       enabled && virtualizerTestState.renderItems
         ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
@@ -242,7 +261,9 @@ afterEach(() => {
   virtualizerTestState.resizeItem.mockClear();
   virtualizerTestState.renderItems = true;
   virtualizerTestState.getItemKeys.length = 0;
+  virtualizerTestState.overscan.mockClear();
   messageItemTestState.toolArrays.length = 0;
+  messageItemTestState.renderActualToolGroup = false;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -393,6 +414,7 @@ function mount(
     compactMode?: boolean;
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
+    failedPromptStatus?: 'failed' | 'uncertain';
     onRetryFailedPrompt?: () => void;
     onEditUserMessage?: (turnIndex: number, content: string) => void;
   } = {},
@@ -435,6 +457,7 @@ function mount(
                 sourceSessionId={opts.sourceSessionId}
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
+                failedPromptStatus={opts.failedPromptStatus}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
                 onEditUserMessage={opts.onEditUserMessage}
               />
@@ -620,6 +643,42 @@ const simpleTurns = (count: number): Message[] =>
   }).flat();
 
 describe('MessageList — locate scroll timer lifecycle', () => {
+  it('follows a queued resize when the reader resumes following before locate settles', () => {
+    vi.useFakeTimers();
+    resizeObserversFireOnObserve = false;
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
+    let height = 1200;
+    let top = 600;
+    Object.defineProperties(list, {
+      scrollHeight: { get: () => height },
+      clientHeight: { value: 600 },
+      scrollTop: {
+        get: () => top,
+        set: (value: number) => {
+          top = Math.min(value, height - 600);
+        },
+      },
+    });
+    act(() => {
+      expect(ref.current?.scrollToMessage('u2')).toBe(true);
+      list.scrollTop = 400;
+      list.dispatchEvent(new Event('scroll'));
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: 195 }));
+      list.scrollTop = 595;
+      list.dispatchEvent(new Event('scroll'));
+    });
+
+    height = 1800;
+    act(triggerResizeObservers);
+    act(() => vi.advanceTimersByTime(150));
+
+    expect(list.scrollTop).toBe(1200);
+  });
+
   it('does not schedule scroll work after unmounting before locate settles', () => {
     vi.useFakeTimers();
     const ref = createRef<MessageListHandle>();
@@ -701,10 +760,11 @@ describe('MessageList — locate scroll timer lifecycle', () => {
 });
 
 describe('MessageList — failed prompt retry', () => {
-  it('marks only the matching user message and forwards retry', () => {
+  it('marks only the matching user message and forwards retry and status', () => {
     const onRetry = vi.fn();
     const container = mount([userMsg('u1'), userMsg('u2')], undefined, {
       failedPromptMessageId: 'u1',
+      failedPromptStatus: 'uncertain',
       onRetryFailedPrompt: onRetry,
     });
 
@@ -715,8 +775,18 @@ describe('MessageList — failed prompt retry', () => {
     ).toBe('true');
     expect(
       container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-send-failed-status'),
+    ).toBe('uncertain');
+    expect(
+      container
         .querySelector('[data-testid="msg-u2"]')
         ?.getAttribute('data-send-failed'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-u2"]')
+        ?.getAttribute('data-send-failed-status'),
     ).toBeNull();
 
     act(() =>
@@ -1106,6 +1176,49 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('preserves an expanded turn and scroll container when the same session temporarily loses its Mod asker', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({
+      root,
+      container,
+      transcriptRenderMode: 'interactive',
+      compactMode: false,
+    });
+    const messages = [userMsg('u1'), toolMsg('g1'), asstMsg('a1')];
+    const render = (asker: ModRowAsker | undefined) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ModRowAskerContext.Provider value={asker}>
+              <ModRowsProvider messages={messages}>
+                <MessageList
+                  key="session:live"
+                  messages={messages}
+                  pendingApproval={null}
+                />
+              </ModRowsProvider>
+            </ModRowAskerContext.Provider>
+          </I18nProvider>,
+        );
+      });
+    const ask = async () => ({ status: 'unhooked' as const });
+    render(new ModRowAsker(ask));
+    expect(isCollapsed(container, 'g1')).toBe(true);
+    click(toggleRow(container, 'u1'));
+    const selector = '[data-web-shell-message-list]';
+    const scroll = container.querySelector<HTMLElement>(selector)!;
+    scroll.scrollTop = 240;
+
+    for (const asker of [undefined, new ModRowAsker(ask)]) {
+      render(asker);
+      expect(container.querySelector(selector)).toBe(scroll);
+      expect(scroll.scrollTop).toBe(240);
+      expect(isCollapsed(container, 'g1')).toBe(false);
+    }
+  });
+
   it.each([false, true])(
     'keeps completed questions outside a collapsed mixed tool group (compact=%s)',
     (compactMode) => {
@@ -4781,6 +4894,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(isCollapsed(c, 'g1')).toBe(true);
   });
 
+  it.each([
+    [undefined, 15],
+    [0, 0],
+    [6, 6],
+  ])('uses overscan %s as %s virtual rows', (overscan, expected) => {
+    mount(simpleTurns(110), undefined, { customization: { overscan } });
+    expect(virtualizerTestState.overscan).toHaveBeenLastCalledWith(expected);
+  });
+
   it('renders virtual scroll rows with sizer and row width classes', () => {
     const c = mount(simpleTurns(110));
 
@@ -5772,6 +5894,126 @@ describe('MessageList — turn collapse (DOM)', () => {
     },
   );
 
+  it("folds a subagent's thought into a compact group with its parent", () => {
+    const thought = (id: string, parentToolCallId?: string): Message => ({
+      id,
+      role: 'thinking',
+      content: id,
+      timestamp: 1_001,
+      ...(parentToolCallId ? { parentToolCallId } : {}),
+    });
+    const container = mount(
+      [
+        userMsg('u1'),
+        thought('own'),
+        thought('nested', 'agent-1'),
+        toolMsg('g1'),
+      ],
+      undefined,
+      { isResponding: false, compactMode: true },
+    );
+
+    const summaryRow = container.querySelector('[data-thought-content]');
+    expect(summaryRow?.getAttribute('data-thought-content')).toBe('own|nested');
+    expect(summaryRow?.getAttribute('data-thought-parents')).toBe('|agent-1');
+  });
+
+  it('rewrites an expanded streaming thought when the next tool starts', async () => {
+    messageItemTestState.renderActualToolGroup = true;
+    const ask = vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text: 'Rewritten thought' },
+    }));
+    const asker = new ModRowAsker(ask);
+    const streaming = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        { type: 'user.text.delta', text: 'Question' },
+        {
+          type: 'tool.update',
+          toolCallId: 'first',
+          toolName: 'ReadFile',
+          status: 'completed',
+        },
+        {
+          type: 'tool.update',
+          toolCallId: 'second',
+          toolName: 'Glob',
+          status: 'completed',
+        },
+        { type: 'thought.text.delta', text: 'Original thought' },
+      ],
+    );
+    const settled = reduceDaemonTranscriptEvents(streaming, [
+      {
+        type: 'tool.update',
+        toolCallId: 'next',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+      },
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({
+      root,
+      container,
+      transcriptRenderMode: 'interactive',
+      compactMode: true,
+    });
+    const render = async (state: typeof streaming) => {
+      const messages = transcriptBlocksToDaemonMessages(state.blocks);
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <ModRowAskerContext.Provider value={asker}>
+              <ModRowsProvider messages={messages}>
+                <CompactModeContext.Provider value={true}>
+                  <MessageList
+                    messages={messages}
+                    pendingApproval={null}
+                    isResponding
+                  />
+                </CompactModeContext.Provider>
+              </ModRowsProvider>
+            </ModRowAskerContext.Provider>
+          </I18nProvider>,
+        );
+      });
+    };
+    await render(streaming);
+    const summary = container.querySelector<HTMLElement>(
+      '[data-message-row-key^="msg:summary-"]',
+    )!;
+    act(() => summary.querySelector('button')!.click());
+    const thoughtHeader = () =>
+      summary.querySelector<HTMLButtonElement>(
+        '[data-testid="compact-thinking-summary"]',
+      )!;
+    const openThought = thoughtHeader();
+    act(() => openThought.click());
+    expect(thoughtHeader().getAttribute('aria-expanded')).toBe('true');
+    expect(summary.textContent).toContain('Original thought');
+    expect(ask).not.toHaveBeenCalled();
+
+    await render(settled);
+
+    const nextTool = summary.querySelector(
+      '[data-transcript-tool-call-id="next"]',
+    )!;
+    expect(thoughtHeader()).toBe(openThought);
+    expect(thoughtHeader().getAttribute('aria-expanded')).toBe('true');
+    expect(
+      openThought.compareDocumentPosition(nextTool) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(ask).toHaveBeenCalledExactlyOnceWith({
+      component: 'Thinking',
+      props: { text: 'Original thought' },
+    });
+    expect(summary.textContent).toContain('Rewritten thought');
+  });
+
   it('keeps the compact thinking tail on the streamed-tail patch path while idle', () => {
     const toolGroup = toolMsg('g1');
     const thinking: Message = {
@@ -6266,47 +6508,99 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledWith({ force: true });
   });
 
-  it('does not scroll again for a content-only update in a virtual transcript', async () => {
-    let scrollTop = 0;
-    const getScrollHeight = vi.fn(() => 20_000);
-    const setScrollTop = vi.fn((value: number) => {
-      scrollTop = value;
+  it('follows a transcript resize once after layout without measuring during the update', async () => {
+    resizeObserversFireOnObserve = false;
+    const user = userMsg('u1');
+    const container = mount([user, asstMsg('a1')], undefined, {
+      isResponding: true,
     });
-    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
-      configurable: true,
-      get: getScrollHeight,
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
+    let scrollTop = 600;
+    const readHeight = vi.fn(() => 1500);
+    const writeScrollTop = vi.fn((top: number) => {
+      scrollTop = Math.min(top, 900);
     });
-    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
-      configurable: true,
-      value: 600,
+    Object.defineProperties(list, {
+      scrollHeight: { get: readHeight },
+      clientHeight: { value: 600 },
+      scrollTop: { get: () => scrollTop, set: writeScrollTop },
     });
-    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: setScrollTop,
-    });
-    const messages = simpleTurns(101);
-    messages[messages.length - 1] = {
-      ...(messages[messages.length - 1] as AssistantMessage),
-      isStreaming: true,
-    };
-    const container = mount(messages, undefined, { isResponding: true });
     await nextFrame();
     await nextFrame();
-    getScrollHeight.mockClear();
-    setScrollTop.mockClear();
+    readHeight.mockClear();
+    writeScrollTop.mockClear();
 
-    const updated = messages.slice();
-    updated[updated.length - 1] = {
-      ...(updated[updated.length - 1] as AssistantMessage),
-      content: 'answer with one more streamed token',
-    };
-    rerenderMessages(container, updated, { isResponding: true });
+    rerenderMessages(
+      container,
+      [user, { ...asstMsg('a1'), content: 'a longer reply' }],
+      { isResponding: true },
+    );
+
+    expect(readHeight).not.toHaveBeenCalled();
+    expect(writeScrollTop).not.toHaveBeenCalled();
+
+    act(triggerResizeObservers);
     await nextFrame();
 
-    expect(getScrollHeight).not.toHaveBeenCalled();
-    expect(setScrollTop).not.toHaveBeenCalled();
+    expect(scrollTop).toBe(900);
+    expect(writeScrollTop).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])(
+    'does not scroll again for a content-only update in a virtual transcript (Mod log=%s)',
+    async (withModLog) => {
+      let scrollTop = 0;
+      const getScrollHeight = vi.fn(() => 20_000);
+      const setScrollTop = vi.fn((value: number) => {
+        scrollTop = value;
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        get: getScrollHeight,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: setScrollTop,
+      });
+      const messages = simpleTurns(101);
+      const streamingIndex = messages.length - 1;
+      messages[streamingIndex] = {
+        ...(messages[streamingIndex] as AssistantMessage),
+        isStreaming: true,
+      };
+      if (withModLog)
+        messages.push({
+          id: 'log',
+          role: 'system',
+          variant: 'info',
+          source: 'mod_log',
+          content: '[Mod translator] finished',
+        });
+      const container = mount(messages, undefined, { isResponding: true });
+      await nextFrame();
+      await nextFrame();
+      getScrollHeight.mockClear();
+      setScrollTop.mockClear();
+
+      const updated = messages.slice();
+      updated[streamingIndex] = {
+        ...(updated[streamingIndex] as AssistantMessage),
+        content: 'answer with one more streamed token',
+      };
+      rerenderMessages(container, updated, { isResponding: true });
+      await nextFrame();
+
+      expect(getScrollHeight).not.toHaveBeenCalled();
+      expect(setScrollTop).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {
     const scrollTo = vi.fn();
@@ -6613,6 +6907,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     rerenderMessages(c, [...nextTranscript, asstMsg('a3')], {
       sessionKey: nextSessionKey,
     });
+    act(triggerResizeObservers);
     await nextFrame();
     expect(scrollTop).toBe(1200);
   });
@@ -6672,6 +6967,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       rerenderMessages(c, [...nextTranscript, asstMsg('a3')], {
         sessionKey: nextSessionKey,
       });
+      act(triggerResizeObservers);
       act(() => vi.advanceTimersByTime(500));
       expect(scrollTop).toBe(1800);
     },
