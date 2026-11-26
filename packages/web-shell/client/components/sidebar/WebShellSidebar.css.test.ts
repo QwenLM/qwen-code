@@ -116,12 +116,43 @@ describe('WebShellSidebar session row actions stylesheet', () => {
 
   it('holds the overlay width at rest on rows that show a PR badge', () => {
     // The badge sits right before the slot; growing the slot on hover slid it
-    // left and put Pin under the pointer. Touch keeps the buttons in the
-    // flow, so the reservation is hover-only.
+    // left and put Pin under the pointer. Narrow touch rows anchor only the
+    // action slot so intrinsic badge widths cannot move it outside the row.
     expect(hoverMedia).toMatch(
       /\.sessionMetaSlotReserved\s*\{[^}]*min-width:\s*var\(--session-actions-width/,
     );
-    expect(nonHoverCss).not.toMatch(/\.sessionMetaSlotReserved/);
+    expect(nonHoverCss).not.toMatch(/^[ \t]*\.sessionMetaSlotReserved\s*\{/m);
+    expect(touchMedia).toMatch(
+      /\.sessionMetaSlotReserved:has\(\.sessionActions\)\s*\{[^}]*display:\s*contents;/,
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionRow\s+\.sessionMetaSlotReserved\s+\.sessionActions\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*2px 0 2px auto;[^}]*width:\s*var\(--session-actions-width, 26px\)/,
+    );
+  });
+
+  it('wraps auxiliary metadata rather than overlapping narrow-row actions', () => {
+    const wrappedNarrowRow = String.raw`\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionRow:not\(\.archivedRow\):has\(\s*\.sessionMetaSlotReserved \.sessionAttention,\s*\.sessionMetaSlotReserved \.sessionContinuation,\s*\.sessionMetaSlotReserved \.sessionLoading\s*\)`;
+    expect(touchMedia).toMatch(
+      new RegExp(
+        `${wrappedNarrowRow}\\s*\\{[^}]*row-gap:\\s*6px;[^}]*flex-wrap:\\s*wrap;`,
+      ),
+    );
+    expect(touchMedia).toMatch(
+      new RegExp(
+        `${wrappedNarrowRow}\\s*\\.sessionMetaSlotReserved\\s*\\.sessionActions\\s*\\{\\s*inset:\\s*2px 0 auto auto;[^}]*max-height:\\s*calc\\(100% - 4px\\);`,
+      ),
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar\.mobileOpen\[data-narrow\][^}]*\.sessionMetaSlot:not\(\.sessionMetaSlotReserved\)\s+\.sessionActions\s*\{[^}]*align-self:\s*stretch;/s,
+    );
+    expect(touchMedia).toMatch(
+      new RegExp(
+        `${wrappedNarrowRow}\\s*\\.sessionStatusSlot,\\s*${wrappedNarrowRow}\\s*\\.sessionTreeToggle\\s*\\{\\s*top:\\s*12px;`,
+      ),
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionSourceIcon\s*\{\s*height:\s*20px;/,
+    );
   });
 
   it('hides the busy marker when a background-only row reveals its actions', () => {
@@ -147,6 +178,33 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     );
   });
 
+  it('keeps the running and active-work status dot on the success token', () => {
+    let baseColor: string | undefined;
+    let runningColor: string | undefined;
+    let baseOrder = -1;
+    let runningOrder = -1;
+    let order = 0;
+
+    parseOnce().walkRules((rule) => {
+      if (rule.parent?.type !== 'root') return;
+      if (rule.selector === '.sessionStatusDot') {
+        rule.walkDecls('color', (decl) => {
+          baseColor = decl.value;
+          baseOrder = order++;
+        });
+      } else if (rule.selector === '.sessionStatusDotRunning') {
+        rule.walkDecls('color', (decl) => {
+          runningColor = decl.value;
+          runningOrder = order++;
+        });
+      }
+    });
+
+    expect(baseColor).toMatch(/^var\(\s*--agent-blue-500(?:\s*,|\s*\))/);
+    expect(runningColor).toMatch(/^var\(\s*--success-color(?:\s*,|\s*\))/);
+    expect(runningOrder).toBeGreaterThan(baseOrder);
+  });
+
   it('hides the trailing markers whenever the overlay is revealed', () => {
     for (const marker of [
       'sessionGitIcon',
@@ -160,5 +218,23 @@ describe('WebShellSidebar session row actions stylesheet', () => {
         ),
       );
     }
+  });
+});
+
+describe('WebShellSidebar more-menu stylesheet', () => {
+  it('sizes the popup to its longest label instead of a fixed English width', () => {
+    expect(sidebarCss).toMatch(
+      /\.moreMenu\s*\{[^}]*width:\s*max-content;[^}]*min-width:\s*240px;[^}]*max-width:\s*min\(22rem,\s*calc\(100vw - 24px\)\);/,
+    );
+    expect(sidebarCss).not.toMatch(/\.moreMenu\s*\{[^}]*[^-\w]width:\s*240px;/);
+  });
+
+  it('keeps more-menu rows a uniform height with left-aligned, unwrapped labels', () => {
+    expect(sidebarCss).toMatch(
+      /\.moreMenu \.footerButton,\s*\.moreMenu \.collapseButton,[\s\S]*?height:\s*36px;[\s\S]*?text-align:\s*start;/,
+    );
+    expect(sidebarCss).toMatch(
+      /\.moreMenu \.footerButtonLabel,\s*\.moreMenu \.collapseButton > span\s*\{[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;[^}]*text-align:\s*start;/,
+    );
   });
 });

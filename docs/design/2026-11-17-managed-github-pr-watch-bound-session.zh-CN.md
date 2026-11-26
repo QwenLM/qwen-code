@@ -2,7 +2,7 @@
 
 [English](2026-11-17-managed-github-pr-watch-bound-session.md) | [简体中文](2026-11-17-managed-github-pr-watch-bound-session.zh-CN.md)
 
-状态：范围已确认；已在 #17665 实现，评审中。基于已合入的 managed GitHub adapter（#17511，`2c23f72bef`）。
+状态：已在 #17665 合入（squash 提交 `8a96777248`）；评审延期跟进项见 #17792。基于已合入的 managed GitHub adapter（#17511，`2c23f72bef`）。验证账本（合并树全绿）：github adapter 1040 测试、core parity + record-sink 59、cli pr-watch funnel / channel client / capability-parity 与 hosted-harness 854、Java pr-watch + surface 套件、36 项真实进程 E2E。
 
 已确认决策（2026-11-17）：首切片 = private-only 绑定注入（公开回帖、角色模板、Web Shell UI 延后）；**D1 = 新 `pr_event` input source**；**D3 = adapter 侧检测**。D2（专用 PR-watch 绑定表）按下文建议采纳。**D5 定为 internal channel-adapter 面**（租户头 + 可信 adapter + 启用门，`RuleClass.INTERNAL_CHANNEL_ADAPTER`），与已合入的 channel register/inbound 路由同一信任边界——不是 OPERATOR 公共路由，也不是每请求 writer 凭据。见下文绑定路由契约；早先 OPERATOR/Session-owner 措辞已被取代。
 

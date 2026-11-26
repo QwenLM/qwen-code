@@ -49,9 +49,9 @@ function check(label, condition, detail) {
     );
   }
 }
-function listen(server) {
+function listen(server, port = 0) {
   return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+    server.listen(port, '127.0.0.1', () => resolve(server.address().port));
   });
 }
 function inputIdFor(body) {
@@ -269,7 +269,7 @@ async function fakeControlPlane(opts = {}) {
       return send(404, { error: { code: 'not_found' } });
     });
   });
-  const port = await listen(server);
+  const port = await listen(server, opts.port ?? 0);
   cleanups.push(
     () =>
       new Promise((resolve) => {
@@ -277,7 +277,7 @@ async function fakeControlPlane(opts = {}) {
         server.closeAllConnections();
       }),
   );
-  return { baseUrl: `http://127.0.0.1:${port}`, state };
+  return { baseUrl: `http://127.0.0.1:${port}`, state, port, server };
 }
 
 function workspace() {
@@ -356,8 +356,18 @@ function stateFile(ws) {
     const base = join(channelsDir, scope);
     for (const entry of readdirSync(base)) {
       if (entry.startsWith('github-')) {
-        const file = join(base, entry, 'managed-state.json');
-        if (existsSync(file)) return file;
+        const dir = join(base, entry);
+        // The live ledger is identity-keyed (managed-state-<16 hex>.json, the
+        // store's slice(0, 16) key). Match it exactly so the scan never hands
+        // back a managed-state.json.stranded-<uuid> archive or an in-flight
+        // <uuid>.tmp. Fall back to the pre-upgrade managed-state.json so the
+        // rig also works against an older build.
+        const keyed = readdirSync(dir).find((f) =>
+          /^managed-state-[0-9a-f]{16}\.json$/.test(f),
+        );
+        if (keyed) return join(dir, keyed);
+        const legacy = join(dir, 'managed-state.json');
+        if (existsSync(legacy)) return legacy;
       }
     }
   }
@@ -665,8 +675,20 @@ async function scenarioP3() {
   await new Promise((r) => setTimeout(r, 12_000));
 
   // The replacement control plane already holds the admission (committed,
-  // answer lost): the re-drive must derive the SAME id and replay.
-  const cp2 = await fakeControlPlane({ preadmitted: [replayId] });
+  // answer lost): the re-drive must derive the SAME id and replay. It must
+  // listen on the SAME port as cp1: the ledger FILE is keyed on the destination
+  // key (whose first component is the control-plane baseUrl), so a new port
+  // would be a NEW registration opening a fresh ledger with no pending to
+  // re-drive. Crash-recovery is the SAME destination, so close cp1 and reuse
+  // its port (R7-3).
+  await new Promise((resolve) => {
+    cp1.server.close(resolve);
+    cp1.server.closeAllConnections();
+  });
+  const cp2 = await fakeControlPlane({
+    preadmitted: [replayId],
+    port: cp1.port,
+  });
   const proc2 = startCli(ws, cp2.baseUrl);
   await waitFor(
     () => cp2.state.injects.length >= 1,

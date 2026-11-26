@@ -500,6 +500,17 @@ const DEFAULT_TOOL_SEARCH_THRESHOLD = 0;
 // without a live lock as possibly current.
 const MANAGED_ACTIVATION_LEASE_MS = 5 * 60 * 1000;
 
+function normalizeVisionBridgeTimeoutMs(
+  timeoutMs: number | undefined,
+): number | undefined {
+  return timeoutMs !== undefined &&
+    Number.isInteger(timeoutMs) &&
+    timeoutMs > 0 &&
+    timeoutMs <= 2_147_483_647
+    ? timeoutMs
+    : undefined;
+}
+
 /** The recorder's view of a Managed Session log. */
 function managedRecordWriter(
   managed: ManagedSession,
@@ -1848,17 +1859,19 @@ export interface ConfigParameters {
   allowPrivateNetworkHooks?: boolean;
   /**
    * Callback for persisting a permission rule to settings.
-   * Injected by the CLI layer; core uses this to write allow/ask/deny rules
-   * to project or user settings when the user clicks "Always Allow".
+   * Injected by the CLI layer to write allow/ask/deny rules for an approved
+   * tool call.
    *
    * @param scope - 'project' for workspace settings, 'user' for user settings.
    * @param ruleType - 'allow' | 'ask' | 'deny'.
    * @param rule - The raw rule string, e.g. "Bash(git *)" or "Edit".
+   * @param workspaceDir - The project root of the Config that owns the call.
    */
   onPersistPermissionRule?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
+    workspaceDir: string,
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
@@ -2502,8 +2515,11 @@ export interface SubSessionSpawnRequest {
    * absent means the caller's workspace. */
   workspace?: string;
   workspaceGeneration?: string;
-  /** A sub-session this caller created earlier, to send the prompt to
-   * instead of creating one. It lives in `workspace`. */
+  /** The named workspace was selected under YOLO without one-time approval. */
+  requiresYolo?: true;
+  /** The authorization was automatic under AUTO and requires that mode still. */
+  requiresAutoMode?: true;
+  /** An existing session in `workspace` to send the prompt to. */
   sessionId?: string;
 }
 
@@ -2511,6 +2527,8 @@ export interface SubSessionWorkspaceBinding {
   workspaceId: string;
   workspaceCwd: string;
   workspaceGeneration: string;
+  /** Derived from launcher identity; used for approval, not launch authorization. */
+  sameWorkspace: boolean;
 }
 
 export type SubSessionWorkspaceResolver = (
@@ -3408,11 +3426,7 @@ export class Config {
   private ignoredExtensionRules: string[] = [];
   private readonly allowedHttpHookUrls: string[];
   private readonly allowPrivateNetworkHooks: boolean;
-  private readonly onPersistPermissionRuleCallback?: (
-    scope: 'project' | 'user',
-    ruleType: 'allow' | 'ask' | 'deny',
-    rule: string,
-  ) => Promise<void>;
+  private readonly onPersistPermissionRuleCallback: ConfigParameters['onPersistPermissionRule'];
   private initialized: boolean = false;
   private initializationPromise?: Promise<void>;
   private initializationSucceeded = false;
@@ -3472,7 +3486,7 @@ export class Config {
   private reasoningSnapshot?: ReasoningSnapshot;
   private latestReasoningSnapshot?: ReasoningSnapshot;
   private imageModel?: string;
-  private readonly visionBridgeTimeoutMs: number | undefined;
+  private visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -4122,13 +4136,9 @@ export class Config {
     // schema still accepts via /config) would throw RangeError or silently
     // degrade to a 1ms timeout, killing every bridge turn. Reject anything the
     // timer can't take and fall back to the built-in default.
-    this.visionBridgeTimeoutMs =
-      params.visionBridgeTimeoutMs !== undefined &&
-      Number.isInteger(params.visionBridgeTimeoutMs) &&
-      params.visionBridgeTimeoutMs > 0 &&
-      params.visionBridgeTimeoutMs <= 2_147_483_647
-        ? params.visionBridgeTimeoutMs
-        : undefined;
+    this.visionBridgeTimeoutMs = normalizeVisionBridgeTimeoutMs(
+      params.visionBridgeTimeoutMs,
+    );
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -6727,9 +6737,11 @@ export class Config {
         `with every request, which is the cost a rule exists to avoid. Add ` +
         `\`paths:\` to it, or move the content into the extension's context file.`,
     );
-    const extra = memoryContextWarning
-      ? [...ruleWarnings, memoryContextWarning]
-      : ruleWarnings;
+    const extra = [
+      ...ruleWarnings,
+      ...(memoryContextWarning ? [memoryContextWarning] : []),
+      ...(this.getHookSystem()?.getConfigWarnings() ?? []),
+    ];
     return extra.length > 0 ? [...this.warnings, ...extra] : this.warnings;
   }
 
@@ -7894,6 +7906,14 @@ export class Config {
    */
   getVisionBridgeTimeoutMs(): number | undefined {
     return this.visionBridgeTimeoutMs;
+  }
+
+  /**
+   * Update the vision bridge timeout at runtime (`/model --vision --timeout`).
+   * Values the constructor would reject fall back to the built-in default.
+   */
+  setVisionBridgeTimeoutMs(timeoutMs: number | undefined): void {
+    this.visionBridgeTimeoutMs = normalizeVisionBridgeTimeoutMs(timeoutMs);
   }
 
   /**
@@ -9096,6 +9116,11 @@ export class Config {
           mcpServers[key] = {
             ...server,
             extensionName: extension.config.name,
+            ...(extension.artifactGeneration !== undefined
+              ? {
+                  extensionArtifactRevision: `${extension.id}:${extension.artifactGeneration}`,
+                }
+              : {}),
           };
         },
       );
@@ -13041,7 +13066,9 @@ export class Config {
     projection: SessionRestoreProjection | undefined,
   ): void {
     this.pendingSessionRestoreProjection = projection;
-    this.sessionRestoreRuntime = projection?.runtime;
+    this.sessionRestoreRuntime = projection
+      ? { ...projection.runtime, conversationStartTime: projection.startTime }
+      : undefined;
     this.restoredFileHistory = false;
   }
 
@@ -13527,7 +13554,11 @@ export class Config {
         rule: string,
       ) => Promise<void>)
     | undefined {
-    return this.onPersistPermissionRuleCallback;
+    const persist = this.onPersistPermissionRuleCallback;
+    return persist
+      ? (scope, ruleType, rule) =>
+          persist(scope, ruleType, rule, this.getProjectRoot())
+      : undefined;
   }
 
   // Check permission then register a lazy factory; its import runs on first use.

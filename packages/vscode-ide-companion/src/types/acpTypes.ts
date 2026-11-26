@@ -49,10 +49,12 @@ export interface SessionUpdateMeta {
     modelInvocable?: boolean;
   }> | null;
   source?: string | null;
+  stopReason?: string | null;
   qwenDiscreteMessage?: boolean | null;
-  // Set on the summary emitted by MessageRewriteMiddleware so consumers can
-  // distinguish the rewritten copy from the original chunk (which carries the
-  // same qwenDiscreteMessage flag) and avoid persisting both.
+  // Set on the summary that older CLIs' MessageRewriteMiddleware emitted, so
+  // consumers can distinguish the rewritten copy from the original chunk
+  // (which carries the same qwenDiscreteMessage flag) and avoid persisting
+  // both. Current CLIs no longer emit it.
   rewritten?: boolean | null;
   backgroundTask?: {
     taskId?: string;

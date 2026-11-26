@@ -243,6 +243,7 @@ describe('settings presentation aliases', () => {
       'setting:git-pr-co-author': 'general.gitCoAuthor.pr',
       'setting:language': 'general.language',
       'setting:output-language': 'general.outputLanguage',
+      'setting:display-language': 'general.displayLanguage',
       'setting:prevent-system-sleep': 'general.preventSystemSleep',
       'setting:review-attribution': 'review.attribution',
       'setting:review-sandbox': 'review.sandbox',
@@ -265,6 +266,7 @@ describe('settings presentation aliases', () => {
       'setting:advisor-model': 'advisorModel',
       'setting:advisor-session-call-limit': 'advisorMaxUses',
       'setting:vision-model': 'visionModel',
+      'setting:vision-bridge-timeout': 'visionBridgeTimeoutMs',
       'setting:model-fallbacks': 'modelFallbacks',
       'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
       'setting:respect-qwen-ignore': 'context.fileFiltering.respectQwenIgnore',
@@ -297,6 +299,7 @@ describe('settings presentation aliases', () => {
       'setting:omni-media-delivery': 'omni.enabled',
       'setting:artifacts': 'experimental.artifact',
       'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
+      'setting:mods': 'experimental.mods',
       'setting:unified-agent-loop': 'experimental.unifiedAgentLoop',
       'setting:event-bus-agent-loop': 'experimental.eventBusAgentLoop',
       'setting:model-availability-tracking':

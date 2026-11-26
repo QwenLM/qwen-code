@@ -154,7 +154,11 @@ function gh(args) {
 // flag, so fall back to the bare call ONLY when stderr says `unknown flag`.
 // Strip VT control characters either way: raw ANSI would otherwise reach
 // feedback.md and step stdout, where the existing defang handles only `::`
-// and `##[`. Same three-part shape as autofix-pr/ci-log.ts's jobLog.
+// and `##[`. Bare CR and the other terminal controls are stripped downstream
+// by skillLog, AFTER redaction — stripping them here would delete both the
+// word boundary redactLog's anchored secret patterns need and the CR line end
+// that keeps its Cookie:/Authorization: rules off the following line. Same
+// fetch shape as autofix-pr/ci-log.ts's jobLog.
 function fetchLog(repo, id) {
   const path = `repos/${repo}/actions/jobs/${id}/logs`;
   let result = ghResult(['api', '--allow-escape-sequences', path]);

@@ -8,6 +8,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { createServer as createSecureServer } from 'node:https';
+import type { Socket } from 'node:net';
 import type { Application } from 'express';
 import type { SleepInhibitorHandle } from '@qwen-code/qwen-code-core';
 import { sleepInhibitor } from '@qwen-code/qwen-code-core';
@@ -158,6 +159,7 @@ export interface LocalControlServiceDeps {
 export class LocalControlService {
   readonly #deps: LocalControlServiceDeps;
   #server: Server | undefined;
+  #sockets = new Set<Socket>();
   #token: PairingToken | undefined;
   #selected: LanCandidate | undefined;
   #port: number | undefined;
@@ -264,6 +266,16 @@ export class LocalControlService {
     // of this function running.
     tagListener(server, { kind: 'local-control' });
 
+    // closeAllConnections() does not reach sockets detached by an upgrade;
+    // track them so disable() cannot hang on a paired ACP peer that never
+    // answers close (same sweep as the primary listener and remote-access).
+    const sockets = new Set<Socket>();
+    this.#sockets = sockets;
+    server.on('connection', (socket) => {
+      sockets.add(socket);
+      socket.once('close', () => sockets.delete(socket));
+    });
+
     // Register the credential before the socket accepts anything. The origin
     // and final listener identity are installed synchronously in `listening`,
     // once the OS-assigned endpoint is authoritative.
@@ -318,7 +330,7 @@ export class LocalControlService {
       this.#deps.detachWebSocket(server);
       this.#deps.credentials.revokePairingToken(token.id);
       this.#deps.originAllowlist.remove(CORS_KEY);
-      if (server.listening) await close(server);
+      if (server.listening) await close(server, sockets);
       throw error;
     }
 
@@ -404,7 +416,7 @@ export class LocalControlService {
 
     if (server) {
       this.#deps.detachWebSocket(server);
-      await close(server);
+      await close(server, this.#sockets);
     }
     return { active: false };
   }
@@ -538,12 +550,15 @@ function normalizeBindError(error: Error): Error {
   }
 }
 
-function close(server: Server): Promise<void> {
+function close(server: Server, sockets: Set<Socket>): Promise<void> {
   return new Promise((resolve) => {
     // `closeAllConnections` cuts keep-alive sockets that `close()` alone would
     // wait on indefinitely. Without it, disable() would resolve only once the
-    // phone happened to disconnect.
+    // phone happened to disconnect. Upgraded sockets are detached from that
+    // sweep, so destroy the tracked survivors as well.
     server.closeAllConnections?.();
+    for (const socket of sockets) socket.destroy();
+    sockets.clear();
     server.close(() => resolve());
   });
 }

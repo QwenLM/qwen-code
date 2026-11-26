@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -19,6 +18,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,7 +68,7 @@ final class AgentEventJournal {
             long afterSequence, int limit) {
         storeRows.requireSession(tenantId, sessionId);
         return jdbc.query(
-                "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id = X''"
+                "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id = ''"
                     + " AND tenant_id = ? AND session_id = ? AND sequence_id > ? ORDER BY"
                     + " sequence_id ASC LIMIT ?",
                 eventMapper,
@@ -95,12 +95,8 @@ final class AgentEventJournal {
                 pairs.append(",");
             }
             pairs.append(" (?, ?)");
-            // Bound as identity bytes: H2 types row-comparison parameters
-            // as VARCHAR, and a command it recompiles after binding (any
-            // new session or SET in between) refuses VARBINARY rows against
-            // VARCHAR ones. Bytes compare the same on MySQL and MariaDB.
-            arguments.add(ManagedSchemaKeys.identity(turn.sessionId()));
-            arguments.add(ManagedSchemaKeys.identity(turn.turnId()));
+            arguments.add(turn.sessionId());
+            arguments.add(turn.turnId());
         }
         arguments.add(tenantId);
         // One row per session: the latest environment event of its latest
@@ -109,13 +105,13 @@ final class AgentEventJournal {
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns("event") + " FROM ma_public_event event JOIN (SELECT environment.session_id,"
                             + " MAX(environment.sequence_id) AS max_sequence FROM ma_public_event environment WHERE"
-                            + " environment.stream_kind = 'SESSION' AND environment.stream_id = X'' AND environment.tenant_id = ? AND"
+                            + " environment.stream_kind = 'SESSION' AND environment.stream_id = '' AND environment.tenant_id = ? AND"
                             + " environment.event_type IN ('environment.provisioning', 'environment.ready',"
                             + " 'environment.failed') AND (environment.session_id, environment.turn_id) IN ("
                                 + pairs
                                 + ") GROUP BY environment.session_id) latest ON latest.session_id ="
                                 + " event.session_id AND latest.max_sequence = event.sequence_id"
-                                + " WHERE event.stream_kind = 'SESSION' AND event.stream_id = X''"
+                                + " WHERE event.stream_kind = 'SESSION' AND event.stream_id = ''"
                                 + " AND event.tenant_id = ?",
                         eventMapper,
                         arguments.toArray());
@@ -130,7 +126,7 @@ final class AgentEventJournal {
             String sessionId, long throughSequence) {
         storeRows.requireSession(tenantId, sessionId);
         return jdbc.query(
-                "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id = X''"
+                "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id = ''"
                     + " AND tenant_id = ? AND session_id = ? AND sequence_id <= ? AND event_type"
                     + " NOT IN ('turn.accepted', 'item.output_text.delta', 'item.reasoning.delta',"
                     + " 'item.tool_call.updated', 'item.tool_result.updated') ORDER BY sequence_id"
@@ -148,7 +144,7 @@ final class AgentEventJournal {
                 beforeSequence == null
                         ? jdbc.query(
                                 "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                                    + " stream_id = X'' AND tenant_id = ? AND session_id = ? ORDER"
+                                    + " stream_id = '' AND tenant_id = ? AND session_id = ? ORDER"
                                     + " BY sequence_id DESC LIMIT ?",
                                 eventMapper,
                                 tenantId,
@@ -156,7 +152,7 @@ final class AgentEventJournal {
                                 limit + 1)
                         : jdbc.query(
                                 "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                                    + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND"
+                                    + " stream_id = '' AND tenant_id = ? AND session_id = ? AND"
                                     + " sequence_id < ? ORDER BY sequence_id DESC LIMIT ?",
                                 eventMapper,
                                 tenantId,
@@ -169,7 +165,7 @@ final class AgentEventJournal {
         } else {
             rows = new ArrayList<>(rows);
         }
-        java.util.Collections.reverse(rows);
+        Collections.reverse(rows);
         return new EventPage(List.copyOf(rows), hasMore);
     }
 
@@ -200,7 +196,7 @@ final class AgentEventJournal {
                 eventEpoch, lastSourceId, now, tenantId, sessionId);
         jdbc.update(
                 "UPDATE ma_event_stream SET last_sequence = ?, gmt_modified = ? WHERE tenant_id = ?"
-                    + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                    + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 next,
                 now,
                 tenantId,
@@ -230,7 +226,7 @@ final class AgentEventJournal {
     void appendPublicEventIfAbsent(String tenantId, String sessionId,
             String turnId, String type, Map<String, Object> data,
             boolean terminal, String sourceKey) {
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (!hasSourceEvent(tenantId, sessionId, sourceKey)) {
             appendEvent(tenantId, sessionId, turnId, type, data, terminal,
                     sourceKey, clock.millis());
@@ -240,7 +236,6 @@ final class AgentEventJournal {
     void appendLiveSessionEventIfAbsent(String tenantId,
             String sessionId, String type, Map<String, Object> data,
             String sourceKey) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         // A locking read sees the latest committed status, where a plain one
         // could still see the snapshot taken before a deletion committed.
         Optional<SessionRecord> session = jdbc.query(AgentStoreRows.SESSION_WITH_STREAM + " WHERE ma_session.tenant_id = ? AND"
@@ -275,7 +270,7 @@ final class AgentEventJournal {
         Long sequence =
                 jdbc.queryForObject(
                         "SELECT last_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
+                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' FOR"
                             + " UPDATE",
                         Long.class,
                         tenantId,
@@ -293,7 +288,7 @@ final class AgentEventJournal {
                 identity.contentPartId());
         jdbc.update("UPDATE ma_event_stream SET last_sequence = ?,"
                         + " gmt_modified = ? WHERE tenant_id = ? AND session_id = ?"
-                        + " AND stream_kind = 'SESSION' AND stream_id = X''",
+                        + " AND stream_kind = 'SESSION' AND stream_id = ''",
                 next, now, tenantId, sessionId);
         jdbc.update(INSERT_EVENT, event.tenantId(), event.sessionId(),
                 event.sequence(), event.eventId(), event.turnId(),
@@ -313,7 +308,7 @@ final class AgentEventJournal {
         List<EventRecord> events =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
-                            + " = X'' AND tenant_id = ? AND session_id = ? AND sequence_id >= ?"
+                            + " = '' AND tenant_id = ? AND session_id = ? AND sequence_id >= ?"
                             + " ORDER BY sequence_id ASC",
                         eventMapper,
                         tenantId,
@@ -334,7 +329,7 @@ final class AgentEventJournal {
                 jdbc.update(
                         "UPDATE ma_public_event SET item_id = ?, content_part_id = ? WHERE"
                             + " tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND"
-                            + " stream_id = X'' AND sequence_id = ?",
+                            + " stream_id = '' AND sequence_id = ?",
                         identity.itemId(),
                         identity.contentPartId(),
                         tenantId,
@@ -355,7 +350,7 @@ final class AgentEventJournal {
         List<Identity> rows =
                 jdbc.query(
                         "SELECT event_type, item_id, content_part_id FROM ma_public_event WHERE"
-                            + " stream_kind = 'SESSION' AND stream_id = X'' AND tenant_id = ? AND"
+                            + " stream_kind = 'SESSION' AND stream_id = '' AND tenant_id = ? AND"
                             + " session_id = ? AND sequence_id = ?",
                         (result, row) ->
                                 new Identity(
@@ -390,7 +385,7 @@ final class AgentEventJournal {
         Integer count =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                            + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND turn_id ="
+                            + " stream_id = '' AND tenant_id = ? AND session_id = ? AND turn_id ="
                             + " ? AND event_type = ?",
                         Integer.class,
                         tenantId,
@@ -405,7 +400,7 @@ final class AgentEventJournal {
         Integer count =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                            + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND source_key"
+                            + " stream_id = '' AND tenant_id = ? AND session_id = ? AND source_key"
                             + " = ?",
                         Integer.class,
                         tenantId,

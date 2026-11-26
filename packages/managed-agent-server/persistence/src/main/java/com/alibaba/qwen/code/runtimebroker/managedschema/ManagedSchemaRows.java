@@ -6,7 +6,9 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -15,6 +17,7 @@ import java.util.Set;
 /** Reads raw SQL rows while decoding only declared UTF-8 identity columns. */
 public final class ManagedSchemaRows {
     private static final Set<String> BOOLEANS = Set.of(
+            "has_activity_diagnostics",
             "is_accepted_complete",
             "is_activation_record",
             "is_archived",
@@ -30,6 +33,7 @@ public final class ManagedSchemaRows {
             "is_plan_enabled",
             "is_projection_pending",
             "is_provision_seeded",
+            "is_publication_retention_registered",
             "is_quarantined",
             "is_recovery_protected",
             "is_resource_gc_completed",
@@ -54,7 +58,6 @@ public final class ManagedSchemaRows {
                     "original_workspace",
                     "source_session_id",
                     "target_session_id",
-                    "public_session_id",
                     "harness_session_id",
                     "operation_id",
                     "retirement_operation_id",
@@ -84,6 +87,7 @@ public final class ManagedSchemaRows {
                     "occurrence_key",
                     "turn_id",
                     "prompt_id",
+                    "wake_seal_parked_prompt_id",
                     "item_id",
                     "action_id",
                     "task_id",
@@ -94,7 +98,6 @@ public final class ManagedSchemaRows {
                     "parent_workspace_id",
                     "segment_id",
                     "creation_key",
-                    "provider_id",
                     "lease_id",
                     "binding_id",
                     "active_binding_id",
@@ -150,7 +153,33 @@ public final class ManagedSchemaRows {
                     "thread_id",
                     "lease_owner",
                     "run_id",
-                    "record_resource_id");
+                    "record_resource_id",
+                    "actor_id",
+                    "creator_actor_key",
+                    "owner_actor_key",
+                    "operation_ref",
+                    "scope_ref",
+                    "owner_ref",
+                    "physical_id",
+                    "holder_id",
+                    "request_id",
+                    "execution_storage_id",
+                    "command_ref",
+                    "actor_scope_ref",
+                    "result_operation_ref",
+                    "deletion_operation_ref",
+                    "evidence_resource_ref",
+                    "body_resource_ref",
+                    "artifact_refs_resource_ref",
+                    "manifest_resource_ref",
+                    "seal_manifest_resource_ref",
+                    "decision_scope",
+                    "hook_once_key",
+                    "hook_occurrence_id",
+                    "hook_definition_id",
+                    "source_scope_id",
+                    "delivery_id",
+                    "runtime_binding_id");
 
     private ManagedSchemaRows() {}
 
@@ -162,8 +191,8 @@ public final class ManagedSchemaRows {
             Object value = value(result, index, columns.getColumnType(index), label);
             if (value instanceof byte[] bytes && IDENTITIES.contains(label)) {
                 value = utf8(bytes, label);
-            } else if (value instanceof java.time.LocalDateTime timestamp) {
-                value = java.sql.Timestamp.valueOf(timestamp);
+            } else if (value instanceof LocalDateTime timestamp) {
+                value = Timestamp.valueOf(timestamp);
             }
             row.put(label, value);
         }
@@ -197,10 +226,10 @@ public final class ManagedSchemaRows {
         return result.wasNull() ? null : value;
     }
 
-    private static java.sql.Timestamp timestamp(ResultSet result, int index) throws SQLException {
+    private static Timestamp timestamp(ResultSet result, int index) throws SQLException {
         if ("DATETIME".equalsIgnoreCase(result.getMetaData().getColumnTypeName(index))) {
-            var local = result.getObject(index, java.time.LocalDateTime.class);
-            return local == null ? null : java.sql.Timestamp.valueOf(local);
+            var local = result.getObject(index, LocalDateTime.class);
+            return local == null ? null : Timestamp.valueOf(local);
         }
         return result.getTimestamp(index);
     }

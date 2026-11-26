@@ -127,6 +127,21 @@
   );
 }
 
+@media (hover: none) and (pointer: coarse) {
+  .sidebar.mobileOpen {
+    width: clamp(
+      min(var(--web-shell-sidebar-min-width, 220px), 100%),
+      calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
+      var(--web-shell-sidebar-max-width, 420px)
+    );
+    min-width: clamp(
+      min(var(--web-shell-sidebar-min-width, 220px), 100%),
+      calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
+      var(--web-shell-sidebar-max-width, 420px)
+    );
+  }
+}
+
 .sidebar.mobileOpen .resizeHandle {
   display: none;
 }
@@ -1414,6 +1429,7 @@ button.livePendingSession:hover {
     :has(
       .sessionLoading,
       .sessionAttention,
+      .sessionContinuation,
       .sessionGitIcon,
       .sessionSourceIcon
     )
@@ -1439,6 +1455,20 @@ button.livePendingSession:hover {
 .sessionAttentionUserInput {
   background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
   color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
+}
+
+.sessionContinuation {
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning-color) 12%, transparent);
+  color: color-mix(in srgb, var(--warning-color) 95%, var(--foreground));
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .sessionGitIcon {
@@ -1509,6 +1539,8 @@ button.livePendingSession:hover {
     .sessionMetaSlot:has([data-state='open']) .sessionLoading,
     .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
     .sessionMetaSlot:has([data-state='open']) .sessionAttention,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionContinuation,
+    .sessionMetaSlot:has([data-state='open']) .sessionContinuation,
     .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
     .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
       opacity: 0;
@@ -1536,12 +1568,14 @@ button.livePendingSession:hover {
 
   .sessionRow:hover:not(.runningSession) .sessionGitIcon,
   .sessionRow:hover:not(.runningSession) .sessionAttention,
+  .sessionRow:hover:not(.runningSession) .sessionContinuation,
   /* A background-only row is not .runningSession, so a row hover reveals the
      actions over the busy marker; hide it like the other markers. */
   .sessionRow:hover:not(.runningSession) .sessionLoading,
   .sessionMetaSlot:hover .sessionGitIcon,
   .sessionMetaSlot:hover .sessionLoading,
-  .sessionMetaSlot:hover .sessionAttention {
+  .sessionMetaSlot:hover .sessionAttention,
+  .sessionMetaSlot:hover .sessionContinuation {
     opacity: 0;
   }
 
@@ -1558,10 +1592,99 @@ button.livePendingSession:hover {
   .sessionActions {
     position: static;
     opacity: 1;
+    pointer-events: auto;
   }
 
   .sessionActionButton {
     pointer-events: auto;
+  }
+}
+
+/* Very narrow touch drawers prioritize the title and enabled actions over
+   branch/source decoration. PR state and goal markers stay visible. */
+@media (hover: none) and (pointer: coarse) {
+  .sidebar.mobileOpen[data-narrow] .sessionGitIcon {
+    display: none;
+  }
+
+  /* Keep markers in the flex layout; anchor only More outside their flow. */
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionActions
+    ) {
+    padding-right: 26px;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow)
+    .sessionMetaSlotReserved:has(.sessionActions) {
+    display: contents;
+  }
+
+  /* Non-interactive source glyphs should not raise the title-row flex line. */
+  .sidebar.mobileOpen[data-narrow] .sessionSourceIcon {
+    height: 20px;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    ) {
+    /* Keep More's 26px hit area above the next metadata line. */
+    row-gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    )
+    .sessionStatusSlot,
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    )
+    .sessionTreeToggle {
+    top: 12px;
+  }
+
+  .sidebar.mobileOpen[data-narrow] .sessionRow .sessionLoading {
+    margin-right: 4px;
+    margin-left: 4px;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow
+    .sessionMetaSlot:not(.sessionMetaSlotReserved)
+    .sessionActions {
+    align-self: stretch;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow
+    .sessionMetaSlotReserved
+    .sessionActions {
+    position: absolute;
+    inset: 2px 0 2px auto;
+    width: var(--session-actions-width, 26px);
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    )
+    .sessionMetaSlotReserved
+    .sessionActions {
+    inset: 2px 0 auto auto;
+    max-height: calc(100% - 4px);
   }
 }
 
@@ -2457,7 +2580,9 @@ button.livePendingSession:hover {
 }
 
 .moreMenu {
-  width: 240px;
+  width: max-content;
+  min-width: 240px;
+  max-width: min(22rem, calc(100vw - 24px));
   max-height: var(--radix-popover-content-available-height);
   overflow-y: auto;
 }
@@ -2500,10 +2625,17 @@ button.livePendingSession:hover {
   color: inherit;
   background: transparent;
   cursor: pointer;
+  text-align: start;
 }
 
-.moreMenu .footerButtonLabel {
-  display: inline;
+.moreMenu .footerButtonLabel,
+.moreMenu .collapseButton > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
 }
 
 .moreMenu .navIcon {
@@ -2519,6 +2651,11 @@ button.livePendingSession:hover {
 
 .moreLocalFiles::after {
   content: attr(aria-label);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
 }
 
 .moreMenu .version {

@@ -35,6 +35,11 @@ export type {
   DaemonWorkspaceContextValue,
   DaemonWorkspaceProviderProps,
   DaemonWorkspaceStatus,
+  DaemonArtifactLibraryMemberError,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
   ResourceResult,
   ResourceState,
 } from './types.js';

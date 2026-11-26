@@ -53,7 +53,7 @@ class HostedClientFilesRelayIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "client-files-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<String> browserMethods = new CopyOnWriteArrayList<>();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
@@ -116,8 +116,8 @@ class HostedClientFilesRelayIT {
                 .isEqualTo("active");
         assertThat(jdbc.queryForObject(
                 "SELECT token_hash FROM ma_client_files_binding"
-                        + " WHERE session_scope_key = ?",
-                String.class, scope(session)))
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session))
                 .isEqualTo(DigestUtils.sha256Hex(token))
                 .isNotEqualTo(token);
 
@@ -245,11 +245,6 @@ class HostedClientFilesRelayIT {
 
         System.out.println("CLIENT_FILES_TURN_EVIDENCE yoloTurn=true approvedTurn=true"
                 + " toolCallArgs=true durableResult=true");
-    }
-
-    private String scope(String session) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
-                .sessionScopeKey(tenant, session);
     }
 
     private Drain registerBinding(String session) throws Exception {

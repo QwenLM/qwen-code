@@ -10,6 +10,7 @@ import fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { captureFixedPolicyHookStopReporter } from './policy/fixed-policy-hook-stop.js';
 import { isAbortError } from '../utils/errors.js';
 import { isFfmpegAvailable, isFfprobeAvailable } from './ffmpeg.js';
 import {
@@ -397,6 +398,8 @@ export async function processMediaForOmniDelivery(
     /** Provenance for fixed-policy origin matching. Defaults to 'user';
      * the tool-result funnel passes 'tool'. */
     origin?: 'user' | 'tool';
+    /** Only tool reads and tool results can end an owning tool batch. */
+    onHookStop?: (reason: string) => boolean;
     /**
      * The URL this media was downloaded from. Set by the URL funnel, whose
      * `filePath` is a staging download it deletes in its `finally` THIS
@@ -694,6 +697,7 @@ export async function processMediaForOmniDelivery(
           store,
           policies,
           signal,
+          onHookStop: options?.onHookStop,
           limits: processingConfig?.limits,
           conditionContext,
           memory: memoryService
@@ -920,6 +924,7 @@ export async function processMediaForOmniDelivery(
             store,
             policies: guardPolicies,
             signal,
+            onHookStop: options?.onHookStop,
             limits: processingConfig.limits,
             conditionContext,
             // The guard pass derives FROM the current final resource, so
@@ -1081,6 +1086,7 @@ export async function readMediaViaOmniDelivery(params: {
     const delivery = await processMediaForOmniDelivery(filePath, config, {
       expectedModality,
       signal,
+      onHookStop: captureFixedPolicyHookStopReporter(),
     });
     // §6.2/D8 ordering contract documented on buildTranscriptParts.
     const transcriptParts = buildTranscriptParts(
