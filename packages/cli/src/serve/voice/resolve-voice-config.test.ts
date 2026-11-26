@@ -17,6 +17,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: mocks.loadSettings,
+  readModelPolicyOptions: () => ({
+    allowedModelBaseUrls: undefined,
+    qwenOAuthBuiltinsDisabled: false,
+    allowedBaseUrlsWorkspaceOnly: false,
+  }),
 }));
 
 vi.mock('../../utils/modelConfigUtils.js', () => ({
