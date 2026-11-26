@@ -6,7 +6,9 @@ import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -15,18 +17,22 @@ import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore.Place
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -43,6 +49,122 @@ import static org.mockito.Mockito.when;
 
 class HarnessPoolConnectorTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
+
+    @Test
+    void vanishedAdmissionReselectsPlacementAndPassesAFreshRecoveryCall() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var first = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1, "ACTIVE");
+        var fresh = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 2, "ACTIVE");
+        var current = new AtomicReference<>(first);
+        when(placements.get("tenant", "session")).thenAnswer(call -> current.get());
+        var body = Map.<String, Object>of("kind", "submit_input");
+        when(leafA.runChannelOperation("tenant", "session", body)).thenAnswer(call -> {
+            current.set(fresh);
+            throw new HarnessAttachmentLostFailure(null);
+        });
+        when(leafB.runChannelOperation("tenant", "session", body)).thenReturn(Map.of("accepted", true));
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            assertThat(pool.runChannelOperation("tenant", "session", body)).containsEntry("accepted", true);
+            var routed = ArgumentCaptor.forClass(QwenHostedHarnessConnector.PoolCall.class);
+            verify(leafB).withPlacement(routed.capture(), any());
+            assertThat(routed.getValue().placement().getPlacementEpoch()).isEqualTo(2);
+            assertThat(routed.getValue().placement().getInstanceId()).isEqualTo("b");
+            assertThat(routed.getValue().recoveringAdmission()).isTrue();
+            verify(leafA).runChannelOperation("tenant", "session", body);
+            verify(leafB).runChannelOperation("tenant", "session", body);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void publicChildAgentsUseTheNegotiatedPoolCapability(boolean supported) {
+        // D5′: a pooled worker that advertises the feature admits children.
+        var features = new java.util.ArrayList<>(List.of(
+                "harness-pool-owner/1", "harness-instance-lifecycle/1", "approval-selection/1"));
+        if (supported) {
+            features.add("public-child-agents/1");
+        }
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.capabilities().getFeatures()).thenReturn(features);
+        when(clientA.capabilities().getLifecycleV2Profiles())
+                .thenReturn(List.of("hosted-workspace-shell/1"));
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            assertThat(pool.supportsPublicChildAgents()).isFalse();
+            pool.refresh();
+            assertThat(pool.supportsPublicChildAgents()).isEqualTo(supported);
+        }
+    }
+
+    @Test
+    void publicChildAgentsRequireApprovalSelectionAndShellLifecycleV2() {
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.capabilities().getFeatures()).thenReturn(
+                List.of("harness-pool-owner/1", "harness-instance-lifecycle/1", "public-child-agents/1"));
+        when(clientA.capabilities().getLifecycleV2Profiles())
+                .thenReturn(List.of("hosted-workspace-shell/1"));
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            pool.refresh();
+            // The token builds on approval-selection/1.
+            assertThat(pool.supportsPublicChildAgents()).isFalse();
+        }
+        when(clientA.capabilities().getFeatures()).thenReturn(
+                List.of("harness-pool-owner/1", "harness-instance-lifecycle/1",
+                        "public-child-agents/1", "approval-selection/1"));
+        when(clientA.capabilities().getLifecycleV2Profiles()).thenReturn(List.of());
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            pool.refresh();
+            // Without the negotiated Shell v2 profile the lifecycle gate refuses.
+            assertThat(pool.supportsPublicChildAgents()).isFalse();
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("filesLifecycleV2Cases")
+    void filesLifecycleRidesTheNegotiatedV2ProfilesAndTheAvailabilityGate(
+            List<String> profiles, boolean filesEnabled, boolean supported) {
+        // D3: ordinary files settles on the negotiated lifecycle v2 profiles,
+        // not the saved v1 protocol. Reverting the files arm to
+        // contract.lifecycle()==1 or dropping the isWorkspaceFilesAvailable()
+        // conjunct reds these cases.
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.capabilities().getLifecycleV2Profiles()).thenReturn(profiles);
+        var settings = settings();
+        settings.getHarness().setWorkspaceFilesEnabled(filesEnabled);
+        try (var pool = new HarnessPoolConnector(settings, mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            assertThat(pool.supportsLifecycle(WorkspaceToolProfiles.FILES)).isFalse();
+            pool.refresh();
+            assertThat(pool.supportsLifecycle(WorkspaceToolProfiles.FILES)).isEqualTo(supported);
+            assertThat(pool.supportsLifecycle()).isEqualTo(supported);
+        }
+    }
+
+    private static Stream<Arguments> filesLifecycleV2Cases() {
+        return Stream.of(
+                Arguments.of(List.of("hosted-workspace-files/1", "hosted-workspace-shell/1"), true, true),
+                Arguments.of(List.of(), true, false),
+                Arguments.of(List.of("hosted-workspace-files/1"), false, false));
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -175,6 +297,44 @@ class HarnessPoolConnectorTest {
     }
 
     @Test
+    void unattachedRecoveryReadsOnlyTheActiveOwnerAndRejectsAChangedPlacement() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var session = new SessionRecord("tenant", "session", "qwen-code", null, "ACTIVE",
+                null, null, 0, 0, 1, 1, null, 1);
+        var original = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 1, "ACTIVE");
+        var successor = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 2, "ACTIVE");
+        var saved = new AtomicReference<Placement>();
+        when(placements.get("tenant", "session")).thenAnswer(call -> saved.get());
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            assertThat(pool.inspectUnattachedRecovery(session, "prompt")).isNull();
+            saved.set(original);
+            when(leafB.inspectUnattachedRecovery(session, "prompt")).thenAnswer(call -> {
+                saved.set(successor);
+                return null;
+            });
+            assertThatThrownBy(() -> pool.inspectUnattachedRecovery(session, "prompt"))
+                    .hasMessageContaining("No compatible Harness owner");
+            var routed = ArgumentCaptor.forClass(QwenHostedHarnessConnector.PoolCall.class);
+            verify(leafB).withPlacement(routed.capture(), any());
+            assertThat(routed.getValue().placement().getPlacementEpoch()).isEqualTo(original.epoch());
+            verify(leafB).inspectUnattachedRecovery(session, "prompt");
+            verify(leafA, never()).inspectUnattachedRecovery(any(), anyString());
+            verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
+            verify(placements, never()).takeover(anyString(), anyString(), any(), anyString(), anyString());
+        }
+    }
+
+    @Test
     void discoveryUncertaintyPausesPlacementWhileOriginalCachedOwnerRemainsUsable() {
         var placements = mock(JdbcHarnessPlacementStore.class);
         var endpoint = endpoint("a", 4101);
@@ -193,6 +353,99 @@ class HarnessPoolConnectorTest {
             assertThatThrownBy(() -> pool.createOrLoad("tenant", "new", false))
                     .hasMessageContaining("No compatible Harness owner");
             verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @Test
+    void refreshReapsDepartedPlacementWithoutOpeningAnAttachment() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var b = endpoint("b", 4102);
+        var leafB = leaf();
+        var clientB = client("b");
+        var expected = new Placement("tenant", "session", "workspace", "a", "old-boot", 3, "QUIESCING");
+        var successor = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 4, "ACTIVE");
+        when(placements.findExpiredSuspensions(Set.of("b"), 32)).thenReturn(List.of(expected));
+        when(placements.takeover("tenant", "session", expected, "b", successor.bootId())).thenReturn(successor);
+        when(placements.get("tenant", "session")).thenReturn(successor);
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(b), true), ignored -> leafB, null, null,
+                ignored -> clientB)) {
+            pool.refresh();
+            verify(placements).takeover("tenant", "session", expected, "b", successor.bootId());
+            verify(leafB, never()).createOrLoad(anyString(), anyString(), eq(true));
+
+            pool.createOrLoad("tenant", "session", true);
+            verify(leafB).createOrLoad("tenant", "session", true);
+        }
+    }
+
+    @Test
+    void knownUnreachableOwnerIsOfferedOnlyWithTheStoreProof() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var expected = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1, "ACTIVE");
+        var successor = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 2, "ACTIVE");
+        when(clientA.readInstance()).thenThrow(new RuntimeException("temporary outage"));
+        when(placements.findExpiredSuspensions(Set.of("b"), 32)).thenReturn(List.of(expected));
+        when(placements.takeover("tenant", "session", expected, "b", successor.bootId())).thenReturn(successor);
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            verify(placements).findExpiredSuspensions(Set.of("b"), 32);
+            verify(placements).takeover("tenant", "session", expected, "b", successor.bootId());
+        }
+    }
+
+    @Test
+    void healthyConfiguredOwnerStaysExcludedFromTheReaper() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            verify(placements).findExpiredSuspensions(Set.of("a", "b"), 32);
+            verify(placements, never()).takeover(anyString(), anyString(), any(), anyString(), anyString());
+        }
+    }
+
+    @Test
+    void uncertainDiscoveryDoesNotInvokeTheReaper() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a), false), ignored -> leaf(), null, null,
+                ignored -> client("a"))) {
+            pool.refresh();
+            verify(placements, never()).findExpiredSuspensions(any(), eq(32));
+        }
+    }
+
+    @Test
+    void noAcceptingSuccessorSkipsTheReaper() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.readInstance()).thenReturn(Map.of("state", "QUIESCING"));
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            pool.refresh();
+            verify(placements, never()).findExpiredSuspensions(any(), eq(32));
+            verify(placements, never()).takeover(anyString(), anyString(), any(), anyString(), anyString());
         }
     }
 
@@ -592,6 +845,16 @@ class HarnessPoolConnectorTest {
         when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of());
         when(client.readInstance()).thenReturn(Map.of("state", "ACCEPTING"));
         return client;
+    }
+
+    @Test
+    void refusesNonStaticPoolDiscovery() {
+        var properties = settings();
+        properties.getHarness().getPool().setDiscovery("kubernetes");
+        assertThatThrownBy(() -> new HarnessPoolConnector(properties, mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(), true), ignored -> leaf(), null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Harness pool discovery must be static");
     }
 
     private static ManagedAgentProperties settings() {

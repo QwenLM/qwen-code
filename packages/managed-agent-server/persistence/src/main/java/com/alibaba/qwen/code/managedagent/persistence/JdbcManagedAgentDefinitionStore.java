@@ -15,6 +15,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -181,12 +183,12 @@ public class JdbcManagedAgentDefinitionStore
     private Admission record(String tenantId, String idempotencyKey,
             String requestDigest, DefinitionRevision revision, long now) {
         try {
-            jdbc.update("INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
-                            + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, request_digest,"
+            jdbc.update("INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_id,"
+                            + " scope_kind, scope_ref, scope_id, idempotency_key, idempotency_digest, request_digest,"
                             + " state, agent_id, agent_revision, gmt_create, gmt_modified)"
-                            + " VALUES (?, 'AGENT_DEFINITION', ?, ?, 'TENANT', ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?)",
-                    receiptKey(tenantId, idempotencyKey), ManagedSchemaKeys.key(tenantId), tenantId,
-                    ManagedSchemaKeys.key("TENANT", tenantId), tenantId, idempotencyKey,
+                            + " VALUES (?, 'AGENT_DEFINITION', ?, 'TENANT', ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?)",
+                    receiptKey(tenantId, idempotencyKey), tenantId,
+                    ManagedSchemaKeys.identity(ManagedReceipts.scope(tenantId, tenantId)), tenantId, idempotencyKey,
                     ManagedSchemaKeys.key(idempotencyKey), requestDigest, revision.agentId(), revision.revision(), now, now);
         } catch (DuplicateKeyException error) {
             // A concurrent request recorded this key first.
@@ -209,8 +211,8 @@ public class JdbcManagedAgentDefinitionStore
                 revision.definitionJson(), revision.createdAt());
     }
 
-    private static DefinitionRevision row(java.sql.ResultSet row, int index)
-            throws java.sql.SQLException {
+    private static DefinitionRevision row(ResultSet row, int index)
+            throws SQLException {
         return new DefinitionRevision(row.getString("agent_id"),
                 row.getLong("revision"), row.getString("digest"),
                 row.getString("definition_json"), row.getLong("gmt_create"));

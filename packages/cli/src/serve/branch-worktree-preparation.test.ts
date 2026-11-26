@@ -321,6 +321,61 @@ describe('branch worktree preparation journal', () => {
     });
   });
 
+  it('removes a stale detached prepared worktree (empty branch convention)', async () => {
+    const service = new GitWorktreeService(root);
+    const created = await service.createUserWorktree(
+      'branch-detached',
+      baseCommit,
+      { detached: true },
+    );
+    if (!created.success || !created.worktree) {
+      throw new Error(created.error ?? 'worktree creation failed');
+    }
+    expect(created.worktree.branch).toBe('');
+    let journal = await createBranchWorktreeJournal({
+      journalPath,
+      targetSessionId,
+      slug: 'branch-detached',
+      worktreePath: created.worktree.path,
+      worktreeBranch: '',
+      repoTop: root,
+      baseCommit,
+      sidecarPath,
+    });
+    journal = await updateBranchWorktreeJournal(
+      journalPath,
+      journal,
+      'worktree-created',
+    );
+    await createWorktreeSessionMarker(created.worktree.path, targetSessionId);
+    journal = await updateBranchWorktreeJournal(
+      journalPath,
+      journal,
+      'marker-created',
+    );
+    await fs.writeFile(sidecarPath, '{}\n', 'utf8');
+    journal = await updateBranchWorktreeJournal(
+      journalPath,
+      journal,
+      'sidecar-ready',
+    );
+    await markJournalStale(journal);
+
+    const warn = vi.fn();
+    await recoverStalePreparation(fakeSessionService(false), { warn });
+
+    await expect(fs.stat(created.worktree.path)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(fs.stat(journalPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(warn).not.toHaveBeenCalledWith(
+      'branch worktree recovery journal identity mismatch',
+      expect.anything(),
+    );
+  });
+
   it('reaps a stale preparation whose marker sits at nlink 2 in the publish window', async () => {
     // Crash residue: the daemon died between the publisher's link and
     // unlink, so `.qwen-session` sits at nlink 2 with complete, fsync'd
@@ -429,6 +484,47 @@ describe('branch worktree preparation journal', () => {
       'branch worktree recovery sidecar ownership is unknown',
       { targetSessionId },
     );
+  });
+
+  it('recovery reaps a dirty carried overlay via the journal carriedPaths', async () => {
+    // The prepared worktree carries the source's dirty overlay, so the
+    // cleanliness gate only passes when recovery forwards the journal's
+    // carriedPaths; dropping the argument strands the worktree forever.
+    await fs.writeFile(path.join(root, 'dirty.txt'), 'dirty\n');
+    const service = new GitWorktreeService(root);
+    const created = await service.createUserWorktree(
+      'branch-dirty',
+      baseCommit,
+      { detached: true, carryDirtyState: true },
+    );
+    if (!created.success || !created.worktree) {
+      throw new Error(created.error ?? 'worktree creation failed');
+    }
+    let journal = await createBranchWorktreeJournal({
+      journalPath,
+      targetSessionId,
+      slug: 'branch-dirty',
+      worktreePath: created.worktree.path,
+      worktreeBranch: '',
+      repoTop: root,
+      baseCommit,
+      sidecarPath,
+    });
+    journal = await updateBranchWorktreeJournal(
+      journalPath,
+      { ...journal, carriedPaths: created.carriedPaths },
+      'worktree-created',
+    );
+    await markJournalStale(journal);
+
+    await recoverStalePreparation(fakeSessionService(false));
+
+    await expect(fs.stat(created.worktree.path)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(fs.stat(journalPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('finishes safe branch deletion after a worktree-removed checkpoint', async () => {
@@ -563,6 +659,53 @@ describe('branch worktree preparation journal', () => {
 });
 
 describe('resolveBranchWorktreeBaseCheckout', () => {
+  it('accepts a worktree created under its nested registered workspace', async () => {
+    const workspaceCwd = path.join(root, 'nested');
+    const otherWorkspace = path.join(root, 'other');
+    await fs.mkdir(workspaceCwd);
+    await fs.mkdir(otherWorkspace);
+    const sessionId = '22222222-2222-4222-8222-222222222222';
+    const created = await new GitWorktreeService(
+      workspaceCwd,
+    ).createUserWorktree('nested-task', baseCommit, { detached: true });
+    if (!created.worktree) throw new Error(created.error);
+    const worktree = created.worktree;
+    await createWorktreeSessionMarker(worktree.path, sessionId);
+    await fs.mkdir(path.dirname(sidecarPath), { recursive: true });
+    const resolve = () =>
+      resolveBranchWorktreeBaseCheckout({
+        workspaceCwd,
+        sessionId,
+        sidecarPath,
+        snapshot: {
+          workspaceCwd,
+          effectiveCwd: worktree.path,
+          worktree: { slug: 'nested-task', path: worktree.path, branch: '' },
+        },
+      });
+    const attest = (owner: string) =>
+      fs.writeFile(
+        sidecarPath,
+        JSON.stringify({
+          slug: 'nested-task',
+          worktreePath: worktree.path,
+          worktreeBranch: '',
+          workspaceCwd: owner,
+          originalCwd: workspaceCwd,
+          originalBranch: 'main',
+          originalHeadCommit: baseCommit,
+        }),
+      );
+    await attest(otherWorkspace);
+    await expect(resolve()).resolves.toBeNull();
+    await attest(workspaceCwd);
+    await expect(resolve()).resolves.toMatchObject({
+      repoTop: await fs.realpath(root),
+      checkoutCwd: await fs.realpath(worktree.path),
+      headCommit: baseCommit,
+    });
+  });
+
   it('accepts a detached HEAD in the source session managed worktree', async () => {
     const sourceSessionId = '22222222-2222-4222-8222-222222222222';
     const service = new GitWorktreeService(root);
@@ -639,6 +782,62 @@ describe('resolveBranchWorktreeBaseCheckout', () => {
       }
       await fs.rm(decoyParent, { recursive: true, force: true });
     }
+  });
+
+  it('resolves the source checkout HEAD when it diverges from the repo top (R5-4)', async () => {
+    // The branch worktree must be created at the SOURCE checkout's HEAD
+    // (base.headCommit), not the repo top's: the two differ when the
+    // session lives in a sibling managed worktree that committed ahead.
+    const sourceSessionId = '33333333-3333-4333-8333-333333333333';
+    const service = new GitWorktreeService(root);
+    const created = await service.createUserWorktree('source', baseCommit, {
+      detached: true,
+    });
+    if (!created.success || !created.worktree) {
+      throw new Error(created.error ?? 'worktree creation failed');
+    }
+    const sourcePath = created.worktree.path;
+    await fs.writeFile(path.join(sourcePath, 'ahead.txt'), 'ahead\n');
+    execFileSync('git', ['add', 'ahead.txt'], { cwd: sourcePath });
+    execFileSync('git', ['commit', '-qm', 'source work', '--no-verify'], {
+      cwd: sourcePath,
+    });
+    const sourceHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: sourcePath,
+      encoding: 'utf8',
+    }).trim();
+    expect(sourceHead).not.toBe(baseCommit);
+    await createWorktreeSessionMarker(sourcePath, sourceSessionId);
+    await fs.mkdir(path.dirname(sidecarPath), { recursive: true });
+    await fs.writeFile(
+      sidecarPath,
+      `${JSON.stringify({
+        slug: 'source',
+        worktreePath: sourcePath,
+        worktreeBranch: '',
+        originalCwd: root,
+        originalBranch: 'main',
+        originalHeadCommit: baseCommit,
+      })}\n`,
+      'utf8',
+    );
+
+    const resolved = await resolveBranchWorktreeBaseCheckout({
+      workspaceCwd: root,
+      sessionId: sourceSessionId,
+      snapshot: {
+        workspaceCwd: root,
+        effectiveCwd: sourcePath,
+        worktree: { slug: 'source', path: sourcePath, branch: '' },
+      },
+      sidecarPath,
+    });
+
+    expect(resolved).toMatchObject({
+      repoTop: await fs.realpath(root),
+      checkoutCwd: await fs.realpath(sourcePath),
+      headCommit: sourceHead,
+    });
   });
 });
 

@@ -11,8 +11,20 @@ import {
   HOOKS_CONFIG_FIELDS,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('HOOK_REGISTRY');
+
+export function hasUnsupportedCommandHookArgs(
+  config: Record<string, unknown>,
+): boolean {
+  const args = config['args'];
+  return (
+    config['type'] === 'command' &&
+    args !== undefined &&
+    !(Array.isArray(args) && args.length === 0)
+  );
+}
 
 /**
  * The identity the registry uses to spot a duplicate hook within one source,
@@ -194,11 +206,9 @@ export class HookRegistry {
   ): () => void {
     const before = this.entries.length;
     try {
-      this.processHooksConfiguration(
-        hooks,
-        HooksConfigSource.Session,
+      this.processHooksConfiguration(hooks, HooksConfigSource.Session, {
         agentScope,
-      );
+      });
       for (const entry of this.entries.slice(before)) {
         entry.owner = Object.freeze({ ...registration.owner });
         entry.isSourceTrusted = registration.isSourceTrusted;
@@ -317,11 +327,12 @@ export class HookRegistry {
 
     // Extension hooks are always loaded
     const extensions = this.config.getExtensions() || [];
-    for (const extension of extensions) {
+    for (const [index, extension] of extensions.entries()) {
       if (extension.isActive && extension.hooks) {
         this.processHooksConfiguration(
           extension.hooks,
           HooksConfigSource.Extensions,
+          { sourceLabel: `extension config #${index + 1}` },
         );
       }
     }
@@ -333,7 +344,10 @@ export class HookRegistry {
   private processHooksConfiguration(
     hooksConfig: { [K in HookEventName]?: HookDefinition[] },
     source: HooksConfigSource,
-    agentScope?: string,
+    {
+      agentScope,
+      sourceLabel = `${source} config`,
+    }: { agentScope?: string; sourceLabel?: string } = {},
   ): void {
     for (const [eventName, definitions] of Object.entries(hooksConfig)) {
       if (HOOKS_CONFIG_FIELDS.includes(eventName)) {
@@ -341,27 +355,29 @@ export class HookRegistry {
       }
 
       if (!this.isValidEventName(eventName)) {
-        this.feedbackEmitter?.emitFeedback(
-          'warning',
-          `Invalid hook event name: "${eventName}" from ${source} config. Skipping.`,
+        // Match Unicode code points so the limit cannot split a surrogate pair.
+        const displayEvent = stripAnsiAndControl(eventName).replace(
+          /^(.{60}).+/su,
+          '$1...',
+        );
+        this.warn(
+          `Hook event "${displayEvent}" from ${sourceLabel} is not supported and was skipped.`,
         );
         continue;
       }
 
-      const typedEventName = eventName;
-
+      const location = `for ${eventName} from ${sourceLabel}`;
       if (!Array.isArray(definitions)) {
-        debugLogger.warn(
-          `Hook definitions for event "${eventName}" from source "${source}" is not an array. Skipping.`,
-        );
+        this.warn(`Hooks ${location} must be a list and were skipped.`);
         continue;
       }
 
-      for (const definition of definitions) {
+      for (const [index, definition] of definitions.entries()) {
         this.processHookDefinition(
           definition,
-          typedEventName,
+          eventName,
           source,
+          `entry #${index + 1} ${location}`,
           agentScope,
         );
       }
@@ -375,6 +391,7 @@ export class HookRegistry {
     definition: HookDefinition,
     eventName: HookEventName,
     source: HooksConfigSource,
+    location: string,
     agentScope?: string,
   ): void {
     if (
@@ -382,113 +399,118 @@ export class HookRegistry {
       typeof definition !== 'object' ||
       !Array.isArray(definition.hooks)
     ) {
-      debugLogger.warn(
-        `Discarding invalid hook definition for ${eventName} from ${source}:`,
-        definition,
-      );
+      this.warn(`Hook ${location} has no "hooks" list and was skipped.`);
       return;
     }
 
-    for (const hookConfig of definition.hooks) {
-      if (
-        hookConfig &&
-        typeof hookConfig === 'object' &&
-        this.validateHookConfig(hookConfig, eventName, source)
-      ) {
-        const hookIdentity = this.getHookIdentity({ config: hookConfig });
-        const hookName = this.getHookName({ config: hookConfig });
-
-        // Check for duplicate hooks. `agentScope` participates in the key so
-        // a per-agent hook does not get swallowed when an identical
-        // session/user/project hook already exists, and so two concurrent
-        // subagents declaring the same hook each keep their own copy.
-        const isDuplicate = this.entries.some(
-          (existing) =>
-            existing.eventName === eventName &&
-            existing.source === source &&
-            existing.agentScope === agentScope &&
-            this.getHookIdentity(existing) === hookIdentity &&
-            existing.matcher === definition.matcher &&
-            existing.sequential === definition.sequential,
-        );
-        if (isDuplicate) {
-          debugLogger.debug(
-            `Skipping duplicate hook "${hookName}" for ${eventName} from ${source}`,
-          );
-          continue;
-        }
-
-        // Add source to hook config (only for command and http hooks)
-        if (hookConfig.type !== 'function') {
-          (hookConfig as { source?: HooksConfigSource }).source = source;
-        }
-
-        this.entries.push({
-          config: hookConfig,
-          source,
-          eventName,
-          matcher: definition.matcher,
-          sequential: definition.sequential,
-          enabled: true,
-          ...(agentScope !== undefined ? { agentScope } : {}),
-        });
-      } else {
-        // Invalid hooks are logged and discarded here, they won't reach HookRunner
-        debugLogger.warn(
-          `Discarding invalid hook configuration for ${eventName} from ${source}:`,
-          hookConfig,
-        );
+    for (const [index, hookConfig] of definition.hooks.entries()) {
+      const where = `Hook #${index + 1} in ${location}`;
+      if (!hookConfig || typeof hookConfig !== 'object') {
+        this.warn(`${where} must be an object and was skipped.`);
+        continue;
       }
+      if (!this.validateHookConfig(hookConfig, where)) continue;
+
+      const hookIdentity = this.getHookIdentity({ config: hookConfig });
+      const hookName = this.getHookName({ config: hookConfig });
+
+      // Check for duplicate hooks. `agentScope` participates in the key so
+      // a per-agent hook does not get swallowed when an identical
+      // session/user/project hook already exists, and so two concurrent
+      // subagents declaring the same hook each keep their own copy.
+      const isDuplicate = this.entries.some(
+        (existing) =>
+          existing.eventName === eventName &&
+          existing.source === source &&
+          existing.agentScope === agentScope &&
+          this.getHookIdentity(existing) === hookIdentity &&
+          existing.matcher === definition.matcher &&
+          existing.sequential === definition.sequential,
+      );
+      if (isDuplicate) {
+        debugLogger.debug(
+          `Skipping duplicate hook "${hookName}" for ${eventName} from ${source}`,
+        );
+        continue;
+      }
+
+      // Add source to hook config (only for command and http hooks)
+      if (hookConfig.type !== 'function') {
+        (hookConfig as { source?: HooksConfigSource }).source = source;
+      }
+
+      this.entries.push({
+        config: hookConfig,
+        source,
+        eventName,
+        matcher: definition.matcher,
+        sequential: definition.sequential,
+        enabled: true,
+        ...(agentScope !== undefined ? { agentScope } : {}),
+      });
     }
   }
 
   /**
    * Validate a hook configuration
    */
-  private validateHookConfig(
-    config: HookConfig,
-    eventName: HookEventName,
-    source: HooksConfigSource,
-  ): boolean {
+  private validateHookConfig(config: HookConfig, where: string): boolean {
+    const raw = config as unknown as Record<string, unknown>;
     if (
       !config.type ||
       !['command', 'http', 'function', 'prompt'].includes(config.type)
     ) {
-      debugLogger.warn(
-        `Invalid hook ${eventName} from ${source} type: ${config.type}`,
+      this.warn(
+        `${where} has a missing or unsupported "type" and was skipped.`,
       );
       return false;
     }
 
-    if (config.type === 'command' && !config.command) {
-      debugLogger.warn(
-        `Command hook ${eventName} from ${source} missing command field`,
-      );
-      return false;
-    }
-
-    if (config.type === 'http' && !config.url) {
-      debugLogger.warn(
-        `HTTP hook ${eventName} from ${source} missing url field`,
-      );
+    const requiredField = { command: 'command', http: 'url', prompt: 'prompt' }[
+      config.type as 'command' | 'http' | 'prompt'
+    ];
+    if (requiredField && !raw[requiredField]) {
+      this.warn(`${where} has no "${requiredField}" and was skipped.`);
       return false;
     }
 
     if (config.type === 'function' && typeof config.callback !== 'function') {
-      debugLogger.warn(
-        `Function hook ${eventName} from ${source} missing or invalid callback`,
+      this.warn(`${where} has no valid "callback" and was skipped.`);
+      return false;
+    }
+
+    if (hasUnsupportedCommandHookArgs(raw)) {
+      this.warn(
+        `${where} uses "args", which Qwen Code does not support yet, and was skipped.`,
       );
       return false;
     }
 
-    if (config.type === 'prompt' && !config.prompt) {
-      debugLogger.warn(
-        `Prompt hook ${eventName} from ${source} missing prompt field`,
+    const ignored = Object.entries({
+      onFailure: undefined,
+      asyncRewake: false,
+      if: '',
+      once: false,
+    })
+      .filter(
+        ([field, noOp]) =>
+          raw[field] !== undefined &&
+          raw[field] !== noOp &&
+          !(field === 'once' && config.type === 'http'),
+      )
+      .map(([field]) => `"${field}"`);
+    if (ignored.length > 0) {
+      this.warn(
+        `${where} sets ${ignored.join(', ')}, which Qwen Code does not support yet; ignored.`,
       );
-      return false;
     }
 
     return true;
+  }
+
+  private warn(message: string): void {
+    debugLogger.warn(message);
+    this.feedbackEmitter?.emitFeedback('warning', message);
   }
 
   /**

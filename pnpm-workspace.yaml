@@ -4,13 +4,16 @@
 packages:
   - 'packages/*'
   - 'packages/cua-driver/typescript'
+  - 'packages/channels/aone'
   - 'packages/channels/base'
   - 'packages/channels/dingtalk'
   - 'packages/channels/dws'
   - 'packages/channels/email'
   - 'packages/channels/feishu'
+  - 'packages/channels/generic-webhook'
   - 'packages/channels/github'
   - 'packages/channels/gitlab'
+  - 'packages/channels/msteams'
   - 'packages/channels/plugin-example'
   - 'packages/channels/qqbot'
   - 'packages/channels/telegram'
@@ -20,6 +23,9 @@ packages:
   - 'integrations/external-context-mem0'
   - 'integrations/test-failure-explorer'
   - 'integrations/generated-ui'
+  - 'packages/harness/cli'
+  - 'packages/harness/core'
+  - 'packages/harness/resource'
   - '!packages/desktop'
   - '!packages/live-host'
   - '!packages/mobile-shell'
@@ -55,6 +61,9 @@ fetchRetryMaxtimeout: 120000
 fetchTimeout: 300000
 
 overrides:
+  proxy-addr: '^2.0.8'
+  follow-redirects: '^1.16.2'
+  shell-quote: '^1.12.0'
   'glob@10 || 13': '14.0.6'
   'minimatch@9 || 10': '11.0.8'
   qs: '6.17.1'
@@ -63,6 +72,7 @@ overrides:
   hono: '4.13.18'
   '@hono/node-server@2': '2.1.7'
   body-parser: '2.4.0'
+  'express-rate-limit@8': '8.7.2'
   dompurify: '3.4.17'
   'undici@7': '7.30.2'
   'brace-expansion@1': '1.1.21'
@@ -124,6 +134,15 @@ allowBuilds:
   keytar: true
   msw: true
   protobufjs: true
+  # packages/harness/core's sharp 0.34 install script only checks for the
+  # prebuilt @img/sharp-* binary, which arrives as an optional dependency, and
+  # falls back to a source build when it is missing. The root's sharp 0.35
+  # has no install script.
+  sharp: false
+  # packages/harness/core loads only tree-sitter-bash.wasm through
+  # web-tree-sitter; the install script builds the native binding it never
+  # loads.
+  tree-sitter-bash: false
 
 minimumReleaseAgeExclude:
   - '@qwen-code/channel-base'

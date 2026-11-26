@@ -16,6 +16,8 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 import org.springframework.beans.factory.ObjectProvider;
 
@@ -1583,6 +1585,27 @@ class ChildResultRelayTest {
         verify(store, never()).terminalResultText(TENANT, CHILD, "turn-1");
     }
 
+    // #18149 Stage 3: an Action-parked child Turn stays RUNNING, so a park
+    // that outlives the message-turn bound with a message still waiting is
+    // a wait, never the bound's failure.
+    @Test
+    void waitsOutAParkedChildPastTheMessageTurnBound() {
+        watching();
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "RUNNING", null,
+                AgentStateStore.HARNESS_ACTION_PARKED, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new JdbcChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now - 31 * 60_000L, null));
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        assertThat(row.get().attempts()).isZero();
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+    }
+
     // The settlement names the messages it saw, so the parent refuses it
     // over one opened after the relay's reads (a message accepted in that
     // window would otherwise be closed away unread).
@@ -2132,7 +2155,9 @@ class ChildResultRelayTest {
                         .containsEntry("started", false));
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
                 JdbcChildWorkspaceStore.DISCARD);
-        // Any other refusal is retried as before.
+        // child_parent_unavailable settles immediately: the parent's profile
+        // cannot admit a child, so retrying would defer the refusal until the
+        // parent's Turn deadline.
         harness.operations.clear();
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 0, 0, null, now, now));
@@ -2140,8 +2165,11 @@ class ChildResultRelayTest {
                 .createChildSession(TENANT, PARENT, RUN, "audit the diff",
                         "review", true);
         relay.scan();
-        assertThat(harness.operations).isEmpty();
-        assertThat(row.get().attempts()).isEqualTo(1);
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations).singleElement()
+                .satisfies(fail -> assertThat(fail)
+                        .containsEntry("stopReason", "creation_failed")
+                        .containsEntry("started", false));
     }
 
     @Test
@@ -3258,10 +3286,13 @@ class ChildResultRelayTest {
         assertThat(row.get().attempts()).isEqualTo(1);
     }
 
-    // A child waiting on its recovery takes no stop yet: the heartbeat asks
-    // again without spending an attempt.
-    @Test
-    void aStopTheChildCannotTakeYetSpendsNoAttempt() {
+    // A child waiting on its recovery, closing, or out of cold-open slots
+    // takes no stop yet: the heartbeat asks again without spending an
+    // attempt.
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted_turn_recovery_required",
+            "hosted_session_closing", "hosted_session_open_busy"})
+    void aStopTheChildCannotTakeYetSpendsNoAttempt(String refusalCode) {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
@@ -3272,7 +3303,7 @@ class ChildResultRelayTest {
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
                 new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now, null));
-        harness.refuseMessageCode = "hosted_turn_recovery_required";
+        harness.refuseMessageCode = refusalCode;
         relay.scan();
         assertThat(row.get().attempts()).isZero();
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),

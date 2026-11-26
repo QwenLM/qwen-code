@@ -77,15 +77,15 @@ class ToolPublicationLockOrderMySqlIT {
             jdbc.update("UPDATE ma_operation SET state = 'PENDING', available_at = 0"
                     + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
             var claim = fixture.results().claim().orElseThrow();
-            jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain)"
-                            + " VALUES (?, ?, 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key",
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant-1"), "tenant-1");
+            jdbc.update("INSERT INTO ma_tenant_guard (tenant_id, guard_domain)"
+                            + " VALUES (?, 'output_publication') ON DUPLICATE KEY UPDATE tenant_id = tenant_id",
+                    "tenant-1");
             var pool = Executors.newSingleThreadExecutor();
             var hold = fixture.manager().getTransaction(new DefaultTransactionDefinition());
             try {
                 assertThat(jdbc.queryForObject("SELECT tenant_id FROM ma_tenant_guard"
-                                + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE",
-                        String.class, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant-1")))
+                                + " WHERE guard_domain = 'output_publication' AND tenant_id = ? FOR UPDATE",
+                        String.class, "tenant-1"))
                         .isEqualTo("tenant-1");
                 long before = System.nanoTime();
                 assertThat(pool.submit(() -> fixture.results().complete(claim, projection, fixture.policy().version()))
@@ -441,7 +441,7 @@ class ToolPublicationLockOrderMySqlIT {
                                             }
                                             Object value = call.invoke(statement, values);
                                             if (afterSnapshot != null && call.getName().startsWith("execute")
-                                                    && sql.contains(" FROM ma_output_capture WHERE scope_key = ?")
+                                                    && sql.contains(" FROM ma_output_capture WHERE scope_ref = ?")
                                                     && !sql.contains("FOR UPDATE") && snapshotRead.compareAndSet(false, true)) {
                                                 afterSnapshot.run();
                                             }

@@ -732,6 +732,7 @@ export function OpenTuiExtensionDiscoverTab(
     <box flexDirection="column">
       <text fg={C.text}>{heading}</text>
       <box
+        id="screen-reader-input-line"
         flexDirection="row"
         borderStyle="rounded"
         borderColor={C.dim}

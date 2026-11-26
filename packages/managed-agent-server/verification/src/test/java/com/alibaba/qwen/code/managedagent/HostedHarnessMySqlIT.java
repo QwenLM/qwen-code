@@ -12,8 +12,16 @@ import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore;
+import com.alibaba.qwen.code.managedagent.persistence.ExternalWorkspaceMaterializationStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.BooleanNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -24,6 +32,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.io.IOException;
@@ -75,7 +84,7 @@ class HostedHarnessMySqlIT {
     private final CountDownLatch cancellationRequested = new CountDownLatch(1);
     private final CountDownLatch releaseCancellation = new CountDownLatch(1);
     private final StringBuilder output = new StringBuilder();
-    private final String tenant = "hosted-mysql-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final String sessionId = UUID.randomUUID().toString();
     private final ScheduledExecutorService watchdog =
             Executors.newSingleThreadScheduledExecutor();
@@ -226,7 +235,7 @@ class HostedHarnessMySqlIT {
 
     private JsonNode modelStatistics() {
         var snapshots = jdbc.query("SELECT DISTINCT u.inline_bytes FROM ma_resource u JOIN ma_resource_ref r"
-                        + " ON r.session_scope_key = u.session_scope_key AND r.resource_id = u.resource_id"
+                        + " ON r.tenant_id = u.tenant_id AND r.session_id = u.session_id AND r.resource_id = u.resource_id"
                         + " WHERE u.tenant_id = ? AND u.session_id = ? AND r.owner_kind = 'JOURNAL'"
                         + " AND u.kind IN ('managed-hosted-model-usage-v2', 'managed-hook-model-usage-v2', 'managed-session-model-stats')",
                 (row, index) -> {
@@ -237,9 +246,9 @@ class HostedHarnessMySqlIT {
                     }
                 }, tenant, sessionId);
         assertThat(snapshots).as("Committed diagnostic resources from the packaged Harness").isNotEmpty();
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head"
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head"
                         + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
-                Integer.class, tenant, sessionId)).isEqualTo(4);
+                Boolean.class, tenant, sessionId)).isTrue();
         return snapshots.stream().max(java.util.Comparator.comparingLong(value -> value.path("snapshotRevision").asLong())).orElseThrow();
     }
 
@@ -255,24 +264,7 @@ class HostedHarnessMySqlIT {
         // The Harness writes to the Store through Spring, so Spring's address
         // must be known before it starts.
         springPort = reservePort();
-        spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
-                ManagedAgentServerApplication.class).run(
-                "--server.address=127.0.0.1", "--server.port=" + springPort,
-                "--spring.datasource.url=" + required("mysql.url"),
-                "--spring.datasource.username=" + required("mysql.user"),
-                "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
-                "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
-                "--spring.datasource.druid.max-active=3",
-                "--qwen.managed-agent.session-store.enabled=true",
-                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + springPort,
-                "--qwen.managed-agent.session-store.workspace-id=hosted-lifecycle-workspace",
-                "--qwen.managed-agent.harness.enabled=true",
-                "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + harnessPort,
-                "--qwen.managed-agent.harness.token=" + TOKEN,
-                "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
-                "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
-                "--qwen.managed-agent.runtime-broker.enabled=false",
-                "--qwen.managed-agent.dispatch.scan-delay=100ms");
+        spring = startHostedControlPlane(springPort, "100ms");
         try {
             String id = api("POST", "/v1/agents/sessions", "create", """
                     {"agent_id":"qwen-code",
@@ -306,6 +298,174 @@ class HostedHarnessMySqlIT {
             System.err.println("HOSTED_MYSQL_HARNESS_LOG\n" + logs());
             throw failure;
         }
+    }
+
+    @Test
+    @Timeout(160)
+    void twoControlPlanesReuseAndCancelOnTheOriginalHarness() throws Exception {
+        Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
+        assertThat(cli).isRegularFile();
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
+                new DriverManagerDataSource(required("mysql.url"), required("mysql.user"),
+                        System.getProperty("mysql.password", "")));
+        startModel();
+        startHarness(cli);
+        springPort = reservePort();
+        spring = startHostedControlPlane(springPort, "120s");
+        try (var replica = startHostedControlPlane(0, "100ms")) {
+            HarnessConnector original = spring.getBean(HarnessConnector.class);
+            HarnessConnector cold = replica.getBean(HarnessConnector.class);
+            int replicaPort = replica.getWebServer().getPort();
+            String sessions = "/v1/agents/sessions";
+            String id = api("POST", sessions, "empty-session", """
+                    {"agent_id":"qwen-code"}
+                    """, 202).path("id").asText();
+            var resident = original.createOrLoad(tenant, id, false);
+            assertThat(resident.bootId()).isNotBlank();
+            assertThat(jdbc.queryForObject("SELECT harness_boot_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                    String.class, tenant, id)).isNull();
+            assertThat(cold.attachedSessions()).isEmpty();
+
+            api(replicaPort, "POST", sessions + "/" + id + "/events", "first-turn", """
+                    {"type":"agent.session.input.message",
+                     "input":[{"type":"input_text","text":"FIRST_FROM_REPLICA"}]}
+                    """, 202);
+            await(() -> api("GET", sessions + "/" + id + "/events", null, null, 200)
+                    .path("data").toString().contains("\"turn.completed\""),
+                    SETTLEMENT_POLL_SECONDS, "First Turn from the cold replica");
+            assertThat(cold.attachedSessions()).anyMatch(attachment -> id.equals(attachment.sessionId()));
+            assertThat(modelRequests).hasSize(1);
+            assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                    Long.class, tenant, id)).isEqualTo(1L);
+
+            String cancelled = api("POST", sessions, "cancel-session", """
+                    {"agent_id":"qwen-code",
+                     "input":[{"type":"input_text","text":"MYSQL_CANCEL"}]}
+                    """, 202).path("id").asText();
+            assertThat(cancellationRequested.await(15, TimeUnit.SECONDS)).isTrue();
+            assertThat(cold.attachedSessions()).noneMatch(attachment -> cancelled.equals(attachment.sessionId()));
+            String promptId = jdbc.queryForObject("SELECT prompt_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
+                    String.class, tenant, cancelled);
+            cold.cancelOriginalTurn(tenant, cancelled, promptId);
+            releaseCancellation.countDown();
+            await(() -> api("GET", sessions + "/" + cancelled + "/events", null, null, 200)
+                    .path("data").toString().contains("\"turn.cancelled\""),
+                    SETTLEMENT_POLL_SECONDS, "Original Turn cancelled from the cold replica");
+            assertThat(modelRequests).hasSize(2);
+        } catch (Exception | AssertionError failure) {
+            System.err.println("HOSTED_MYSQL_HARNESS_LOG\n" + logs());
+            throw failure;
+        }
+    }
+
+    @Test
+    @Timeout(100)
+    void twoControlPlanesAgreeOnRecoveryWithoutAttachingTheColdReplica() throws Exception {
+        Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
+        assertThat(cli).isRegularFile();
+        var source = new DriverManagerDataSource(required("mysql.url"), required("mysql.user"),
+                System.getProperty("mysql.password", ""));
+        jdbc = new ManagedSchemaJdbcTemplate(source);
+        startModel();
+        startHarness(cli);
+        springPort = reservePort();
+        spring = startHostedControlPlane(springPort, "120s");
+        try (var replica = startHostedControlPlane(0, "120s")) {
+            HarnessConnector warm = spring.getBean(HarnessConnector.class);
+            HarnessConnector cold = replica.getBean(HarnessConnector.class);
+            int replicaPort = replica.getWebServer().getPort();
+            String sessions = "/v1/agents/sessions";
+            String id = api("POST", sessions, "recovery-session", """
+                    {"agent_id":"qwen-code","input":[{"type":"input_text","text":"RECOVERY_FIXTURE"}]}
+                    """, 202).path("id").asText();
+            String path = sessions + "/" + id;
+            await(() -> api("GET", path + "/events", null, null, 200)
+                    .path("data").toString().contains("\"turn.completed\""),
+                    SETTLEMENT_POLL_SECONDS, "Harness commits the original Turn");
+            String promptId = jdbc.queryForObject("SELECT prompt_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
+                    String.class, tenant, id);
+            await(() -> {
+                var status = warm.inspectRecovery(tenant, id, promptId);
+                return status != null && status.nextTurnAllowed();
+            }, 15, "Resident Harness permits continuation");
+            assertThat(cold.attachedSessions()).isEmpty();
+
+            // Seed a persisted external Session view after the real Harness commits its prompt.
+            // This models a control plane that has not projected the Harness terminal yet.
+            var manager = new DataSourceTransactionManager(source);
+            new ExternalStorageRegistrationStore(jdbc, manager).registerExternalStorage(tenant, "register",
+                    new ExternalStorageRegistration(
+                            new ExternalStorageRegistration.ExternalStorageIdentity("provider", "physical", 1),
+                            new ExternalStorageRegistration.StorageAlias("external", "/aliases/external", "/remote/external")));
+            new ExternalWorkspaceMaterializationStore(jdbc, manager)
+                    .materialize(tenant, "external", "External", "actor", "materialize");
+            assertThat(jdbc.update("""
+                    UPDATE ma_session SET workspace_id = 'external', workspace_generation = 1,
+                        workspace_storage_id = 'external', cwd_relative = '.', context_config_ref = ?,
+                        context_revision = 1, workspace_config_ref = ?, workspace_policy_ref = ?, tool_profile = ?
+                    WHERE tenant_id = ? AND session_id = ?
+                    """, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
+                    WorkspaceExecutionProfile.POLICY_REF, WorkspaceToolProfiles.EXTERNAL_FILES, tenant, id)).isEqualTo(1);
+            assertThat(jdbc.update("""
+                    UPDATE ma_public_event SET source_key = NULL
+                    WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION'
+                        AND is_terminal = 1 AND source_key IS NOT NULL
+                    """, tenant, id)).isPositive();
+            assertThat(jdbc.update("""
+                    UPDATE ma_turn SET status = 'RUNNING', completed_at = NULL, error_code = ?
+                    WHERE tenant_id = ? AND session_id = ?
+                    """, TurnExecutionStore.RUNTIME_RECOVERY_BLOCKED, tenant, id)).isEqualTo(1);
+
+            var active = api("GET", path + "/recovery", null, null, 200);
+            assertThat(active.path("reasonCode").asText()).isEqualTo("recovery_evidence_unavailable");
+            assertThat(active.path("nextTurnAllowed")).isEqualTo(BooleanNode.FALSE);
+            assertThat(api(replicaPort, "GET", path + "/recovery", null, null, 200)).isEqualTo(active);
+            assertThat(api("GET", path, null, null, 200).path("recovery")).isEqualTo(active);
+            assertThat(api(replicaPort, "GET", path, null, null, 200).path("recovery")).isEqualTo(active);
+
+            var journal = jdbc.queryForMap("""
+                    SELECT state, writer_id, writer_generation FROM ma_session_head
+                    WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'
+                    """, tenant, id);
+            assertThat(jdbc.update("""
+                    UPDATE ma_turn SET status = 'FAILED', completed_at = gmt_modified
+                    WHERE tenant_id = ? AND session_id = ?
+                    """, tenant, id)).isEqualTo(1);
+            var terminal = api("GET", path + "/recovery", null, null, 200);
+            assertThat(terminal.path("reasonCode").asText()).isEqualTo("ready");
+            assertThat(terminal.path("nextTurnAllowed")).isEqualTo(BooleanNode.TRUE);
+            assertThat(api(replicaPort, "GET", path + "/recovery", null, null, 200)).isEqualTo(terminal);
+            assertThat(cold.attachedSessions()).isEmpty();
+            assertThat(jdbc.queryForMap("""
+                    SELECT state, writer_id, writer_generation FROM ma_session_head
+                    WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'
+                    """, tenant, id)).isEqualTo(journal);
+            assertThat(modelRequests).hasSize(1);
+        } catch (Exception | AssertionError failure) {
+            System.err.println("HOSTED_MYSQL_HARNESS_LOG\n" + logs());
+            throw failure;
+        }
+    }
+
+    private ServletWebServerApplicationContext startHostedControlPlane(int port, String scanDelay) {
+        return (ServletWebServerApplicationContext) new SpringApplicationBuilder(
+                ManagedAgentServerApplication.class).run(
+                "--server.address=127.0.0.1", "--server.port=" + port,
+                "--spring.datasource.url=" + required("mysql.url"),
+                "--spring.datasource.username=" + required("mysql.user"),
+                "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
+                "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
+                "--spring.datasource.druid.max-active=3",
+                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + springPort,
+                "--qwen.managed-agent.session-store.workspace-id=hosted-lifecycle-workspace",
+                "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + harnessPort,
+                "--qwen.managed-agent.harness.token=" + TOKEN,
+                "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
+                "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
+                "--qwen.managed-agent.runtime-broker.enabled=false",
+                "--qwen.managed-agent.dispatch.scan-delay=" + scanDelay);
     }
 
     private void cancelAutomationOccurrence() throws Exception {
@@ -372,9 +532,14 @@ class HostedHarnessMySqlIT {
 
     private JsonNode api(String method, String path, String idempotencyKey, String body,
             int expected) {
+        return api(springPort, method, path, idempotencyKey, body, expected);
+    }
+
+    private JsonNode api(int port, String method, String path, String idempotencyKey, String body,
+            int expected) {
         try {
             HttpRequest.Builder request = HttpRequest.newBuilder(
-                    URI.create("http://127.0.0.1:" + springPort + path))
+                    URI.create("http://127.0.0.1:" + port + path))
                     .timeout(Duration.ofSeconds(10))
                     .header("X-Qwen-Tenant-Id", tenant)
                     .header("X-Qwen-Actor-Id", "actor")

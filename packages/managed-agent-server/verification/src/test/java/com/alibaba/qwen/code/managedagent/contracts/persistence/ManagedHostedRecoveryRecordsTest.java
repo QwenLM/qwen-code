@@ -124,6 +124,88 @@ class ManagedHostedRecoveryRecordsTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"extensions-components-", "mcp-"})
+    void acceptsDurableRuntimeOwnersWithHookResults(String prefix) {
+        ObjectNode body = nativeContinuation("read_file");
+        setNativeRuntimeOwner(body, prefix + "a".repeat(64));
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        var results = call.putArray("hookResults");
+        results.addObject().put("event", "PreToolUse").put("resultDigest", "b".repeat(64));
+        results.addObject().put("event", "PermissionRequest").put("resultDigest", "c".repeat(64));
+        assertThatCode(() -> validateNativeContinuation(body)).doesNotThrowAnyException();
+
+        results.add(results.get(0).deepCopy());
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Hook result order");
+        results.remove(2);
+        ((ObjectNode) results.get(0)).put("resultDigest", "invalid");
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Hook result digest");
+        ((ObjectNode) results.get(0)).put("resultDigest", "b".repeat(64));
+        ((com.fasterxml.jackson.databind.node.ArrayNode) body.get("calls"))
+                .add(nativeContinuation("read_file").path("calls").get(0));
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Hook results");
+    }
+
+    @Test
+    void enforcesDurableNativeOwnerAndPrepareCorrelation() {
+        ObjectNode body = nativeContinuation("mcp_" + "a".repeat(32));
+        String owner = "mcp-" + "1".repeat(64);
+        setNativeRuntimeOwner(body, owner);
+        assertThatCode(() -> validateNativeContinuation(body)).doesNotThrowAnyException();
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        call.put("prepareKey", "different:call");
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Runtime correlation");
+        setNativeRuntimeOwner(body, "mcp-not-a-durable-id");
+        assertThatThrownBy(() -> validateNativeContinuation(body)).hasMessageContaining("Runtime owner");
+
+        ObjectNode activationScoped = nativeContinuation("read_file");
+        ((ObjectNode) activationScoped.path("calls").get(0)).putArray("hookResults");
+        assertThatThrownBy(() -> validateNativeContinuation(activationScoped)).hasMessageContaining("Runtime owner");
+
+        ObjectNode question = nativeContinuation("ask_user_question");
+        setNativeRuntimeOwner(question, owner);
+        ((ObjectNode) question.get("runtime")).put("provisionerKind", "local-process");
+        assertThatThrownBy(() -> validateNativeContinuation(question)).hasMessageContaining("Runtime owner");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void validatesVersionZeroShellIdentityAgainstPinnedDefinition(boolean publicationLane) {
+        String publicationId = "01234567-89ab-cdef-0123-456789abcdef";
+        ObjectNode body = nativeContinuation("run_shell_command");
+        ObjectNode definition = json.createObjectNode().put("toolProfile", "hosted-workspace-shell/1");
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        if (publicationLane) {
+            definition.put("captureBytes", 1024);
+            call.put("publicationId", publicationId);
+        } else {
+            call.putNull("publicationId");
+        }
+        assertThatCode(() -> validateNativeContinuation(body, definition)).doesNotThrowAnyException();
+
+        if (publicationLane) {
+            call.putNull("publicationId");
+        } else {
+            call.put("publicationId", publicationId);
+        }
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("publication identity");
+        call.remove("publicationId");
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("publication identity");
+    }
+
+    @Test
+    void requiresPublicShellProfileAndToolForPublicationIdentity() {
+        ObjectNode definition = json.createObjectNode().put("toolProfile", "hosted-workspace-files/1");
+        ObjectNode body = nativeContinuation("run_shell_command");
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        call.putNull("publicationId");
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("public Shell profile");
+
+        definition.put("toolProfile", "hosted-workspace-shell/1");
+        ((ObjectNode) call.get("call")).put("name", "read_file");
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("publication identity");
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"ssh-process", "external-workspace", "static", "", "local-process-extra"})
     void rejectsUnsupportedNativeQuestionProviders(String provider) {
         ObjectNode body = nativeContinuation("ask_user_question");
@@ -184,11 +266,25 @@ class ManagedHostedRecoveryRecordsTest {
         return body;
     }
 
+    private static void setNativeRuntimeOwner(ObjectNode body, String runtimeSessionId) {
+        ((ObjectNode) body.get("runtime")).put("runtimeSessionId", runtimeSessionId);
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        call.put("prepareKey", runtimeSessionId + ":" + call.path("runtimeCallId").asText());
+        ((ObjectNode) call.get("prepareReference")).put("sessionId", runtimeSessionId);
+    }
+
     private void validateNativeContinuation(ObjectNode body) {
+        validateNativeContinuation(body, json.createObjectNode());
+    }
+
+    private void validateNativeContinuation(ObjectNode body, ObjectNode pinnedDefinition) {
+        var definition = stored("definition", "managed-definition", pinnedDefinition);
+        body.set("definitionRef", reference(definition));
         var kinds = java.util.Map.of("definition", "managed-definition", "root", "managed-root",
                 "assistant", "managed-message", "input", "managed-tool-input", "tool", "managed-tool-definition");
         ManagedHostedRecoveryRecords.validateResource(stored("continuation", "hosted-approval-continuation", body),
-                "tenant", "workspace", "session", id -> stored(id, kinds.get(id), json.createObjectNode()));
+                "tenant", "workspace", "session",
+                id -> id.equals("definition") ? definition : stored(id, kinds.get(id), json.createObjectNode()));
     }
 
     @ParameterizedTest
@@ -206,7 +302,10 @@ class ManagedHostedRecoveryRecordsTest {
             return nested;
         };
         for (int i = 0; i < 12; i++) {
-            byte[] root = json.createObjectNode().put("v", version).set("definitionRef", ref).toString().getBytes(StandardCharsets.UTF_8);
+            ObjectNode rootBody = json.createObjectNode().put("v", version);
+            rootBody.set("definitionRef", ref);
+            rootBody.set("continuationRef", ref);
+            byte[] root = rootBody.toString().getBytes(StandardCharsets.UTF_8);
             ManagedHostedRecoveryRecords.validateResource(new ManagedSessionStoreModels.StoredResource(
                     "root-" + i, "managed-action-options", 1, root.length, "b".repeat(64), root),
                     "tenant", "workspace", "session", reader, seen);

@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -84,16 +85,21 @@ public class JdbcChannelInstanceStore
             // An ownership move must not inherit what was visible to the
             // old owner: every retained binding still names a Session of
             // the old Workspace, and its routes and receipts would answer
-            // under the new connection's read authority. Re-registering a
-            // fresh connection with no bindings keeps the history.
+            // under the new connection's read authority. Both binding
+            // classes count — channel route bindings and PR-watch bindings.
+            // Re-registering a fresh connection with no bindings keeps the
+            // history.
             boolean ownershipMoves = !current.actorId()
                     .equals(candidate.actorId())
                     || !current.workspaceId().equals(candidate.workspaceId())
                     || !current.cwdRelative().equals(candidate.cwdRelative());
             if (ownershipMoves && jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM ma_channel_binding"
-                            + " WHERE tenant_id = ? AND channel_id = ?",
+                    "SELECT (SELECT COUNT(*) FROM ma_channel_binding"
+                            + " WHERE tenant_id = ? AND channel_id = ?)"
+                            + " + (SELECT COUNT(*) FROM ma_pr_watch_binding"
+                            + " WHERE tenant_id = ? AND channel_id = ?)",
                     Long.class, candidate.tenantId(),
+                    candidate.channelId(), candidate.tenantId(),
                     candidate.channelId()) > 0) {
                 throw new IllegalStateException("channel_ownership_conflict");
             }
@@ -102,7 +108,8 @@ public class JdbcChannelInstanceStore
             // longer slip between the earlier SELECT and this UPDATE. An
             // ownership move's binding count rides in this same statement:
             // a racing bind committed between the pre-check and now makes
-            // the subquery flatten the write to zero rows (R10 P2).
+            // the subquery flatten the write to zero rows (R10 P2). Both
+            // binding classes count, so a racing PR-watch bind is caught too.
             if (ownershipMoves) {
                 int rows = jdbc.update("UPDATE ma_channel_instance"
                                 + " SET account_generation = ?, state = ?,"
@@ -111,15 +118,20 @@ public class JdbcChannelInstanceStore
                                 + " gmt_modified = ?"
                                 + " WHERE tenant_id = ? AND channel_id = ?"
                                 + " AND account_generation <= ?"
-                                + " AND (SELECT COUNT(*) FROM"
+                                + " AND ((SELECT COUNT(*) FROM"
                                 + " ma_channel_binding b"
                                 + " WHERE b.tenant_id = ?"
-                                + " AND b.channel_id = ?) = 0",
+                                + " AND b.channel_id = ?)"
+                                + " + (SELECT COUNT(*) FROM"
+                                + " ma_pr_watch_binding p"
+                                + " WHERE p.tenant_id = ?"
+                                + " AND p.channel_id = ?)) = 0",
                         candidate.accountGeneration(), candidate.state(),
                         candidate.actorId(), candidate.workspaceId(),
                         candidate.cwdRelative(), candidate.policyJson(), now,
                         candidate.tenantId(), candidate.channelId(),
                         candidate.accountGeneration(), candidate.tenantId(),
+                        candidate.channelId(), candidate.tenantId(),
                         candidate.channelId());
                 if (rows == 0) {
                     throw new IllegalStateException(
@@ -218,6 +230,11 @@ public class JdbcChannelInstanceStore
      */
     public List<String> listSessionsWithPendingDeliveries(String tenantId,
             String channelId, int limit) {
+        // ma_session.is_publication_retention_registered is a retention-
+        // registration marker, not a Session scope: lockSessionRoot sets it on
+        // any root a journal lock registers, PUBLIC Sessions included. The
+        // record join must therefore stay on the raw tenant/session identity,
+        // not the marker, which a PUBLIC Session acquires on its first commit.
         return jdbc.query("SELECT r.session_id, MIN(r.gmt_create) AS"
                         + " oldest_due"
                         + " FROM ma_session_record r"
@@ -242,12 +259,12 @@ public class JdbcChannelInstanceStore
             String sessionId, String deliveryId) {
         return jdbc.query("SELECT delivery_state, record_resource_id"
                         + " FROM ma_session_record"
-                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
+                        + " WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'channel_delivery'"
                         + " AND record_id = ?",
                 (row, index) -> new DeliveryRecordState(row.getString(1),
                         row.getString(2)),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                tenantId, sessionId,
                 deliveryId).stream().findFirst();
     }
 
@@ -261,15 +278,15 @@ public class JdbcChannelInstanceStore
         return jdbc.query("SELECT session_id, record_id, revision,"
                         + " delivery_state, record_resource_id"
                         + " FROM ma_session_record USE INDEX (idx_ma_record_session_delivery)"
-                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
+                        + " WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'channel_delivery'"
                         + " AND delivery_state IN ('planned', 'partial')"
-                        + " ORDER BY gmt_create, record_key LIMIT ?",
+                        + " ORDER BY gmt_create, record_id LIMIT ?",
                 (row, index) -> new PendingDelivery(row.getString("session_id"),
                         row.getString("record_id"), row.getLong("revision"),
                         row.getString("delivery_state"),
                         row.getString("record_resource_id")),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                tenantId, sessionId,
                 limit);
     }
 
@@ -277,11 +294,11 @@ public class JdbcChannelInstanceStore
     public String readResource(String tenantId, String sessionId, String resourceId) {
         List<byte[]> rows = jdbc.query(
                 "SELECT inline_bytes FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND storage_kind = 'MYSQL_INLINE'"
                         + " AND state = 'REFERENCED'",
                 (row, index) -> row.getBytes("inline_bytes"),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, resourceId);
+                tenantId, sessionId, resourceId);
         return rows.isEmpty() ? null
                 : new String(rows.getFirst(), StandardCharsets.UTF_8);
     }
@@ -291,10 +308,10 @@ public class JdbcChannelInstanceStore
         long now = databaseNow();
         jdbc.update("UPDATE ma_delivery SET source_session_id = ?, claimed_at = ?,"
                         + " claim_generation = claim_generation + 1, gmt_modified = ?"
-                        + " WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
+                        + " WHERE source_scope_id = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
                         + " AND channel_id = ? AND delivery_id = ? AND claimed_at IS NULL",
                 sessionId, now, now,
-                JdbcChannelDeliveryRepository.deliveryKey(tenantId, channelId, deliveryId),
+                ManagedSchemaKeys.identity(channelId),
                 tenantId, channelId, deliveryId);
         ChannelClaim claim = findClaim(tenantId, channelId, deliveryId)
                 .orElseThrow(() -> new IllegalStateException("Channel delivery must exist before its claim"));
@@ -309,9 +326,9 @@ public class JdbcChannelInstanceStore
             String deliveryId) {
         long now = databaseNow();
         jdbc.update("UPDATE ma_delivery SET claimed_at = ?, claim_generation = claim_generation + 1,"
-                        + " reconcile_operation_id = NULL, gmt_modified = ? WHERE delivery_key = ? AND delivery_kind = 'CHANNEL'"
+                        + " reconcile_operation_id = NULL, gmt_modified = ? WHERE source_scope_id = ? AND delivery_kind = 'CHANNEL'"
                         + " AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND claimed_at IS NOT NULL",
-                now, now, JdbcChannelDeliveryRepository.deliveryKey(tenantId, channelId, deliveryId),
+                now, now, ManagedSchemaKeys.identity(channelId),
                 tenantId, channelId, deliveryId);
         return findClaim(tenantId, channelId, deliveryId).orElseThrow();
     }
@@ -319,15 +336,15 @@ public class JdbcChannelInstanceStore
     public Optional<ChannelClaim> findClaim(String tenantId, String channelId,
             String deliveryId) {
         return jdbc.query("SELECT tenant_id, channel_id, delivery_id, source_session_id AS session_id, claimed_at, claim_generation"
-                        + " FROM ma_delivery WHERE delivery_key = ? AND delivery_kind = 'CHANNEL'"
+                        + " FROM ma_delivery WHERE source_scope_id = ? AND delivery_kind = 'CHANNEL'"
                         + " AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND claimed_at IS NOT NULL",
-                CLAIM, JdbcChannelDeliveryRepository.deliveryKey(tenantId, channelId, deliveryId),
+                CLAIM, ManagedSchemaKeys.identity(channelId),
                 tenantId, channelId, deliveryId).stream().findFirst();
     }
 
     public boolean reserveReconciliation(ChannelClaim claim) {
-        return jdbc.update("UPDATE ma_delivery SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", reconcile_operation_id = ? WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND source_session_id = ? AND claimed_at = ? AND claim_generation = ? AND transport_state IN ('planned','sending','partial')",
-                ChannelInstanceStore.reconciliationOperationId(claim), JdbcChannelDeliveryRepository.deliveryKey(claim.tenantId(), claim.channelId(), claim.deliveryId()),
+        return jdbc.update("UPDATE ma_delivery SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", reconcile_operation_id = ? WHERE source_scope_id = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND source_session_id = ? AND claimed_at = ? AND claim_generation = ? AND transport_state IN ('planned','sending','partial')",
+                ChannelInstanceStore.reconciliationOperationId(claim), ManagedSchemaKeys.identity(claim.channelId()),
                 claim.tenantId(), claim.channelId(), claim.deliveryId(), claim.sessionId(), claim.claimedAt(), claim.claimGeneration()) == 1;
     }
 
@@ -342,7 +359,7 @@ public class JdbcChannelInstanceStore
         if (claims.size() != 1 || !tenantId.equals(claims.getFirst().tenantId())
                 || !sessionId.equals(claims.getFirst().sessionId()) || !deliveryId.equals(claims.getFirst().deliveryId())
                 || !operationId.equals(ChannelInstanceStore.reconciliationOperationId(claims.getFirst()))) {
-            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(409,
+            throw new ManagedAgentException(409,
                     "channel_claim_stale", "The channel delivery claim changed before reconciliation committed.");
         }
     }

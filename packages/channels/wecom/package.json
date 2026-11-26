@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-wecom",
-  "version": "0.27.4",
+  "version": "0.28.6",
   "description": "WeCom channel adapter for Qwen Code",
   "repository": {
     "type": "git",
@@ -25,12 +25,14 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.27.4",
+    "@qwen-code/channel-base": "0.28.6",
     "@wecom/aibot-node-sdk": "^1.0.7",
+    "proper-lockfile": "^4.1.2",
     "saxes": "6.0.0",
     "undici": "^7.30.2"
   },
   "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4",
     "typescript": "^5.0.0"
   }
 }

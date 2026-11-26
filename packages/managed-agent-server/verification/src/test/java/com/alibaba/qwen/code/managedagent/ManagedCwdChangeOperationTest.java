@@ -14,7 +14,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -23,8 +22,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -137,8 +135,7 @@ class ManagedCwdChangeOperationTest {
     }
 
     private void installMigrationFence(Fixture fixture) {
-        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
-                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE), RuntimeAdmissionFences.storageFenceKey(TENANT), RuntimeAdmissionFences.storageFenceKey(STORAGE),
+        fixture.jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?)",
                 TENANT, STORAGE, UUID.randomUUID().toString());
     }
 
@@ -1183,22 +1180,19 @@ class ManagedCwdChangeOperationTest {
         }
 
         void insertOperation(String sessionId, String operationId, String kind, String state, String delivery, String taskId) {
-            String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-            String target = ManagedSchemaKeys.key(sessionId);
-            jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, target_id, request_json,"
+            jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, target_kind, target_id, request_json,"
                             + " tenant_id, session_id, operation_id, operation_kind, request_digest, state, phase, admission_stage,"
                             + " delivery_state, session_status_before, task_id, gmt_create, gmt_modified)"
-                            + " VALUES (?, ?, 'SESSION', ?, ?, '{}', ?, ?, ?, ?, 'digest', ?, ?, 'JAVA_DURABLE', ?, 'ACTIVE', ?, 0, 0)",
-                    ManagedSchemaKeys.operationKey(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind),
-                            scope, target, operationId), scope, target, sessionId, TENANT, sessionId, operationId, kind, state, state, delivery, taskId);
+                            + " VALUES (?, 'SESSION', ?, 'SESSION', ?, '{}', ?, ?, ?, ?, 'digest', ?, ?, 'JAVA_DURABLE', ?, 'ACTIVE', ?, 0, 0)",
+                    ManagedIdentityRefs.operationRef(kind, TENANT, "SESSION", sessionId, sessionId, operationId),
+                    sessionId, sessionId, TENANT, sessionId, operationId, kind, state, state, delivery, taskId);
         }
 
         void insertAction(String sessionId, String actionId,
                 long expiresAtMillis) {
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, record_kind, domain, record_id, tenant_id,"
+            jdbc.update("INSERT INTO ma_session_record (record_kind, domain, record_id, tenant_id,"
                             + " workspace_id, session_id, action_id, action_version, revision, state, options_json, gmt_create)"
-                            + " VALUES (?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, 1, 1, 'requested', ?, 0)",
-                    ManagedSessionStore.sessionScopeKey(TENANT, sessionId), ManagedSchemaKeys.key("action", actionId),
+                            + " VALUES ('ACTION', 'action', ?, ?, ?, ?, ?, 1, 1, 'requested', ?, 0)",
                     actionId, TENANT, WS, sessionId, actionId,
                     mapper.valueToTree(java.util.Map.of("expiresAt",
                             expiresAtMillis)).toString());

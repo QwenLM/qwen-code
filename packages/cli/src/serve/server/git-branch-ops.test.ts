@@ -18,6 +18,11 @@ import {
   isDirtyTree,
 } from './git-branch-ops.js';
 
+const warnMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({ warn: warnMock, debug: vi.fn() }),
+}));
+
 // `git-branch-ops.ts` captures `promisify(execFile)` at module load, which
 // `vi.mock('node:child_process')` cannot intercept, so these tests exercise the
 // real git binary against a throwaway repository. This verifies the actual
@@ -173,6 +178,58 @@ describe('getHeadCommit', () => {
       fs.rmSync(notARepo, { recursive: true, force: true });
     }
   });
+
+  it('returns undefined for an unborn HEAD without logging a fault', async () => {
+    const unborn = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-unborn-'));
+    try {
+      git(unborn, 'init', '-q', '-b', 'main');
+      warnMock.mockClear();
+      await expect(getHeadCommit(unborn)).resolves.toBeUndefined();
+      expect(warnMock).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(unborn, { recursive: true, force: true });
+    }
+  });
+
+  it('logs a fault when HEAD is unreadable outside a repository', async () => {
+    const notARepo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-not-repo-'));
+    try {
+      warnMock.mockClear();
+      await expect(getHeadCommit(notARepo)).resolves.toBeUndefined();
+      expect(warnMock).toHaveBeenCalledWith(
+        expect.stringContaining('git fault reading HEAD'),
+      );
+    } finally {
+      fs.rmSync(notARepo, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds the fault probe so a hung git cannot double the budget', async () => {
+    // The first rev-parse fails fast; the probe hangs. The probe must be
+    // killed by its own small bound, not run to the hang's full length.
+    const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-git-shim-'));
+    const shim = path.join(shimDir, 'git');
+    fs.writeFileSync(
+      shim,
+      '#!/bin/sh\ncase "$*" in\n  *--verify*) sleep 10; exit 128 ;;\n  *) exit 128 ;;\nesac\n',
+    );
+    fs.chmodSync(shim, 0o755);
+    const prevPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}:${prevPath}`;
+    try {
+      warnMock.mockClear();
+      const started = Date.now();
+      await expect(getHeadCommit(repo)).resolves.toBeUndefined();
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeLessThan(9000);
+      expect(warnMock).toHaveBeenCalledWith(
+        expect.stringContaining('git fault reading HEAD'),
+      );
+    } finally {
+      process.env['PATH'] = prevPath;
+      fs.rmSync(shimDir, { recursive: true, force: true });
+    }
+  }, 15000);
 });
 
 describe('createBranch', () => {

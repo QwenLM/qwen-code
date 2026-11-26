@@ -68,7 +68,7 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 
 1. 环境变量，当它指向该入口时；
 2. 显式设置（`experimental.unifiedAgentLoop` / `experimental.eventBusAgentLoop`），当它被设置时；
-3. 该入口的内置默认值——headless 和 Ink TUI 是 `true`，其他入口都是 `false`；每个灰度 PR 一次翻转一个入口的默认值，且只翻转那一个。
+3. 该入口的内置默认值——共享 loop 在 headless、ACP、两个 TUI 和 AgentCore 默认为 `true`。内核在 headless 和 Ink TUI 默认为 `true`。每个开关在其余入口默认为 `false`。每个灰度 PR 只翻转一个入口的默认值。
 
 **入口标识符。** `headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`。它们命名的是 loop 入口，不是包：Ink TUI 是 `ink`，OpenTUI 渲染器是 `opentui`，跑在 AgentCore 上的子代理是 `agent-core`，Hosted Harness 是 `hosted`——它只开启模型轮，其 journal 化工具派发仍留在 `hosted-harness-model.ts`。
 
@@ -82,7 +82,7 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 **getter 形状。** `Config.isUnifiedAgentLoopEnabled(surface)` 与 `Config.isEventBusAgentLoopEnabled(surface)` 接收入口标识符；每个调用点写明自己的入口。AgentCore 的 `runtimeContext` 钩子传 `agent-core`。#17029（已合入）的 speculation 读取点传 `speculation`。共享 loop 关闭时内核开关仍然无效——解析按开关各自进行，内核只作用于 `runAgentLoop` 内部。
 
-**设置在运行时变为三态。** CLI 不再把未设置塌缩成 `false`（本切片之前 `packages/cli/src/config/config.ts` 是 `?? false`）；core 参数变为 `boolean | undefined`。合并后的设置对未设置的键本来就保持 undefined——加载器不会物化 schema 默认值（`packages/cli/src/config/settings.test.ts:4679` 钉住了这一点）——所以运行时不需要任何 schema 改动就能区分「未设置」和「显式关闭」。在那之前 schema 条目保留 `default: false`，`experimental.eventBusAgentLoop` 现在仍保留：当 schema 默认值为 undefined 时，`nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:693`）对未设置布尔值的第一次切换会写入 `false`，这会翻转两个设置对话框「第一次切换即开启」的行为。schema 默认值在第一个入口的内置默认值翻转时一并移除，同时给对话框的未设置态一个呈现方式：该设置声明 `unsetToggleValue: true`，所以在两个对话框和 `/config` 中，对未设置值的第一次切换仍写入 `true`；Web Shell 设置面板读的是生效值而不是 schema 默认值，两种情况下都不受影响。
+**设置在运行时变为三态。** CLI 不再把未设置塌缩成 `false`（本切片之前 `packages/cli/src/config/config.ts` 是 `?? false`）；core 参数变为 `boolean | undefined`。合并后的设置对未设置的键本来就保持 undefined——加载器不会物化 schema 默认值（`packages/cli/src/config/settings.test.ts:4679` 钉住了这一点）——所以运行时不需要任何 schema 改动就能区分「未设置」和「显式关闭」。Headless 内核默认开启时，移除了 `experimental.eventBusAgentLoop` 的 schema 默认值 `false`，并新增 `unsetToggleValue: true`。缺少这个覆盖值时，`nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:693`）会在首次切换未设置的开关时写入 `false`。有了覆盖值，两个设置对话框和 `/config` 首次切换仍写入 `true`。Web Shell 设置面板读取生效的设置值。
 
 **对拍两臂强制。** 同一 PR 内：ACP 对拍的 off 臂把环境变量设为 `'0'` 而不是删除；TUI off 臂已在切片 1 钉住 `'0'`，切片 2 让 `'0'` 表示强制关闭。headless 对拍保留显式的按臂设置。有了切片 2 的强制关闭语义，`'0'` 无论默认值如何都钉住 off 臂；在切片 2 落地前，`'0'` 是惰性的（只读 `'1'`），所以 ACP 对拍改动可以与机制同 PR 安全落地。
 
@@ -116,7 +116,7 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 - loop 契约（`AgentLoopHost`、`runAgentLoop` 选项）同一时间只有一个负责人（#17045 C 块）；切片 2 改的是 Config getter，不是契约，但 getter 签名与 #17029（speculation）共享——协调落地顺序。
 - 与 PR 17048 的强制关闭分工对顺序敏感：其 `current` 腿钉住必须在第一个入口默认值翻转之前落地，其 `true`/`false` 拼写在 rebase 到按入口 resolver 时必须保持仅整值。本切片不翻转任何默认值、整值只接受 `1`/`0`，因此两种落地顺序下都安全。
-- 内核组会在 K 块的取消与有界收尾落地之前每晚跑 headless 内核路径；那里的内核路径失败是信号，不是默认路径的回归，且不得阻塞其他组（`fail-fast: false` 已经保证）。
+- 内核组每晚跑内核路径；K 块的取消与有界收尾已经合入（#17145）。headless 和 Ink TUI 默认运行在内核上，因此 Linux 内核组上二者任一的失败就是其默认路径的回归，按回归处理。这个组把内核变量对所有入口都设为 `1`，所以它是二者默认路径的替身，而不是实际发布的组合：没有哪个组让它们运行在内核上、同时它们的子代理（AgentCore）留在过程式路径；headless 可见性测试在两个开关都未设置时运行，只检查 headless 走内核。对内核仍默认关闭的入口，内核路径失败不是其默认路径的回归：它让该入口在内核默认开启之前的晚数重新计算，除非失败的测试与 loop 无关、且在 main 上关闭开关时也以同样方式失败。无论哪种情况，都不得阻塞其他组（`fail-fast: false` 已经保证）。
 - schema 默认值保留到第一个入口默认值翻转：更早移除会改变设置对话框的第一次切换行为（`nextBooleanSettingValue`），超出切片 2 的范围。headless 默认值翻转时连同对话框的处理一起移除它。
 - workflow 体积棘轮：`e2e.yml` 增长超过 4096 字节容差需要同 PR 更新基线。
 

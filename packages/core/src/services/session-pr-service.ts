@@ -424,6 +424,7 @@ export function toSessionPrInfo({
   number,
   url,
   state,
+  source,
   role,
   issues,
 }: Omit<SessionPr, 'createdAt'>): Omit<SessionPr, 'createdAt'> {
@@ -431,6 +432,7 @@ export function toSessionPrInfo({
     number,
     url,
     ...(state ? { state } : {}),
+    ...(source ? { source } : {}),
     ...(role ? { role } : {}),
     ...(issues ? { issues } : {}),
   };

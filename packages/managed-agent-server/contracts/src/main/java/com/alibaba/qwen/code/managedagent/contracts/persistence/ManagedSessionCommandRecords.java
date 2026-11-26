@@ -73,7 +73,7 @@ public final class ManagedSessionCommandRecords {
                 "Session command delivery must be a session delivery");
         String state = delivery.get("state").textValue();
         ManagedExtensionRecords.id(record.get("commandId"), "commandId");
-        ManagedExtensionRecords.id(record.get("childRunId"), "childRunId");
+        ManagedExtensionRecords.id(record.get("childRunId"), "childRunId", 256);
         String sender = ManagedExtensionRecords.id(
                 record.get("senderSessionId"), "senderSessionId");
         String target = nullableId(record.get("targetSessionId"),

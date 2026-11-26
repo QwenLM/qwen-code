@@ -7,7 +7,6 @@
 import { Box, Text } from 'ink';
 import { IdeIntegrationNudge } from '../IdeIntegrationNudge.js';
 import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
-import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
 import { ProjectHooksApprovalDialog } from './hooks/ProjectHooksApprovalDialog.js';
@@ -104,6 +103,7 @@ export const DialogManager = ({
         branch={uiState.activeWorktree.branch}
         worktreePath={uiState.activeWorktree.path}
         originalHeadCommit={uiState.activeWorktree.originalHeadCommit}
+        worktreeBase={uiState.activeWorktree.worktreeBase}
         onKeep={() => void uiActions.handleWorktreeExit('keep')}
         onRemove={() => void uiActions.handleWorktreeExit('remove')}
         onCancel={() => void uiActions.handleWorktreeExit('cancel')}
@@ -165,14 +165,6 @@ export const DialogManager = ({
         request={uiState.shellConfirmationRequest}
         availableTerminalHeight={constrainedDialogHeight}
         contentWidth={mainAreaWidth}
-      />
-    );
-  }
-  if (uiState.loopDetectionConfirmationRequest) {
-    return (
-      <LoopDetectionConfirmation
-        cause={uiState.loopDetectionConfirmationRequest.cause}
-        onComplete={uiState.loopDetectionConfirmationRequest.onComplete}
       />
     );
   }

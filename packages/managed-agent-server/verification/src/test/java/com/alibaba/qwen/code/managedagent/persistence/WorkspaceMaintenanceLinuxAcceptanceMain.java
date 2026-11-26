@@ -47,7 +47,7 @@ public final class WorkspaceMaintenanceLinuxAcceptanceMain {
                 throw new IllegalStateException("Use a fresh task directory and database for staging");
             }
             state = new LinkedHashMap<>();
-            state.put("tenant", "linux-native-" + UUID.randomUUID());
+            state.put("tenant", UUID.randomUUID().toString());
             state.put("workspace", "workspace");
             state.put("storage", "storage");
         } else {
@@ -137,7 +137,7 @@ public final class WorkspaceMaintenanceLinuxAcceptanceMain {
             }
             String successorStep = authority.holdForMaintenance(binding, maintenance, replacement.claimGeneration());
             authority.releaseMaintenance(binding, maintenance, generation, execution);
-            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE maintenance_id = ? AND maintenance_generation = ? AND holder_key IS NOT NULL",
+            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE maintenance_id = ? AND maintenance_generation = ? AND holder_id IS NOT NULL",
                     Integer.class, maintenance, replacement.claimGeneration()) != 1) {
                 throw new IllegalStateException("An old generation erased the successor hold");
             }

@@ -636,6 +636,7 @@ describe('buildHooksListing', () => {
             {
               hooks: [
                 { type: 'command', command: {} },
+                { type: 'command', command: 'node', args: ['audit.js'] },
                 { type: 'unknown', command: './x.sh' },
                 { type: 'function', id: 'no-callback' },
                 'not-an-object',

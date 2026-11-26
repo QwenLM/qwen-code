@@ -11,6 +11,46 @@ import { matchTurnEvent } from '../src/daemon/DaemonClient.js';
 import { normalizeDaemonEvent } from '../src/daemon/ui/normalizer.js';
 
 describe('daemon transcript rewind', () => {
+  it('projects a Stop hook notice outside the assistant answer and its branch anchor', () => {
+    const promptId = 'prompt';
+    const notice = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      promptId,
+      data: {
+        sessionId: 'session',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            source: 'stop_hook_notice',
+            qwenDiscreteMessage: true,
+            stopReason: 'Build is red.',
+          },
+        },
+      },
+    });
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'assistant.text.delta', text: '{"ok":true}', promptId },
+      ...notice,
+      {
+        type: 'assistant.done',
+        reason: 'end_turn',
+        promptId,
+        branchRecordId: 'model-record',
+      },
+    ]);
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'assistant',
+        text: '{"ok":true}',
+        branchRecordId: 'model-record',
+      },
+      { kind: 'status', source: 'stop_hook_notice', text: 'Build is red.' },
+    ]);
+  });
+
   it('retains subscription quota display context through normalization and replay', () => {
     const subscriptionQuota = {
       type: 'subscription_quota',
