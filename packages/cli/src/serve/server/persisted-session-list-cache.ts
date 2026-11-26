@@ -19,6 +19,7 @@ export interface PersistedSessionListSnapshot {
   truncated: boolean;
   scanPages: number;
   scanDurationMs: number;
+  catalogReadFallbacks?: number;
 }
 
 export type PersistedSessionListCacheStatus =

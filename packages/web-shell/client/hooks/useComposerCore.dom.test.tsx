@@ -291,7 +291,7 @@ afterEach(() => {
   for (let index = localStorage.length - 1; index >= 0; index--) {
     const key = localStorage.key(index);
     if (
-      key === 'qwen-web-shell-command-history' ||
+      key?.startsWith('qwen-web-shell-command-history') ||
       key?.startsWith('qwen-web-shell-history') ||
       key?.startsWith('qwen-web-shell-session-draft:') ||
       key?.startsWith('qwen-web-shell-pending-task-draft:')
@@ -5095,6 +5095,21 @@ describe('useComposerCore prepareSubmit gate', () => {
       release();
     });
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('keeps a desktop slash followup on the normal submit path', async () => {
+    const { onSubmit } = await mount({
+      followupState: {
+        isVisible: true,
+        shownAt: 0,
+        suggestion: '/clear',
+      },
+    });
+
+    act(() => latest!.submitText());
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0]).toBe('/clear');
   });
 
   it('recomputes the follow-up completion after preparation inserts text', async () => {

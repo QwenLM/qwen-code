@@ -93,6 +93,9 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('excludes attribution markers so a project .env cannot spoof channel', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_SERVE');
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DESKTOP');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_MANAGED_RUNTIME',
+    );
   });
 
   // Language servers run with the user's permissions, so a cloned repository

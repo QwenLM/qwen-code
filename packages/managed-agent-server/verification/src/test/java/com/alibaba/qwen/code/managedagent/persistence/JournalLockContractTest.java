@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -101,14 +100,12 @@ class JournalLockContractTest {
     void ordinaryJournalAndPublicationCheckStorageWithoutLocking(String route) {
         var jdbc = new ManagedSchemaJdbcTemplate(trace);
         String physical = "d".repeat(64);
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, physical_id,"
                         + " storage_kind, registration_state, registration_revision, registration_json)"
-                        + " VALUES (?, ?, ?, ?, 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
-                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"),
-                RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey("storage"), TENANT, physical);
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
-                + " VALUES (?, ?, 'LOCAL', 'READY')", physical, physical);
+                        + " VALUES (?, 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
+                TENANT, physical);
+        jdbc.update("INSERT INTO ma_storage_owner (physical_id, storage_kind, mount_state)"
+                + " VALUES (?, 'LOCAL', 'READY')", physical);
         jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = ?", TENANT);
         trace.clear();
         boolean placement = "placement-publication".equals(route);

@@ -186,6 +186,15 @@ off" summary. It returns `{ sessionId, recap: string | null }`; `null` means the
 history was too short or the model failed temporarily. This endpoint is
 best-effort.
 
+### Mod Rows (`session_mod_rows` capability tag)
+
+`POST /session/:id/mod-row` asks a live session's Mods for one row the Web Shell
+draws, with body `{ component, props }` (`AssistantMessage` with
+`{ text, isFirstOfReply }`, or `Thinking` with `{ text }`). It answers
+`{ status: 'unhooked' }`, `{ status: 'unanswered' }` or
+`{ status: 'answered', props? }`; the session answers the same props from its
+row cache. See the protocol reference for the full contract.
+
 ### Session BTW / Side Question (`session_btw` capability tag)
 
 `POST /session/:id/btw` asks a one-off question against the session context
@@ -384,7 +393,7 @@ resets that window, including when the channel was already live.
   timeout.
 - `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
 - `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
-- Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_btw_stream`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
+- Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_mod_rows`, `session_generation`, `session_btw`, `session_btw_stream`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
 
 ### Stateless generation (`session_generation` capability tag)
 

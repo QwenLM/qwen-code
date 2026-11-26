@@ -2757,17 +2757,23 @@ export async function loadCliConfig(
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
-    onPersistPermissionRule: async (scope, ruleType, rule) => {
-      const currentSettings = loadSettings(cwd);
+    onPersistPermissionRule: async (scope, ruleType, rule, workspaceDir) => {
+      const currentSettings = loadSettings(workspaceDir, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: scope === 'user',
+      });
       const settingScope =
         scope === 'project' ? SettingScope.Workspace : SettingScope.User;
-      const key = `permissions.${ruleType}`;
-      const currentRules: string[] =
-        currentSettings.forScope(settingScope).settings.permissions?.[
-          ruleType
-        ] ?? [];
-      if (!currentRules.includes(rule)) {
-        currentSettings.setValue(settingScope, key, [...currentRules, rule]);
+      const file = currentSettings.forScope(settingScope);
+      const rawRules = file.originalSettings.permissions?.[ruleType] ?? [];
+      if (
+        !rawRules.includes(rule) &&
+        !file.settings.permissions?.[ruleType]?.includes(rule)
+      ) {
+        currentSettings.setValue(settingScope, `permissions.${ruleType}`, [
+          ...rawRules,
+          rule,
+        ]);
       }
     },
     toolDiscoveryCommand:
@@ -3056,7 +3062,12 @@ export async function loadCliConfig(
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
     stopHookBlockingCap:
       bareMode || safeMode ? undefined : settings.stopHookBlockingCap,
-    channel: argv.channel,
+    // Synthesized ACP argv (the Hosted Harness per-turn configs) never passes
+    // through parseArguments, so resolve the same launcher-marker fallback
+    // here; an explicit --channel still wins. isAcpMode covers the deprecated
+    // experimentalAcp alias exactly like the parseArguments copy.
+    channel:
+      argv.channel ?? (isAcpMode ? resolveAcpChannelFallback() : undefined),
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and
     // `--input-file` fall back to settings.dualOutput.* when the flag is

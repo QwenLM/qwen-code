@@ -82,6 +82,15 @@ vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
+// The storage-boundary fence is exercised against disk in
+// session-archive-write-fence.test.ts, not this mocked filesystem.
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  advanceSessionArchiveGeneration: vi.fn(),
+}));
 // The archive-transition move runs real filesystem locks this mocked-fs suite
 // cannot host; its semantics (rename, split-pair merge, lock coverage) are
 // pinned in session-pr-service.test.ts.

@@ -1028,7 +1028,7 @@ describe('loggers', () => {
       expectRequestSessionId();
     });
 
-    it('keeps task identity local to UI telemetry', () => {
+    it('keeps task identity and the first visible offset local to UI telemetry', () => {
       const event = new ApiResponseEvent(
         'test-response-id',
         'test-model',
@@ -1039,6 +1039,7 @@ describe('loggers', () => {
         undefined,
         'general-purpose',
       );
+      event.first_visible_offset_ms = 80;
 
       logApiResponse(mockConfig, event, undefined, {
         id: 'general-purpose-12345678',
@@ -1051,6 +1052,7 @@ describe('loggers', () => {
           subagent_name: 'general-purpose',
           subagent_id: 'general-purpose-12345678',
           subagent_task_name: 'inspect customer records',
+          first_visible_offset_ms: 80,
         }),
         'test-session-id',
       );
@@ -1058,6 +1060,7 @@ describe('loggers', () => {
       expect(attributes.subagent_name).toBe('general-purpose');
       expect(attributes).not.toHaveProperty('subagent_id');
       expect(attributes).not.toHaveProperty('subagent_task_name');
+      expect(attributes).not.toHaveProperty('first_visible_offset_ms');
     });
 
     const responseWithUsage = (promptId: string) =>
@@ -1075,9 +1078,26 @@ describe('loggers', () => {
       'forked_query',
       'speculation',
       'side-query:session-title',
-    ])('does not record token usage for internal prompt_id %s', (promptId) => {
-      logApiResponse(mockConfig, responseWithUsage(promptId));
+    ])('records actual token usage for internal prompt_id %s', (promptId) => {
+      const event = responseWithUsage(promptId);
+      logApiResponse(mockConfig, event);
 
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).toHaveBeenCalledWith(mockConfig, event);
+    });
+
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])('does not record disabled internal token usage: %s', (promptId) => {
+      const configWithUsageStatsDisabled = {
+        ...mockConfig,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      logApiResponse(configWithUsageStatsDisabled, responseWithUsage(promptId));
       expect(
         tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
       ).not.toHaveBeenCalled();

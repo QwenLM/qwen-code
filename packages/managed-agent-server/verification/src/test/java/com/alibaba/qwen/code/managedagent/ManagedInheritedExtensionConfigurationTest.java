@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -168,7 +168,9 @@ class ManagedInheritedExtensionConfigurationTest {
                 // An inherited extension resource is never legitimately empty.
                 "byte_length = 0",
                 "state = 'COLLECTED'",
-                "deletion_operation_key = '" + "e".repeat(64) + "'")) {
+                "deletion_operation_ref = '"
+                        + ManagedIdentityRefs.tenantOperationRef("SESSION_RESOURCE_GC", TENANT, "gc")
+                        + "'")) {
             jdbc.update("UPDATE ma_resource SET " + update + " WHERE tenant_id = ?"
                     + " AND session_id = ? AND resource_id = ?", TENANT, child, resourceId);
             assertThatThrownBy(() -> records.readCommittedResource(TENANT, child,
@@ -277,13 +279,12 @@ class ManagedInheritedExtensionConfigurationTest {
 
     private void insert(String sessionId, String resourceId, String kind, byte[] bytes,
             String state) {
-        String scopeKey = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
                         + " state, gmt_create, last_verified_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, ?, ?, ?)",
-                ManagedSessionStore.resourceKey(scopeKey, resourceId), scopeKey, TENANT,
+                        + " VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, ?, ?, ?)",
+                TENANT,
                 WORKSPACE, sessionId, resourceId, kind, bytes.length,
                 ExtensionRecordJournal.sha256(bytes), bytes, resourceId, state, 1_000L, 1_000L);
     }
