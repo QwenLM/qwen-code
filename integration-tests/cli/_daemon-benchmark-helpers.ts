@@ -315,6 +315,9 @@ export async function spawnDaemonWithTime(
     '127.0.0.1',
     '--workspace',
     opts.workspaceCwd ?? process.cwd(),
+    // Benchmarks measure daemon overhead, not the host-load gate; a
+    // shared runner's real load must not pause session creation.
+    '--no-load-admission',
     ...extraArgs,
   ];
 

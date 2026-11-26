@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import org.flywaydb.core.Flyway;
 import org.springframework.boot.autoconfigure.flyway.FlywayMigrationStrategy;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -59,7 +60,7 @@ public class ManagedSchemaConfiguration {
             if (populated) {
                 ManagedSchema.validate(source);
                 if (!history) {
-                    org.flywaydb.core.Flyway.configure()
+                    Flyway.configure()
                             .configuration(flyway.getConfiguration())
                             .baselineVersion("1")
                             .load()

@@ -936,7 +936,7 @@ describe('TUI product evidence', () => {
   });
 
   it('budgets cold setup and all three serial product acceptance legs', () => {
-    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(60);
   });
 
   it('treats unhandled errors as acceptance failures on every runner', () => {
@@ -1042,10 +1042,15 @@ describe('e2e workflow', () => {
       e2eRunScript.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
     ).toHaveLength(1);
     expect(
+      e2eRunScript.match(
+        /--exclude '\*\*\/cli\/qwen-serve-liveness-grace\.test\.ts'/g,
+      ),
+    ).toHaveLength(1);
+    expect(
       e2eRunScript.match(/--exclude '\*\*\/sdk-typescript\/\*\*'/g),
     ).toHaveLength(1);
     expect(e2eRunScript).toContain(
-      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1',
+      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts cli/qwen-serve-liveness-grace.test.ts --poolOptions.forks.maxForks=1',
     );
     expect(e2eRunScript).not.toContain('--poolOptions.forks.singleFork');
     // The arrangement is load-bearing: the batch must run first and the
@@ -1054,13 +1059,16 @@ describe('e2e workflow', () => {
     // the pattern tolerates formatting-only rewrites (continuations, comment
     // lines, trailing spaces) so a benign edit cannot turn CI red.
     expect(e2eRunScript).toMatch(
-      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
+      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts cli\/qwen-serve-liveness-grace\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
     );
     // Text pins never touch the tree: renaming the file or directory these
     // filters name silently returns the suites to the three-fork batch.
     expect(existsSync('integration-tests/cli/qwen-serve-routes.test.ts')).toBe(
       true,
     );
+    expect(
+      existsSync('integration-tests/cli/qwen-serve-liveness-grace.test.ts'),
+    ).toBe(true);
     expect(existsSync('integration-tests/sdk-typescript')).toBe(true);
     expect(existsSync('integration-tests/channel-plugin.test.ts')).toBe(true);
     expect(
@@ -2079,7 +2087,7 @@ describe('installed npm acceptance workflow', () => {
     expect(workflow.jobs.changes.if).toBeUndefined();
   });
   it('keeps installed setup independent of the original source parity budget', () => {
-    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(60);
     expect(job['timeout-minutes']).toBe(60);
     expect(
       job.steps.some((step) => step.uses?.startsWith('oven-sh/setup-bun')),

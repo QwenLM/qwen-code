@@ -928,13 +928,16 @@ await agent('scan package.json')
     expect(invocation.getDescription()).toContain('deep-research.js');
   });
 
-  it('rejects background runs outside the TUI and ACP clients, or without a completion channel', () => {
+  it('takes background runs in any host with a completion channel', () => {
     const background = { script: 'return 1', run_in_background: true };
     const headless = configWithRegistry({ isInteractive: () => false });
-    headless.registry.setCompletionCallback(vi.fn());
     expect(() => new WorkflowTool(headless.config).build(background)).toThrow(
-      /only in the interactive TUI and ACP clients/i,
+      /completion channel/i,
     );
+    headless.registry.setCompletionCallback(vi.fn());
+    expect(
+      new WorkflowTool(headless.config).build(background).params,
+    ).toMatchObject({ run_in_background: true });
 
     const { config, registry } = configWithRegistry({
       isInteractive: () => true,
@@ -3093,7 +3096,7 @@ describe('WorkflowTool — name-only sessions', () => {
       const matched = await run({ scriptPath: top }, 'audit');
       expect(matched.resumeName).toBe('audit');
       expect(completion.mock.calls[0][1] as string).toContain(
-        `Resume: Workflow({ name: "audit", resumeFromRunId: "${matched.runId}" })`,
+        `Resume: Workflow({ name: "audit", resumeFromRunId: "${matched.runId}", run_in_background: true })`,
       );
 
       const unmatched = await run({ scriptPath: nested }, 'report');

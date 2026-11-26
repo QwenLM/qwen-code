@@ -165,7 +165,7 @@ class WorkspaceCreationAdmissionLockTest {
 
     private static void update(java.sql.Connection connection, String sql, String workspace) throws SQLException {
         try (var statement = connection.prepareStatement(sql)) {
-            statement.setBytes(1, workspace.getBytes(StandardCharsets.UTF_8));
+            statement.setString(1, workspace);
             assertThat(statement.executeUpdate()).isEqualTo(1);
         }
     }

@@ -12,6 +12,11 @@
 > valid. The alignment doc adds the independent standard
 > `gen_ai.response.time_to_first_chunk` attribute alongside `ttft_ms`.
 
+> **Dispatch timing:** [TTFT from request dispatch](./ttft-from-request-dispatch.md)
+> makes the implementation start TTFT at the provider's first request dispatch
+> within an attempt, as D1 states, instead of before the request is built.
+> `sampling_ms` and the `RESPONSE_PROCESSING` phase leave the build time out.
+
 > Issue #3731 — Phase 4 of hierarchical session tracing. Adds time-to-first-token, request-setup duration, sampling duration, and per-attempt retry telemetry to the `qwen-code.llm_request` span so operators can answer "why was this LLM call slow?" without guessing.
 >
 > Builds on Phase 1 (#4126), Phase 1.5 (#4302), Phase 2 (#4321). Independent of Phase 3 (#4410, in review) — recommended to land Phase 3 first so Phase 4's per-attempt fields aggregate cleanly under subagent subtrees.
@@ -66,7 +71,7 @@ These gaps make `qwen-code.llm_request` the least informative span in the trace 
 
 ### D1 — TTFT semantic: "first chunk containing user-visible content"
 
-TTFT measures wall-clock from the **successful attempt's** request dispatch to the **first stream chunk that contains user-visible output**. A chunk is "user-visible" if any normalized `Part` in `candidates[0].content.parts` is one of:
+TTFT measures wall-clock from the attempt's **first request dispatch** to the **first stream chunk that contains user-visible output**. A chunk is "user-visible" if any normalized `Part` in `candidates[0].content.parts` is one of:
 
 - `text` with non-empty string
 - `functionCall` (tool use)

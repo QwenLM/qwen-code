@@ -27,6 +27,7 @@ const CLI_BUILD_PACKAGE_PATHS = [
   'packages/channels/generic-webhook',
   'packages/channels/qqbot',
   'packages/channels/github',
+  'packages/channels/msteams',
   'packages/channels/plugin-example',
   'packages/audio-capture',
   'packages/acp-bridge',
