@@ -51,11 +51,6 @@ import {
 } from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import {
-  DEFAULT_LOOP_PROTECTION,
-  isLoopProtectionMode,
-} from '../services/loop-protection.js';
-import type { LoopProtectionMode } from '../services/loop-protection.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
 import {
   getQualifiedVisionModelId,
@@ -218,7 +213,6 @@ import {
 } from '../agents/runtime/workflow-size.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
-import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
@@ -1657,10 +1651,7 @@ export interface ConfigParameters {
   preventSystemSleep?: boolean;
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
-  skipLoopDetection?: boolean;
-  /** What a firing loop detector does; defaults to `warn`. */
-  loopProtection?: LoopProtectionMode;
-  /** Per-turn tool-call cap; <= 0 disables. See getMaxToolCallsPerTurn. */
+  /** Per-turn tool-call cap; unset or <= 0 means no cap. */
   maxToolCallsPerTurn?: number;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
@@ -2100,13 +2091,13 @@ export function normalizeGoalMaxActiveMinutes(value: unknown): number {
 }
 
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
-  const resolved = value ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
-  if (!Number.isInteger(resolved)) {
+  if (value === undefined) return 0;
+  if (!Number.isInteger(value)) {
     throw new FatalConfigError(
-      `Invalid maxToolCallsPerTurn: must be an integer, got ${String(resolved)}`,
+      `Invalid maxToolCallsPerTurn: must be an integer, got ${String(value)}`,
     );
   }
-  return resolved;
+  return value;
 }
 
 /** Maximum number of fallback models allowed in the chain. */
@@ -3411,10 +3402,7 @@ export class Config {
   private teamContext: TeamContext | null = null;
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly worktreeSettings: WorktreeSettings;
-  private readonly skipLoopDetection: boolean;
-  private readonly loopProtection: LoopProtectionMode;
   private readonly maxToolCallsPerTurn: number;
-  private readonly maxToolCallsPerTurnExplicit: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
@@ -3854,17 +3842,9 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.trustFileDecisionBelowIdeRoot = params.trustFileDecisionBelowIdeRoot;
-    this.skipLoopDetection = params.skipLoopDetection ?? false;
-    // Embedders bypass the CLI's check; an unknown mode would act as `off`.
-    this.loopProtection = isLoopProtectionMode(params.loopProtection)
-      ? params.loopProtection
-      : DEFAULT_LOOP_PROTECTION;
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
       params.maxToolCallsPerTurn,
     );
-    // Whether the user explicitly set the cap (vs. the resolved default). An
-    // explicit value is honored as a hard cap; the default is adaptive.
-    this.maxToolCallsPerTurnExplicit = params.maxToolCallsPerTurn !== undefined;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
@@ -12699,34 +12679,16 @@ export class Config {
     return this.accessibility.screenReader ?? false;
   }
 
-  getSkipLoopDetection(): boolean {
-    return this.skipLoopDetection;
-  }
-
-  getLoopProtection(): LoopProtectionMode {
-    return this.loopProtection;
-  }
-
   /**
-   * Effective per-turn tool-call cap. A configured value <= 0 disables the
-   * cap and is returned as Infinity so callers can compare unconditionally
-   * (mirrors getTruncateToolOutputThreshold).
+   * Effective per-turn tool-call cap. No cap (unset or a value <= 0) is
+   * returned as Infinity so callers can compare unconditionally (mirrors
+   * getTruncateToolOutputThreshold).
    */
   getMaxToolCallsPerTurn(): number {
     if (this.maxToolCallsPerTurn <= 0) {
       return Number.POSITIVE_INFINITY;
     }
     return this.maxToolCallsPerTurn;
-  }
-
-  /**
-   * Whether maxToolCallsPerTurn was explicitly configured (vs. the resolved
-   * default). An explicit value is treated as a hard cap (the released
-   * contract); the default is treated adaptively (see
-   * LoopDetectionService.checkTurnToolCallCap).
-   */
-  isMaxToolCallsPerTurnExplicit(): boolean {
-    return this.maxToolCallsPerTurnExplicit;
   }
 
   getSkipStartupContext(): boolean {

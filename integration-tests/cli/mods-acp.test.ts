@@ -74,7 +74,6 @@ describe.each([false, true])('Mods in an ACP session (shared=%s)', (shared) => {
       model: {
         skipNextSpeakerCheck: true,
         sessionTokenLimit: 9_000,
-        loopProtection: 'stop',
       },
       ui: { enableFollowupSuggestions: false },
       telemetry: { enabled: false },

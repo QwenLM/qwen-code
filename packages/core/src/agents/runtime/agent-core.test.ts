@@ -92,7 +92,7 @@ import { markToolCallArgumentsIncomplete } from '../../core/incomplete-tool-call
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { runAgentLoop } from '../../core/agent-loop.js';
 import * as agentLoopRollout from '../../config/agent-loop-rollout.js';
-import { LoopDetectionService } from '../../services/loopDetectionService.js';
+import { TurnToolCallCap } from '../../services/turn-tool-call-cap.js';
 import { streamOf } from '../../test-utils/model-fixtures.js';
 import {
   AgentEventType,
@@ -205,17 +205,9 @@ async function runToolStep(
       }),
     getHistoryToolCallFingerprints: () => [],
   } as unknown as LlmChat;
-  // The loop detector is not under test here.
+  // The tool-call cap is not under test here.
   const detector = [
-    vi
-      .spyOn(LoopDetectionService.prototype, 'checkAlwaysOnSafeties')
-      .mockReturnValue(false),
-    vi
-      .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
-      .mockReturnValue(false),
-    vi
-      .spyOn(LoopDetectionService.prototype, 'recordToolResult')
-      .mockReturnValue(false),
+    vi.spyOn(TurnToolCallCap.prototype, 'check').mockReturnValue(false),
   ];
   const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
   try {
@@ -875,7 +867,7 @@ describe.each(LOOPS)(
         getToolResultBytesWritten: vi.fn().mockReturnValue(0),
         getSessionId: vi.fn().mockReturnValue(`${slug}-session`),
         isUnifiedAgentLoopEnabled: vi.fn(() => shared),
-        getSkipLoopDetection: () => false,
+        getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
         isEventBusAgentLoopEnabled: vi.fn(() => kernel),
         ...overrides,
       } as unknown as Config;
@@ -1200,9 +1192,7 @@ describe.each(LOOPS)(
                 ? { serverName: 'catalog', serverToolName: 'lookup' }
                 : undefined,
           }),
-          getSkipLoopDetection: () => true,
-          getMaxToolCallsPerTurn: () => 100,
-          isMaxToolCallsPerTurnExplicit: () => false,
+          getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
         },
       );
       const chat = {
@@ -1243,9 +1233,7 @@ describe.each(LOOPS)(
         'hook-stop',
         { tools: ['*'] },
         {
-          getSkipLoopDetection: () => true,
-          getMaxToolCallsPerTurn: () => 100,
-          isMaxToolCallsPerTurnExplicit: () => false,
+          getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
         },
       );
       const addHistory = vi.fn();
@@ -1866,7 +1854,7 @@ describe.each(LOOPS)(
           getMaxSubagentDepth: vi.fn().mockReturnValue(5),
           getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
           isUnifiedAgentLoopEnabled: () => shared,
-          getSkipLoopDetection: () => false,
+          getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
           isEventBusAgentLoopEnabled: () => kernel,
         } as unknown as Config;
         const core = new AgentCore(
@@ -2182,7 +2170,7 @@ describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
       const checkToolSteps = trackToolSteps(shared, kernel);
       const config = {
         isUnifiedAgentLoopEnabled: () => shared,
-        getSkipLoopDetection: () => false,
+        getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
         isEventBusAgentLoopEnabled: () => kernel,
         getToolRegistry: vi.fn().mockReturnValue({ getTool: vi.fn() }),
         getDebugLogger: vi
@@ -2305,7 +2293,7 @@ describe('AgentCore.prepareTools', () => {
       getToolOutputBatchBudget: vi.fn().mockReturnValue(toolOutputBatchBudget),
       getToolResultBytesWritten: vi.fn().mockReturnValue(500 * 1024 * 1024),
       isUnifiedAgentLoopEnabled: () => shared,
-      getSkipLoopDetection: () => false,
+      getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
       isEventBusAgentLoopEnabled: () => kernel,
     } as unknown as Config;
 

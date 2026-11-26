@@ -2,7 +2,7 @@
 
 [English](2026-11-25-remove-loop-detection.md) | [简体中文](2026-11-25-remove-loop-detection.zh-CN.md)
 
-- **Status**: proposed
+- **Status**: implemented (step 3 of Delivery)
 - **Date**: 2026-11-25
 - **Supersedes**: [loop protection setting](2026-10-21-loop-protection-setting.md),
   [loop stop reasons](2026-10-20-loop-stop-reason.md) (except the two stops
@@ -141,6 +141,12 @@ daemon tool batch that would cross it is skipped whole. A small per-turn
 counter replaces the service; the turn resets stay where they are (user turns,
 blocking Stop-hook continuations and Goal turns each start a fresh count).
 
+Tool error texts that are not a loop judgment stay as they are: the
+scheduler's retry directive on repeated schema errors, and the retry directive
+a refused partial edit gets from its second refusal in a response (truncated
+output or incomplete arguments). Only the daemon's stop after the third
+refused partial edit goes, with the other stops.
+
 ### Settings
 
 | Key                         | After                                                                                                                                                                  |
@@ -182,19 +188,20 @@ repeats `read_file` with an invalid `path` argument, and then with a valid one:
   appended to the tool result.
 - `PostToolUseFailure` does not fire for a call rejected before execution
   (`invalid_tool_params`, `not_started`).
-- No tool hook can end the turn. `PostToolUse` with `continue: false` only
-  turns that call's result into an error (`EXECUTION_DENIED`, "Tool ... was not
-  run"); the model is called again and the run goes on. The loop capability
-  ledger records this as C14 and T27 (`differs`).
+- Since #18345, a tool hook's `continue: false` ends the turn after the
+  current batch (`PreToolUse`, `PostToolUse`, `PostToolUseFailure` and
+  `PostToolBatch`; ledger C14 and T11). Before it, `PostToolUse` with
+  `continue: false` only turned that call's result into an error and the run
+  went on.
 
-So a hook can remind and deny today, but not stop. Ending the turn on a tool
-hook's `continue: false` (`PreToolUse`, `PostToolUse` and
-`PostToolUseFailure`; ledger C14 and T27, hooks alignment #18217) ships before
-the removal (Delivery step 2).
+So a hook can remind, deny and stop. A restored `ask_user_question` call after
+a daemon restart is the one daemon path where a tool hook stop still only fails
+the call.
 
-The settings reference gets a short example: a `PreToolUse` command hook that
-keeps the last calls in a file under the session directory and adds a reminder
-after three identical calls.
+The hooks guide gets a short example (Example 4), linked from the
+`model.maxToolCallsPerTurn` reference: a `PreToolUse` command hook that keeps
+the session's last call in a temporary file, adds a reminder after three
+identical calls in a row and ends the turn at six.
 
 ## Decisions and rationale
 
@@ -288,9 +295,9 @@ Current state.
 
 1. **DashScope hint** (small, independent): the formatter and daemon hint and
    their tests (#18317).
-2. **Tool hooks end the turn**: `continue: false` from `PreToolUse`,
-   `PostToolUse` and `PostToolUseFailure` ends the turn after the batch
-   (ledger C14 and T27, #18217), so the hook extension point can stop.
+2. **Tool hooks end the turn** (#18345, merged): `continue: false` from any
+   tool hook ends the turn after the batch (ledger C14 and T11, #18217), so the
+   hook extension point can stop.
 3. **Removal**: core, subagents, daemon, settings, TUI, telemetry and docs, in
    one PR, since the settings and the shared counter cross all three runtimes.
 4. **Presentation cleanup**: Web Shell and SDK texts for the removed causes.

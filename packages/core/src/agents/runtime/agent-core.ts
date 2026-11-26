@@ -68,8 +68,8 @@ import {
   type ModelRoundSource,
 } from '../../core/agent-loop.js';
 import { SendMessageType } from '../../core/client.js';
-import { LoopDetectionService } from '../../services/loopDetectionService.js';
-import type { LoopType } from '../../telemetry/types.js';
+import { TurnToolCallCap } from '../../services/turn-tool-call-cap.js';
+import { LoopType } from '../../telemetry/types.js';
 import {
   CoreToolScheduler,
   type ToolCall,
@@ -1150,23 +1150,12 @@ export class AgentCore {
       responded: new Set(),
     };
     let stickyMaxOutputTokens: number | undefined;
-    // Whether THIS round's stream produced a chunk (model acceptance). The
-    // round finally uses it to tell a pre-acceptance failure apart from the
-    // round that just took a reminder for the NEXT round.
-    let roundSawModelChunk = false;
-    const loopDetector = new LoopDetectionService(this.runtimeContext);
-    loopDetector.reset(
+    const toolCallCap = new TurnToolCallCap(this.runtimeContext);
+    toolCallCap.reset(
       `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
     );
-    const checkSubagentLoop = (event: ServerLlmStreamEvent): boolean => {
-      if (loopDetector.checkAlwaysOnSafeties(event)) {
-        return true;
-      }
-      return (
-        !this.runtimeContext.getSkipLoopDetection() &&
-        loopDetector.addAndCheckHeuristicLoops(event)
-      );
-    };
+    const checkSubagentLoop = (event: ServerLlmStreamEvent): boolean =>
+      toolCallCap.check(event);
 
     // On the shared agent loop (`experimental.unifiedAgentLoop`), each model
     // round is the loop's round on a `Turn` over this agent's chat.
@@ -1204,7 +1193,6 @@ export class AgentCore {
       try {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
-        roundSawModelChunk = false;
         retryWaitScope = this.createRetryWaitScope(
           turnCounter,
           promptId,
@@ -1289,10 +1277,6 @@ export class AgentCore {
               },
               refusedDuplicates,
               checkSubagentLoop,
-              onModelAccepted: () => {
-                roundSawModelChunk = true;
-                loopDetector.commitLoopReminderDelivery();
-              },
               onMaxOutputTokensEscalated: (limit) => {
                 stickyMaxOutputTokens = limit;
               },
@@ -1395,13 +1379,6 @@ export class AgentCore {
 
           // Handle chunk events
           if (streamEvent.type === 'chunk') {
-            // First chunk of the round: the model accepted the request. If
-            // it carries a prepared loop-protection reminder, its delivery
-            // accounting settles here — the same model-acceptance boundary
-            // the core client commits at. Later chunks no-op once the
-            // prepared receipt is consumed.
-            roundSawModelChunk = true;
-            loopDetector.commitLoopReminderDelivery();
             const resp = streamEvent.value;
             // Track the response ID for tool call correlation
             if (resp.responseId) {
@@ -1578,27 +1555,7 @@ export class AgentCore {
             terminateMode = AgentTerminateMode.HOOK_STOPPED;
             break;
           }
-          // Result-aware loop guards (issue #9450): stateful reads like
-          // task_list may legitimately repeat with identical arguments while
-          // the shared task board changes, so the detector must see each
-          // executed result before the next round re-emits the call.
-          for (const toolResult of toolCallResult.results) {
-            if (
-              loopDetector.recordToolResult(
-                { name: toolResult.toolName, args: toolResult.args },
-                toolResult.responseParts,
-              )
-            ) {
-              terminateMode = AgentTerminateMode.LOOP_DETECTED;
-              break;
-            }
-          }
-          if (terminateMode === AgentTerminateMode.LOOP_DETECTED) {
-            break;
-          }
           currentMessages = toolCallResult.messages;
-          const toolPartCount =
-            currentMessages[currentMessages.length - 1]?.parts?.length ?? 0;
 
           const externalInputs = this.drainExternalInputs(options);
           if (externalInputs.length > 0) {
@@ -1618,24 +1575,6 @@ export class AgentCore {
           if ((currentMessages[0]?.parts?.length ?? 0) === 0) {
             terminateMode = AgentTerminateMode.ERROR;
             break;
-          }
-          // Right after the tool results, before any external input, as in
-          // the core client and the daemon.
-          const loopReminder = loopDetector.takeLoopReminder();
-          if (loopReminder) {
-            currentMessages[currentMessages.length - 1].parts!.splice(
-              toolPartCount,
-              0,
-              { text: loopReminder },
-            );
-            // The reminder text rides in currentMessages toward the next
-            // round's model call, but that round can still exit at the
-            // abort/maxTurns/time checks or fail in prepareTools() before
-            // any request is attempted. Like the core client, the delivery
-            // stays prepared here and only settles when that round crosses
-            // the model-acceptance boundary (first chunk above); a round that
-            // exits before its first chunk abandons it in the round finally,
-            // so `reminded` telemetry credits a warning the model actually saw.
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
@@ -1729,16 +1668,6 @@ export class AgentCore {
         }
         throw error;
       } finally {
-        // The round exited without a chunk proving model acceptance
-        // (prepareTools/send rejection, zero-chunk break, abort before the
-        // first chunk): put the prepared reminder delivery back so
-        // `reminded` stays un-credited and the streak's warning stays
-        // eligible for a later round. The round that just TOOK a reminder
-        // for the next one saw its own chunks and skips this; a committed
-        // delivery makes the abandon a no-op.
-        if (!roundSawModelChunk) {
-          loopDetector.abandonLoopReminderDelivery();
-        }
         retryWaitScope?.close();
         // Reverse-cleanup fires whether the iteration ended normally, broke,
         // returned, or threw — preventing parent-listener accumulation on
@@ -1753,7 +1682,11 @@ export class AgentCore {
       terminateMode,
       turnsUsed: turnCounter,
       ...(terminateMode === AgentTerminateMode.LOOP_DETECTED
-        ? { loopType: loopDetector.getLastLoopType() }
+        ? {
+            loopType: toolCallCap.getStop()
+              ? LoopType.TURN_TOOL_CALL_CAP
+              : null,
+          }
         : {}),
     };
   }
@@ -1866,7 +1799,6 @@ export class AgentCore {
     duplicates: AgentLoopDuplicateState;
     refusedDuplicates: AgentLoopDuplicateState;
     checkSubagentLoop: (event: ServerLlmStreamEvent) => boolean;
-    onModelAccepted: () => void;
     onMaxOutputTokensEscalated: (limit: number) => void;
     /** After the stream; true when the time limit has passed. */
     finishModelRound: (
@@ -1923,7 +1855,6 @@ export class AgentCore {
           });
         },
         onChunk: ({ text, thoughtText, responseId, usageMetadata }) => {
-          params.onModelAccepted();
           if (responseId) model.responseId = responseId;
           if (usageMetadata) model.usageMetadata = usageMetadata;
           // A loop stop on Thought can close the stream before Content.

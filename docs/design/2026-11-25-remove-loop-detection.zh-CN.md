@@ -2,7 +2,7 @@
 
 [English](2026-11-25-remove-loop-detection.md) | [简体中文](2026-11-25-remove-loop-detection.zh-CN.md)
 
-- **状态**：提案
+- **状态**：已实现（"交付"第 3 步）
 - **日期**：2026-11-25
 - **取代**：[循环保护设置](2026-10-21-loop-protection-setting.zh-CN.md)、
   [循环停止原因](2026-10-20-loop-stop-reason.zh-CN.md)（下文保留的两种停止除外）、
@@ -120,6 +120,10 @@ DeepSeek、Kimi、GLM 模型在 N = 30 以内都不会。qwen3.7-plus 是 Token 
 daemon 中会越过上限的工具批次整批跳过。用一个小的每 turn 计数器取代原服务；turn
 的重置点保持不变（用户 turn、阻塞式 Stop hook 续跑和 Goal turn 都从零开始计数）。
 
+不属于循环判断的工具错误文案保持不变：调度器对重复 schema 错误追加的重试指令，以及
+被拒绝的部分编辑（输出被截断或参数不完整）从第二次拒绝起得到的重试指令。只有 daemon
+在第三次拒绝部分编辑时的停止随其他停止一起移除。
+
 ### 设置
 
 | 键                          | 变更后                                                                                                              |
@@ -156,16 +160,17 @@ headless 下对接模拟服务（模型先用无效的 `path` 参数、再用有
 - `PostToolUse` 只对实际执行的调用触发；它的 `additionalContext` 会附加到工具结果上。
 - 对执行前就被拒绝的调用（`invalid_tool_params`、`not_started`），
   `PostToolUseFailure` 不会触发。
-- 没有任何工具 hook 能结束 turn。`PostToolUse` 返回 `continue: false` 只会把该次
-  调用的结果变成错误（`EXECUTION_DENIED`，"Tool ... was not run"）；模型会被再次
-  调用，运行继续。loop capability ledger 把这一点记为 C14 和 T27（`differs`）。
+- 自 #18345 起，工具 hook 返回 `continue: false` 会在当前批次之后结束 turn
+  （`PreToolUse`、`PostToolUse`、`PostToolUseFailure` 和 `PostToolBatch`；ledger
+  C14 与 T11）。在此之前，`PostToolUse` 返回 `continue: false` 只会把该次调用的结果
+  变成错误，运行继续。
 
-因此 hook 目前能提醒、能拒绝，但不能停止。让工具 hook（`PreToolUse`、
-`PostToolUse` 和 `PostToolUseFailure`）的 `continue: false` 结束 turn（ledger C14
-与 T27，hooks 对齐 #18217）会在移除之前交付（"交付"第 2 步）。
+因此 hook 能提醒、能拒绝，也能停止。daemon 重启后恢复的 `ask_user_question` 调用
+是唯一一条工具 hook 停止仍只让该次调用失败的 daemon 路径。
 
-设置参考文档中增加一个简短示例：一个 `PreToolUse` 命令 hook，把最近的调用记录在
-会话目录下的文件里，在三次相同调用后加一条提醒。
+hooks 指南中增加一个简短示例（示例 4），`model.maxToolCallsPerTurn` 的参考说明链接到
+它：一个 `PreToolUse` 命令 hook，把会话最近一次调用记录在临时文件里，连续三次相同调用
+后加一条提醒，到第六次结束 turn。
 
 ## 决策与理由
 
@@ -237,9 +242,8 @@ headless 下对接模拟服务（模型先用无效的 `path` 参数、再用有
 ## 交付
 
 1. **DashScope 提示**（小而独立）：格式化逻辑与 daemon 中的提示及其测试（#18317）。
-2. **工具 hook 结束 turn**：`PreToolUse`、`PostToolUse` 和 `PostToolUseFailure` 的
-   `continue: false` 在该批次之后结束 turn（ledger C14 与 T27，#18217），使 hook
-   扩展点能够停止。
+2. **工具 hook 结束 turn**（#18345，已合入）：任一工具 hook 的 `continue: false`
+   在该批次之后结束 turn（ledger C14 与 T11，#18217），使 hook 扩展点能够停止。
 3. **移除**：core、子 agent、daemon、设置、TUI、遥测和文档放在一个 PR 中，因为
    设置和共享计数器横跨三个运行时。
 4. **展示清理**：Web Shell 和 SDK 中已移除原因的文案。

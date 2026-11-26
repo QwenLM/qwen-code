@@ -1860,6 +1860,70 @@ if len(user_prompt) > 1000:
 sys.exit(0)
 ```
 
+### Example 4: A Repeated-Call Guard
+
+Qwen Code does not judge whether the model is looping. A PreToolUse hook can: this one remembers the session's last tool call, reminds the model after the same call three times in a row, and ends the turn at six.
+
+**repeat_guard.py**
+
+```python
+import hashlib
+import json
+import os
+import sys
+import tempfile
+
+data = json.load(sys.stdin)
+key = hashlib.sha256(
+    json.dumps([data["tool_name"], data["tool_input"]], sort_keys=True).encode()
+).hexdigest()
+state_path = os.path.join(
+    tempfile.gettempdir(), f"qwen-repeat-guard-{data['session_id']}.json"
+)
+try:
+    with open(state_path) as f:
+        state = json.load(f)
+except (OSError, ValueError):
+    state = {}
+count = state.get("count", 0) + 1 if state.get("key") == key else 1
+with open(state_path, "w") as f:
+    json.dump({"key": key, "count": count}, f)
+
+if count >= 6:
+    print(json.dumps({
+        "continue": False,
+        "stopReason": f"{data['tool_name']} was called {count} times in a row with the same input.",
+    }))
+elif count >= 3:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": f"{data['tool_name']} has been called {count} times in a row with the same input. Use the result you already have or change the approach.",
+        }
+    }))
+sys.exit(0)
+```
+
+Configure it for every tool:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/repeat_guard.py",
+            "name": "repeat-guard"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ## Troubleshooting
 
 ### A hook does not fire

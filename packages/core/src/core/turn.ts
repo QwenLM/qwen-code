@@ -696,6 +696,17 @@ export type ServerLlmStreamEvent =
   | ServerLlmSessionTokenLimitExceededEvent
   | ServerLlmRetryEvent;
 
+/**
+ * Whether a stream event restarts the current attempt from scratch: the
+ * failed attempt's partial output is discarded and streamed again.
+ */
+export function isAttemptRestartEvent(event: ServerLlmStreamEvent): boolean {
+  return (
+    event.type === LlmEventType.Retry ||
+    event.type === LlmEventType.ModelFallback
+  );
+}
+
 /** @deprecated Use `ServerLlmRetryEvent`; retained until a future major release. */
 export type ServerGeminiRetryEvent = ServerLlmRetryEvent;
 /** @deprecated Use `ServerLlmModelFallbackEvent`; retained until a future major release. */
