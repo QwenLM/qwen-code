@@ -309,9 +309,11 @@ export function ArchivedSessionsPanel({
               {formatGroupCount(group.sessions.length, group.hasMore)}
             </span>
           </div>
-          <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
-            {group.sessions.map(renderSession)}
-          </div>
+          {group.sessions.length > 0 && (
+            <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+              {group.sessions.map(renderSession)}
+            </div>
+          )}
           {group.loadMoreError && (
             <div
               role="alert"

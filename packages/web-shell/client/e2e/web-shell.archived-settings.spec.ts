@@ -416,6 +416,27 @@ test('archive management remains reachable without a local workspace @smoke', as
   await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
+  await page.route(/\/standalone\/sessions(?:\?|$)/, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('archiveState') !== 'archived') {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      json:
+        url.searchParams.get('cursor') === 'page-2'
+          ? {
+              sessions: [
+                {
+                  ...scenario.standaloneSessions[0]!,
+                  sessionId: '44444444-4444-4444-8444-444444444444',
+                  displayName: 'Standalone page 2 archived',
+                },
+              ],
+            }
+          : { sessions: scenario.standaloneSessions, nextCursor: 'page-2' },
+    });
+  });
   await page.goto('/?language=en');
   // A Home-only shell renders footer actions inline; there is no More menu.
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -432,9 +453,26 @@ test('archive management remains reachable without a local workspace @smoke', as
   await nav
     .getByRole('button', { name: 'Archived conversations', exact: true })
     .click();
-  await expect(
-    page.locator('[data-web-shell-archived-sessions]'),
-  ).toContainText('Archived without a project');
+  const archive = page.locator('[data-web-shell-archived-sessions]');
+  await expect(archive).toContainText('Archived without a project');
+  const searchInput = archive.getByRole('textbox', {
+    name: 'Search archived conversations',
+    exact: true,
+  });
+  const noMatches = archive.getByText('No matching archived conversations.', {
+    exact: true,
+  });
+  await searchInput.fill('Standalone page 2');
+  const showAll = archive.getByRole('button', {
+    name: 'Show all',
+    exact: true,
+  });
+  await expect(showAll).toBeVisible();
+  await expect(noMatches).toHaveCount(0);
+  await showAll.click();
+  await expect(archive.getByText('Standalone page 2 archived')).toBeVisible();
+  await searchInput.fill('not in either page');
+  await expect(noMatches).toBeVisible();
 });
 
 test('hides archive management when the daemon has no archive capability @smoke', async ({
@@ -618,9 +656,22 @@ test('supports archived search, workspace filter, sort persistence, and per-work
     .click();
   await expect(archive.getByText('Zulu primary archived')).toBeVisible();
 
-  // Load more appends page 2 under archive-primary.
-  await archive.getByRole('button', { name: 'Load more', exact: true }).click();
+  // Search leaves the next page reachable even when page 1 has no matches.
+  await searchInput.fill('Alpha page 2');
+  const loadMore = archive.getByRole('button', {
+    name: 'Load more',
+    exact: true,
+  });
+  const noMatches = archive.getByText('No matching archived conversations.', {
+    exact: true,
+  });
+  await expect(loadMore).toBeVisible();
+  await expect(noMatches).toHaveCount(0);
+  await loadMore.click();
   await expect(archive.getByText('Alpha page 2 archived')).toBeVisible();
+  await searchInput.fill('not in either page');
+  await expect(noMatches).toBeVisible();
+  await searchInput.press('Escape');
 
   // Switch Sort by to Alphabetical and confirm persistence across reload.
   await archive

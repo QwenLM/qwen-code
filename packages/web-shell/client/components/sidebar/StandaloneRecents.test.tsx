@@ -1408,8 +1408,13 @@ describe('StandaloneRecents', () => {
       hideWhenSearchEmpty: true,
     });
     expect(
-      container.querySelector('[data-testid="standalone-archive"]'),
+      container.querySelector('[data-testid="standalone-archived-group"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="standalone-row"]'),
     ).toBeNull();
+    expect(container.textContent).toContain('sidebar.showAllSessions');
+    expect(container.textContent).not.toContain('sidebar.archivedEmpty');
     expect(statuses.at(-1)).toMatchObject({
       count: 7,
       matchedCount: 0,

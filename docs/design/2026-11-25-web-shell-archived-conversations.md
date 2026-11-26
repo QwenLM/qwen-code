@@ -131,9 +131,9 @@ Placed immediately below the panel heading (`flex flex-wrap items-center gap-2 p
 
 ### 3.3 Pagination, Empty States, and Query Hygiene
 
-- **Per-workspace `Load more`:** When a workspace's archived query returns `nextCursor`, render a `Load more` button below that workspace card that fetches subsequent pages using the daemon's cursor and appends deduplicated sessions.
+- **Per-workspace `Load more`:** When a workspace's archived query returns `nextCursor`, render a `Load more` button below that workspace card that fetches subsequent pages using the daemon's cursor and appends deduplicated sessions. Keep the button available during search even when no loaded rows match.
 - **Query slimming:** Omit `view: 'organized', group: 'all'` from Web Shell's archived catalog queries (archived panels do not render pin/group sections, so skipping organized mode prevents pinned old sessions from jumping to the top and avoids reading `session-organization.v1.json`).
-- **`StandaloneRecents` empty-search suppression:** Extend `onStatusChange` with `matchedCount: number`. When `searchQuery.trim()` is non-empty and `matchedCount === 0` (with `!loading && !loadError`), `StandaloneRecents` suppresses its standalone section chrome so `ArchivedSessionsPanel` can render one unified empty state (`No matching archived conversations` + `Clear filters`).
+- **`StandaloneRecents` empty-search suppression:** Extend `onStatusChange` with `matchedCount: number`. After loading succeeds, hide the standalone section during a search only when no loaded rows match and the standalone cursor is exhausted. The archive panel shows the unified no-match state and `Clear filters` after the visible groups have exhausted their cursors.
 - **Snippet isolation:** In `WebShellSidebar.tsx`'s `renderSessionRow`, archived rows read `options.searchSnippet` exclusively and never read active sidebar `contentSearchHits`.
 
 ---

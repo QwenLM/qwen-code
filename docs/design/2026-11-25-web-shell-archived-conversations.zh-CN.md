@@ -131,9 +131,9 @@
 
 ### 3.3 分页、空态与查询减负
 
-- **工作区分组「加载更多」：** 当某个工作区归档查询返回 `nextCursor` 时，在卡片下方渲染「加载更多」按钮，按游标拉取下一页并去重追加。
+- **工作区分组「加载更多」：** 当某个工作区归档查询返回 `nextCursor` 时，在卡片下方渲染「加载更多」按钮，按游标拉取下一页并去重追加。搜索时，即使已加载记录没有命中，也保留按钮。
 - **去除不必要的 organized 开销：** 归档面板不展示置顶或颜色分组，请求归档目录时去掉 `view: 'organized', group: 'all'`，避免被置顶过的旧会话强行排在前面，并省去一次 `session-organization.v1.json` 读盘。
-- **`StandaloneRecents` 空搜索噪音抑制：** 在 `onStatusChange` 中增加 `matchedCount: number`。当存在搜索词且 `matchedCount === 0`（且 `!loading && !loadError`）时隐藏 `StandaloneRecents` 分组，由 `ArchivedSessionsPanel` 统一呈现「无匹配的已归档会话 + 清除筛选」空态。
+- **`StandaloneRecents` 搜索空态：** 在 `onStatusChange` 中增加 `matchedCount: number`。加载成功后，搜索结果为空且无工作区分组的游标已耗尽时才隐藏该分组。可见分组的游标均已耗尽后，归档面板统一呈现无匹配提示和「清除筛选」按钮。
 - **摘要隔离：** `WebShellSidebar.tsx` 的 `renderSessionRow` 在 `isArchived === true` 时仅读取 `options.searchSnippet`，不读取活跃侧边栏的 `contentSearchHits`。
 
 ---

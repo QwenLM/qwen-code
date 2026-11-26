@@ -7326,7 +7326,7 @@ export function WebShellSidebar({
       const matched = group.sessions.filter((session) =>
         matchesArchivedSearch(session, archivedSearchQuery),
       );
-      if (matched.length === 0) continue;
+      if (matched.length === 0 && !group.hasMore) continue;
       const orderedSessions = needsClientSort
         ? [...matched].sort((a, b) =>
             compareArchivedSessions(a, b, effectiveArchivedSort),
@@ -7470,17 +7470,19 @@ export function WebShellSidebar({
     const archivedErrorWithStandalone =
       effectiveArchivedError ||
       (showStandaloneInArchived && standaloneArchivedStatus.error);
+    const hasMoreArchivedSessions =
+      filteredArchivedWorkspaceGroups.some((group) => group.hasMore) ||
+      (showStandaloneInArchived && Boolean(standaloneArchivedStatus.hasMore));
     const showPaginationSortHint =
       (effectiveArchivedSort === 'createdAt' ||
         effectiveArchivedSort === 'alphabetical') &&
-      (filteredArchivedWorkspaceGroups.some((group) => group.hasMore) ||
-        (showStandaloneInArchived &&
-          Boolean(standaloneArchivedStatus.hasMore)));
+      hasMoreArchivedSessions;
 
     let emptyState: ArchivedEmptyState = 'none';
     if (
       !archivedLoadingWithStandalone &&
       archivedCount === 0 &&
+      (archivedErrorWithStandalone || !hasMoreArchivedSessions) &&
       !(showCloudArchived && managedArchivedSessions?.error)
     ) {
       if (archivedErrorWithStandalone) {

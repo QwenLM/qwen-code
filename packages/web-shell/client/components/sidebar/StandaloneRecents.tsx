@@ -540,6 +540,7 @@ export function StandaloneRecents({
     !loadError &&
     !sessionError &&
     !loading &&
+    !hasMore &&
     visibleSessions.length === 0
   ) {
     return null;
@@ -713,13 +714,16 @@ export function StandaloneRecents({
                   </div>
                 )
               : renderRows()}
-            {!loading && !loadError && visibleSessions.length === 0 && (
-              <div className={workspaceStyles.empty}>
-                {archiveState === 'active'
-                  ? t('sidebar.noSessions')
-                  : t('sidebar.archivedEmpty')}
-              </div>
-            )}
+            {!loading &&
+              !loadError &&
+              visibleSessions.length === 0 &&
+              (archiveState === 'active' || !hasMore) && (
+                <div className={workspaceStyles.empty}>
+                  {archiveState === 'active'
+                    ? t('sidebar.noSessions')
+                    : t('sidebar.archivedEmpty')}
+                </div>
+              )}
             {sessionsLimited && (
               <button
                 type="button"
