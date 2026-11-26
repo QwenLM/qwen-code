@@ -184,6 +184,9 @@ const acquire = (...args) => startAcquire(...args).done;
 
 describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   it.each([
+    ['queue creation', 'mkdir() { return 1; }', null],
+    ['host lock open', 'mkdir "${QUEUE%.queue}"', null],
+    ['counter read', 'tail() { return 1; }', ''],
     ['counter open', 'mkdir "$QUEUE/.seq"', null],
     ['sequence lock', 'flock() { [[ $1 != 8 ]]; }', ''],
     ['counter write', "trap '' XFSZ; ulimit -f 0", ''],
@@ -219,6 +222,11 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
     );
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('caller status=1');
+    expect(
+      readdirSync(queue, { withFileTypes: true }).filter(
+        (entry) => entry.isFile() && entry.name !== '.seq',
+      ),
+    ).toHaveLength(0);
     if (counter !== null) {
       expect(readFileSync(join(queue, '.seq'), 'utf8')).toBe(counter);
     }

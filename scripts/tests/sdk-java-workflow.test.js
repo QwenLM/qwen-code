@@ -5410,7 +5410,7 @@ exec /usr/bin/find "$@"
         // The best-effort copy is skipped, but the suite result is not.
         expect(result.status, body + result.stderr).toBe(suiteStatus);
         expect(result.stdout).toContain(
-          '::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy',
+          '::warning::Maven cache write-back skipped: the sdk-java host lock could not be acquired',
         );
         // The pinned infrastructure line must not reach the log.
         expect(result.stdout).not.toContain('lock not acquired within');

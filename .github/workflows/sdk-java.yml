@@ -411,7 +411,7 @@ jobs:
             exec 7>&-
             wait "${lock_filter}" 2>/dev/null || true
             if [ "${lock_rc}" -ne 0 ]; then
-              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock could not be acquired; the gate result above is unaffected"
               mvn_report_failed_suite
               exit "${mvn_status}"
             fi
@@ -1102,7 +1102,7 @@ jobs:
             exec 7>&-
             wait "${lock_filter}" 2>/dev/null || true
             if [ "${lock_rc}" -ne 0 ]; then
-              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock could not be acquired; the gate result above is unaffected"
               mvn_report_failed_suite
               exit "${mvn_status}"
             fi
