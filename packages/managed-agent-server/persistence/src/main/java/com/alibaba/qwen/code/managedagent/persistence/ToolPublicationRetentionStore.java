@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationRetention;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
@@ -15,8 +17,12 @@ import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.PreparedStatementSetter;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -26,7 +32,7 @@ import java.util.Map;
 import java.util.UUID;
 
 /** Durable Session-root protection; elapsed time never closes a physical PUT. */
-public final class ToolPublicationRetentionStore implements com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationRetention {
+public final class ToolPublicationRetentionStore implements ToolPublicationRetention {
     private static final ObjectMapper JSON = new ObjectMapper();
     static final long READ_BUDGET_MILLIS = 120_000;
     private final JdbcTemplate jdbc;
@@ -322,19 +328,19 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         return read((String) row.get("tenant_id"), (String) row.get("session_id"));
     }
 
-    public java.io.InputStream open(String scope, String publication, String objectKey,
+    public InputStream open(String scope, String publication, String objectKey,
             ToolPublicationObjectStore objects) {
         return open(scope, publication, objectKey, objects, () -> {});
     }
 
-    public java.io.InputStream open(String scope, String publication, String objectKey,
+    public InputStream open(String scope, String publication, String objectKey,
             ToolPublicationObjectStore objects, Runnable guard) {
         var lease = readPublication(scope, publication);
         try {
             var input = open(objectKey, objects, lease, guard);
-            return new java.io.FilterInputStream(input) {
+            return new FilterInputStream(input) {
                 @Override
-                public void close() throws java.io.IOException {
+                public void close() throws IOException {
                     try (lease) {
                         super.close();
                     }
@@ -350,22 +356,22 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         }
     }
 
-    java.io.InputStream open(String objectKey, ToolPublicationObjectStore objects,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    InputStream open(String objectKey, ToolPublicationObjectStore objects,
+            ArtifactReadLease lease, Runnable guard) {
         lease.check();
         guard.run();
         var input = objects.open(objectKey, () -> {
             lease.check();
             guard.run();
         });
-        return new java.io.FilterInputStream(input) {
+        return new FilterInputStream(input) {
             @Override
-            public int read() throws java.io.IOException {
+            public int read() throws IOException {
                 byte[] one = new byte[1];
                 return read(one, 0, 1) < 0 ? -1 : one[0] & 255;
             }
             @Override
-            public int read(byte[] bytes, int offset, int length) throws java.io.IOException {
+            public int read(byte[] bytes, int offset, int length) throws IOException {
                 lease.check();
                 guard.run();
                 int result = in.readNBytes(bytes, offset, Math.min(length, 1024 * 1024));
@@ -413,7 +419,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 });
     }
 
-    public final class ReadLease implements com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease {
+    public final class ReadLease implements ArtifactReadLease {
         final String id;
         private final String tenant;
         private final String session;
@@ -617,7 +623,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 if (observed.length != bytes.length || !bodyDigest.equals(ToolPublicationContract.sha256(observed))) {
                     throw unresolvedPut();
                 }
-            } catch (java.io.IOException | RuntimeException error) {
+            } catch (IOException | RuntimeException error) {
                 throw unresolvedPut();
             }
             String proof =
@@ -764,7 +770,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     private boolean recoveryActive(String tenant, String session) {
-        boolean locking = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive();
+        boolean locking = TransactionSynchronizationManager.isActualTransactionActive();
         return !jdbc.query(
                         "SELECT w.operation_ref FROM ma_operation_work w JOIN ma_operation o ON"
                             + " o.operation_ref = w.operation_ref WHERE w.tenant_id = ? AND"

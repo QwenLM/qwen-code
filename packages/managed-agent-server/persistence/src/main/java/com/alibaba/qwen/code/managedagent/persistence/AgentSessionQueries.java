@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
@@ -14,11 +15,13 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -31,12 +34,12 @@ import java.util.Set;
 
 final class AgentSessionQueries {
     private final AgentStoreRows storeRows;
-    private final com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
+    private final WorktreeFiles worktreeFiles;
     private final JdbcTemplate jdbc;
     private final List<WebShellModelOption> modelCatalog;
 
     AgentSessionQueries(AgentStoreRows storeRows,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             JdbcTemplate jdbc,
             List<WebShellModelOption> modelCatalog) {
         this.storeRows = storeRows;
@@ -108,7 +111,7 @@ final class AgentSessionQueries {
         List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
         arguments.add(tenantId);
         sessionIds.forEach(id -> arguments.add(
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(id)));
+                ManagedSchemaKeys.identity(id)));
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM"
                         + " ma_operation WHERE tenant_id = ?"
                         + " AND scope_kind = 'SESSION' AND scope_id IN (" + AgentStoreRows.placeholders(sessionIds.size())
@@ -141,7 +144,7 @@ final class AgentSessionQueries {
 
     /** The batch twin of {@link #hasExecutionRegistryFacts}. */
     Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
-            java.util.Collection<String> sessionIds) {
+            Collection<String> sessionIds) {
         if (sessionIds.isEmpty()) {
             return Set.of();
         }
@@ -308,7 +311,7 @@ final class AgentSessionQueries {
             rows = new ArrayList<>(rows.subList(0, limit));
         }
         var selectedWorktrees = rows.stream().map(row -> worktrees.get(row.sessionId()))
-                .filter(java.util.Objects::nonNull).toList();
+                .filter(Objects::nonNull).toList();
         return new SessionPage(List.copyOf(rows), hasMore, JdbcSessionWorktreeStore.descriptors(worktreeFiles, jdbc, selectedWorktrees));
     }
 
@@ -548,8 +551,8 @@ final class AgentSessionQueries {
                         + " AND session_status_before IS NOT NULL"
                         + " ORDER BY gmt_create DESC LIMIT 1",
                 (rows, row) -> rows.getString(1),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)), tenantId, sessionId)
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)), tenantId, sessionId)
                 .stream().findFirst();
     }
 

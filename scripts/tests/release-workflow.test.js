@@ -386,6 +386,23 @@ mkdir "\${release_state}/bin"
 echo "NPM_CONFIG_PREFIX=\${release_state}" >> "\${GITHUB_ENV}"
 echo "\${release_state}/bin" >> "\${GITHUB_PATH:?}"
 `;
+const canonicalPreflightBootstrap = `set -euo pipefail
+bootstrap=$(mktemp -d "\${RUNNER_TEMP:?}/release-bootstrap.XXXXXX")
+trap 'rm -rf -- "$bootstrap"' EXIT
+export GH_CONFIG_DIR="$bootstrap/gh"
+mkdir -p "$GH_CONFIG_DIR"
+for script in prepare-release-runner.sh check-disk-floor.sh; do
+  for attempt in 1 2 3; do
+    if gh api "repos/\${GITHUB_REPOSITORY}/contents/.github/scripts/\${script}?ref=\${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script" && [ -s "$bootstrap/$script" ]; then
+      break
+    fi
+    [ "$attempt" -lt 3 ] || exit 1
+    sleep 2
+  done
+done
+bash "$bootstrap/prepare-release-runner.sh"
+node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
+bash "$bootstrap/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"`;
 const releaseRunnerScript = readFileSync(
   '.github/scripts/prepare-release-runner.sh',
   'utf8',
@@ -451,20 +468,50 @@ describe('release workflow', () => {
         String(step.uses ?? '').includes('actions/checkout'),
       );
       expect(checkoutIndex, id).toBeGreaterThan(0);
-      // Every caller must reach the same pinned cleanup implementation.
-      expect(job.steps[restoreIndex]?.uses, id).toBe(
-        '$/.github/actions/prepare-release-runner',
-      );
+      // Every caller must run the same pinned inline preflight bootstrap
+      // instead of a '$/' self-repository action (which downloads the full
+      // ~100 MB repo archive during Set up job).
+      const restoreStep = job.steps[restoreIndex];
+      expect(restoreStep?.uses, id).toBeUndefined();
+      expect(restoreStep?.['working-directory'], id).toBe('${{ runner.temp }}');
+      expect(restoreStep?.shell, id).toBe('bash');
+      expect(restoreStep?.env, id).toEqual({
+        GH_TOKEN: '${{ github.token }}',
+        WORKFLOW_SHA: '${{ github.workflow_sha }}',
+      });
+      expect(restoreStep?.run, id).toBe(canonicalPreflightBootstrap);
     }
     // Full-body equality also catches early exits or a commented-out wipe.
     expect(releaseRunnerScript).toBe(canonicalWipe);
+    // No job may reintroduce a '$/' self-repository action reference.
+    for (const [id, job] of Object.entries(releaseYaml.jobs)) {
+      for (const step of job.steps ?? []) {
+        expect(String(step.uses ?? ''), id).not.toMatch(/^\$\//);
+      }
+    }
     // Pool-routed jobs inherit root-owned leftovers whether or not they
-    // check out, so the exemption above must never extend to them.
+    // check out, so every one must run the same first-step inline preflight.
     for (const [id, job] of Object.entries(releaseYaml.jobs)) {
       if (!isPoolRouted(job)) {
         continue;
       }
       expect(wipesWorkspace(job), id).toBe(true);
+      const restoreIndex = (job.steps ?? []).findIndex(
+        (step) => step.name === 'Restore workspace ownership',
+      );
+      expect(restoreIndex, id).toBe(0);
+      const restoreStep = job.steps[restoreIndex];
+      expect(restoreStep?.if, id).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+      expect(restoreStep?.uses, id).toBeUndefined();
+      expect(restoreStep?.['working-directory'], id).toBe('${{ runner.temp }}');
+      expect(restoreStep?.shell, id).toBe('bash');
+      expect(restoreStep?.env, id).toEqual({
+        GH_TOKEN: '${{ github.token }}',
+        WORKFLOW_SHA: '${{ github.workflow_sha }}',
+      });
+      expect(restoreStep?.run, id).toBe(canonicalPreflightBootstrap);
       expect(['read', 'write'], id).toContain(job.permissions?.contents);
     }
   });
@@ -575,6 +622,9 @@ describe('release workflow', () => {
       expect(scriptCheckout.with, jobId).toEqual({
         ref: '${{ github.workflow_sha }}',
         'fetch-depth': 1,
+        // A blob-less sparse checkout fetches missing blobs while checking
+        // out, after the action's retryable fetch has already succeeded.
+        filter: 'blob:limit=1g',
         'persist-credentials': false,
         // The tarball gate rides this checkout too: run from the selected
         // ref's own `scripts/`, it is missing on any ref that predates it.
@@ -597,6 +647,23 @@ describe('release workflow', () => {
         }
       }
     }
+  });
+
+  it('keeps every sparse checkout blob inside the retryable fetch', () => {
+    // The YAML pin above cannot tell a filter that omits objects from one
+    // that keeps them: `blob:none` and `tree:0` both leave the checkout
+    // fetching from the promisor remote after the action's retries are spent.
+    // Only a size-bounded blob filter above GitHub's file-size limit admits
+    // every blob the sparse set can need.
+    let swept = 0;
+    for (const job of Object.values(releaseYaml.jobs)) {
+      for (const step of job.steps ?? []) {
+        if (step.name !== 'Checkout release workflow scripts') continue;
+        swept += 1;
+        expect(step.with.filter, step.name).toMatch(/^blob:limit=\d+[kmg]$/);
+      }
+    }
+    expect(swept).toBeGreaterThan(0);
   });
 
   it('re-pins trusted runners before every step that runs one', () => {

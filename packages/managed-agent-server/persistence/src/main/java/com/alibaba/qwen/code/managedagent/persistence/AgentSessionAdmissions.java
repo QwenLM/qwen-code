@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.StandaloneSkill;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -17,6 +19,9 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -44,7 +49,7 @@ final class AgentSessionAdmissions {
     private final JdbcManagedAgentDefinitionStore definitions;
     private final JdbcManagedSessionSkills creationSkills;
     private final JdbcSessionWorktreeStore sessionWorktrees;
-    private final com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages;
+    private final ExtensionPackages extensionPackages;
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
     private final boolean workspaceChildAgentsEnabled;
@@ -66,7 +71,7 @@ final class AgentSessionAdmissions {
             JdbcManagedAgentDefinitionStore definitions,
             JdbcManagedSessionSkills creationSkills,
             JdbcSessionWorktreeStore sessionWorktrees,
-            com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
+            ExtensionPackages extensionPackages,
             boolean workspaceFilesEnabled,
             boolean workspaceShellEnabled,
             boolean workspaceChildAgentsEnabled,
@@ -147,7 +152,7 @@ final class AgentSessionAdmissions {
         List<Map<String, Object>> skills = command.skills();
         boolean publicChildrenSupported = command.publicChildrenSupported();
         String modelId = command.modelId();
-        List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins =
+        List<ManagedExtensionPackages.Pin> extensionPins =
                 command.extensionPins();
         Set<String> extensionLifecycleProfiles = command.extensionLifecycleProfiles();
         JdbcSessionWorktreeStore.Plan worktree = command.worktree();
@@ -348,7 +353,7 @@ final class AgentSessionAdmissions {
 
     Admission insertPublicChildSessionCommand(String tenantId, String parentSessionId,
             String idempotencyKey, String requestDigest, String title, List<Map<String, Object>> input,
-            String payloadDigest, StoreModels.SessionLineage lineage, com.fasterxml.jackson.databind.JsonNode snapshot) {
+            String payloadDigest, StoreModels.SessionLineage lineage, JsonNode snapshot) {
         return insertChildSession(tenantId, parentSessionId, idempotencyKey, requestDigest,
                 title, input, payloadDigest, lineage, null, snapshot);
     }
@@ -357,7 +362,7 @@ final class AgentSessionAdmissions {
             String parentSessionId, String idempotencyKey,
             String requestDigest, String title, List<Map<String, Object>> input,
             String payloadDigest, StoreModels.SessionLineage lineage,
-            String childCwdRelative, com.fasterxml.jackson.databind.JsonNode snapshot) {
+            String childCwdRelative, JsonNode snapshot) {
         BrokerValues.requireChildRunId(lineage.parentChildRunId(), "parentChildRunId");
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
@@ -524,7 +529,7 @@ final class AgentSessionAdmissions {
                         .anyMatch(skill -> ManagedLoopSkill.NAME.equals(skill.get("name")));
         boolean parentServerLoop = creationSkills.serverLoopInjected(tenantId, parentSessionId);
         boolean childServerLoop = toolProfile == null && parentServerLoop;
-        java.util.Optional.ofNullable(ManagedLoopSkill.childCatalog(inheritedSkills, toolProfile, parentDefinitionHasLoop, parentServerLoop))
+        Optional.ofNullable(ManagedLoopSkill.childCatalog(inheritedSkills, toolProfile, parentDefinitionHasLoop, parentServerLoop))
                 .ifPresent(skills -> creationSkills.save(tenantId, sessionId, skills, childServerLoop));
         eventJournal.appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
@@ -645,11 +650,11 @@ final class AgentSessionAdmissions {
     }
 
     void requireCreationScope(String tenantId, String idempotencyKey, boolean workspaceBound) {
-        var namespace = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_CREATE_MODE;
-        var scope = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.TENANT;
+        var namespace = ManagedSchemaContract.ReceiptNamespace.SESSION_CREATE_MODE;
+        var scope = ManagedSchemaContract.ReceiptScope.TENANT;
         try {
             ManagedReceipts.insert(jdbc, namespace, tenantId, scope, tenantId, idempotencyKey,
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(Boolean.toString(workspaceBound)),
+                    ManagedSchemaKeys.key(Boolean.toString(workspaceBound)),
                     null, null, null, null, "RESERVED", null, workspaceBound, clock.millis());
         } catch (DuplicateKeyException existing) {
             // The independently persisted creation-mode claim cannot be overwritten by replay.

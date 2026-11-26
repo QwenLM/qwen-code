@@ -1573,6 +1573,29 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagent.execute).toHaveBeenCalledTimes(1);
   });
 
+  it('does not restart a resumed subagent stopped by a tool hook', async () => {
+    const agentId = 'agent-tool-hook-stop';
+    seedPaused('session-tool-hook-stop', agentId, 'Resume work');
+    const reason = 'A hook stopped the agent: budget spent';
+    const subagent = stubSubagent({
+      getTerminateMode: () => AgentTerminateMode.HOOK_STOPPED,
+      getFinalText: () => reason,
+    });
+    const { service, hookSystem } = createService({ subagent });
+    hookSystem.fireSubagentStopEvent.mockResolvedValueOnce({
+      isBlockingDecision: () => true,
+      getEffectiveReason: () => 'Keep going',
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await waitForStatus(agentId, 'failed');
+    expect(hookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(1);
+    expect(subagent.execute).toHaveBeenCalledTimes(1);
+    expect(registry.get(agentId)?.error).toBe(reason);
+  });
+
   it('appends a warning when resumed SubagentStop hooks reach the blocking cap', async () => {
     const agentId = 'agent-stop-hook-cap';
     seedPaused('session-stop-hook-cap', agentId, 'Resume cap path');

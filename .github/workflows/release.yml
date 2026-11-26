@@ -72,7 +72,29 @@ jobs:
       - &restore_release_workspace
         name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
-        uses: '$/.github/actions/prepare-release-runner'
+        working-directory: '${{ runner.temp }}'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          WORKFLOW_SHA: '${{ github.workflow_sha }}'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          bootstrap=$(mktemp -d "${RUNNER_TEMP:?}/release-bootstrap.XXXXXX")
+          trap 'rm -rf -- "$bootstrap"' EXIT
+          export GH_CONFIG_DIR="$bootstrap/gh"
+          mkdir -p "$GH_CONFIG_DIR"
+          for script in prepare-release-runner.sh check-disk-floor.sh; do
+            for attempt in 1 2 3; do
+              if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${script}?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script" && [ -s "$bootstrap/$script" ]; then
+                break
+              fi
+              [ "$attempt" -lt 3 ] || exit 1
+              sleep 2
+            done
+          done
+          bash "$bootstrap/prepare-release-runner.sh"
+          node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
+          bash "$bootstrap/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -86,6 +108,9 @@ jobs:
         with:
           ref: '${{ github.workflow_sha }}'
           fetch-depth: 1
+          # Keep sparse checkout from fetching missing blobs after the
+          # action's retryable fetch has already succeeded.
+          filter: 'blob:limit=1g'
           persist-credentials: false
           sparse-checkout: |-
             /.github/scripts
