@@ -206,6 +206,356 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     );
   });
 
+  it.each(['samplingParams', 'extra_body'] as const)(
+    'projects DeepSeek controls for the final %s.model in cold workspace status',
+    async (source) => {
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'deepseek-v4.1-flash-1017', reasoningEffort: 'low' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-v4.1-flash-1017',
+              baseUrl,
+              generationConfig: { [source]: { model: 'deepseek-v4-pro' } },
+            },
+          ],
+        },
+      });
+      const result = await provider(workspace, false);
+      expect(result.initialized).toBe(true);
+      expect(
+        result.providers
+          .flatMap((entry) => entry.models)
+          .find((model) => model.baseModelId === 'deepseek-v4.1-flash-1017'),
+      ).toMatchObject({
+        baseModelId: 'deepseek-v4.1-flash-1017',
+        configOptions: [
+          {
+            currentValue: 'high',
+            options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+          },
+        ],
+      });
+    },
+  );
+
+  it('uses the final DeepSeek route declaration in cold workspace status', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'deepseek-v4.1-flash-1017' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'deepseek-v4.1-flash-1017',
+            baseUrl,
+            generationConfig: { extra_body: { model: 'deepseek-v4-pro' } },
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                disableField: 'enable_thinking',
+                efforts: ['low'],
+                defaultEffort: 'low',
+              },
+            },
+          },
+          {
+            id: 'deepseek-v4-pro',
+            fastOnly: true,
+            baseUrl,
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                disableField: 'enable_thinking',
+                efforts: ['max'],
+                defaultEffort: 'max',
+              },
+            },
+          },
+          {
+            id: 'deepseek-v4-pro',
+            baseUrl: 'https://api.deepseek.com/v1',
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                disableField: 'enable_thinking',
+                efforts: ['low'],
+                defaultEffort: 'low',
+              },
+            },
+          },
+        ],
+      },
+    });
+    const result = await provider(workspace, false);
+    expect(
+      result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.baseModelId === 'deepseek-v4.1-flash-1017'),
+    ).toMatchObject({
+      baseModelId: 'deepseek-v4.1-flash-1017',
+      configOptions: [
+        { currentValue: 'max', options: [{ value: 'none' }, { value: 'max' }] },
+      ],
+    });
+  });
+
+  it('projects endpoint-specific DeepSeek controls for duplicate model routes', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com/v1',
+        reasoningEffort: 'low',
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: 'deepseek-v4-pro',
+            name: 'Official',
+            baseUrl: 'https://api.deepseek.com/v1',
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                efforts: ['low', 'high', 'max'],
+                defaultEffort: 'high',
+                disableField: 'thinking',
+              },
+            },
+          },
+          {
+            id: 'deepseek-v4-pro',
+            name: 'MaaS',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          },
+          {
+            id: 'deepseek-v4-pro',
+            name: 'Custom',
+            baseUrl: 'https://custom.example/v1',
+          },
+        ],
+        anthropic: [
+          {
+            id: 'deepseek-v4-pro',
+            name: 'Anthropic',
+            baseUrl: 'https://api.deepseek.com/anthropic',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    const official = models.find((model) => model.name === 'Official');
+    const maas = models.find((model) => model.name === 'MaaS');
+    expect(official?.modelId).toMatch(/^qwen-route:v1:/);
+    expect(maas?.modelId).toMatch(/^qwen-route:v1:/);
+    expect(official?.configOptions).toMatchObject([
+      {
+        currentValue: 'low',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'high' },
+          { value: 'max' },
+        ],
+      },
+    ]);
+    expect(maas?.configOptions).toMatchObject([
+      {
+        currentValue: 'high',
+        options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+      },
+    ]);
+    expect(
+      models.find((model) => model.name === 'Custom')?.configOptions,
+    ).toMatchObject([
+      {
+        currentValue: 'high',
+        options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+      },
+    ]);
+    expect(
+      models.find((model) => model.name === 'Anthropic')?.configOptions,
+    ).toBeUndefined();
+  });
+
+  it('projects tiered Qwen controls for duplicate model routes', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    const maasA =
+      'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    const maasB =
+      'https://llm-b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'qwen4-plus',
+        baseUrl: maasA,
+        reasoningEffort: 'low',
+      },
+      modelProviders: {
+        openai: [
+          { id: 'qwen4-plus', name: 'Qwen4 A', baseUrl: maasA },
+          { id: 'qwen4-plus', name: 'Qwen4 B', baseUrl: maasB },
+          {
+            id: 'qwen-latest-series-invite-202610-m6',
+            name: 'Invite A',
+            baseUrl: maasA,
+          },
+          {
+            id: 'qwen-latest-series-invite-202610-m6',
+            name: 'Invite B',
+            baseUrl: maasB,
+          },
+          { id: 'qwen3.8-max', name: 'Stable A', baseUrl: maasA },
+          { id: 'qwen3.8-max', name: 'Stable B', baseUrl: maasB },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    // Only qwen4-max takes the qwen4-max ladder; other qwen4* routes (the
+    // qwen4-plus fixtures here), the invitation-only previews, and the stable
+    // family all keep the qwen3.8-max ladder (low/medium/xhigh).
+    const expectedLadders: Record<string, string[]> = {
+      'Qwen4 A': ['none', 'low', 'medium', 'xhigh'],
+      'Qwen4 B': ['none', 'low', 'medium', 'xhigh'],
+      'Invite A': ['none', 'low', 'medium', 'xhigh'],
+      'Invite B': ['none', 'low', 'medium', 'xhigh'],
+      'Stable A': ['none', 'low', 'medium', 'xhigh'],
+      'Stable B': ['none', 'low', 'medium', 'xhigh'],
+    };
+    for (const [name, ladder] of Object.entries(expectedLadders)) {
+      const entry = models.find((model) => model.name === name);
+      expect(entry?.modelId).toMatch(/^qwen-route:v1:/);
+      expect(entry?.configOptions).toMatchObject([
+        {
+          currentValue: 'low',
+          options: ladder.map((value) => ({ value })),
+        },
+      ]);
+    }
+  });
+
+  it.each([
+    [
+      'https://api.deepseek.com/v1',
+      { reasoning: { effort: 'low' } },
+      undefined,
+      'low',
+    ],
+    [
+      'https://api.deepseek.com/v1',
+      { reasoning: { effort: 'low' }, extra_body: { reasoning_effort: 'max' } },
+      undefined,
+      'max',
+    ],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      { samplingParams: { reasoning: { effort: 'max' } } },
+      undefined,
+      'max',
+    ],
+    [
+      'https://api.deepseek.com/v1',
+      { extra_body: { thinking: { type: 'disabled' } } },
+      undefined,
+      'none',
+    ],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      { extra_body: { enable_thinking: false } },
+      undefined,
+      'none',
+    ],
+    [
+      'https://api.deepseek.com/v1',
+      {
+        extra_body: { thinking: { type: 'disabled' }, reasoning_effort: 'low' },
+      },
+      'max',
+      'max',
+    ],
+  ] as const)(
+    'projects DeepSeek provider defaults from %s with %j and persisted %s',
+    async (baseUrl, generationConfig, reasoningEffort, currentValue) => {
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'deepseek-flash', reasoningEffort },
+        modelProviders: {
+          openai: [{ id: 'deepseek-flash', baseUrl, generationConfig }],
+        },
+      });
+      const result = await provider(workspace, false);
+      const model = result.providers
+        .flatMap((entry) => entry.models)
+        .find((entry) => entry.baseModelId === 'deepseek-flash');
+      expect(model?.configOptions).toMatchObject([{ currentValue }]);
+    },
+  );
+
+  it('previews the auth fallback for a missing saved model without rewriting settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max-preview',
+            name: '[Token Plan] preview',
+            baseUrl: 'https://token-plan.example/v1',
+            envKey: 'REPRO_PLAN_KEY',
+          },
+        ],
+      },
+    });
+    const before = await fs.readFile(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+    const result = await provider(workspace, false);
+    expect(result.current).toMatchObject({
+      authType: 'openai',
+      modelId: 'qwen3.8-max-preview(openai)',
+      baseUrl: 'https://token-plan.example/v1',
+    });
+    expect(
+      result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.isCurrent)?.baseModelId,
+    ).toBe('qwen3.8-max-preview');
+    expect(
+      await fs.readFile(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ).toBe(before);
+  });
+
+  it('preserves a missing model backed by explicit connection settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: {
+        auth: {
+          selectedType: 'openai',
+          apiKey: 'manual-key',
+          baseUrl: 'https://manual.example/v1',
+        },
+      },
+      model: { name: 'manual-model' },
+      modelProviders: { openai: [{ id: 'other-model' }] },
+    });
+    expect((await provider(workspace, false)).current?.modelId).toBe(
+      'manual-model',
+    );
+  });
+
   it('reads fresh default model settings on every request', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
@@ -469,6 +819,156 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(true);
   });
 
+  it('projects Kimi K3 reasoning for a custom OpenAI-compatible route', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'kimi-k3.1-pro' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'kimi-k3.1-pro',
+            baseUrl: 'https://gateway.example.test/v1',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === 'kimi-k3.1-pro');
+
+    expect(model?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'max',
+        options: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'max',
+            thinkingMandatory: true,
+          },
+        },
+      },
+    ]);
+  });
+
+  it.each([
+    {
+      name: 'inferred K3 with a samplingParams effort',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: { samplingParams: { reasoning_effort: 'low' } },
+      currentValue: 'low',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'partial K3 with a winning extra_body effort',
+      modelId: 'kimi-k3.1-pro',
+      capabilities: { reasoning: { defaultEffort: 'high' } },
+      generationConfig: {
+        samplingParams: { reasoning_effort: 'high' },
+        extra_body: { reasoning_effort: 'low' },
+      },
+      currentValue: 'low',
+      defaultEffort: 'high',
+    },
+    {
+      name: 'inferred K3 with a final null placeholder',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: {
+        samplingParams: { reasoning_effort: 'low' },
+        extra_body: { reasoning_effort: null },
+      },
+      currentValue: 'max',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'inferred K3 with a final empty placeholder',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: {
+        samplingParams: { reasoning_effort: 'low' },
+        extra_body: { reasoning_effort: '' },
+      },
+      currentValue: 'max',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'inferred K3 with an explicit nested effort',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: {
+        samplingParams: {
+          reasoning: { effort: 'high' },
+          reasoning_effort: 'low',
+        },
+      },
+      currentValue: 'high',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'mandatory K3 with a raw off value',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      currentValue: 'max',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'K3 with a complete explicit profile',
+      modelId: 'kimi-k3',
+      capabilities: {
+        reasoning: {
+          profile: 'openai-reasoning',
+          efforts: ['low', 'high'],
+          defaultEffort: 'high',
+        },
+      },
+      generationConfig: { extra_body: { reasoning_effort: 'low' } },
+      currentValue: 'high',
+      defaultEffort: 'high',
+      completeProfile: true,
+    },
+  ])('projects the OpenRouter raw effort for $name', async (testCase) => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: testCase.modelId },
+      modelProviders: {
+        openai: [
+          {
+            id: testCase.modelId,
+            baseUrl: 'https://openrouter.ai/api/v1',
+            capabilities: testCase.capabilities,
+            generationConfig: testCase.generationConfig,
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === testCase.modelId);
+    expect(model?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: testCase.currentValue,
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: testCase.defaultEffort,
+            ...('completeProfile' in testCase
+              ? {}
+              : { thinkingMandatory: true }),
+          },
+        },
+      },
+    ]);
+  });
+
   it.each([
     {
       persisted: 'medium' as const,
@@ -638,24 +1138,24 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(settingsBefore);
   });
 
-  it('does not project reasoning preview onto opaque route models', async () => {
+  it('does not project reasoning preview onto opaque routes without a tiered manifest', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
       security: { auth: { selectedType: 'openai' } },
       model: {
-        name: 'qwen3.8-max',
+        name: 'qwen3.7-plus',
         baseUrl: 'https://one.example/v1',
       },
       modelProviders: {
         openai: [
           {
-            id: 'qwen3.8-max',
-            name: 'Qwen 3.8 Max One',
+            id: 'qwen3.7-plus',
+            name: 'Qwen 3.7 Plus One',
             baseUrl: 'https://one.example/v1',
           },
           {
-            id: 'qwen3.8-max',
-            name: 'Qwen 3.8 Max Two',
+            id: 'qwen3.7-plus',
+            name: 'Qwen 3.7 Plus Two',
             baseUrl: 'https://two.example/v1',
           },
         ],

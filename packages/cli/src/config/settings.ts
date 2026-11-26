@@ -25,6 +25,7 @@ import {
   parseExecutionSandboxSettings,
   readBareModeOperatorSettings,
   readOperatorSandboxSettings,
+  selectOperatorCatalogRefresh,
   selectOperatorExecutionSandbox,
   stripUtf8Bom,
 } from './execution-sandbox-settings.js';
@@ -37,8 +38,10 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
+import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
+  deleteNestedPropertySafe,
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
   WORKSPACE_RESTRICTED_ROOT_SETTINGS,
@@ -211,6 +214,30 @@ export enum SettingScope {
   SystemDefaults = 'SystemDefaults',
 }
 
+function mergeTrustCheckSettings(
+  systemDefaults: Settings,
+  user: Settings,
+  system: Settings,
+): Settings {
+  return customDeepMerge(
+    getMergeStrategyForPath,
+    {},
+    systemDefaults,
+    user,
+    system,
+  ) as Settings;
+}
+
+export function getOperatorTrustSettings(
+  settings: Pick<LoadedSettings, 'forScope'>,
+): Settings {
+  return mergeTrustCheckSettings(
+    settings.forScope(SettingScope.SystemDefaults).settings,
+    settings.forScope(SettingScope.User).settings,
+    settings.forScope(SettingScope.System).settings,
+  );
+}
+
 export interface CheckpointingSettings {
   enabled?: boolean;
 }
@@ -231,6 +258,8 @@ export interface SettingsFile {
   path: string;
   rawJson?: string;
 }
+
+const REMOVED_MODEL_SETTINGS = ['loopProtection', 'skipLoopDetection'];
 
 function getSettingsFileKeyWarnings(
   settings: Record<string, unknown>,
@@ -268,8 +297,19 @@ function getSettingsFileKeyWarnings(
 
     ignoredLegacyKeys.add(oldKey);
     warnings.push(
-      `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
+      REMOVED_MODEL_SETTINGS.some((key) => newPath === `model.${key}`)
+        ? `Warning: Legacy setting '${oldKey}' was removed (loop detection no longer exists) and will be ignored in ${settingsFilePath}.`
+        : `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
     );
+  }
+
+  const model = settings['model'];
+  for (const key of REMOVED_MODEL_SETTINGS) {
+    if (isPlainObject(model) && model[key] !== undefined) {
+      warnings.push(
+        `Warning: Setting 'model.${key}' was removed (loop detection no longer exists) and will be ignored in ${settingsFilePath}.`,
+      );
+    }
   }
 
   // Unknown top-level keys — log silently to debug output.
@@ -727,6 +767,22 @@ function mergeSettings(
   } else if (merged.tools && typeof merged.tools === 'object') {
     delete merged.tools.executionSandbox;
   }
+  const operatorCatalogRefresh = selectOperatorCatalogRefresh(
+    systemDefaults,
+    user,
+    system,
+  );
+  // Same shape as the executionSandbox restore: a project that replaces the
+  // whole `model` section cannot reset the operator's refresh opt-out.
+  if (operatorCatalogRefresh !== undefined) {
+    const model = merged.model;
+    merged.model = {
+      ...(model && typeof model === 'object' && !Array.isArray(model)
+        ? model
+        : {}),
+      catalogRefresh: operatorCatalogRefresh,
+    } as Settings['model'];
+  }
   return merged;
 }
 
@@ -801,7 +857,7 @@ export class LoadedSettings {
 
   setValue(
     scope: SettingScope,
-    key: string,
+    key: string | readonly string[],
     value: unknown,
     assertCanCommit?: () => void,
     opts: { throwOnWriteFailure?: boolean } = {},
@@ -823,12 +879,27 @@ export class LoadedSettings {
         },
       );
     }
-    setNestedPropertySafe(settingsFile.settings, key, value);
-    setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    if (typeof key !== 'string' && value === undefined) {
+      deleteNestedPropertySafe(settingsFile.settings, key);
+      deleteNestedPropertySafe(settingsFile.originalSettings, key);
+    } else {
+      setNestedPropertySafe(settingsFile.settings, key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    }
     this._merged = this.computeMergedSettings();
     if (!opts.throwOnWriteFailure) {
       saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
     }
+  }
+
+  setTopLevelValues(scope: SettingScope, values: Partial<Settings>): void {
+    const settingsFile = this.forScope(scope);
+    saveSettings(settingsFile, values, [], { throwOnWriteFailure: true });
+    for (const [key, value] of Object.entries(values)) {
+      setNestedPropertySafe(settingsFile.settings, key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    }
+    this._merged = this.computeMergedSettings();
   }
 
   setValues(
@@ -1003,6 +1074,7 @@ export function createMinimalSettings(): LoadedSettings {
         }
       : {}),
     ...(operator.privacy ? { privacy: operator.privacy } : {}),
+    ...(operator.model ? { model: operator.model } : {}),
   };
   const emptySettingsFile: SettingsFile = {
     path: '',
@@ -1189,8 +1261,15 @@ function readSettingsLayers(
     // This is okay. The path might not exist yet, and that's a valid state.
   }
 
-  // We expect homedir to always exist and be resolvable.
-  const realHomeDir = resolveHomeDirectory();
+  // The home directory may not exist (e.g. a container user created without
+  // `-m`); like the workspace path above, that's a valid state. Fall back to
+  // the unresolved path so the home-vs-workspace comparison still works.
+  let realHomeDir = path.resolve(homedir());
+  try {
+    realHomeDir = resolveHomeDirectory();
+  } catch (_e) {
+    // This is okay. The path might not exist yet, and that's a valid state.
+  }
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
@@ -1557,20 +1636,15 @@ function readSettingsLayers(
   // answer the final merged settings (and `loadCliConfig`'s `trustedFolder`)
   // use; the workspace scope stays out, since a workspace file that only a
   // trusted workspace may contribute cannot decide its own trust.
-  const initialTrustCheckSettings = customDeepMerge(
-    getMergeStrategyForPath,
-    {},
+  const initialTrustCheckSettings = mergeTrustCheckSettings(
     systemDefaultSettings,
     userSettings,
     systemSettings,
   );
   const isTrusted =
     opts.workspaceTrusted ??
-    isWorkspaceTrusted(
-      initialTrustCheckSettings as Settings,
-      undefined,
-      realWorkspaceDir,
-    ).isTrusted ??
+    isWorkspaceTrusted(initialTrustCheckSettings, undefined, realWorkspaceDir)
+      .isTrusted ??
     false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
@@ -1586,6 +1660,9 @@ function readSettingsLayers(
   // the settings to avoid a cycle
   if (!opts.skipLoadEnvironment) {
     loadEnvironment(tempMergedSettings, workspaceDir);
+    // `verifyPr` is a workspace-restricted root, so the merged value already
+    // excludes a cloned repository's choice of publishing target.
+    applyVerifyPrCoordinateEnv(tempMergedSettings.verifyPr);
   }
 
   // Create LoadedSettings first
@@ -1643,7 +1720,7 @@ function readSettingsLayers(
 }
 
 function createSettingsUpdate(
-  key: string,
+  key: string | readonly string[],
   value: unknown,
 ): Record<string, unknown> {
   const root: Record<string, unknown> = {};

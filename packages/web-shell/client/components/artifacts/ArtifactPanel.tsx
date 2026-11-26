@@ -6,12 +6,15 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
 import {
   useConnection,
   useWorkspace,
+  type DaemonContextMemoryDetail,
+  type DaemonFileStat,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
@@ -20,11 +23,15 @@ import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
 import { DownloadIcon } from 'lucide-react';
 import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
   ChevronRightIcon,
+  CircleHelpIcon,
   CirclePlusIcon,
   Code2Icon,
   EyeIcon,
   ExpandIcon,
+  FileDiffIcon,
   GaugeIcon,
   GlobeIcon,
   FolderIcon as FilesIcon,
@@ -33,6 +40,7 @@ import {
   WrenchIcon,
   ListTreeIcon,
   MessageCirclePlusIcon,
+  PackageIcon,
   PanelRightIcon,
   PlusIcon,
   ShrinkIcon,
@@ -67,11 +75,16 @@ import { normalizeTextMediaType } from '../../utils/imageIngestion';
 import { DialogShell } from '../dialogs/DialogShell';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { isSafeHref, Markdown } from '../messages/Markdown';
+import { BtwMessage } from '../messages/BtwMessage';
+import { explainDisplayLabel } from '../../utils/composerTasks';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import {
@@ -84,6 +97,7 @@ import {
 import taskStyles from '../dialogs/ScheduledTasksDialog.module.css';
 import {
   artifactKindLabel,
+  canPreviewWorkspaceArtifact,
   downloadWorkspaceFile,
   formatArtifactSize,
   getArtifactFreshnessKey,
@@ -91,8 +105,14 @@ import {
   getArtifactImageMimeType,
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
+  isAutomationSnapshotArtifact,
+  isCodeReviewArtifact,
   isDownloadOnlyWorkspaceArtifact,
+  isDocxFile,
   isExcelFile,
+  isPdfArtifact,
+  isWebPreviewSnapshotArtifact,
+  MAX_WORKSPACE_FILE_BLOB_BYTES,
   normalizeArtifactMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
@@ -111,19 +131,28 @@ import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
 import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { ArtifactIcon } from './ArtifactIcon';
+import DocxPreview from './DocxPreview';
 import { measureSessionTitleScroll } from '../sidebar/sessionTitleScroll';
 import { SubagentDetail } from './SubagentDetail';
 import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
+import { SessionPanel } from './SessionPanel';
 import type { WebShellModelManagementOptions } from '../../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../../unavailableModels';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
 import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
 import { TerminalPanel } from '../terminal/TerminalPanel';
+import { DaemonConnectionBanner } from '../DaemonConnectionBanner';
 import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
 import { TokenUsagePanel } from './TokenUsagePanel';
+import { ArtifactsListPanel } from './ArtifactsListPanel';
+import { ChangeOverviewPanel } from './ChangeOverviewPanel';
 import { TrajectoryPanel } from './TrajectoryPanel';
 import type { TrajectoryPageLoader } from '../../trajectory/useTrajectoryWindow';
 import type { ContextUsageControls } from '../../hooks/useContextUsageControls';
@@ -153,8 +182,12 @@ const loadWorkspaceFileBrowser = () =>
 const loadPierreFilePreview = () =>
   import('./PierreFilePreview').catch(fileImportFailed);
 const SpreadsheetPreview = lazy(() => import('./SpreadsheetPreview'));
+const WorkspacePdfRangePreview = lazy(
+  () => import('./WorkspacePdfRangePreview'),
+);
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
+const MIN_PDF_RANGE_PREVIEW_BYTES = 4 * 1024 * 1024;
 const FREQUENCIES: Frequency[] = [
   'daily',
   'weekdays',
@@ -210,6 +243,7 @@ export type ArtifactPanelTab =
       workspaceCwd?: string;
       workspaceId?: string;
       changes?: readonly TurnOutputFileChange[];
+      unfilteredChanges?: readonly TurnOutputFileChange[];
       selectedPath?: string;
       sourceTurnId?: string;
       sourceSessionId?: string;
@@ -327,6 +361,14 @@ export type ArtifactPanelTab =
       initialPrompt?: string;
     }
   | {
+      /** Another session, shown read-only: where a `/send` message runs. */
+      id: string;
+      kind: 'session';
+      title: string;
+      sessionId: string;
+      workspaceCwd: string;
+    }
+  | {
       id: string;
       kind: 'terminal';
       title: string;
@@ -364,6 +406,20 @@ export type ArtifactPanelTab =
     }
   | {
       id: string;
+      kind: 'artifacts';
+      title: string;
+      sessionId?: string;
+    }
+  | {
+      id: string;
+      kind: 'change_overview';
+      title: string;
+      workspaceCwd: string;
+      workspaceId?: string;
+      sessionId?: string;
+    }
+  | {
+      id: string;
       kind: 'workflow';
       title: string;
       sessionId?: string;
@@ -382,7 +438,9 @@ export type ArtifactPanelTab =
 
 type WorkspaceScopedArtifactPanelTab = Extract<
   ArtifactPanelTab,
-  { kind: 'review' | 'file' | 'artifact' | 'scheduled_task' }
+  {
+    kind: 'review' | 'file' | 'artifact' | 'scheduled_task' | 'change_overview';
+  }
 >;
 
 function isWorkspaceScopedTab(
@@ -392,7 +450,8 @@ function isWorkspaceScopedTab(
     tab.kind === 'review' ||
     tab.kind === 'file' ||
     tab.kind === 'artifact' ||
-    tab.kind === 'scheduled_task'
+    tab.kind === 'scheduled_task' ||
+    tab.kind === 'change_overview'
   );
 }
 
@@ -413,16 +472,26 @@ export interface SideTaskListItem {
   title: string;
   workspaceCwd?: string;
   updatedAt?: string;
+  archivable?: boolean;
 }
 
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
+  'changeOverview',
 ];
 
 interface ArtifactPanelProps {
   contextUsageControls?: Readonly<Record<string, ContextUsageControls>>;
   artifacts: readonly DaemonSessionArtifact[];
+  /**
+   * The session's own artifacts, matching the header count badge. The list tab
+   * renders these rather than the panel-wide merged collection (which also
+   * carries pane/open-time extras used for preview-tab icon lookup).
+   */
+  sessionArtifacts?: readonly DaemonSessionArtifact[];
+  /** Open an artifact preview tab from the artifacts list tab. */
+  onOpenArtifact?: (artifactId: string) => void;
   tabs: readonly ArtifactPanelTab[];
   activeTabId: string | null;
   reviewChanges: readonly TurnOutputFileChange[];
@@ -445,8 +514,20 @@ interface ArtifactPanelProps {
     workspaceCwd?: string,
     workspaceId?: string,
   ) => void;
+  /** Open a context-panel memory file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
+  /**
+   * Offer the delivery-unit change overview tab. Gated on an active workspace
+   * (a cwd to scope it to), not on git-ness: a non-git workspace still opens
+   * the tab, which reports that it is not a git repository.
+   */
+  changeOverviewAvailable?: boolean;
+  onOpenChangeOverview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
   onOpenTerminal?: () => void;
   /** Open this session's trajectory tab (shown as an empty-state action). */
@@ -465,9 +546,17 @@ interface ArtifactPanelProps {
   items?: readonly WebShellRightPanelItem[];
   sideTaskAvailable?: boolean;
   sideTasks?: readonly SideTaskListItem[];
+  archivedSideTasks?: readonly SideTaskListItem[];
   sideTasksLoading?: boolean;
   onCreateSideTask?: () => void;
   onOpenSideTask?: (sideTask: SideTaskListItem) => void;
+  onArchiveSideTasks?: (
+    sideTasks: readonly SideTaskListItem[],
+  ) => void | Promise<void>;
+  onUnarchiveSideTasks?: (
+    sideTasks: readonly SideTaskListItem[],
+  ) => void | Promise<void>;
+  onSideTaskMenuOpen?: () => void;
   onCreateSideTaskSession?: (
     tabId: string,
     parentSessionId: string,
@@ -491,12 +580,25 @@ interface ArtifactPanelProps {
     workspaceCwd?: string,
   ) => void;
   agentTasks?: readonly EnvironmentAgentTask[];
+  /** The background task shown in the active tab, when it can be explained. */
+  explainTask?: DaemonSessionTaskWithWorkflowStatus | null;
+  onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+  /** A pending/settled task explanation to mirror in place (taskId-matched). */
+  taskExplanation?: {
+    messageId: string;
+    taskId: string;
+    question: string;
+    answer: string;
+    isPending: boolean;
+  } | null;
   agentTraceLoading?: boolean;
   agentTraceError?: string;
   onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   workflow?: {
     todos: readonly TodoItem[];
     tools: readonly ACPToolCall[];
@@ -585,7 +687,11 @@ function WorkspaceFilesPane({
   return (
     <ErrorBoundary label="workspace file browser" fallback={failure}>
       <Suspense
-        fallback={<div className={styles.empty}>{t('common.loading')}</div>}
+        fallback={
+          <div className={`${styles.empty} text-center`} role="status">
+            {t('common.loading')}
+          </div>
+        }
       >
         <WorkspaceFileBrowser
           key={`${tab.workspaceCwd}:${tab.workspaceId ?? ''}`}
@@ -629,6 +735,8 @@ function WorkspaceFilesPane({
 export function ArtifactPanel({
   contextUsageControls,
   artifacts,
+  sessionArtifacts,
+  onOpenArtifact,
   tabs,
   activeTabId,
   reviewChanges,
@@ -642,8 +750,11 @@ export function ArtifactPanel({
   onSelectTurnCallsPrompt,
   onCloseTab,
   onOpenFilePreview,
+  onOpenMemoryFile,
   latestReviewAvailable = false,
   onOpenLatestReview,
+  changeOverviewAvailable = false,
+  onOpenChangeOverview,
   onOpenTerminal,
   onOpenTrajectory,
   trajectoryTabId,
@@ -654,9 +765,13 @@ export function ArtifactPanel({
   items = DEFAULT_RIGHT_PANEL_ITEMS,
   sideTaskAvailable = false,
   sideTasks = [],
+  archivedSideTasks = [],
   sideTasksLoading = false,
   onCreateSideTask,
   onOpenSideTask,
+  onArchiveSideTasks,
+  onUnarchiveSideTasks,
+  onSideTaskMenuOpen,
   onCreateSideTaskSession,
   onSideTaskCreated,
   onSideTaskTitleChange,
@@ -665,12 +780,17 @@ export function ArtifactPanel({
   onNestedArtifactsChange,
   onOpenNestedSubagent,
   agentTasks = [],
+  explainTask,
+  onExplainTask,
+  taskExplanation,
   agentTraceLoading = false,
   agentTraceError,
   onOpenWorkflowAgent,
   onError,
   sessionWorkflowEnabled,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   workflow,
   onImageIngestionNotice,
   deferSubagentMount = false,
@@ -706,6 +826,9 @@ export function ArtifactPanel({
       sideTaskMenuCloseTimerRef.current = null;
     }, 120);
   }, []);
+  useEffect(() => {
+    if (sideTaskMenuOpen) onSideTaskMenuOpen?.();
+  }, [onSideTaskMenuOpen, sideTaskMenuOpen]);
   useEffect(
     () => () => {
       if (sideTaskMenuCloseTimerRef.current) {
@@ -743,6 +866,9 @@ export function ArtifactPanel({
     items.includes('sideTask') &&
     sideTaskAvailable &&
     Boolean(onCreateSideTask);
+  const hasArchivableSideTasks = sideTasks.some(
+    (sideTask) => sideTask.archivable === true,
+  );
   const showTerminalMenuItem = Boolean(onOpenTerminal);
   const showWebPreviewMenuItem =
     items.includes('webPreview') && Boolean(onOpenWebPreview);
@@ -759,6 +885,11 @@ export function ArtifactPanel({
         tab.workspaceCwd === workspaceCwd &&
         tab.workspaceId === filesOwner?.id,
     );
+  const showChangeOverviewMenuItem =
+    items.includes('changeOverview') &&
+    changeOverviewAvailable &&
+    Boolean(onOpenChangeOverview) &&
+    !tabs.some((tab) => tab.id === 'change_overview');
   const showAddMenu =
     Boolean(activeTab) &&
     (showFilesMenuItem ||
@@ -766,7 +897,8 @@ export function ArtifactPanel({
       showSideTaskMenuItems ||
       showTerminalMenuItem ||
       showWebPreviewMenuItem ||
-      showTrajectoryMenuItem);
+      showTrajectoryMenuItem ||
+      showChangeOverviewMenuItem);
   const activeWorkspaceIdentity =
     activeTab && isWorkspaceScopedTab(activeTab)
       ? {
@@ -825,87 +957,100 @@ export function ArtifactPanel({
                     tab.kind === 'turn_calls' ? t('turnCalls.title') : tab.title
                   }
                 >
-                  <span
-                    className={`${styles.tabIcon} ${getArtifactPanelTabKind(tab) === 'artifact' ? styles.tabArtifactIcon : ''}`}
-                    aria-hidden="true"
-                  >
-                    {getArtifactPanelTabKind(tab) === 'review' ? (
-                      <TabReviewIcon />
-                    ) : tab.kind === 'files' ? (
-                      <FilesIcon className={styles.tabIconSvg} />
-                    ) : tab.kind === 'workflow' ? (
-                      <NetworkIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'file' ? (
-                      <FileTypeIcon
-                        name={tab.workspacePath}
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'artifact' ? (
-                      <ArtifactIcon
-                        artifact={artifacts.find(
-                          (artifact) =>
-                            'artifactId' in tab &&
-                            artifact.id === tab.artifactId,
-                        )}
-                        className={styles.tabIconSvg}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'subagent' ? (
-                      <TabSubagentIcon />
-                    ) : getArtifactPanelTabKind(tab) === 'monitor' ? (
-                      <SquareActivityIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'shell' ? (
-                      <SquareTerminalIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'side_task' ? (
-                      <MessageCirclePlusIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'web_preview' ? (
-                      <GlobeIcon className={styles.tabIconSvg} />
-                    ) : tab.kind === 'terminal' ? (
-                      <SquareTerminalIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'image' ? (
-                      <ImageIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'context_usage' ? (
-                      <LayersIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'token_usage' ? (
-                      <GaugeIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'turn_calls' ? (
-                      <WrenchIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'trajectory' ? (
-                      <ListTreeIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : (
-                      <TabScheduledTaskIcon />
-                    )}
-                  </span>
+                  {/* Another session's tab is named by its title alone. */}
+                  {tab.kind !== 'session' && (
+                    <span
+                      className={`${styles.tabIcon} ${getArtifactPanelTabKind(tab) === 'artifact' ? styles.tabArtifactIcon : ''}`}
+                      aria-hidden="true"
+                    >
+                      {getArtifactPanelTabKind(tab) === 'review' ? (
+                        <TabReviewIcon />
+                      ) : tab.kind === 'files' ? (
+                        <FilesIcon className={styles.tabIconSvg} />
+                      ) : tab.kind === 'workflow' ? (
+                        <NetworkIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'file' ? (
+                        <FileTypeIcon
+                          name={tab.workspacePath}
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'artifact' ? (
+                        <ArtifactIcon
+                          artifact={artifacts.find(
+                            (artifact) =>
+                              'artifactId' in tab &&
+                              artifact.id === tab.artifactId,
+                          )}
+                          className={styles.tabIconSvg}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'subagent' ? (
+                        <TabSubagentIcon />
+                      ) : getArtifactPanelTabKind(tab) === 'monitor' ? (
+                        <SquareActivityIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'shell' ? (
+                        <SquareTerminalIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'side_task' ? (
+                        <MessageCirclePlusIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'web_preview' ? (
+                        <GlobeIcon className={styles.tabIconSvg} />
+                      ) : tab.kind === 'terminal' ? (
+                        <SquareTerminalIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'image' ? (
+                        <ImageIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'context_usage' ? (
+                        <LayersIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'token_usage' ? (
+                        <GaugeIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'artifacts' ? (
+                        <PackageIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'turn_calls' ? (
+                        <WrenchIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'trajectory' ? (
+                        <ListTreeIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'change_overview' ? (
+                        <FileDiffIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : (
+                        <TabScheduledTaskIcon />
+                      )}
+                    </span>
+                  )}
                   <span
                     className={styles.tabTitle}
                     data-web-shell-session-title
@@ -931,6 +1076,20 @@ export function ArtifactPanel({
           </div>
         )}
         <div className={styles.headerActions}>
+          {explainTask && onExplainTask && (
+            <button
+              type="button"
+              className={styles.iconButton}
+              aria-label={t('tasks.explain.aria', {
+                label: explainDisplayLabel(explainTask.label),
+              })}
+              title={t('tasks.explain.tooltip')}
+              data-testid="artifact-panel-explain"
+              onClick={() => onExplainTask(explainTask)}
+            >
+              <CircleHelpIcon className={styles.toolbarIcon} aria-hidden />
+            </button>
+          )}
           {showAddMenu && (
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
@@ -963,9 +1122,20 @@ export function ArtifactPanel({
                     </span>
                   </DropdownMenuItem>
                 )}
-                {showReviewMenuItem && showSideTaskMenuItems && (
-                  <DropdownMenuSeparator />
+                {showChangeOverviewMenuItem && (
+                  <DropdownMenuItem onSelect={onOpenChangeOverview}>
+                    <FileDiffIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('changeOverview.title')}
+                    </span>
+                  </DropdownMenuItem>
                 )}
+                {(showReviewMenuItem || showChangeOverviewMenuItem) &&
+                  showSideTaskMenuItems && <DropdownMenuSeparator />}
                 {showSideTaskMenuItems && (
                   <DropdownMenuItem
                     disabled={sideTasksLoading}
@@ -1052,6 +1222,24 @@ export function ArtifactPanel({
           </button>
         </div>
       </div>
+      {(fullscreen || variant === 'drawer') && <DaemonConnectionBanner />}
+      {taskExplanation &&
+        explainTask &&
+        taskExplanation.taskId === explainTask.id && (
+          <div
+            className={styles.explainBlock}
+            data-testid="artifact-panel-explanation"
+          >
+            <BtwMessage
+              key={taskExplanation.messageId}
+              question={taskExplanation.question}
+              answer={taskExplanation.answer}
+              isPending={taskExplanation.isPending}
+              hidePrefix
+              hideShortcuts
+            />
+          </div>
+        )}
       <div
         className={`${styles.body} ${
           activeTab?.kind === 'side_task' || activeTab?.kind === 'files'
@@ -1201,10 +1389,32 @@ export function ArtifactPanel({
                 />
               </button>
             )}
+            {showChangeOverviewMenuItem && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                onClick={onOpenChangeOverview}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <FileDiffIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('changeOverview.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('changeOverview.description')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
             {items.includes('sideTask') &&
               sideTaskAvailable &&
               onCreateSideTask &&
-              (sideTasks.length === 0 ? (
+              (sideTasks.length === 0 && archivedSideTasks.length === 0 ? (
                 <button
                   type="button"
                   className={styles.emptyAction}
@@ -1266,22 +1476,115 @@ export function ArtifactPanel({
                     onMouseEnter={openSideTaskMenu}
                     onMouseLeave={scheduleSideTaskMenuClose}
                   >
-                    {sideTasks.map((sideTask) => (
-                      <DropdownMenuItem
-                        key={sideTask.sessionId}
-                        onSelect={() => onOpenSideTask?.(sideTask)}
-                      >
-                        <span className={styles.sideTaskListTitle}>
-                          {sideTask.title}
-                        </span>
-                        {sideTask.updatedAt && (
-                          <span className={styles.sideTaskListTime}>
-                            {formatRelativeTime(sideTask.updatedAt, t)}
+                    {sideTasks.map((sideTask) => {
+                      const content = (
+                        <>
+                          <span className={styles.sideTaskListTitle}>
+                            {sideTask.title}
                           </span>
-                        )}
+                          {sideTask.updatedAt && (
+                            <span className={styles.sideTaskListTime}>
+                              {formatRelativeTime(sideTask.updatedAt, t)}
+                            </span>
+                          )}
+                        </>
+                      );
+                      if (!onArchiveSideTasks) {
+                        return (
+                          <DropdownMenuItem
+                            key={sideTask.sessionId}
+                            onSelect={() => onOpenSideTask?.(sideTask)}
+                          >
+                            {content}
+                          </DropdownMenuItem>
+                        );
+                      }
+                      return (
+                        <DropdownMenuSub key={sideTask.sessionId}>
+                          <DropdownMenuSubTrigger>
+                            {content}
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent
+                            onMouseEnter={openSideTaskMenu}
+                            onMouseLeave={scheduleSideTaskMenuClose}
+                          >
+                            <DropdownMenuItem
+                              onSelect={() => onOpenSideTask?.(sideTask)}
+                            >
+                              <EyeIcon />
+                              {t('common.open')}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={sideTask.archivable !== true}
+                              title={
+                                sideTask.archivable === true
+                                  ? undefined
+                                  : t('sideTask.archiveUnavailable')
+                              }
+                              onSelect={() => {
+                                void onArchiveSideTasks([sideTask]);
+                              }}
+                            >
+                              <ArchiveIcon />
+                              {t('sidebar.archive')}
+                            </DropdownMenuItem>
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                      );
+                    })}
+                    {onArchiveSideTasks && sideTasks.length > 0 && (
+                      <DropdownMenuSeparator />
+                    )}
+                    {onArchiveSideTasks && sideTasks.length > 0 && (
+                      <DropdownMenuItem
+                        disabled={!hasArchivableSideTasks}
+                        onSelect={() => {
+                          void onArchiveSideTasks(sideTasks);
+                        }}
+                      >
+                        <ArchiveIcon />
+                        <span className={styles.sideTaskListTitle}>
+                          {t('sideTask.archiveCompleted')}
+                        </span>
                       </DropdownMenuItem>
-                    ))}
-                    <DropdownMenuSeparator />
+                    )}
+                    {onUnarchiveSideTasks && archivedSideTasks.length > 0 && (
+                      <>
+                        {sideTasks.length > 0 && <DropdownMenuSeparator />}
+                        <DropdownMenuSub>
+                          <DropdownMenuSubTrigger>
+                            <ArchiveRestoreIcon />
+                            <span className={styles.sideTaskListTitle}>
+                              {t('sidebar.archivedTitle')} (
+                              {archivedSideTasks.length})
+                            </span>
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent
+                            className="max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto"
+                            onMouseEnter={openSideTaskMenu}
+                            onMouseLeave={scheduleSideTaskMenuClose}
+                          >
+                            {archivedSideTasks.map((sideTask) => (
+                              <DropdownMenuItem
+                                key={sideTask.sessionId}
+                                onSelect={() => {
+                                  void onUnarchiveSideTasks([sideTask]);
+                                }}
+                              >
+                                <ArchiveRestoreIcon />
+                                <span className={styles.sideTaskListTitle}>
+                                  {sideTask.title}
+                                </span>
+                                <span className={styles.sideTaskListTime}>
+                                  {t('sidebar.unarchive')}
+                                </span>
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                      </>
+                    )}
+                    {sideTasks.length > 0 && <DropdownMenuSeparator />}
                     <DropdownMenuItem onSelect={onCreateSideTask}>
                       <CirclePlusIcon
                         className={styles.sideTaskNewIcon}
@@ -1385,6 +1688,10 @@ export function ArtifactPanel({
         ) : isWorkspaceScopedTab(activeTab) &&
           (activeTab.kind !== 'scheduled_task' || activeTab.task.durable) &&
           (activeTab.kind !== 'file' || !activeTab.previewOnly) &&
+          (activeTab.kind !== 'review' ||
+            !(activeTab.changes ?? reviewChanges).some(
+              (change) => change.diffs.length > 0,
+            )) &&
           (activeTab.kind !== 'artifact' ||
             activeTabArtifact?.metadata?.['artifactType'] !==
               'web_preview_snapshot') &&
@@ -1397,20 +1704,26 @@ export function ArtifactPanel({
             changes={activeTab.changes ?? reviewChanges}
             selectedPath={activeTab.selectedPath ?? selectedReviewPath}
             workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
-            onOpenFilePreview={(change) =>
-              onOpenFilePreview(
-                change,
-                activeTab.workspaceCwd ?? workspaceCwd,
-                activeTab.workspaceId,
-              )
+            onOpenFilePreview={
+              activeWorkspaceActions
+                ? (change) =>
+                    onOpenFilePreview(
+                      change,
+                      activeTab.workspaceCwd ?? workspaceCwd,
+                      activeTab.workspaceId,
+                    )
+                : undefined
             }
-            onDownloadFile={(change, isCancelled) =>
-              downloadWorkspaceFile(
-                activeWorkspaceActions!,
-                change.path,
-                getReviewDownloadMimeType(change.path),
-                isCancelled,
-              )
+            onDownloadFile={
+              activeWorkspaceActions
+                ? (change, isCancelled) =>
+                    downloadWorkspaceFile(
+                      activeWorkspaceActions,
+                      change.path,
+                      getReviewDownloadMimeType(change.path),
+                      isCancelled,
+                    )
+                : undefined
             }
             onDownloadError={(downloadError) => {
               const message = t('common.downloadFailed', {
@@ -1435,13 +1748,18 @@ export function ArtifactPanel({
             </div>
           ) : activeTab.sourcePreview &&
             activeTab.previewData &&
+            !isDocxFile(
+              activeTab.workspacePath,
+              activeTab.previewMimeType || activeTab.previewData.type,
+            ) &&
             !isExcelFile(
               activeTab.workspacePath,
               activeTab.previewMimeType || activeTab.previewData.type,
             ) &&
-            normalizeArtifactMimeType(
-              activeTab.previewMimeType || activeTab.previewData.type,
-            ) !== 'application/pdf' &&
+            !isPdfArtifact({
+              workspacePath: activeTab.workspacePath,
+              mimeType: activeTab.previewMimeType || activeTab.previewData.type,
+            }) &&
             !normalizeTextMediaType(
               activeTab.previewMimeType || activeTab.previewData.type,
               activeTab.workspacePath,
@@ -1510,6 +1828,18 @@ export function ArtifactPanel({
             task={activeTab.task}
             actions={activeTab.sessionActions}
           />
+        ) : activeTab.kind === 'session' ? (
+          <SessionPanel
+            key={activeTab.id}
+            tabId={activeTab.id}
+            sessionId={activeTab.sessionId}
+            workspaceCwd={activeTab.workspaceCwd}
+            title={activeTab.title}
+            onRightPanelOpen={onNestedRightPanelOpen}
+            onArtifactsChange={onNestedArtifactsChange}
+            onError={onError}
+            onImageIngestionNotice={onImageIngestionNotice}
+          />
         ) : activeTab.kind === 'side_task' ? (
           <SideTaskPanel
             key={activeTab.id}
@@ -1531,6 +1861,8 @@ export function ArtifactPanel({
             onError={onError}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             modelManagement={modelManagement}
+            unavailableModels={unavailableModels}
+            mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : activeTab.kind === 'image' ? (
@@ -1565,6 +1897,7 @@ export function ArtifactPanel({
             controls={contextUsageControls?.[activeTab.sessionId]}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
+            onOpenMemoryFile={onOpenMemoryFile}
           />
         ) : activeTab.kind === 'trajectory' ? (
           <TrajectoryPanel
@@ -1576,6 +1909,19 @@ export function ArtifactPanel({
           <TokenUsagePanel
             key={activeTab.id}
             sessionActions={activeTab.sessionActions}
+            sessionId={activeTab.sessionId}
+          />
+        ) : activeTab.kind === 'artifacts' ? (
+          <ArtifactsListPanel
+            key={activeTab.id}
+            artifacts={sessionArtifacts ?? artifacts}
+            loading={loading}
+            onOpenArtifact={onOpenArtifact}
+          />
+        ) : activeTab.kind === 'change_overview' ? (
+          <ChangeOverviewPanel
+            key={activeTab.id}
+            workspaceCwd={activeTab.workspaceCwd}
             sessionId={activeTab.sessionId}
           />
         ) : activeTab.kind === 'turn_calls' ? (
@@ -2357,8 +2703,8 @@ function ReviewChanges({
   changes: readonly TurnOutputFileChange[];
   selectedPath: string | null;
   workspaceCwd?: string;
-  onOpenFilePreview: (change: TurnOutputFileChange) => void;
-  onDownloadFile: (
+  onOpenFilePreview?: (change: TurnOutputFileChange) => void;
+  onDownloadFile?: (
     change: TurnOutputFileChange,
     isCancelled: () => boolean,
   ) => Promise<void>;
@@ -2480,7 +2826,7 @@ function ReviewChanges({
     setExpandedPath((current) => (current === path ? null : path));
   };
   const downloadFile = async (change: TurnOutputFileChange) => {
-    if (downloadingPaths.has(change.path)) return;
+    if (!onDownloadFile || downloadingPaths.has(change.path)) return;
     setDownloadingPaths((current) => new Set(current).add(change.path));
     try {
       await onDownloadFile(change, () => !mountedRef.current);
@@ -2578,8 +2924,10 @@ function ReviewChanges({
           >
             {changes.map((change) => {
               const isExpanded = expandedPath === change.path;
-              const canOpenPreview = isRenderedFilePath(change.path);
-              const canDownload = isDownloadableReviewFilePath(change.path);
+              const canOpenPreview =
+                onOpenFilePreview && isRenderedFilePath(change.path);
+              const canDownload =
+                onDownloadFile && isDownloadableReviewFilePath(change.path);
               return (
                 <div
                   key={`${change.toolCallId}:${change.path}`}
@@ -2613,7 +2961,7 @@ function ReviewChanges({
                         <button
                           type="button"
                           className={styles.reviewOpenButton}
-                          onClick={() => onOpenFilePreview(change)}
+                          onClick={() => onOpenFilePreview?.(change)}
                           title={`${t('turnOutputs.preview')} ${change.path}`}
                         >
                           {t('turnOutputs.preview')}
@@ -3138,31 +3486,35 @@ function fileExtensionLabel(value: string) {
   return labels[extension] ?? extension.slice(0, 3).toUpperCase();
 }
 
-function ArtifactDetail({
+export function ArtifactDetail({
   artifact,
   sourceSessionId,
   workspaceActions,
   previewContent,
+  onSnapshotSessionNotFound,
 }: {
   artifact: DaemonSessionArtifact;
   sourceSessionId?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
+  onSnapshotSessionNotFound?: () => void;
 }) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
   const location = getArtifactLocation(artifact);
   const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
-  const isAutomationSnapshot =
-    artifact.metadata?.['artifactType'] === 'automation_snapshot';
-  const isCodeReview = artifact.metadata?.['artifactType'] === 'code_review';
-  const canPreviewWorkspaceFile =
-    artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
+  const isAutomationSnapshot = isAutomationSnapshotArtifact(artifact);
+  const isCodeReview = isCodeReviewArtifact(artifact);
+  const canPreviewWorkspaceFile = canPreviewWorkspaceArtifact(artifact);
   const imageMimeType = getArtifactImageMimeType(artifact);
 
-  if (artifact.metadata?.['artifactType'] === 'web_preview_snapshot') {
+  if (isWebPreviewSnapshotArtifact(artifact)) {
     return (
-      <SavedWebPreview artifact={artifact} sourceSessionId={sourceSessionId} />
+      <SavedWebPreview
+        artifact={artifact}
+        sourceSessionId={sourceSessionId}
+        onSessionNotFound={onSnapshotSessionNotFound}
+      />
     );
   }
 
@@ -3185,7 +3537,9 @@ function ArtifactDetail({
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
     if (
       isDownloadOnlyWorkspaceArtifact(artifact) ||
-      (isExcelFile(artifact.workspacePath, artifact.mimeType) &&
+      ((isDocxFile(artifact.workspacePath, artifact.mimeType) ||
+        isExcelFile(artifact.workspacePath, artifact.mimeType) ||
+        isPdfArtifact(artifact)) &&
         artifact.status !== 'available' &&
         artifact.status !== 'changed')
     ) {
@@ -3203,7 +3557,9 @@ function ArtifactDetail({
         workspaceActions={workspaceActions}
         previewContent={previewContent}
         previewSizeBytes={artifact.sizeBytes}
-        previewMimeType={artifact.mimeType}
+        previewMimeType={
+          isPdfArtifact(artifact) ? 'application/pdf' : artifact.mimeType
+        }
         imageMimeType={imageMimeType}
         previewKind={
           isHtmlArtifact(artifact)
@@ -3448,53 +3804,54 @@ function SourceDetail({
       : locator.type === 'attachment'
         ? locator.attachmentId
         : '';
-  const isPdf = /\.pdf$/i.test(path);
+  const isPdf = isPdfArtifact({ workspacePath: path });
+  const owner = tab.owner;
+  const handlePreviewError = useCallback(
+    (error: string) => {
+      if (owner.isCurrent()) setError(error);
+    },
+    [owner],
+  );
+  const previewWorkspaceActions = useMemo(() => {
+    if (!workspaceActions || !isPdf || locator.type !== 'workspace_file')
+      return workspaceActions;
+    const readWithOwner = async <T,>(read: () => Promise<T>): Promise<T> => {
+      if (!owner.isCurrent()) throw new Error(t('sources.unavailable'));
+      const result = await read();
+      if (!owner.isCurrent()) throw new Error(t('sources.unavailable'));
+      return result;
+    };
+    return {
+      ...workspaceActions,
+      stat: (path: string) => readWithOwner(() => workspaceActions.stat(path)),
+      readFileBytes: (
+        ...args: Parameters<ArtifactWorkspaceActions['readFileBytes']>
+      ) => readWithOwner(() => workspaceActions.readFileBytes(...args)),
+    };
+  }, [workspaceActions, isPdf, locator.type, owner, t]);
   useEffect(() => {
     let cancelled = false;
     setData(undefined);
     setError(undefined);
     setDownloadUrl(undefined);
-    if (!valid || locator.type === 'url') return;
+    if (!valid || locator.type !== 'attachment') return;
     const load = async () => {
-      if (locator.type === 'attachment') {
-        const attachment = await tab.sessionActions.readAttachment(
-          locator.attachmentId,
-        );
-        if (cancelled || !tab.owner.isCurrent()) return;
-        const bytes = Uint8Array.from(atob(attachment.data), (character) =>
-          character.charCodeAt(0),
-        );
-        setData(new Blob([bytes], { type: attachment.mimeType }));
-      } else if (isPdf && workspaceActions) {
-        const blob = await readWorkspaceFileAsBlob(
-          workspaceActions.readFileBytes,
-          path,
-          'application/pdf',
-          {
-            statFile: workspaceActions.stat,
-            isCancelled: () => cancelled || !tab.owner.isCurrent(),
-          },
-        );
-        if (!cancelled && tab.owner.isCurrent()) setData(blob);
-      }
+      const attachment = await tab.sessionActions.readAttachment(
+        locator.attachmentId,
+      );
+      if (cancelled || !owner.isCurrent()) return;
+      const bytes = Uint8Array.from(atob(attachment.data), (character) =>
+        character.charCodeAt(0),
+      );
+      setData(new Blob([bytes], { type: attachment.mimeType }));
     };
     void load().catch((err: unknown) => {
-      if (!cancelled && tab.owner.isCurrent())
-        setError(extractErrorDetail(err));
+      if (!cancelled && owner.isCurrent()) setError(extractErrorDetail(err));
     });
     return () => {
       cancelled = true;
     };
-  }, [
-    attempt,
-    valid,
-    locator,
-    path,
-    isPdf,
-    tab.owner,
-    tab.sessionActions,
-    workspaceActions,
-  ]);
+  }, [attempt, valid, locator, owner, tab.sessionActions]);
   if (valid && locator.type === 'url')
     return (
       <div className="flex flex-col gap-3 p-4">
@@ -3576,13 +3933,14 @@ function SourceDetail({
             {t('common.download')}
           </Button>
         </div>
-      ) : (locator.type === 'attachment' || isPdf) && !data ? (
+      ) : locator.type === 'attachment' && !data ? (
         <div className={styles.empty} role="status">
           {t('common.loading')}
         </div>
       ) : data &&
+        !isDocxFile(path, data.type) &&
         !isExcelFile(path, data.type) &&
-        data.type !== 'application/pdf' &&
+        !isPdfArtifact({ workspacePath: path, mimeType: data.type }) &&
         !normalizeTextMediaType(data.type, path) ? (
         <SourceBlobPreview
           data={data}
@@ -3599,10 +3957,13 @@ function SourceDetail({
           <WorkspaceFilePreview
             key={attempt}
             workspacePath={path}
-            workspaceActions={workspaceActions!}
-            onLoadError={setError}
+            workspaceActions={previewWorkspaceActions!}
+            onLoadError={handlePreviewError}
             previewData={data}
             previewOnly={locator.type === 'attachment'}
+            downloadName={
+              locator.type === 'attachment' ? source.title : undefined
+            }
             previewMimeType={data?.type}
             previewKind={
               /\.html?$/i.test(path) ||
@@ -3670,8 +4031,10 @@ function WorkspaceFilePreview({
   previewOnly,
   onLoadError,
   sourceRenderer,
+  downloadName,
 }: {
   sourceRenderer?: (content: string) => ReactNode;
+  downloadName?: string;
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
@@ -3685,6 +4048,17 @@ function WorkspaceFilePreview({
   onLoadError?: (error: string) => void;
 }) {
   const { t } = useI18n();
+  if (isDocxFile(workspacePath, previewMimeType || previewData?.type)) {
+    return (
+      <DocxPreview
+        workspacePath={workspacePath}
+        workspaceActions={workspaceActions}
+        data={previewData}
+        artifactVersion={artifactVersion}
+        downloadName={downloadName}
+      />
+    );
+  }
   if (isExcelFile(workspacePath, previewMimeType || previewData?.type)) {
     return (
       <ErrorBoundary
@@ -3745,6 +4119,16 @@ function WorkspaceFilePreview({
         data={previewData}
         mimeType={previewMimeType}
         previewKind={previewKind}
+        onLoadError={onLoadError}
+      />
+    );
+  }
+  if (isPdfArtifact({ workspacePath, mimeType: previewMimeType })) {
+    return (
+      <WorkspacePdfPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
         onLoadError={onLoadError}
       />
     );
@@ -3830,11 +4214,11 @@ function AttachmentBlobPreview({
     .split(';', 1)[0]!
     .trim()
     .toLowerCase();
-  if (resolvedMimeType === 'application/pdf') {
+  if (isPdfArtifact({ workspacePath, mimeType: resolvedMimeType })) {
     return (
       <PdfAttachmentPreview
         data={data}
-        mimeType={resolvedMimeType}
+        mimeType="application/pdf"
         title={workspacePath}
       />
     );
@@ -3906,6 +4290,127 @@ function TextAttachmentPreview({
   );
 }
 
+function WorkspacePdfPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  onLoadError,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  onLoadError?: (error: string) => void;
+}) {
+  const { t } = useI18n();
+  const [attempt, setAttempt] = useState(0);
+  const request = useMemo(
+    () => ({ workspacePath, workspaceActions, artifactVersion, attempt }),
+    [workspacePath, workspaceActions, artifactVersion, attempt],
+  );
+  const [fullPreviewRequest, setFullPreviewRequest] =
+    useState<typeof request>();
+  const [result, setResult] = useState<
+    { request: typeof request } & (
+      | { kind: 'range'; initialStat: DaemonFileStat }
+      | { kind: 'native'; data: Blob }
+      | { kind: 'error'; message: string }
+    )
+  >();
+  const fullPreviewRequested = fullPreviewRequest === request;
+  useEffect(() => {
+    let cancelled = false;
+    setResult(undefined);
+    const { workspacePath, workspaceActions } = request;
+    const load = async () => {
+      const initialStat = await workspaceActions.stat(workspacePath);
+      if (cancelled) return;
+      if (
+        !fullPreviewRequested &&
+        initialStat.type === 'file' &&
+        initialStat.sizeBytes >= MIN_PDF_RANGE_PREVIEW_BYTES &&
+        initialStat.sizeBytes <= MAX_WORKSPACE_FILE_BLOB_BYTES
+      ) {
+        setResult({ request, kind: 'range', initialStat });
+        return;
+      }
+      const data = await readWorkspaceFileAsBlob(
+        workspaceActions.readFileBytes,
+        workspacePath,
+        'application/pdf',
+        {
+          statFile: workspaceActions.stat,
+          initialStat,
+          isCancelled: () => cancelled,
+        },
+      );
+      if (!cancelled) setResult({ request, kind: 'native', data });
+    };
+    void load().catch((err: unknown) => {
+      if (cancelled) return;
+      const message = extractErrorDetail(err);
+      setResult({ request, kind: 'error', message });
+      onLoadError?.(message);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [request, fullPreviewRequested, onLoadError]);
+  const preview = result?.request === request ? result : undefined;
+  if (preview?.kind === 'error') {
+    return (
+      <div className={styles.empty}>
+        <div role="alert" className={styles.previewError}>
+          {preview.message}
+        </div>
+        <Button onClick={() => setAttempt((value) => value + 1)}>
+          {t('common.retry')}
+        </Button>
+      </div>
+    );
+  }
+  const loading = (
+    <div className={styles.empty} role="status">
+      {t('attachment.loadingPreview')}
+    </div>
+  );
+  if (preview?.kind === 'range' && !fullPreviewRequested) {
+    const openFull = () => setFullPreviewRequest(request);
+    return (
+      <ErrorBoundary
+        label="workspace PDF preview"
+        fallback={(error) => (
+          <div className={styles.empty}>
+            <div role="alert" className={styles.previewError}>
+              {t('artifact.previewFailed', {
+                message: extractErrorDetail(error),
+              })}
+            </div>
+            <Button onClick={openFull}>{t('pdf.openFull')}</Button>
+          </div>
+        )}
+      >
+        <Suspense fallback={loading}>
+          <WorkspacePdfRangePreview
+            workspacePath={workspacePath}
+            workspaceActions={workspaceActions}
+            initialStat={preview.initialStat}
+            onOpenFull={openFull}
+          />
+        </Suspense>
+      </ErrorBoundary>
+    );
+  }
+  return preview?.kind === 'native' ? (
+    <PdfAttachmentPreview
+      data={preview.data}
+      mimeType="application/pdf"
+      title={workspacePath}
+    />
+  ) : (
+    loading
+  );
+}
+
 function PdfAttachmentPreview({
   data,
   mimeType,
@@ -3925,11 +4430,29 @@ function PdfAttachmentPreview({
     return () => URL.revokeObjectURL(objectUrl);
   }, [data, mimeType]);
   return src ? (
-    <iframe
-      className={styles.pdfAttachmentPreview}
-      src={src}
-      title={`Preview ${title}`}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex justify-end border-b border-border p-1">
+        <Button variant="ghost" size="sm" asChild>
+          <a
+            href={src}
+            download={fileName(title)}
+            aria-label={`Download ${fileName(title)}`}
+          >
+            <DownloadIcon aria-hidden="true" />
+            {t('common.download')}
+          </a>
+        </Button>
+      </div>
+      {navigator.pdfViewerEnabled === false ? (
+        <div className={styles.empty}>{t('attachment.previewUnsupported')}</div>
+      ) : (
+        <iframe
+          className={`${styles.pdfAttachmentPreview} min-h-0 flex-1`}
+          src={src}
+          title={`Preview ${title}`}
+        />
+      )}
+    </div>
   ) : (
     <div className={styles.empty}>{t('attachment.loadingPreview')}</div>
   );

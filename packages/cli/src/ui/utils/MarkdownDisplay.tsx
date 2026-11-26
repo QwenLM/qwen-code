@@ -17,12 +17,13 @@ import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
 import { parseCodeFenceInfo } from './markdown-utilities.js';
+import { parseInkMarkdownBlocks } from './ink-markdown-blocks.js';
 import {
   fitPendingSlice,
   splitMarkdownTableRow,
-  TABLE_ROW_RE,
   TABLE_SEPARATOR_RE,
   CODE_FENCE_RE,
+  isClosingCodeFence,
 } from './pending-rendered-height.js';
 // Minimum content lines to keep in a clipped live preview (own constant — not
 // coupled to MaxSizedBox's floor).
@@ -43,6 +44,9 @@ interface MarkdownDisplayProps {
   contentWidth: number;
   textColor?: string;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  /** Original Markdown when the row displays a rewrite. */
+  sourceCopyText?: string;
+  showSourceCopyHints?: boolean;
   /**
    * When true, enforce the rendered-height budget from `availableTerminalHeight`
    * even for non-pending content. Normally the height-aware pre-slice
@@ -69,26 +73,43 @@ export interface MarkdownSourceBlockCounts {
   mathBlockCount: number;
 }
 
+type SourceCopyKind = 'mermaid' | 'latex';
+type OriginalCopyHint = (
+  kind: SourceCopyKind,
+  content: string[],
+) => string | undefined;
+
 export function countMarkdownSourceBlocks(
   text: string,
+  onCopyableBlock?: (
+    kind: SourceCopyKind,
+    source: string,
+    index: number,
+  ) => void,
 ): MarkdownSourceBlockCounts {
   const codeBlockLanguageCounts = new Map<string, number>();
   const lines = text.split(/\r?\n/);
   const codeFenceRegex = CODE_FENCE_RE;
   const mathFenceRegex = /^ *\$\$ *$/;
   let activeCodeFence: string | null = null;
+  let codeLanguage: string | undefined;
   let inMathBlock = false;
   let mathBlockCount = 0;
+  let sourceStart = 0;
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
     const codeFenceMatch = line.match(codeFenceRegex);
     if (activeCodeFence) {
-      if (
-        codeFenceMatch &&
-        codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
-        codeFenceMatch[1].length >= activeCodeFence.length
-      ) {
+      if (isClosingCodeFence(codeFenceMatch, activeCodeFence)) {
         activeCodeFence = null;
+        if (codeLanguage === 'mermaid') {
+          onCopyableBlock?.(
+            'mermaid',
+            lines.slice(sourceStart, index).join('\n'),
+            codeBlockLanguageCounts.get(codeLanguage)!,
+          );
+        }
       }
       continue;
     }
@@ -96,17 +117,23 @@ export function countMarkdownSourceBlocks(
     if (inMathBlock) {
       if (mathFenceRegex.test(line)) {
         inMathBlock = false;
+        onCopyableBlock?.(
+          'latex',
+          lines.slice(sourceStart, index).join('\n'),
+          mathBlockCount,
+        );
       }
       continue;
     }
 
     if (codeFenceMatch) {
       activeCodeFence = codeFenceMatch[1];
-      const lang = parseCodeFenceInfo(codeFenceMatch[2]).lang?.toLowerCase();
-      if (lang) {
+      sourceStart = index + 1;
+      codeLanguage = parseCodeFenceInfo(codeFenceMatch[2]).lang?.toLowerCase();
+      if (codeLanguage) {
         codeBlockLanguageCounts.set(
-          lang,
-          (codeBlockLanguageCounts.get(lang) ?? 0) + 1,
+          codeLanguage,
+          (codeBlockLanguageCounts.get(codeLanguage) ?? 0) + 1,
         );
       }
       continue;
@@ -114,11 +141,37 @@ export function countMarkdownSourceBlocks(
 
     if (mathFenceRegex.test(line)) {
       inMathBlock = true;
+      sourceStart = index + 1;
       mathBlockCount += 1;
     }
   }
 
   return { codeBlockLanguageCounts, mathBlockCount };
+}
+
+function originalCopyHint(
+  text: string,
+  offsets: MarkdownSourceCopyIndexOffsets | undefined,
+): OriginalCopyHint {
+  const hints = {
+    mermaid: new Map<string, string | undefined>(),
+    latex: new Map<string, string | undefined>(),
+  };
+  countMarkdownSourceBlocks(text, (kind, source, index) => {
+    const offset =
+      kind === 'mermaid'
+        ? offsets?.codeBlockLanguageCounts.get(kind)
+        : offsets?.mathBlockCount;
+    const bySource = hints[kind];
+    // A repeated source does not identify a unique position in the reply.
+    bySource.set(
+      source,
+      bySource.has(source)
+        ? undefined
+        : `/copy ${kind} ${index + (offset ?? 0)}`,
+    );
+  });
+  return (kind, content) => hints[kind].get(content.join('\n'));
 }
 
 // Constants for Markdown parsing and rendering
@@ -137,9 +190,17 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   contentWidth,
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
+  sourceCopyText,
+  showSourceCopyHints = true,
   enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
+  const copyHint = React.useMemo(() => {
+    if (!showSourceCopyHints) return () => undefined;
+    return sourceCopyText === undefined
+      ? undefined
+      : originalCopyHint(sourceCopyText, sourceCopyIndexOffsets);
+  }, [showSourceCopyHints, sourceCopyText, sourceCopyIndexOffsets]);
   if (!text) return <></>;
 
   const renderVisualBlocks = renderMode === 'render';
@@ -177,16 +238,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     (isPending || enforceHeightBudget) && availableTerminalHeight !== undefined
       ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
       : undefined;
-  const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = CODE_FENCE_RE;
-  const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
-  const olItemRegex = /^([ \t]*)(\d+)\. +(.*)/;
-  const hrRegex = /^ *([-*_] *){3,} *$/;
-  const blockquoteRegex = /^ *> ?(.*)$/;
   const mathFenceRegex = /^ *\$\$ *$/;
-  // Single source of truth for table detection (shared with pending-rendered-
-  // height.ts so the height estimator and the renderer never diverge).
-  const tableRowRegex = TABLE_ROW_RE;
   const tableSeparatorRegex = TABLE_SEPARATOR_RE;
 
   // Rendered-height-aware slice of the pending preview (shared with
@@ -251,11 +304,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         const line = lines[i]!;
         if (activeCodeFence) {
           const fenceMatch = line.match(codeFenceRegex);
-          if (
-            fenceMatch &&
-            fenceMatch[1]!.startsWith(activeCodeFence[0]!) &&
-            fenceMatch[1]!.length >= activeCodeFence.length
-          ) {
+          if (isClosingCodeFence(fenceMatch, activeCodeFence)) {
             activeCodeFence = '';
           }
           continue;
@@ -366,436 +415,161 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     }
   }
 
-  /** Parse column alignments from a markdown table separator like `|:---|:---:|---:|` */
-  const parseTableAligns = (line: string): ColumnAlign[] =>
-    splitMarkdownTableRow(line)
-      .filter((cell) => cell.length > 0)
-      .map((cell) => {
-        const startsWithColon = cell.startsWith(':');
-        const endsWithColon = cell.endsWith(':');
-        if (startsWithColon && endsWithColon) return 'center';
-        if (endsWithColon) return 'right';
-        return 'left';
-      });
-
   const contentBlocks: React.ReactNode[] = [];
-  let inCodeBlock = false;
-  let codeBlockIndex = 0;
-  let currentCodeBlockIndex = 0;
-  let currentCodeBlockLangIndex = 0;
-  // Gutter start line for the current block: >1 when it continues a block that
-  // streaming split across commits (see splitFencedMarkdown).
-  let currentCodeBlockStartLine = 1;
-  const codeBlockLanguageCounts = new Map<string, number>(
+  const codeBlockLanguageCounts = new Map(
     sourceCopyIndexOffsets?.codeBlockLanguageCounts,
   );
-  let lastLineEmpty = true;
-  let codeBlockContent: string[] = [];
-  let codeBlockLang: string | null = null;
-  let codeBlockFence = '';
-  let inMathBlock = false;
+  let codeBlockIndex = 0;
   let mathBlockIndex = sourceCopyIndexOffsets?.mathBlockCount ?? 0;
-  let currentMathBlockIndex = 0;
-  let mathBlockContent: string[] = [];
-  let inTable = false;
-  let tableRows: string[][] = [];
-  let tableHeaders: string[] = [];
-  let tableAligns: ColumnAlign[] = [];
+  let lastLineEmpty = true;
 
   function addContentBlock(block: React.ReactNode) {
-    if (block) {
-      contentBlocks.push(block);
-      lastLineEmpty = false;
-    }
+    contentBlocks.push(block);
+    lastLineEmpty = false;
   }
 
-  lines.forEach((line, index) => {
-    const key = `line-${index}`;
-
-    if (inCodeBlock) {
-      const fenceMatch = line.match(codeFenceRegex);
-      if (
-        fenceMatch &&
-        fenceMatch[1].startsWith(codeBlockFence[0]) &&
-        fenceMatch[1].length >= codeBlockFence.length
-      ) {
+  for (const block of parseInkMarkdownBlocks(
+    lines,
+    renderVisualBlocks,
+    isPending,
+  )) {
+    const atEnd = block.index === lines.length;
+    const key = `line-${block.index}`;
+    switch (block.kind) {
+      case 'code': {
+        const { lang, startLine } = parseCodeFenceInfo(block.info);
+        const normalizedLang = lang?.toLowerCase();
+        let languageIndex = 0;
+        if (normalizedLang) {
+          languageIndex =
+            (codeBlockLanguageCounts.get(normalizedLang) ?? 0) + 1;
+          codeBlockLanguageCounts.set(normalizedLang, languageIndex);
+        }
+        codeBlockIndex += 1;
         addContentBlock(
           <RenderCodeBlock
-            key={key}
-            content={codeBlockContent}
-            lang={codeBlockLang}
-            codeBlockIndex={currentCodeBlockIndex}
-            codeBlockLangIndex={currentCodeBlockLangIndex}
+            key={atEnd ? 'line-eof' : key}
+            content={block.content}
+            lang={lang}
+            codeBlockIndex={codeBlockIndex}
+            codeBlockLangIndex={languageIndex}
+            originalCopyHint={copyHint}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth}
-            startLineNumber={currentCodeBlockStartLine}
+            startLineNumber={startLine}
           />,
         );
-        inCodeBlock = false;
-        currentCodeBlockIndex = 0;
-        currentCodeBlockLangIndex = 0;
-        codeBlockContent = [];
-        codeBlockLang = null;
-        codeBlockFence = '';
-      } else {
-        codeBlockContent.push(line);
+        break;
       }
-      return;
-    }
-
-    if (inMathBlock) {
-      if (mathFenceRegex.test(line)) {
+      case 'math':
+        mathBlockIndex += 1;
         addContentBlock(
           <RenderMathBlock
-            key={key}
-            content={mathBlockContent}
-            sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
+            key={atEnd ? 'math-eof' : key}
+            content={block.content}
+            sourceCopyCommand={
+              copyHint
+                ? copyHint('latex', block.content)
+                : `/copy latex ${mathBlockIndex}`
+            }
             contentWidth={contentWidth}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
           />,
         );
-        inMathBlock = false;
-        currentMathBlockIndex = 0;
-        mathBlockContent = [];
-      } else {
-        mathBlockContent.push(line);
-      }
-      return;
-    }
-
-    const codeFenceMatch = line.match(codeFenceRegex);
-    const mathFenceMatch = line.match(mathFenceRegex);
-    const headerMatch = line.match(headerRegex);
-    const ulMatch = line.match(ulItemRegex);
-    const olMatch = line.match(olItemRegex);
-    const hrMatch = line.match(hrRegex);
-    const blockquoteMatch = line.match(blockquoteRegex);
-    const tableRowMatch = line.match(tableRowRegex);
-    const tableSeparatorMatch = line.match(tableSeparatorRegex);
-
-    if (codeFenceMatch) {
-      inCodeBlock = true;
-      codeBlockIndex += 1;
-      currentCodeBlockIndex = codeBlockIndex;
-      codeBlockFence = codeFenceMatch[1];
-      const fenceInfo = parseCodeFenceInfo(codeFenceMatch[2]);
-      codeBlockLang = fenceInfo.lang;
-      currentCodeBlockStartLine = fenceInfo.startLine;
-      if (codeBlockLang) {
-        const normalizedLang = codeBlockLang.toLowerCase();
-        const nextLangIndex =
-          (codeBlockLanguageCounts.get(normalizedLang) ?? 0) + 1;
-        codeBlockLanguageCounts.set(normalizedLang, nextLangIndex);
-        currentCodeBlockLangIndex = nextLangIndex;
-      } else {
-        currentCodeBlockLangIndex = 0;
-      }
-    } else if (mathFenceMatch && renderVisualBlocks) {
-      inMathBlock = true;
-      mathBlockIndex += 1;
-      currentMathBlockIndex = mathBlockIndex;
-      mathBlockContent = [];
-    } else if (tableRowMatch && !inTable && renderVisualBlocks) {
-      // Potential table start - check if next line is separator with matching column count
-      const potentialHeaders = splitMarkdownTableRow(tableRowMatch[1]);
-      const nextLine = index + 1 < lines.length ? lines[index + 1]! : '';
-      const sepMatch = nextLine.match(tableSeparatorRegex);
-      const sepColCount = sepMatch
-        ? splitMarkdownTableRow(nextLine).filter((c) => c.length > 0).length
-        : 0;
-
-      if (sepMatch && sepColCount === potentialHeaders.length) {
-        inTable = true;
-        tableHeaders = potentialHeaders;
-        tableRows = [];
-      } else {
-        // Not a table, treat as regular text
-        addContentBlock(
-          <Box key={key}>
-            <Text wrap="wrap">
-              <RenderInline
-                text={line}
-                textColor={textColor}
-                enableInlineMath={renderVisualBlocks}
-              />
-            </Text>
-          </Box>,
-        );
-      }
-    } else if (inTable && tableSeparatorMatch) {
-      // Parse alignment from separator line
-      tableAligns = parseTableAligns(line);
-    } else if (
-      isPending &&
-      inTable &&
-      index === lines.length - 1 &&
-      tableHeaders.length > 0 &&
-      /^\s*\|/.test(line) &&
-      (!tableRowMatch ||
-        splitMarkdownTableRow(tableRowMatch[1]).length < tableHeaders.length)
-    ) {
-      // Live streaming frontier: the final line is a row still being typed —
-      // either mid-cell (`| a | b` with no closing `|` yet) or closed but with
-      // fewer cells than the header (`| a |` while `| a | b | c |` is coming, an
-      // intermediate that itself matches the row regex). Both would otherwise
-      // render as a padded row that fills in cell by cell and flips as the
-      // closing `|`/columns arrive, jittering the frame. Hold the row back until
-      // it has all its columns: skip it so `inTable` stays set and the
-      // end-of-content handler renders only the COMPLETE rows as a live table.
-      // The whole row (border + all cells) then appears in one step. Guarded on
-      // `tableHeaders.length > 0` so the header + separator never blank out with
-      // a stray partial line beneath them while the first row is typed.
-    } else if (inTable && tableRowMatch) {
-      // Add table row
-      const cells = splitMarkdownTableRow(tableRowMatch[1]);
-      // Ensure row has same column count as headers
-      while (cells.length < tableHeaders.length) {
-        cells.push('');
-      }
-      if (cells.length > tableHeaders.length) {
-        cells.length = tableHeaders.length;
-      }
-      tableRows.push(cells);
-    } else if (inTable && !tableRowMatch) {
-      // End of table — a following line closes it, so this table is COMPLETE
-      // and renders in full (the rendered-aware slice guarantees a completed
-      // table that would overflow was cut before it; `maxHeight` clamps the
-      // residual wrapped-cell case).
-      if (tableHeaders.length > 0 && tableRows.length > 0) {
+        break;
+      case 'table':
         addContentBlock(
           <RenderTable
             key={`table-${contentBlocks.length}`}
-            headers={tableHeaders}
-            rows={tableRows}
+            headers={block.headers}
+            rows={block.rows}
+            aligns={block.aligns}
             contentWidth={contentWidth}
-            aligns={tableAligns}
             enableInlineMath={renderVisualBlocks}
             isPending={isPending}
-            // A following non-table line closed this table: it is COMPLETE and
-            // will gain no more rows, so it is not the streaming frontier. Decide
-            // its format from all rows (not just the first) so it does not flip
-            // horizontal→vertical when the message finally commits.
-            isFrontier={false}
+            isFrontier={block.frontier}
             availableTerminalHeight={availableTerminalHeight}
           />,
         );
-      }
-      inTable = false;
-      tableRows = [];
-      tableHeaders = [];
-      tableAligns = [];
-
-      // Process current line as normal
-      if (line.trim().length > 0) {
+        break;
+      case 'rule':
         addContentBlock(
           <Box key={key}>
-            <Text wrap="wrap">
+            <Text dimColor>---</Text>
+          </Box>,
+        );
+        break;
+      case 'quote':
+        addContentBlock(
+          <RenderBlockquote
+            key={key}
+            quoteText={block.text}
+            textColor={textColor}
+            enableInlineMath={renderVisualBlocks}
+          />,
+        );
+        break;
+      case 'heading':
+        addContentBlock(
+          <Box key={key}>
+            <Text
+              bold={block.level <= 3}
+              italic={block.level === 4}
+              color={textColor}
+            >
               <RenderInline
-                text={line}
+                text={block.text}
                 textColor={textColor}
                 enableInlineMath={renderVisualBlocks}
               />
             </Text>
           </Box>,
         );
-      }
-    } else if (hrMatch) {
-      addContentBlock(
-        <Box key={key}>
-          <Text dimColor>---</Text>
-        </Box>,
-      );
-    } else if (blockquoteMatch && renderVisualBlocks) {
-      addContentBlock(
-        <RenderBlockquote
-          key={key}
-          quoteText={blockquoteMatch[1]}
-          textColor={textColor}
-          enableInlineMath={renderVisualBlocks}
-        />,
-      );
-    } else if (headerMatch) {
-      const level = headerMatch[1].length;
-      const headerText = headerMatch[2];
-      let headerNode: React.ReactNode = null;
-      switch (level) {
-        case 1:
-          headerNode = (
-            <Text bold color={textColor}>
-              <RenderInline
-                text={headerText}
-                textColor={textColor}
-                enableInlineMath={renderVisualBlocks}
-              />
-            </Text>
-          );
+        break;
+      case 'list':
+        addContentBlock(
+          <RenderListItem
+            key={key}
+            itemText={block.text}
+            ordered={block.ordered}
+            marker={block.marker}
+            indentation={block.indentation}
+            checked={block.checked}
+            textColor={textColor}
+            renderVisualBlocks={renderVisualBlocks}
+          />,
+        );
+        break;
+      case 'text':
+        if (block.text.trim().length === 0) {
+          if (!lastLineEmpty) {
+            contentBlocks.push(
+              <Box key={`spacer-${block.index}`} height={EMPTY_LINE_HEIGHT} />,
+            );
+            lastLineEmpty = true;
+          }
           break;
-        case 2:
-          headerNode = (
-            <Text bold color={textColor}>
-              <RenderInline
-                text={headerText}
-                textColor={textColor}
-                enableInlineMath={renderVisualBlocks}
-              />
-            </Text>
-          );
-          break;
-        case 3:
-          headerNode = (
-            <Text bold color={textColor}>
-              <RenderInline
-                text={headerText}
-                textColor={textColor}
-                enableInlineMath={renderVisualBlocks}
-              />
-            </Text>
-          );
-          break;
-        case 4:
-          headerNode = (
-            <Text italic color={textColor}>
-              <RenderInline
-                text={headerText}
-                textColor={textColor}
-                enableInlineMath={renderVisualBlocks}
-              />
-            </Text>
-          );
-          break;
-        default:
-          headerNode = (
-            <Text color={textColor}>
-              <RenderInline
-                text={headerText}
-                textColor={textColor}
-                enableInlineMath={renderVisualBlocks}
-              />
-            </Text>
-          );
-          break;
-      }
-      if (headerNode) addContentBlock(<Box key={key}>{headerNode}</Box>);
-    } else if (ulMatch) {
-      const leadingWhitespace = ulMatch[1];
-      const marker = ulMatch[2];
-      const itemText = ulMatch[3];
-      addContentBlock(
-        <RenderListItem
-          key={key}
-          itemText={itemText}
-          type="ul"
-          marker={marker}
-          leadingWhitespace={leadingWhitespace}
-          textColor={textColor}
-          renderVisualBlocks={renderVisualBlocks}
-        />,
-      );
-    } else if (olMatch) {
-      const leadingWhitespace = olMatch[1];
-      const marker = olMatch[2];
-      const itemText = olMatch[3];
-      addContentBlock(
-        <RenderListItem
-          key={key}
-          itemText={itemText}
-          type="ol"
-          marker={marker}
-          leadingWhitespace={leadingWhitespace}
-          textColor={textColor}
-          renderVisualBlocks={renderVisualBlocks}
-        />,
-      );
-    } else {
-      if (line.trim().length === 0 && !inCodeBlock) {
-        if (!lastLineEmpty) {
-          contentBlocks.push(
-            <Box key={`spacer-${index}`} height={EMPTY_LINE_HEIGHT} />,
-          );
-          lastLineEmpty = true;
         }
-      } else {
         addContentBlock(
           <Box key={key}>
-            <Text wrap="wrap" color={textColor}>
+            <Text
+              wrap="wrap"
+              color={block.tableFallback ? undefined : textColor}
+            >
               <RenderInline
-                text={line}
+                text={block.text}
                 textColor={textColor}
                 enableInlineMath={renderVisualBlocks}
               />
             </Text>
           </Box>,
         );
-      }
+        break;
+      default:
+        block satisfies never;
     }
-  });
-
-  if (inCodeBlock) {
-    addContentBlock(
-      <RenderCodeBlock
-        key="line-eof"
-        content={codeBlockContent}
-        lang={codeBlockLang}
-        codeBlockIndex={currentCodeBlockIndex}
-        codeBlockLangIndex={currentCodeBlockLangIndex}
-        isPending={isPending}
-        availableTerminalHeight={availableTerminalHeight}
-        contentWidth={contentWidth}
-        startLineNumber={currentCodeBlockStartLine}
-      />,
-    );
-  }
-
-  if (inMathBlock) {
-    addContentBlock(
-      <RenderMathBlock
-        key="math-eof"
-        content={mathBlockContent}
-        sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
-        contentWidth={contentWidth}
-        isPending={isPending}
-        availableTerminalHeight={availableTerminalHeight}
-      />,
-    );
-  }
-
-  // Handle table at end of content — the table still being written. Draw it live
-  // (growing each tick); the `maxHeight` clamp caps it at the viewport and the
-  // slice above keeps preceding content within budget, so it can never overflow
-  // and lock the terminal. Renders in full once the message commits to <Static>
-  // (isPending=false → no clamp).
-  //
-  // While PENDING, defer a table that has no COMPLETE data row yet. A zero-row
-  // table can only render horizontally (the vertical fallback needs rows to lay
-  // out), so drawing the empty header box and then flipping to the vertical
-  // `label: value` format once a long first row lands is a visible format change
-  // — and the format genuinely cannot be known from the header alone (column
-  // names are short; the width comes from the values). Waiting for the first
-  // complete row means the table first appears ALREADY in its final format, with
-  // no flip. Cost: the table area stays blank while the header + first row stream
-  // (the pre-loop trim already hid the header text, so this just extends that
-  // blank until the first row terminates). The `tableRows.length > 0` guard also
-  // matches the mid-content end-of-table handler above, so a degenerate zero-row
-  // table renders (or not) the same whether it ends the message or is followed by
-  // more text — pending or committed.
-  if (inTable && tableHeaders.length > 0 && tableRows.length > 0) {
-    addContentBlock(
-      <RenderTable
-        key={`table-${contentBlocks.length}`}
-        headers={tableHeaders}
-        rows={tableRows}
-        contentWidth={contentWidth}
-        aligns={tableAligns}
-        enableInlineMath={renderVisualBlocks}
-        isPending={isPending}
-        // End of content: this table is at the streaming frontier and may still
-        // gain rows, so anchor its format to the first row while pending.
-        isFrontier={true}
-        availableTerminalHeight={availableTerminalHeight}
-      />,
-    );
   }
 
   // Safety-net clip: when the pending preview exceeds the rendered-height
@@ -831,6 +605,7 @@ interface RenderCodeBlockProps {
   lang: string | null;
   codeBlockIndex: number;
   codeBlockLangIndex: number;
+  originalCopyHint?: OriginalCopyHint;
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -844,6 +619,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   lang,
   codeBlockIndex,
   codeBlockLangIndex,
+  originalCopyHint,
   isPending,
   availableTerminalHeight,
   contentWidth,
@@ -873,7 +649,11 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     return (
       <MermaidDiagram
         source={content.join('\n')}
-        sourceCopyCommand={`/copy mermaid ${codeBlockLangIndex || codeBlockIndex}`}
+        sourceCopyCommand={
+          originalCopyHint
+            ? originalCopyHint('mermaid', content)
+            : `/copy mermaid ${codeBlockLangIndex || codeBlockIndex}`
+        }
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
@@ -976,7 +756,7 @@ const RenderPendingMermaidBlock = React.memo(RenderPendingMermaidBlockInternal);
 
 interface RenderMathBlockProps {
   content: string[];
-  sourceCopyCommand: string;
+  sourceCopyCommand?: string;
   contentWidth: number;
   isPending: boolean;
   availableTerminalHeight?: number;
@@ -989,6 +769,9 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
   isPending,
   availableTerminalHeight,
 }) => {
+  const title = sourceCopyCommand
+    ? `LaTeX block · source: ${sourceCopyCommand}`
+    : 'LaTeX block';
   // One row for the "LaTeX block · source:" header plus one row of headroom.
   // The third row used to hold a "... generating more ..." cue (removed with PR
   // #6170); reclaiming it shows an extra preview line at the same total height.
@@ -1008,7 +791,7 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
           flexShrink={0}
         >
           <Text bold color={theme.text.accent}>
-            LaTeX block · source: {sourceCopyCommand}
+            {title}
           </Text>
           {previewLines.map((line, index) => (
             <Text key={index} color={theme.text.secondary} wrap="truncate-end">
@@ -1029,7 +812,7 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
       flexShrink={0}
     >
       <Text bold color={theme.text.accent}>
-        LaTeX block · source: {sourceCopyCommand}
+        {title}
       </Text>
       <Text color={theme.text.accent} wrap="wrap">
         {rendered}
@@ -1069,32 +852,30 @@ const RenderBlockquote = React.memo(RenderBlockquoteInternal);
 
 interface RenderListItemProps {
   itemText: string;
-  type: 'ul' | 'ol';
+  ordered: boolean;
   marker: string;
-  leadingWhitespace?: string;
+  indentation: number;
+  checked?: boolean;
   textColor?: string;
   renderVisualBlocks?: boolean;
 }
 
 const RenderListItemInternal: React.FC<RenderListItemProps> = ({
   itemText,
-  type,
+  ordered,
   marker,
-  leadingWhitespace = '',
+  indentation,
+  checked,
   textColor = theme.text.primary,
   renderVisualBlocks = true,
 }) => {
-  const taskMatch = itemText.match(/^\[([ xX])\]\s+(.*)$/);
-  const isTaskItem = taskMatch !== null && renderVisualBlocks;
-  const isTaskChecked = taskMatch?.[1]?.toLowerCase() === 'x';
-  const effectiveItemText = isTaskItem ? taskMatch[2] : itemText;
-  const prefix = isTaskItem
-    ? `${isTaskChecked ? '✓' : ICON.CIRCLE_EMPTY} `
-    : type === 'ol'
-      ? `${marker}. `
-      : `${marker} `;
+  const prefix =
+    checked !== undefined
+      ? `${checked ? '✓' : ICON.CIRCLE_EMPTY} `
+      : ordered
+        ? `${marker}. `
+        : `${marker} `;
   const prefixWidth = stringWidth(prefix);
-  const indentation = leadingWhitespace.length;
 
   return (
     <Box
@@ -1107,7 +888,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
       <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
         <Text wrap="wrap" color={textColor}>
           <RenderInline
-            text={effectiveItemText}
+            text={itemText}
             textColor={textColor}
             enableInlineMath={renderVisualBlocks}
           />

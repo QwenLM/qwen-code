@@ -9,8 +9,12 @@ import type { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed
 import { randomUUID } from 'node:crypto';
 import { isChildNotificationSource } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
-import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
+import {
+  wakeHasPriorAttempt,
+  MonitorWakeTransientReadError,
+} from './hosted-monitor-wake.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { LOOP_INPUT_SOURCE } from './hosted-loop-session.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
@@ -22,7 +26,13 @@ import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-c
  * would silently consume every recovery exception while the wiring stays
  * green, which is exactly how the round-9 regression shipped.
  */
-export function monitorWakeNeedsRecovery(cause: unknown): boolean {
+export function monitorWakeNeedsRecovery(
+  cause: unknown,
+): cause is
+  | HostedToolRecoveryRequiredError
+  | HostedMcpRecoveryRequiredError
+  | HostedHookRecoveryRequiredError
+  | LlmRequestPreparationError {
   return (
     cause instanceof HostedToolRecoveryRequiredError ||
     cause instanceof HostedMcpRecoveryRequiredError ||
@@ -61,10 +71,23 @@ export function createMonitorWakeRunTurn(params: {
     text: string,
     abort: AbortController,
   ) => Promise<unknown>;
+  /** Commits a loop tick's expanded content once the turn delivered it, so an
+   * aborted tick cannot poison the resolver's full-vs-reminder cache. */
+  readonly markLoopDelivered?: () => void;
+  /** Fire-time sentinel expansion at delivery. Returns the text plus whether
+   * a sentinel was expanded (only then is the resolver cache committed), or
+   * null when a denied re-review settled the input (the loop ends). */
+  readonly expandLoopFire?: (
+    turnId: string,
+    text: string,
+  ) => Promise<{ text: string; expanded: boolean } | null>;
   readonly busy: () => boolean;
   /** A turn its source no longer runs (H4d-b: a stopped run's message),
    * re-read with the busy verdict right before the turn starts. */
   readonly held?: (turn: HostedMonitorWakeTurn) => boolean;
+  readonly cancelled?: (
+    turn: HostedMonitorWakeTurn,
+  ) => boolean | Promise<boolean>;
   /**
    * The recovery-required classification. It is injected because these
    * error classes must be matched by type — their
@@ -88,15 +111,100 @@ export function createMonitorWakeRunTurn(params: {
     turn: HostedMonitorWakeTurn,
     attempted: ChatRecord[],
   ) => Promise<'settled' | 'held' | 'busy' | false>;
+  /**
+   * A wake turn that died waiting for an approval its saved continuation can
+   * resume runs that continuation, as a parked prompt's takeover does,
+   * instead of settling as a crash. Resolves to the resumed run, or undefined
+   * when the turn has no such wait or its continuation is durably refused.
+   * Rejects only on a transient fault, which the pump retries.
+   */
+  readonly resumeInterrupted?: (
+    turn: HostedMonitorWakeTurn,
+  ) => Promise<((abort: AbortController) => Promise<unknown>) | undefined>;
   readonly writeStderr: (line: string) => void;
 }): (
   turn: HostedMonitorWakeTurn,
 ) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   const { session } = params;
+  // A settled turn burns the input either way, so the pump still advances —
+  // but only a completed one proves the child result was delivered to the
+  // model: anything cancelled or errored answers 'settled_incomplete', which
+  // the consumption gate refuses.
+  const settledAs = (turnResult: unknown) =>
+    (turnResult as { systemPayload?: Record<string, unknown> } | null)
+      ?.systemPayload?.['state'] === 'completed'
+      ? ('settled' as const)
+      : ('settled_incomplete' as const);
+  const failed = async (turnId: string, cause: unknown) => {
+    if (params.needsRecovery(cause)) {
+      // Something parked mid-turn: a later settle or takeover consumes
+      // the input, exactly like a parked prompt.
+      session.blocked = true;
+      params.writeStderr(
+        'qwen serve: Monitor wake turn ' +
+          turnId +
+          ' is recovery blocked: ' +
+          String(cause),
+      );
+      return 'recovery' as const;
+    }
+    try {
+      await session.managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: params.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        cwd: params.cwd,
+        version: 'hosted-harness/1',
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: turnId,
+          state: 'error',
+          stopReason: 'error',
+          endedAt: Date.now(),
+        },
+      } as ChatRecord);
+    } catch {
+      // The settle log is best-effort; the pump's caller decides what a
+      // lost journal write means.
+    }
+    throw cause;
+  };
   return async (turn) => {
     if (params.busy() || session.blocked) return 'busy';
     const attempted = await session.managed.sink.project();
     if (wakeHasPriorAttempt(attempted, turn.turnId)) {
+      let resume: ((abort: AbortController) => Promise<unknown>) | undefined;
+      let cancelled = false;
+      try {
+        resume = await params.resumeInterrupted?.(turn);
+        cancelled = !!resume && (await params.cancelled?.(turn)) === true;
+      } catch (cause) {
+        params.writeStderr(
+          'qwen serve: Interrupted wake turn ' +
+            turn.turnId +
+            ' could not read its approval continuation this pass; the next wake attempt reads it again: ' +
+            String(cause),
+        );
+        return 'busy';
+      }
+      if (resume) {
+        if (params.busy() || session.blocked) return 'busy';
+        const abort = new AbortController();
+        // A cancelled source resumes already aborted, as a cancelled
+        // prompt's takeover does: the wait ends cancelled and the
+        // checkpoint moves on, which the crash path cannot do.
+        if (cancelled) abort.abort();
+        session.active = { promptId: turn.turnId, digest: '', abort };
+        try {
+          return settledAs(await resume(abort));
+        } catch (cause) {
+          return await failed(turn.turnId, cause);
+        } finally {
+          session.active = undefined;
+        }
+      }
       let interrupted: 'settled' | 'held' | 'busy' | false | undefined;
       try {
         interrupted = await params.settleInterrupted?.(turn, attempted);
@@ -152,28 +260,17 @@ export function createMonitorWakeRunTurn(params: {
     // route's own claim in this window would otherwise be cleared here,
     // losing its turn instead of queuing this one.
     if (params.busy() || session.blocked || params.held?.(turn)) return 'busy';
+    let cancelled: boolean | undefined;
+    try {
+      cancelled = await params.cancelled?.(turn);
+    } catch (cause) {
+      if (cause instanceof MonitorWakeTransientReadError) return 'busy';
+      throw cause;
+    }
+    if (params.busy() || session.blocked || params.held?.(turn)) return 'busy';
     const abort = new AbortController();
     session.active = { promptId: turn.turnId, digest: '', abort };
-    let turnResult: { systemPayload?: Record<string, unknown> } | null;
-    try {
-      turnResult = (await params.executeHostedTurn(
-        turn.turnId,
-        turn.text,
-        abort,
-      )) as { systemPayload?: Record<string, unknown> } | null;
-    } catch (cause) {
-      if (params.needsRecovery(cause)) {
-        // Something parked mid-turn: a later settle or takeover consumes
-        // the input, exactly like a parked prompt.
-        session.blocked = true;
-        params.writeStderr(
-          'qwen serve: Monitor wake turn ' +
-            turn.turnId +
-            ' is recovery blocked: ' +
-            String(cause),
-        );
-        return 'recovery';
-      }
+    if (cancelled) {
       try {
         await session.managed.sink.write({
           uuid: randomUUID(),
@@ -186,26 +283,60 @@ export function createMonitorWakeRunTurn(params: {
           subtype: 'turn_result',
           systemPayload: {
             promptId: turn.turnId,
-            state: 'error',
-            stopReason: 'error',
+            state: 'cancelled',
+            stopReason: 'cancelled',
             endedAt: Date.now(),
           },
         } as ChatRecord);
-      } catch {
-        // The settle log is best-effort; the pump's caller decides what a
-        // lost journal write means.
+        return 'settled_incomplete';
+      } catch (cause) {
+        params.writeStderr(
+          'qwen serve: Queued wake cancellation ' +
+            turn.turnId +
+            ' could not settle this pass; the next wake attempt drives it again: ' +
+            String(cause),
+        );
+        return 'busy';
+      } finally {
+        session.active = undefined;
       }
-      throw cause;
+    }
+    let turnResult: { systemPayload?: Record<string, unknown> } | null;
+    try {
+      // Fire-time sentinel expansion happens here, at delivery, not in the
+      // pump's pick: a busy Session must not re-classify the same tick on
+      // every retry, and a denied re-review settles the input and lets the
+      // pump advance to the next pending input instead of stranding it.
+      let turnText = turn.text;
+      let didExpand = false;
+      if (turn.source === LOOP_INPUT_SOURCE && params.expandLoopFire) {
+        const expanded = await params.expandLoopFire(turn.turnId, turn.text);
+        if (expanded === null) return 'settled';
+        turnText = expanded.text;
+        didExpand = expanded.expanded;
+      }
+      turnResult = (await params.executeHostedTurn(
+        turn.turnId,
+        turnText,
+        abort,
+      )) as { systemPayload?: Record<string, unknown> } | null;
+      // Commit the resolver cache only for a completed turn that actually
+      // expanded a sentinel: a non-sentinel loop turn must not commit an
+      // orphaned expansion left pending by an earlier held/aborted/denied
+      // fire, and a cancelled/errored turn's user record is stripped from
+      // every later turn's history — committing it would leave each later
+      // fire on a short reminder for guidance the model never received
+      // (R8-1). executeHostedTurn settles those outcomes by returning the
+      // record, not by throwing, so the guard cannot live in the catch.
+      if (didExpand && turnResult?.systemPayload?.['state'] === 'completed') {
+        params.markLoopDelivered?.();
+      }
+    } catch (cause) {
+      return await failed(turn.turnId, cause);
     } finally {
       session.active = undefined;
     }
-    // A settled turn burns the input either way, so the pump still
-    // advances — but only a completed one proves the child result was
-    // delivered to the model: anything cancelled or errored answers
-    // 'settled_incomplete', which the consumption gate refuses.
-    return turnResult?.systemPayload?.['state'] === 'completed'
-      ? 'settled'
-      : 'settled_incomplete';
+    return settledAs(turnResult);
   };
 }
 
@@ -236,17 +367,18 @@ export function withChildAgentConsumption(
 ) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   return async (turn) => {
     const outcome = await runWakeTurn(turn);
+    const notificationTurnId = turn.notificationTurnId ?? turn.turnId;
     if (
       outcome === 'settled' &&
       !session.blocked &&
       // #13803: either child Session kind's acceptance notification.
       isChildNotificationSource(turn.source) &&
-      turn.turnId.endsWith(':accept:notify') &&
+      notificationTurnId.endsWith(':accept:notify') &&
       session.childAgents
     ) {
       try {
         await session.childAgents.markConsumed(
-          turn.turnId.slice(0, -':accept:notify'.length),
+          notificationTurnId.slice(0, -':accept:notify'.length),
         );
       } catch (cause) {
         // The wake settled the input durably already: a rejected consume

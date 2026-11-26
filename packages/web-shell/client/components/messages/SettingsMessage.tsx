@@ -1,13 +1,17 @@
 import {
   useCallback,
+  useContext,
   useEffect,
+  useId,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
 import {
   BotIcon,
   CableIcon,
+  ArchiveIcon,
   DatabaseIcon,
   FlaskConicalIcon,
   PaletteIcon,
@@ -29,6 +33,7 @@ import {
   useI18n,
   type WebShellLanguage,
 } from '../../i18n';
+import { ArrowKeyHistoryContext } from '../../WebShellContexts';
 import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
 import { LiveVoiceSettingsCard } from '../../live/LiveVoiceSettingsCard';
 import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
@@ -76,6 +81,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import {
   isItemVisible,
   isSettingVisible,
+  OUTPUT_LANGUAGE_SETTING_KEY,
   type WebShellSettingsOptions,
 } from '../../settings';
 
@@ -85,6 +91,12 @@ interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
   presentation?: WebShellSettingsOptions;
   onLanguageChange: (language: WebShellLanguage, scope: Scope) => void;
+  /**
+   * Applies a model output language through `/language output`. Resolves to
+   * whether the value was applied, so a rejected commit can restore the saved
+   * value instead of leaving an unsaved draft on screen.
+   */
+  onOutputLanguageChange: (language: string) => Promise<boolean> | boolean;
   onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
   chatWidthMode: ChatWidthMode;
@@ -93,9 +105,24 @@ interface SettingsMessageProps {
   modelManagementSectionProps?: ModelManagementProps;
   /** Browser-local remote computer catalog and connection controls. */
   connections?: ReactNode;
+  archivedSessions?: ReactNode;
+  /**
+   * Extra-directory management for the selected workspace. Rendered only on
+   * the Workspace scope tab; omitted when the daemon cannot manage them.
+   */
+  workspaceDirectoriesSection?: ReactNode;
+  /** Optional workspace switcher rendered beside the scope tabs. */
+  workspaceControl?: ReactNode;
   embedded?: boolean;
   /** Category to select on open (deep link, e.g. 'Daemon'). */
   initialCategory?: string;
+  /**
+   * Whether the active session may write workspace settings. Standalone
+   * sessions cannot: their `/language ui --project` is refused, so the UI
+   * language row is offered only under the User tab, the one scope it can
+   * persist.
+   */
+  workspaceSettingsWritable?: boolean;
 }
 
 export interface SettingsMessageSettingsState {
@@ -121,6 +148,7 @@ const SUB_DIALOG_KEYS = new Set([
   'modelFallbacks',
 ]);
 const HIDDEN_SETTING_KEYS = new Set([
+  'ui.allowedApprovalModes',
   'ui.hideTips',
   'ui.enableUserFeedback',
   // Compact behavior is fixed on in the web shell; the daemon schema still
@@ -128,6 +156,9 @@ const HIDDEN_SETTING_KEYS = new Set([
   'ui.compactMode',
   'mcpServers',
   'model.reasoningEffort',
+  // Read by the composer to default new sessions to worktree mode; the
+  // configuration surface is settings.json, not a panel row.
+  'worktree.defaultForNewSessions',
 ]);
 const LIVE_SETTING_KEYS = new Set([
   'experimental.liveVoice.enabled',
@@ -238,6 +269,7 @@ function scopeHintKey(
   setting: DaemonSettingDescriptor,
   scope: Scope,
 ): 'settings.modifiedIn' | 'settings.alsoModifiedIn' | undefined {
+  if (setting.key === 'general.displayLanguage') return undefined;
   const otherHasValue =
     scope === 'workspace'
       ? setting.values.user !== undefined
@@ -259,12 +291,25 @@ interface CategoryGroup {
   items: DaemonSettingDescriptor[];
 }
 
+const LOCAL_SETTING_IDS = {
+  chatWidth: 'builtin:chat-width',
+  arrowKeyHistory: 'builtin:arrow-key-history',
+  browserNotifications: 'builtin:browser-notifications',
+} as const;
+
+type LocalSettingItem = {
+  type: 'local';
+  localKey: keyof typeof LOCAL_SETTING_IDS;
+};
+
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' }
+  | LocalSettingItem
   | { type: 'local-control' }
   | { type: 'live' }
   | { type: 'connections' }
+  | { type: 'archived-sessions' }
+  | { type: 'workspace-directories' }
   | { type: 'model-management' };
 
 interface SettingsPageCategory {
@@ -291,25 +336,28 @@ function groupByCategory(settings: DaemonSettingDescriptor[]): CategoryGroup[] {
 
 function CategoryIcon({ category }: { category: string }) {
   const normalized = category.toLowerCase();
-  const Icon = normalized.includes('ui')
-    ? PaletteIcon
-    : normalized.includes('tool')
-      ? WrenchIcon
-      : normalized.includes('context')
-        ? DatabaseIcon
-        : normalized.includes('privacy')
-          ? ShieldIcon
-          : normalized.includes('model')
-            ? BotIcon
-            : normalized.includes('connection')
-              ? CableIcon
-              : normalized.includes('daemon')
-                ? ServerIcon
-                : normalized.includes('advanced')
-                  ? SlidersHorizontalIcon
-                  : normalized.includes('experimental')
-                    ? FlaskConicalIcon
-                    : Settings2Icon;
+  const Icon =
+    normalized === 'archived'
+      ? ArchiveIcon
+      : normalized.includes('ui')
+        ? PaletteIcon
+        : normalized.includes('tool')
+          ? WrenchIcon
+          : normalized.includes('context')
+            ? DatabaseIcon
+            : normalized.includes('privacy')
+              ? ShieldIcon
+              : normalized.includes('model')
+                ? BotIcon
+                : normalized.includes('connection')
+                  ? CableIcon
+                  : normalized.includes('daemon')
+                    ? ServerIcon
+                    : normalized.includes('advanced')
+                      ? SlidersHorizontalIcon
+                      : normalized.includes('experimental')
+                        ? FlaskConicalIcon
+                        : Settings2Icon;
   return <Icon data-icon="inline-start" aria-hidden="true" />;
 }
 
@@ -347,6 +395,246 @@ function SettingsRow({
   );
 }
 
+// A commit may be rejected (busy session, failed command). The saved value
+// does not change in that case, so the draft has to be restored explicitly.
+function applyCommitResult(result: unknown, restore: () => void): void {
+  if (result && typeof (result as Promise<unknown>).then === 'function') {
+    void (result as Promise<unknown>).then(
+      (applied) => {
+        if (applied === false) restore();
+      },
+      () => restore(),
+    );
+    return;
+  }
+  if (result === false) restore();
+}
+
+function OutputLanguageCombobox({
+  name,
+  label,
+  value,
+  options,
+  disabled,
+  placeholder,
+  onCommit,
+}: {
+  name: string;
+  label: string;
+  value: string;
+  options: ReadonlyArray<{ value: string | number; label: string }>;
+  disabled: boolean;
+  placeholder: string;
+  onCommit: (value: string) => unknown;
+}) {
+  const { t } = useI18n();
+  const currentValue = value;
+  const [draft, setDraft] = useState(currentValue);
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  // Enter takes the highlighted row only after the user moved through the
+  // list; otherwise it keeps the exact typed text.
+  const [navigated, setNavigated] = useState(false);
+  const [pending, setPending] = useState(false);
+  const lastCommittedRef = useRef<string | null>(null);
+  const listId = `${name}-options`;
+
+  useEffect(() => {
+    setDraft(currentValue);
+    setNavigated(false);
+    setActiveIndex(0);
+    lastCommittedRef.current = null;
+  }, [currentValue]);
+
+  const items = useMemo(() => {
+    const all = [
+      { value: '', label: placeholder },
+      ...options.map((option) => ({
+        value: String(option.value),
+        label: option.label,
+      })),
+    ];
+    const query = draft.trim().toLowerCase();
+    // Opening on the saved value shows every suggestion; only an edited draft
+    // narrows the list.
+    if (!query || query === currentValue.trim().toLowerCase()) return all;
+    const matches = all.filter(
+      (item) =>
+        item.value.toLowerCase().includes(query) ||
+        item.label.toLowerCase().includes(query),
+    );
+    if (matches.length > 0) return matches;
+    // The setting accepts any language name, so an unmatched draft stays
+    // selectable as free-form input.
+    return [
+      {
+        value: draft.trim(),
+        label: t('settings.option.general.outputLanguage.useCustom', {
+          value: draft.trim(),
+        }),
+      },
+    ];
+  }, [currentValue, draft, options, placeholder, t]);
+
+  const commit = (next: string) => {
+    if (pending) return;
+    const trimmed = next.trim();
+    setOpen(false);
+    setNavigated(false);
+    setActiveIndex(0);
+    if (
+      trimmed === currentValue.trim() ||
+      trimmed === lastCommittedRef.current
+    ) {
+      setDraft(currentValue);
+      return;
+    }
+    lastCommittedRef.current = trimmed;
+    // Show the value being saved so a later blur cannot resubmit the query.
+    setDraft(trimmed);
+    setPending(true);
+    const settle = (applied: unknown) => {
+      setPending(false);
+      if (applied === false) {
+        lastCommittedRef.current = null;
+        setDraft(currentValue);
+      }
+    };
+    const result = onCommit(trimmed);
+    if (result && typeof (result as Promise<unknown>).then === 'function') {
+      void (result as Promise<unknown>).then(settle, () => settle(false));
+    } else {
+      settle(result);
+    }
+  };
+
+  // Enter keeps the exact typed text (or the saved value) unless the user
+  // explicitly moved through the list; only an exact or unique-prefix match
+  // resolves to a suggestion.
+  const commitDraft = () => {
+    const trimmed = draft.trim();
+    if (trimmed === currentValue.trim()) {
+      setDraft(currentValue);
+      setOpen(false);
+      return;
+    }
+    const lower = trimmed.toLowerCase();
+    const all = [
+      { value: '', label: placeholder },
+      ...options.map((option) => ({
+        value: String(option.value),
+        label: option.label,
+      })),
+    ];
+    const exact = all.find(
+      (item) =>
+        item.value.toLowerCase() === lower ||
+        item.label.toLowerCase() === lower,
+    );
+    if (exact) {
+      commit(exact.value);
+      return;
+    }
+    const prefixMatches = trimmed
+      ? all.filter(
+          (item) =>
+            item.value.toLowerCase().startsWith(lower) ||
+            item.label.toLowerCase().startsWith(lower),
+        )
+      : [];
+    commit(prefixMatches.length === 1 ? prefixMatches[0].value : trimmed);
+  };
+
+  return (
+    <div className="relative">
+      <Input
+        role="combobox"
+        name={name}
+        autoComplete="off"
+        aria-label={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={
+          open && items[activeIndex] ? `${listId}-${activeIndex}` : undefined
+        }
+        value={draft}
+        disabled={disabled}
+        placeholder={placeholder}
+        className="w-[min(200px,50vw)] max-md:w-full"
+        onChange={(event) => {
+          setDraft(event.target.value);
+          setActiveIndex(0);
+          setNavigated(false);
+          setOpen(true);
+        }}
+        onFocus={() => {
+          // A new interaction starts un-navigated, so Enter keeps the saved
+          // value instead of reusing the previous round's highlight.
+          setNavigated(false);
+          setActiveIndex(0);
+          setOpen(true);
+        }}
+        onBlur={commitDraft}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            setOpen(true);
+            setNavigated(true);
+            setActiveIndex((index) => Math.min(index + 1, items.length - 1));
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            setNavigated(true);
+            setActiveIndex((index) => Math.max(index - 1, 0));
+          } else if (event.key === 'Enter') {
+            event.preventDefault();
+            const picked = open && navigated ? items[activeIndex] : undefined;
+            if (picked) commit(picked.value);
+            else commitDraft();
+          } else if (event.key === 'Escape') {
+            event.preventDefault();
+            setOpen(false);
+            setNavigated(false);
+            setDraft(currentValue);
+          }
+        }}
+      />
+      {open && !disabled && (
+        <div
+          role="listbox"
+          id={listId}
+          className="absolute left-0 top-full z-20 mt-1 max-h-64 w-[min(240px,80vw)] overflow-y-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
+          // Keep focus in the input so clicking an option does not commit the
+          // typed draft first.
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          {items.map((item, index) => (
+            <div
+              key={item.value || 'auto'}
+              id={`${listId}-${index}`}
+              role="option"
+              aria-selected={index === activeIndex}
+              className={`flex w-full cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm ${
+                index === activeIndex
+                  ? 'bg-accent text-accent-foreground'
+                  : 'hover:bg-accent/60'
+              }`}
+              onMouseEnter={() => {
+                setActiveIndex(index);
+                setNavigated(true);
+              }}
+              onClick={() => commit(item.value)}
+            >
+              <span className="truncate">{item.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingInput({
   name,
   label,
@@ -355,14 +643,18 @@ function SettingInput({
   disabled,
   onCommit,
   onInvalid,
+  placeholder,
+  className = 'w-[min(80px,50vw)] max-md:w-full',
 }: {
   name: string;
   label: string;
   type: 'number' | 'text';
   value: unknown;
   disabled: boolean;
-  onCommit: (value: unknown) => void;
+  onCommit: (value: unknown) => unknown;
   onInvalid: () => void;
+  placeholder?: string;
+  className?: string;
 }) {
   const currentValue = String(value ?? '');
   const [draft, setDraft] = useState(currentValue);
@@ -378,10 +670,14 @@ function SettingInput({
         onInvalid();
         return;
       }
-      if (parsed !== value) onCommit(parsed);
+      if (parsed !== value) {
+        applyCommitResult(onCommit(parsed), () => setDraft(currentValue));
+      }
       return;
     }
-    if (draft !== currentValue) onCommit(draft);
+    if (draft !== currentValue) {
+      applyCommitResult(onCommit(draft), () => setDraft(currentValue));
+    }
   };
 
   return (
@@ -392,7 +688,8 @@ function SettingInput({
       aria-label={label}
       value={draft}
       disabled={disabled}
-      className="w-[min(80px,50vw)] max-md:w-full"
+      placeholder={placeholder}
+      className={className}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={commit}
       onKeyDown={(event) => {
@@ -409,7 +706,7 @@ function SettingInput({
 export type FlatRow =
   | { type: 'header'; category: string }
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' };
+  | LocalSettingItem;
 
 /* Wraps around at both ends (matching the native CLI) while skipping
    category-header rows. Exported for tests. */
@@ -432,17 +729,24 @@ export function SettingsMessage({
   settingsState,
   presentation,
   onLanguageChange,
+  onOutputLanguageChange,
   onSubDialog,
   onThemeChange,
   chatWidthMode,
   onChatWidthModeChange,
   modelManagementSectionProps,
   connections,
+  archivedSessions,
+  workspaceDirectoriesSection,
+  workspaceControl,
   embedded = false,
   initialCategory,
+  workspaceSettingsWritable = true,
 }: SettingsMessageProps) {
+  const settingsId = useId();
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
+  const arrowKeyHistory = useContext(ArrowKeyHistoryContext);
   const notifications = useBrowserNotificationSettings();
   const refreshNotificationPermission = notifications?.refreshPermission;
   useEffect(() => {
@@ -450,19 +754,26 @@ export function SettingsMessage({
   }, [refreshNotificationPermission]);
   const { status, settings, loading, error, reload, setValue, liveSetup } =
     settingsState;
-  const [scope, setScope] = useState<Scope>('workspace');
+  // A standalone session has no workspace to write, so opening the panel on
+  // the Workspace tab would only offer rows whose session-routed writes are
+  // refused (the UI language row). Start on the User tab there instead.
+  const [scope, setScope] = useState<Scope>(
+    workspaceSettingsWritable ? 'workspace' : 'user',
+  );
   const [activeCategory, setActiveCategory] = useState('');
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [restartPending, setRestartPending] = useState(false);
 
+  const hasArrowKeyHistory = arrowKeyHistory !== null;
   const hasNotifications = notifications !== undefined;
   const showInitialLoading = loading && !status;
   const categories = useMemo(() => {
     const visibleSettings = settings.filter(
       (setting) =>
         !HIDDEN_SETTING_KEYS.has(setting.key) &&
-        !LIVE_SETTING_KEYS.has(setting.key),
+        !LIVE_SETTING_KEYS.has(setting.key) &&
+        (scope === 'user' || setting.key !== 'general.displayLanguage'),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({
@@ -474,32 +785,38 @@ export function SettingsMessage({
         })),
       }),
     );
-    const localItem = {
-      type: 'local' as const,
-      localKey: 'chatWidth' as const,
-    };
-    const themeGroup = groups.find((group) =>
-      group.items.some(
-        (item) =>
-          item.type === 'setting' && item.setting.key === THEME_SETTING_KEY,
-      ),
-    );
-    if (themeGroup) {
-      const themeIndex = themeGroup.items.findIndex(
+    const localItems: LocalSettingItem[] = [
+      { type: 'local', localKey: 'chatWidth' },
+    ];
+    if (hasArrowKeyHistory) {
+      localItems.push({ type: 'local', localKey: 'arrowKeyHistory' });
+    }
+    const uiGroup =
+      groups.find((group) => group.id === 'UI') ??
+      groups.find((group) =>
+        group.items.some(
+          (item) =>
+            item.type === 'setting' && item.setting.key === THEME_SETTING_KEY,
+        ),
+      );
+    if (uiGroup) {
+      const themeIndex = uiGroup.items.findIndex(
         (item) =>
           item.type === 'setting' && item.setting.key === THEME_SETTING_KEY,
       );
-      themeGroup.items.splice(themeIndex + 1, 0, localItem);
+      uiGroup.items.splice(themeIndex + 1, 0, ...localItems);
     } else {
       groups.push({
         id: 'UI',
         label: formatSettingCategory('UI', t),
-        items: [localItem],
+        items: localItems,
       });
     }
     if (hasNotifications) {
-      const group = groups.find((item) => item.items.includes(localItem));
-      group?.items.push({ type: 'local', localKey: 'browserNotifications' });
+      (uiGroup?.items ?? localItems).push({
+        type: 'local',
+        localKey: 'browserNotifications',
+      });
     }
     if (liveSetup?.supported) {
       const experimental = groups.find((group) => group.id === 'Experimental');
@@ -540,6 +857,22 @@ export function SettingsMessage({
         items: [{ type: 'connections' }],
       });
     }
+    if (archivedSessions) {
+      groups.push({
+        id: 'Archived',
+        label: formatSettingCategory('Archived', t),
+        items: [{ type: 'archived-sessions' }],
+      });
+    }
+    // Extra directories are a workspace-scope concept; the User tab has no
+    // equivalent list to show.
+    if (workspaceDirectoriesSection && scope === 'workspace') {
+      groups.push({
+        id: 'Workspace',
+        label: t('workspaceDirectories.title'),
+        items: [{ type: 'workspace-directories' }],
+      });
+    }
     return groups
       .map((group) => ({
         ...group,
@@ -549,16 +882,18 @@ export function SettingsMessage({
           }
           const id =
             item.type === 'local'
-              ? item.localKey === 'chatWidth'
-                ? 'builtin:chat-width'
-                : 'builtin:browser-notifications'
+              ? LOCAL_SETTING_IDS[item.localKey]
               : item.type === 'live'
                 ? 'builtin:live-setup'
                 : item.type === 'local-control'
                   ? 'builtin:local-control'
                   : item.type === 'connections'
                     ? 'builtin:connections'
-                    : 'builtin:model-management';
+                    : item.type === 'archived-sessions'
+                      ? 'builtin:archived-sessions'
+                      : item.type === 'workspace-directories'
+                        ? 'builtin:workspace-directories'
+                        : 'builtin:model-management';
           return isItemVisible(id, presentation);
         }),
       }))
@@ -567,9 +902,13 @@ export function SettingsMessage({
     liveSetup,
     settings,
     t,
+    hasArrowKeyHistory,
     hasNotifications,
     modelManagementSectionProps,
     connections,
+    archivedSessions,
+    workspaceDirectoriesSection,
+    scope,
     presentation,
     showInitialLoading,
   ]);
@@ -635,13 +974,21 @@ export function SettingsMessage({
 
   const activeRows =
     activeGroup?.items.filter(
-      (item) => item.type !== 'model-management' && item.type !== 'connections',
+      (item) =>
+        item.type !== 'model-management' &&
+        item.type !== 'connections' &&
+        item.type !== 'archived-sessions' &&
+        item.type !== 'workspace-directories',
     ) ?? [];
   const showModelManagement = activeGroup?.items.some(
     (item) => item.type === 'model-management',
   );
+  const showArchivedSessions = activeGroup?.id === 'Archived';
   const showConnections = activeGroup?.items.some(
     (item) => item.type === 'connections',
+  );
+  const showWorkspaceDirectories = activeGroup?.items.some(
+    (item) => item.type === 'workspace-directories',
   );
 
   const renderSelect = (
@@ -671,7 +1018,10 @@ export function SettingsMessage({
     </Select>
   );
 
-  const renderSettingControl = (setting: DaemonSettingDescriptor) => {
+  const renderSettingControl = (
+    setting: DaemonSettingDescriptor,
+    unsetBadgeId: string | undefined,
+  ) => {
     const value = resolveValue(setting, scope);
     const isBusy = busyKey === setting.key;
     // User-scope settings are editable (this PR enables user-scope writes); the
@@ -715,6 +1065,25 @@ export function SettingsMessage({
       );
     }
 
+    if (setting.key === OUTPUT_LANGUAGE_SETTING_KEY) {
+      // Model output language is a user-level preference applied by the
+      // language command (which rewrites output-language.md and refreshes
+      // running sessions); an empty value means follow the user's input. The
+      // combobox offers the supported names but still accepts any language.
+      const effective = String(value ?? '').trim();
+      return (
+        <OutputLanguageCombobox
+          name={setting.key}
+          label={formatSettingLabel(setting, t)}
+          value={effective.toLowerCase() === 'auto' ? '' : effective}
+          options={setting.options ?? []}
+          placeholder={t('settings.placeholder.general.outputLanguage')}
+          disabled={disabled}
+          onCommit={(next) => onOutputLanguageChange(String(next ?? '').trim())}
+        />
+      );
+    }
+
     if (SUB_DIALOG_KEYS.has(setting.key)) {
       return (
         <Button
@@ -732,12 +1101,17 @@ export function SettingsMessage({
 
     if (setting.type === 'boolean') {
       const checked = value === true;
+      const unsetToggleValue =
+        value === undefined ? setting.unsetToggleValue : undefined;
       return (
         <Switch
           checked={checked}
           disabled={disabled}
-          onCheckedChange={(next) => handleSetValue(setting.key, next)}
+          onCheckedChange={(next) =>
+            handleSetValue(setting.key, unsetToggleValue ?? next)
+          }
           aria-label={formatSettingLabel(setting, t)}
+          aria-describedby={unsetBadgeId}
         />
       );
     }
@@ -816,17 +1190,28 @@ export function SettingsMessage({
           setScope(next as Scope);
         }}
       >
-        {activeGroup?.id !== 'Connections' && (
-          <div className="flex items-center justify-between gap-4 border-b border-border px-3 py-2">
+        {restartPending &&
+          (activeGroup?.id === 'Connections' || showArchivedSessions) && (
+            <div className="border-b border-border px-3 py-2">
+              <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
+            </div>
+          )}
+        {activeGroup?.id !== 'Connections' && !showArchivedSessions && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-3 py-2">
             <TabsList className="p-0">
               <TabsTrigger value="workspace">
                 {t('settings.scope.workspace')}
               </TabsTrigger>
               <TabsTrigger value="user">{t('settings.scope.user')}</TabsTrigger>
             </TabsList>
-            {restartPending && (
-              <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
-            )}
+            <div className="flex items-center gap-2">
+              {scope === 'workspace' ? workspaceControl : null}
+              {restartPending && (
+                <Badge variant="secondary">
+                  {t('settings.requiresRestart')}
+                </Badge>
+              )}
+            </div>
           </div>
         )}
 
@@ -855,14 +1240,16 @@ export function SettingsMessage({
                 <span className="min-w-0 flex-1 truncate text-left">
                   {category.label}
                 </span>
-                <span className="text-xs tabular-nums text-muted-foreground">
-                  {Math.max(
-                    1,
-                    category.items.filter(
-                      (item) => item.type !== 'model-management',
-                    ).length,
-                  )}
-                </span>
+                {category.id !== 'Archived' && (
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    {Math.max(
+                      1,
+                      category.items.filter(
+                        (item) => item.type !== 'model-management',
+                      ).length,
+                    )}
+                  </span>
+                )}
               </Button>
             ))}
           </nav>
@@ -894,6 +1281,38 @@ export function SettingsMessage({
                           const separator = index > 0 && (
                             <Separator className="mx-5 w-auto max-md:mx-4" />
                           );
+                          if (
+                            item.type === 'local' &&
+                            item.localKey === 'arrowKeyHistory' &&
+                            arrowKeyHistory
+                          ) {
+                            const label = t('settings.arrowKeyHistory.label');
+                            const disabled =
+                              arrowKeyHistory.setEnabled === undefined;
+                            return (
+                              <div key={item.localKey}>
+                                {separator}
+                                <SettingsRow
+                                  title={label}
+                                  description={t(
+                                    disabled
+                                      ? 'settings.arrowKeyHistory.disabledByHost'
+                                      : 'settings.arrowKeyHistory.description',
+                                  )}
+                                  control={
+                                    <Switch
+                                      aria-label={label}
+                                      checked={arrowKeyHistory.enabled}
+                                      disabled={disabled}
+                                      onCheckedChange={
+                                        arrowKeyHistory.setEnabled
+                                      }
+                                    />
+                                  }
+                                />
+                              </div>
+                            );
+                          }
                           if (
                             item.type === 'local' &&
                             item.localKey === 'browserNotifications' &&
@@ -1017,6 +1436,28 @@ export function SettingsMessage({
                             );
                           }
 
+                          if (
+                            (item.setting.key === LANGUAGE_SETTING_KEY ||
+                              item.setting.key === 'visionBridgeTimeoutMs') &&
+                            scope === 'workspace' &&
+                            !workspaceSettingsWritable
+                          ) {
+                            // Standalone sessions can edit these settings at
+                            // user scope only.
+                            return null;
+                          }
+
+                          if (
+                            item.setting.key === OUTPUT_LANGUAGE_SETTING_KEY &&
+                            scope === 'workspace'
+                          ) {
+                            // The language command persists this at user
+                            // scope only; showing it under the workspace tab
+                            // would imply a workspace override that the write
+                            // path cannot honor.
+                            return null;
+                          }
+
                           const setting = item.setting;
                           const description = formatSettingDescription(
                             setting,
@@ -1024,6 +1465,11 @@ export function SettingsMessage({
                           );
                           const hintKey = scopeHintKey(setting, scope);
                           const hasScopeValue = scopeHasValue(setting, scope);
+                          const unsetBadgeId =
+                            setting.type === 'boolean' &&
+                            resolveValue(setting, scope) === undefined
+                              ? `${settingsId}-unset-${setting.key}`
+                              : undefined;
                           const scopeHint = hintKey
                             ? t(hintKey, {
                                 scope: t(
@@ -1050,13 +1496,17 @@ export function SettingsMessage({
                                         ? t('settings.scope.workspace')
                                         : t('settings.scope.user')}
                                     </Badge>
+                                  ) : unsetBadgeId ? (
+                                    <Badge id={unsetBadgeId} variant="outline">
+                                      {t('settings.value.unset')}
+                                    </Badge>
                                   ) : undefined
                                 }
                                 control={
                                   busyKey === setting.key ? (
                                     <Spinner />
                                   ) : (
-                                    renderSettingControl(setting)
+                                    renderSettingControl(setting, unsetBadgeId)
                                   )
                                 }
                               />
@@ -1073,6 +1523,16 @@ export function SettingsMessage({
                   </div>
                 )}
                 {showConnections && connections}
+                {showArchivedSessions && (
+                  <div>
+                    <h2 className="mb-4 flex items-center gap-2 text-base font-semibold">
+                      <ArchiveIcon size={18} aria-hidden="true" />
+                      {activeGroup.label}
+                    </h2>
+                    {archivedSessions}
+                  </div>
+                )}
+                {showWorkspaceDirectories && workspaceDirectoriesSection}
               </div>
             )}
           </section>

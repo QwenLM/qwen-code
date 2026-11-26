@@ -6,6 +6,7 @@
 
 import { parse } from 'shell-quote';
 import { getErrorMessage } from './errors.js';
+import { hasByteValuedAnsiCEscape } from './shell-utils.js';
 
 const BRE_OPERATORS = new Set(['+', '?', '|', '(', ')', '{', '}']);
 const SIMPLE_REGEX_QUANTIFIERS = new Set(['*', '+', '?']);
@@ -22,6 +23,10 @@ export function parseSedEditCommand(command: string): SedEditInfo | null {
   const trimmed = command.trim();
   const sedMatch = trimmed.match(/^\s*sed\s+/);
   if (!sedMatch) return null;
+
+  // ANSI-C byte and Unicode escapes can parse to different path bytes than
+  // bash passes to sed. Fall back to the original shell command instead.
+  if (hasByteValuedAnsiCEscape(trimmed)) return null;
 
   let parsed: ReturnType<typeof parse>;
   try {
@@ -179,13 +184,14 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
   try {
     const jsPattern = toJavascriptPattern(sedInfo);
     if (
-      hasPosixBracketExpression(jsPattern) ||
+      hasPosixBracketExpression(sedInfo.pattern) ||
       hasLeadingBracketLiteral(jsPattern) ||
-      hasSedJavascriptDivergentEscape(jsPattern)
+      hasSedJavascriptDivergentEscape(jsPattern) ||
+      hasBracketCharacterEscape(sedInfo.pattern)
     ) {
       return false;
     }
-    new RegExp(jsPattern);
+    new RegExp(jsPattern, 'su');
     if (
       hasReplacementBackrefBeyondCaptures(
         sedInfo.replacement,
@@ -201,7 +207,44 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
 }
 
 function hasPosixBracketExpression(pattern: string): boolean {
-  return /\[\[:[A-Za-z]+:\]\]/u.test(pattern);
+  // A character class, collating symbol or equivalence class opens with `[:`,
+  // `[.` or `[=` only *inside* a bracket expression (`[[:alpha:]]`, `[[.ch.]]`,
+  // `[[=a=]]`). Matching the byte sequence anywhere also rejected plain classes
+  // such as `[.]`, a common literal-dot idiom the translator handles correctly.
+  let inBracketExpression = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      // An escaped `[` outside a bracket expression is a literal, so
+      // `\[[:alpha:]]` is a literal `[` followed by an ordinary `[:alpha:]`
+      // class to BSD sed. GNU sed rejects the whole pattern as a malformed
+      // bracket expression, so the simulation cannot match both; declining
+      // lets the real sed decide. Only the POSIX-shaped lookalike is declined
+      // — a plain `\[` is a literal in every sed and keeps its fast path —
+      // and an escaped `[` inside a class is just a member.
+      if (
+        !inBracketExpression &&
+        pattern[i + 1] === '[' &&
+        pattern[i + 2] === '[' &&
+        /[:.=]/u.test(pattern[i + 3] ?? '')
+      ) {
+        return true;
+      }
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      if (inBracketExpression && /[:.=]/u.test(pattern[i + 1] ?? '')) {
+        return true;
+      }
+      inBracketExpression = true;
+      continue;
+    }
+    if (char === ']') {
+      inBracketExpression = false;
+    }
+  }
+  return false;
 }
 
 /**
@@ -226,8 +269,43 @@ function hasLeadingBracketLiteral(pattern: string): boolean {
   return /\[\^?\]/u.test(pattern);
 }
 
+// `\p{…}`, `\P{…}` and `\u{…}` are literals to sed but Unicode property and
+// code-point escapes to an ES regex with the `u` flag, so the simulation would
+// rewrite a file that real sed rejects or leaves alone. `\0` is the mirror
+// case: NUL to an ES regex, a literal `0` to sed. Declining falls back to real
+// sed, which is the module's documented policy for divergent constructs.
 function hasSedJavascriptDivergentEscape(pattern: string): boolean {
-  return /\\[<>dDwWsS]/u.test(pattern);
+  return /\\[0<>dDwWsSpPu]/u.test(pattern);
+}
+
+/**
+ * True when a bracket expression holds a character escape such as `\t`,
+ * `\n` or `\x41`. GNU sed expands these, so `[ \t]` is a space or a TAB;
+ * POSIX reads a backslash and a `t`, as the translation does. The seds
+ * disagree, so the caller declines the pattern and real sed runs it.
+ */
+function hasBracketCharacterEscape(pattern: string): boolean {
+  let inCharacterClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      const next = pattern[i + 1] ?? '';
+      if (inCharacterClass && /[ntrfvadoxc]/u.test(next)) {
+        return true;
+      }
+      // Inside a bracket only `\\` pairs up, so `[\\t]` ends in a plain `t`.
+      if (!inCharacterClass || next === '\\') {
+        i++;
+      }
+      continue;
+    }
+    if (char === '[') {
+      inCharacterClass = true;
+    } else if (char === ']') {
+      inCharacterClass = false;
+    }
+  }
+  return false;
 }
 
 function hasReplacementBackrefBeyondCaptures(
@@ -481,7 +559,7 @@ export function applySedSubstitution(
   const replaceAll = sedInfo.flags.includes('g');
 
   try {
-    const globalRegex = new RegExp(jsPattern, 'g');
+    const globalRegex = new RegExp(jsPattern, 'gsu');
     const parts = content.split(/(\n)/);
     const processableParts = content.endsWith('\n')
       ? parts.slice(0, -1)
@@ -505,15 +583,13 @@ export function applySedSubstitution(
 function toJavascriptPattern(sedInfo: SedEditInfo): string {
   const pattern = unescapeSedDelimiter(sedInfo.pattern);
 
-  if (sedInfo.extendedRegex) {
-    return pattern;
-  }
-
   let jsPattern = '';
   let inCharacterClass = false;
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i]!;
     if (inCharacterClass) {
+      // A backslash inside a bracket expression is a literal member in BRE
+      // and ERE alike, not an escape as in JS.
       if (char === '\\') {
         jsPattern += '\\\\';
         continue;
@@ -528,6 +604,21 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
     if (char === '[') {
       inCharacterClass = true;
       jsPattern += char;
+      continue;
+    }
+
+    if (char === ']') {
+      jsPattern += '\\]';
+      continue;
+    }
+
+    if (sedInfo.extendedRegex) {
+      if (char === '\\' && i + 1 < pattern.length) {
+        jsPattern += char + pattern[i + 1]!;
+        i++;
+      } else {
+        jsPattern += char;
+      }
       continue;
     }
 

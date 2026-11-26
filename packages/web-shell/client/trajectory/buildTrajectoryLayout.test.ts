@@ -124,6 +124,50 @@ describe('trajectory layout', () => {
     ).toEqual(['turn:ordinal:1', 'req:main', 'req:grandchild']);
   });
 
+  it('nests workflow agents under the Workflow tool call in their id', () => {
+    const timing = (
+      recordId: string,
+      subagentId?: string,
+    ): TrajectoryEntry => ({
+      kind: 'timing',
+      recordId,
+      timing: {
+        kind: 'request',
+        durationMs: 1000,
+        ...(subagentId ? { subagentId } : {}),
+      },
+    });
+    const trajectory = buildTrajectory([
+      timing('main'),
+      {
+        kind: 'block',
+        block: {
+          kind: 'tool',
+          id: 'block-call_wf',
+          toolCallId: 'call_wf',
+          status: 'completed',
+          title: 'workflow',
+          toolName: 'workflow',
+          clientReceivedAt: 0,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      },
+      timing('suffixed', 'workflow-agent-0123456789abcdef-call_wf'),
+      // Before the call id was suffixed, nothing linked the agent to the call.
+      timing('bare', 'workflow-agent-0123456789abcdef'),
+    ]);
+    const layout = buildTrajectoryLayout(trajectory);
+    expect(
+      trajectory.rows.find((row) => row.key === 'req:suffixed'),
+    ).toMatchObject({ parentToolCallId: 'call_wf', depth: 1 });
+    expect(layout.ancestors.get('req:suffixed')).toEqual([
+      'turn:ordinal:1',
+      'req:main',
+    ]);
+    expect([...layout.unresolvedParents]).toEqual(['req:bare']);
+  });
+
   it('rejects cycles and ambiguous intermediate parents', () => {
     const nested = (key: string, parentToolCallId: string) => ({
       ...tool(key),

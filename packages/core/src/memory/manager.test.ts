@@ -44,6 +44,23 @@ vi.mock('../telemetry/index.js', async (importOriginal) => ({
   logMemoryMigration: telemetryMocks.logMemoryMigration,
 }));
 
+// Keep the real logger surface (isEnabled/gating) and observe only `warn`, so
+// the cadence loss reports can be asserted instead of vanishing into a debug
+// session this suite does not bind.
+const { debugWarn } = vi.hoisted(() => ({ debugWarn: vi.fn() }));
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) => ({
+      ...actual.createDebugLogger(tag),
+      warn: debugWarn,
+    }),
+  };
+});
+
 vi.mock('./extract.js', () => ({
   runAutoMemoryExtract: vi.fn(),
 }));
@@ -2063,6 +2080,54 @@ describe('MemoryManager', () => {
       expect(vi.mocked(runAutoMemoryExtract)).toHaveBeenCalledTimes(2);
     });
 
+    it('does not emit an unhandled rejection when a queued extraction fails', async () => {
+      // The queued run has no caller: scheduleExtract returned 'queued' before
+      // it started, and runExtract already logged the failure and marked the
+      // task failed. Its rejection must not reach the process handler.
+      const failure = new Error('queued extract failed');
+      const first = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract)
+        .mockReturnValueOnce(first.promise)
+        .mockRejectedValueOnce(failure);
+
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        const mgr = new MemoryManager();
+        const firstPromise = mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', 'first'),
+        );
+        const queued = await mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', 'second', makeMockConfig()),
+        );
+        expect(queued.skippedReason).toBe('queued');
+
+        first.resolve(extractResult('sess-1', []));
+        await firstPromise;
+        await mgr.drain();
+        // unhandledRejection fires once the microtask queue has drained.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(unhandled).not.toHaveBeenCalled();
+        const tasks = mgr.listTasksByType('extract', tmp.projectRoot);
+        expect(tasks.map((task) => task.status).sort()).toEqual([
+          'completed',
+          'failed',
+        ]);
+        // The record and the telemetry event are the whole trace a failed
+        // queued run leaves: it has no caller to observe its rejection.
+        expect(tasks.find((task) => task.status === 'failed')?.error).toBe(
+          'queued extract failed',
+        );
+        expect(telemetryMocks.logMemoryExtract).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ status: 'failed' }),
+        );
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
     it('isolates state between manager instances', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue(
         extractResult('sess-1', ['user']),
@@ -2076,6 +2141,1525 @@ describe('MemoryManager', () => {
 
       expect(mgrA.listTasksByType('extract', tmp.projectRoot)).toHaveLength(1);
       expect(mgrB.listTasksByType('extract', tmp.projectRoot)).toHaveLength(0);
+    });
+  });
+
+  describe('scheduleExtract() cadence (#13004)', () => {
+    const tmp = useTempProject('mgr-cadence-', {});
+    const turns = (count: number): Content[] =>
+      Array.from({ length: count }, (_, i) => userText(`turn ${i}`));
+    const turn = (mgr: MemoryManager, length: number, sessionId = 'sess') =>
+      mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, sessionId, turns(length)),
+        belowCompactionWarn: true,
+      });
+    const engagedNoop = (sessionId = 'sess', processedOffset = 2) => ({
+      ...extractResult(sessionId, [], processedOffset),
+      extractorEngaged: true,
+      madeGenuineProgress: true,
+    });
+
+    // Holds the next extraction open and resolves it with the value built from
+    // the attempt that was held; the returned function lets the run land.
+    const holdNextExtract = <
+      T extends Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+    >(
+      build: (params: Parameters<typeof runAutoMemoryExtract>[0]) => T,
+    ) => {
+      const gate = deferred<T>();
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce((params) => {
+        release = () => gate.resolve(build(params));
+        return gate.promise as ReturnType<typeof runAutoMemoryExtract>;
+      });
+      return () => release();
+    };
+
+    beforeEach(() => {
+      vi.mocked(runAutoMemoryExtract).mockReset();
+      vi.mocked(runAutoMemoryExtract).mockImplementation(async (params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+    });
+
+    it('runs every turn while the experiment is off', async () => {
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      await turn(mgr, 4);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
+    it('skips up to N turns after a run that read memory and saved nothing', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      await turn(mgr, 8);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[1][0].history,
+      ).toHaveLength(8);
+    });
+
+    it('records a pressured turn as memory_pressure without spending cadence budget', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+
+      const pressured = await mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, 'sess', turns(4)),
+        config: pressureConfig('hard'),
+        belowCompactionWarn: true,
+      });
+      expect(pressured.skippedReason).toBe('memory_pressure');
+
+      // The arm and the budget survive: a run that could never fork must not be
+      // recorded as a cadence skip, and it must not disarm the experiment.
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+    });
+
+    it('records the cadence skip in telemetry with its own reason', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const config = makeMockConfig();
+      const turnWithConfig = (length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(tmp.projectRoot, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      await turnWithConfig(2);
+      telemetryMocks.logMemoryExtract.mockClear();
+      expect((await turnWithConfig(4)).skippedReason).toBe('cadence');
+      expect(telemetryMocks.logMemoryExtract).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          status: 'skipped',
+          skipped_reason: 'cadence',
+        }),
+      );
+    });
+
+    it('does not arm after a run that saved memory or used no tool', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
+        ...engagedNoop(),
+        touchedTopics: ['user'],
+      });
+      await turn(mgr, 2);
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+        extractResult('sess'),
+      );
+      await turn(mgr, 4);
+      await turn(mgr, 6);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
+    it("runs when unprocessed entries would leave the next run's window", async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 22)).skippedReason).toBe('cadence');
+      expect((await turn(mgr, 23)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
+    it('runs near compaction, and a failed run disarms', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      // No belowCompactionWarn: the turn runs although the session is armed.
+      vi.mocked(runAutoMemoryExtract).mockRejectedValueOnce(new Error('boom'));
+      await expect(
+        mgr.scheduleExtract(extractParams(tmp.projectRoot, 'sess', turns(4))),
+      ).rejects.toThrow('boom');
+      await turn(mgr, 6);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
+    it.each([false, true])(
+      'preserves skipped history after a long turn (failed: %s)',
+      async (failed) => {
+        vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+        const mgr = new MemoryManager();
+        await turn(mgr, 2);
+        expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+        if (failed) {
+          vi.mocked(runAutoMemoryExtract).mockRejectedValueOnce(
+            new Error('retry'),
+          );
+          await expect(turn(mgr, 60)).rejects.toThrow('retry');
+          await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+            true,
+          );
+        } else {
+          await turn(mgr, 60);
+        }
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(failed ? 3 : 2);
+        for (const [params] of vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.slice(1)) {
+          expect(params.skippedHistory).toEqual(turns(4).slice(2));
+        }
+      },
+    );
+
+    it.each(['next turn', 'close'])(
+      'retries skipped history after a text-only long run on %s',
+      async (boundary) => {
+        vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+        const mgr = new MemoryManager();
+        await turn(mgr, 2);
+        expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+        vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+          extractResult('sess', [], 2),
+        );
+        await turn(mgr, 60);
+
+        if (boundary === 'close') {
+          vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+            extractResult('sess', [], 2),
+          );
+          await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+            false,
+          );
+          await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+            true,
+          );
+        } else {
+          await turn(mgr, 62);
+        }
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(
+          boundary === 'close' ? 4 : 3,
+        );
+        for (const [params] of vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.slice(1)) {
+          expect(params.skippedHistory).toEqual(turns(4).slice(2));
+        }
+      },
+    );
+
+    it('does not re-arm from an extraction predating a main-agent memory write', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const pending = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () => pending.promise,
+      );
+      const first = turn(mgr, 2);
+      const wrote = await mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, 'sess', [
+          ...turns(4),
+          content(
+            'model',
+            fnCall('write_file', {
+              file_path: path.join(
+                tmp.projectRoot,
+                '.qwen/memory/user/test.md',
+              ),
+            }),
+          ),
+        ]),
+        belowCompactionWarn: true,
+      });
+      expect(wrote.skippedReason).toBe('memory_tool');
+      pending.resolve(engagedNoop());
+      await first;
+      await mgr.drain();
+      expect((await turn(mgr, 6)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps cadence state per session', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2, 'a');
+      await mgr.drain();
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue(engagedNoop('b'));
+      expect((await turn(mgr, 2, 'b')).skippedReason).toBeUndefined();
+    });
+
+    it('does not carry an armed skip into a relocated project root', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const relocated = path.join(tmp.tempDir, 'relocated');
+      await fs.mkdir(relocated, { recursive: true });
+      // Turn 1 arms in the original root; turn 2 skips there and parks its
+      // snapshot. `/cd` then relocates the root without a session switch, so
+      // no discard fires: the arm was earned against the old project's memory
+      // and must not suppress a turn in the new one.
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      const moved = await mgr.scheduleExtract({
+        ...extractParams(relocated, 'sess', turns(6)),
+        belowCompactionWarn: true,
+      });
+      expect(moved.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+      expect(vi.mocked(runAutoMemoryExtract).mock.calls[0][0].projectRoot).toBe(
+        relocated,
+      );
+    });
+
+    it('drops the skip state of both sessions a switch touches', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+      // /clear, /resume and /branch do not flush: the skipped turn is dropped
+      // and the resumed id runs its next turn instead of inheriting the skip.
+      mgr.discardExtractCadence('other', 'sess');
+      expect((await turn(mgr, 6)).skippedReason).toBeUndefined();
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not re-arm a session from a run that was in flight across a switch', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const finish = holdNextExtract(() => engagedNoop());
+      const inFlight = turn(mgr, 2);
+      await vi.waitFor(() => expect(runAutoMemoryExtract).toHaveBeenCalled());
+      // The switch lands while the extraction runs; the id can come back.
+      mgr.discardExtractCadence('sess', 'next');
+      finish();
+      await inFlight;
+      await mgr.drain();
+
+      expect((await turn(mgr, 4)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not re-arm a session from a trailing run queued across a switch', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const finish = holdNextExtract(() => engagedNoop());
+      const first = turn(mgr, 2);
+      await vi.waitFor(() => expect(runAutoMemoryExtract).toHaveBeenCalled());
+      // The turn is queued behind the in-flight run, so the epoch has to be
+      // captured here: the switch lands while it waits, and `finally` only
+      // starts it afterwards.
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+      mgr.discardExtractCadence('sess', 'next');
+      finish();
+      await first;
+      await mgr.drain();
+
+      expect((await turn(mgr, 6)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
+    it('accepts a superseded trailing run whose epoch refreshed after a switch', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      // Hold the project slot so the following turns queue behind it.
+      const finish = holdNextExtract(() => engagedNoop());
+      const held = turn(mgr, 2);
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1),
+      );
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+
+      // The switch bumps the epoch and drops the session's entry; the request
+      // that supersedes the queued one is re-keyed to the new epoch, so its
+      // outcome still counts when it finally runs.
+      mgr.discardExtractCadence('sess', 'next');
+      expect((await turn(mgr, 6)).skippedReason).toBe('queued');
+
+      finish();
+      await held;
+      await mgr.drain();
+
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+    });
+
+    it('reports a flush whose own deadline expired while the slot was held', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      const direct = turn(mgr, 6);
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
+      );
+
+      debugWarn.mockClear();
+      // The slot is held past the flush's 1ms budget, so the run that finally
+      // takes it finds its own deadline already expired.
+      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      release();
+      await direct;
+      await mgr.drain();
+
+      await vi.waitFor(() =>
+        expect(debugWarn).toHaveBeenCalledWith(
+          expect.stringContaining('expired before it could run'),
+          expect.objectContaining({
+            reason: 'flush_deadline_expired',
+            owedTurns: 2,
+          }),
+        ),
+      );
+    });
+
+    it('runs instead of parking when the skip base already sits past live history', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4);
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      // The held run captures the longer, pre-compaction history.
+      const direct = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess', turns(20)),
+      );
+      expect((await turn(mgr, 9)).skippedReason).toBe('cadence');
+      release();
+      await direct;
+
+      // A compaction-style drop of the park leaves the arm in place while the
+      // settled base (20) now sits past the live history (8): the fit test's
+      // negative half must refuse the park rather than slice an empty window.
+      mgr.invalidatePendingExtract('sess');
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      expect((await turn(mgr, 8)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
+
+    it('flushes the latest skipped turn once and then forgets it', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      await turn(mgr, 4);
+      await turn(mgr, 6);
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[1][0].history,
+      ).toHaveLength(6);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+
+      // The flush's own bypass run re-armed the cadence under this session id,
+      // which `/resume` restores: the next turn must extract instead of
+      // inheriting a skip from the session's earlier incarnation.
+      expect((await turn(mgr, 8)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
+    it('keeps the pending turn when the flush run extracted nothing', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      // The process-global cache-safe slot belongs to another session, so the
+      // bypass run returns without extracting. The boundary must not be told
+      // the turns were saved.
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
+        ...engagedNoop(),
+        skippedReason: 'session_mismatch',
+      });
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(false);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+
+      // Nothing consumed the skipped turn, so a later boundary retries it.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
+      ).toHaveLength(4);
+    });
+
+    it('makes an overlapping boundary wait for the flush already running', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+      const first = mgr.flushPendingExtract('sess', 1_000);
+      const second = mgr.flushPendingExtract('sess', 1_000);
+      await tick();
+
+      // The second boundary joins the first one's run instead of passing on an
+      // entry that is already being flushed.
+      const settled = await Promise.race([
+        second.then(() => 'settled'),
+        tick().then(() => 'waiting'),
+      ]);
+      expect(settled).toBe('waiting');
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+
+      release();
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(true);
+      // One shared run: the same turns were not forked twice.
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
+    it('drops the pending run once the live session moved on', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      let liveSessionId = 'sess';
+      const config = {
+        getSessionId: () => liveSessionId,
+      } as unknown as Config;
+      const liveTurn = (length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(tmp.projectRoot, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      await liveTurn(2);
+      expect((await liveTurn(4)).skippedReason).toBe('cadence');
+
+      // The boundary timed out and the switch landed: `startNewSession()`
+      // mutated the live Config this snapshot points at, so both sides of the
+      // cache-safe mismatch guard would move together.
+      liveSessionId = 'next';
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(false);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      // The departed session's snapshot is dropped, not kept for a retry no
+      // boundary will ever ask for.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops the pending run once the session relocated to another root', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      let projectRoot = tmp.projectRoot;
+      const config = {
+        getSessionId: () => 'sess',
+        getProjectRoot: () => projectRoot,
+      } as unknown as Config;
+      const liveTurn = (length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(tmp.projectRoot, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      await liveTurn(2);
+      expect((await liveTurn(4)).skippedReason).toBe('cadence');
+
+      // `/cd` relocated the live Config this snapshot points at. The fork's
+      // conversation comes from the session's cache-safe capture, not from
+      // the snapshot's history, so replaying it would read the new project's
+      // turns against the old project's memory and write into the old
+      // project's memory from them.
+      projectRoot = path.join(tmp.tempDir, 'relocated');
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(false);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      // The relocated session's snapshot is dropped, not kept for a retry no
+      // boundary will ever ask for.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the relocated root snapshot when a run for the old root settles', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const relocated = path.join(tmp.tempDir, 'relocated');
+      await fs.mkdir(relocated, { recursive: true });
+      let liveRoot = tmp.projectRoot;
+      const config = {
+        getSessionId: () => 'sess',
+        getProjectRoot: () => liveRoot,
+      } as unknown as Config;
+      const turnAt = (root: string, length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(root, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      // Turn 1 arms in the original root, parked so it settles last.
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      const parked = turnAt(tmp.projectRoot, 2);
+
+      // `/cd` relocates the live Config in place and fires no discard. The new
+      // root's first run re-keys the entry, and the next turn skips and parks
+      // a snapshot that is genuinely owed a run.
+      liveRoot = relocated;
+      await turnAt(relocated, 4);
+      expect((await turnAt(relocated, 6)).skippedReason).toBe('cadence');
+
+      // The parked run describes the abandoned root, so it must not re-key the
+      // entry or drop the snapshot the live root parked.
+      release();
+      await parked;
+      await mgr.drain();
+
+      // Without the guard the snapshot is gone and this resolves `true` having
+      // forked nothing, certifying turns as extracted that never were.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      const flush = vi.mocked(runAutoMemoryExtract).mock.calls.at(-1)![0];
+      expect(flush.projectRoot).toBe(relocated);
+      expect(flush.history).toHaveLength(6);
+    });
+
+    it('does not carry a snapshot across roots when a run for the old root settles', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const relocated = path.join(tmp.tempDir, 'relocated');
+      await fs.mkdir(relocated, { recursive: true });
+      let liveRoot = tmp.projectRoot;
+      const config = {
+        getSessionId: () => 'sess',
+        getProjectRoot: () => liveRoot,
+      } as unknown as Config;
+      const turnAt = (root: string, length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(root, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      // Root A's run is in flight when the user `/cd`s away and back.
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      const inFlight = turnAt(tmp.projectRoot, 2);
+
+      // In root B a run settles and arms, and a skip parks B's snapshot.
+      liveRoot = relocated;
+      await turnAt(relocated, 4);
+      expect((await turnAt(relocated, 6)).skippedReason).toBe('cadence');
+
+      // Back in A the in-flight run settles. Carrying B's snapshot would
+      // re-key the entry to A while keeping B's parked turns (and B's spent
+      // skip budget), and the supplement gate — comparing the entry's root
+      // alone — would splice them into A's extraction. 45 is measured from
+      // the snapshot's own base (skippedFrom 4): 45 − 4 > 40 fires the gate
+      // whenever a foreign snapshot survives the settle.
+      liveRoot = tmp.projectRoot;
+      release();
+      await inFlight;
+      await mgr.drain();
+
+      const supplemented = await turnAt(tmp.projectRoot, 45);
+      expect(supplemented.skippedReason).toBeUndefined();
+      const last = vi.mocked(runAutoMemoryExtract).mock.calls.at(-1)![0];
+      expect(last.projectRoot).toBe(tmp.projectRoot);
+      expect(last.skippedHistory ?? []).toEqual([]);
+    });
+
+    it('keeps a snapshot the relocated root parked behind a refused flush', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      let projectRoot = tmp.projectRoot;
+      const relocated = path.join(tmp.tempDir, 'relocated');
+      const config = {
+        getSessionId: () => 'sess',
+        getProjectRoot: () => projectRoot,
+      } as unknown as Config;
+      const turnAt = (root: string, length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(root, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      await turnAt(tmp.projectRoot, 2);
+      expect((await turnAt(tmp.projectRoot, 4)).skippedReason).toBe('cadence');
+
+      // Another session holds the old root's slot, so the boundary parks
+      // behind it instead of timing out with a snapshot nobody runs.
+      const otherRun = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () => otherRun.promise,
+      );
+      const other = turn(mgr, 2, 'other');
+      const parkedFlush = mgr.flushPendingExtract('sess', 30_000);
+
+      // `/cd` relocates the live Config while that flush is still parked. The
+      // session lives on: the new root's own run re-keys the entry, and its
+      // next turn skips and parks a snapshot that is genuinely owed a run.
+      projectRoot = relocated;
+      await turnAt(relocated, 4);
+      expect((await turnAt(relocated, 6)).skippedReason).toBe('cadence');
+
+      otherRun.resolve(engagedNoop('other'));
+      await other;
+      // The parked snapshot describes the abandoned root, so this boundary
+      // refuses it — without dropping the snapshot the live root parked, which
+      // no run would then ever fork.
+      await expect(parkedFlush).resolves.toBe(false);
+
+      const before = vi.mocked(runAutoMemoryExtract).mock.calls.length;
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(vi.mocked(runAutoMemoryExtract).mock.calls.length).toBe(
+        before + 1,
+      );
+      const flush = vi.mocked(runAutoMemoryExtract).mock.calls.at(-1)![0];
+      expect(flush.projectRoot).toBe(relocated);
+      expect(flush.history).toHaveLength(6);
+    });
+
+    it('drops a snapshot a newer run for the session already covered', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      // Another session holds the slot while a newer extraction covers pending.
+      const other = turn(mgr, 2, 'other');
+      const flushing = mgr.flushPendingExtract('sess', 30_000);
+
+      // A newer run for this session queues behind the same blocker, so it
+      // commits before the parked flush gets the slot.
+      const newer = turn(mgr, 8);
+      release();
+      await other;
+      await newer;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await mgr.drain();
+      await expect(flushing).resolves.toBe(false);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const lengths = vi
+        .mocked(runAutoMemoryExtract)
+        .mock.calls.map((call) => call[0].history.length);
+      // The covered snapshot is dropped instead of re-forked, which is what
+      // would persist the cursor backwards behind the newer run's offset.
+      expect(lengths).not.toContain(4);
+      expect(lengths).toContain(8);
+    });
+
+    it('refuses a parked flush whose snapshot a session switch deleted outright', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      const other = turn(mgr, 2, 'other');
+      const flushing = mgr.flushPendingExtract('sess', 30_000);
+
+      // startNewSession() discards the cadence entry before it decides whether
+      // the session id actually changed, so resuming the session already in
+      // use deletes it under the parked flush while the live id stays put.
+      mgr.discardExtractCadence('sess', 'sess');
+
+      release();
+      await other;
+      await expect(flushing).resolves.toBe(false);
+      // The orphaned snapshot is not forked: its cursor would land over the
+      // live one and nothing owns the turns it carries.
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(4);
+    });
+
+    it('keeps a parked snapshot when the run that advanced past it never forked', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      // The no-new-user-text early return writes the cursor and returns
+      // without forking: no `extractorEngaged`, so its offset is not coverage
+      // for turns it never read.
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+        extractResult('sess', [], 6) as never,
+      );
+      await turn(mgr, 6);
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toContain(4);
+    });
+
+    // Regression (#13004 R18-1): the supplement is spliced at schedule time, so
+    // a request that waits in `extractQueued` can outlive the parked snapshot
+    // that justified it — the covering run's `recordCadenceOutcome` deletes that
+    // snapshot before `startQueuedExtract` re-enters `runExtract`, and nothing
+    // re-derives the slice. Replaying it re-feeds turns the covering run
+    // already extracted.
+    it('drops a queued supplement whose parked snapshot a concurrent run consumed', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4);
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+
+      // Run A holds the project slot; turn B queues behind it and picks the
+      // parked slice up at schedule time (50 - 4 evicts it from B's own tail).
+      const hung = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(hung.promise);
+      const running = turn(mgr, 10);
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
+      );
+      expect((await turn(mgr, 50)).skippedReason).toBe('queued');
+
+      // A settles with coverage of the parked snapshot (it forked, and its
+      // offset reaches the snapshot's length), so the coverage delete removes
+      // the state that justified B's supplement before B starts.
+      hung.resolve(engagedNoop('sess', 10));
+      await running;
+      await mgr.drain({ timeoutMs: 5_000 });
+
+      const queuedCall = vi
+        .mocked(runAutoMemoryExtract)
+        .mock.calls.find((call) => call[0].history.length === 50);
+      expect(queuedCall).toBeDefined();
+      expect(queuedCall?.[0].skippedHistory).toBeUndefined();
+    });
+
+    it('extracts a snapshot that replaced the parked run it did not join', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      // Another session holds the slot while a newer skip replaces pending.
+      const other = turn(mgr, 2, 'other');
+      const olderFlush = mgr.flushPendingExtract('sess', 30_000);
+
+      // A later turn skips while the older flush is parked, replacing pending.
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+
+      // Retried while the older run is still parked, so it must not take that
+      // run's answer for turns it never extracted.
+      const newerFlush = mgr.flushPendingExtract('sess', 30_000);
+
+      release();
+      await other;
+      await expect(olderFlush).resolves.toBe(false);
+      await expect(newerFlush).resolves.toBe(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      // Only the replacement snapshot is extracted, exactly once.
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length)
+          .filter((length) => length === 6),
+      ).toHaveLength(1);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toContain(6);
+    });
+
+    it('keeps a newer snapshot when a parked flush refuses its older one', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      const other = turn(mgr, 2, 'other');
+      const flushing = mgr.flushPendingExtract('sess', 30_000);
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+
+      // Refusing the older snapshot must leave the newer one pending.
+      release();
+      await other;
+      await mgr.drain();
+      await expect(flushing).resolves.toBe(false);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toContain(6);
+    });
+
+    it('keeps a later skipped turn pending when an older trailing run completes', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const releases: Array<() => void> = [];
+      const slowRun = (params: Parameters<typeof runAutoMemoryExtract>[0]) =>
+        new Promise<ReturnType<typeof engagedNoop>>((resolve) => {
+          releases.push(() =>
+            resolve(engagedNoop(params.sessionId, params.history.length)),
+          );
+        });
+      vi.mocked(runAutoMemoryExtract)
+        .mockImplementationOnce(slowRun)
+        .mockImplementationOnce(slowRun);
+
+      const first = turn(mgr, 2);
+      // Queued as a trailing request behind the first run.
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+      releases[0]();
+      await first;
+      // The trailing run (history 4) is now active and the session is armed.
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      releases[1]();
+      await mgr.drain();
+
+      // The carried settle moved the entry's base to 4 while the parked slice
+      // keeps the base it was cut at (2). At 43 the tail — measured from the
+      // slice's own base — no longer holds it, so this turn prepends it.
+      const supplemented = await turn(mgr, 43);
+      expect(supplemented.skippedReason).toBeUndefined();
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].skippedHistory,
+      ).toEqual(turns(6).slice(2));
+
+      // That run covered the parked turns, so the close flush forks nothing.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
+    it('supplements only past the capture window, measured from the slice base', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      // Exactly the window: 42 - 2 = 40. The parked slice still fits the
+      // captured tail, so this turn extracts without prepending it; the case
+      // above pins the other side at 43, where one more entry leaves it out.
+      const atWindow = await turn(mgr, 42);
+      expect(atWindow.skippedReason).toBeUndefined();
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[1][0].skippedHistory,
+      ).toBeUndefined();
+    });
+
+    it('runs when a carried settle let the parked span outgrow the skip window', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const releases: Array<() => void> = [];
+      const slowRun = (params: Parameters<typeof runAutoMemoryExtract>[0]) =>
+        new Promise<ExtractResult>((resolve) => {
+          releases.push(() =>
+            resolve(engagedNoop(params.sessionId, params.history.length)),
+          );
+        });
+      vi.mocked(runAutoMemoryExtract)
+        .mockImplementationOnce(slowRun)
+        .mockImplementationOnce(slowRun);
+
+      const first = turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+      releases[0]();
+      await first;
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      releases[1]();
+      await mgr.drain();
+
+      // Base 4 after the carry, but the parked slice still starts at 2:
+      // measured from that base the unprocessed span is 22 — past the window
+      // half — so skipping again would strand entries the next tail evicts.
+      expect((await turn(mgr, 24)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].skippedHistory,
+      ).toBeUndefined();
+    });
+
+    it('keeps a later skipped turn pending when an older direct run completes', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+
+      // `belowCompactionWarn: false` means the cadence gate declines, so the
+      // run starts directly while the next turn — evaluated before the
+      // `extractRunning` branch — skips instead of queueing behind it.
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      const direct = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess', turns(4)),
+      );
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
+      );
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      release();
+      await direct;
+      await mgr.drain();
+
+      // The direct run is the older request here too, so the skip survives it.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
+      ).toHaveLength(6);
+    });
+
+    it('drops the pending snapshot when compaction shrank the history under it', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4);
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+
+      // Compaction collapses the live history below what the session already
+      // extracted, so this run is not an older trailing request: the skipped
+      // snapshot predates the shrink and must not be carried or replayed.
+      await turn(mgr, 2);
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+    });
+
+    // Regression: an in-flight run scheduled BEFORE a skip cannot cover the
+    // snapshot parked behind it — not even when a compaction lands between
+    // the run's schedule and its settle, making its `processedOffset` larger
+    // than the snapshot's live-space length (R6-2).
+    it('keeps a skipped turn pending when a compaction lands inside an in-flight run', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4); // arm at 4
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      // A above-compaction turn starts a direct run at 20 and hangs in it.
+      const direct = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess', turns(20)),
+      );
+      // Compaction collapses the live history, the following turn regrows it
+      // to 9 and skips, parking a genuine snapshot at length 9.
+      expect((await turn(mgr, 9)).skippedReason).toBe('cadence');
+      // The pre-compaction run settles having consumed its own index space.
+      release();
+      await direct;
+
+      // The snapshot was parked after that run was scheduled, so it must
+      // survive the settle and be extracted by the close flush.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => (call[0].history as Content[]).length),
+      ).toEqual([4, 20, 9]);
+    });
+
+    // Regression: the park must be cut from the base the fit test measured. A
+    // carried settle writes `lastExtractedLength` from the hung run's own
+    // longer, pre-compaction index space while the parked snapshot keeps its
+    // older base, so slicing the next park at `lastExtractedLength` comes out
+    // empty and the turns the snapshot exists to preserve are dropped (R19-1).
+    it('keeps the owed turns when a carried settle moves the base past live history', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4); // arm at 4
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      // A direct run captures the longer, pre-compaction history and hangs.
+      const direct = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess', turns(20)),
+      );
+      // The following turn skips and parks slice(4) at length 9.
+      expect((await turn(mgr, 9)).skippedReason).toBe('cadence');
+      // The hung run settles: the carry keeps that snapshot but moves
+      // `lastExtractedLength` to 20, past the live history.
+      release();
+      await direct;
+
+      // The next skip still fits measured from the snapshot's own base (8 - 4),
+      // so it replaces the park.
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+
+      // Growing past the tail supplements the next run from the replaced park:
+      // it must still hold every owed turn, not an empty slice.
+      await turn(mgr, 50);
+      const supplemented = vi
+        .mocked(runAutoMemoryExtract)
+        .mock.calls.map(([params]) => params)
+        .find((params) => (params.history as Content[]).length === 50);
+      expect(supplemented?.skippedHistory).toEqual(turns(8).slice(4));
+    });
+
+    // Regression: a snapshot parked AFTER a compaction shrink, by a skip that
+    // landed while the shorter post-shrink run was still in flight, is not a
+    // pre-shrink snapshot — the short run's settle must carry it (R13-1).
+    it('carries a snapshot parked after a shrink when the short in-flight run settles', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 10); // arm at 10
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      // A post-compaction short history starts a run at 3 and hangs.
+      const direct = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess', turns(3)),
+      );
+      // The history regrows; the turn at 12 skips and parks slice(10).
+      expect((await turn(mgr, 12)).skippedReason).toBe('cadence');
+      release();
+      await direct;
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => (call[0].history as Content[]).length),
+      ).toEqual([10, 3, 12]);
+    });
+
+    // Regression: the flush deadline cancels the run, not only the wait — an
+    // expired budget aborts the fork instead of detaching it past the close,
+    // and the abandoned outcome leaves the entry pending for a retry (R13-2).
+    it('aborts the flush fork when the budget expires mid-run', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      let captured: { abortSignal?: AbortSignal } | undefined;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce((params) => {
+        captured = params;
+        return new Promise((_, reject) => {
+          params.abortSignal?.throwIfAborted();
+          params.abortSignal?.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          );
+        });
+      });
+      await expect(mgr.flushPendingExtract('sess', 50)).resolves.toBe(false);
+      expect(captured?.abortSignal?.aborted).toBe(true);
+
+      // Abandoned, not consumed: the snapshot survives for a later boundary.
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
+      );
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
+      ).toHaveLength(4);
+    });
+
+    it('drops a snapshot a partial compaction left above the cursor', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 13)).skippedReason).toBe('cadence');
+
+      // Compaction collapses the live history to 6: still above what the
+      // session extracted, so this run is not a shrink by cursor, and the spent
+      // budget makes the gate decline. The snapshot predates the shrink anyway.
+      await turn(mgr, 6);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+
+      // Carrying it would keep the gate shut until the history regrew past 13,
+      // and a close would replay it into a cursor no live history can match.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+    });
+
+    it('drops a parked snapshot invalidated where compaction shrinks the history', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 13)).skippedReason).toBe('cadence');
+
+      // Compaction shrinks the live history and the turn ends cancelled, so
+      // no scheduleExtract observes the shrink: ChatCompressionService calls
+      // this where the shrink is decided. Without it the flush's
+      // bypassCadence replay forks the stale 13-entry snapshot above the live
+      // history and persists a cursor no live history can match.
+      mgr.invalidatePendingExtract('sess');
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(13);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    // Regression (#13004 R18-3): `ChatCompressionService.compress()` runs per
+    // chat while the cadence entry is per session, and a subagent's derived
+    // Config shares both this manager and the base Config's session id. Only
+    // the Config that scheduled the snapshot may drop it.
+    it('refuses an invalidation from a Config that does not own the snapshot', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const sessionConfig = () =>
+        makeMockConfig({
+          getSessionId: vi.fn().mockReturnValue('sess'),
+          getProjectRoot: vi.fn().mockReturnValue(tmp.projectRoot),
+        } as Partial<Config>);
+      const owner = sessionConfig();
+      const parkOwed = async (mgr: MemoryManager) => {
+        const schedule = (length: number) =>
+          mgr.scheduleExtract({
+            ...extractParams(tmp.projectRoot, 'sess', turns(length), owner),
+            belowCompactionWarn: true,
+          });
+        await schedule(2);
+        expect((await schedule(4)).skippedReason).toBe('cadence');
+      };
+      const replaysOfSnapshot = () =>
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.filter((call) => call[0].history.length === 4).length;
+
+      // A foreign Config asking for the same session id is refused, so the
+      // snapshot survives and the flush still replays the turns it owes.
+      const foreign = new MemoryManager();
+      await parkOwed(foreign);
+      foreign.invalidatePendingExtract('sess', sessionConfig());
+      await expect(foreign.flushPendingExtract('sess', 1_000)).resolves.toBe(
+        true,
+      );
+      expect(replaysOfSnapshot()).toBe(1);
+
+      // The owning Config still drops its own snapshot, so the flush has
+      // nothing left to replay.
+      const own = new MemoryManager();
+      await parkOwed(own);
+      own.invalidatePendingExtract('sess', owner);
+      await expect(own.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(replaysOfSnapshot()).toBe(1);
+    });
+
+    it('refuses a parked flush whose snapshot a shrink dropped', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4);
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      // Another session holds the project slot, so the flush parks behind it.
+      const other = turn(mgr, 2, 'other');
+      const flushing = mgr.flushPendingExtract('sess', 30_000);
+
+      // Compaction shrinks this session while that flush is still parked: the
+      // run queues behind the same blocker, drops the snapshot and rewrites the
+      // cursor downward before the parked flush gets the slot.
+      const shrunk = turn(mgr, 2);
+      release();
+      await other;
+      await shrunk;
+      await mgr.drain();
+      await expect(flushing).resolves.toBe(false);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      // The forward-only cursor test reads `2 >= 6` as false and replays the
+      // abandoned snapshot while resolving `true` to a boundary that is gone.
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(6);
+    });
+
+    it('refuses a parked flush whose snapshot a reskip replaced with a shorter one', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+
+      const otherRun = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () => otherRun.promise,
+      );
+      // Another session holds the project slot, so the flush parks behind it.
+      const other = turn(mgr, 2, 'other');
+      const parked = mgr.flushPendingExtract('sess', 30_000);
+
+      // Compaction shrinks the live history to 4 and the next turn skips
+      // again, replacing `pending` with a snapshot shorter than the parked
+      // run's. That snapshot predates both, so replaying it forks turns no
+      // live history has and persists the cursor above them.
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      otherRun.resolve(engagedNoop('other'));
+      await other;
+      await expect(parked).resolves.toBe(false);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(6);
+
+      // The snapshot the live history parked is the one still owed a run.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls.at(-1)![0].history,
+      ).toHaveLength(4);
+    });
+
+    it('records the coverage of a run whose outcome a relocation drops', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      // The session relocates while this run is in flight. The run persisted
+      // the old project's cursor before it returned, so it already covered the
+      // snapshot the cadence parked even though the root guard drops the
+      // outcome: the entry has to be told, or a boundary replays turns this run
+      // extracted and persists the cursor backwards behind its offset.
+      const relocated = path.join(tmp.tempDir, 'relocated');
+      const oldRootRun = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () => oldRootRun.promise,
+      );
+      const run = mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, 'sess', turns(6), {
+          getSessionId: () => 'sess',
+          getProjectRoot: () => relocated,
+        } as unknown as Config),
+      });
+      oldRootRun.resolve(engagedNoop('sess', 6));
+      await run;
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toEqual([2, 6]);
+    });
+
+    it('records the coverage of a run the discard epoch drops', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      // The epoch is manager-wide, so a discard that names other sessions
+      // drops this run's outcome while its entry — parked snapshot included —
+      // stays for this session's boundary.
+      const activeRun = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () => activeRun.promise,
+      );
+      const run = turn(mgr, 6);
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
+      );
+      mgr.discardExtractCadence('other-a', 'other-b');
+      activeRun.resolve(engagedNoop('sess', 6));
+      await run;
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toEqual([2, 6]);
+    });
+
+    it.each(['next long turn', 'close'] as const)(
+      'retains earlier skipped turns after an unrelated memory write for %s',
+      async (boundary) => {
+        vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+        const mgr = new MemoryManager();
+        await turn(mgr, 2);
+        const owed = [
+          userText('My preferred accent color is CERULEAN-72.'),
+          content('model', { text: 'Understood.' }),
+        ];
+        const skipped = [...turns(2), ...owed];
+        const skippedResult = await mgr.scheduleExtract({
+          ...extractParams(tmp.projectRoot, 'sess', skipped),
+          belowCompactionWarn: true,
+        });
+        expect(skippedResult.skippedReason).toBe('cadence');
+
+        const wroteHistory = [
+          ...skipped,
+          userText('Remember that the build system is LANTERN.'),
+          content(
+            'model',
+            fnCall('write_file', {
+              file_path: path.join(
+                tmp.projectRoot,
+                '.qwen/memory/project/unrelated.md',
+              ),
+              content: 'The build system is LANTERN.',
+            }),
+          ),
+        ];
+        const wrote = await mgr.scheduleExtract({
+          ...extractParams(tmp.projectRoot, 'sess', wroteHistory),
+          belowCompactionWarn: true,
+        });
+        expect(wrote.skippedReason).toBe('memory_tool');
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+        if (boundary === 'next long turn') {
+          await mgr.scheduleExtract({
+            ...extractParams(tmp.projectRoot, 'sess', [
+              ...wroteHistory,
+              ...turns(50),
+            ]),
+            belowCompactionWarn: true,
+          });
+        } else {
+          await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+            true,
+          );
+        }
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+        expect(
+          vi.mocked(runAutoMemoryExtract).mock.calls[1][0].skippedHistory,
+        ).toEqual(owed);
+        await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+          true,
+        );
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it('does not flush after a foreground memory write without earlier skipped turns', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      const wrote = await mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, 'sess', [
+          ...turns(2),
+          userText('Remember that the build system is LANTERN.'),
+          content(
+            'model',
+            fnCall('write_file', {
+              file_path: path.join(
+                tmp.projectRoot,
+                '.qwen/memory/project/unrelated.md',
+              ),
+              content: 'The build system is LANTERN.',
+            }),
+          ),
+        ]),
+        belowCompactionWarn: true,
+      });
+      expect(wrote.skippedReason).toBe('memory_tool');
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a carried skip pending without refunding its budget', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const releases: Array<() => void> = [];
+      const slowRun = (params: Parameters<typeof runAutoMemoryExtract>[0]) =>
+        new Promise<ReturnType<typeof engagedNoop>>((resolve) => {
+          releases.push(() =>
+            resolve(engagedNoop(params.sessionId, params.history.length)),
+          );
+        });
+      vi.mocked(runAutoMemoryExtract)
+        .mockImplementationOnce(slowRun)
+        .mockImplementationOnce(slowRun);
+
+      const first = turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+      releases[0]();
+      await first;
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      releases[1]();
+      await mgr.drain();
+
+      // The trailing run (history 4) carried the history-6 skip forward, so the
+      // budget that skip spent stays spent: one skip left, then a real run.
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+      expect((await turn(mgr, 10)).skippedReason).toBeUndefined();
+    });
+
+    it("flush waits for another session's run on the same project", async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      await turn(mgr, 4);
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      const other = turn(mgr, 2, 'other');
+      const flushed = mgr.flushPendingExtract('sess', 1_000);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+
+      release();
+      await other;
+      await expect(flushed).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(runAutoMemoryExtract).mock.calls[2][0].sessionId).toBe(
+        'sess',
+      );
+    });
+
+    it('abandons a parked flush once its budget expires instead of forking', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      const release = holdNextExtract((params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+      const other = turn(mgr, 2, 'other');
+      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+
+      clock.mockReturnValue(1_002);
+      release();
+      await other;
+      await mgr.drain();
+      clock.mockRestore();
+
+      // The flush budget expired while the run was parked, so it must not
+      // fork the snapshot it was started for.
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(4);
+
+      // The skipped turn is still recorded, and the next boundary extracts it.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toContain(4);
     });
   });
 
@@ -2953,6 +4537,10 @@ describe('MemoryManager', () => {
   });
 
   describe('resetExtractStateForTests()', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
     it('clears in-flight extract state so subsequent calls are not blocked', async () => {
       const extract = deferred<ExtractResult>();
       vi.mocked(runAutoMemoryExtract)
@@ -2971,6 +4559,62 @@ describe('MemoryManager', () => {
       expect(result.skippedReason).not.toBe('already_running');
 
       extract.resolve(extractResult('sess'));
+    });
+
+    it('clears the #13004 cadence state so a leaked skip cannot suppress the next test', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        ...extractResult('sess', [], 2),
+        extractorEngaged: true,
+        madeGenuineProgress: true,
+      });
+
+      // No suite in this repo shares one manager across cases today (the
+      // helper runs in each suite's own beforeEach/afterEach); the cadence
+      // clear exists so a future shared-manager suite cannot inherit an armed
+      // skip.
+      const mgr = new MemoryManager();
+      const turn = (length: number, sessionId = 'sess') =>
+        mgr.scheduleExtract({
+          ...extractParams(
+            '/project',
+            sessionId,
+            Array.from({ length }, (_, i) => userText(`turn ${i}`)),
+          ),
+          belowCompactionWarn: true,
+        });
+
+      await turn(2);
+      expect((await turn(4)).skippedReason).toBe('cadence');
+
+      mgr.resetExtractStateForTests();
+
+      expect((await turn(6)).skippedReason).toBeUndefined();
+      await mgr.drain();
+
+      // The same reset, with the extraction still in flight when it lands: the
+      // run holds the pre-reset epoch, so the helper has to bump the counter or
+      // the run re-arms an id the clear just dropped.
+      const inFlight = deferred<ExtractResult>();
+      let started = false;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(() => {
+        started = true;
+        return inFlight.promise;
+      });
+      const running = turn(2, 'other');
+      await vi.waitFor(() => expect(started).toBe(true));
+
+      mgr.resetExtractStateForTests();
+
+      inFlight.resolve({
+        ...extractResult('other', [], 2),
+        extractorEngaged: true,
+        madeGenuineProgress: true,
+      });
+      await running;
+      await mgr.drain();
+
+      expect((await turn(4, 'other')).skippedReason).toBeUndefined();
     });
   });
 

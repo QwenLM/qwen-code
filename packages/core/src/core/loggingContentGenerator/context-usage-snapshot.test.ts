@@ -24,6 +24,11 @@ import { ToolNames } from '../../tools/tool-names.js';
 import { serializeContextUsage } from '../../telemetry/context-usage.js';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { appendAdditionalContext } from '../toolHookTriggers.js';
+import {
+  appendAutoMemorySnapshot,
+  EMPTY_AUTO_MEMORY_CATALOG,
+  getAutoMemorySnapshot,
+} from '../../memory/request-context.js';
 import { createContextUsageSnapshot } from './context-usage-snapshot.js';
 import {
   content,
@@ -323,7 +328,54 @@ describe('createContextUsageSnapshot', () => {
   });
 });
 
-describe('request-only memory attribution', () => {
+describe('memory attribution', () => {
+  it('counts every retained snapshot once without classifying identical user text as memory', () => {
+    const first = getAutoMemorySnapshot([], 'catalog A')!;
+    const contents: Content[] = [userText(first.text!)];
+    appendAutoMemorySnapshot(contents, first);
+    contents.push(
+      { role: 'model', parts: [{ text: 'answer' }] },
+      userText('next'),
+    );
+    const second = getAutoMemorySnapshot(contents, 'catalog B')!;
+    appendAutoMemorySnapshot(contents, second);
+    const original = structuredClone(contents);
+    const snapshot = createContextUsageSnapshot(
+      requestOf(contents),
+      createConfig({ autoMemoryContext: 'catalog B' }),
+      100000,
+    )!;
+    expect(snapshot.breakdown.memory_files_tokens).toBe(
+      estimateContextTextTokens(first.text!) +
+        estimateContextTextTokens(second.text!),
+    );
+    expect(snapshot.breakdown.messages_tokens).toBe(
+      estimateContentTokens([
+        userText(first.text!),
+        contents[1],
+        userText('next'),
+      ]),
+    );
+    expect(contents).toEqual(original);
+  });
+  it('attributes text matching the empty catalog sentinel to the user', () => {
+    const contents = [userText(EMPTY_AUTO_MEMORY_CATALOG)];
+    const snapshot = createContextUsageSnapshot(
+      requestOf(contents, { systemInstruction: 'policy' }),
+      createConfig({
+        autoMemory: 'policy',
+        autoMemoryContext: EMPTY_AUTO_MEMORY_CATALOG,
+      }),
+      100000,
+    )!;
+    expect(snapshot.breakdown.memory_files_tokens).toBe(
+      estimateContextTextTokens('policy'),
+    );
+    expect(snapshot.breakdown.messages_tokens).toBe(
+      estimateContentTokens(contents),
+    );
+  });
+
   it('counts only the injected final catalog as memory, preserving prior identical user text', () => {
     const catalog = 'current catalog';
     const config = createConfig({

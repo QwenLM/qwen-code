@@ -32,15 +32,30 @@ import {
 } from './channel-handshake.js';
 import {
   terminateChannel,
-  channelUnavailableReject,
+  raceChannelUnavailable,
 } from './channel-transport.js';
 import {
   startChannelLivenessMonitor,
   type ChannelLivenessFailure,
 } from './channel-liveness.js';
+import {
+  sampleChannelProcess,
+  type ChannelProcessSample,
+} from './channel-process-sample.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import { withTimeout } from './with-timeout.js';
 import { writeStderrLine } from './internal/stderrLine.js';
+
+// Single source for the sample-field guards shared by the kill line and the
+// grace line: an operator comparing both lines from one incident must see
+// one format for the same sample. Field order stays pinned by bridge tests.
+function wchanEvidence(sample: ChannelProcessSample | undefined): string {
+  return sample?.wchan || '?';
+}
+
+function rssMbEvidence(sample: ChannelProcessSample | undefined): string {
+  return sample ? String(Math.round(sample.rssBytes / 1048576)) : '?';
+}
 
 export interface ChannelStartupOptions {
   channelFactory: ChannelFactory;
@@ -295,15 +310,16 @@ export function createChannelStartup({
             initTimeoutMs - (Date.now() - startupStartedAt),
           );
           const response = await withTimeout(
-            Promise.race([
+            raceChannelUnavailable(
+              channel,
               connection.initialize(
                 createChannelInitializeRequest(
                   privateParentCapability,
                   delegateReadTextFileToClient,
                 ),
               ),
-              channelUnavailableReject(channel, 'during initialize'),
-            ]),
+              'during initialize',
+            ),
             remainingStartupMs,
             'initialize',
           );
@@ -311,6 +327,7 @@ export function createChannelStartup({
             response,
             isExternalToolGuardRequired(),
           );
+          info.retirementReceipts = capabilities.retirementReceipts;
           if (capabilities.activeWork) {
             info.activeWork = { ...capabilities.activeWork, seq: 0 };
           }
@@ -417,13 +434,55 @@ export function createChannelStartup({
       const failChannelLiveness = (error: ChannelLivenessFailure) => {
         if (info.isDying || !channelLifecycle.has(info)) return;
         markTransportFailed(error);
+        const evidence = error.evidence;
+        const sample = evidence?.lastSample;
         telemetry.event('channel.liveness_failed', {
           'qwen-code.daemon.acp_channel.id': info.id,
           'qwen-code.daemon.channel.session_count': sessionCount(info),
           'qwen-code.daemon.channel.transport_error_code': error.code,
+          // Per-field guards: the attribute contract admits no undefined
+          // values, and numeric zero (a zero-CPU stall's cpu_delta_ticks)
+          // is evidence, so guard numerics on !== undefined, not truthiness.
+          ...(evidence
+            ? {
+                ...(info.channel.pid !== undefined
+                  ? {
+                      'qwen-code.daemon.channel.liveness.pid': info.channel.pid,
+                    }
+                  : {}),
+                ...(sample
+                  ? {
+                      'qwen-code.daemon.channel.liveness.state': sample.state,
+                      ...(sample.wchan
+                        ? {
+                            'qwen-code.daemon.channel.liveness.wchan':
+                              sample.wchan,
+                          }
+                        : {}),
+                      'qwen-code.daemon.channel.liveness.rss_bytes':
+                        sample.rssBytes,
+                    }
+                  : {}),
+                ...(evidence.lastCpuDeltaTicks !== undefined
+                  ? {
+                      'qwen-code.daemon.channel.liveness.cpu_delta_ticks':
+                        evidence.lastCpuDeltaTicks,
+                    }
+                  : {}),
+                'qwen-code.daemon.channel.liveness.busy_extensions':
+                  evidence.busyExtensions,
+                'qwen-code.daemon.channel.liveness.consecutive_timeouts':
+                  evidence.consecutiveTimeouts,
+              }
+            : {}),
         });
+        // SIGKILL destroys the scene; the evidence must land in the log
+        // before the kill so the next incident is triageable.
+        const evidenceSuffix = evidence
+          ? ` pid=${info.channel.pid ?? '?'} state=${sample?.state ?? '?'} wchan=${wchanEvidence(sample)} cpuDelta=${evidence.lastCpuDeltaTicks ?? '?'} busy=${evidence.busyExtensions} timeouts=${evidence.consecutiveTimeouts} rssMB=${rssMbEvidence(sample)}`
+          : '';
         writeStderrLine(
-          `qwen serve: channel liveness failed (${error.code}); killing channel`,
+          `qwen serve: channel liveness failed (${error.code})${evidenceSuffix}; killing channel`,
         );
         if (info.channel.transportGuard) {
           info.channel.transportGuard.fail(error);
@@ -437,6 +496,15 @@ export function createChannelStartup({
             v: CHANNEL_LIVENESS_VERSION,
             nonce,
           }),
+        sampleProcess: () => sampleChannelProcess(info.channel.pid),
+        onBusyExtension: ({ extension, limit, cpuDeltaTicks, sample }) => {
+          const graceSuffix = sample
+            ? ` state=${sample.state} wchan=${wchanEvidence(sample)} rssMB=${rssMbEvidence(sample)}`
+            : '';
+          writeStderrLine(
+            `qwen serve: channel liveness probe timed out but agent pid=${info.channel.pid ?? '?'} consumed CPU (${cpuDeltaTicks} ticks)${graceSuffix}; extending grace ${extension}/${limit}`,
+          );
+        },
         onFailure: failChannelLiveness,
         isActive: () =>
           channelLifecycle.currentFor(engine) === info &&

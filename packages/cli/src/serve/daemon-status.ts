@@ -55,11 +55,14 @@ import type {
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
+import type { LoadAdmissionSnapshot } from './load-admission.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
+import type { ListenerKind } from './local-control/listener-identity.js';
+import type { StreamOccupancySnapshot } from './sse-occupancy.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
 // import the bucket shape from the status module alongside the rest of the
@@ -115,7 +118,8 @@ export interface DaemonStatusIssue {
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed'
     | 'daemon_log_degraded'
-    | 'daemon_memory_pressure';
+    | 'daemon_memory_pressure'
+    | 'system_overloaded';
   severity: IssueSeverity;
   message: string;
   section?: string;
@@ -137,6 +141,7 @@ export interface BuildDaemonStatusOptions {
   acpHandle?: AcpHttpHandle;
   rateLimiter?: RateLimiterInstance;
   getRestSseActive: () => number;
+  getStreamOccupancy: () => StreamOccupancySnapshot;
   features: readonly string[];
   protocolVersions: ServeProtocolVersions;
   supportedDeviceFlowProviders: readonly string[];
@@ -150,6 +155,7 @@ export interface BuildDaemonStatusOptions {
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getLoadAdmissionSnapshot?: () => LoadAdmissionSnapshot;
   /** Returns undefined when no policy was built — direct-embed, or no budget. */
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
   getCommittedAcpChildCount?: () => number;
@@ -203,7 +209,21 @@ interface DaemonStatusLimits {
   maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   listenerMaxConnections: number | null;
+  /**
+   * Effective admission cap for concurrent long-lived streams across every
+   * surface (`runtime.transport.streamOccupancy.total` is the live
+   * occupancy; `restSseActive` remains the REST event surface alone).
+   * `null` = unlimited (listener cap disabled, or explicit opt-out).
+   */
+  maxSseConnections?: number | null;
+  /**
+   * Per-listener admission clamps paired with `maxSseConnections`
+   * (issue #17554). Each pairing listener keeps its own short-request
+   * headroom; `null` = unlimited. Additive — older daemons omit it.
+   */
+  maxSseConnectionsPerListener?: Record<ListenerKind, number | null>;
   eventRingSize: number;
+  eventRingMaxBytes: number;
   compactedReplayMaxBytes: number;
   maxJournalEvents: number;
   maxJournalBytes: number;
@@ -360,6 +380,13 @@ interface DaemonStatusRuntime {
   channelWorkers?: ChannelWorkerGroupSnapshot[];
   transport: {
     restSseActive: number;
+    /**
+     * Listener-slot occupancy across every long-lived stream surface
+     * (issue #17554), broken down by surface and by listener. Includes
+     * ACP WebSocket connections: the gauge measures slots, not frames.
+     * Additive — older daemons omit it.
+     */
+    streamOccupancy?: StreamOccupancySnapshot;
     acp: {
       enabled: boolean;
       connections: number;
@@ -392,6 +419,14 @@ interface DaemonStatusRuntime {
    * Absent when no budget resolved.
    */
   memory?: DaemonStatusRuntimeMemory;
+  /**
+   * Load-based fresh-session admission state. `enabled: false` when the
+   * operator passed `--no-load-admission`; `overloaded` is the cached
+   * monitor verdict that refuses new child spawns with 503
+   * `system_overloaded`. Live sessions and the control plane are never
+   * gated by it.
+   */
+  loadAdmission?: LoadAdmissionSnapshot;
   perf?: DaemonPerfSnapshot;
   /**
    * Rolling per-interval activity series backing the Daemon Status charts
@@ -880,8 +915,24 @@ export async function buildDaemonStatusResponse(
       ? input.getChannelWorkerSnapshots?.()
       : undefined;
   const totalAdmissionSnapshot = input.getTotalSessionAdmissionSnapshot?.();
+  const loadAdmissionSnapshot = input.getLoadAdmissionSnapshot?.();
   const issues: DaemonStatusIssue[] = [];
   let full: FullDaemonStatus | undefined;
+
+  if (loadAdmissionSnapshot?.overloaded) {
+    issues.push({
+      code: 'system_overloaded',
+      // `warning`, not `error`: same calibration caution as
+      // `daemon_memory_pressure` — the thresholds are new, and the rollup
+      // should not claim a daemon-wide error on their first deployments.
+      severity: 'warning',
+      message:
+        `System overloaded (${loadAdmissionSnapshot.reason}); new sessions ` +
+        'are paused until load subsides ' +
+        `(load ratio ${loadAdmissionSnapshot.loadRatio.toFixed(2)}, ` +
+        `event-loop p99 ${Math.round(loadAdmissionSnapshot.eventLoopLagP99Ms)} ms).`,
+    });
+  }
 
   pushRuntimeIssues(
     issues,
@@ -1007,12 +1058,26 @@ export async function buildDaemonStatusResponse(
       maxPendingPromptsPerSession:
         bridgeSnapshot.limits.maxPendingPromptsPerSession,
       listenerMaxConnections: listenerMaxConnections(input.opts.maxConnections),
+      maxSseConnections: sseMaxConnections(
+        input.opts.maxConnections,
+        input.opts.maxSseConnections,
+      ),
+      maxSseConnectionsPerListener: sseListenerCapsForStatus(
+        input.opts.maxConnections,
+        input.opts.maxSseConnections,
+      ),
       eventRingSize: bridgeSnapshot.limits.eventRingSize,
+      eventRingMaxBytes: bridgeSnapshot.limits.eventRingMaxBytes,
       compactedReplayMaxBytes: bridgeSnapshot.limits.compactedReplayMaxBytes,
       maxJournalEvents: bridgeSnapshot.limits.maxJournalEvents,
       maxJournalBytes: bridgeSnapshot.limits.maxJournalBytes,
       promptDeadlineMs: positiveFiniteOrNull(input.opts.promptDeadlineMs),
-      writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
+      // Effective budget, not the raw flag: the reaper is default-on, so
+      // `null` here means "disabled" (direct embeds passing 0), never
+      // "no writer eviction" — an unset flag reports the 60s default.
+      writerIdleTimeoutMs: positiveFiniteOrNull(
+        resolveWriterIdleBudgetMs(input.opts.writerIdleTimeoutMs),
+      ),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       sessionPromptSettledCloseGraceMs:
@@ -1082,6 +1147,7 @@ export async function buildDaemonStatusResponse(
         : {}),
       transport: {
         restSseActive: input.getRestSseActive(),
+        streamOccupancy: input.getStreamOccupancy(),
         acp: {
           enabled: acpSnapshot !== undefined,
           connections: acpAggregate?.connectionCount ?? 0,
@@ -1131,6 +1197,9 @@ export async function buildDaemonStatusResponse(
             : null,
       },
       ...(runtimeMemory ? { memory: runtimeMemory } : {}),
+      ...(loadAdmissionSnapshot
+        ? { loadAdmission: loadAdmissionSnapshot }
+        : {}),
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),
@@ -1710,10 +1779,144 @@ export function listenerMaxConnections(
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+/**
+ * Fraction of the listener cap reserved for long-lived REST SSE streams.
+ * The remainder is headroom for short requests (`/health`, static assets,
+ * JSON API calls) so SSE accumulation can never silently occupy every
+ * listener slot and take the whole HTTP surface down at accept time.
+ */
+export const SSE_LISTENER_CAP_FRACTION = 0.8;
+
+/**
+ * Effective admission cap for concurrent REST SSE streams (`null` means
+ * unlimited). Without an explicit `maxSseConnections`, the cap derives
+ * from the effective listener cap (80%, at least one stream); a disabled
+ * listener cap disables the derived SSE cap too. An explicit value is
+ * honoured downward but normalised: fractional values floor to at least
+ * one stream (so `0.8` cannot collapse into the enforcement site's
+ * `> 0` "unlimited" gate while status publishes `0`), and the result is
+ * clamped to the listener's headroom ceiling so an explicit cap above the
+ * listener budget cannot silently erase the reserved short-request
+ * headroom. `0` / `Infinity` keep meaning unlimited even when the
+ * listener cap is disabled — an explicit cap still applies in that case.
+ */
+export function sseMaxConnections(
+  listenerCap: number | undefined,
+  sseCap: number | undefined,
+): number | null {
+  const listener = listenerMaxConnections(listenerCap);
+  // At least one stream must be admittable even for tiny listener caps.
+  const ceiling =
+    listener === null
+      ? null
+      : Math.max(1, Math.floor(listener * SSE_LISTENER_CAP_FRACTION));
+  if (sseCap !== undefined) {
+    if (sseCap === 0 || sseCap === Infinity) return null;
+    if (!Number.isFinite(sseCap) || sseCap < 0) return null;
+    const floor = Math.max(1, Math.floor(sseCap));
+    return ceiling === null ? floor : Math.min(ceiling, floor);
+  }
+  return ceiling;
+}
+
+/**
+ * Socket budget of the pairing listeners (local-control and remote-access).
+ * Shared by `local-control/service.ts` and `remote-access.ts` so the budget
+ * and the per-listener SSE clamp derived from it cannot drift.
+ */
+export const PAIRING_LISTENER_MAX_CONNECTIONS = 64;
+
+/**
+ * Admission caps for long-lived stream surfaces (issue #17554). `undefined`
+ * means unlimited. `aggregate` bounds the daemon-wide total across every
+ * surface and listener; `byListener` additionally clamps each listener so
+ * the pairing surfaces keep the same short-request headroom guarantee as
+ * the primary listener.
+ */
+export interface SseAdmissionCaps {
+  aggregate: number | undefined;
+  byListener: Record<ListenerKind, number | undefined>;
+}
+
+/**
+ * Resolve the effective admission caps. The aggregate reuses
+ * {@link sseMaxConnections} unchanged (explicit override floors/clamps;
+ * `0`/`Infinity` and a disabled listener cap derive unlimited). The primary
+ * listener's clamp IS the aggregate — it is already clamped to the primary
+ * listener's headroom ceiling. Each pairing listener clamps at 80% of its
+ * own 64-socket budget while the aggregate is enabled; when the operator
+ * disables the cap, the per-listener clamps are disabled too (parity with
+ * the primary listener's opt-out semantics).
+ */
+export function resolveSseAdmissionCaps(opts: {
+  maxConnections?: number;
+  maxSseConnections?: number;
+}): SseAdmissionCaps {
+  const aggregate =
+    sseMaxConnections(opts.maxConnections, opts.maxSseConnections) ?? undefined;
+  const pairing =
+    aggregate === undefined
+      ? undefined
+      : Math.max(
+          1,
+          Math.floor(
+            PAIRING_LISTENER_MAX_CONNECTIONS * SSE_LISTENER_CAP_FRACTION,
+          ),
+        );
+  return {
+    aggregate,
+    byListener: {
+      primary: aggregate,
+      'local-control': pairing,
+      'remote-access': pairing,
+    },
+  };
+}
+
+/** Status-payload view of the per-listener clamps (`null` = unlimited). */
+export function sseListenerCapsForStatus(
+  listenerCap: number | undefined,
+  sseCap: number | undefined,
+): Record<ListenerKind, number | null> {
+  const { byListener } = resolveSseAdmissionCaps({
+    maxConnections: listenerCap,
+    maxSseConnections: sseCap,
+  });
+  return {
+    primary: byListener.primary ?? null,
+    'local-control': byListener['local-control'] ?? null,
+    'remote-access': byListener['remote-access'] ?? null,
+  };
+}
+
 export function positiveFiniteOrNull(value: number | undefined): number | null {
   return value !== undefined && Number.isFinite(value) && value > 0
     ? value
     : null;
+}
+
+/**
+ * Default writer-stall budget applied when `--writer-idle-timeout-ms` is
+ * unset. The reaper only fires while a write is stuck waiting for `drain`
+ * (the consumer stopped reading and the kernel send buffer is full), so
+ * healthy idle streams — whose 15s heartbeats keep flushing — are never
+ * evicted regardless of this value. 60s bounds how long a stalled writer
+ * can pin a listener slot before it is force-evicted.
+ */
+export const DEFAULT_WRITER_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * Resolve the effective writer-stall budget. Unset ⇒ default-on reaper;
+ * an explicit positive value wins; non-positive (direct embeds only — the
+ * CLI flag validates positive integers) disables the reaper. Lives here
+ * (not in the route module) so status surfaces can report the effective
+ * budget without importing route code.
+ */
+export function resolveWriterIdleBudgetMs(
+  flagValue: number | undefined,
+): number {
+  if (flagValue === undefined) return DEFAULT_WRITER_IDLE_TIMEOUT_MS;
+  return flagValue > 0 ? flagValue : 0;
 }
 
 function zeroRateHits(): Record<RateLimitTier, number> {

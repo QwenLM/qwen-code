@@ -2,6 +2,8 @@
 
 [English](2026-10-02-managed-workspace-w2-cwd-change.md) | [简体中文](2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md)
 
+Current status: new directory-change admission and UI are retired; only existing operation query/settlement remains. See [retirement design](2026-10-26-retire-managed-cwd-change.md).
+
 Status: implemented in this change. Part of [proposal #12380](https://github.com/QwenLM/qwen-code/issues/12380) ("W2 same-Workspace cwd change: controlled directory-change admission and settlement; public/WebShell routes remain `planned`" in the 2026-10-02 delivery snapshot).
 Research baseline: main `d5c22d336b` (2026-10-02); integrated onto the later merges #13138 (W1b, V31), #13135 + #13223 (bound close, V32), #13142 (D8a, contract v1.29.0, V33), #13194 (bound archive/delete) and #13112 (bound later turns) — the PR merges origin/main past all of them, and the migration renumbered to V46 after #13090 took V34, the tool profile took V35, the session-journal chain took V36–V39 (`V36` activation, `V37` event-type index, `V38` deferral marker, `V39` sequence index), the session-creator record plus the CSI chain took V40–V44, and the task journal took V45 meanwhile.
 The target contract is [Workspace v1.12, section 4](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md) and the in-repo reviewed OpenAPI contract v1.27.0, which already pins the two `planned` routes and their schemas.
@@ -12,7 +14,7 @@ A Workspace-bound Managed Session pins `cwdRelative` and `contextRevision=1` at 
 
 ## Verified current state
 
-Paths are under `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` unless noted.
+Paths are under `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` unless noted.
 
 - **Binding.** `V7__managed_workspace_binding.sql` adds the eight-column binding set (`workspace_id`, `workspace_generation`, `workspace_storage_id`, `cwd_relative`, `context_config_ref`, `context_revision`, `workspace_config_ref`, `workspace_policy_ref`) as one all-null-or-all-not-null unit behind the seven-field `ContextBinding` model, including `cwd_relative` and `context_revision` (hard-coded `1` at `store/ManagedWorkspaceRegistry.java:212`). No `context_state` column exists, and none is needed here: an open cwd operation is the gate.
 - **Operation ledger.** `V17__managed_session_operation.sql`'s `managed_agent_operation` is the durable 202 + Idempotency-Key substrate: per-(tenant, session, kind, actor, key) uniqueness, PENDING/RUNNING/COMPLETED states, lease/claim/retry columns, and a coordinator (`service/SessionLifecycleCoordinator.java`) with `@Scheduled recoverOperations()`. Kinds are bespoke (`CLOSE/ARCHIVE/DELETE/ACTION_RESPONSE` at `store/StoreModels.java:84`); V24 added per-kind columns, which is the template for the cwd columns. `findDeliverableOperations`, `claimOperation` and `retryOperation` are kind-generic; `beginOperation`/`completeOperation` are not (they assert the lifecycle status machine and reject bound Sessions).
@@ -126,13 +128,13 @@ WebShell requests carry `sessionId`, `idempotencyKey`, `cwdRelative`, `expectedC
 - `api/PublicAgentController.java`, `api/WebShellAgentController.java`, `api/ApiModels.java` (route + DTO records).
 - Tests: store admission matrix, coordinator settlement/reclaim, transport probe with H2 and temp mounts, controller tests, `ManagedAgentApiContractTest` and planned-schema pins, the Hosted integration suite's cwd group (H2; MySQL CI lane alongside the existing suite).
 - `packages/web-shell` regenerates `managed-agent-api.ts` from the updated contract (mechanical, same as prior contract bumps).
-- This design pair; `packages/sdk-java/managed-agent-server/README.md` (route behavior and gates).
+- This design pair; `packages/managed-agent-server/README.md` (route behavior and gates).
 
 No change to `packages/cli/src/serve/**`, `packages/core/**`, the worker, the envelope, or the shared fixtures.
 
 ## Validation plan
 
-- **Java**: `mvn test` and `mvn checkstyle:check` in `packages/sdk-java/managed-agent-server` on JDK 21; focused store/coordinator/controller/contract tests.
+- **Java**: `mvn test` and `mvn checkstyle:check` in `packages/managed-agent-server` on JDK 21; focused store/coordinator/controller/contract tests.
 - **Store admission matrix**: every row of the admission table, including replay-before-CAS order, digest conflict, cross-tenant invisibility, unreadable-actor 404 `session_not_found` vs readable non-creator 403 `session_operation_forbidden`, revoked grant, draining/removed registry, generation drift, expected-revision mismatch, busy on the G0 initial Turn or retained Runtime context, and the no-op same-directory change.
 - **Settlement**: probe failure leaves the Session untouched with `failure_code=workspace_unavailable`; commit after external revision bump fails with `context_revision_conflict`; commit with a fresh active Turn or retained Runtime context fails with `session_context_busy`; retry after a transient failure succeeds once; a probe that never stops failing transiently settles terminally when the 8-attempt budget runs out — deliverable rows drain and both admission barriers re-open; a vanished mount root or target classifies terminal (pinned against real deleted directories) while a momentary I/O shape classifies retryable (pinned with a deterministic ENAMETOOLONG probe); reclaim of a dead owner's LEASED row completes exactly once; legacy lifecycle operations and `ACTION_RESPONSE` are untouched (their tests stay green).
 - **Contract**: mapped vs planned drift test, schema pins for the six touched schemas, WebShell twins, event documentation consistency.

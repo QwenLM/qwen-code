@@ -445,6 +445,98 @@ summary {
   border: 0;
 }
 
+.view-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  flex-shrink: 0;
+  color: var(--muted);
+  background: var(--subtle);
+  font-size: 10px;
+}
+.view-toolbar button {
+  flex-shrink: 0;
+}
+.explorer > .warnings {
+  padding: 4px 12px;
+  flex-shrink: 0;
+}
+.generated-sections {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.view-section {
+  border-bottom: 1px solid var(--border);
+}
+.view-failure-list .list-pane {
+  height: 340px;
+  border-top: 1px solid var(--border);
+}
+.view-evidence .detail-pane {
+  display: flex;
+  height: 300px;
+  border-left: 0;
+}
+.view-evidence .back-to-list {
+  display: inline-block;
+  padding: 3px 6px;
+}
+.group-filter,
+.entry-duration {
+  color: var(--muted);
+  font-size: 10px;
+}
+.group-filter {
+  padding: 0 16px 8px;
+}
+.file-group-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--subtle);
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.file-group-heading > span:last-child {
+  flex-shrink: 0;
+}
+.hypothesis-groups {
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+.hypothesis-groups ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.hypothesis-groups li {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.hypothesis-groups h3 {
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+.hypothesis-notice,
+.hypothesis-references {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.hypothesis-groups button {
+  margin-top: 6px;
+}
+
 @media (max-width: 620px) {
   .report-header,
   .report-summary {

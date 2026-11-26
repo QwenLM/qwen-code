@@ -382,27 +382,36 @@ describe('mcp reconnect command', () => {
   });
 
   describe('process scope (issue #9944)', () => {
-    it('initializes the throwaway config without background MCP discovery', async () => {
-      // The command runs its own targeted `discoverToolsForServer`; the
-      // background incremental pass would race `config.shutdown()` and
-      // re-arm health-check timers that keep the process alive forever.
-      mockedLoadSettings.mockReturnValue({
-        merged: {
-          mcpServers: {
-            'test-server': { command: '/path/to/server' },
+    it.each([false, true])(
+      'initializes without background discovery, chat or file hooks (all=%s)',
+      async (all) => {
+        // The command runs its own targeted `discoverToolsForServer`; the
+        // background incremental pass would race `config.shutdown()` and
+        // re-arm health-check timers that keep the process alive forever.
+        mockedLoadSettings.mockReturnValue({
+          merged: {
+            mcpServers: {
+              'test-server': { command: '/path/to/server' },
+            },
           },
-        },
-      });
+        });
 
-      const handler = reconnectCommand.handler as (
-        argv: Record<string, unknown>,
-      ) => Promise<void>;
-      await handler({ 'server-name': 'test-server', all: false });
+        const handler = reconnectCommand.handler as (
+          argv: Record<string, unknown>,
+        ) => Promise<void>;
+        await handler({ 'server-name': all ? undefined : 'test-server', all });
 
-      expect(mockConfig.initialize).toHaveBeenCalledWith({
-        skipMcpDiscovery: true,
-      });
-    });
+        expect(mockConfig.initialize).toHaveBeenCalledWith({
+          skipMcpDiscovery: true,
+          skipFileWatching: true,
+          skipLlmInitialization: true,
+        });
+        expect(mockToolRegistry.discoverToolsForServer).toHaveBeenCalledWith(
+          'test-server',
+        );
+        expect(mockConfig.shutdown).toHaveBeenCalledOnce();
+      },
+    );
 
     it('clarifies that single-server success only covers this process', async () => {
       mockedLoadSettings.mockReturnValue({

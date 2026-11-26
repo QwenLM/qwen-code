@@ -1,0 +1,34 @@
+{
+  "name": "@qwen-code/qwen-code-next",
+  "version": "1.0.0-rc.0",
+  "description": "Qwen Code CLI on the Harness kernel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/qwen"
+  },
+  "private": true,
+  "type": "module",
+  "bin": {
+    "qwen": "dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build_package.js",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:ci": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@commander-js/extra-typings": "^14.0.0",
+    "@qwen-code/cli": "file:../harness/cli",
+    "@qwen-code/resource": "file:../harness/resource"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.4"
+  }
+}

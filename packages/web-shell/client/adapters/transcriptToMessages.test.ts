@@ -20,6 +20,30 @@ import {
   transcriptBlocksToDaemonMessages,
 } from './transcriptToMessages.js';
 import { getToolDescription } from '../components/messages/toolFormatting';
+import { modReplyRows } from '../components/messages/mod-rows';
+
+it('preserves marked quota data when projecting a terminal error', () => {
+  const subscriptionQuota = { type: 'subscription_quota', memberType: 'pro' };
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    normalizeDaemonEvent({
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session',
+        message: 'quota fallback',
+        subscriptionQuota,
+      },
+    }),
+  );
+  expect(transcriptBlocksToDaemonMessages(state.blocks)).toContainEqual(
+    expect.objectContaining({
+      role: 'system',
+      variant: 'error',
+      data: { subscriptionQuota },
+    }),
+  );
+});
 
 function textBlock(
   id: string,
@@ -100,8 +124,15 @@ it('preserves literal slash-command output and artifact references when a direct
   expect(messages[0]).toMatchObject({
     role: 'assistant',
     content: text,
+    // Not the model's reply, so no Mod row.
+    source: 'slash_command',
     reportedArtifacts: [descriptor],
   });
+  expect(
+    transcriptBlocksToDaemonMessages([
+      textBlock('answer', 'assistant', 'The answer', 1),
+    ])[0],
+  ).not.toHaveProperty('source');
 });
 
 it('retains slash-command insight cards when no export descriptor is reported', () => {
@@ -278,6 +309,7 @@ function toolBlock(
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
     subagentSessionReady: overrides.subagentSessionReady,
+    agent: overrides.agent,
     serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
@@ -286,6 +318,35 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('keeps producer identity across live/history projections and separates identical tool results', () => {
+    const output = {
+      resultDisplay: { type: 'mcp_app', documentId: 'same-content' },
+    };
+    const live = transcriptBlocksToDaemonMessages([
+      toolBlock('live-block', 'producer-a', 'completed', 1, {
+        rawOutput: output,
+      }),
+    ]);
+    const history = transcriptBlocksToDaemonMessages([
+      toolBlock('history-block', 'producer-a', 'completed', 1, {
+        rawOutput: output,
+      }),
+      toolBlock('history-block-2', 'producer-b', 'completed', 2, {
+        rawOutput: output,
+      }),
+    ]);
+    const ids = (
+      messages: ReturnType<typeof transcriptBlocksToDaemonMessages>,
+    ) =>
+      messages.flatMap((message) =>
+        message.role === 'tool_group'
+          ? message.tools.map((tool) => tool.generatedUiToolCallId)
+          : [],
+      );
+    expect(ids(live)).toEqual(['producer-a']);
+    expect(ids(history)).toEqual(['producer-a', 'producer-b']);
+  });
+
   it('keeps shell input previews out of output while preserving actual content', () => {
     const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
       toolName: 'run_shell_command',
@@ -512,6 +573,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('shows the normalized sending session beside reference annotations', () => {
+    const reference = {
+      type: 'reference' as const,
+      start: 0,
+      end: 5,
+      text: '@file',
+      reference: { id: 'file', serialized: '@file' },
+    };
+    const source = {
+      type: 'source' as const,
+      sessionId: 'caller',
+      workspaceCwd: '/work/a',
+      title: 'Caller',
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', '@file look', 1, false, {
+        meta: { sourceAnnotation: source, inputAnnotations: [reference] },
+      }),
+      textBlock('user-2', 'user', 'plain', 2, false, {
+        meta: { sourceAnnotation: source },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      sentFrom: source,
+      inputAnnotations: [reference],
+    });
+    expect(messages[1]).toMatchObject({ sentFrom: source });
+    expect(messages[1]).not.toHaveProperty('inputAnnotations');
+  });
+
   it('renders live background task notifications as system messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
@@ -602,6 +694,35 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'assistant',
         content: 'Normal reply',
         isStreaming: false,
+        timestamp: 2,
+      },
+    ]);
+  });
+
+  it('keeps Stop hook notices separate from assistant output', () => {
+    const answer = '{"ok":true}';
+    const stopReason = 'Model switched: verification still required';
+    expect(
+      transcriptBlocksToDaemonMessages([
+        textBlock('reply', 'assistant', answer, 1),
+        statusBlock('stop-notice', stopReason, 2, {
+          source: 'stop_hook_notice',
+        }),
+      ]),
+    ).toEqual([
+      {
+        id: 'reply',
+        role: 'assistant',
+        content: answer,
+        isStreaming: false,
+        timestamp: 1,
+      },
+      {
+        id: 'stop-notice',
+        role: 'system',
+        content: stopReason,
+        variant: 'info',
+        source: 'stop_hook_notice',
         timestamp: 2,
       },
     ]);
@@ -852,6 +973,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
           role: 'assistant',
           content:
             'Compression instructions were truncated to 2000 characters.\nContext compressed (263195 -> 99799).',
+          source: 'slash_command',
           isStreaming: false,
           timestamp: 1,
         },
@@ -876,6 +998,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
           id: 'compression',
           role: 'assistant',
           content: 'Context compressed.',
+          source: 'slash_command',
           isStreaming: false,
           timestamp: 1,
         },
@@ -1650,6 +1773,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('preserves source and streaming when splitting /insight output', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'insight-1',
+        'assistant',
+        'Generating insights... {"insight_progress":{"stage":"scan","progress":0.5,"detail":"reading"}}',
+        1,
+        true,
+        { meta: { source: 'slash_command' } },
+      ),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'Generating insights...',
+        source: 'slash_command',
+        isStreaming: true,
+      },
+      { role: 'insight_progress', stage: 'scan' },
+    ]);
+  });
+
   it('renders terminal insight messages with surrounding text', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
@@ -1665,6 +1811,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         id: 'insight-1-t-0',
         role: 'assistant',
         content: 'before',
+        isStreaming: false,
         timestamp: 1,
       },
       {
@@ -1677,6 +1824,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         id: 'insight-1-t-2',
         role: 'assistant',
         content: 'middle',
+        isStreaming: false,
         timestamp: 1,
       },
       {
@@ -1689,6 +1837,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         id: 'insight-1-t-4',
         role: 'assistant',
         content: 'after',
+        isStreaming: false,
         timestamp: 1,
       },
     ]);
@@ -1723,6 +1872,103 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toMatchObject([
       { id: 'insight-1', role: 'assistant', content },
     ]);
+  });
+
+  it('keeps an incomplete-history warning out of the model reply rows', () => {
+    const warning = 'Some earlier messages are unavailable.';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('gap', 'assistant', warning, 1, false, {
+        segmentId: 'record:0',
+        meta: { source: 'history_gap' },
+      }),
+      textBlock('answer', 'assistant', 'Model reply', 2, false, {
+        segmentId: 'record:1',
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'gap', role: 'assistant', content: warning, source: 'history_gap' },
+      { id: 'answer', role: 'assistant', content: 'Model reply' },
+    ]);
+    expect([...modReplyRows(messages)]).toEqual([['answer', true]]);
+  });
+
+  it('keeps assistant text from a missing parent separate from the model reply', () => {
+    const parentToolCallId = 'missing-call';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('first', 'assistant', 'Model before', 1),
+      textBlock('nested', 'assistant', 'Subagent', 2, false, {
+        parentToolCallId,
+      }),
+      textBlock('nested-continuation', 'assistant', ' output', 3, false, {
+        parentToolCallId,
+      }),
+      textBlock('answer', 'assistant', 'Model after', 4),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'first', role: 'assistant', content: 'Model before' },
+      {
+        id: 'nested',
+        role: 'assistant',
+        content: 'Subagent output',
+        parentToolCallId,
+      },
+      { id: 'answer', role: 'assistant', content: 'Model after' },
+    ]);
+    expect([...modReplyRows(messages)]).toEqual([
+      ['first', true],
+      ['answer', true],
+    ]);
+  });
+
+  it("keeps a thought from a missing parent apart from the model's thought", () => {
+    const parentToolCallId = 'missing-call';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('own', 'thought', 'Model thought', 1),
+      textBlock('nested', 'thought', 'Subagent', 2, false, {
+        parentToolCallId,
+      }),
+      textBlock('nested-continuation', 'thought', ' thought', 3, false, {
+        parentToolCallId,
+      }),
+      textBlock('answer', 'assistant', 'Model reply', 4),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'own', role: 'thinking', content: 'Model thought' },
+      {
+        id: 'nested',
+        role: 'thinking',
+        content: 'Subagent thought',
+        parentToolCallId,
+      },
+      { id: 'answer', role: 'assistant', content: 'Model reply' },
+    ]);
+    expect(messages[0]).not.toHaveProperty('parentToolCallId');
+  });
+
+  it('keeps the parent on assistant text split around an insight', () => {
+    const parentToolCallId = 'missing-call';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'nested',
+        'assistant',
+        'Before {"insight_ready":{"path":"/tmp/report.md"}} after',
+        1,
+        false,
+        { parentToolCallId },
+      ),
+      textBlock('answer', 'assistant', 'Model reply', 2),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'assistant', content: 'Before', parentToolCallId },
+      { role: 'insight_ready', path: '/tmp/report.md' },
+      { role: 'assistant', content: 'after', parentToolCallId },
+      { id: 'answer', role: 'assistant', content: 'Model reply' },
+    ]);
+    expect([...modReplyRows(messages)]).toEqual([['answer', true]]);
   });
 
   it('keeps parented assistant chunks inside a subagent', () => {
@@ -2302,6 +2548,24 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
       },
     ]);
+  });
+
+  it('keeps adjacent slash-command output and model replies separate', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'Earlier model text.', 1),
+      textBlock('command', 'assistant', 'Skill notice.', 2, false, {
+        meta: { source: 'slash_command' },
+      }),
+      textBlock('a2', 'assistant', 'Model reply.', 3, true),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'assistant', content: 'Earlier model text.' },
+      { role: 'assistant', content: 'Skill notice.', source: 'slash_command' },
+      { role: 'assistant', content: 'Model reply.', isStreaming: true },
+    ]);
+    expect(messages[0]).not.toHaveProperty('source');
+    expect(messages[2]).not.toHaveProperty('source');
   });
 
   it('keeps identity-tagged assistant segments as separate messages', () => {
@@ -4015,6 +4279,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       status: 'in_progress',
       kind: 'fetch',
     });
+    expect(pendingTool?.generatedUiToolCallId).toBeUndefined();
 
     const messages = transcriptBlocksToDaemonMessages([
       {
@@ -4057,6 +4322,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolName: 'web_fetch',
       status: 'completed',
       rawOutput: 'Content processed successfully.',
+      generatedUiToolCallId: 'webfetch-1',
     });
   });
 
@@ -4362,6 +4628,41 @@ describe('transcriptBlocksToDaemonMessages', () => {
       retryable: false,
       source: 'turn_error',
     });
+  });
+
+  it('prefers the cause label for a loop stop and falls back without one', () => {
+    const loopError = (loop?: { loopType: string; loopReason?: string }) => ({
+      id: 'err-loop',
+      kind: 'error' as const,
+      source: 'turn_error' as const,
+      errorKind: 'loop_detected' as const,
+      text: 'internal fallback',
+      ...(loop ? { loop } : {}),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const labels = {
+      loopDetected: 'Generic loop guidance.',
+      loopDetectedFor: (loop: { loopType?: string; loopReason?: string }) =>
+        loop.loopReason ? `Cause: ${loop.loopReason}` : undefined,
+    };
+
+    const [withCause] = transcriptBlocksToDaemonMessages(
+      [loopError({ loopType: 'turn_tool_call_cap', loopReason: 'backstop' })],
+      { labels },
+    );
+    const [unknownCause] = transcriptBlocksToDaemonMessages(
+      [loopError({ loopType: 'turn_tool_call_cap' })],
+      { labels },
+    );
+    const [noLoop] = transcriptBlocksToDaemonMessages([loopError()], {
+      labels,
+    });
+
+    expect(withCause.content).toBe('Cause: backstop');
+    expect(unknownCause.content).toBe('Generic loop guidance.');
+    expect(noLoop.content).toBe('Generic loop guidance.');
   });
 
   it('renders model stream interruption errors from structured errorKind labels', () => {
@@ -5460,6 +5761,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
   });
 });
 
+describe('replayed agent identity', () => {
+  function firstTool(blocks: DaemonTranscriptBlock[]) {
+    return transcriptBlocksToDaemonMessages(blocks).find(
+      (message) => message.role === 'tool_group',
+    )?.tools[0];
+  }
+
+  it('adopts the block agent path for a replayed Agent result', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+        agent: {
+          agentName: '/root/general-purpose',
+          depth: 1,
+          kind: 'subagent',
+        },
+      }),
+    ]);
+    expect(tool?.agentPath).toBe('/root/general-purpose');
+  });
+
+  it('stays unattributed when the replay carried no identity', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+      }),
+    ]);
+    expect(tool?.agentPath).toBeUndefined();
+  });
+});
+
 describe('running subagent replay start time', () => {
   function firstTool(blocks: DaemonTranscriptBlock[]) {
     return transcriptBlocksToDaemonMessages(blocks).find(
@@ -5715,6 +6047,67 @@ describe('background execution identity', () => {
       expect(messages[2]).toMatchObject({
         content: 'Main agent summary',
       });
+    },
+  );
+  it.each(['completion', 'notification', 'none'])(
+    'reads the replying session from %s metadata',
+    (source) => {
+      const fromSession = { sessionId: 'kid', workspaceCwd: '/w/b' };
+      const task = {
+        taskId: 'task-1',
+        kind: source === 'none' ? 'shell' : 'agent',
+        status: 'completed',
+        ...(source === 'none' ? {} : { fromSession }),
+      };
+      const turn = { ...backgroundTurn, toolUseId: undefined };
+      const messages = transcriptBlocksToDaemonMessages([
+        ...(source !== 'notification'
+          ? [
+              textBlock(
+                'completed',
+                'assistant',
+                'Task mentioned [a session](qwen-session://other%id).',
+                5,
+                false,
+                {
+                  meta: {
+                    source: 'background_task_completed',
+                    qwenDiscreteMessage: true,
+                    backgroundTask: task,
+                  },
+                },
+              ),
+            ]
+          : []),
+        textBlock('start', 'assistant', 'Continue', 10, false, {
+          meta: {
+            source: 'background_notification_turn_started',
+            backgroundTurn: turn,
+          },
+        }),
+        ...(source === 'notification'
+          ? [
+              textBlock('notice', 'assistant', 'Task notified', 11, false, {
+                meta: {
+                  source: 'background_notification',
+                  qwenDiscreteMessage: true,
+                  backgroundTurn: turn,
+                  backgroundTask: task,
+                },
+              }),
+            ]
+          : []),
+        textBlock('answer', 'assistant', 'It said MARIGOLD.', 12, false, {
+          backgroundTurn: turn,
+        }),
+      ]);
+      const marker = messages.find(
+        (message) => message.source === 'background_notification_turn_started',
+      );
+      expect(
+        (marker?.data as { backgroundTask?: { fromSession?: unknown } })
+          ?.backgroundTask?.fromSession,
+      ).toEqual(source === 'none' ? undefined : fromSession);
     },
   );
   it.each([false, true])(

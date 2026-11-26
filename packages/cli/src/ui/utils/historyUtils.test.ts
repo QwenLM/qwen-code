@@ -13,6 +13,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
   realUserPromptTexts,
+  stripLeadingSystemReminders,
 } from './historyUtils.js';
 
 const mk = (
@@ -274,5 +275,63 @@ describe('realUserPromptTexts', () => {
       mk({ type: 'user', text: 'valid' }, 3),
     ];
     expect(realUserPromptTexts(h)).toEqual(['valid']);
+  });
+
+  it('recalls full paste text while preserving literal legacy placeholders', () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const first = 'PASTE_ALPHA '.padEnd(1200, 'a');
+    const second = 'PASTE_BETA '.padEnd(1200, 'b');
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: placeholder, recallText: first }, 1),
+      mk({ type: 'user', text: placeholder, recallText: second }, 2),
+      mk({ type: 'user', text: placeholder }, 3),
+    ];
+    expect(realUserPromptTexts(h)).toEqual([first, second, placeholder]);
+    expect(h.map((item) => item.text)).toEqual([
+      placeholder,
+      placeholder,
+      placeholder,
+    ]);
+  });
+});
+
+describe('stripLeadingSystemReminders', () => {
+  const envelope = (body: string) =>
+    `<system-reminder>\n${body}\n</system-reminder>`;
+
+  it('drops one leading envelope and keeps the typed text verbatim', () => {
+    expect(
+      stripLeadingSystemReminders(
+        `${envelope('1 background agent was restored from this session.')}\n\nreview the diff`,
+      ),
+    ).toBe('review the diff');
+  });
+
+  it('drops a stack of leading envelopes', () => {
+    expect(
+      stripLeadingSystemReminders(
+        `${envelope('A')}\n\n${envelope('B')}\n\nfix the parser`,
+      ),
+    ).toBe('fix the parser');
+  });
+
+  it('leaves text without a leading envelope unchanged', () => {
+    expect(stripLeadingSystemReminders('review the diff')).toBe(
+      'review the diff',
+    );
+    expect(
+      stripLeadingSystemReminders(`keep this ${envelope('mid')} as typed`),
+    ).toBe(`keep this ${envelope('mid')} as typed`);
+  });
+
+  it('does not swallow text that only looks like an envelope', () => {
+    const typed =
+      '<system-reminder> please fix the parser that handles </system-reminder> tags';
+    expect(stripLeadingSystemReminders(typed)).toBe(typed);
+  });
+
+  it('keeps the raw text when the prompt is only envelopes', () => {
+    const only = envelope('nothing else');
+    expect(stripLeadingSystemReminders(only)).toBe(only);
   });
 });

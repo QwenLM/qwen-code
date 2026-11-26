@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
-import postcss, { type Rule } from 'postcss';
+import { dirname, resolve } from 'node:path';
+import postcss, { type ChildNode, type Rule } from 'postcss';
+import ts from 'typescript';
 import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
@@ -26,6 +27,36 @@ function readPackageJavascript(): string {
     .join('\n');
 }
 
+function readStaticJavascript(entry: string): string {
+  const files = new Set([entry]);
+  const sources: string[] = [];
+  for (const file of files) {
+    const javascript = readFileSync(file, 'utf8');
+    sources.push(javascript);
+    const source = ts.createSourceFile(
+      file,
+      javascript,
+      ts.ScriptTarget.ESNext,
+    );
+    for (const statement of source.statements) {
+      if (
+        ts.isImportDeclaration(statement) ||
+        ts.isExportDeclaration(statement)
+      ) {
+        const specifier = statement.moduleSpecifier;
+        if (
+          specifier &&
+          ts.isStringLiteral(specifier) &&
+          specifier.text.startsWith('.')
+        ) {
+          files.add(resolve(dirname(file), specifier.text));
+        }
+      }
+    }
+  }
+  return sources.join('\n');
+}
+
 function readInjectedCss(bundle = readBundle()): string {
   const match = bundle.match(/^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");/);
   if (!match?.[1]) throw new Error('Injected component CSS not found');
@@ -43,7 +74,112 @@ function enclosingLayer(rule: Rule): string | undefined {
   return undefined;
 }
 
+function enclosingScope(node: ChildNode): string | undefined {
+  let parent = node.parent;
+  while (parent) {
+    if (parent.type === 'atrule' && parent.name.toLowerCase() === 'scope') {
+      return parent.params;
+    }
+    parent = parent.parent;
+  }
+  return undefined;
+}
+
+function hasDescendantWildcardAfterHas(selector: string): boolean {
+  let index = selector.indexOf(':has(');
+  while (index !== -1) {
+    let depth = 1;
+    let cursor = index + ':has('.length;
+    while (cursor < selector.length && depth > 0) {
+      if (selector[cursor] === '(') depth += 1;
+      else if (selector[cursor] === ')') depth -= 1;
+      cursor += 1;
+    }
+    if (depth === 0 && /^\s*\*/.test(selector.slice(cursor))) {
+      return true;
+    }
+    index = selector.indexOf(':has(', index + 1);
+  }
+  return false;
+}
+
+const EXPECTED_SCOPE_ROOTS = [
+  '[data-web-shell-root][data-web-shell-shadcn]',
+  '[data-web-shell-portal-root][data-web-shell-shadcn]',
+] as const;
+
+function hasWebShellScope(scopeParams: string | undefined): boolean {
+  return (
+    typeof scopeParams === 'string' &&
+    EXPECTED_SCOPE_ROOTS.every((root) => scopeParams.includes(root))
+  );
+}
+
 describe('build artifact — package boundary', () => {
+  it('keeps Generated UI retention out of the read-only transcript runtime', () => {
+    const withoutCss = (javascript: string) =>
+      javascript.replace(/^const __qwenWebShellCss=.*\n/gm, '');
+    expect(withoutCss(readTranscriptBundle())).not.toContain(
+      'data-generated-ui-slot',
+    );
+    expect(withoutCss(readPackageJavascript())).toContain(
+      'data-generated-ui-slot',
+    );
+  });
+
+  it('keeps deletion-only copy out of the read-only transcript', () => {
+    for (const copy of [
+      'Delete permanently',
+      '所选原始消息将从历史中永久删除。已有摘要、命令执行效果和项目文件保持不变。已进入摘要的信息仍可能影响后续回复。',
+      'Session history changed. Select the messages again before deleting.',
+    ]) {
+      expect(
+        readPackageJavascript().includes(copy),
+        `Interactive copy: ${copy}`,
+      ).toBe(true);
+      expect(
+        readTranscriptBundle().includes(copy),
+        `Read-only copy: ${copy}`,
+      ).toBe(false);
+    }
+  });
+
+  it.each(['.', 'assets'])(
+    'ships the xterm runtime and stylesheet in a lazy chunk in dist/%s',
+    (directory) => {
+      const dir = resolve(DIST_DIR, directory);
+      const files = readdirSync(dir).filter((name) => /\.(js|css)$/.test(name));
+      const runtime = files.find((name) =>
+        /^terminal-runtime-.*\.js$/.test(name),
+      );
+      expect(runtime).toBeDefined();
+      const code = readFileSync(resolve(dir, runtime!), 'utf8');
+      expect(code).toContain('"xterm-helper-textarea"');
+      expect(code).toContain('.xterm-helper-textarea{');
+      if (directory === '.') {
+        expect(code).toMatch(
+          /@scope\s*\(\[data-web-shell-root\]\[data-web-shell-shadcn\],\s*\[data-web-shell-portal-root\]\[data-web-shell-shadcn\]\)/,
+        );
+        expect(code).toMatch(
+          /:where\(:scope\)\.xterm \.xterm-helper-textarea,\s*\.xterm \.xterm-helper-textarea\{/,
+        );
+      } else {
+        expect(
+          readFileSync(resolve(DIST_DIR, 'index.html'), 'utf8'),
+        ).not.toContain(runtime);
+      }
+      const otherChunks = files
+        .filter((name) => name !== runtime)
+        .map((name) => readFileSync(resolve(dir, name), 'utf8'))
+        .join('\n');
+      expect(otherChunks).toContain(`import("./${runtime}")`);
+      expect(otherChunks).not.toMatch(
+        /(?:from|import)\s*["']\.\/terminal-runtime-[^"']+\.js["']/,
+      );
+      expect(otherChunks.includes('xterm-helper-textarea')).toBe(false);
+    },
+  );
+
   it.each(['.', 'assets'])(
     'ships the spreadsheet worker in a lazy chunk in dist/%s',
     (directory) => {
@@ -128,6 +264,10 @@ describe('build artifact — package boundary', () => {
     expect(bundle).not.toContain('fileName:');
   });
 
+  it('uses the host React DOM server renderer for conversation exports', () => {
+    expect(readPackageJavascript()).toContain('from "react-dom/server"');
+  });
+
   it('externalizes @qwen-code/sdk subpaths', () => {
     const bundle = readPackageJavascript();
     // Should not contain raw SDK implementation
@@ -167,45 +307,81 @@ describe('build artifact — package boundary', () => {
     );
   });
 
-  it('scopes every component CSS rule to a WebShell root', () => {
-    const unscoped: string[] = [];
-    postcss.parse(readInjectedCss()).walkRules((rule) => {
-      let parent = rule.parent;
-      while (parent) {
-        if (
-          parent.type === 'atrule' &&
-          parent.name.toLowerCase().endsWith('keyframes')
-        ) {
-          return;
+  it('scopes every component CSS rule to a WebShell root via native @scope', () => {
+    for (const bundle of [readBundle(), readTranscriptBundle()]) {
+      const root = postcss.parse(readInjectedCss(bundle));
+      const unscoped: string[] = [];
+      const legacyWhereScoped: string[] = [];
+      const descendantHasWildcards: string[] = [];
+      const nestedGlobals: string[] = [];
+
+      root.walkRules((rule) => {
+        let parent = rule.parent;
+        while (parent) {
+          if (
+            parent.type === 'atrule' &&
+            parent.name.toLowerCase().endsWith('keyframes')
+          ) {
+            return;
+          }
+          parent = parent.parent;
         }
-        parent = parent.parent;
-      }
-      if (
-        !rule.selector.includes('[data-web-shell-root]') &&
-        !rule.selector.includes('[data-web-shell-portal-root]')
-      ) {
-        unscoped.push(rule.selector);
-      }
-    });
-    expect(unscoped).toEqual([]);
+        if (!hasWebShellScope(enclosingScope(rule))) {
+          unscoped.push(rule.selector);
+        }
+        if (
+          rule.selector.includes(
+            ':where([data-web-shell-root][data-web-shell-shadcn]',
+          )
+        ) {
+          legacyWhereScoped.push(rule.selector);
+        }
+        if (hasDescendantWildcardAfterHas(rule.selector)) {
+          descendantHasWildcards.push(rule.selector);
+        }
+      });
+
+      root.walkAtRules((atRule) => {
+        const name = atRule.name.toLowerCase();
+        if (
+          (name === 'font-face' ||
+            name === 'property' ||
+            name.endsWith('keyframes')) &&
+          enclosingScope(atRule) !== undefined
+        ) {
+          nestedGlobals.push(`@${atRule.name} ${atRule.params}`);
+        }
+      });
+
+      expect(unscoped).toEqual([]);
+      expect(legacyWhereScoped).toEqual([]);
+      expect(descendantHasWildcards).toEqual([]);
+      expect(nestedGlobals).toEqual([]);
+    }
   });
 
   it('applies Tailwind theme variables to WebShell roots', () => {
-    const themeRules: string[] = [];
+    const themeRules: Array<{ selector: string; scope: string | undefined }> =
+      [];
     postcss.parse(readInjectedCss()).walkRules((rule) => {
       if (
         rule.nodes.some(
           (node) => node.type === 'decl' && node.prop === '--spacing',
         )
       ) {
-        themeRules.push(rule.selector);
+        themeRules.push({
+          selector: rule.selector,
+          scope: enclosingScope(rule),
+        });
       }
     });
 
-    expect(themeRules).toContain(
-      ':is([data-web-shell-root]:where([data-web-shell-shadcn]), [data-web-shell-portal-root]:where([data-web-shell-shadcn]))',
-    );
-    expect(themeRules).not.toEqual(
+    expect(
+      themeRules.some(
+        (entry) => entry.selector === ':scope' && hasWebShellScope(entry.scope),
+      ),
+    ).toBe(true);
+    expect(themeRules.map((entry) => entry.selector)).not.toEqual(
       expect.arrayContaining([
         expect.stringContaining(':root'),
         expect.stringContaining(':host'),
@@ -228,9 +404,8 @@ describe('build artifact — package boundary', () => {
       }
     });
 
-    expect(scrollbarRootRule?.selector).toContain(
-      ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn]))',
-    );
+    expect(scrollbarRootRule?.selectors).toEqual([':scope', ':scope *']);
+    expect(hasWebShellScope(enclosingScope(scrollbarRootRule!))).toBe(true);
   });
 
   it('keeps component resets and utilities above plain host selectors', () => {
@@ -283,10 +458,11 @@ describe('build artifact — package boundary', () => {
     expect(enclosingLayer(headingRule)).toBeUndefined();
     expect(enclosingLayer(formControlRule)).toBeUndefined();
     expect(enclosingLayer(utilityRule)).toBeUndefined();
-    expect(headingRule.selector).toContain(
-      ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn]))',
-    );
-    expect(cssModuleRule.selector).toContain(
+    expect(headingRule.selector).toContain(':scope');
+    expect(hasWebShellScope(enclosingScope(headingRule))).toBe(true);
+    expect(hasWebShellScope(enclosingScope(cssModuleRule))).toBe(true);
+    expect(cssModuleRule.selector).toContain(':where(:scope).');
+    expect(cssModuleRule.selector).not.toContain(
       ':where([data-web-shell-root][data-web-shell-shadcn]',
     );
     expect(cssModuleRule.selector).not.toContain(':is([data-web-shell-root]');
@@ -300,6 +476,43 @@ describe('build artifact — package boundary', () => {
       }
     });
     expect(conflictingLayers).toEqual([]);
+  });
+
+  it('keeps the iOS input size rule scoped and unlayered in shared CSS', () => {
+    const css = postcss.parse(readInjectedCss(readTranscriptBundle()));
+    const rules: Rule[] = [];
+    css.walkAtRules('supports', (supports) => {
+      if (!/^\(-webkit-touch-callout:\s*none\)$/.test(supports.params)) return;
+      supports.walkAtRules('media', (media) => {
+        expect(media.params.replace(/\s+/g, '')).toBe(
+          '(hover:none)and(pointer:coarse)',
+        );
+        media.walkRules((rule) => rules.push(rule));
+      });
+    });
+
+    expect(rules).toHaveLength(1);
+    const rule = rules[0]!;
+    expect(enclosingLayer(rule)).toBeUndefined();
+    expect(rule.selector).toContain(':scope');
+    expect(hasWebShellScope(enclosingScope(rule))).toBe(true);
+    for (const field of [
+      'input:is(:not([type])',
+      'textarea',
+      '[contenteditable',
+      '[data-composer] .cm-content',
+      '[data-composer] .cm-line',
+    ]) {
+      expect(rule.selector).toContain(field);
+    }
+    expect(
+      rule.nodes.some(
+        (node) =>
+          node.type === 'decl' &&
+          node.prop === 'font-size' &&
+          node.value === '16px',
+      ),
+    ).toBe(true);
   });
 
   it('removes the transcript width cap from fullscreen panels', () => {
@@ -319,6 +532,15 @@ describe('build artifact — package boundary', () => {
     });
 
     expect(fullscreenRule).toBeDefined();
+    expect(fullscreenRule?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'decl',
+          prop: '--chat-responsive-content-width',
+          value: '100%',
+        }),
+      ]),
+    );
     expect(fullscreenRule?.selector).toMatch(
       /\._panelFullscreen_[A-Za-z0-9_]+$/,
     );
@@ -368,7 +590,7 @@ describe('build artifact — package boundary', () => {
       matched,
       '::selection rule for [data-user-selectable] missing from lib bundle',
     ).toBeDefined();
-    expect(matched?.selector).toContain('[data-web-shell-root]');
+    expect(hasWebShellScope(enclosingScope(matched!))).toBe(true);
     expect(
       matched?.nodes.some(
         (n) =>
@@ -402,7 +624,7 @@ describe('build artifact — package boundary', () => {
       }
     });
 
-    expect(mathmlRule?.selector).toContain('[data-web-shell-root]');
+    expect(hasWebShellScope(enclosingScope(mathmlRule!))).toBe(true);
     expect(hasInlineFont).toBe(true);
   });
 });
@@ -478,46 +700,58 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('vaul');
   });
 
-  it('keeps the transcript entry a fraction of the interactive entry', () => {
-    // The daemon hook runtime is NOT absent from this entry — MessageList
-    // renders McpStatusMessage, TasksStatusMessage and the artifact turn
-    // outputs, and those call the strict useDaemonActions /
-    // useDaemonWorkspace hooks, so the provider guards ship. Asserting their
-    // absence would assert something this entry does not deliver (see the
-    // docblock in client/transcript.ts and #11100).
-    //
-    // What the entry does deliver is a bounded payload, so bound it. The JS
-    // remainder measured 1,298,657 UTF-16 code units on main at fa4a4c92 and
-    // 1,300,341 here after adding author attribution for multi-agent
-    // transcripts. O3 result summaries bring it to 1,306,052, and
-    // session-agent replies (status, steps, token usage, squad labels) to
-    // 1,315,297 at e951f96; that rendering is intentional transcript UI.
-    // main grew the same entry in parallel — 1,309,207 at 1aba19c878, plus
-    // 3,033 for table fullscreen and Shadow DOM keyboard handling, reaching
-    // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811. The W2
-    // managed cwd slice (#13760) adds its strings to the shared i18n table
-    // every entry ships — no interactive cwd code enters this graph — and
-    // measured 1,323,120 before main's host-status copy. After rebasing onto
-    // c34b8423, main measures 1,321,586 and this branch 1,324,022; substituting
-    // main's i18n table yields an identical JS remainder. The selection-copy
-    // menu strings (#13833) land in that same shared table — the menu itself
-    // stays stubbed out of this entry — and measure 1,325,251. The
-    // action-reminder help copy (#13832) entered that same table only after
-    // the 1,325,251 measurement was taken, so the entry was already past the
-    // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
-    // Managed task panel's copy (#13936) stays stubbed out of this entry.
-    // At 008c0de7 the remainder measures 1,327,531. The read-only Excel
-    // preview puts its ten excel.* strings into that same shared table in
-    // both locales; its parser, worker and markup stay inside the lazily
-    // imported SpreadsheetPreview chunk, so only the copy enters this graph.
-    // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
-    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
-    // Re-measure and lower it if the entry gets leaner.
+  it('keeps Managed tool-detail transport out of the transcript entry', () => {
+    expect(readPackageJavascript()).toContain('/tool-details/get');
+    expect(readTranscriptBundle()).not.toContain('/tool-details/get');
+  });
+
+  it('keeps Managed MCP management transport and copy out of the transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const content of [
+      '/session-mcp/management/submit',
+      'Choose an exact definition published for this Runtime and Workspace.',
+      '原命令仍需确认，请先查询该命令，再开始其他修改。',
+    ]) {
+      expect(packaged).toContain(content);
+      expect(transcript).not.toContain(content);
+    }
+  });
+
+  it('keeps artifact-library copy and lookups in the interactive entry only', () => {
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_331_500);
+    expect(js).not.toMatch(/["'`]managed\.artifactLibrary\./);
+    expect(js).not.toMatch(/["'`]workspaceArtifactLibrary\./);
+    expect(js).not.toContain(
+      'No artifacts have been produced in this workspace yet.',
+    );
+    expect(js).not.toContain('此工作区还没有产出产物。');
+    expect(js).not.toContain('В этом Workspace ещё нет артефактов.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('managed.artifactLibrary.title');
+    expect(interactive).toContain('workspaceArtifactLibrary.title');
+    expect(interactive).toContain('Artifact library');
+    expect(interactive).toContain('产物库');
+    expect(interactive).toContain('Библиотека артефактов');
+  });
+
+  it('keeps workspace mutations out of the read-only transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const method of [
+      'writeWorkspaceFile',
+      'createWorkspaceDirectory',
+      'deleteWorkspaceDirectory',
+      'deleteWorkspaceFile',
+      'uploadWorkspaceFile',
+    ]) {
+      expect(packaged).toContain(method);
+      expect(transcript).not.toContain(method);
+    }
+    expect(transcript).toContain('dirList');
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {
@@ -537,6 +771,18 @@ describe('build artifact — transcript entry (#11031)', () => {
       'files.sourceTooLarge',
     ] as const)
       expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
+    for (const key of Object.keys(FILES_MESSAGES_EN)) {
+      expect(bundle).not.toContain(`"${key}"`);
+      expect(bundle).not.toContain(`'${key}'`);
+    }
+  });
+
+  it('keeps Token Usage copy and lookups in the interactive entry only', () => {
+    expect(readTranscriptBundle()).not.toMatch(/["'`]tokenUsage\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('tokenUsage.inputWithCacheRate');
+    expect(interactive).toContain('Failed to load token usage.');
+    expect(interactive).toContain('Token 消耗加载失败。');
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -594,6 +840,24 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js.includes('managed.tasks.')).toBe(false);
   });
 
+  it('keeps browser notification strings and lookups in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('browserNotifications.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('browserNotifications.helpMac');
+    expect(interactive).toContain('browserNotifications.approval');
+    expect(interactive).toContain('Open System Settings → Notifications.');
+    expect(interactive).toContain('浏览器（Chrome');
+  });
+
+  it('keeps remote Workspace registration copy in the interactive entry', () => {
+    expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
+    expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');
+  });
+
   it('carries no settings strings and looks none up', () => {
     // Same contract as the Live Voice stub above, for
     // client/settings/messages.ts: a settings.* lookup here would render as
@@ -618,15 +882,47 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(interactive).toContain('审阅 App 消息');
   });
 
-  it('keeps trajectory filter strings in the interactive entry only', () => {
+  it('keeps trajectory chrome strings in the interactive entry only', () => {
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js).not.toMatch(/["'`]trajectory\.(filter|window)\./);
-    expect(readPackageJavascript()).toContain('trajectory.window.older');
+    expect(js).not.toMatch(
+      /["'`]trajectory\.(filter|window|summary|pill|boundary|about)\./,
+    );
+    expect(readPackageJavascript()).toContain('trajectory.window.return');
+    expect(readPackageJavascript()).toContain('trajectory.pill.live');
     expect(readPackageJavascript()).toContain('trajectory.filter.search');
     expect(readPackageJavascript()).toContain('Search loaded records');
+  });
+
+  it('keeps the Russian and Traditional Chinese catalogs in the interactive entry only', () => {
+    const transcript = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('Что вы хотите сделать?');
+    expect(interactive).toContain('Недельный лимит кредитов исчерпан');
+    expect(interactive).toContain('Вас @упомянули в комментарии');
+    expect(interactive).toContain('週額度已用完');
+    expect(transcript).not.toContain('Что вы хотите сделать?');
+    expect(transcript).not.toContain('Недельный лимит кредитов исчерпан');
+    expect(transcript).not.toContain('Вас @упомянули в комментарии');
+    expect(transcript).not.toContain('週額度已用完');
+  });
+
+  it('loads translated catalogs outside the interactive entry static import graph', () => {
+    const interactive = readPackageJavascript();
+    const startup = readStaticJavascript(DIST_PATH);
+    for (const copy of [
+      '周额度已用完',
+      '週額度已用完',
+      'Недельный лимит кредитов исчерпан',
+    ]) {
+      expect(interactive).toContain(copy);
+      expect(startup).not.toContain(copy);
+    }
   });
 
   it('still carries what a transcript actually renders', () => {
@@ -657,7 +953,8 @@ describe('build artifact — transcript entry (#11031)', () => {
         .walkRules((rule) => rules.push(rule));
       const preflightIndex = rules.findIndex(
         (rule) =>
-          rule.selector.includes('[data-web-shell-shadcn]') &&
+          hasWebShellScope(enclosingScope(rule)) &&
+          rule.selector.includes(':scope') &&
           rule.selector.includes('::backdrop') &&
           rule.nodes.some(
             (node) =>
@@ -678,6 +975,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       );
 
       expect(preflightIndex).toBeGreaterThanOrEqual(0);
+      expect(rules[preflightIndex]?.selectors).toContain(':scope ::backdrop');
       expect(katexIndex).toBeGreaterThan(preflightIndex);
     }
   });

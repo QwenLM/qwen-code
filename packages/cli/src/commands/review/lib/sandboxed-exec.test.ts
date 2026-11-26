@@ -28,13 +28,19 @@ import { fileURLToPath } from 'node:url';
 import type { spawnSync } from 'node:child_process';
 import { isolateOperatorReviewSettings } from './test-utils.js';
 import * as environment from '../../../config/environment.js';
+import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from '../../../config/shared-env-keys.js';
 import {
+  CONTAINER_PIDS_LIMIT,
   containerCommand,
+  containerCommandEnv,
+  describeExecutionBoundary,
   firstAnsweringRuntime,
   killContainer,
+  reapContainer,
   containerPathFor,
   hasRootlessMarker,
   readInfoDocument,
+  refuseHostExecutionPhase,
   runtimeIsRootless,
   boxedRunLeftContainer,
   CONTAINER_HOME,
@@ -329,6 +335,15 @@ describe('the decisions this module exists to make', () => {
         () => true,
       ),
     ).toBe('off');
+  });
+
+  it('keeps the policy key out of repository-sourced environment entirely', () => {
+    // The read-time predicate above protects this process. A child inheriting
+    // the value sees an empty provenance registry, so the loader must refuse
+    // the key before it can ever be written — the same closure
+    // QWEN_REVIEW_PREBUILD relies on, pinned here with the real symbol so
+    // neither side can drift.
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_REVIEW_SANDBOX');
   });
 
   it('reads either side the way an operator would write it', () => {
@@ -700,6 +715,91 @@ describe('containerCommand', () => {
     }
   });
 
+  it('gives a build and an install — not a test — its declared heap, on both channels, ahead of the image', () => {
+    // The direct spawn gets it through `buildRunEnv`; the allowlist has no
+    // NODE_OPTIONS, so without this a boxed `tsc --build` dies at Node's
+    // default heap — the failure the declared heap exists to prevent. npm
+    // replaces NODE_OPTIONS with the tree's own `node-options`, hence the
+    // second, which keeps the rest of what those say.
+    const npm = '--require=/w/preload.cjs --max-old-space-size=512';
+    const argv = (
+      kind: 'build' | 'test' | 'install',
+      // `null`: the tree has none.
+      own: string | null = npm,
+    ): string[] =>
+      containerCommand('npm run build', {
+        ...base,
+        cwd: join(tmpDir, 'review-pr-9'),
+        kind,
+        heapMb: 6144,
+        npmNodeOptions: own ?? undefined,
+      }).args;
+    const passed = (args: string[]): string[] =>
+      args.filter((_, i) => args[i - 1] === '--env');
+    for (const kind of ['build', 'install'] as const) {
+      const args = argv(kind);
+      expect(passed(args)).toContain('NODE_OPTIONS=--max-old-space-size=6144');
+      expect(passed(args)).toContain(
+        'npm_config_node_options=--require=/w/preload.cjs --max-old-space-size=6144',
+      );
+      // After the image they are `sh -lc`'s arguments, not the container's
+      // environment.
+      expect(args.slice(-4)).toEqual([
+        base.image,
+        'sh',
+        '-lc',
+        'npm run build',
+      ]);
+    }
+    // The install still gets the registry it is the one command to need.
+    const offline = (args: string[]): boolean =>
+      args.some((a, i) => a === '--network' && args[i + 1] === 'none');
+    expect(offline(argv('install'))).toBe(false);
+    expect(offline(argv('build'))).toBe(true);
+    // No npm options of the tree's own, or ones that already set enough:
+    // npm's channel is left as it is.
+    for (const own of [null, '--max-old-space-size=8192']) {
+      expect(
+        passed(argv('build', own)).some((e) =>
+          e.startsWith('npm_config_node_options='),
+        ),
+      ).toBe(false);
+    }
+    expect(
+      passed(argv('test')).some(
+        (e) =>
+          e.startsWith('NODE_OPTIONS=') ||
+          e.startsWith('npm_config_node_options='),
+      ),
+    ).toBe(false);
+    // Already expanded by npm: escaped, so the container's npm does not
+    // expand it again.
+    expect(passed(argv('build', '-r /w/${X}.cjs'))).toContain(
+      'npm_config_node_options=-r /w/\\${X}.cjs --max-old-space-size=6144',
+    );
+  });
+
+  it('builds the environment entries it passes from containerCommandEnv', () => {
+    const opts = {
+      ...base,
+      cwd: join(tmpDir, 'review-pr-9'),
+      kind: 'build' as const,
+      heapMb: 6144,
+    };
+    const args = containerCommand('npm run build', opts).args;
+    expect(args.filter((_, i) => args[i - 1] === '--env')).toEqual(
+      containerCommandEnv(opts),
+    );
+    expect(containerCommandEnv(opts)).toContain(
+      'NODE_OPTIONS=--max-old-space-size=6144',
+    );
+    expect(
+      containerCommandEnv({ ...opts, kind: 'test' }).some((e) =>
+        e.startsWith('NODE_OPTIONS='),
+      ),
+    ).toBe(false);
+  });
+
   // Windows has no `process.getuid`, so the flag is correctly absent there —
   // and the merge queue runs this file on Windows.
   it.skipIf(process.getuid === undefined)(
@@ -1017,5 +1117,247 @@ describe('reviewSandboxImage', () => {
     ) as { config?: { sandboxImageUri?: string } };
     expect(manifest.config?.sandboxImageUri).toBeTruthy();
     expect(reviewSandboxImage({})).toBe(manifest.config?.sandboxImageUri);
+  });
+});
+
+describe('tiered sandbox, container hardening, and verifiable reap', () => {
+  it('ranks tiered stricter than required and blocks repository env keys in hardcoded exclusions', () => {
+    expect(
+      sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'tiered' }, { sandbox: 'required' }),
+    ).toBe('tiered');
+    expect(
+      sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'required' }, { sandbox: 'tiered' }),
+    ).toBe('tiered');
+    for (const key of [
+      'QWEN_REVIEW_SANDBOX',
+      'QWEN_REVIEW_SANDBOX_IMAGE',
+      'QWEN_REVIEW_SANDBOX_BACKEND',
+      'QWEN_REVIEW_FORCE_HARDWARE',
+      'QWEN_REVIEW_VM_KERNEL',
+      'QWEN_REVIEW_VM_ROOTFS',
+      'QWEN_REVIEW_VM_BRIDGE_SOCKET',
+      'QWEN_REVIEW_VM_PID_FILE',
+      'QWEN_REVIEW_PROVIDER_VM_DRIVER',
+      'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
+      'QWEN_REVIEW_FCSANDBOX_TEMPLATE',
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
+  it('adds least-privilege hardening flags to every containerCommand', () => {
+    const { args } = containerCommand('npm test', {
+      cwd: join(sep, 'repo', '.qwen', 'tmp', 'review-pr-1'),
+      tmpDir: join(sep, 'repo', '.qwen', 'tmp'),
+      kind: 'test',
+      runtime: 'docker',
+      image: 'example/image:tag',
+      rootless: false,
+      name: 'qwen-review-hardened',
+    });
+    expect(args).toContain('--cap-drop=ALL');
+    expect(args).toContain('--security-opt=no-new-privileges:true');
+    expect(args).toContain(`--pids-limit=${CONTAINER_PIDS_LIMIT}`);
+  });
+
+  it('reapContainer verifies container absence/stop and flags still-running containers as failed', () => {
+    const cleanRemoved = reapContainer('docker', 'c1', ((
+      _cmd: string,
+      a: string[],
+    ) =>
+      a[0] === 'rm'
+        ? { status: 0, stdout: '', stderr: '' }
+        : {
+            status: 1,
+            stdout: '',
+            stderr: 'No such container',
+          }) as typeof spawnSync);
+    expect(cleanRemoved.status).toBe('clean');
+
+    const cleanStopped = reapContainer('docker', 'c2', ((
+      _cmd: string,
+      a: string[],
+    ) =>
+      a[0] === 'rm'
+        ? { status: 0, stdout: '', stderr: '' }
+        : { status: 0, stdout: 'false\n', stderr: '' }) as typeof spawnSync);
+    expect(cleanStopped.status).toBe('clean');
+
+    const leaked = reapContainer('docker', 'c3', ((
+      _cmd: string,
+      a: string[],
+    ) =>
+      a[0] === 'rm'
+        ? { status: 0, stdout: '', stderr: '' }
+        : { status: 0, stdout: 'true\n', stderr: '' }) as typeof spawnSync);
+    expect(leaked.status).toBe('failed');
+    expect(leaked.detail).toContain('still running');
+
+    const throwing = reapContainer('docker', 'c4', (() => {
+      throw new Error('daemon gone');
+    }) as unknown as typeof spawnSync);
+    expect(throwing.status).toBe('failed');
+    expect(throwing.detail).toContain('daemon gone');
+
+    const daemonDown = reapContainer('docker', 'c5', ((
+      _cmd: string,
+      a: string[],
+    ) =>
+      a[0] === 'rm'
+        ? {
+            status: 1,
+            stdout: '',
+            stderr: 'Cannot connect to the Docker daemon',
+          }
+        : {
+            status: 1,
+            stdout: '',
+            stderr: 'Cannot connect to the Docker daemon',
+          }) as typeof spawnSync);
+    expect(daemonDown.status).toBe('failed');
+    expect(daemonDown.detail).toContain('Cannot connect to the Docker daemon');
+  });
+
+  it('tiered sandboxVerdict allows hardened container for low-risk collaborator PRs and refuses external/high-risk PRs even when Docker answers', () => {
+    const trusted = sandboxVerdict('tiered', {}, () => 'docker', {
+      isLocal: false,
+      isCrossRepository: false,
+      authorAssociation: 'COLLABORATOR',
+      changedFiles: [{ path: 'packages/cli/src/foo.ts' }],
+    });
+    expect(trusted).toEqual({ kind: 'container', runtime: 'docker' });
+
+    const external = sandboxVerdict('tiered', {}, () => 'docker', {
+      isLocal: false,
+      isCrossRepository: true,
+      authorAssociation: 'NONE',
+      changedFiles: [{ path: 'packages/cli/src/foo.ts' }],
+    });
+    expect(external.kind).toBe('refused');
+    if (external.kind === 'refused') {
+      expect(external.reason).toContain('hardware-isolated');
+      expect(external.reason).toContain('cross-repository-pr');
+    }
+
+    const highRisk = sandboxVerdict('tiered', {}, () => 'docker', {
+      isLocal: false,
+      isCrossRepository: false,
+      authorAssociation: 'OWNER',
+      changedFiles: [{ path: 'package.json' }],
+    });
+    expect(highRisk.kind).toBe('refused');
+    if (highRisk.kind === 'refused') {
+      expect(highRisk.reason).toContain('dependency-manifest:package.json');
+    }
+
+    const forced = sandboxVerdict(
+      'off',
+      { QWEN_REVIEW_FORCE_HARDWARE: '1' },
+      () => 'docker',
+      { isLocal: true, changedFiles: [{ path: 'src/a.ts' }] },
+      undefined,
+      () => false,
+    );
+    expect(forced.kind).toBe('refused');
+  });
+
+  it('refuseHostExecutionPhase allows off/auto and refuses required/tiered/forceHardware', () => {
+    expect(
+      refuseHostExecutionPhase({
+        policy: 'off',
+        env: {},
+        fileSourced: () => false,
+      }),
+    ).toBeNull();
+    expect(
+      refuseHostExecutionPhase({
+        policy: 'auto',
+        env: {},
+        fileSourced: () => false,
+      }),
+    ).toBeNull();
+    const reqMsg = refuseHostExecutionPhase({
+      policy: 'required',
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(reqMsg).toContain('review.sandbox is "required"');
+    expect(reqMsg).not.toContain('unknown-pr-trust');
+
+    const withTrustMsg = refuseHostExecutionPhase({
+      policy: 'tiered',
+      env: {},
+      trustContext: {
+        isLocal: false,
+        isCrossRepository: true,
+        changedFiles: [{ path: 'src/a.ts' }],
+      },
+      fileSourced: () => false,
+    });
+    expect(withTrustMsg).toContain('external -> hardware-isolated');
+    expect(withTrustMsg).toContain('cross-repository-pr');
+
+    expect(
+      refuseHostExecutionPhase({
+        policy: 'tiered',
+        env: {},
+        fileSourced: () => false,
+      }),
+    ).toContain('review.sandbox is "tiered"');
+    expect(
+      refuseHostExecutionPhase({
+        policy: 'off',
+        env: { QWEN_REVIEW_FORCE_HARDWARE: '1' },
+        fileSourced: () => false,
+      }),
+    ).toContain('QWEN_REVIEW_FORCE_HARDWARE=1');
+
+    const boundary = describeExecutionBoundary({
+      policy: 'tiered',
+      verdict: { kind: 'refused', reason: 'no hardware backend' },
+      trustContext: {
+        isLocal: false,
+        isCrossRepository: true,
+        changedFiles: [{ path: 'src/a.ts' }],
+      },
+      teardownStatus: 'not-applicable',
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(boundary).toEqual({
+      policy: 'tiered',
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      backend: 'refused',
+      escalationReasons: ['cross-repository-pr'],
+      teardownStatus: 'not-applicable',
+    });
+
+    const unclassified = describeExecutionBoundary({
+      policy: 'off',
+      backend: 'direct',
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(unclassified).toEqual({
+      policy: 'off',
+      prTrust: 'unknown',
+      executionClass: 'unclassified',
+      backend: 'direct',
+      escalationReasons: [],
+    });
+  });
+
+  it('handOffRefused also rejects unsupported hand-offs under tiered and forceHardware', () => {
+    expect(handOffRefused('unsupported', 'tiered', {}, () => false)).toBe(true);
+    expect(
+      handOffRefused(
+        'unsupported',
+        'off',
+        { QWEN_REVIEW_FORCE_HARDWARE: '1' },
+        () => false,
+      ),
+    ).toBe(true);
+    expect(handOffRefused('unsupported', 'auto', {}, () => false)).toBe(false);
   });
 });

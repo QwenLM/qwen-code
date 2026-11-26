@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { resolveModOptions, resolveModToolDialect } from './options.js';
+import {
+  resolveModOptions,
+  resolveModToolDialect,
+  resolveModUnsupportedEvents,
+} from './options.js';
 
 const field = (type: string, extra = {}) => ({
   type,
@@ -66,6 +70,38 @@ describe('Mod tool dialect settings', () => {
       expect(() => resolveModToolDialect([scope], 'example')).toThrow(
         /Invalid Mod pluginConfigs/,
       );
+    },
+  );
+});
+
+describe('Mod unsupported event settings', () => {
+  it('defaults to skip and follows operator precedence and aliases', () => {
+    expect(resolveModUnsupportedEvents([], 'example')).toBe('skip');
+    const scopes = [
+      { 'example@inline': { unsupportedEvents: 'reject' } },
+      { example: { options: { unsupportedEvents: 'skip' } } },
+    ];
+    expect(resolveModUnsupportedEvents(scopes, 'example')).toBe('reject');
+    expect(
+      resolveModUnsupportedEvents(
+        [...scopes, { example: { unsupportedEvents: 'skip' } }],
+        'example',
+      ),
+    ).toBe('skip');
+    expect(resolveModUnsupportedEvents(scopes, 'example', 'market')).toBe(
+      'skip',
+    );
+  });
+
+  it.each([null, '', 'Reject', true, []])(
+    'rejects unsupported policy %j',
+    (unsupportedEvents) => {
+      expect(() =>
+        resolveModUnsupportedEvents(
+          [{ example: { unsupportedEvents } }],
+          'example',
+        ),
+      ).toThrow('Invalid Mod unsupportedEvents: expected skip or reject.');
     },
   );
 });

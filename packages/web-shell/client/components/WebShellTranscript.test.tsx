@@ -139,10 +139,12 @@ describe('WebShellTranscript contract', () => {
         language="zh-CN"
         workspaceCwd="/workspace"
         virtualScrollThreshold={25}
+        overscan={0}
       />,
     );
 
-    const { props } = latestObservation();
+    const { props, customization } = latestObservation();
+    expect(customization.overscan).toBe(0);
     expect(props.messages).toMatchObject([
       { id: 'user', role: 'user', content: 'hello' },
       {
@@ -210,6 +212,9 @@ describe('WebShellTranscript contract', () => {
     expect(root?.classList.contains('dark')).toBe(false);
     expect(root?.lang).toBe('zh-CN');
     expect(root?.style.getPropertyValue('--chat-content-width')).toBe('720px');
+    expect(
+      root?.style.getPropertyValue('--chat-responsive-content-width'),
+    ).toBe('min(720px, clamp(440px, 85cqw, calc(100cqw - 128px)))');
   });
 
   it('uses the non-virtualized, expanded document boundary', () => {

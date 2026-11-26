@@ -8,7 +8,8 @@ import {
   useId,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
+import { ChevronDown } from 'lucide-react';
+import { isAgentTool } from '../../constants/toolNames.js';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { GoalApprovalContent } from './GoalApprovalContent';
@@ -29,6 +30,12 @@ import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { DiffView } from './tools/DiffView';
 import { useWebShellCustomization } from '../../customization';
 import { BrowserNotificationControl } from './BrowserNotificationControl';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
@@ -47,6 +54,15 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  /**
+   * Escape dismisses without recording a decision (the TUI approval dialog's
+   * defer semantics). Default false keeps the tool-approval behavior where
+   * Escape rejects the pending request. A persistent trust decision must
+   * not be recordable by a habitual Escape.
+   */
+  escapeDismisses?: boolean;
+  /** Called when Escape dismisses; only meaningful with escapeDismisses. */
+  onDismiss?: () => void;
   /**
    * Id of an extra description the caller renders beside this panel, added to
    * `aria-describedby`. The Managed approvals card states there that the tool
@@ -199,6 +215,8 @@ function orderPermissionOptions(
 function getOptionI18nKey(
   option: PermissionRequest['options'][number],
 ): string | undefined {
+  if (option.id === 'hooks_approve') return 'hooksApproval.approve';
+  if (option.id === 'hooks_reject') return 'hooksApproval.reject';
   if (option.id === 'proceed_once_and_switch_to_default') {
     return 'approval.option.allowOnceAndSwitchToDefault';
   }
@@ -241,15 +259,8 @@ function prepareDisplayOptions(
   return deduplicateOptions(orderPermissionOptions(options));
 }
 
-function getOptionClassName(
-  option: PermissionRequest['options'][number],
-): string {
-  if (option.kind === 'allow_once') return styles.optionPrimary;
-  if (option.kind === 'allow_always') return styles.optionSecondary;
-  if (option.kind === 'reject_once' || option.kind === 'reject_always') {
-    return styles.optionPlain;
-  }
-  return styles.optionSecondary;
+function isRejectOption(option: PermissionRequest['options'][number]): boolean {
+  return option.kind === 'reject_once' || option.kind === 'reject_always';
 }
 
 export function ToolApproval({
@@ -259,6 +270,8 @@ export function ToolApproval({
   disabled = false,
   showBrowserNotifications = false,
   keyboardActive = true,
+  escapeDismisses = false,
+  onDismiss,
   extraDescriptionId,
   planTodos = [],
   planExecutionMode,
@@ -267,6 +280,7 @@ export function ToolApproval({
   const { t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
   const isGoal = request.toolName === 'propose_goal';
+  const isProjectHooks = request.toolName === 'project_hooks';
   const isExitPlanApproval = isExitPlanApprovalRequest(request);
   const hasPlanExecutionMode =
     isExitPlanApproval && planExecutionMode !== undefined;
@@ -277,6 +291,7 @@ export function ToolApproval({
           ? request.options.filter(
               (option) =>
                 option.id === 'restore_previous' ||
+                option.id === 'allow' ||
                 option.kind === 'reject_once' ||
                 option.kind === 'reject_always',
             )
@@ -284,10 +299,46 @@ export function ToolApproval({
       ),
     [request.options, hasPlanExecutionMode],
   );
+  const { directOptions, menuOptions, primaryOption } = useMemo(() => {
+    const allowOptions = displayOptions.filter(
+      (option) =>
+        option.kind === 'allow_once' || option.kind === 'allow_always',
+    );
+    const rejectOptions = displayOptions.filter(isRejectOption);
+    const oneShotOptions = allowOptions.filter(
+      (option) => option.kind === 'allow_once',
+    );
+    const primary =
+      oneShotOptions.find(
+        (option) =>
+          option.id !== 'restore_previous' &&
+          option.id !== 'proceed_once_and_switch_to_default',
+      ) ?? oneShotOptions[0];
+    if (
+      rejectOptions.length > 1 ||
+      allowOptions.length + rejectOptions.length !== displayOptions.length ||
+      allowOptions.length === 0 ||
+      (allowOptions.length === 1 && primary)
+    ) {
+      return {
+        directOptions: displayOptions,
+        menuOptions: [],
+        primaryOption: undefined,
+      };
+    }
+    return {
+      directOptions: primary ? [...rejectOptions, primary] : rejectOptions,
+      menuOptions: primary
+        ? [primary, ...allowOptions.filter((option) => option !== primary)]
+        : allowOptions,
+      primaryOption: primary,
+    };
+  }, [displayOptions]);
+  const hasApprovalMenu = menuOptions.length > 0;
   const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const safeDefaultIndex = useMemo(
-    () => getSafeDefaultIndex(displayOptions, isAgent),
-    [displayOptions, isAgent],
+    () => getSafeDefaultIndex(directOptions, isAgent),
+    [directOptions, isAgent],
   );
   // Prefer the localized label. Known producers give every option a distinct
   // i18n key (plan mode's restore_previous has its own), so this normally
@@ -307,7 +358,10 @@ export function ToolApproval({
         if (option.kind === 'allow_once') return t('approval.goal.confirm');
         if (option.kind === 'reject_once') return t('approval.goal.reject');
       }
-      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+      if (
+        hasPlanExecutionMode &&
+        (option.id === 'restore_previous' || option.id === 'allow')
+      ) {
         return t('approval.option.executePlan', {
           mode: t(`mode.label.${planExecutionMode}`),
         });
@@ -360,6 +414,7 @@ export function ToolApproval({
   const safeDefaultIndexRef = useRef(safeDefaultIndex);
   safeDefaultIndexRef.current = safeDefaultIndex;
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const headingId = useId();
   const questionId = useId();
@@ -384,9 +439,11 @@ export function ToolApproval({
     request.toolName || parsedTitle.toolName || request.kind || 'Tool';
   const toolName = isGoal
     ? t('approval.goal.title')
-    : showsPlanWorkflow
-      ? t('workflow.planReview.title')
-      : localizeToolDisplayName(rawToolName, t);
+    : isProjectHooks
+      ? t('hooksApproval.title')
+      : showsPlanWorkflow
+        ? t('workflow.planReview.title')
+        : localizeToolDisplayName(rawToolName, t);
   const descriptionText =
     showsPlanWorkflow || isGoal ? undefined : getDescriptionText(request);
   const contentText = extractContentText(request);
@@ -426,7 +483,7 @@ export function ToolApproval({
   );
 
   const focusOption = useCallback((index: number) => {
-    const target = optionRefs.current[index];
+    const target = optionRefs.current[index] ?? menuTriggerRef.current;
     if (!target) return;
     // A bare .focus() is a no-op when the option already has focus, so a new
     // request that lands on the same index wouldn't re-announce for screen
@@ -474,7 +531,8 @@ export function ToolApproval({
 
   const moveSelection = useCallback(
     (delta: number) => {
-      const count = displayOptions.length;
+      const count = directOptions.length;
+      if (count === 0) return;
       // Compute from the ref (kept in sync) so rapid key repeats advance
       // correctly even before React re-renders, and keep the state updater pure
       // (no focus() side effect inside it).
@@ -483,7 +541,7 @@ export function ToolApproval({
       setSelected(next);
       focusOption(next);
     },
-    [displayOptions.length, focusOption],
+    [directOptions.length, focusOption],
   );
 
   // Keyboard handling is scoped to the panel (onKeyDown), so it only fires while
@@ -493,9 +551,11 @@ export function ToolApproval({
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (
-        e.target instanceof Element &&
-        ((e.key !== 'Escape' && e.target.closest('[data-plan-interactive]')) ||
-          e.target.closest('[data-approval-shortcuts-ignore]'))
+        e.defaultPrevented ||
+        (e.target instanceof Element &&
+          ((e.key !== 'Escape' &&
+            e.target.closest('[data-plan-interactive]')) ||
+            e.target.closest('[data-approval-shortcuts-ignore]')))
       ) {
         return;
       }
@@ -511,7 +571,7 @@ export function ToolApproval({
         return;
       }
 
-      const count = displayOptions.length;
+      const count = directOptions.length;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
         moveSelection(1);
@@ -524,6 +584,7 @@ export function ToolApproval({
         setSelected(0);
         focusOption(0);
       } else if (e.key === 'End') {
+        if (count === 0) return;
         e.preventDefault();
         const last = count - 1;
         selectedRef.current = last;
@@ -531,19 +592,28 @@ export function ToolApproval({
         focusOption(last);
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        const reject = requestRef.current.options.find(
-          (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
-        );
+        if (escapeDismisses) {
+          onDismiss?.();
+          return;
+        }
+        const reject = requestRef.current.options.find(isRejectOption);
         if (reject) confirm(reject.id);
       } else if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key, 10) - 1;
         if (idx < count) {
           e.preventDefault();
-          confirm(displayOptions[idx].id);
+          confirm(directOptions[idx].id);
         }
       }
     },
-    [displayOptions, moveSelection, confirm, focusOption],
+    [
+      directOptions,
+      moveSelection,
+      confirm,
+      focusOption,
+      escapeDismisses,
+      onDismiss,
+    ],
   );
 
   const isExec = isExecKind(request);
@@ -609,15 +679,61 @@ export function ToolApproval({
   const execWarningsDisplay = execWarningsText
     ? sanitizeControlChars(execWarningsText)
     : undefined;
+  // The content text is model- or peer-supplied as well, and this block renders
+  // it in the body, in the `title` tooltip and as the `aria-describedby`
+  // target. Neutralise the text only: `showsContent` above stays on the raw
+  // value so the IDREF is still gated by whether the element renders.
+  const contentDisplay = sanitizeControlChars(contentText);
   const questionText = isGoal
     ? t('approval.goal.hint')
-    : showsPlanWorkflow
-      ? t('workflow.planReview.question')
-      : isAgent
-        ? t('approval.launchAgentQuestion')
-        : isExec
-          ? t('approval.execQuestion', { tool: toolName })
-          : t('approval.changeQuestion');
+    : isProjectHooks
+      ? t('hooksApproval.description')
+      : showsPlanWorkflow
+        ? t('workflow.planReview.question')
+        : isAgent
+          ? t('approval.launchAgentQuestion')
+          : isExec
+            ? t('approval.execQuestion', { tool: toolName })
+            : t('approval.changeQuestion');
+
+  const actionsDisabled = disabled || (isGoal && submitting);
+  const approvalMenuLabel = t('approval.option.approvalScopes');
+  function renderOption(
+    option: PermissionRequest['options'][number],
+    index: number,
+  ) {
+    const isSelected = index === selected;
+    return (
+      <button
+        key={option.id}
+        type="button"
+        ref={(el) => {
+          optionRefs.current[index] = el;
+        }}
+        className={`${styles.option} ${
+          option.kind === 'allow_once'
+            ? styles.optionPrimary
+            : styles.optionSecondary
+        }`}
+        data-web-shell-permission-option
+        disabled={actionsDisabled}
+        data-option-id={option.id}
+        tabIndex={isSelected ? 0 : -1}
+        role={hasApprovalMenu ? undefined : 'radio'}
+        aria-checked={hasApprovalMenu ? undefined : isSelected}
+        aria-keyshortcuts={index < 9 ? String(index + 1) : undefined}
+        onClick={() => confirm(option.id)}
+        onFocus={() => {
+          selectedRef.current = index;
+          setSelected(index);
+        }}
+      >
+        <span className={styles.label} data-web-shell-option-label>
+          {labelForOption(option)}
+        </span>
+      </button>
+    );
+  }
 
   return (
     <div
@@ -701,9 +817,9 @@ export function ToolApproval({
             isExitPlanApproval ? ` ${styles.planContent}` : ''
           }`}
           id={commandId}
-          title={contentText}
+          title={contentDisplay}
         >
-          {contentText}
+          {contentDisplay}
         </pre>
       ) : null}
 
@@ -715,8 +831,11 @@ export function ToolApproval({
         <div className={styles.content} data-plan-interactive>
           {diffs.map((block, index) => (
             <div key={index}>
-              <div>{block.path}</div>
-              <DiffView diff={block.diff} />
+              <div>{sanitizeControlChars(block.path ?? '')}</div>
+              <DiffView
+                diff={block.diff}
+                fillScrollRegion={variant === 'floating'}
+              />
             </div>
           ))}
         </div>
@@ -725,18 +844,6 @@ export function ToolApproval({
       {showsPlanWorkflow && (
         <div className={styles.workflow}>
           <PlanExecutionView todos={planTodos} tools={[]} tasks={[]} />
-        </div>
-      )}
-
-      {isExec && command && generateContent && (
-        <div className={styles.explainRow}>
-          <ThinkingTranslateButton
-            key={request.id}
-            content={command}
-            generateContent={generateContent}
-            className={styles.explainButton}
-            mode="explain-shell"
-          />
         </div>
       )}
 
@@ -759,49 +866,71 @@ export function ToolApproval({
         </div>
       )}
 
-      {/* radiogroup semantics — the approval choice is single-select. No label
-          on the group: the alertdialog already exposes the question via
-          aria-describedby, so labelling the container with the same text would
-          make screen readers speak the question twice. */}
-      <div className={styles.options} role="radiogroup">
-        {displayOptions.map((option, i) => {
-          const isSelected = i === selected;
-          const label = labelForOption(option);
-          return (
-            <button
-              key={option.id}
-              type="button"
-              ref={(el) => {
-                optionRefs.current[i] = el;
-              }}
-              className={`${styles.option} ${getOptionClassName(option)} ${
-                isSelected ? styles.optionActive : ''
-              }`}
-              data-web-shell-permission-option
-              disabled={disabled || (isGoal && submitting)}
-              data-option-id={option.id}
-              tabIndex={isSelected ? 0 : -1}
-              role="radio"
-              aria-checked={isSelected}
-              aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
-              onClick={() => confirm(option.id)}
-              onFocus={() => {
-                selectedRef.current = i;
-                setSelected(i);
-              }}
-            >
-              <span className={styles.pointer} aria-hidden="true">
-                {isSelected ? '›' : ' '}
-              </span>
-              <span className={styles.num} aria-hidden="true">
-                {i + 1}.
-              </span>
-              <span className={styles.label} data-web-shell-option-label>
-                {label}
-              </span>
-            </button>
-          );
-        })}
+      <div
+        className={[
+          styles.footer,
+          isExec && command && generateContent && styles.footerWithExplanation,
+        ]
+          .filter(Boolean)
+          .join(' ')}
+      >
+        {isExec && command && generateContent && (
+          <div className={styles.explainRow}>
+            <ThinkingTranslateButton
+              key={request.id}
+              content={command}
+              generateContent={generateContent}
+              className={styles.explainButton}
+              mode="explain-shell"
+            />
+          </div>
+        )}
+
+        <div
+          className={styles.options}
+          role={hasApprovalMenu ? 'group' : 'radiogroup'}
+        >
+          {directOptions.map((option, index) =>
+            option === primaryOption ? null : renderOption(option, index),
+          )}
+          {hasApprovalMenu && (
+            <div className={primaryOption ? styles.splitAction : undefined}>
+              {primaryOption &&
+                renderOption(primaryOption, directOptions.length - 1)}
+              <DropdownMenu key={request.id} modal={false}>
+                <DropdownMenuTrigger
+                  ref={directOptions.length === 0 ? menuTriggerRef : undefined}
+                  className={`${styles.option} ${styles.optionPrimary} ${styles.menuTrigger}`}
+                  disabled={actionsDisabled}
+                  aria-label={approvalMenuLabel}
+                >
+                  {!primaryOption && approvalMenuLabel}
+                  <ChevronDown size={16} aria-hidden="true" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  side="top"
+                  className={styles.approvalMenu}
+                  data-approval-shortcuts-ignore
+                >
+                  {menuOptions.map((option) => (
+                    <DropdownMenuItem
+                      key={option.id}
+                      data-web-shell-permission-option
+                      data-option-id={option.id}
+                      disabled={actionsDisabled}
+                      onSelect={() => confirm(option.id)}
+                    >
+                      <span data-web-shell-option-label>
+                        {labelForOption(option)}
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

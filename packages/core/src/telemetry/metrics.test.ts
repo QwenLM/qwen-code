@@ -20,7 +20,7 @@ import {
   ApiRequestPhase,
 } from './metrics.js';
 import { makeFakeConfig } from '../test-utils/config.js';
-import type { GoalStateEvent } from './types.js';
+import { ToolResultSizeEvent, type GoalStateEvent } from './types.js';
 
 const mockCounterAddFn: Mock<
   (value: number, attributes?: Attributes, context?: Context) => void
@@ -120,6 +120,38 @@ describe('Telemetry Metrics', () => {
     record(mockConfig, value, attrs);
     expect(mockHistogramRecordFn).toHaveBeenCalledWith(value, expected);
   };
+
+  it('records raw/injected size without call/session cardinality by default', () => {
+    init();
+    m.recordToolResultSizeMetrics(
+      mockConfig,
+      new ToolResultSizeEvent(
+        'shell',
+        'native',
+        'injection',
+        100,
+        20,
+        25,
+        5,
+        true,
+        20,
+        'batch',
+        'private-call',
+        'private-prompt',
+      ),
+    );
+    expect(mockHistogramRecordFn).toHaveBeenCalledTimes(4);
+    expect(mockHistogramRecordFn).toHaveBeenCalledWith(100, {
+      function_name: 'shell',
+      tool_type: 'native',
+      truncated: true,
+      phase: 'raw',
+    });
+    for (const [, attrs] of mockHistogramRecordFn.mock.calls) {
+      expect(attrs).not.toHaveProperty('call_id');
+      expect(attrs).not.toHaveProperty('session.id');
+    }
+  });
 
   describe('recordToolCallMetrics', () => {
     const config = makeFakeConfig({ sessionId: 'test-session-id' });
@@ -493,32 +525,6 @@ describe('Telemetry Metrics', () => {
         execution_status: 'success',
         tool_type: 'native',
       });
-    });
-  });
-
-  describe('recordRepeatedToolFailureGuardMetrics', () => {
-    it('records only low-cardinality transition attributes', () => {
-      init(makeFakeConfig({ sessionId: 'test-session-id' }));
-      const attrs = {
-        route: 'acp_foreground',
-        mode: 'enforce',
-        phase_before: 'warned',
-        phase_after: 'latched',
-        decision: 'stopped',
-        failure_count_bucket: '8+',
-        batch_count_bucket: '3+',
-        terminal_status: 'error',
-        execution_status: 'error',
-        tool_type: 'mcp',
-      } as const;
-
-      m.recordRepeatedToolFailureGuardMetrics(attrs);
-
-      expect(mockCreateCounterFn).toHaveBeenCalledWith(
-        'qwen-code.repeated_tool_failure_guard.count',
-        expect.any(Object),
-      );
-      expect(mockCounterAddFn).toHaveBeenCalledWith(1, attrs);
     });
   });
 

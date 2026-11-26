@@ -5,6 +5,10 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
     globals: true,
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: 'junit.xml',
+    },
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     // Shared-pool ceiling; see scripts/tests/unit-vitest-configs.test.ts.
@@ -17,6 +21,10 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@qwen-code/channel-base/markdown-chunks': path.resolve(
+        __dirname,
+        '../base/src/markdown-chunks.ts',
+      ),
       '@qwen-code/channel-base': path.resolve(
         __dirname,
         '../base/src/index.ts',

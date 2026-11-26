@@ -78,6 +78,7 @@ import {
 import { getModelProvidersOwnerScope } from './modelProvidersScope.js';
 import { needsMigration } from './migration/index.js';
 import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -104,13 +105,11 @@ delete process.env['QWEN_HOME'];
 // Resolve the (mocked) user-settings path once at module load. Tests mock
 // `os.homedir`, so the value is stable across the suite. Production callers
 // must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`
-// resolved from `~/.env` after module load.
-// The package test-setup pins QWEN_HOME to a per-worker temp dir so a
-// polluted real ~/.qwen cannot leak into the suite. This file mocks the
-// filesystem outright and keys its fixtures on the os.homedir() mock, so it
-// drops the pin before the module-load path constants below are captured.
+// resolved from `~/.env` after module load. An ambient QWEN_HOME would divert
+// every user-settings and .env path away from the mocked home, so this file
+// cannot run with one set (the suite setup pins a private home when the
+// environment provides none).
 delete process.env['QWEN_HOME'];
-
 const USER_SETTINGS_PATH = getUserSettingsPath();
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
@@ -342,6 +341,42 @@ describe('Settings Loading and Merging', () => {
         const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
         expect(settings.workspaceSettingsActive).toBe(true);
+      });
+
+      it('should keep loading when the home directory does not exist', () => {
+        // Regression (#16861): a sandbox container user created without
+        // `useradd -m` has a HOME that does not exist; loading settings must
+        // not crash while resolving it.
+        const missingHome = '/mock/home/missing';
+        vi.mocked(osActual.homedir).mockReturnValue(missingHome);
+        const userSettingsPath = pathActual.join(
+          missingHome,
+          SETTINGS_DIRECTORY_NAME,
+          'settings.json',
+        );
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p.toString() === userSettingsPath,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) =>
+            p.toString() === userSettingsPath
+              ? JSON.stringify({ ui: { theme: 'Default' } })
+              : '{}',
+        );
+        (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) => {
+          if (p.toString() === missingHome) {
+            throw new Error(
+              `ENOENT: no such file or directory, lstat '${missingHome}'`,
+            );
+          }
+          return p.toString();
+        });
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.workspaceSettingsActive).toBe(true);
+        expect(settings.user.settings.ui).toEqual({ theme: 'Default' });
+        expect(settings.merged.ui?.theme).toBe('Default');
       });
 
       it('should keep workspace settings empty when reloading the home directory', () => {
@@ -754,6 +789,49 @@ describe('Settings Loading and Merging', () => {
         ]);
       },
     );
+
+    it('warns that the removed loop-detection settings are ignored', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                model: { loopProtection: 'stop', skipLoopDetection: false },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([
+        `Warning: Setting 'model.loopProtection' was removed (loop detection no longer exists) and will be ignored in ${USER_SETTINGS_PATH}.`,
+        `Warning: Setting 'model.skipLoopDetection' was removed (loop detection no longer exists) and will be ignored in ${USER_SETTINGS_PATH}.`,
+      ]);
+    });
+
+    it('does not point a legacy top-level skipLoopDetection at the removed key', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                skipLoopDetection: false,
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([
+        `Warning: Legacy setting 'skipLoopDetection' was removed (loop detection no longer exists) and will be ignored in ${USER_SETTINGS_PATH}.`,
+      ]);
+    });
 
     it('should silently ignore unknown top-level keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
@@ -1500,7 +1578,7 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
-    it('should use folderTrust from workspace settings when trusted', () => {
+    it('should ignore workspace folderTrust and keep the user value', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const userSettingsContent = {
         security: {
@@ -1512,7 +1590,7 @@ describe('Settings Loading and Merging', () => {
       const workspaceSettingsContent = {
         security: {
           folderTrust: {
-            enabled: false, // This should be used
+            enabled: false, // A repository must not disarm the gate.
           },
         },
       };
@@ -1533,7 +1611,27 @@ describe('Settings Loading and Merging', () => {
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(settings.merged.security?.folderTrust?.enabled).toBe(false); // Workspace setting should be used
+      expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+    });
+
+    it('should not let a workspace enable folderTrust for itself', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { folderTrust: { enabled: true } },
+              context: { fileName: 'WORKSPACE.md' },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // Otherwise a repo could arm the gate that authorizes its own hooks and
+      // reach any pre-existing TRUST_FOLDER/TRUST_PARENT rule for the directory.
+      expect(settings.merged.security?.folderTrust?.enabled).toBeUndefined();
+      expect(settings.merged.context?.fileName).toBe('WORKSPACE.md');
     });
 
     it('should use system folderTrust over user setting', () => {
@@ -2448,9 +2546,7 @@ describe('Settings Loading and Merging', () => {
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
-    it
-      .skipIf(process.platform === 'win32' || process.getuid?.() === 0)
-      .each([0o400, 0o444])(
+    it.skipIf(!arePermissionBitsEnforced()).each([0o400, 0o444])(
       'recovers repeatedly from a read-only Workspace file (%o)',
       async (mode) => {
         const actualFs = await vi.importActual<typeof fs>('node:fs');
@@ -2870,6 +2966,36 @@ describe('Settings Loading and Merging', () => {
         );
       });
     });
+
+    it.each([{ workspaceModes: ['default'] }, { workspaceModes: [] }])(
+      'ignores the workspace approval mode list $workspaceModes in favor of the user list',
+      ({ workspaceModes }) => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) =>
+            p === USER_SETTINGS_PATH ||
+            p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) =>
+            JSON.stringify({
+              ui: {
+                allowedApprovalModes:
+                  p === USER_SETTINGS_PATH ? ['auto', 'yolo'] : workspaceModes,
+              },
+            }),
+        );
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.ui?.allowedApprovalModes).toEqual([
+          'auto',
+          'yolo',
+        ]);
+        expect(
+          getSettingsWarnings(settings).some((warning) =>
+            warning.includes('ui.allowedApprovalModes'),
+          ),
+        ).toBe(true);
+      },
+    );
 
     it('should resolve environment variables in user settings', () => {
       process.env['TEST_API_KEY'] = 'user_api_key_from_env';
@@ -4074,14 +4200,14 @@ describe('Settings Loading and Merging', () => {
         [MOCK_WORKSPACE_SETTINGS_PATH]: {
           security: {
             allowedHttpHookUrls: ['*'],
-            folderTrust: { enabled: true },
+            dnsResolutionOrder: 'ipv4first',
           },
         },
       });
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(settings.merged.security?.allowedHttpHookUrls).toEqual(USER_LIST);
-      expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+      expect(settings.merged.security?.dnsResolutionOrder).toBe('ipv4first');
     });
 
     it('drops the workspace whitelist entirely when the folder is untrusted', () => {
@@ -4206,6 +4332,28 @@ describe('Settings Loading and Merging', () => {
         ),
       ).toBe(true);
     });
+
+    it('should warn when workspace settings define lspEnabled', () => {
+      // A cloned repo must not enable the subsystem that spawns language
+      // servers with the user's permissions; the value is stripped, not
+      // honored, and the warning is the only signal the user gets.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ tools: { lspEnabled: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.lspEnabled).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('tools.lspEnabled'),
+        ),
+      ).toBe(true);
+    });
   });
 
   describe('advisorModel scope handling', () => {
@@ -4275,6 +4423,33 @@ describe('Settings Loading and Merging', () => {
   );
 
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
+    it.each([undefined, 'off', 'en'])(
+      'ignores workspace display translation when the user value is %s',
+      (displayLanguage) => {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({ general: { displayLanguage } });
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify({
+                general: { displayLanguage: 'zh-CN' },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.isTrusted).toBe(true);
+        expect(settings.merged.general?.displayLanguage).toBe(displayLanguage);
+        expect(getSettingsWarnings(settings)).toEqual(
+          expect.arrayContaining([
+            expect.stringContaining('general.displayLanguage'),
+          ]),
+        );
+      },
+    );
+
     it.each([undefined, 0, 25])(
       'ignores workspace memory budget zero while preserving user budget %s',
       (budget) => {
@@ -4458,6 +4633,79 @@ describe('Settings Loading and Merging', () => {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
         'tools.workflowsEnabled',
       );
+    });
+
+    // Named key, not list iteration: dropping the entry must red here.
+    it('strips a workspace-only catalog refresh opt-out', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ model: { catalogRefresh: false } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.catalogRefresh).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('model.catalogRefresh'),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  describe('serve.sessionPrWatch scope handling', () => {
+    // Named key, not list iteration: dropping the entry must red here. The
+    // list-driven case above iterates whatever the list holds, so it stays
+    // green when an entry is removed.
+    it('is listed as workspace-restricted', () => {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'serve.sessionPrWatch',
+      );
+    });
+
+    it('honors serve.sessionPrWatch from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              serve: { sessionPrWatch: { events: ['head_change'] } },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.serve?.sessionPrWatch).toEqual({
+        events: ['head_change'],
+      });
+    });
+
+    it('strips serve.sessionPrWatch from workspace scope and warns', () => {
+      // A repository must not spend daemon-wide gh budget or inject prompts
+      // into sessions across workspaces; the trust-gated channel alias is
+      // its path.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              serve: { sessionPrWatch: { events: ['head_change'] } },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.serve?.sessionPrWatch).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('serve.sessionPrWatch'),
+        ),
+      ).toBe(true);
     });
   });
 
@@ -5694,6 +5942,50 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.theme).toBe('default');
     });
 
+    it('commits only the provided top-level settings and updates memory after saving', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const previous = {
+        visionModel: 'openai:old-vision',
+        visionBridgeTimeoutMs: 30_000,
+        imageModel: 'openai:image-model',
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? JSON.stringify(previous) : '{}',
+      );
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const updates = {
+        visionModel: 'openai:new-vision',
+        visionBridgeTimeoutMs: 45_000,
+      };
+      const mockFn = vi.mocked(jsoncEditor.updateSettingsFilePreservingFormat);
+      mockFn.mockClear();
+      mockFn.mockReturnValueOnce(false);
+
+      expect(() =>
+        settings.setTopLevelValues(SettingScope.User, updates),
+      ).toThrow(
+        /saveSettings: updateSettingsFilePreservingFormat returned false/,
+      );
+      expect(settings.user.originalSettings).toMatchObject(previous);
+      expect(settings.merged).toMatchObject(previous);
+
+      mockFn.mockClear();
+      mockFn.mockReturnValueOnce(true);
+      settings.setTopLevelValues(SettingScope.User, updates);
+
+      expect(mockFn).toHaveBeenCalledExactlyOnceWith(
+        USER_SETTINGS_PATH,
+        updates,
+        false,
+        [],
+      );
+      expect(settings.user.originalSettings).toMatchObject(updates);
+      expect(settings.merged).toMatchObject({ ...previous, ...updates });
+    });
+
     it('re-syncs uncommitted scopes from disk when setValues persistence fails', () => {
       (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
         [USER_SETTINGS_PATH, MOCK_WORKSPACE_SETTINGS_PATH].includes(
@@ -6442,6 +6734,7 @@ describe('Settings Loading and Merging', () => {
         delete process.env['QWEN_HOME'];
         delete process.env['QWEN_RUNTIME_DIR'];
         delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
+        delete process.env['QWEN_CODE_HOOK_APPROVALS_PATH'];
         delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
         delete process.env['QWEN_CODE_WARNINGS_FILE'];
 
@@ -6465,6 +6758,7 @@ describe('Settings Loading and Merging', () => {
                 'QWEN_HOME=/tmp/hijack',
                 'QWEN_RUNTIME_DIR=/tmp/hijack-runtime',
                 'QWEN_CODE_MCP_APPROVALS_PATH=/tmp/preapproved.json',
+                'QWEN_CODE_HOOK_APPROVALS_PATH=/tmp/hooks-approved.json',
                 'QWEN_CODE_TRUSTED_FOLDERS_PATH=/tmp/trusted.json',
                 'QWEN_CODE_WARNINGS_FILE=/tmp/sensitive.txt',
                 'OTHER_VAR=ok',
@@ -6479,6 +6773,7 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['QWEN_HOME']).toBeUndefined();
         expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
         expect(process.env['QWEN_CODE_MCP_APPROVALS_PATH']).toBeUndefined();
+        expect(process.env['QWEN_CODE_HOOK_APPROVALS_PATH']).toBeUndefined();
         expect(process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']).toBeUndefined();
         expect(process.env['QWEN_CODE_WARNINGS_FILE']).toBeUndefined();
         // Other vars from the same project .env still load.

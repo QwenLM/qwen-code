@@ -6,7 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { HookAggregator } from './hookAggregator.js';
-import { HookEventName, HookType, createHookOutput } from './types.js';
+import {
+  HookEventName,
+  HookType,
+  createHookOutput,
+  isBlockingHookOutput,
+} from './types.js';
 import type {
   DefaultHookOutput,
   HookExecutionResult,
@@ -20,7 +25,10 @@ describe('HookAggregator', () => {
   const aggregator = new HookAggregator();
 
   type ResultFields = Partial<
-    Pick<HookExecutionResult, 'success' | 'output' | 'error' | 'duration'>
+    Pick<
+      HookExecutionResult,
+      'success' | 'output' | 'error' | 'duration' | 'exitCode'
+    >
   > & { command?: string };
 
   /** Aggregates `event` results; defaults: `echo test`, success, 100ms. */
@@ -53,6 +61,147 @@ describe('HookAggregator', () => {
     createHookOutput(event, aggregate(event, outputs).finalOutput ?? {}) as T;
 
   describe('aggregateResults', () => {
+    it.each([
+      HookEventName.PreToolUse,
+      HookEventName.PostToolUse,
+      HookEventName.PostToolUseFailure,
+      HookEventName.PostToolBatch,
+    ])(
+      'ignores turn control from a non-blocking command failure on %s',
+      (event) => {
+        const failed = {
+          success: false,
+          exitCode: 1,
+          output: {
+            continue: false,
+            stopReason: 'partial result',
+            systemMessage: 'check failed',
+            suppressOutput: true,
+            hookSpecificOutput: {
+              additionalContext: 'partial diagnostics',
+              artifacts: [{ title: 'log' }],
+            },
+          },
+        };
+        const alone = aggregateAll(event, failed).finalOutput;
+        expect(alone?.continue).toBeUndefined();
+        expect(alone?.systemMessage).toBe('check failed');
+        expect(alone?.suppressOutput).toBe(true);
+        expect(alone?.hookSpecificOutput).toEqual(
+          failed.output.hookSpecificOutput,
+        );
+
+        const stop = { continue: false, stopReason: 'budget spent' };
+        const combined = aggregateAll(
+          event,
+          { output: stop },
+          {
+            ...failed,
+            output: {
+              ...failed.output,
+              decision: 'block',
+              hookSpecificOutput: { permissionDecision: 'deny' },
+            },
+          },
+        ).finalOutput;
+        expect(combined).toMatchObject(stop);
+        expect(isBlockingHookOutput(event, combined ?? {})).toBe(false);
+      },
+    );
+
+    it.each([
+      HookEventName.PreToolUse,
+      HookEventName.PostToolUse,
+      HookEventName.PostToolUseFailure,
+      HookEventName.PostToolBatch,
+    ])(
+      'preserves an exit-code-2 block when a %s hook requests a turn stop',
+      (event) => {
+        const stop = { continue: false, stopReason: 'Budget spent' };
+
+        expect(
+          aggregateAll(event, { success: false, exitCode: 2, output: stop })
+            .finalOutput,
+        ).toMatchObject({ ...stop, decision: 'deny' });
+        expect(
+          aggregateAll(event, { success: false, exitCode: 2 }, { output: stop })
+            .finalOutput,
+        ).toMatchObject({ ...stop, decision: 'deny' });
+        expect(
+          aggregateAll(event, { output: stop }).finalOutput,
+        ).not.toMatchObject({ decision: 'deny' });
+      },
+    );
+
+    it('keeps the successful PreToolUse input when a failed command also rewrites it', () => {
+      const result = aggregateAll(
+        HookEventName.PreToolUse,
+        {
+          output: {
+            hookSpecificOutput: { updatedInput: { path: 'validated' } },
+          },
+        },
+        {
+          success: false,
+          exitCode: 1,
+          output: { hookSpecificOutput: { updatedInput: { path: 'partial' } } },
+        },
+      );
+
+      expect(result.finalOutput?.hookSpecificOutput?.['updatedInput']).toEqual({
+        path: 'validated',
+      });
+    });
+
+    it('does not add a new PostToolUse decision for exit code 2 alone', () => {
+      const { finalOutput } = aggregateAll(HookEventName.PostToolUse, {
+        success: false,
+        exitCode: 2,
+        output: { reason: 'Blocking error' },
+      });
+
+      expect(finalOutput).toMatchObject({
+        decision: 'allow',
+        reason: 'Blocking error',
+      });
+    });
+
+    it.each([HookEventName.SessionStart, HookEventName.FileChanged])(
+      'ignores watchPaths from a failed %s hook without mutating its other fields',
+      (eventName) => {
+        const failed: HookOutput = {
+          reason: 'failed',
+          hookSpecificOutput: {
+            hookEventName: eventName,
+            watchPaths: ['/failed'],
+            additionalContext: 'kept',
+          },
+        };
+        const result = aggregateAll(
+          eventName,
+          {
+            output: {
+              hookSpecificOutput: {
+                hookEventName: eventName,
+                watchPaths: ['/valid'],
+              },
+            },
+          },
+          { success: false, output: failed },
+        );
+        expect(result.allOutputs[0].hookSpecificOutput?.['watchPaths']).toEqual(
+          ['/valid'],
+        );
+        expect(result.allOutputs[1]).toEqual({
+          reason: 'failed',
+          hookSpecificOutput: {
+            hookEventName: eventName,
+            additionalContext: 'kept',
+          },
+        });
+        expect(failed.hookSpecificOutput?.['watchPaths']).toEqual(['/failed']);
+      },
+    );
     it('should return undefined finalOutput when no results', () => {
       const result = aggregator.aggregateResults([], HookEventName.PreToolUse);
       expect(result.success).toBe(true);
@@ -109,6 +258,19 @@ describe('HookAggregator', () => {
         { continue: false, stopReason: 'second stop' },
       ]);
       expect(result.finalOutput?.stopReason).toBe('second stop');
+    });
+
+    it('ignores malformed reason fields when combining matching hooks', () => {
+      const invalid = JSON.parse(
+        '{"continue":false,"stopReason":44,"reason":{"toString":null}}',
+      ) as HookOutput;
+      const output = accessorsFor(HookEventName.PreToolUse, [
+        { continue: false, stopReason: 'first stop', reason: 'Valid reason' },
+        invalid,
+      ]);
+
+      expect(output.reason).toBe('Valid reason');
+      expect(output.getEffectiveReason()).toBe('first stop');
     });
 
     it('keeps the last updatedInput in hook order as a whole object', () => {

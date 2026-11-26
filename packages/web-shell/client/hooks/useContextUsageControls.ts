@@ -12,12 +12,16 @@ type CompressionResult =
   | { kind: 'completed'; usage: DaemonSessionContextUsageStatus }
   | { kind: 'failed' | 'cancelled' | 'refreshFailed' | 'interrupted' };
 
-export interface ContextUsageControls {
-  sessionId: string;
+export interface ContextCompressionControls {
   canCompress: boolean;
   compressing: boolean;
-  result?: CompressionResult;
+  result?: CompressionResult | { kind: 'compressed' | 'noop' };
   compress(): Promise<void>;
+}
+
+export interface ContextUsageControls extends ContextCompressionControls {
+  sessionId: string;
+  result?: CompressionResult;
   captureOwner(): DaemonSessionOwnerSnapshot;
   getContextUsage: DaemonSessionActions['getContextUsage'];
 }
@@ -97,7 +101,9 @@ export function useContextUsageControls({
     };
     try {
       onBeforeCompress();
-      const result = await actions.sendPrompt('/compress');
+      const result = await actions.sendPrompt('/compress', {
+        suppressInputHistory: true,
+      });
       if (!isCurrent()) return;
       if (!owner.isCurrent()) {
         settle({ kind: 'interrupted' });

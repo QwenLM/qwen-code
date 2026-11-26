@@ -168,6 +168,18 @@ independent process ledger also returns its definitive 404. Only the typed
 Turn. A present row, unknown result, wrong identity or rejected probe leaves
 the record unresolved. The publication error itself is never proof.
 
+For a failed turn with multiple background Shell bindings, each grant-owner
+`NOT_STARTED` decision settles its record immediately. All remaining
+grant-owner decisions finish before the permitted process-ledger probes start together.
+A silent Broker therefore consumes one 30-second probe window rather than one
+window per binding. The reload scanner and live-turn recovery share the same
+probe decision: only an absent row proves never-started; a present row reports
+`ambiguous_state (<state>)`; and a rejected lookup reports
+`probe_rejected (<safe detail>)`. Diagnostics name the execution id, distinguish
+the two known Broker contract errors and the transport error type without
+interpolating rejection messages, and record each successful process-ledger
+settlement.
+
 This fallback applies only to background Shell requests. Monitor dispatches
 create their own `:process` rows, but `request.background` deliberately excludes
 them; their settlement stays with the monitor-specific grant and remote-evidence
@@ -267,7 +279,7 @@ execution: 'not_started_proven'} }`, `valid: true` — replayed by the
   forcing rule (`outcome_unknown|corrupt` ⇒ `recovery_blocked`) already
   commits the ambiguity family elsewhere.
 
-Hook wiring (`hosted-harness-session.test.ts`):
+Hook wiring (`hosted-harness-session.lifecycle.test.ts`):
 
 - A load on a Session with a stranded record invokes the reconcile with the
   built session (module mock; **fails if the hook is removed**), and the
@@ -283,7 +295,7 @@ Hook wiring (`hosted-harness-session.test.ts`):
 | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                  | in-turn proof fallback                 |
 | `packages/cli/src/serve/hosted-workspace-tool-turn.test.ts`                             | absent and ambiguous process witnesses |
 | `packages/cli/src/serve/hosted-harness-session.ts`                                      | call the arm on open (~small)          |
-| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | wiring witness                         |
+| `packages/cli/src/serve/hosted-harness-session.lifecycle.test.ts`                       | wiring witness                         |
 | `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 successor pair                      |
 | `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | this doc                               |
 

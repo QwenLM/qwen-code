@@ -53,8 +53,8 @@ to file authorization; it does not introduce a Hosted execution entry point.
 | Resource reads    | Persist OPEN/RETURNED/UNKNOWN read ownership and recheck original writer, resource bytes/metadata and delivery bounds. Uncertain reads remain recorded.                           |
 | Schema            | Fresh unpublished migrations for request pin, first activation, native authorization and resource-read ownership. Published migrations are unchanged.                             |
 
-The principal affected areas are `packages/sdk-java/runtime-broker` and
-`packages/sdk-java/managed-agent-server`. Existing shared stores, transport,
+The principal affected areas are `packages/managed-agent-server` and
+`packages/managed-agent-server`. Existing shared stores, transport,
 schema and configuration receive only required CSI changes; new private
 classes and their tests are extracted from the frozen source. Main's existing
 workspace execution lease schema and later ordinary reader, collection,
@@ -97,7 +97,7 @@ MQ wake claims use the same durable legacy-mutation guard before inserting or ad
 
 Ordinary publication refuses private Sessions when allocating a read lease or PUT attempt. Session profile and request pin are fixed at creation; supported APIs never convert an ordinary Session into a private Session. Admitted leases continue checking expiration and retirement, and close only removes that lease. Admitted PUTs must record RETURNED or UNKNOWN without losing physical-write evidence to another admission check. These settlement operations do not need another journal-head lock. Collector guards and lock order remain intact. Main's budget assertions are unchanged: 4 statements for an empty materialization tick, 35 for a full batch and 17 for its tail, and 6 locked head reads in the exercised publication path.
 
-Broker and Server share the identity implementation. The former `com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity` retains its public static `verify`, `boot` and `expectedPod` methods, delegating to Broker. The former entry point is deprecated without duplicating validation logic. The added Broker API and feature still require maintainer review.
+Broker and Server share the identity implementation. The Spring adapter `com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiRuntimeIdentity` retains its public static `verify`, `boot` and `expectedPod` methods, delegating to Broker. The adapter is deprecated without duplicating validation logic. The added Broker API and feature still require maintainer review.
 
 Integration with main retains ordinary Monitor control classification, exact watch ownership, exit-evidence settlement and hold-row fencing. Private CSI history dispatch still requires the original READY owner and its own control fence. Every generic control, including Monitor, refuses a private CSI Runtime before transport. These are separate existing paths; the integration adds no private Monitor or Hosted entry point.
 

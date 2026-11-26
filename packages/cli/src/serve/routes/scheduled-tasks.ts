@@ -42,6 +42,8 @@ import {
   appendCronRun,
   annotateCronRunSession,
   taskHasLegacyCondition,
+  withTaskGate,
+  gateCommandError,
   parseCron,
   nextFireTime,
   nextDurableFireMs,
@@ -51,12 +53,20 @@ import {
   isValidCronTaskRoutingId,
   MAX_JOBS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
+  type CronGateStatus,
   type CronRunSessionOutcome,
   type CronTaskDelivery,
   type DurableCronTask,
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionNotFoundError,
+  SystemOverloadedError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import type {
+  BridgeClientRequestContext,
+  CloseSessionOpts,
+} from '@qwen-code/acp-bridge';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
@@ -73,6 +83,7 @@ import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
   sendConversationRuntimeUnavailable,
+  sendDaemonDrainingError as sendActivityGateError,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
@@ -116,7 +127,11 @@ export interface ScheduledTasksSessionBridge {
     signal?: AbortSignal,
     context?: { onPromptAdmitted?: () => void },
   ): Promise<unknown>;
-  closeSession(sessionId: string): Promise<unknown>;
+  closeSession(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    opts?: CloseSessionOpts,
+  ): Promise<unknown>;
   /** Persist a restorable transcript anchor for an eligible default session. */
   ensureDefaultSessionPersisted?(sessionId: string): Promise<void>;
   /** Advance the in-memory session-catalog revision after a successful
@@ -202,6 +217,8 @@ export interface ExistingSessionScheduledTaskCreateInput {
   groupId?: string;
   name?: string;
   delivery?: CronTaskDelivery;
+  /** Shell command run at each fire outside the model (a scheduled-task gate). */
+  gate?: string;
 }
 
 export class ExistingSessionScheduledTaskCreateError extends Error {
@@ -352,6 +369,24 @@ export async function createScheduledTaskWithExistingSession(
       'The scheduled-task prompt is invalid',
     );
   }
+  const gate = input.gate?.trim();
+  if (gate !== undefined) {
+    const gateError = gateCommandError(gate);
+    if (gateError) {
+      throw new ExistingSessionScheduledTaskCreateError(
+        400,
+        'invalid_gate',
+        `The scheduled-task gate ${gateError}`,
+      );
+    }
+    if (!input.recurring) {
+      throw new ExistingSessionScheduledTaskCreateError(
+        400,
+        'gate_requires_recurring',
+        GATE_REQUIRES_RECURRING_MESSAGE,
+      );
+    }
+  }
   const allowActivePrompt = options.source === 'cron-tool';
   const assertCallerPromptActive =
     options.source === 'cron-tool'
@@ -398,26 +433,30 @@ export async function createScheduledTaskWithExistingSession(
   }
 
   const now = Date.now();
-  const task: DurableCronTask = {
-    id: generateCronTaskId(),
-    cron: input.cron,
-    prompt,
-    recurring: input.recurring,
-    createdAt: now,
-    lastFiredAt: now - (now % 60_000),
-    enabled: input.enabled !== false,
-    sessionId: input.sessionId,
-    sessionOwnedByTask: false,
-    sessionMode: input.sessionMode === 'per_run' ? 'per_run' : 'persistent',
-    ...(input.sessionMode === 'per_run' && input.modelServiceId !== undefined
-      ? { modelServiceId: input.modelServiceId }
-      : {}),
-    ...(input.sessionMode === 'per_run' && input.groupId !== undefined
-      ? { groupId: input.groupId }
-      : {}),
-    ...(input.delivery !== undefined ? { delivery: input.delivery } : {}),
-    ...(input.name !== undefined ? { name: input.name } : {}),
-  };
+  // withTaskGate keeps the downgrade fuse (`condition`) in step with the gate.
+  const task: DurableCronTask = withTaskGate(
+    {
+      id: generateCronTaskId(),
+      cron: input.cron,
+      prompt,
+      recurring: input.recurring,
+      createdAt: now,
+      lastFiredAt: now - (now % 60_000),
+      enabled: input.enabled !== false,
+      sessionId: input.sessionId,
+      sessionOwnedByTask: false,
+      sessionMode: input.sessionMode === 'per_run' ? 'per_run' : 'persistent',
+      ...(input.sessionMode === 'per_run' && input.modelServiceId !== undefined
+        ? { modelServiceId: input.modelServiceId }
+        : {}),
+      ...(input.sessionMode === 'per_run' && input.groupId !== undefined
+        ? { groupId: input.groupId }
+        : {}),
+      ...(input.delivery !== undefined ? { delivery: input.delivery } : {}),
+      ...(input.name !== undefined ? { name: input.name } : {}),
+    },
+    gate,
+  );
   let before: DurableCronTask[] | undefined;
   let after: DurableCronTask[] | undefined;
   await runWithScheduledTaskTarget(target, () =>
@@ -621,6 +660,7 @@ async function dispatchTaskToFreshSession(
               prompt: task.prompt,
               triggeredAt,
               trigger: 'manual',
+              ...(task.gate ? { gate: task.gate } : {}),
             }),
           },
         ],
@@ -736,21 +776,6 @@ async function runWithScheduledTaskTarget<T>(
   return (await result) as Awaited<T>;
 }
 
-function sendActivityGateError(res: Response, error: unknown): boolean {
-  if (
-    !error ||
-    typeof error !== 'object' ||
-    (error as { code?: unknown }).code !== 'daemon_draining'
-  ) {
-    return false;
-  }
-  res.status(503).json({
-    error: 'The daemon is draining and no longer accepts work.',
-    code: 'daemon_draining',
-  });
-  return true;
-}
-
 /** On-the-wire task shape — normalizes the optional on-disk fields so the
  * client never has to special-case `undefined` name/enabled/runs. */
 interface ScheduledTaskView {
@@ -769,7 +794,14 @@ interface ScheduledTaskView {
   groupId: string | null;
   runs: CronTaskRun[];
   delivery?: CronTaskDelivery;
+  /** The gate command, or null for an ungated task. */
+  gate: string | null;
+  /** Summary of the gate's recent runs; null until the gate first ran. */
+  gateStatus: CronGateStatus | null;
 }
+
+const GATE_REQUIRES_RECURRING_MESSAGE =
+  'A gate needs a recurring task: a one-shot whose gate prints nothing would be consumed with nothing delivered';
 
 /** Next scheduled fire (epoch ms) for an enabled task, or null when the task
  * is disabled (it won't fire) or its cron can't be projected. A GET-time
@@ -815,6 +847,9 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
     ...(task.delivery !== undefined ? { delivery: task.delivery } : {}),
+    gate:
+      typeof task.gate === 'string' && task.gate.length > 0 ? task.gate : null,
+    gateStatus: task.gateStatus ?? null,
   };
 }
 
@@ -857,6 +892,24 @@ function canonicalCron(cron: string): string | null {
   } catch {
     return null;
   }
+}
+
+function sendScheduledTaskOverload(
+  res: Response,
+  error: SystemOverloadedError,
+  route: string,
+): void {
+  writeStderrLine(
+    `qwen serve: ${route} load admission rejected (reason=${error.reason}, loadRatio=${error.loadRatio}, eventLoopLagP99Ms=${error.eventLoopLagP99Ms})`,
+  );
+  res.set('Retry-After', '15');
+  res.status(503).json({
+    error: error.message,
+    code: 'system_overloaded',
+    reason: error.reason,
+    loadRatio: error.loadRatio,
+    eventLoopLagP99Ms: error.eventLoopLagP99Ms,
+  });
 }
 
 function registerScheduledTaskCrudRoutes(
@@ -1086,6 +1139,24 @@ function registerScheduledTaskCrudRoutes(
       }
       const recurring = body['recurring'] !== false;
       const enabled = body['enabled'] !== false;
+      let gate: string | undefined;
+      if (body['gate'] !== undefined && body['gate'] !== null) {
+        const gateError = gateCommandError(body['gate']);
+        if (gateError) {
+          res
+            .status(400)
+            .json({ error: `\`gate\` ${gateError}`, code: 'invalid_gate' });
+          return;
+        }
+        gate = (body['gate'] as string).trim();
+        if (!recurring) {
+          res.status(400).json({
+            error: GATE_REQUIRES_RECURRING_MESSAGE,
+            code: 'gate_requires_recurring',
+          });
+          return;
+        }
+      }
       const taskId = generateCronTaskId();
 
       if (sessionMode === 'per_run' && (!bridge || !bridge.sendPrompt)) {
@@ -1113,6 +1184,7 @@ function registerScheduledTaskCrudRoutes(
               ...(nameResult.value !== undefined
                 ? { name: nameResult.value }
                 : {}),
+              ...(gate !== undefined ? { gate } : {}),
             },
             { source: 'rest' },
           );
@@ -1198,6 +1270,10 @@ function registerScheduledTaskCrudRoutes(
         } catch (err) {
           if (sendActivityGateError(res, err)) return;
           if (sendGenerationClosedError(res, err)) return;
+          if (err instanceof SystemOverloadedError) {
+            sendScheduledTaskOverload(res, err, `POST ${base}`);
+            return;
+          }
           writeStderrLine(
             `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
           );
@@ -1210,27 +1286,31 @@ function registerScheduledTaskCrudRoutes(
       }
 
       const now = Date.now();
-      const task: DurableCronTask = {
-        id: taskId,
-        cron,
-        prompt,
-        recurring,
-        createdAt: now,
-        // Pin to the creation minute so the scheduler can't fire during the
-        // minute the task was created — same guard cronScheduler.create uses.
-        lastFiredAt: now - (now % 60_000),
-        enabled,
-        sessionMode,
-        ...(typeof modelServiceId === 'string' ? { modelServiceId } : {}),
-        ...(typeof groupId === 'string' ? { groupId } : {}),
-        ...(delivery !== undefined ? { delivery } : {}),
-        ...(boundSessionId !== undefined
-          ? {
-              sessionId: boundSessionId,
-            }
-          : {}),
-        ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
-      };
+      // withTaskGate keeps the downgrade fuse (`condition`) in step with the gate.
+      const task: DurableCronTask = withTaskGate(
+        {
+          id: taskId,
+          cron,
+          prompt,
+          recurring,
+          createdAt: now,
+          // Pin to the creation minute so the scheduler can't fire during the
+          // minute the task was created — same guard cronScheduler.create uses.
+          lastFiredAt: now - (now % 60_000),
+          enabled,
+          sessionMode,
+          ...(typeof modelServiceId === 'string' ? { modelServiceId } : {}),
+          ...(typeof groupId === 'string' ? { groupId } : {}),
+          ...(delivery !== undefined ? { delivery } : {}),
+          ...(boundSessionId !== undefined
+            ? {
+                sessionId: boundSessionId,
+              }
+            : {}),
+          ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
+        },
+        gate,
+      );
 
       // Best-effort teardown of the just-minted session when the create can't be
       // committed. closeSession only tears down the live child; removeSession also
@@ -1338,6 +1418,7 @@ function registerScheduledTaskCrudRoutes(
       let clearDelivery = false;
       let clearModelServiceId = false;
       let clearGroupId = false;
+      let clearGate = false;
       let missingGroupId: string | undefined;
 
       const removedPatchField = findRemovedTaskField(body);
@@ -1475,12 +1556,28 @@ function registerScheduledTaskCrudRoutes(
           }
         }
       }
+      if ('gate' in body) {
+        if (body['gate'] === null || body['gate'] === '') {
+          clearGate = true;
+        } else {
+          const gateError = gateCommandError(body['gate']);
+          if (gateError) {
+            res.status(400).json({
+              error: `\`gate\` must be null or a shell command; it ${gateError}`,
+              code: 'invalid_gate',
+            });
+            return;
+          }
+          patch.gate = (body['gate'] as string).trim();
+        }
+      }
       if (
         Object.keys(patch).length === 0 &&
         !clearName &&
         !clearDelivery &&
         !clearModelServiceId &&
-        !clearGroupId
+        !clearGroupId &&
+        !clearGate
       ) {
         res.status(400).json({
           error: 'No updatable fields provided',
@@ -1493,6 +1590,7 @@ function registerScheduledTaskCrudRoutes(
       let updated: DurableCronTask | undefined;
       let blockedByArchive = false;
       let blockedLegacy = false;
+      let blockedGateOneShot = false;
       let blockedSessionModeDelivery = false;
       let blockedSessionModeUnavailable = false;
       let blockedSessionModeUnbound = false;
@@ -1544,6 +1642,16 @@ function registerScheduledTaskCrudRoutes(
                 blockedLegacy = true;
                 return tasks; // no write
               }
+              // A legacy guarded task's `condition` is its own fail-closed
+              // marker, not a gate's downgrade fuse: clearing a gate would strip
+              // it (always-run), and setting one would dress it up as a gate.
+              if (
+                (patch.gate !== undefined || clearGate) &&
+                taskHasLegacyCondition(current)
+              ) {
+                blockedLegacy = true;
+                return tasks; // no write
+              }
               // A task disabled BY archiving its session (`disabledByArchive`) can't
               // be re-enabled through this generic PATCH: its bound session is still
               // archived and can't fire, so flipping `enabled: true` here would show
@@ -1558,7 +1666,7 @@ function registerScheduledTaskCrudRoutes(
                 blockedByArchive = true;
                 return tasks; // no write
               }
-              const next: DurableCronTask = { ...current, ...patch };
+              let next: DurableCronTask = { ...current, ...patch };
               // `name: null/""` clears the field rather than storing an empty name,
               // so toView reports it as unnamed and isValidTask never sees a "".
               if (clearName) delete next.name;
@@ -1571,6 +1679,28 @@ function registerScheduledTaskCrudRoutes(
               }
               if (next.sessionMode === 'per_run' && next.delivery) {
                 blockedSessionModeDelivery = true;
+                return tasks;
+              }
+              // The downgrade fuse (`condition`) moves with the gate, and a
+              // changed or cleared gate starts its status over: the summary
+              // described a different command.
+              if (clearGate || patch.gate !== undefined) {
+                next = withTaskGate(next, clearGate ? undefined : patch.gate);
+                if (clearGate || patch.gate !== current.gate) {
+                  delete next.gateStatus;
+                }
+              }
+              // Refused only when this edit makes the combination (sets a
+              // gate, or turns the task one-shot): a task already in it, from
+              // an older daemon or a hand edit, keeps its other edits and can
+              // still clear the gate.
+              if (
+                next.gate !== undefined &&
+                !next.recurring &&
+                ((patch.gate !== undefined && patch.gate !== current.gate) ||
+                  (patch.recurring === false && current.recurring !== false))
+              ) {
+                blockedGateOneShot = true;
                 return tasks;
               }
               // Re-seat the task's schedule anchor to "now" whenever an edit would
@@ -1722,6 +1852,13 @@ function registerScheduledTaskCrudRoutes(
         });
         return;
       }
+      if (blockedGateOneShot) {
+        res.status(400).json({
+          error: GATE_REQUIRES_RECURRING_MESSAGE,
+          code: 'gate_requires_recurring',
+        });
+        return;
+      }
       if (!updated) {
         res
           .status(404)
@@ -1858,11 +1995,16 @@ function registerScheduledTaskCrudRoutes(
           .json({ error: 'Task not found', code: 'task_not_found' });
         return;
       }
-      // Stop the now-orphaned session (keeps its transcript on disk as history).
+      // Remove the now-orphaned live session only after its child confirms that
+      // no background work still owns it. The idle reaper retries after holds
+      // clear; the transcript remains on disk as history either way.
       if (boundSessionId && sessionOwnedByTask && bridge) {
         try {
           await runWithScheduledTaskTarget(target, () =>
-            bridge.closeSession(boundSessionId!),
+            bridge.closeSession(boundSessionId!, undefined, {
+              closeIfUnheld: true,
+              reason: 'scheduled_task_deleted',
+            }),
           );
         } catch (error) {
           if (sendActivityGateError(res, error)) return;
@@ -2067,6 +2209,10 @@ function registerScheduledTaskCrudRoutes(
               removalGenerations,
               `POST ${base}/${id}/run fresh-session dispatch`,
             );
+          }
+          if (error instanceof SystemOverloadedError) {
+            sendScheduledTaskOverload(res, error, `POST ${base}/${id}/run`);
+            return;
           }
           writeStderrLine(
             `qwen serve: POST ${base}/${id}/run could not create a fresh session: ${error instanceof Error ? error.message : String(error)}`,

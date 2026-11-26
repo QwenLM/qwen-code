@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
+import { outputIncludesThoughts, outputTokenCount } from './gen-ai-usage.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
@@ -73,16 +74,38 @@ export interface SkillMetrics {
 
 export interface GenerationTimingSample {
   model: string;
+  /** From sending the request to its first visible output. */
   ttftMs: number;
+  /** From the first to the last visible output. */
   generationDurationMs: number;
+  /** Reasoning counted once. */
   outputTokens: number;
 }
 
 export interface GenerationMetrics {
   timedRequests: number;
+  /** Summed over every timed request. */
   totalTtftMs: number;
+  /**
+   * Generation time of the requests whose window is at least 100 ms. Older
+   * clients divide `totalThroughputOutputTokens` by it, so its meaning stays.
+   */
   totalGenerationDurationMs: number;
+  /** Output tokens of the same requests as `totalGenerationDurationMs`. */
   totalThroughputOutputTokens: number;
+  /** Generation time summed over every timed request, like `totalTtftMs`. */
+  totalTimedGenerationDurationMs: number;
+  /**
+   * Output tokens, reasoning counted once, of the timed requests that
+   * reported any. Output speed divides them by `totalOutputSpeedDurationMs`.
+   */
+  totalOutputSpeedTokens: number;
+  /**
+   * TTFT plus generation time of the same requests as
+   * `totalOutputSpeedTokens`: each one's time from sending it to its last
+   * visible output.
+   */
+  totalOutputSpeedDurationMs: number;
   last?: GenerationTimingSample;
 }
 
@@ -96,6 +119,7 @@ export interface ModelMetricsCore {
     totalRequests: number;
     totalErrors: number;
     totalLatencyMs: number;
+    totalErrorLatencyMs?: number;
   };
   tokens: {
     prompt: number;
@@ -116,10 +140,68 @@ export interface ModelMetrics extends ModelMetricsCore {
   bySource: Record<string, ModelMetricsCore>;
 }
 
+/** One timed, non-internal response, for the per-request speed timeline. */
+export interface RequestTimingSample {
+  /** Event time, epoch ms. */
+  at: number;
+  ttftMs: number;
+  /** From the first to the last visible output. */
+  generationMs: number;
+  /** Reasoning counted once. */
+  outputTokens: number;
+  /** Subagent that issued the request; absent for the main conversation. */
+  source?: string;
+}
+
+/** One failed API call. */
+export interface RequestFailureSample {
+  /** Event time, epoch ms. */
+  at: number;
+  /** HTTP status code, else error type, else `unknown`. */
+  kind: string;
+  source?: string;
+}
+
+/**
+ * Model totals for the daemon stats route. Generation timing lives here, not
+ * in `ModelMetrics`, because `models` is also written to managed usage records
+ * whose model entries are validated against a closed set of keys.
+ */
+export interface StatsModelMetrics extends ModelMetricsCore {
+  generation?: GenerationMetrics;
+  /** Most recent timed responses, oldest first, capped at `MAX_TIMING_SAMPLES`. */
+  timingSamples?: RequestTimingSample[];
+  /** Failed calls by kind, and the most recent ones (oldest first). */
+  failures?: {
+    byKind: Record<string, number>;
+    recent: RequestFailureSample[];
+  };
+}
+
+/** Per-model response timeline length kept for the stats route. */
+export const MAX_TIMING_SAMPLES = 200;
+/** Per-model failure timeline length kept for the stats route. */
+export const MAX_FAILURE_SAMPLES = 50;
+
+function eventTime(event: { 'event.timestamp'?: string }): number {
+  const parsed = Date.parse(event['event.timestamp'] ?? '');
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function pushCapped<T>(list: T[], item: T, cap: number): void {
+  list.push(item);
+  if (list.length > cap) list.splice(0, list.length - cap);
+}
+
 export interface SessionMetrics {
   models: Record<string, ModelMetrics>;
   /** Provider-normalized model totals exposed by the daemon stats route. */
-  statsModels?: Record<string, ModelMetricsCore>;
+  statsModels?: Record<string, StatsModelMetrics>;
+  /** Per-event output estimates; absent for models restored from raw-only history. */
+  billableOutputTokens?: Record<
+    string,
+    { total: number; bySource: Record<string, number> }
+  >;
   generation?: GenerationMetrics;
   /**
    * Per-instance subagent metadata (invocation id → business name + agent
@@ -180,8 +262,85 @@ const createInitialModelMetrics = (): ModelMetrics => ({
  * for every `bySource` map it touches. Every snapshot/restore clone goes
  * through here so the guard survives a replay rollback.
  */
+export const MAX_TRACKED_EXECUTION_IDS = 10_000;
+
+const executionIdsByMetrics = new WeakMap<SessionMetrics, Set<string>>();
+const successfulExecutionIdsByMetrics = new WeakMap<
+  SessionMetrics,
+  Set<string>
+>();
+// Once a long-lived session exceeds MAX_TRACKED_EXECUTION_IDS distinct ids,
+// drop both sets and fall back to conservative matching rather than retaining
+// an unbounded set or exposing a truncated partial id list.
+const executionIdsOverflowed = new WeakSet<SessionMetrics>();
+
+export function getRequestExecutionIds(
+  metrics: SessionMetrics,
+): ReadonlySet<string> | undefined {
+  return executionIdsByMetrics.get(metrics);
+}
+
+export function getSuccessfulRequestExecutionIds(
+  metrics: SessionMetrics,
+): ReadonlySet<string> | undefined {
+  return successfulExecutionIdsByMetrics.get(metrics);
+}
+
+function overflowExecutionIds(metrics: SessionMetrics): void {
+  executionIdsOverflowed.add(metrics);
+  executionIdsByMetrics.delete(metrics);
+  successfulExecutionIdsByMetrics.delete(metrics);
+}
+
+function recordRequestExecutionId(
+  metrics: SessionMetrics,
+  executionId: string | undefined,
+  successful = false,
+): void {
+  if (!executionId || executionIdsOverflowed.has(metrics)) return;
+  const ids = executionIdsByMetrics.get(metrics) ?? new Set<string>();
+  if (!ids.has(executionId) && ids.size >= MAX_TRACKED_EXECUTION_IDS) {
+    overflowExecutionIds(metrics);
+    return;
+  }
+  ids.add(executionId);
+  executionIdsByMetrics.set(metrics, ids);
+  if (successful) {
+    const successfulIds =
+      successfulExecutionIdsByMetrics.get(metrics) ?? new Set<string>();
+    if (
+      !successfulIds.has(executionId) &&
+      successfulIds.size >= MAX_TRACKED_EXECUTION_IDS
+    ) {
+      overflowExecutionIds(metrics);
+      return;
+    }
+    successfulIds.add(executionId);
+    successfulExecutionIdsByMetrics.set(metrics, successfulIds);
+  }
+}
+
 const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
   const clone = structuredClone(metrics);
+  if (executionIdsOverflowed.has(metrics)) {
+    executionIdsOverflowed.add(clone);
+  } else {
+    const executionIds = executionIdsByMetrics.get(metrics);
+    if (executionIds) {
+      executionIdsByMetrics.set(clone, new Set(executionIds));
+    }
+    const successfulExecutionIds = successfulExecutionIdsByMetrics.get(metrics);
+    if (successfulExecutionIds) {
+      successfulExecutionIdsByMetrics.set(
+        clone,
+        new Set(successfulExecutionIds),
+      );
+    }
+  }
+  clone.models = Object.assign(
+    Object.create(null) as SessionMetrics['models'],
+    clone.models,
+  );
   for (const model of Object.values(clone.models)) {
     model.bySource = Object.assign(
       Object.create(null) as Record<string, ModelMetricsCore>,
@@ -205,6 +364,28 @@ const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
       Object.create(null) as NonNullable<SessionMetrics['statsModels']>,
       clone.statsModels,
     );
+    for (const model of Object.values(clone.statsModels)) {
+      if (model.failures) {
+        model.failures.byKind = Object.assign(
+          Object.create(null) as Record<string, number>,
+          model.failures.byKind,
+        );
+      }
+    }
+  }
+  if (clone.billableOutputTokens) {
+    clone.billableOutputTokens = Object.assign(
+      Object.create(null) as NonNullable<
+        SessionMetrics['billableOutputTokens']
+      >,
+      clone.billableOutputTokens,
+    );
+    for (const model of Object.values(clone.billableOutputTokens)) {
+      model.bySource = Object.assign(
+        Object.create(null) as Record<string, number>,
+        model.bySource,
+      );
+    }
   }
   return clone;
 };
@@ -216,11 +397,20 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   byName: {},
 });
 
+/**
+ * Shortest generation window in the legacy `totalGenerationDurationMs` and
+ * `totalThroughputOutputTokens` sums.
+ */
+const LEGACY_MIN_THROUGHPUT_WINDOW_MS = 100;
+
 const createInitialGenerationMetrics = (): GenerationMetrics => ({
   timedRequests: 0,
   totalTtftMs: 0,
   totalGenerationDurationMs: 0,
   totalThroughputOutputTokens: 0,
+  totalTimedGenerationDurationMs: 0,
+  totalOutputSpeedTokens: 0,
+  totalOutputSpeedDurationMs: 0,
 });
 
 const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
@@ -229,14 +419,23 @@ const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
     event.input_token_count > 0
       ? event.input_token_count
       : event.cached_content_token_count;
-  const thoughtsIncludedInOutput =
-    event.auth_type === 'openai' || event.auth_type === 'qwen-oauth';
   return (
     input +
     event.output_token_count +
-    (thoughtsIncludedInOutput ? 0 : event.thoughts_token_count)
+    (outputIncludesThoughts(event.auth_type) ? 0 : event.thoughts_token_count)
   );
 };
+
+const getEventBillableOutputTokens = (event: ApiResponseEvent): number =>
+  outputTokenCount(
+    {
+      input: event.input_token_count,
+      output: event.output_token_count,
+      thoughts: event.thoughts_token_count,
+      total: event.total_token_count,
+    },
+    event.auth_type,
+  );
 
 const getLegacySubagentId = (
   event: { prompt_id?: string; subagent_name?: string },
@@ -261,7 +460,7 @@ const getLegacySubagentId = (
 };
 
 const createInitialMetrics = (): SessionMetrics => ({
-  models: {},
+  models: Object.create(null) as SessionMetrics['models'],
   tools: {
     totalCalls: 0,
     totalSuccess: 0,
@@ -307,9 +506,13 @@ const createInitialMetrics = (): SessionMetrics => ({
  */
 export interface UiTelemetryReplaySnapshot {
   readonly metrics: SessionMetrics;
+  readonly liveMetrics: SessionMetrics;
+  readonly sessionStartTime: Date;
+  readonly runStartTime: Date;
   readonly sessionId: string;
   /** Absent when the session had no bucket yet — restore removes it again. */
   readonly sessionMetrics: SessionMetrics | undefined;
+  readonly sessionOutputBaseline: number | undefined;
   readonly sessionWasClosed: boolean;
   /**
    * The session the process was on when the replay began — the one a failed
@@ -323,6 +526,7 @@ export interface UiTelemetryReplaySnapshot {
   readonly outgoingSessionId?: string;
   /** Absent when the outgoing session had no bucket yet — restore removes it. */
   readonly outgoingSessionMetrics?: SessionMetrics | undefined;
+  readonly outgoingSessionOutputBaseline?: number | undefined;
   readonly outgoingSessionWasClosed?: boolean;
   readonly lastPromptTokenCount: number;
   readonly lastCachedContentTokenCount: number;
@@ -331,14 +535,36 @@ export interface UiTelemetryReplaySnapshot {
 export class UiTelemetryService extends EventEmitter {
   static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
+  #liveMetrics: SessionMetrics = createInitialMetrics();
   #sessionMetrics: Map<string, SessionMetrics> = new Map();
+  #sessionOutputBaselines: Map<string, number> = new Map();
   #closedSessions: Set<string> = new Set();
   #lastPromptTokenCount = 0;
   #lastCachedContentTokenCount = 0;
+  /** Display/session lifetime. Kept intact when a new run begins. */
   #sessionStartTime: Date = new Date();
+  /** Lifetime of the usage counters written for the active run. */
+  #runStartTime: Date = new Date();
 
   addEvent(event: UiEvent, sessionId?: string) {
+    this.#record(event, sessionId, true);
+  }
+
+  /**
+   * Accumulates a stored event that a resume replayed. It counts toward the
+   * display aggregate — a resumed session's `/stats` legitimately shows the
+   * conversation's history — but not toward {@link getLiveMetrics}, because
+   * those tokens were spent by an earlier run and were already persisted then.
+   * Billing them again is what made a seven-minute resume of a long
+   * conversation look like it spent the whole conversation's tokens.
+   */
+  addReplayedEvent(event: UiEvent, sessionId?: string) {
+    this.#record(event, sessionId, false);
+  }
+
+  #record(event: UiEvent, sessionId: string | undefined, live: boolean) {
     if (!this.#accumulateEvent(this.#metrics, event)) return;
+    if (live) this.#accumulateEvent(this.#liveMetrics, event);
 
     if (sessionId && !this.#closedSessions.has(sessionId)) {
       if (!this.#sessionMetrics.has(sessionId)) {
@@ -354,11 +580,27 @@ export class UiTelemetryService extends EventEmitter {
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      event,
     });
   }
 
   getMetrics(): SessionMetrics {
     return this.#metrics;
+  }
+
+  /**
+   * Usage this process produced itself, excluding history a resume replayed.
+   * This is what cross-session usage history persists; with no replay it is
+   * field-for-field identical to {@link getMetrics}.
+   */
+  getLiveMetrics(): SessionMetrics {
+    return this.#liveMetrics;
+  }
+
+  /** Starts a new run without restarting the conversation's wall clock. */
+  resetLiveMetrics(): void {
+    this.#liveMetrics = createInitialMetrics();
+    this.#runStartTime = new Date();
   }
 
   getMetricsForSession(sessionId: string): SessionMetrics {
@@ -374,12 +616,23 @@ export class UiTelemetryService extends EventEmitter {
    */
   getTotalOutputTokens(sessionId: string): number {
     const metrics = this.#sessionMetrics.get(sessionId);
-    if (!metrics) return 0;
-    let total = 0;
-    for (const model of Object.values(metrics.models)) {
+    let total = this.#sessionOutputBaselines.get(sessionId) ?? 0;
+    for (const model of Object.values(metrics?.models ?? {})) {
       total += model.tokens.candidates;
     }
     return total;
+  }
+
+  restoreSessionOutputTokensBaseline(sessionId: string, total: number): void {
+    if (!Number.isFinite(total) || total < 0 || total > Number.MAX_SAFE_INTEGER)
+      return;
+    const current = this.getTotalOutputTokens(sessionId);
+    if (total > current)
+      this.#sessionOutputBaselines.set(
+        sessionId,
+        (this.#sessionOutputBaselines.get(sessionId) ?? 0) + total - current,
+      );
+    this.#closedSessions.delete(sessionId);
   }
 
   restoreSessionModelMetrics(
@@ -399,6 +652,9 @@ export class UiTelemetryService extends EventEmitter {
       ...createInitialMetrics(),
       models,
     }).models;
+    // Raw history has no per-event convention. Never replace its full estimate
+    // with an authoritative count containing only subsequent live requests.
+    delete metrics.billableOutputTokens;
     this.#sessionMetrics.set(sessionId, metrics);
     this.#closedSessions.delete(sessionId);
   }
@@ -409,6 +665,9 @@ export class UiTelemetryService extends EventEmitter {
     sessionId?: string,
   ): void {
     this.#accumulateSkillInvocation(this.#metrics, skillName, success);
+    // Skill invocations are never replayed from a transcript, so every one of
+    // them belongs to this run and must reach the persisted counters too.
+    this.#accumulateSkillInvocation(this.#liveMetrics, skillName, success);
 
     if (sessionId && !this.#closedSessions.has(sessionId)) {
       if (!this.#sessionMetrics.has(sessionId)) {
@@ -441,6 +700,22 @@ export class UiTelemetryService extends EventEmitter {
 
   getSessionStartTime(): Date {
     return this.#sessionStartTime;
+  }
+
+  /** Clock for the displayed conversation, independent of the current run. */
+  setSessionStartTime(startTime: Date, sessionId?: string): void {
+    this.#sessionStartTime = new Date(startTime);
+    // The initial UI subscription can predate replay's clock binding.
+    this.emit('update', {
+      metrics: this.#metrics,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+      clockSessionId: sessionId,
+    });
+  }
+
+  /** Start of the active run for persisted usage records, not the UI clock. */
+  getRunStartTime(): Date {
+    return this.#runStartTime;
   }
 
   getLastCachedContentTokenCount(): number {
@@ -481,14 +756,21 @@ export class UiTelemetryService extends EventEmitter {
       : undefined;
     return {
       metrics: cloneSessionMetrics(this.#metrics),
+      liveMetrics: cloneSessionMetrics(this.#liveMetrics),
+      sessionStartTime: new Date(this.#sessionStartTime),
+      runStartTime: new Date(this.#runStartTime),
       sessionId,
       sessionMetrics: sessionMetrics
         ? cloneSessionMetrics(sessionMetrics)
         : undefined,
+      sessionOutputBaseline: this.#sessionOutputBaselines.get(sessionId),
       sessionWasClosed: this.#closedSessions.has(sessionId),
       outgoingSessionId: outgoing,
       outgoingSessionMetrics: outgoingSessionMetrics
         ? cloneSessionMetrics(outgoingSessionMetrics)
+        : undefined,
+      outgoingSessionOutputBaseline: outgoing
+        ? this.#sessionOutputBaselines.get(outgoing)
         : undefined,
       outgoingSessionWasClosed: outgoing
         ? this.#closedSessions.has(outgoing)
@@ -509,16 +791,21 @@ export class UiTelemetryService extends EventEmitter {
    */
   restoreFromReplaySnapshot(snapshot: UiTelemetryReplaySnapshot): void {
     this.#metrics = cloneSessionMetrics(snapshot.metrics);
+    this.#liveMetrics = cloneSessionMetrics(snapshot.liveMetrics);
+    this.#sessionStartTime = new Date(snapshot.sessionStartTime);
+    this.#runStartTime = new Date(snapshot.runStartTime);
     this.#restoreSessionState(
       snapshot.sessionId,
       snapshot.sessionMetrics,
       snapshot.sessionWasClosed,
+      snapshot.sessionOutputBaseline,
     );
     if (snapshot.outgoingSessionId) {
       this.#restoreSessionState(
         snapshot.outgoingSessionId,
         snapshot.outgoingSessionMetrics,
         snapshot.outgoingSessionWasClosed,
+        snapshot.outgoingSessionOutputBaseline,
       );
     }
     this.#lastPromptTokenCount = snapshot.lastPromptTokenCount;
@@ -526,6 +813,7 @@ export class UiTelemetryService extends EventEmitter {
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      clockSessionId: snapshot.outgoingSessionId,
     });
   }
 
@@ -533,6 +821,7 @@ export class UiTelemetryService extends EventEmitter {
     sessionId: string,
     metrics: SessionMetrics | undefined,
     wasClosed: boolean | undefined,
+    outputBaseline: number | undefined,
   ): void {
     if (metrics) {
       this.#sessionMetrics.set(sessionId, cloneSessionMetrics(metrics));
@@ -540,6 +829,11 @@ export class UiTelemetryService extends EventEmitter {
       // No bucket existed before the replay; the replay created one. Drop it
       // rather than leave an empty bucket that reads as a live session.
       this.#sessionMetrics.delete(sessionId);
+    }
+    if (outputBaseline === undefined) {
+      this.#sessionOutputBaselines.delete(sessionId);
+    } else {
+      this.#sessionOutputBaselines.set(sessionId, outputBaseline);
     }
     if (wasClosed) {
       this.#closedSessions.add(sessionId);
@@ -553,23 +847,29 @@ export class UiTelemetryService extends EventEmitter {
    */
   reset(): void {
     this.#metrics = createInitialMetrics();
+    this.#liveMetrics = createInitialMetrics();
     this.#sessionMetrics.clear();
+    this.#sessionOutputBaselines.clear();
     this.#closedSessions.clear();
     this.#lastPromptTokenCount = 0;
     this.#lastCachedContentTokenCount = 0;
     this.#sessionStartTime = new Date();
+    this.#runStartTime = new Date();
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      clockSessionId: undefined,
     });
   }
 
   resetSession(sessionId: string): void {
+    this.#sessionOutputBaselines.delete(sessionId);
     this.#sessionMetrics.set(sessionId, createInitialMetrics());
     this.#closedSessions.delete(sessionId);
   }
 
   removeSession(sessionId: string): void {
+    this.#sessionOutputBaselines.delete(sessionId);
     this.#sessionMetrics.delete(sessionId);
     this.#closedSessions.add(sessionId);
     if (this.#closedSessions.size > UiTelemetryService.#MAX_CLOSED_SESSIONS) {
@@ -603,6 +903,7 @@ export class UiTelemetryService extends EventEmitter {
     event: ApiResponseEvent,
     sessionId?: string,
   ): void {
+    recordRequestExecutionId(metrics, event.execution_id, true);
     const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
     const statsModelMetrics = sessionId
       ? this.#getOrCreateStatsModelMetrics(metrics, event.model)
@@ -619,6 +920,13 @@ export class UiTelemetryService extends EventEmitter {
         ? event.input_token_count
         : event.cached_content_token_count;
     const normalizedTotalTokens = getEventTotalTokenCount(event);
+    const billable = metrics.billableOutputTokens?.[event.model];
+    if (billable) {
+      const output = getEventBillableOutputTokens(event);
+      const source = event.subagent_name ?? MAIN_SOURCE;
+      billable.total += output;
+      billable.bySource[source] = (billable.bySource[source] ?? 0) + output;
+    }
     const accumulate = (
       bucket: ModelMetricsCore,
       prompt: number,
@@ -649,31 +957,67 @@ export class UiTelemetryService extends EventEmitter {
       );
     }
 
+    const ttftMs = event.ttft_ms;
+    const generationDurationMs = event.generation_ms;
+    // Events recorded before `generation_ms` existed also predate counting
+    // tool-call preparations as visible output, so their TTFT can span a
+    // whole tool-call-only request. Leave them out of timing entirely.
     if (
-      event.ttft_ms === undefined ||
-      !Number.isFinite(event.ttft_ms) ||
-      event.ttft_ms < 0 ||
+      ttftMs === undefined ||
+      !Number.isFinite(ttftMs) ||
+      ttftMs < 0 ||
+      generationDurationMs === undefined ||
+      !Number.isFinite(generationDurationMs) ||
+      generationDurationMs < 0 ||
       isInternalPromptId(event.prompt_id)
     ) {
       return;
     }
 
-    const generation =
-      metrics.generation ??
-      (metrics.generation = createInitialGenerationMetrics());
-    const generationDurationMs = Math.max(0, event.duration_ms - event.ttft_ms);
+    // Reasoning counted once: the time to the first visible output can be
+    // spent on reasoning that some providers report apart from the output.
+    const outputTokens = getEventBillableOutputTokens(event);
+    const accumulateGeneration = (generation: GenerationMetrics) => {
+      generation.timedRequests++;
+      generation.totalTtftMs += ttftMs;
+      generation.totalTimedGenerationDurationMs += generationDurationMs;
+      if (generationDurationMs >= LEGACY_MIN_THROUGHPUT_WINDOW_MS) {
+        generation.totalGenerationDurationMs += generationDurationMs;
+        generation.totalThroughputOutputTokens += event.output_token_count;
+      }
+      // Output speed includes TTFT, so a burst of visible output cannot
+      // shrink its time to zero. A request without reported output tokens
+      // would add time but no tokens, so it stays out.
+      if (outputTokens > 0) {
+        generation.totalOutputSpeedTokens += outputTokens;
+        generation.totalOutputSpeedDurationMs += ttftMs + generationDurationMs;
+      }
+    };
 
-    generation.timedRequests++;
-    generation.totalTtftMs += event.ttft_ms;
-    if (generationDurationMs > 0) {
-      generation.totalGenerationDurationMs += generationDurationMs;
-      generation.totalThroughputOutputTokens += event.output_token_count;
+    const generation = (metrics.generation ??=
+      createInitialGenerationMetrics());
+    accumulateGeneration(generation);
+    if (statsModelMetrics) {
+      accumulateGeneration(
+        (statsModelMetrics.generation ??= createInitialGenerationMetrics()),
+      );
+      pushCapped(
+        (statsModelMetrics.timingSamples ??= []),
+        {
+          at: eventTime(event),
+          ttftMs,
+          generationMs: generationDurationMs,
+          outputTokens,
+          ...(event.subagent_name ? { source: event.subagent_name } : {}),
+        },
+        MAX_TIMING_SAMPLES,
+      );
     }
     generation.last = {
       model: event.model,
-      ttftMs: event.ttft_ms,
+      ttftMs,
       generationDurationMs,
-      outputTokens: event.output_token_count,
+      outputTokens,
     };
   }
 
@@ -682,6 +1026,7 @@ export class UiTelemetryService extends EventEmitter {
     event: ApiErrorEvent,
     sessionId?: string,
   ): void {
+    recordRequestExecutionId(metrics, event.execution_id);
     const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
     const statsModelMetrics = sessionId
       ? this.#getOrCreateStatsModelMetrics(metrics, event.model)
@@ -704,6 +1049,28 @@ export class UiTelemetryService extends EventEmitter {
       bucket.api.totalRequests++;
       bucket.api.totalErrors++;
       bucket.api.totalLatencyMs += event.duration_ms;
+      bucket.api.totalErrorLatencyMs =
+        (bucket.api.totalErrorLatencyMs ?? 0) + event.duration_ms;
+    }
+    if (statsModelMetrics) {
+      const kind =
+        event.status_code !== undefined && event.status_code !== ''
+          ? String(event.status_code)
+          : event.error_type || 'unknown';
+      const failures = (statsModelMetrics.failures ??= {
+        byKind: Object.create(null) as Record<string, number>,
+        recent: [],
+      });
+      failures.byKind[kind] = (failures.byKind[kind] ?? 0) + 1;
+      pushCapped(
+        failures.recent,
+        {
+          at: eventTime(event),
+          kind,
+          ...(event.subagent_name ? { source: event.subagent_name } : {}),
+        },
+        MAX_FAILURE_SAMPLES,
+      );
     }
   }
 
@@ -837,6 +1204,13 @@ export class UiTelemetryService extends EventEmitter {
   ): ModelMetrics {
     if (!metrics.models[modelName]) {
       metrics.models[modelName] = createInitialModelMetrics();
+      const billable = (metrics.billableOutputTokens ??= Object.create(
+        null,
+      ) as NonNullable<SessionMetrics['billableOutputTokens']>);
+      billable[modelName] = {
+        total: 0,
+        bySource: Object.create(null) as Record<string, number>,
+      };
     }
     return metrics.models[modelName];
   }
@@ -844,10 +1218,10 @@ export class UiTelemetryService extends EventEmitter {
   #getOrCreateStatsModelMetrics(
     metrics: SessionMetrics,
     modelName: string,
-  ): ModelMetricsCore {
+  ): StatsModelMetrics {
     const statsModels = (metrics.statsModels ??= Object.create(null) as Record<
       string,
-      ModelMetricsCore
+      StatsModelMetrics
     >);
     return (statsModels[modelName] ??= createInitialModelMetricsCore());
   }

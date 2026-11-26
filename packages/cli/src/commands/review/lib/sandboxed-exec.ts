@@ -63,10 +63,58 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { operatorReviewSettings } from './review-settings.js';
 import { mountRootFor } from './worktree.js';
+import { raiseNpmHeap } from './heap.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../../../utils/processUtils.js';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
 import { readPackageUpSync } from 'read-package-up';
 import { CLI_VERSION } from '../../../generated/git-commit.js';
+import {
+  classifyReviewTrust,
+  forceHardwareRequested,
+  type ReviewBoundaryExecutionClass,
+  type ReviewExecutionBoundary,
+  type ReviewSandboxBackend,
+  type ReviewTeardownStatus,
+  type ReviewTrustInput,
+} from './sandbox-trust.js';
+import {
+  requestedSandboxBackend,
+  selectReviewSandboxBackend,
+  type ReviewBackendProbe,
+} from './sandbox-backends.js';
+import { validateBridgeSocketEndpoint } from './guest-exec-bridge.js';
+
+export type {
+  ReviewBoundaryExecutionClass,
+  ReviewExecutionBoundary,
+  ReviewExecutionClass,
+  ReviewPrTrust,
+  ReviewSandboxBackend,
+  ReviewTeardownStatus,
+  ReviewTrustInput,
+} from './sandbox-trust.js';
+export {
+  classifyReviewTrust,
+  detectReviewMandatoryEscalations,
+  forceHardwareRequested,
+  trustInputFromPlan,
+} from './sandbox-trust.js';
+export {
+  buildReviewBackendPlan,
+  probeHostReviewBackends,
+  requestedSandboxBackend,
+  selectReviewSandboxBackend,
+} from './sandbox-backends.js';
+export {
+  closeGuestSessionSync,
+  executeViaGuestBridge,
+  executeViaGuestBridgeSync,
+  reapVmWorker,
+  validateBridgeSocketEndpoint,
+  type GuestExecRequest,
+  type GuestExecResult,
+  type GuestWorkspaceMode,
+} from './guest-exec-bridge.js';
 
 // Re-exported from its old home: `mountRootFor` moved into `worktree.ts` so
 // the gates there — `untrustedGitfile`, `untrustedRepositoryFrom` and the
@@ -102,13 +150,17 @@ export type ContainerRuntime = (typeof RUNTIMES)[number];
  * What the operator asked for.
  *
  * - `off` — run the PR's commands directly, as every review does today.
- * - `auto` — use a container when one is available, run directly when not.
+ * - `auto` — use a hardened container when one is available, run directly when not.
  * - `required` — refuse to run the PR's commands unsandboxed. The caller
  *   reports the affected evidence unavailable; it does not abandon the review.
+ * - `tiered` — classify PR trust and high-risk changed files into
+ *   `trusted-shared-kernel` (hardened container, no host fallback) vs
+ *   `hardware-isolated` (firecracker / vfkit / provider-vm, fail-closed with
+ *   no downgrade to container or host).
  */
-export type SandboxPolicy = 'off' | 'auto' | 'required';
+export type SandboxPolicy = 'off' | 'auto' | 'required' | 'tiered';
 
-const POLICIES: readonly string[] = ['off', 'auto', 'required'];
+const POLICIES: readonly string[] = ['off', 'auto', 'required', 'tiered'];
 
 /**
  * The policy for this run.
@@ -282,6 +334,12 @@ const infoDocuments = new Map<ContainerRuntime, string>();
 export type SandboxVerdict =
   | { kind: 'direct'; disclose?: string }
   | { kind: 'container'; runtime: ContainerRuntime }
+  | {
+      kind: 'microvm';
+      backend: 'firecracker' | 'vfkit';
+      socketPath: string;
+      workerPidFile?: string;
+    }
   | { kind: 'refused'; reason: string };
 
 /**
@@ -300,7 +358,44 @@ export function sandboxVerdict(
   // code is contained, and a test that answers differently on two machines
   // pins nothing.
   probe: () => ContainerRuntime | null = containerRuntime,
+  trustContext?: ReviewTrustInput,
+  hostProbe?: ReviewBackendProbe,
+  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): SandboxVerdict {
+  const forceHardware = forceHardwareRequested(env, fileSourced);
+  const requestedBackend = requestedSandboxBackend(env, fileSourced);
+
+  if (policy === 'tiered' || forceHardware) {
+    const trust = classifyReviewTrust(trustContext, env, fileSourced);
+    const selection = selectReviewSandboxBackend({
+      executionClass: trust.executionClass,
+      requestedBackend,
+      containerRuntime: probe(),
+      hostProbe,
+    });
+    if (selection.kind === 'container') {
+      return { kind: 'container', runtime: selection.runtime };
+    }
+    if (selection.kind === 'hardware-bridge') {
+      return {
+        kind: 'microvm',
+        backend: selection.backend,
+        socketPath: selection.socketPath,
+        ...(selection.workerPidFile
+          ? { workerPidFile: selection.workerPidFile }
+          : {}),
+      };
+    }
+    const reasons =
+      trust.escalationReasons.length > 0
+        ? ` [${trust.escalationReasons.join(', ')}]`
+        : '';
+    return {
+      kind: 'refused',
+      reason: `tiered sandbox (${trust.prTrust} -> ${trust.executionClass}${reasons}): ${selection.reason}`,
+    };
+  }
+
   // NOTE: `SANDBOX` being set is NOT a shortcut past the policy. The first cut
   // returned `direct` for it, reasoning that the outer boundary is the one the
   // operator asked for — which is wrong for the property this module is about.
@@ -315,9 +410,40 @@ export function sandboxVerdict(
       kind: 'direct',
       disclose:
         'the PR’s own build and test commands ran as you, in your environment — ' +
-        'set review.sandbox to "auto" or "required" to run them in a container',
+        'set review.sandbox to "auto", "required", or "tiered" to isolate them',
     };
   }
+
+  if (
+    requestedBackend === 'firecracker' ||
+    requestedBackend === 'vfkit' ||
+    requestedBackend === 'provider-vm'
+  ) {
+    const selection = selectReviewSandboxBackend({
+      executionClass: 'hardware-isolated',
+      requestedBackend,
+      containerRuntime: probe(),
+      hostProbe,
+    });
+    if (selection.kind === 'hardware-bridge') {
+      return {
+        kind: 'microvm',
+        backend: selection.backend,
+        socketPath: selection.socketPath,
+        ...(selection.workerPidFile
+          ? { workerPidFile: selection.workerPidFile }
+          : {}),
+      };
+    }
+    return {
+      kind: 'refused',
+      reason:
+        selection.kind === 'container'
+          ? `requested hardware backend "${requestedBackend}" cannot fall back to a shared-kernel container`
+          : selection.reason,
+    };
+  }
+
   const runtime = probe();
   if (runtime) return { kind: 'container', runtime };
   if (policy === 'required') {
@@ -342,7 +468,7 @@ export function sandboxVerdict(
 }
 
 /**
- * The one place a `required` refusal becomes an outcome.
+ * The one place a `required` / `tiered` refusal becomes an outcome.
  *
  * `sandboxVerdict` can say `refused`, and the first cut left acting on it to
  * "the caller" — where no caller acted, so `required` ran the reviewed code
@@ -365,19 +491,32 @@ export function refuseUnsandboxedPhase(
   // The tree this phase would execute in. Required, because "is a runtime
   // running" is the wrong question — see below.
   root: string,
-  verdict: SandboxVerdict = sandboxVerdict(),
+  verdict?: SandboxVerdict,
   mountRoot: (cwd: string) => string | null = mountRootFor,
   policy: SandboxPolicy = sandboxPolicy(),
+  trustContext?: ReviewTrustInput,
 ): string | null {
-  if (verdict.kind === 'refused') return verdict.reason;
-  if (verdict.kind === 'direct') return null;
-  // Only `required` turns an unmountable tree into a refusal. Under `auto` the
-  // contract is "contain it when that is possible" — a `/review` of a local
-  // checkout has no layout to mount, and refusing there would take the
+  const resolvedVerdict =
+    verdict ??
+    sandboxVerdict(policy, process.env, containerRuntime, trustContext);
+  if (resolvedVerdict.kind === 'refused') return resolvedVerdict.reason;
+  if (resolvedVerdict.kind === 'direct') return null;
+  if (resolvedVerdict.kind === 'microvm') {
+    // MicroVM bridge packs workspace files by content over UDS/vsock instead of
+    // RW-mounting a host temp dir, so `.qwen/tmp` mountability is not required;
+    // the bridge socket itself must remain a non-symlinked Unix socket.
+    const check = validateBridgeSocketEndpoint(resolvedVerdict.socketPath);
+    return check.ok
+      ? null
+      : `microVM bridge (${resolvedVerdict.backend}) unavailable: ${check.reason}`;
+  }
+  // Only `required` and `tiered` turn an unmountable tree into a refusal. Under
+  // `auto` the contract is "contain it when that is possible" — a `/review` of
+  // a local checkout has no layout to mount, and refusing there would take the
   // build/test and efficacy evidence away from every local review the moment a
   // daemon happened to be running. The first cut of this branch refused
   // regardless of policy and said "required" in a message `auto` could reach.
-  if (policy !== 'required') return null;
+  if (policy !== 'required' && policy !== 'tiered') return null;
   // A runtime answering is not containment. The first cut asked only whether
   // one did, and every route the container cannot actually serve still ran the
   // reviewed code with the full environment under `required`: a `/review` of a
@@ -388,13 +527,104 @@ export function refuseUnsandboxedPhase(
   // that can fail while the runtime is healthy.
   if (mountRoot(root) === null) {
     return (
-      'review.sandbox is "required" and this tree cannot be mounted: it is ' +
+      `review.sandbox is "${policy}" and this tree cannot be mounted: it is ` +
       `not under a review temp dir (${root}), which is the layout the ` +
       'container boundary is built on — a review of a local checkout has no ' +
       'such layout, so its commands cannot be contained'
     );
   }
   return null;
+}
+
+/**
+ * Phase gate for review subcommands that execute reviewed code directly on the
+ * host via tmux/bash (`drive`, `ab-drive`, `capture-tui`) and therefore cannot
+ * provide a container or hardware-isolated boundary.
+ *
+ * Refuses fail-closed under `required`, `tiered`, or operator
+ * `QWEN_REVIEW_FORCE_HARDWARE=1`. Returns `null` under `off`/`auto`.
+ */
+export function refuseHostExecutionPhase(
+  opts: {
+    policy?: SandboxPolicy;
+    env?: NodeJS.ProcessEnv;
+    trustContext?: ReviewTrustInput;
+    fileSourced?: (key: string) => boolean;
+  } = {},
+): string | null {
+  const env = opts.env ?? process.env;
+  const fileSourced = opts.fileSourced ?? isFileSourcedEnvKey;
+  const policy = opts.policy ?? sandboxPolicy(env, undefined, fileSourced);
+  const forceHardware = forceHardwareRequested(env, fileSourced);
+  if (policy !== 'required' && policy !== 'tiered' && !forceHardware) {
+    return null;
+  }
+  const trigger = forceHardware
+    ? 'QWEN_REVIEW_FORCE_HARDWARE=1'
+    : `review.sandbox is "${policy}"`;
+  let trustSuffix = '';
+  if (opts.trustContext !== undefined) {
+    const trust = classifyReviewTrust(opts.trustContext, env, fileSourced);
+    const reasons =
+      trust.escalationReasons.length > 0
+        ? ` [${trust.escalationReasons.join(', ')}]`
+        : '';
+    trustSuffix = ` (${trust.prTrust} -> ${trust.executionClass}${reasons})`;
+  }
+  return (
+    `${trigger}${trustSuffix} and ` +
+    'host tmux execution cannot provide an isolated sandbox boundary — refusing ' +
+    'to run untrusted commands directly on the host'
+  );
+}
+
+/**
+ * Builds the structured `executionBoundary` record embedded into review
+ * execution reports (`build-test`, `test-efficacy`, `test-delta`, `drive`,
+ * `ab-drive`).
+ */
+export function describeExecutionBoundary(opts: {
+  policy?: SandboxPolicy;
+  verdict?: SandboxVerdict;
+  backend?: ReviewSandboxBackend;
+  trustContext?: ReviewTrustInput;
+  teardownStatus?: ReviewTeardownStatus;
+  note?: string;
+  env?: NodeJS.ProcessEnv;
+  fileSourced?: (key: string) => boolean;
+}): ReviewExecutionBoundary {
+  const env = opts.env ?? process.env;
+  const fileSourced = opts.fileSourced ?? isFileSourcedEnvKey;
+  const policy = opts.policy ?? sandboxPolicy(env, undefined, fileSourced);
+  // No trust context means this execution was never classified — saying
+  // `unknown -> hardware-isolated` here would contradict a `direct` backend
+  // and describe a rule that was never applied.
+  const trust =
+    opts.trustContext === undefined
+      ? null
+      : classifyReviewTrust(opts.trustContext, env, fileSourced);
+  const executionClass: ReviewBoundaryExecutionClass =
+    trust?.executionClass ?? 'unclassified';
+  const backend: ReviewSandboxBackend =
+    opts.backend ??
+    (opts.verdict?.kind === 'container'
+      ? 'container'
+      : opts.verdict?.kind === 'microvm'
+        ? opts.verdict.backend
+        : opts.verdict?.kind === 'refused'
+          ? 'refused'
+          : 'direct');
+  return {
+    policy,
+    prTrust: trust?.prTrust ?? 'unknown',
+    executionClass,
+    backend,
+    escalationReasons: trust?.escalationReasons ?? [],
+    ...(opts.teardownStatus !== undefined
+      ? { teardownStatus: opts.teardownStatus }
+      : {}),
+    ...(opts.note !== undefined ? { note: opts.note } : {}),
+  };
 }
 
 /** Whether one command needs the network. */
@@ -405,10 +635,10 @@ export type CommandKind = 'install' | 'build' | 'test';
  *
  * The hand-off — `toolchain: "unsupported"`, which the brief reads as "install
  * and build it yourself" — is an execution that leaves this process for an
- * agent's own shell, contained by nothing here. Under `required` that is the
- * one route the phase gate cannot catch, because the gate passes exactly when
- * a runtime answered and the tree is mountable, which is when a repo the
- * adapters cannot scope still reaches the hand-off.
+ * agent's own shell, contained by nothing here. Under `required` / `tiered`
+ * that is the one route the phase gate cannot catch, because the gate passes
+ * exactly when a runtime answered and the tree is mountable, which is when a
+ * repo the adapters cannot scope still reaches the hand-off.
  *
  * A predicate, and exported, because the first attempt at this lived inline as
  * `!applicable` — the filtered adapter ARRAY, never falsy — and shipped as dead
@@ -417,8 +647,15 @@ export type CommandKind = 'install' | 'build' | 'test';
 export function handOffRefused(
   toolchain: string,
   policy: SandboxPolicy = sandboxPolicy(),
+  env: NodeJS.ProcessEnv = process.env,
+  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): boolean {
-  return toolchain === 'unsupported' && policy === 'required';
+  return (
+    toolchain === 'unsupported' &&
+    (policy === 'required' ||
+      policy === 'tiered' ||
+      forceHardwareRequested(env, fileSourced))
+  );
 }
 
 /**
@@ -460,6 +697,19 @@ export interface ContainerCommandOptions {
   /** The review temp dir (`<repo>/.qwen/tmp`): the mount, and the farm's far end. */
   tmpDir: string;
   kind: CommandKind;
+  /**
+   * The heap a build or an install gets — the number `declaredBuildHeapMb`
+   * read from the root build script, never an inherited `NODE_OPTIONS`.
+   * Ignored for a test.
+   */
+  heapMb?: number;
+  /**
+   * The tree's own npm `node-options`, as npm inside the container computes
+   * them (`npmNodeOptions`, asked in the environment `containerCommandEnv`
+   * builds), which it hands a lifecycle script in place of `NODE_OPTIONS`.
+   * Raised to `heapMb` with the rest kept, never replaced.
+   */
+  npmNodeOptions?: string;
   runtime: ContainerRuntime;
   image: string;
   /**
@@ -523,6 +773,96 @@ export function killContainer(
   }
 }
 
+/** Bounded PID ceiling for lightweight review containers (stops fork bombs while fitting concurrent Vitest/esbuild workers). */
+export const CONTAINER_PIDS_LIMIT = 512;
+
+export interface ContainerReapResult {
+  status: ReviewTeardownStatus;
+  detail?: string;
+}
+
+/**
+ * Kill a container the deadline could not, then verify via `inspect` that it
+ * is no longer running. Returns a verifiable `ReviewTeardownStatus` so callers
+ * can surface leaked containers instead of silently ignoring teardown failure.
+ */
+export function reapContainer(
+  runtime: ContainerRuntime,
+  name: string,
+  spawn: typeof spawnSync = spawnSync,
+): ContainerReapResult {
+  let rmFailedDetail: string | undefined;
+  try {
+    const rm = spawn(runtime, ['rm', '-f', name], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'ignore', 'pipe'],
+      timeout: 30_000,
+      env: runtimeClientEnv(),
+    });
+    if (rm.error) {
+      rmFailedDetail = `${runtime} rm -f ${name} error: ${rm.error.message}`;
+    } else if (rm.status !== 0) {
+      const rmErr = String(rm.stderr ?? '').trim();
+      rmFailedDetail = `${runtime} rm -f ${name} exited ${String(rm.status)}${rmErr ? `: ${rmErr}` : ''}`;
+    }
+  } catch (err) {
+    return {
+      status: 'failed',
+      detail: `failed to invoke ${runtime} rm -f ${name}: ${(err as Error).message}`,
+    };
+  }
+  try {
+    const inspect = spawn(
+      runtime,
+      ['inspect', '--format', '{{.State.Running}}', name],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 10_000,
+        env: runtimeClientEnv(),
+      },
+    );
+    if (inspect.error) {
+      return {
+        status: 'failed',
+        detail: `could not verify teardown of ${name}: ${inspect.error.message}`,
+      };
+    }
+    const stdout = String(inspect.stdout ?? '')
+      .trim()
+      .toLowerCase();
+    const stderr = String(inspect.stderr ?? '').trim();
+    if (inspect.status === 0) {
+      if (stdout === 'false') return { status: 'clean' };
+      return {
+        status: 'failed',
+        detail:
+          stdout === 'true'
+            ? `container ${name} is still running after ${runtime} rm -f`
+            : `unexpected ${runtime} inspect output for ${name}: ${JSON.stringify(stdout)}`,
+      };
+    }
+    if (/no such (?:container|object)/i.test(stderr)) {
+      return { status: 'clean' };
+    }
+    if (!rmFailedDetail && stderr === '') {
+      return { status: 'clean' };
+    }
+    return {
+      status: 'failed',
+      detail:
+        `could not confirm removal of ${name} (inspect exited ${String(inspect.status)}` +
+        `${stderr ? `: ${stderr}` : ''}` +
+        `${rmFailedDetail ? `; ${rmFailedDetail}` : ''})`,
+    };
+  } catch (err) {
+    return {
+      status: 'failed',
+      detail: `could not verify teardown of ${name}: ${(err as Error).message}`,
+    };
+  }
+}
+
 export function containerCommand(
   command: string,
   opts: ContainerCommandOptions,
@@ -531,6 +871,9 @@ export function containerCommand(
     'run',
     '--rm',
     '--init',
+    '--cap-drop=ALL',
+    '--security-opt=no-new-privileges:true',
+    `--pids-limit=${CONTAINER_PIDS_LIMIT}`,
     // A NAME, so the deadline has something to aim at. `--rm` fires only when
     // the container exits on its own, and a `spawnSync` timeout kills the
     // runtime CLIENT — measured on docker 29.1.3, an attached client forwards
@@ -589,11 +932,62 @@ export function containerCommand(
   // root-owned by default, and `--user` would then be unable to write its own
   // HOME — the very failure this HOME exists to prevent.
   args.push('--tmpfs', `${CONTAINER_HOME}:rw,mode=1777`);
-  for (const entry of containerEnv(join(opts.tmpDir, '.npm-cache'))) {
-    args.push('--env', entry);
-  }
+  // Before the image, or the runtime hands them to `sh -lc` as arguments.
+  for (const entry of containerCommandEnv(opts)) args.push('--env', entry);
+  // npm's own `node-options` — the mounted tree's `.npmrc` can set it, and npm
+  // replaces `NODE_OPTIONS` with it — raised only where it sets less, keeping
+  // its other options.
+  const npm =
+    opts.kind === 'test' ||
+    opts.heapMb === undefined ||
+    opts.npmNodeOptions === undefined
+      ? undefined
+      : raiseNpmHeap(opts.npmNodeOptions, opts.heapMb);
+  if (npm !== undefined) args.push('--env', `npm_config_node_options=${npm}`);
   args.push(opts.image, 'sh', '-lc', command);
   return { file: opts.runtime, args };
+}
+
+/**
+ * The environment a review command's container gets, as `KEY=value` entries:
+ * the `containerEnv` allowlist and, for a build or an install, the declared
+ * heap — the channel the direct spawn raises (`buildRunEnv`). Nothing larger
+ * can be inherited here: `containerEnv` passes no `NODE_OPTIONS`. The heap is
+ * added here, not to `containerEnv`, which subagent workers share. Exported
+ * because the host asks npm its `node-options` in this same environment
+ * (`npmNodeOptions`).
+ */
+export function containerCommandEnv(
+  opts: Pick<ContainerCommandOptions, 'tmpDir' | 'kind' | 'heapMb'>,
+): string[] {
+  const entries = containerEnv(join(opts.tmpDir, '.npm-cache'));
+  if (opts.kind !== 'test' && opts.heapMb !== undefined) {
+    entries.push(`NODE_OPTIONS=--max-old-space-size=${opts.heapMb}`);
+  }
+  return entries;
+}
+
+/**
+ * Allowlisted environment map for microVM guest execution (same credential-free
+ * allowlist as `containerCommandEnv`, with a guest-local cache path so no host
+ * path leaks across the VM boundary).
+ */
+export function guestCommandEnv(
+  kind: CommandKind,
+  heapMb?: number,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of containerCommandEnv({
+    tmpDir: '/tmp/qwen-review-guest',
+    kind,
+    heapMb,
+  })) {
+    const eq = entry.indexOf('=');
+    if (eq > 0) {
+      out[entry.slice(0, eq)] = entry.slice(eq + 1);
+    }
+  }
+  return out;
 }
 
 /**

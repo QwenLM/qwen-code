@@ -330,6 +330,20 @@ describe('HookEventHandler', () => {
       });
     });
 
+    it('should include the sending session when provided', async () => {
+      const source = { session_id: 'sender', cwd: '/workspace/a' };
+      const input = await captureInput(() =>
+        hookEventHandler.fireUserPromptSubmitEvent(
+          'model prompt',
+          undefined,
+          undefined,
+          source,
+        ),
+      );
+      expect(input).toMatchObject({ prompt: 'model prompt', source });
+      expect(input).not.toHaveProperty('submitted_prompt');
+    });
+
     it.each(['', ' \t\n '])(
       'should omit an empty submitted prompt',
       async (submittedPrompt) => {
@@ -366,6 +380,25 @@ describe('HookEventHandler', () => {
         parent_file_path: '/repo/QWEN.md',
       });
     });
+  });
+
+  describe('fireFileChangedEvent', () => {
+    it.each(['add', 'change', 'unlink'] as const)(
+      'includes the observed path and %s event',
+      async (event) => {
+        const input = await captureInput(() =>
+          hookEventHandler.fireFileChangedEvent(
+            '/outside/memory/topic.md',
+            event,
+          ),
+        );
+        expectPlanned(HookEventName.FileChanged, {
+          filePath: '/outside/memory/topic.md',
+        });
+        expectFields(input, { file_path: '/outside/memory/topic.md', event });
+        expect(input).not.toHaveProperty('tool_use_id');
+      },
+    );
   });
 
   describe('fireUserPromptExpansionEvent', () => {
@@ -794,7 +827,7 @@ describe('HookEventHandler', () => {
   describe('project-skill trust gate at fire time', () => {
     // The second side of the gate `applySideEffects` enforces on the way
     // in: a hook registered from a repository's `.qwen/skills/` frontmatter
-    // fires only while the folder is STILL trusted. `isTrustedFolder()` is
+    // fires only while the folder is STILL trusted. `isExplicitlyTrustedFolder()` is
     // live under an IDE connection, so a revocation mid-session must
     // silence the hook at its next event — no restart, no unregistration.
     const gated = {
@@ -811,9 +844,9 @@ describe('HookEventHandler', () => {
       config: { type: HookType.Command, command: './mine.sh' },
     };
     const trust = (value: boolean) => {
-      const isTrustedFolder = vi.fn().mockReturnValue(value);
-      Object.assign(mockConfig, { isTrustedFolder });
-      return isTrustedFolder;
+      const isExplicitlyTrustedFolder = vi.fn().mockReturnValue(value);
+      Object.assign(mockConfig, { isExplicitlyTrustedFolder });
+      return isExplicitlyTrustedFolder;
     };
     const fire = async (sessionHooks: unknown[]) => {
       vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue(

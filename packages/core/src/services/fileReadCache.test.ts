@@ -9,7 +9,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Stats } from 'node:fs';
-import { FileReadCache, type FileReadEntry } from './fileReadCache.js';
+import {
+  FileReadCache,
+  type FileReadEntry,
+  type FileReadRecordOpts,
+} from './fileReadCache.js';
 
 /**
  * Build a Stats-shaped object with the fields the cache actually reads.
@@ -44,7 +48,7 @@ describe('FileReadCache', () => {
   const read = (
     absPath: string,
     stats: Stats,
-    opts = { full: true, cacheable: true },
+    opts: FileReadRecordOpts = { full: true, cacheable: true },
   ) => cache.recordRead(absPath, stats, opts);
   // Full reads of `/x/<prefix>-<i>.ts` at ino i for i in [from, to].
   const readRange = (prefix: string, from: number, to: number) => {
@@ -69,6 +73,27 @@ describe('FileReadCache', () => {
     expect(cache.getClearGeneration()).toBe(generation);
     cache.clear();
     expect(cache.getClearGeneration()).toBe(generation + 1);
+  });
+
+  it('keeps recovered-write baseline state across inode replacement until a text Read', () => {
+    const original = makeStats();
+    read('/x/file', original);
+    const replaced = makeStats({ ino: 101, mtimeMs: 2_000_000 });
+    cache.recordWrite('/x/file', replaced, { readBaselineNeedsRefresh: true });
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(true);
+    expect(fresh(replaced).readResidentInHistory).toBe(false);
+    expect(fresh(replaced).lastReadWasFull).toBe(false);
+    cache.recordWrite('/x/file', replaced);
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(true);
+    read('/x/file', replaced, { full: false, cacheable: false });
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(true);
+    read('/x/file', replaced, { full: false, cacheable: true });
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(false);
+    expect(fresh(replaced).lastReadWasFull).toBe(false);
+    expect(fresh(replaced).readResidentInHistory).toBe(false);
+    read('/x/file', replaced);
+    expect(fresh(replaced).lastReadWasFull).toBe(true);
+    expect(fresh(replaced).readResidentInHistory).toBe(true);
   });
 
   describe('inodeKey', () => {
@@ -449,6 +474,57 @@ describe('FileReadCache', () => {
     });
   });
 
+  describe('lastReadRange / ranged fast-path view', () => {
+    const range = { offset: 5, limit: 3 };
+
+    it('records the request range for a satisfied ranged read', () => {
+      const entry = read('/x/foo.ts', makeStats(), {
+        full: false,
+        cacheable: true,
+        range,
+      });
+      expect(entry.lastReadRange).toEqual(range);
+      expect(entry.lastReadRangeResident).toBe(true);
+    });
+
+    it('records no view for a no-args read', () => {
+      const entry = read('/x/foo.ts', makeStats());
+      expect(entry.lastReadRange).toBeUndefined();
+      expect(entry.lastReadRangeResident).toBe(false);
+    });
+
+    it('records no view for non-text reads', () => {
+      const entry = read('/x/foo.png', makeStats(), {
+        full: false,
+        cacheable: false,
+        range,
+      });
+      expect(entry.lastReadRange).toBeUndefined();
+      expect(entry.lastReadRangeResident).toBe(false);
+    });
+
+    it('lets the most recent read overwrite the view', () => {
+      read('/x/foo.ts', makeStats(), { full: false, cacheable: true, range });
+      const entry = read('/x/foo.ts', makeStats());
+      expect(entry.lastReadRange).toBeUndefined();
+      expect(entry.lastReadRangeResident).toBe(false);
+    });
+
+    it('markReadEvictedFromHistory disarms the ranged view too', () => {
+      const stats = makeStats();
+      read('/x/foo.ts', stats, { full: false, cacheable: true, range });
+      expect(cache.markReadEvictedFromHistory(stats)).toBe(true);
+      expect(fresh(stats).lastReadRangeResident).toBe(false);
+    });
+
+    it('markAllReadsEvictedFromHistory disarms the ranged view too', () => {
+      const stats = makeStats();
+      read('/x/foo.ts', stats, { full: false, cacheable: true, range });
+      cache.markAllReadsEvictedFromHistory();
+      expect(fresh(stats).lastReadRangeResident).toBe(false);
+    });
+  });
+
   describe('readResidentInHistory / markReadEvictedFromHistory (issue #4239)', () => {
     it('a fresh recordRead is resident in history', () => {
       expect(read('/x/foo.ts', makeStats()).readResidentInHistory).toBe(true);
@@ -472,6 +548,22 @@ describe('FileReadCache', () => {
       expect(entry.lastReadAt).toBeDefined();
       expect(entry.lastReadWasFull).toBe(true);
       expect(entry.lastReadCacheable).toBe(true);
+    });
+
+    it('disarms unknown truncated reads without revoking rights', () => {
+      const stats = makeStats();
+      const otherStats = makeStats({ ino: 101 });
+      const entry = read('/x/foo.ts', stats);
+      const other = read('/x/other.ts', otherStats);
+      const generation = cache.getClearGeneration();
+      cache.markAllReadsEvictedFromHistory();
+      expect(fresh(stats)).toBe(entry);
+      expect(entry.readResidentInHistory).toBe(false);
+      expect(entry.lastReadAt).toBeDefined();
+      expect(entry.lastReadWasFull).toBe(true);
+      expect(entry.lastReadCacheable).toBe(true);
+      expect(other.readResidentInHistory).toBe(false);
+      expect(cache.getClearGeneration()).toBe(generation);
     });
 
     it('returns false (caller must fall back to clear) when there is no entry for the stats', () => {

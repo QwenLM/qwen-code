@@ -30,7 +30,7 @@ import {
 // disabled for submission until the slices that ship their producers (H5b
 // inbound, H5c outbound); the shared fixtures in
 // contracts/managed-channel-record-v1.fixtures.json pin both validators,
-// and ManagedChannelRecords in packages/sdk-java/managed-agent-server
+// and ManagedChannelRecords in packages/managed-agent-server
 // replays the same cases.
 
 /** The route scope kinds, preserving the Legacy router's semantics. */

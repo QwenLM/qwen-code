@@ -149,7 +149,14 @@ afterEach(async () => {
   await new Promise((resolve) => setTimeout(resolve, 50));
   Storage.setRuntimeBaseDir(null);
   vi.unstubAllEnvs();
-  await fs.rm(runtimeDir, { recursive: true, force: true });
+  await fs.rm(runtimeDir, {
+    recursive: true,
+    force: true,
+    // A cancelled turn can land its last write while the tree is being
+    // removed; retry instead of failing the test with ENOTEMPTY.
+    maxRetries: 3,
+    retryDelay: 50,
+  });
 });
 
 function harness(
@@ -2080,7 +2087,10 @@ describe('SessionAgentOrchestrator squads', () => {
     expect((await h.engagement())?.active).toBe(true);
 
     clock += RECORD_WATCH_MAX_MS;
-    await vi.waitFor(() => expect(h.turnOf('ag_lead', 1)).toBeDefined());
+    // The watcher backs off; its next check may be a while.
+    await vi.waitFor(() => expect(h.turnOf('ag_lead', 1)).toBeDefined(), {
+      timeout: 3_000,
+    });
     const wake = h.turnOf('ag_lead', 1)!.input.prompt;
     expect(wake).toContain('Fixed in auth.ts.');
     expect(wake).toContain('disk full');

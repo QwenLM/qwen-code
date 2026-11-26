@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
+import { getTurnSkillSourcePath } from '../skills/turn-skill-snapshot.js';
 import {
   parseRules,
   parseRule,
@@ -13,6 +15,7 @@ import {
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
+  warnDroppedPermissionRule,
 } from './rule-parser.js';
 import type { McpToolIdentity, PathMatchContext } from './rule-parser.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
@@ -166,9 +169,9 @@ export interface PermissionManagerConfig {
   /**
    * Live folder trust. Read on every permission decision for the session
    * allow rules a project skill granted (`trustGated`): those apply only
-   * while the folder is trusted. Absent means trusted.
+   * while the folder is explicitly trusted. Absent denies repository grants.
    */
-  isTrustedFolder?(): boolean;
+  isExplicitlyTrustedFolder?(): boolean;
   /**
    * Returns the current approval mode (plan/default/auto-edit/yolo).
    * Used by `getDefaultMode()` to determine the fallback when no rule matches.
@@ -469,19 +472,8 @@ export class PermissionManager {
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
-    const {
-      toolName,
-      toolAliases,
-      mcpIdentity,
-      command,
-      cwd,
-      filePath,
-      domain,
-      specifier,
-      toolParams,
-    } = ctx;
+    const { toolName, mcpIdentity, command, cwd } = ctx;
 
-    // Build path context for resolving relative path patterns
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
@@ -490,16 +482,7 @@ export class PermissionManager {
           }
         : undefined;
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-      toolParams,
-      toolAliases,
-    ] as const;
+    const matches = this.createRuleMatcher(ctx, pathCtx);
 
     // Compute the base decision from explicit Bash/file/domain rules.
     // Using an IIFE to keep the priority-cascade logic clean.
@@ -511,16 +494,14 @@ export class PermissionManager {
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
-          return 'deny';
+        if (matches(rule, true)) return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
-          return 'ask';
+        if (matches(rule, true)) return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
@@ -528,7 +509,7 @@ export class PermissionManager {
         ...this.persistentRules.allow,
       ]) {
         if (
-          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
+          matches(rule) &&
           !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity)
         ) {
           return 'allow';
@@ -569,6 +550,45 @@ export class PermissionManager {
     }
 
     return baseDecision;
+  }
+
+  private createRuleMatcher(
+    ctx: PermissionCheckContext,
+    pathCtx: PathMatchContext | undefined,
+  ): (rule: PermissionRule, restrictive?: boolean) => boolean {
+    const {
+      toolName,
+      command,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+      toolAliases,
+      mcpIdentity,
+    } = ctx;
+    const sourcePath =
+      filePath &&
+      getTurnSkillSourcePath(
+        path.resolve(pathCtx?.cwd ?? process.cwd(), filePath),
+      );
+    const filePaths = sourcePath ? [filePath, sourcePath] : [filePath];
+    return (rule, restrictive = false) =>
+      filePaths.some((permissionPath) =>
+        matchesRule(
+          rule,
+          toolName,
+          command,
+          permissionPath,
+          domain,
+          pathCtx,
+          specifier,
+          toolParams,
+          toolAliases,
+          restrictive ? 'canonical' : 'lexical',
+          mcpIdentity,
+          restrictive,
+        ),
+      );
   }
 
   /**
@@ -797,6 +817,7 @@ export class PermissionManager {
     'loop_wakeup',
     'create_sub_session',
     'monitor',
+    'autofix_pr',
   ]);
 
   /**
@@ -1187,17 +1208,7 @@ export class PermissionManager {
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
-    const {
-      toolName,
-      toolAliases,
-      mcpIdentity,
-      command,
-      cwd,
-      filePath,
-      domain,
-      specifier,
-      toolParams,
-    } = ctx;
+    const { toolName, mcpIdentity, command, cwd } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -1236,27 +1247,17 @@ export class PermissionManager {
             return true;
           }
 
-          const opMatchArgs = [
-            op.virtualTool,
-            undefined,
-            op.filePath,
-            op.domain,
+          const matches = this.createRuleMatcher(
+            {
+              toolName: op.virtualTool,
+              filePath: op.filePath,
+              domain: op.domain,
+            },
             pathCtx,
-            undefined,
-          ] as const;
+          );
           return (
-            restrictiveRules.some((rule) =>
-              matchesRule(
-                rule,
-                ...opMatchArgs,
-                undefined,
-                undefined,
-                'canonical',
-              ),
-            ) ||
-            allowRules.some((rule) =>
-              matchesRule(rule, ...opMatchArgs, undefined),
-            )
+            restrictiveRules.some((rule) => matches(rule, true)) ||
+            allowRules.some((rule) => matches(rule))
           );
         })
       ) {
@@ -1273,24 +1274,12 @@ export class PermissionManager {
       }
     }
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-      toolParams,
-      toolAliases,
-    ] as const;
-
+    const matches = this.createRuleMatcher(ctx, pathCtx);
     return (
-      restrictiveRules.some((rule) =>
-        matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
-      ) ||
+      restrictiveRules.some((rule) => matches(rule, true)) ||
       allowRules.some(
         (rule) =>
-          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
+          matches(rule) &&
           !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity),
       )
     );
@@ -1307,17 +1296,7 @@ export class PermissionManager {
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
-    const {
-      toolName,
-      toolAliases,
-      mcpIdentity,
-      command,
-      cwd,
-      filePath,
-      domain,
-      specifier,
-      toolParams,
-    } = ctx;
+    const { toolName, command, cwd } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -1345,23 +1324,15 @@ export class PermissionManager {
             return true;
           }
 
-          const opMatchArgs = [
-            op.virtualTool,
-            undefined,
-            op.filePath,
-            op.domain,
+          const matches = this.createRuleMatcher(
+            {
+              toolName: op.virtualTool,
+              filePath: op.filePath,
+              domain: op.domain,
+            },
             pathCtx,
-            undefined,
-          ] as const;
-          return askRules.some((rule) =>
-            matchesRule(
-              rule,
-              ...opMatchArgs,
-              undefined,
-              undefined,
-              'canonical',
-            ),
           );
+          return askRules.some((rule) => matches(rule, true));
         })
       ) {
         return true;
@@ -1377,20 +1348,8 @@ export class PermissionManager {
       }
     }
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-      toolParams,
-      toolAliases,
-    ] as const;
-
-    return askRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
-    );
+    const matches = this.createRuleMatcher(ctx, pathCtx);
+    return askRules.some((rule) => matches(rule, true));
   }
 
   private hasAskRuleForTool(toolName: string): boolean {
@@ -1407,14 +1366,14 @@ export class PermissionManager {
   /**
    * The session allow rules in force right now: every rule the user granted,
    * plus the repository-granted (`trustGated`) ones only while the folder is
-   * trusted. Trust is re-read on every call — `Config.isTrustedFolder()` is
+   * trusted. Trust is re-read on every call — `Config.isExplicitlyTrustedFolder()` is
    * live under an IDE connection — so a revocation mid-session suspends a
    * project skill's grants at the next decision, and a later grant of trust
    * restores them, the second side of the gate `applySideEffects` enforces
    * on the way in.
    */
   private activeSessionAllowRules(): PermissionRule[] {
-    const trusted = this.config.isTrustedFolder?.() ?? true;
+    const trusted = this.config.isExplicitlyTrustedFolder?.() ?? false;
     return trusted
       ? this.sessionRules.allow
       : this.sessionRules.allow.filter((rule) => !rule.trustGated);
@@ -1440,6 +1399,7 @@ export class PermissionManager {
         debugLogger.warn(
           `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
         );
+        warnDroppedPermissionRule(rule.raw, 'allow');
         return;
       }
       // AUTO mode invariant: while dangerous allow rules are stripped,
@@ -1493,6 +1453,7 @@ export class PermissionManager {
         debugLogger.warn(
           `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
         );
+        warnDroppedPermissionRule(rule.raw, 'deny');
         return;
       }
       this.sessionRules.deny.push(rule);
@@ -1509,6 +1470,7 @@ export class PermissionManager {
         debugLogger.warn(
           `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
         );
+        warnDroppedPermissionRule(rule.raw, 'ask');
         return;
       }
       this.sessionRules.ask.push(rule);
@@ -1534,6 +1496,7 @@ export class PermissionManager {
       debugLogger.warn(
         `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
       );
+      warnDroppedPermissionRule(rule.raw, type);
       return rule;
     }
     // AUTO mode invariant: see addSessionAllowRule above. A dangerous

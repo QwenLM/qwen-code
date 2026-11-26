@@ -201,14 +201,32 @@ describe('createDaemonToolGuard', () => {
 
   // `$'…'` ANSI-C quoting and `$(…)` substitution are bash spellings; the
   // Windows lanes deny them at the divergent-syntax gate before analysis.
+  // shell-quote >= 1.11 understands `$'…'`, so those forms arrive as the
+  // plain tokens bash would run and the denial is the ordinary outside-
+  // workspace relocation reason; `$(…)` still parses as a dynamic token.
   it
     .runIf(bashSemanticsLane)
     .each([
-      "git $'-C' /outside/repo reset --hard",
-      "$'git' -C /outside/repo reset --hard",
-      'git $(echo -C) /outside/repo reset --hard',
+      `git $'-C' ${cmdPath(outsideRepo)} reset --hard`,
+      `$'git' -C ${cmdPath(outsideRepo)} reset --hard`,
     ])(
-    'denies shell-expansion relocation forms on the bash lanes %#',
+    'denies ANSI-C-quoted relocation forms on the bash lanes %#',
+    async (command) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each(['git $(echo -C) /outside/repo reset --hard'])(
+    'denies substitution relocation forms on the bash lanes %#',
     async (command) => {
       const guard = createDaemonToolGuard();
 
@@ -216,6 +234,61 @@ describe('createDaemonToolGuard', () => {
         allowed: false,
         reason: expect.stringContaining('dynamic repository location'),
       });
+    },
+  );
+
+  // shell-quote decodes a byte-valued ANSI-C escape to the same-numbered
+  // code point while bash passes the raw byte: `$'\xc3\xbf'` parses as
+  // `Ã¿` (U+00C3 U+00BF) but executes as `ÿ` (bytes c3 bf). With a decoy
+  // directory at the parsed name inside the workspace and a symlink at the
+  // byte path pointing outside it, an analysis that trusted the token would
+  // validate the decoy while bash reset the external repository, so the
+  // encoded form fails closed.
+  it.runIf(bashSemanticsLane)(
+    'fails closed on a byte-valued ANSI-C relocation the parse misreads',
+    async () => {
+      const decoy = path.join(effectiveCwd, 'Ã¿');
+      const bytePath = path.join(effectiveCwd, 'ÿ');
+      mkdirSync(decoy, { recursive: true });
+      await symlink(outsideRepo, bytePath);
+      const guard = createDaemonToolGuard();
+
+      // The control group: the direct paths keep their ordinary verdicts.
+      await expect(
+        guard(request(`git -C ${cmdPath(decoy)} reset --hard`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`git -C ${cmdPath(bytePath)} reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+
+      // The encoded form can name either one depending on who decodes it,
+      // so it is refused outright.
+      await expect(
+        guard(request(String.raw`git -C $'\xc3\xbf' reset --hard`)),
+      ).resolves.toMatchObject({ allowed: false });
+      // Octal escapes are byte-valued the same way.
+      await expect(
+        guard(request(String.raw`git -C $'\303\277' reset --hard`)),
+      ).resolves.toMatchObject({ allowed: false });
+
+      // Unicode escape output varies with bash's locale and surrogate
+      // handling, so these forms fail closed before path analysis.
+      for (const command of [
+        String.raw`git -C $'\u00ff' reset --hard`,
+        String.raw`git -C $'\ud800' reset --hard`,
+        String.raw`git -C $'\U0000d800' reset --hard`,
+        String.raw`git -C $'\U00110000' reset --hard`,
+      ]) {
+        await expect(guard(request(command))).resolves.toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining('could not be parsed'),
+        });
+      }
     },
   );
 
@@ -2332,7 +2405,9 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
           }),
         ).resolves.toMatchObject({
           allowed: false,
-          reason: expect.stringContaining('execution directory'),
+          reason: expect.stringMatching(
+            /execution directory[\s\S]*a command runs only inside the session working directory/,
+          ),
         });
       },
     );

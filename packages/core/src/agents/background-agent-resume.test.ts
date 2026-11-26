@@ -805,6 +805,68 @@ describe('BackgroundAgentResumeService', () => {
     },
   );
 
+  it('never resumes or revives a run whose record says it is never continued', async () => {
+    const sessionId = 'session-blocked';
+    const reason = 'A background fix of /autofix-pr is never continued.';
+    for (const [agentId, status] of [
+      ['blocked-running', 'running'],
+      ['blocked-done', 'completed'],
+    ] as const) {
+      seedMeta(sessionId, agentId, agentId, {
+        status,
+        isBackgrounded: true,
+        resumeBlockedReason: reason,
+      });
+      writeJsonl(
+        getAgentJsonlPath(tempDir, sessionId, agentId),
+        rec(`${agentId}-u1`, null, sessionId, T0, 'user', {
+          agentId,
+          cwd: tempDir,
+          message: userText('Fix it'),
+        }),
+      );
+    }
+    const { service, subagentManager } = createService();
+    await service.loadPausedBackgroundAgents(sessionId);
+    expect(registry.get('blocked-running')).toMatchObject({
+      status: 'paused',
+      resumeBlockedReason: reason,
+    });
+    expect(registry.get('blocked-done')).toMatchObject({
+      status: 'completed',
+      resumeBlockedReason: reason,
+    });
+    expect(
+      await service.resumeBackgroundAgent('blocked-running', 'go on'),
+    ).toBeUndefined();
+    expect(
+      await service.reviveCompletedBackgroundAgent('blocked-done', 'go on'),
+    ).toBeUndefined();
+    // Registered in this process without the reason: the record still holds.
+    const live = 'blocked-live';
+    seedMeta(sessionId, live, live, {
+      status: 'completed',
+      isBackgrounded: true,
+      resumeBlockedReason: reason,
+    });
+    const metaPath = getAgentMetaPath(tempDir, sessionId, live);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, live);
+    writeJsonl(
+      outputFile,
+      rec('live-u1', null, sessionId, T0, 'user', {
+        agentId: live,
+        cwd: tempDir,
+        message: userText('Fix it'),
+      }),
+    );
+    register(live, 'Live task', { status: 'completed', outputFile, metaPath });
+    expect(
+      await service.reviveCompletedBackgroundAgent(live, 'go on'),
+    ).toBeUndefined();
+    expect(registry.get(live)?.resumeBlockedReason).toBe(reason);
+    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
+
   it('keeps damaged and unsafe retained entries visible but non-continuable', async () => {
     const sessionId = 'session-unsafe';
     const missingId = 'missing-transcript';
@@ -1490,6 +1552,48 @@ describe('BackgroundAgentResumeService', () => {
         expect.any(AbortSignal),
       );
     });
+  });
+
+  it('lets a resumed subagent stop when SubagentStop returns continue: false without a block', async () => {
+    const agentId = 'agent-stop-hook-continue-false';
+    seedPaused('session-stop-hook-continue-false', agentId, 'Resume stop');
+    const subagent = stubSubagent({ getFinalText: () => 'final output' });
+    const { service, hookSystem } = createService({ subagent });
+    hookSystem.fireSubagentStopEvent.mockResolvedValue({
+      isBlockingDecision: vi.fn().mockReturnValue(false),
+      shouldStopExecution: vi.fn().mockReturnValue(true),
+      getEffectiveReason: vi.fn().mockReturnValue('Done here'),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await waitForStatus(agentId, 'completed');
+    expect(hookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(1);
+    expect(subagent.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not restart a resumed subagent stopped by a tool hook', async () => {
+    const agentId = 'agent-tool-hook-stop';
+    seedPaused('session-tool-hook-stop', agentId, 'Resume work');
+    const reason = 'A hook stopped the agent: budget spent';
+    const subagent = stubSubagent({
+      getTerminateMode: () => AgentTerminateMode.HOOK_STOPPED,
+      getFinalText: () => reason,
+    });
+    const { service, hookSystem } = createService({ subagent });
+    hookSystem.fireSubagentStopEvent.mockResolvedValueOnce({
+      isBlockingDecision: () => true,
+      getEffectiveReason: () => 'Keep going',
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await waitForStatus(agentId, 'failed');
+    expect(hookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(1);
+    expect(subagent.execute).toHaveBeenCalledTimes(1);
+    expect(registry.get(agentId)?.error).toBe(reason);
   });
 
   it('appends a warning when resumed SubagentStop hooks reach the blocking cap', async () => {
@@ -2595,6 +2699,7 @@ describe('BackgroundAgentResumeService', () => {
     );
     register(agentId, 'Isolated result', {
       status: 'running',
+      workspacePinned: true,
       outputFile,
       metaPath,
     });
@@ -2608,7 +2713,7 @@ describe('BackgroundAgentResumeService', () => {
 
     await expect(
       service.reviveCompletedBackgroundAgent(agentId, 'continue'),
-    ).resolves.toBeDefined();
+    ).resolves.toMatchObject({ workspacePinned: false });
     await waitForStatus(agentId, 'completed');
 
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledOnce();

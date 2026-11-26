@@ -5,11 +5,17 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import {
+  hasTurnResourceWork,
+  runWithTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+} from '../skills/turn-skill-snapshot.js';
 import { HookRunner } from './hookRunner.js';
+import { HookCommandCgroup } from './hook-command-cgroup.js';
 import {
   HookEventName,
   HookType,
@@ -224,6 +230,102 @@ describe('HookRunner', () => {
   };
 
   describe('executeHook', () => {
+    it('opts the waitForProcessTree launcher into parent-death reaping', async () => {
+      const launch = vi.fn().mockReturnValue({
+        executable: process.execPath,
+        args: ['--eval', 'process.exit(0)'],
+        env: {},
+      });
+      const unit = {
+        launch,
+        waitForEmpty: vi.fn().mockResolvedValue(true),
+        terminate: vi.fn().mockResolvedValue(undefined),
+        remove: vi.fn(),
+      } as unknown as HookCommandCgroup;
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      const mockProcess = scriptSpawn(0);
+      // The cgroup path reads the launcher's joined marker from fd 3.
+      (mockProcess as unknown as { stdio: unknown[] }).stdio = [
+        null,
+        null,
+        null,
+        { on: vi.fn() },
+      ];
+
+      const result = await hookRunner.executeHook(
+        cmd('echo hi'),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        { waitForProcessTree: true, cgroupRoot: '/fake-root' },
+      );
+
+      expect(result.success).toBe(true);
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][3]).toEqual({ reapOnParentExit: true });
+    });
+
+    const cancelWithUnit = async (covered: boolean) => {
+      const events: string[] = [];
+      const removeReaper = vi.fn();
+      const unit = {
+        launch: vi.fn().mockReturnValue({
+          executable: process.execPath,
+          args: ['--eval', 'process.exit(0)'],
+          env: {},
+        }),
+        covers: vi.fn().mockReturnValue(covered),
+        terminate: vi.fn(async () => {
+          events.push('terminate');
+        }),
+        waitForEmpty: vi.fn().mockResolvedValue(true),
+        remove: vi.fn(),
+        removeReaper,
+      } as unknown as HookCommandCgroup;
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      const mockProcess = spawnControllable(4321);
+      mockProcess.kill.mockImplementation(() => {
+        events.push('kill');
+        return true;
+      });
+      (mockProcess as unknown as { stdio: unknown[] }).stdio = [
+        null,
+        null,
+        null,
+        { on: vi.fn() },
+      ];
+      const controller = new AbortController();
+      const resultPromise = hookRunner.executeHook(
+        cmd('echo hi'),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+        { waitForProcessTree: true, cgroupRoot: '/fake-root' },
+      );
+      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), {
+        timeout: 5_000,
+      });
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+      return { events, removeReaper };
+    };
+
+    it('drains a covered launcher before the final kill on cancellation', async () => {
+      const { events, removeReaper } = await cancelWithUnit(true);
+
+      expect(events[0]).toBe('terminate');
+      expect(events.at(-1)).toBe('kill');
+      expect(removeReaper).toHaveBeenCalledWith(4321);
+    });
+
+    it('stops an uncovered launcher before terminating the unit', async () => {
+      const { events } = await cancelWithUnit(false);
+
+      expect(events[0]).toBe('kill');
+      expect(events.indexOf('terminate')).toBeGreaterThan(0);
+    });
+
     it('should return error when hook command is missing', async () => {
       const result = await execute('');
 
@@ -328,6 +430,43 @@ describe('HookRunner', () => {
       expect(result.output?.reason).toBe('plain blocking error');
       expect(result.output?.hookSpecificOutput).toBeUndefined();
     });
+
+    describe.each([HookEventName.Stop, HookEventName.SubagentStop])(
+      '%s command hook exits',
+      (eventName) => {
+        it('preserves the exit code 2 block and structured stderr feedback', async () => {
+          const feedback = { continue: false, stopReason: 'Run checks again' };
+          const result = await runHook(
+            'exit 2',
+            2,
+            '',
+            JSON.stringify(feedback),
+            eventName,
+          );
+
+          expect(result.output).toEqual({ ...feedback, decision: 'deny' });
+        });
+
+        it('blocks on exit code 2 with empty stderr', async () => {
+          const result = await runHook('exit 2', 2, '', '', eventName);
+
+          expect(result.output).toEqual({ decision: 'deny' });
+        });
+
+        it('leaves a successful stop request non-blocking', async () => {
+          const feedback = { continue: false, stopReason: 'Done' };
+          const result = await runHook(
+            'echo json',
+            0,
+            JSON.stringify(feedback),
+            '',
+            eventName,
+          );
+
+          expect(result.output).toEqual(feedback);
+        });
+      },
+    );
 
     it('should handle exit code 1 as non-blocking warning', async () => {
       const result = await runHook('exit 1', 1, '', 'warning');
@@ -1963,6 +2102,82 @@ describe('HookRunner', () => {
       expect(result.outcome).toBe('non_blocking_error');
       expect(result.isAsync).toBe(true);
     });
+
+    it('retains only the originating turn until the async hook child closes', async () => {
+      const child = createControllableMockProcess();
+      mockSpawn.mockReturnValue(child);
+      const source: TurnSkillSnapshot = {
+        version: 1,
+        id: 'old',
+        digest: 'old',
+        skills: [],
+      };
+      const next = { ...source, id: 'new' };
+      const result = await runWithTurnSkillSnapshot(source, runAsyncHook);
+      expect(result.isAsync).toBe(true);
+      expect(hasTurnResourceWork(source)).toBe(true);
+      expect(hasTurnResourceWork(next)).toBe(false);
+      await vi.waitFor(() =>
+        expect(child.on).toHaveBeenCalledWith('close', expect.any(Function)),
+      );
+      child.emit('close', 0);
+      await vi.waitFor(() => expect(hasTurnResourceWork(source)).toBe(false));
+    });
+
+    it('retains the pinned files while a real async hook reads them after handoff', async () => {
+      const childProcess =
+        await vi.importActual<typeof import('node:child_process')>(
+          'node:child_process',
+        );
+      mockSpawn.mockImplementation(childProcess.spawn);
+      const dir = await mkdtemp(join(tmpdir(), 'qwen-hook-turn-'));
+      const source: TurnSkillSnapshot = {
+        version: 1,
+        id: 'old',
+        digest: 'old',
+        skills: [],
+      };
+      const controller = new AbortController();
+      try {
+        await writeFile(join(dir, 'artifact'), 'version-one');
+        await writeFile(
+          join(dir, 'read-later.cjs'),
+          [
+            "const fs = require('node:fs');",
+            "const wait = require('node:timers/promises').setTimeout;",
+            '(async () => {',
+            '  for (let i = 0; i < 400; i++) {',
+            "    if (fs.existsSync('proceed')) {",
+            "      fs.writeFileSync('result', fs.readFileSync('artifact'));",
+            '      return;',
+            '    }',
+            '    await wait(10);',
+            '  }',
+            '  process.exitCode = 1;',
+            '})();',
+          ].join('\n'),
+        );
+        const result = await runWithTurnSkillSnapshot(source, () =>
+          hookRunner.executeHook(
+            cmd('node read-later.cjs', { async: true }),
+            HookEventName.PostToolUse,
+            createMockInput({ cwd: dir }),
+            { signal: controller.signal },
+          ),
+        );
+        expect(result.isAsync).toBe(true);
+        expect(hasTurnResourceWork(source)).toBe(true);
+        await writeFile(join(dir, 'proceed'), '');
+        await vi.waitFor(
+          () => expect(hasTurnResourceWork(source)).toBe(false),
+          { timeout: 10000 },
+        );
+        expect(await readFile(join(dir, 'result'), 'utf8')).toBe('version-one');
+      } finally {
+        controller.abort();
+        await rm(dir, { recursive: true, force: true });
+      }
+    }, 15000);
 
     it('reports an async hook handed to the background as success', async () => {
       mockSpawn.mockImplementation(() => createMockProcess());

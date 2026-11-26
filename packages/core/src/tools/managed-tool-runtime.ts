@@ -84,6 +84,39 @@ function refuseUpdatedInput(
   };
 }
 
+/**
+ * The managed protocol keeps its shape: a PostToolUse `continue: false` is
+ * reported as a stop, and PostToolUseFailure carries no stop.
+ */
+function managedPostHook(result: PostToolUseHookResult): PostToolUseHookResult {
+  const { endsTurn, ...rest } = result;
+  return endsTurn ? { ...rest, shouldStop: true } : rest;
+}
+
+function managedFailureHook(
+  result: PostToolUseFailureHookResult,
+): PostToolUseFailureHookResult {
+  const { endsTurn: _endsTurn, stopReason: _stopReason, ...rest } = result;
+  return rest;
+}
+
+/**
+ * Hook payloads arrive untyped over the message bus, so the non-cloneable
+ * fallback carries a hook's text fields only when they really are strings:
+ * any other value could be the one that made the clone throw.
+ */
+function hookStringFields<K extends string>(
+  hook: Partial<Record<K, unknown>>,
+  keys: readonly K[],
+): Partial<Record<K, string>> {
+  const fields: Partial<Record<K, string>> = {};
+  for (const key of keys) {
+    const value = hook[key];
+    if (typeof value === 'string') fields[key] = value;
+  }
+  return fields;
+}
+
 export class ManagedToolPreparationError extends Error {}
 
 export type ManagedToolConfirmationPhase = 'permission' | 'preflight';
@@ -759,36 +792,40 @@ export class ManagedToolRuntime {
         result.executionStatus === 'cancelled' ||
         result.result?.error !== undefined
       ) {
-        result.failureHook = await firePostToolUseFailureHook(
-          messageBus,
-          entry.toolUseId,
-          entry.tool.name,
-          entry.invocation.params as Record<string, unknown>,
-          result.result?.error?.message ??
-            result.error?.message ??
-            'Tool execution failed.',
-          result.executionStatus === 'cancelled' || signal.aborted,
-          this.config.getApprovalMode(),
-          undefined,
-          entry.reference.callId,
-          undefined,
-          entry.hookOwner,
+        result.failureHook = managedFailureHook(
+          await firePostToolUseFailureHook(
+            messageBus,
+            entry.toolUseId,
+            entry.tool.name,
+            entry.invocation.params as Record<string, unknown>,
+            result.result?.error?.message ??
+              result.error?.message ??
+              'Tool execution failed.',
+            result.executionStatus === 'cancelled' || signal.aborted,
+            this.config.getApprovalMode(),
+            undefined,
+            entry.reference.callId,
+            undefined,
+            entry.hookOwner,
+          ),
         );
       } else if (result.executionStatus === 'success' && result.result) {
-        result.postHook = await firePostToolUseHook(
-          messageBus,
-          entry.tool.name,
-          entry.invocation.params as Record<string, unknown>,
-          {
-            llmContent: result.result.llmContent,
-            returnDisplay: result.result.returnDisplay,
-          },
-          entry.toolUseId,
-          this.config.getApprovalMode(),
-          undefined,
-          entry.reference.callId,
-          undefined,
-          entry.hookOwner,
+        result.postHook = managedPostHook(
+          await firePostToolUseHook(
+            messageBus,
+            entry.tool.name,
+            entry.invocation.params as Record<string, unknown>,
+            {
+              llmContent: result.result.llmContent,
+              returnDisplay: result.result.returnDisplay,
+            },
+            entry.toolUseId,
+            this.config.getApprovalMode(),
+            undefined,
+            entry.reference.callId,
+            undefined,
+            entry.hookOwner,
+          ),
         );
       }
     } catch (error) {
@@ -797,7 +834,37 @@ export class ManagedToolRuntime {
         result.postHook = { shouldStop: false, hookError };
       else result.failureHook = { hookError };
     }
-    entry.result = structuredClone(result);
+    try {
+      entry.result = structuredClone(result);
+    } catch (error) {
+      // A hook payload with non-cloneable values must not wedge the
+      // invocation: replace only the hook that ran, and preserve the stop
+      // directive and the text fields the hook actually issued.
+      const hookError = `Cannot serialize managed tool hooks: ${String(error)}`;
+      entry.result = structuredClone({
+        ...result,
+        ...(result.postHook
+          ? {
+              postHook: {
+                shouldStop: result.postHook.shouldStop === true,
+                ...hookStringFields(result.postHook, [
+                  'stopReason',
+                  'additionalContext',
+                ]),
+                hookError,
+              },
+            }
+          : {}),
+        ...(result.failureHook
+          ? {
+              failureHook: {
+                ...hookStringFields(result.failureHook, ['additionalContext']),
+                hookError,
+              },
+            }
+          : {}),
+      });
+    }
     return entry.result;
   }
 
@@ -930,6 +997,7 @@ function runtimeLocalOutcome(
     case ToolConfirmationOutcome.ProceedAlwaysTool:
     case ToolConfirmationOutcome.ProceedAlwaysProject:
     case ToolConfirmationOutcome.ProceedAlwaysUser:
+    case ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault:
       return ToolConfirmationOutcome.ProceedOnce;
     default:
       return outcome;

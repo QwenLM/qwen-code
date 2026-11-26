@@ -215,6 +215,15 @@ export type {
   ShellToolInvocation,
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
+export {
+  getSkillSource,
+  getTurnSkillSnapshot,
+  prepareTurnSkillSnapshot,
+  hasTurnResourceWork,
+  runWithTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+  type TurnSkillSnapshotLease,
+} from './skills/turn-skill-snapshot.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
 export { FORK_SUBAGENT_TYPE } from './tools/agent/fork-subagent.js';
 export type {
@@ -246,7 +255,7 @@ export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
-} from './tools/write-file.js';
+} from './tools/artifact/workspace-auto-record.js';
 export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
@@ -303,6 +312,7 @@ export type {
   PublishArtifactInput,
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
+export type { AutofixPrTool, AutofixPrParams } from './tools/autofix-pr.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type {
   CurrentSessionScheduledTaskCreateRequest,
@@ -340,6 +350,7 @@ export * from './providers/index.js';
 
 export {
   computeThresholds,
+  isBelowCompactionWarn,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
 export { estimateContextTextTokens } from './services/tokenEstimation.js';
@@ -350,7 +361,6 @@ export {
 export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
 export {
   isApiUserPrompt,
-  findApiRewindCutPoint,
   countApiUserPrompts,
   type ApiUserPromptOptions,
 } from './services/api-user-prompt.js';
@@ -362,9 +372,13 @@ export type {
   DurableCronTask,
   CronTaskRun,
   CronRunSessionOutcome,
+  CronGateStatus,
+  CronGateOutcome,
+  CronGateRunOutcome,
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  withTaskGate,
   cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,
@@ -379,6 +393,7 @@ export {
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
   MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
+export { MAX_CRON_GATE_CHARS, gateCommandError } from './services/cron-gate.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
@@ -396,18 +411,14 @@ export {
 export type { ReadTextRangeResult } from './utils/read-text-range.js';
 export { isUtf8CompatibleEncoding } from './utils/encoding.js';
 export * from './services/gitWorktreeService.js';
-export {
-  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
-  GLOBAL_DUPLICATE_THRESHOLD,
-  getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
-} from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
+export * from './services/session-artifact-summary-sidecar.js';
+export * from './services/generated-ui-state.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
 export * from './ipc/peer-admission.js';
@@ -480,11 +491,15 @@ export {
   formatTokenUsageSummaryAsCsv,
   formatTokenUsageSummaryAsJson,
   getTokenUsageFilePath,
+  loadTokenUsageDailyByModel,
   queryTokenUsage,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
 } from './services/tokenUsageService.js';
 export type {
+  TokenUsageCompletedMonthCache,
+  TokenUsageDailyByModel,
+  TokenUsageDayModelTotals,
   TokenUsageExportFormat,
   TokenUsageExportOptions,
   TokenUsageGroupSummary,
@@ -495,7 +510,9 @@ export type {
   TokenUsageTotals,
 } from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
+export * from './services/worktree-snapshot-service.js';
 export * from './services/session-pr-service.js';
+export * from './services/session-goal-sidecar.js';
 export {
   stripTerminalControlSequences,
   stripDisplayControlChars,
@@ -564,6 +581,7 @@ export * from './utils/toolResultDisplayCompaction.js';
 // Production code: config.getMemoryManager().method(...)
 // Tests: new MemoryManager()
 export * from './memory/manager.js';
+export { getExtractNoopSkipTurns } from './memory/extract-cadence.js';
 
 // Foundational utilities (paths, storage scaffold, type definitions, constants)
 // that are legitimately needed by UI code (MemoryDialog, commands, etc.)
@@ -650,7 +668,6 @@ export {
   logExtensionEnable,
   logIdeConnection,
   logLoopDetected,
-  logRepeatedToolFailureGuard,
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
@@ -667,8 +684,8 @@ export {
   IdeConnectionEvent,
   IdeConnectionType,
   LoopDetectedEvent,
+  LoopReason,
   LoopType,
-  RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
@@ -676,6 +693,7 @@ export {
   WorkflowRunEvent,
   WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
+export type { LoopStopDetail } from './telemetry/types.js';
 
 // ============================================================================
 // Extensions, Skills, Subagents & Agents
@@ -794,8 +812,10 @@ export { finalizeToolResponses } from './tools/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
 export { parse, stringify } from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
+export * from './agents/btw-session.js';
 export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';
+export * from './utils/output-language-table.js';
 
 // ============================================================================
 // OAuth & Authentication

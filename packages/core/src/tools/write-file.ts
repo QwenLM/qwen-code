@@ -19,8 +19,6 @@ import {
 } from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
-  ToolArtifact,
-  ToolArtifactKind,
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
   ToolInvocation,
@@ -65,38 +63,13 @@ import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  ARTIFACT_TITLE_MAX_LENGTH,
-  ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
-  hasControlCharacter,
-  hasUnsafeDisplayPayload,
-} from './record-artifact.js';
-import {
-  OFFICE_DOCUMENT_EXTENSIONS,
-  pathHasSkippedDirectoryComponent,
-} from '../utils/workspace-artifact-directory.js';
-import { toCanonicalWorkspaceArtifactPath } from '../utils/workspace-artifact-path.js';
+  buildWorkspaceArtifactCandidate,
+  formatRecordArtifactReminder,
+} from './artifact/workspace-auto-record.js';
+import { backgroundFixHolding } from './autofix-pr-grants.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
-const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
-  ['.csv', 'file'],
-  ['.htm', 'html'],
-  ['.html', 'html'],
-  ['.ipynb', 'notebook'],
-  ['.jpeg', 'image'],
-  ['.jpg', 'image'],
-  ['.pdf', 'pdf'],
-  ['.png', 'image'],
-  ['.svg', 'image'],
-  ['.webp', 'image'],
-]);
-for (const ext of OFFICE_DOCUMENT_EXTENSIONS) {
-  ARTIFACT_KIND_BY_EXTENSION.set(ext, 'document');
-}
-
-type WorkspaceToolArtifact = ToolArtifact & {
-  storage: 'workspace';
-  workspacePath: string;
-};
 
 /**
  * Parameters for the WriteFile tool
@@ -124,9 +97,11 @@ export interface WriteFileToolParams {
 
   /**
    * When false, skip the automatic session-artifact registration that
-   * write_file otherwise does for artifact-like files (html, pdf, images).
+   * write_file otherwise does for artifact-like files (html, pdf, images,
+   * csv, markdown, json, python, and sql).
    * Use this for intermediate files that will be deleted, such as HTML
-   * written only to print a PDF.
+   * written only to print a PDF. An artifact the session already has for
+   * this path is still refreshed.
    */
   record_as_artifact?: boolean;
 }
@@ -152,6 +127,19 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       this.config.getTargetDir(),
     );
     return `Writing to ${shortenPath(relativePath)}`;
+  }
+
+  /**
+   * A write into the worktree of a fix of /autofix-pr running in the
+   * background, by anyone but its own agent, is the user's to approve: that
+   * agent builds and runs what is there without asking.
+   */
+  override requiresUserInteraction(): boolean {
+    return (
+      // As written: resolved as the kernel will.
+      backgroundFixHolding(this.params.file_path, getCurrentAgentId()) !==
+      undefined
+    );
   }
 
   /**
@@ -674,15 +662,11 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           `User modified the \`content\` to be: ${content}`,
         );
       }
-      const artifact =
-        this.params.record_as_artifact === false
-          ? null
-          : buildWorkspaceArtifactMetadata(
-              this.config,
-              file_path,
-              postWriteSizeBytes,
-            );
-      if (artifact) {
+      const artifact = buildWorkspaceArtifactCandidate(this.config, file_path, {
+        recordAsArtifact: this.params.record_as_artifact,
+        sizeBytes: postWriteSizeBytes,
+      });
+      if (artifact && !artifact.updateOnly) {
         llmSuccessMessageParts.push(
           formatRecordArtifactReminder(artifact.workspacePath),
         );
@@ -770,111 +754,8 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 }
 
-/**
- * Kept for the cross-package contract test in `workspace-file-read.test.ts`:
- * the daemon's `GET /file` route resolves the `workspacePath` this produces.
- * Delegates to `buildWorkspaceArtifactMetadata` so the two agree by construction.
- */
-export function buildRecordArtifactReminder(
-  config: Config,
-  filePath: string,
-): string | null {
-  const artifact = buildWorkspaceArtifactMetadata(config, filePath);
-  return artifact ? formatRecordArtifactReminder(artifact.workspacePath) : null;
-}
-
-function formatRecordArtifactReminder(workspacePath: string): string {
-  return (
-    `This file was automatically recorded as a workspace artifact with ` +
-    `workspacePath "${workspacePath}". No extra artifact registration step ` +
-    `is needed.`
-  );
-}
-
-export function buildWorkspaceArtifactMetadata(
-  config: Config,
-  filePath: string,
-  sizeBytes?: number,
-): WorkspaceToolArtifact | null {
-  const recorded = resolveRecordedWorkspaceFile(config, filePath);
-  if (!recorded) {
-    return null;
-  }
-  const title = path.basename(recorded.filePath);
-  // The daemon store rejects titles and paths that are too long, carry control
-  // characters, or contain markup; skip the artifact rather than tell the model
-  // it was recorded when it will be dropped.
-  if (
-    title.length > ARTIFACT_TITLE_MAX_LENGTH ||
-    hasControlCharacter(title) ||
-    hasUnsafeDisplayPayload(title) ||
-    recorded.workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
-    hasControlCharacter(recorded.workspacePath) ||
-    hasUnsafeDisplayPayload(recorded.workspacePath)
-  ) {
-    debugLogger.debug('workspace artifact skipped (safety checks)', {
-      path: filePath,
-    });
-    return null;
-  }
-  return {
-    title,
-    kind: inferWorkspaceArtifactKind(recorded.filePath),
-    storage: 'workspace',
-    workspacePath: recorded.workspacePath,
-    mimeType:
-      getSpecificMimeType(recorded.filePath) ??
-      (recorded.filePath.toLowerCase().endsWith('.ipynb')
-        ? 'application/x-ipynb+json'
-        : undefined),
-    sizeBytes,
-  };
-}
-
-function resolveRecordedWorkspaceFile(
-  config: Config,
-  filePath: string,
-): { filePath: string; workspacePath: string } | null {
-  if (!config.isRecordArtifactEnabled()) {
-    return null;
-  }
-  let resolvedFile = filePath;
-  let resolvedRoot = config.getTargetDir();
-  try {
-    if (!config.getFileSystemService().textFileIo) {
-      resolvedFile = fs.realpathSync(filePath);
-      resolvedRoot = fs.realpathSync(resolvedRoot);
-    }
-  } catch {
-    // Keep the lexical path when the file or root cannot be realpath'd yet.
-  }
-  if (
-    !ARTIFACT_KIND_BY_EXTENSION.has(path.extname(resolvedFile).toLowerCase())
-  ) {
-    return null;
-  }
-  const workspacePath = toCanonicalWorkspaceArtifactPath(
-    resolvedFile,
-    resolvedRoot,
-  );
-  if (!workspacePath) {
-    return null;
-  }
-  if (pathHasSkippedDirectoryComponent(workspacePath)) {
-    return null;
-  }
-  return { filePath: resolvedFile, workspacePath };
-}
-
-function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {
-  return (
-    ARTIFACT_KIND_BY_EXTENSION.get(path.extname(filePath).toLowerCase()) ??
-    'file'
-  );
-}
-
 export const WRITE_FILE_ARTIFACT_DESCRIPTION =
-  'Artifact-like files such as HTML, PDF, images, notebooks, and office documents are automatically registered as session artifacts. Intermediate files that exist only to produce another artifact — for example HTML written solely to print a PDF — must set record_as_artifact=false, or be written under .qwen/tmp/ so they are not registered. Delete those intermediates when done.';
+  'Artifact-like files such as HTML, PDF, images, notebooks, office documents, CSV, Markdown, JSON, SQL, and Python files are automatically registered as session artifacts. Set record_as_artifact=false for intermediates, such as HTML written only to print a PDF: that does not create an artifact, but one the session already has for the path is still refreshed. Files under .qwen/tmp/ are not registered. Delete intermediates when done.';
 
 /**
  * Implementation of the WriteFile tool logic
@@ -908,7 +789,7 @@ The user has the ability to modify \`content\`. If modified, this will be stated
           },
           record_as_artifact: {
             description:
-              'Set false for intermediate files that should not appear as session artifacts, such as HTML used only to print a PDF. Defaults to true for artifact-like extensions.',
+              'Set false to skip creating a session artifact. An artifact the session already has for this path is still refreshed. Defaults to true for artifact-like extensions.',
             type: 'boolean',
           },
         },

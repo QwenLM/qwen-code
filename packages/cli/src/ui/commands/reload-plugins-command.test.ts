@@ -4,12 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { reloadPluginsCommand } from './reload-plugins-command.js';
+import {
+  formatReloadPluginsSummary,
+  reloadPluginsCommand,
+} from './reload-plugins-command.js';
 import type { CommandContext } from './types.js';
 import { reloadPluginsRuntime } from '../../config/extension-runtime-reload.js';
-import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 vi.mock('../../config/extension-runtime-reload.js', () => ({
   reloadPluginsRuntime: vi.fn(async () => ({
@@ -34,6 +38,28 @@ describe('reloadPluginsCommand', () => {
       markExtensionsReloadFailed: vi.fn(),
       notifyExtensionsReloadStarted: vi.fn(),
     } as unknown as ExtensionRefreshState;
+  });
+
+  afterEach(async () => {
+    await setLanguageAsync('en');
+  });
+
+  it('inflects Russian extension and capability counts in the reload summary', async () => {
+    await setLanguageAsync('ru');
+    expect(
+      formatReloadPluginsSummary({
+        extensionCount: 3,
+        commandCount: 4,
+        skillCount: 21,
+        agentCount: 11,
+        workflowCount: 2,
+        hookCount: 0,
+        mcpServerCount: 2,
+        lspServerCount: 5,
+      }),
+    ).toBe(
+      '3 расширения · 4 команды · 21 навык · 11 агентов · 2 рабочих процесса · 0 хуков · 2 MCP-сервера расширения · 5 LSP-серверов расширения',
+    );
   });
 
   it('returns an error when config is missing', async () => {
@@ -103,5 +129,47 @@ describe('reloadPluginsCommand', () => {
       messageType: 'error',
       content: 'Reload failed: boom',
     });
+  });
+
+  it('does not finish a newer shared reload when an earlier command completes', async () => {
+    const state = new ExtensionRefreshState();
+    let finishFirst!: () => void;
+    let finishSecond!: () => void;
+    const summary = {
+      extensionCount: 0,
+      commandCount: 0,
+      skillCount: 0,
+      agentCount: 0,
+      workflowCount: 0,
+      hookCount: 0,
+      mcpServerCount: 0,
+      lspServerCount: 0,
+    };
+    vi.mocked(reloadPluginsRuntime)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirst = () => resolve(summary);
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishSecond = () => resolve(summary);
+          }),
+      );
+    const context = {
+      services: { config: {} as Config, extensionRefreshState: state },
+      ui: { reloadCommands: vi.fn() },
+    } as unknown as CommandContext;
+    const first = reloadPluginsCommand.action!(context, '');
+    const second = reloadPluginsCommand.action!(context, '');
+    finishFirst();
+    await first;
+    expect(state.isReloadInProgress()).toBe(true);
+    finishSecond();
+    await second;
+    expect(state.isReloadInProgress()).toBe(false);
+    expect(state.markExtensionsChanged('later change')).toBe(true);
   });
 });

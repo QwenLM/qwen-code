@@ -59,6 +59,8 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
+  /** Launcher-owned Conversations working root, fixed until daemon restart. */
+  conversationsDir?: string;
   /** Deployment boundary for provider selection and exposed surfaces. */
   profile?: ServeProfile;
   /**
@@ -118,6 +120,15 @@ export interface ServeOptions {
    */
   maxTotalSessions?: number;
   /**
+   * Load-based admission for fresh child spawns. When enabled (the
+   * default), a periodic monitor refuses new sessions with 503
+   * `system_overloaded` while host load stays past its enter threshold
+   * corroborated by daemon event-loop lag, or while event-loop lag alone
+   * is severe; live sessions and the control plane are never gated.
+   * `false` disables the monitor entirely.
+   */
+  loadAdmission?: boolean;
+  /**
    * Per-session cap on accepted prompts that have not settled yet.
    * Defaults to 5. `0` or `Infinity` disables the cap.
    */
@@ -138,14 +149,40 @@ export interface ServeOptions {
    */
   maxConnections?: number;
   /**
+   * Admission cap on concurrent long-lived streams (issue #17554): every
+   * SSE surface — REST session events, agent session-events, session and
+   * workspace generation, artifact-library and side-question streams, the
+   * hosted-harness event handler — plus the ACP SSE and WebSocket
+   * transports. Long-lived streams share the listener's `maxConnections`
+   * quota with short requests; without a separate ceiling a fleet of idle
+   * or stalled streams can occupy every listener slot, after which Node
+   * closes new sockets at accept time WITHOUT an HTTP response — taking
+   * `/health` and the Web Shell down with them. When unset, the cap derives
+   * from the effective listener cap (80%, leaving ≥20% headroom for short
+   * requests); when the listener cap is disabled the derived cap is
+   * disabled too. While the cap is enabled, the pairing listeners
+   * (local-control / remote-access) are additionally clamped at 80% of
+   * their own 64-socket budget. Streams at the cap are rejected with
+   * `503` + `Retry-After` instead of a silent socket close (ACP WebSocket
+   * upgrades get a body-less 503 before the upgrade). `0` (or `Infinity`)
+   * disables the cap explicitly. NaN / negative values throw at boot.
+   */
+  maxSseConnections?: number;
+  /**
    * Per-session SSE replay ring depth. Threaded into the bridge as
    * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
    * construction site. Defaults to 8000. Must be a positive
    * finite integer — `0` / `NaN` / negative fail at boot. Larger
-   * rings let clients with longer reconnect gaps replay more history
-   * at the cost of a few hundred KB extra RAM per session.
+   * rings let clients with longer reconnect gaps replay more history only
+   * while the separate `eventRingMaxBytes` budget has room.
    */
   eventRingSize?: number;
+  /**
+   * Per-session retained SSE ring byte cap, including the latest full commands
+   * snapshot. Threaded into `BridgeOptions.eventRingMaxBytes`. Defaults to
+   * 8 MiB. Must be a positive safe integer up to 256 MiB, never unlimited.
+   */
+  eventRingMaxBytes?: number;
   /**
    * Per-session in-memory compacted replay snapshot byte cap. Threaded into
    * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
@@ -365,7 +402,14 @@ export interface ServeOptions {
   /** Deployment-generated digest for the Hosted Harness private contract. */
   hostedHarnessCapabilityDigest?: string;
   /**
-   * Per-SSE-connection idle deadline.
+   * Per-SSE-connection writer stall budget (ms). A stream whose write is
+   * stuck waiting for `drain` (the consumer stopped reading) for longer
+   * than this budget is force-evicted with a terminal `client_evicted`
+   * frame. When unset, a default 60s budget applies — the reaper only
+   * fires on backpressure stalls, so healthy idle streams are never
+   * evicted and the normal write path pays no per-chunk timestamp cost.
+   * Direct embeds may pass `0` to disable the reaper; the CLI flag
+   * validates positive integers.
    */
   writerIdleTimeoutMs?: number;
   /** ACP child auto-reap delay. Keepalive windows may extend it. */
@@ -450,6 +494,7 @@ export interface ServeOptions {
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
 export interface HostedHarnessCapabilities {
+  readonly instanceId?: string;
   readonly features?: readonly string[];
   readonly lifecycleProtocolVersion?: 1;
   readonly lifecycleV2Profiles?: readonly string[];
@@ -558,6 +603,11 @@ export interface CapabilitiesEnvelope {
     sessionRestoreTimeoutMs?: number;
     /** Present when `workspace_file_upload` is advertised. */
     maxWorkspaceFileUploadBytes?: number;
+    /** Only raw Skill archives and zip-file sources; legacy limits are unchanged. */
+    maxSkillArchiveBytes?: number;
+    maxSkillArchiveExpandedBytes?: number;
+    maxSkillArchiveEntries?: number;
+    maxSkillArchiveManifestBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.
@@ -611,7 +661,7 @@ export interface ServeAuthProviderCatalog {
   workspaceCwd: string;
   providers: ServeAuthProviderDescriptor[];
   groups: Array<{
-    id: 'alibaba' | 'third-party' | 'custom';
+    id: 'qwencloud' | 'alibaba' | 'third-party' | 'custom';
     label: string;
     description: string;
     providerIds: string[];

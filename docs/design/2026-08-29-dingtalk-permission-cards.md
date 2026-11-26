@@ -17,7 +17,7 @@ The DingTalk channel already presents running status and `ask_user_question` int
 ## Non-goals
 
 - No permission-policy, approval-mode, ACP, or session-language API changes.
-- No new DingTalk card template. The existing question form template is reused with one required, single-choice permission field.
+- No new DingTalk card template. The existing question form template is reused with one required permission field, rendered as a checkbox group that behaves as single-choice: a submission is accepted only when exactly one option is selected.
 - No cross-client or group-wide voting. Only the user who started the attended Channel run may operate the card.
 - No native permission-card implementation in CLI, Web, IDE, or other IM adapters.
 
@@ -51,7 +51,7 @@ The same pending-permission response promise serializes card and text-command re
 
 ## DingTalk controller
 
-`PermissionCardController` owns DingTalk-only state keyed by request ID and `outTrackId`. It reuses the existing question template with one `permission_decision` checkbox-group field and no free-form option. The rendered choices are literals selected from the context decisions, so `allow_always` is absent when the daemon did not advertise it.
+`PermissionCardController` owns DingTalk-only state keyed by request ID and `outTrackId`. It reuses the existing question template with one required `permission_decision` checkbox-group field and no free-form option. Single choice is enforced on submission rather than by the field type: a **submit** callback carrying anything other than exactly one value is `ignored`, leaving the record unclaimed and the card pending. A cancel callback carries no value and is accepted, denying through the one-shot responder. The rendered choices are literals selected from the context decisions, so `allow_always` is absent when the daemon did not advertise it.
 
 Presentation follows four states: `reserved`, `pending`, `claimed`, and `terminal`. A record subscribes to Channel settlement before delivery so an outside resolution during the network request cannot reactivate it. Delivery failure removes the local record and returns `unsupported`; `ChannelBase` then sends the existing text request. A successful delivery starts the configured timeout.
 

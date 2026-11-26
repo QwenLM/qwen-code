@@ -30,13 +30,13 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 
 ### Browsing your hooks
 
-Run `/hooks` to open a read-only browser of the hooks this session runs. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Hooks registered for the current session by skills or the SDK are listed with the source Session.
+Run `/hooks` to open a read-only browser of configured and session hooks. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Ink marks command hooks with unsupported `args` as skipped in the handler list. Hooks registered for the current session by skills or the SDK are listed with the source Session.
 
 The browser never edits your configuration: to add, change or remove a hook, edit `settings.json`. It does re-read it. Opening the interactive menu reloads hook definitions from the user, workspace and system (System and SystemDefaults) settings files used by this session, including when the session runs in a worktree, so definitions you added, changed or removed since the session started take effect without a restart. If the user or workspace file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown. If a system settings file cannot be read or parsed, the hooks from the system files stay as they were, your other edits still take effect, the file is left untouched, and an error names it.
 
 Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
 
-This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. Project hooks load only in a trusted folder. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls`, `security.allowPrivateNetworkHooks` and `security.folderTrust` (including trust-store entries) still require a restart. `security.folderTrust` is read from user, system and system-default settings only; a workspace file cannot enable it. Hooks registered at runtime by skills or the SDK are not affected. Project hooks from a project's `.qwen/settings.json` run with either authority, in every mode: your **approval of the exact configuration** (see [Approving project hooks](#approving-project-hooks)) or **explicit folder trust** (enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE). An approved block runs even with the folder-trust feature off. While a block awaits its first decision it is withheld and the interactive approval dialog asks; when the folder is also untrusted the session shows a startup warning and the `/hooks` browser lists the block as disabled (untrusted). With `security.folderTrust.enabled` on and the folder untrusted, workspace settings do not load at all, so the dialog cannot appear — trust the folder first. Settings-file hooks are registered once at startup, so an IDE trust change does not retroactively arm or silence them — reopen the `/hooks` menu or restart to apply it. Non-interactive sessions (`--prompt`/`-p`, piped stdin, ACP/SDK embeddings) follow the same either-or rule; there is no implicit-trust exemption. A fresh default environment with neither an approval nor a trust decision executes no repository hooks; a headless run prints one stderr line when hooks are withheld. Platform embedders record the approval in the home they manage, or enable the feature and pre-trust their directories (a single `TRUST_PARENT` entry can cover a workspace tree). A reload that changes the project hooks asks for approval again. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
 
 ### Agent frontmatter scope
 
@@ -45,6 +45,12 @@ its `SubagentStart` and `SubagentStop` events. They do not inherit into nested
 agents or run for parents and siblings. Global settings hooks and session-wide
 skill/function hooks retain their existing scope. Project-agent hooks recheck
 the trust of the workspace that supplied the agent before every event.
+
+Project skill and agent frontmatter hooks require **explicit folder trust**:
+enable `security.folderTrust.enabled` in user settings and trust the directory,
+or grant workspace trust through your IDE. Disabling folder trust does not
+authorize frontmatter hooks, including in YOLO mode. Their instructions still
+load. User and bundled frontmatter hooks keep their existing behavior.
 
 Use `SubagentStop` for agent completion; `Stop` is not automatically remapped.
 Move an agent hook to settings if it should observe the whole session.
@@ -364,30 +370,31 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                 | Triggered When                                                         | Matcher Target                                                   |
-| :-------------------- | :--------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `PreToolUse`          | Before tool execution                                                  | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.)   |
-| `PostToolUse`         | After successful tool execution                                        | Tool id                                                          |
-| `PostToolUseFailure`  | After tool execution fails                                             | Tool id                                                          |
-| `PostToolBatch`       | Once after every tool call in a batch has resolved                     | None (always fires)                                              |
-| `UserPromptSubmit`    | Before supported model invocations                                     | None                                                             |
-| `UserPromptExpansion` | After a slash command expands into a prompt, before the prompt is sent | Command name, without the leading `/`                            |
-| `SessionStart`        | When session starts or resumes                                         | Source (`startup`, `resume`, `clear`, `compact`)                 |
-| `SessionEnd`          | When session ends                                                      | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)            |
-| `SessionDelete`       | After an explicitly selected session is deleted                        | None                                                             |
-| `MessageDisplay`      | Repeatedly, as the reply streams                                       | None (always fires)                                              |
-| `Stop`                | Before the turn ends                                                   | None (always fires)                                              |
-| `StopFailure`         | When an API error or loop detection ends the turn, instead of `Stop`   | Error type (`rate_limit`, `server_error`, `loop_detected`, etc.) |
-| `SubagentStart`       | When subagent starts                                                   | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                    |
-| `SubagentStop`        | When subagent stops                                                    | Agent type                                                       |
-| `PreCompact`          | Before conversation compaction                                         | Trigger (`manual`, `auto`)                                       |
-| `PostCompact`         | After conversation compaction succeeds                                 | Trigger (`manual`, `auto`)                                       |
-| `Notification`        | When notifications are sent                                            | Type (`permission_prompt`, `idle_prompt`, `auth_success`)        |
-| `PermissionRequest`   | When permission dialog is shown                                        | Tool id                                                          |
-| `PermissionDenied`    | When AUTO-mode classification denies a tool call                       | Tool id                                                          |
-| `TodoCreated`         | When a new todo item is created                                        | None (always fires)                                              |
-| `TodoCompleted`       | When a todo item is marked as completed                                | None (always fires)                                              |
-| `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded | File path of the loaded file                                     |
+| Event                 | Triggered When                                                               | Matcher Target                                                   |
+| :-------------------- | :--------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `PreToolUse`          | Before tool execution                                                        | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.)   |
+| `PostToolUse`         | After successful tool execution                                              | Tool id                                                          |
+| `PostToolUseFailure`  | After tool execution fails                                                   | Tool id                                                          |
+| `PostToolBatch`       | Once after every tool call in a batch has resolved                           | None (always fires)                                              |
+| `UserPromptSubmit`    | Before a fresh user message enters the model                                 | None                                                             |
+| `UserPromptExpansion` | After a slash command expands into a prompt, before the prompt is sent       | Command name, without the leading `/`                            |
+| `SessionStart`        | When session starts or resumes                                               | Source (`startup`, `resume`, `clear`, `compact`)                 |
+| `SessionEnd`          | When session ends                                                            | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)            |
+| `SessionDelete`       | After an explicitly selected session is deleted                              | None                                                             |
+| `MessageDisplay`      | Repeatedly, as the reply streams                                             | None (always fires)                                              |
+| `Stop`                | Before the turn ends                                                         | None (always fires)                                              |
+| `StopFailure`         | When an API error or a `loop_detected` stop ends the turn, instead of `Stop` | Error type (`rate_limit`, `server_error`, `loop_detected`, etc.) |
+| `SubagentStart`       | When subagent starts                                                         | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                    |
+| `SubagentStop`        | When subagent stops                                                          | Agent type                                                       |
+| `PreCompact`          | Before conversation compaction                                               | Trigger (`manual`, `auto`)                                       |
+| `PostCompact`         | After conversation compaction succeeds                                       | Trigger (`manual`, `auto`)                                       |
+| `Notification`        | When notifications are sent                                                  | Type (`permission_prompt`, `idle_prompt`, `auth_success`)        |
+| `PermissionRequest`   | When permission dialog is shown                                              | Tool id                                                          |
+| `PermissionDenied`    | When AUTO-mode classification denies a tool call                             | Tool id                                                          |
+| `TodoCreated`         | When a new todo item is created                                              | None (always fires)                                              |
+| `TodoCompleted`       | When a todo item is marked as completed                                      | None (always fires)                                              |
+| `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded       | File path of the loaded file                                     |
+| `FileChanged`         | After an explicitly watched file is added, modified, or deleted              | Basename of the changed file                                     |
 
 ### Matcher Patterns
 
@@ -410,6 +417,9 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Stop Events         | `StopFailure`                                                                              | ✅ Regex        | Error type: `rate_limit`, `authentication_failed`, `billing_error`, `invalid_request`, `server_error`, `max_output_tokens`, `loop_detected`, `unknown` |
 | Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                                                                                                                    |
 | Instruction Events  | `InstructionsLoaded`                                                                       | ✅ Regex        | File path of the loaded file                                                                                                                           |
+| File Events         | `FileChanged`                                                                              | ✅ Regex        | Basename of the changed file                                                                                                                           |
+
+For `FileChanged`, registering static paths uses literal filenames in cwd; filtering events uses the basename and the rules below. See [FileChanged hooks](file-changed-hooks.md) for dynamic files and recursive directories.
 
 **Matcher Syntax:**
 
@@ -525,6 +535,14 @@ Hook output supports three categories of fields:
 2. **Top-level Decision**: `decision`, `reason` (used by some events)
 3. **Event-specific Control**: `hookSpecificOutput` (must include `hookEventName`)
 
+On the shared agent loop, `continue: false` on `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, or `PostToolBatch` ends the current turn. The batch finishes, its results stay in the conversation, and the model receives no further request in that turn. In a subagent, the parent receives the reason and can continue. An autonomous Goal can start another turn. To suspend the Goal, pause it.
+
+Interactive terminals and ACP clients show `stopReason` (or `reason`). Headless text mode prints the notice to stderr. Headless `json` and `stream-json` finish the turn without a stop notice.
+
+When the same hook output also blocks (`decision: "block"` or `"deny"`, a PreToolUse `permissionDecision: "deny"`, or exit code 2), the blocking decision takes precedence and the turn can continue. The turn can also continue on legacy loops (`experimental.unifiedAgentLoop: false`), in the Hosted Harness, and for an ACP `ask_user_question` call restored after a daemon restart. Those paths have their own continuation handling.
+
+If a tool uses an Omni media policy while running or preparing its result, a hook on the policy's tool call can end the enclosing turn after the batch. A policy can also run while expanding a user's `@file` or retrying a provider request, before any tool batch owns the call. In those cases, a stop on the policy call follows the policy's failure handling.
+
 ```json
 {
   "continue": true,
@@ -607,6 +625,8 @@ In Code Mode (`tools.codeModeOnly`), a call made from an `exec` script returns i
 
 A PermissionRequest hook's `decision.updatedInput` is checked the same way: one that is not a JSON object stops the call, and a replacement is validated and checked against the permission rules before it runs, and the hook's `"allow"` counts only as the approval of that replacement. A replacement that needs a decision the hook cannot make, such as an answer from the user, goes to the approval prompt instead; in ACP sessions it is not run. In AUTO mode, a replacement is reviewed again before it runs.
 
+`continue: false` without a deny stops the call before it runs; its result is the error `stopReason`. The other calls of the batch still run, and then the turn ends.
+
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
 **Example Output**:
@@ -645,6 +665,7 @@ A PermissionRequest hook's `decision.updatedInput` is checked the same way: one 
 - `decision`: "allow", "deny", "block" (defaults to "allow" if not specified)
 - `reason`: reason for the decision
 - `hookSpecificOutput.additionalContext`: additional information to be included
+- `continue: false`: the tool's result is kept, and the turn ends after the batch. Together with `decision: "block"` or `"deny"`, the result is instead replaced by an error carrying `stopReason`, and the turn goes on.
 
 **Example Output**:
 
@@ -680,6 +701,7 @@ A PermissionRequest hook's `decision.updatedInput` is checked the same way: one 
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: error handling information, appended after the error in the tool result the model sees next. This applies both when the tool returns an error and when it throws. For a call made from a Code Mode `exec` script, it goes to the `exec` call's result instead (see [PreToolUse](#pretooluse)). `<` and `>` are escaped.
+- `continue: false`: the turn ends after the batch (see [Hook Output Structure](#hook-output-structure)). It has no effect when the call was interrupted.
 - Standard hook output fields
 
 **Example Output**:
@@ -719,8 +741,9 @@ A PermissionRequest hook's `decision.updatedInput` is checked the same way: one 
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: appended to the result of the last call in the batch, after a blank line. `<` and `>` are escaped.
-- `decision`: `"block"` or `"deny"` stops the batch, and so does `continue: false` or exit code 2. The last call's result is replaced by an error that carries `stopReason`, or `reason` when there is no `stopReason`. The other results are kept, and `additionalContext` is still appended.
-- `stopReason` / `reason`: the text of that error.
+- `decision`: `"block"` or `"deny"` stops the batch, and so does exit code 2. The last call's result is replaced by an error that carries `stopReason`, or `reason` when there is no `stopReason`. The other results are kept, `additionalContext` is still appended, and the turn goes on.
+- `continue: false` without a blocking decision keeps every result and ends the turn.
+- `stopReason` / `reason`: the text of that error, or of the notice when the turn ends.
 
 If the hooks fail, or do not finish within 15 seconds, the batch continues with its results unchanged.
 
@@ -739,22 +762,32 @@ If the hooks fail, or do not finish within 15 seconds, the batch continues with 
 
 #### UserPromptSubmit
 
-**Purpose**: Executed before supported model invocations to validate, block, or enrich their input. On the core/headless path, the event currently covers `UserQuery`, `ToolResult`, and `Hook` sends, while `Retry`, `Steer`, `Cron`, `Notification`, and `Teammate` sends are skipped. It can therefore occur on continuation paths, and `prompt` must not be assumed to be raw user input. The ACP session path has its own invocation policy: retries and newly dispatched background tasks can still invoke legacy hooks; continue, restored-question, and runtime-goal turns do not.
+**Purpose**: Runs once when admitting a fresh user message, including a user message steered into an active turn. It can validate, block, or enrich that message. Tool results, Stop-driven continuations, model-request retries, and automated prompts skip the event. If a hook blocks a steering message, tool results in the same continuation can still proceed. ACP cancellation can preserve a message that the host has already delivered. This history operation skips the event.
+
+Set `"enableDelegatedPromptHooks": true` in the receiving workspace's `.qwen/settings.json` and restart its sessions to check messages sent from another session via `create_sub_session` or `/send`. With this setting enabled, delegated text that starts with a slash is handled as message text. The setting defaults to `false`. Scheduled task runs skip the event.
 
 **Event-specific fields**:
 
 ```json
 {
   "prompt": "legacy prompt for this invocation; semantics depend on the execution path",
-  "submitted_prompt": "optional user text captured at a supported submission boundary"
+  "submitted_prompt": "optional user text captured at a supported submission boundary",
+  "source": {
+    "session_id": "the session that sent this prompt (optional)",
+    "cwd": "that session's workspace"
+  }
 }
 ```
 
-`submitted_prompt` is optional. It is present on supported interactive TUI submissions and first-turn headless `UserQuery` sends. On the ACP session path used by ACP clients, `serve`, and daemon hosts, a fresh turn must carry an explicit submission declaration. Missing, non-string, empty, or whitespace-only declarations omit the field; the value is never reconstructed from `prompt` or a display label. Retries, continuations, and channel-classified turns omit it. The channel exclusion includes both automated events and human messages relayed through channel adapters.
+`source` is present only on a prompt that another session sent. It names the sending session and its workspace. The event's own `session_id` and `cwd` belong to the receiving session. The daemon sets this field, and a prompt request cannot supply it. Such a prompt omits `submitted_prompt`. If a hook blocks it, the first-turn result has stop reason `blocked`, and any `sent` completion notification reports failure.
 
-Web Shell provides the original composer text at its submission boundary. Realtime voice handoffs do not declare provenance because their request text comes from model-generated tool arguments. Other ACP/daemon SDK clients can opt in per request with `_meta: { "qwen.submittedPrompt": "original submitted text" }`, captured before resource or model-only expansion. Existing clients without this declaration continue running legacy hooks but do not trigger provenance-gated Auto Recall. Do not add the declaration globally to an SDK transport: scheduled tasks, Live task runs, sub-session spawns, model-authored cross-session messages, and promoted mid-turn messages must not acquire it automatically. The private `qwen.daemon.submittedPrompt` key is reserved for the daemon-to-child hop and is stripped from external callers. These declarations are caller-supplied provenance, not proof of human authorship or authorization.
+`submitted_prompt` is optional. It is present on supported interactive TUI submissions and first-turn headless `UserQuery` sends. On the ACP session path used by ACP clients, `serve`, and daemon hosts, a fresh turn includes this field when it carries an explicit nonblank string declaration. Its value comes from the declaration, independently of `prompt` or a display label. Channel-classified turns omit this field, including human messages relayed through channel adapters.
+
+Web Shell provides the original composer text at its submission boundary. Realtime voice handoffs omit the declaration because their request text comes from model-generated tool arguments. Other ACP/daemon SDK clients can opt in per request with `_meta: { "qwen.submittedPrompt": "original submitted text" }`, captured before resource or model-only expansion. An eligible user message with a missing declaration still runs the hook. Provenance-gated consumers such as Auto Recall require the declaration. The private `qwen.daemon.submittedPrompt` key is reserved for the daemon-to-child hop and is stripped from external callers.
 
 On the ACP path, the initial legacy `prompt` is the request's text blocks joined with a space before resource, attachment, slash-command, or model-only expansion. It does not expose the complete expanded model input. `submitted_prompt` can equal that text, but comes only from the explicit declaration and preserves its original whitespace. On the core/headless path, legacy `prompt` represents the current model-bound text for the hook invocation. Neither field is a complete DLP inspection surface.
+
+In headless runs, an input that invokes a custom command or skill, including several stacked skills, is checked before the command expands. The hook runs once for that input, with `prompt` and `submitted_prompt` both set to the raw input, such as `/deploy staging`. A block stops the command before it runs: its `!{...}` shell commands do not run, a skill does not register its allowed tools or hooks, and no model request is made. When the input is allowed, its `additionalContext` is added once to the expanded prompt, and `UserPromptExpansion` still runs after the expansion. Hooks that the skill registers do not check the input that invoked it. Other slash commands, MCP prompts and saved workflows, and the interactive UI and ACP sessions, still run the hook on the expanded prompt.
 
 The following composer rules apply to the interactive TUI, not to ACP clients. Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Prompt, command, and shell-history navigation or selected search matches, cross-restart stash restores, and conversation rewind restores also omit it because those paths can surface model-bound text without its original provenance. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
 
@@ -823,7 +856,7 @@ recall both use the pre-hook prompt. They do not include
 - `reason`: human-readable explanation for the decision
 - `hookSpecificOutput.additionalContext`: additional context to append to the prompt (optional)
 
-When sent to the model, injected `additionalContext` is appended as its own message part wrapped in a reserved `<qwen:user-prompt-submit-context>...</qwen:user-prompt-submit-context>` tag, so it stays distinguishable from user-authored text in model history and session transcripts. Angle brackets in hook output are escaped before wrapping, so hook content cannot close or forge the tag. The session transcript also records the user's original prompt text separately; the interactive TUI and the ACP/export transcript-replay path display that original text rather than the injected context.
+When sent to the model, injected `additionalContext` is appended as its own message part wrapped in a reserved `<qwen:user-prompt-submit-context>...</qwen:user-prompt-submit-context>` tag, so it stays distinguishable from user-authored text in model history and session transcripts. Angle brackets in hook output are escaped before wrapping, so hook content cannot close or forge the tag. The session transcript also records the user's original prompt text separately; the interactive TUI and the ACP/export transcript-replay path display that original text rather than the injected context. If the sanitized payload is byte-identical to a block a hook already delivered earlier in the same session, it is not appended again, so a deterministic standing instruction reaches the model once rather than once per turn; this is unconditional with no opt-out, and any change to the payload re-injects it.
 
 **Note**: Since UserPromptSubmitOutput extends HookOutput, all standard fields are available but only additionalContext in hookSpecificOutput is specifically defined for this event.
 
@@ -894,6 +927,7 @@ A command hook that exits 0 with plain-text `stdout` has that text treated as `a
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: context to be available in the session
+- `hookSpecificOutput.watchPaths`: absolute files or recursive directories to watch for `FileChanged`, from synchronous output with `hookEventName: "SessionStart"`. See [FileChanged path registration](file-changed-hooks.md#watch-directories-and-paths-outside-cwd) for replacement, clearing, and validation rules.
 - Standard hook output fields
 
 **Example Output**:
@@ -985,10 +1019,10 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 **Output Options**:
 
-- `decision`: "allow", "deny", "block", or "ask"
-- `reason`: human-readable explanation for the decision
-- `stopReason`: feedback to include in the stop response
-- `continue`: set to false to stop execution
+- Set `decision` to `"block"` or `"deny"` to keep Qwen working. A command hook can also keep Qwen working by exiting with code 2.
+- `reason`: the instruction Qwen continues with when the hook blocks
+- `continue`: `false` ends the turn. When the hook also blocks, the block wins and Qwen keeps working
+- When the hook blocks, `stopReason` takes precedence over `reason`. With `continue: false` and no block, the interactive CLI and non-interactive text mode show the reason as a notice. ACP sends the reason in `_meta.stopReason` on an empty `agent_message_chunk` with `_meta.source` set to `stop_hook_notice`.
 - `hookSpecificOutput.additionalContext`: additional context information
 
 **Note**: Since StopOutput extends HookOutput, all standard fields are available but the stopReason field is particularly relevant for this event.
@@ -1006,7 +1040,7 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 #### StopFailure
 
-**Purpose**: Runs instead of `Stop` when an API error or loop detection ends the turn. API errors fire it in the interactive UI and in ACP sessions, but not in headless (`-p`) runs. Loop detection fires it in the interactive UI and in headless runs, but not in ACP sessions. This is a **fire-and-forget** event: Qwen does not wait for the hooks, and their output and exit codes are ignored.
+**Purpose**: Runs instead of `Stop` when an API error or a `loop_detected` stop ends the turn. A `loop_detected` stop is an explicit `model.maxToolCallsPerTurn` being exceeded or a provider replaying an answered tool call id. API errors fire it in the interactive UI and in ACP sessions, but not in headless (`-p`) runs. A `loop_detected` stop fires it in the interactive UI and in headless runs, but not in ACP sessions. This is a **fire-and-forget** event: Qwen does not wait for the hooks, and their output and exit codes are ignored.
 
 **Event-specific fields**:
 
@@ -1112,8 +1146,10 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 
 **Output Options**:
 
-- `decision`: "allow", "deny", "block", or "ask"
-- `reason`: human-readable explanation for the decision
+- Set `decision` to `"block"` or `"deny"` to keep the subagent working. A command hook can also keep it working by exiting with code 2.
+- `reason`: the instruction the subagent continues with when the hook blocks
+- `stopReason`: when the hook blocks, used instead of `reason`
+- `continue`: `false` without a block lets the subagent stop
 
 **Example Output**:
 
@@ -1250,7 +1286,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 - `hookSpecificOutput.decision`: structured object with permission decision details:
   - `behavior`: "allow" or "deny"
   - `updatedInput`: modified tool input (optional)
-  - `updatedPermissions`: modified permissions (optional)
+  - `updatedPermissions`: permission rules to add when the hook allows the call (optional, see below)
   - `message`: message to show to user (optional)
   - `interrupt`: whether to interrupt the workflow (optional)
 
@@ -1267,6 +1303,32 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
   }
 }
 ```
+
+**Adding permission rules**: when the hook allows the call, each `updatedPermissions` entry of type `addRules` adds rules the same way an "Always allow" choice does, so later matching calls are decided without asking again:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PermissionRequest",
+    "decision": {
+      "behavior": "allow",
+      "updatedPermissions": [
+        {
+          "type": "addRules",
+          "rules": [{ "toolName": "Bash", "ruleContent": "npm test" }],
+          "behavior": "allow",
+          "destination": "session"
+        }
+      ]
+    }
+  }
+}
+```
+
+- `rules`: each `{ toolName, ruleContent }` becomes the permission rule `toolName(ruleContent)`, or `toolName` when `ruleContent` is omitted. If present, `ruleContent` must be a non-blank string. Tool names follow the same rules as `permissions` settings, so `Bash` and `run_shell_command` both work.
+- `behavior`: `"allow"`, `"deny"` or `"ask"`.
+- `destination`: `"session"` keeps the rules in memory for this session. `"projectSettings"` and `"localSettings"` write them to the project's `.qwen/settings.json`, and `"userSettings"` to `~/.qwen/settings.json`. Standalone sessions skip both project destinations.
+- Entries apply when the merged hook decision grants the final tool input and the call passes its pre-execution checks. A call that requires human approval does not apply hook permission updates. Unsupported entry types such as `setMode` or `replaceRules` are skipped.
 
 #### PermissionDenied
 
@@ -1518,9 +1580,38 @@ It fires when the session starts, when context files are reloaded during the ses
 
 - **None** - InstructionsLoaded output and exit codes are ignored.
 
+#### FileChanged
+
+**Purpose**: Observes additions, modifications, and deletions of explicitly watched files in local, non-managed sessions. Changes may come from Qwen Code, shell commands, editors, or other processes. The common input fields identify the listening session, including when another session writes a shared directory.
+
+**Matcher**: Filters against the file basename using the existing matcher rules. Literal cwd filenames separated by `|` also register static paths. Omitted or empty matchers, `*`, and `.*` register no static paths; they receive events from the session's watched paths, including dynamically registered paths.
+
+**Event-specific fields**:
+
+```json
+{
+  "file_path": "/home/me/work/demo/.envrc",
+  "event": "change"
+}
+```
+
+`file_path` is absolute. `event` is `add`, `change`, or `unlink`. The initial directory scan is not replayed, but native filesystem events from a recent write may arrive after registration. Symbolic links are not traversed; register the real directory root. Notifications are best effort after writes settle. Hook output cannot veto or undo a write or add model context.
+
+**Output Options**:
+
+- Successful synchronous `hookSpecificOutput.watchPaths`, with `hookEventName: "FileChanged"`, replaces the dynamic watch list with absolute files or recursive directories. The last valid, explicit list in hook execution order wins; `[]` clears it, while omitted or invalid lists leave it unchanged. Async output does not register paths. Static registrations remain active.
+
+See [FileChanged hooks](file-changed-hooks.md) for configuration, a memory-directory example, session ownership, and self-trigger and delivery limits. Memory directories are watched only when explicitly registered; there is no dedicated auto-memory enable/disable event.
+
 ## Hook Configuration
 
 Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
+
+### Approving project hooks
+
+Hooks in a project's `.qwen/settings.json` are commands written by whoever controls the repository, and they run with your privileges. Like a project MCP server, they do not run until you approve them: the first time Qwen Code starts in a workspace that declares hooks, it lists them (with their environment settings, headers, prompt text and model) and asks whether to approve or reject them; Esc postpones the decision to the next start, and `/hooks` then lists them without asking. The decision is saved in `~/.qwen/hookApprovals.json` and is bound to the exact hooks configuration you reviewed and to the workspace's own `.env` files and `settings.env`, so an edit to the project hooks, or to any of those values, asks again. A rejected configuration stays unloaded and is not asked about again until it changes; to reconsider sooner, remove its entry from that file and open `/hooks` (or restart Qwen Code). A project `.env` cannot relocate the file. Hooks declared in a project skill's or subagent's frontmatter are not covered by this approval yet: they need explicit folder trust instead (see [Agent frontmatter scope](#agent-frontmatter-scope)).
+
+The approval applies whether or not [Trusted Folders](../configuration/trusted-folders.md) is enabled, because a trusted folder means its settings are read, not that every command in them was reviewed. Approval is itself execution authority: an approved block runs even with the folder-trust feature off. Without an approval, an interactive session falls back to explicit folder trust, and a block with neither authority stays withheld with a startup warning. With `security.folderTrust.enabled` on and the folder untrusted, workspace settings do not load at all and the approval dialog cannot appear — trust the folder first. Only `--yolo` or `--approval-mode yolo` on the command line skips the prompt, and only while the session stays in YOLO mode: non-interactive YOLO runs then load project hooks as approved, while interactive YOLO sessions still follow the folder-trust rule. A YOLO approval mode set in settings does not skip the prompt, because a repository's own settings could set it. No approval is asked for while `disableAllHooks`, `--safe-mode` or `--bare` turns hooks off. Non-interactive runs (`-p`, `--acp`) never prompt: unapproved project hooks stay unloaded and `qwen -p` prints a warning on stderr; run Qwen Code interactively in the folder once to approve them. While project hooks are withheld, the `/hooks` browser lists them as not approved or as rejected when a decision is pending, and as untrusted when only the folder-trust gate withholds them.
 
 > [!NOTE]
 > A hook must include a name field to be enabled or disabled individually at runtime. Hooks without a name will always execute when their event and matcher conditions are met.
@@ -1575,7 +1666,7 @@ Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-runn
 **Features:**
 
 - Cannot return decision control (the event continues as soon as the hook starts)
-- Output is not delivered yet: `systemMessage`, `additionalContext` and plain `stdout` from an async hook are neither shown to the user nor added to the model context. The debug log records only that the hook started, completed or failed. Delivering this output is planned.
+- Output is delivered to the model: when an async hook completes, its `additionalContext`, `systemMessage`, plain `stdout` and `stderr` are drained into the next request as a `<qwen:async-hook-context>` block, on sessions whose model round sends through the main client (headless, the TUIs, and ACP with the unified agent loop enabled), and on the ACP default legacy round's own session-chat send. Hiding the block from the user-facing transcript projection and giving it resume provenance are follow-ups. The debug log also records that the hook started, completed or failed. The drained block is capped at 10,000 characters: notification messages (`systemMessage`, `stderr`, errors and warnings) are reserved first, and the `additionalContext` is truncated to the remaining budget — marked with a `[async hook context truncated]` notice. A message half that is itself too large is cut too, marked with a `[async hook message truncated]` notice, and a large message half can squeeze or even fully displace the context down to its notice. Output past the cap is discarded before the block is added to the request.
 - Suitable for side effects such as auditing, logging and background tests that write their results somewhere you can read them
 - Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (60 seconds by default). While all 10 slots are in use, a new async hook is skipped
 
@@ -1606,7 +1697,10 @@ Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-runn
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 if [[ "$FILE_PATH" != *.ts && "$FILE_PATH" != *.js ]]; then exit 0; fi
-# Async hook output is not shown yet, so write the result to a file.
+# Write the result to a file for a durable record. Plain-text (non-JSON) stdout
+# is also delivered to the model on the next request; JSON stdout is delivered
+# only through its systemMessage or hookSpecificOutput.additionalContext fields
+# (see above).
 LOG=/tmp/qwen-async-tests.log
 if npm test >"$LOG" 2>&1; then
   echo "Tests passed after editing $FILE_PATH" >>"$LOG"
@@ -1618,7 +1712,7 @@ fi
 ### Security Model
 
 - Hooks run in the user's environment with user privileges
-- Project-level hooks require trusted folder status
+- Project-level hooks in `.qwen/settings.json` run with either authority, in every mode: your approval of the exact hooks configuration (see [Approving project hooks](#approving-project-hooks)) or explicit folder trust (enable `security.folderTrust.enabled` and trust the folder, or grant IDE workspace trust). Non-interactive sessions (`-p`, piped stdin, ACP/SDK) follow the same rule — there is no implicit-trust exemption; embedders record approvals or pre-trust their managed directories. Hooks in project skill or subagent frontmatter need explicit folder trust
 - Timeouts prevent hanging hooks (default: 60 seconds for command hooks)
 
 ## Best Practices
@@ -1774,15 +1868,93 @@ if len(user_prompt) > 1000:
 sys.exit(0)
 ```
 
+### Example 4: A Repeated-Call Guard
+
+Qwen Code does not judge whether the model is looping. This `PreToolUse` hook reminds the model after three consecutive identical calls in a turn and requests a stop on the sixth. The [shared agent loop](#hook-output-structure) ends the turn after the batch. Legacy loops can continue. The hook keeps a separate count for each `prompt_id` and skips calls that lack one.
+
+**repeat_guard.py**
+
+```python
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+
+data = json.load(sys.stdin)
+prompt_id = data.get("prompt_id")
+if not prompt_id:
+    sys.exit(0)
+
+key = hashlib.sha256(
+    json.dumps([data["tool_name"], data["tool_input"]], sort_keys=True).encode()
+).hexdigest()
+session_key = hashlib.sha256(data["session_id"].encode()).hexdigest()
+state_path = os.path.join(
+    tempfile.gettempdir(), f"qwen-repeat-guard-{session_key}.sqlite3"
+)
+
+with sqlite3.connect(state_path) as db:
+    # Serialize the read and update across concurrent hook processes.
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("""CREATE TABLE IF NOT EXISTS streaks (
+        prompt_id TEXT PRIMARY KEY, call_key TEXT NOT NULL, count INTEGER NOT NULL
+    )""")
+    previous = db.execute(
+        "SELECT call_key, count FROM streaks WHERE prompt_id = ?", (prompt_id,)
+    ).fetchone()
+    count = previous[1] + 1 if previous and previous[0] == key else 1
+    db.execute(
+        "INSERT OR REPLACE INTO streaks (prompt_id, call_key, count) VALUES (?, ?, ?)",
+        (prompt_id, key, count),
+    )
+
+if count >= 6:
+    print(json.dumps({
+        "continue": False,
+        "stopReason": f"{data['tool_name']} was called {count} times in a row with the same input.",
+    }))
+elif count >= 3:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": f"{data['tool_name']} has been called {count} times in a row with the same input. Use the result you already have or change the approach.",
+        }
+    }))
+sys.exit(0)
+```
+
+Configure it for every tool:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/repeat_guard.py",
+            "name": "repeat-guard"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ## Troubleshooting
 
 ### A hook does not fire
 
-1. **Event name.** The key must be one of the events in [Hook Events](#hook-events), spelled exactly, including case. An unknown event name is skipped with the warning `Invalid hook event name`.
-2. **Matcher.** Tool events match the runtime tool id, such as `run_shell_command` or `write_file`, or an accepted alias such as Claude Code's `Bash` or `Write` (see [Matcher Patterns](#matcher-patterns)). On events without matcher support, `matcher` is ignored.
-3. **Folder trust.** Hooks in a project's `.qwen/settings.json` load only when the folder is trusted. User hooks load regardless of folder trust.
-4. **Hooks disabled.** `"disableAllHooks": true`, `--safe-mode` (or `QWEN_CODE_SAFE_MODE`) and `--bare` (or `QWEN_CODE_SIMPLE`) turn off all hooks, including user hooks.
-5. **Debug log.** Start Qwen Code with `--debug`, or set `QWEN_DEBUG_LOG_FILE=1`, then read the session log at `~/.qwen/debug/latest` (under `$QWEN_RUNTIME_DIR` when that is set). Each line is tagged with a namespace:
+1. **Event name.** The key must be one of the events in [Hook Events](#hook-events), spelled exactly, including case. An unknown event name is skipped with a warning that names it.
+2. **Configuration warnings.** The default Ink terminal UI and headless stderr report hook configuration problems at startup. The terminal UI also shows warnings when `/hooks` reloads the settings and when you approve project hooks. The `/hooks` text listing shows the configuration warnings when no hooks were loaded. Warnings identify the source, event and positions in the loaded list. For system hooks, entries from SystemDefaults come before entries from System settings. Qwen Code skips hooks with missing or unsupported types, hooks missing their required `command`, `url` or `prompt`, and command hooks that set `args` other than an empty list. Fields that are not supported yet, `onFailure`, `asyncRewake`, `if` and `once` (except on HTTP hooks), are ignored with a warning, and the hook still runs. Explicit defaults `asyncRewake: false`, `if: ""` and `once: false` are accepted silently.
+3. **Matcher.** Tool events match the runtime tool id, such as `run_shell_command` or `write_file`, or an accepted alias such as Claude Code's `Bash` or `Write` (see [Matcher Patterns](#matcher-patterns)). On events without matcher support, `matcher` is ignored.
+4. **Folder trust or approval.** Hooks in a project's `.qwen/settings.json` run when you have approved the exact configuration (see [Approving project hooks](#approving-project-hooks)) or the folder is explicitly trusted: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE (see [Trusted Folders](../configuration/trusted-folders.md)). With neither authority they stay withheld in every mode, headless included; with the trust feature on and the folder untrusted, workspace settings do not load at all — trust the folder first. User hooks load regardless of folder trust.
+5. **Hooks disabled.** `"disableAllHooks": true`, `--safe-mode` (or `QWEN_CODE_SAFE_MODE`) and `--bare` (or `QWEN_CODE_SIMPLE`) turn off all hooks, including user hooks.
+6. **Debug log.** Start Qwen Code with `--debug`, or set `QWEN_DEBUG_LOG_FILE=1`, then read the session log at `~/.qwen/debug/latest` (under `$QWEN_RUNTIME_DIR` when that is set). Each line is tagged with a namespace:
    - `[HOOK_REGISTRY]`: `Hook registry initialized with N hook entries`, and hook definitions discarded as invalid
    - `[TRUSTED_HOOKS]`: `Hook <name> started for event <event>` and the matching `ended` line for each run, async hook status, and hook system messages
    - `[HOOK_MATCHER]`: matchers that are not valid regular expressions
@@ -1791,7 +1963,7 @@ sys.exit(0)
 
    Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
 
-6. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls and HTTP security settings require a restart.
+7. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls, HTTP security settings and `security.folderTrust` (including trust-store entries) require a restart. Settings-file project hooks are also registered once, so a later IDE trust grant or revocation applies only after that reload or restart.
 
 ### Other checks
 

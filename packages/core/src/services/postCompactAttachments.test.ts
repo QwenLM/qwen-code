@@ -1,7 +1,10 @@
+import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
 import { extractRecentFilePaths } from './postCompactAttachments.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
 
 function fileReadCall(path: string): Content {
   return {
@@ -589,6 +592,13 @@ describe('buildFileRestorationBlocks', () => {
     expect(text).toContain('reference only');
     // Must instruct the model on how to view the actual content.
     expect(text).toMatch(/use.*read_file|call.*read_file/i);
+    const compacted = await composePostCompactHistory(
+      [fileReadCall(big1), fileReadCall(big2)],
+      'SUMMARY',
+    );
+    expect(
+      getStartupContextLength(compacted, { includeCompressed: true }),
+    ).toBe(4);
   });
 
   it('produces one extra user message per embedded small file with its full content', async () => {
@@ -786,6 +796,28 @@ describe('composePostCompactHistory', () => {
   });
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('keeps restored file and image context in a completed summary turn', async () => {
+    const path = join(tmpDir, 'context.txt');
+    writeFileSync(path, 'Restored file contents.');
+    const image = { inlineData: { mimeType: 'image/png', data: 'AA==' } };
+    const result = await composePostCompactHistory(
+      [fileReadCall(path), { role: 'user', parts: [image] }],
+      'Summary.',
+    );
+    expect(result.map((entry) => entry.role)).toEqual([
+      'user',
+      'model',
+      'user',
+    ]);
+    expect(result[2]?.parts).toContainEqual(image);
+    expect(
+      result[2]?.parts?.some((part) =>
+        part.text?.includes('Restored file contents.'),
+      ),
+    ).toBe(true);
+    expect(detectTurnInterruption(result)).toEqual({ kind: 'none' });
   });
 
   it('returns summary + ack only when history has no files or images', async () => {
@@ -1245,6 +1277,30 @@ describe('composePostCompactHistory', () => {
 });
 
 describe('postProcessSummary', () => {
+  it('replaces copied hints and keeps the path on one exact, escaped line before the trailer', () => {
+    const stale = buildCompactionTranscriptHint('/old/session.jsonl');
+    const directory = '/new/space "quote"\n<line>\u0085\u2028\u202e\u2066';
+    const path = directory + '/file.jsonl';
+    const hint = buildCompactionTranscriptHint(path);
+    const result = postProcessSummary(`Summary\n\n${stale}`, hint);
+
+    const lines = result.split('\n');
+    expect(
+      lines.filter((line) => line.includes('<compaction-transcript-hint>')),
+    ).toEqual([hint]);
+    const literal = /grep_search: (\{.*\})\. Supply a regex/.exec(hint)?.[1];
+    expect(JSON.parse(literal!)).toEqual({
+      path: directory,
+      glob: 'file.jsonl',
+    });
+    expect(hint).not.toContain('<line>');
+    expect(hint).not.toMatch(/[\u0085\u2028\u202e\u2066]/);
+    expect(lines.at(-1)).toMatch(/^Resume the prior task/);
+    expect(postProcessSummary(`Summary\n\n${stale}`)).toBe(
+      postProcessSummary('Summary'),
+    );
+  });
+
   it('returns body + trailer when no <analysis> block is present', () => {
     const out = postProcessSummary('<state_snapshot>body</state_snapshot>');
     expect(out).toContain('<state_snapshot>body</state_snapshot>');
@@ -1364,6 +1420,9 @@ describe('composePostCompactHistory — subagent snapshot', () => {
     expect(flat).toContain('<background-tasks>');
     expect(flat).toContain('agent-1');
     expect(flat).toContain('Run the bookmark-app E2E');
+    expect(getStartupContextLength(result, { includeCompressed: true })).toBe(
+      3,
+    );
     expect(flat).toContain('agent-2');
     expect(flat).toContain('Refactor session manager');
     expect(flat).toMatch(/running/);

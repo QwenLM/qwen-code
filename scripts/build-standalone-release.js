@@ -15,6 +15,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { stageOpenTuiPackages } from './opentui-package-assets.js';
 import {
   TARGET_CLIPBOARD_PACKAGE,
   standaloneArchiveName,
@@ -62,12 +63,16 @@ const RELEASE_TARGETS = [
 // falls back to ink). --include-opentui-preview adds the bun flavor's
 // archives (suffixed -opentui-preview) to the same release directory.
 const DEFAULT_RUNTIME = 'node';
-const DEFAULT_BUN_VERSION = '1.3.14';
+const DEFAULT_BUN_VERSION = '1.4.4';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 // The runtime downloads are the publish job's least reliable leg: one
 // transient download failure aborted the v0.23.4 publish while the
-// unchanged re-run passed. Bound each attempt and retry before failing.
-const MAX_DOWNLOAD_ATTEMPTS = 3;
+// unchanged re-run passed. The v0.26.2-preview.0 archive step aborted the
+// same way: its job log shows three consecutive 504s from the GitHub
+// Releases CDN while downloading the bun darwin-x64 runtime, and the
+// unchanged re-run passed. Five attempts back off to ~75s to ride out
+// longer transient bursts.
+const MAX_DOWNLOAD_ATTEMPTS = 5;
 const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
@@ -143,7 +148,7 @@ async function main() {
     // Node packaging must not install them (nor fail on a missing lockfile
     // entry) at all.
     const opentuiModulesDir = flavors.includes('bun')
-      ? stageOpenTuiPackages(runtimeDir)
+      ? stageOpenTuiPackages(rootDir, runtimeDir, OPENTUI_PLATFORM_PACKAGES)
       : undefined;
 
     for (const flavor of flavors) {
@@ -255,12 +260,16 @@ async function packageTarget({
 // native package version comes from. Only the build host's own platform
 // package is installed, so the installed tree cannot answer for the others.
 let pnpmLockedKeys;
-function readPnpmLockedVersion(packageName) {
+function readPnpmLockedKeys() {
   pnpmLockedKeys ??= Object.keys(
     parseYaml(fs.readFileSync(path.join(rootDir, 'pnpm-lock.yaml'), 'utf8'))
       ?.packages ?? {},
   );
-  const versions = pnpmLockedKeys
+  return pnpmLockedKeys;
+}
+
+function readPnpmLockedVersion(packageName) {
+  const versions = readPnpmLockedKeys()
     .filter((key) => key.startsWith(`${packageName}@`))
     .map((key) => key.slice(packageName.length + 1));
   // Two locked versions would leave the staged one ambiguous; fail instead.
@@ -295,21 +304,23 @@ function readClipboardPackageSpecs() {
 // host — the host's own node_modules only ever carries one platform's
 // prebuild, and getPty() resolves the platform package from node_modules at
 // runtime (#11872). Deriving the list from the root manifest keeps it in sync
-// when a platform pin is added (e.g. linux-arm64).
+// when a platform pin is added (e.g. linux-arm64). The staged version is the
+// root pin itself, not "the only locked one": packages/harness/core locks its
+// own node-pty wrapper, so the lock can carry more than one version.
 function readNodePtyPackageSpecs() {
   const rootPackage = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'),
   );
-  const packageNames = Object.keys(
-    rootPackage.optionalDependencies ?? {},
-  ).filter((packageName) => packageName.startsWith('@lydell/node-pty'));
+  const pins = Object.entries(rootPackage.optionalDependencies ?? {}).filter(
+    ([packageName]) => packageName.startsWith('@lydell/node-pty'),
+  );
 
-  return packageNames.map((packageName) => {
-    const version = readPnpmLockedVersion(packageName);
-    if (!version) {
+  return pins.map(([packageName, version]) => {
+    const spec = `${packageName}@${version}`;
+    if (!readPnpmLockedKeys().includes(spec)) {
       fail(`node-pty package version is not locked for ${packageName}`);
     }
-    return `${packageName}@${version}`;
+    return spec;
   });
 }
 
@@ -336,50 +347,6 @@ function stageNativeModules(runtimeDir) {
       '--no-fund',
       ...readClipboardPackageSpecs(),
       ...readNodePtyPackageSpecs(),
-    ],
-    {
-      cwd: rootDir,
-      stdio: 'inherit',
-    },
-  );
-  return path.join(installDir, 'node_modules');
-}
-
-// Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
-// render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
-// so each standalone archive must ship the matching platform package(s).
-function readOpenTuiPackageSpecs() {
-  return OPENTUI_PLATFORM_PACKAGES.map((packageName) => {
-    const version = readPnpmLockedVersion(packageName);
-    if (!version) {
-      fail(`OpenTUI platform package version is not locked for ${packageName}`);
-    }
-    return `${packageName}@${version}`;
-  });
-}
-
-function stageOpenTuiPackages(runtimeDir) {
-  const installDir = path.join(runtimeDir, 'opentui-modules');
-  fs.mkdirSync(installDir, { recursive: true });
-  console.log('Staging standalone OpenTUI native packages');
-  const npmExecPath = process.env.npm_execpath;
-  if (!npmExecPath) {
-    fail('npm_execpath is unavailable; run package:standalone:release via npm');
-  }
-  execFileSync(
-    process.execPath,
-    [
-      npmExecPath,
-      'install',
-      '--prefix',
-      installDir,
-      '--package-lock=false',
-      '--no-save',
-      '--ignore-scripts',
-      '--force',
-      '--no-audit',
-      '--no-fund',
-      ...readOpenTuiPackageSpecs(),
     ],
     {
       cwd: rootDir,

@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { startRequestLifecycle } from '../../telemetry/request-lifecycle.js';
+import { startModelInvocationObservation } from '../../telemetry/model-observation.js';
 import {
   GenerateContentResponse,
   type Content,
@@ -68,6 +69,7 @@ import {
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
 } from '../../telemetry/tracer.js';
 import { hasUserVisibleContent } from './streamContentDetection.js';
+import { observeRequestDispatch } from './request-dispatch.js';
 import {
   retryContext,
   type RetryAttemptContext,
@@ -108,6 +110,14 @@ function snapshotRetryMetadata(): {
   };
 }
 
+function withStreamContext<T>(scopedContext: Context, run: () => T): T {
+  // Dispatch timing is settled before iteration. Clear the consumer's
+  // observer so later retries stay scoped to this stream.
+  return context.with(scopedContext, () =>
+    observeRequestDispatch(undefined, run),
+  );
+}
+
 function bindAsyncGeneratorToContext<TYield, TReturn, TNext>(
   stream: AsyncGenerator<TYield, TReturn, TNext>,
   scopedContext: Context,
@@ -117,11 +127,11 @@ function bindAsyncGeneratorToContext<TYield, TReturn, TNext>(
   // provider iteration and wrapper-side telemetry retain the request context.
   return {
     next: (...args: [] | [TNext]) =>
-      context.with(scopedContext, () => stream.next(...args)),
+      withStreamContext(scopedContext, () => stream.next(...args)),
     return: (value: TReturn | PromiseLike<TReturn>) =>
-      context.with(scopedContext, () => stream.return(value)),
+      withStreamContext(scopedContext, () => stream.return(value)),
     throw: (error: unknown) =>
-      context.with(scopedContext, () => stream.throw(error)),
+      withStreamContext(scopedContext, () => stream.throw(error)),
     [Symbol.asyncIterator]() {
       return this;
     },
@@ -264,6 +274,8 @@ export class LoggingContentGenerator implements ContentGenerator {
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
     ttftMs?: number,
+    generationMs?: number,
+    firstVisibleOffsetMs?: number,
   ): void {
     const identity = subagentIdentityContext.getStore();
     logApiResponse(
@@ -279,6 +291,8 @@ export class LoggingContentGenerator implements ContentGenerator {
         subagentNameContext.getStore(),
         ttftMs,
         executionId,
+        generationMs,
+        firstVisibleOffsetMs,
       ),
       sessionId,
       identity
@@ -378,6 +392,8 @@ export class LoggingContentGenerator implements ContentGenerator {
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
     ttftMs?: number,
+    generationMs?: number,
+    firstVisibleOffsetMs?: number,
   ): void {
     try {
       this._logApiResponse(
@@ -390,6 +406,8 @@ export class LoggingContentGenerator implements ContentGenerator {
         usageMetadata,
         responseText,
         ttftMs,
+        generationMs,
+        firstVisibleOffsetMs,
       );
     } catch (loggingError) {
       debugLogger.warn('Failed to log API response:', loggingError);
@@ -432,6 +450,14 @@ export class LoggingContentGenerator implements ContentGenerator {
     const spanContext = exchange.context;
 
     const startTime = Date.now();
+    const observation = startModelInvocationObservation({
+      sessionId: ownerSessionId,
+      executionId,
+      model: req.model,
+      authType: this.generatorAuthType,
+      startedAt: startTime,
+      retryAttempt: retrySnapshot.attempt,
+    });
     const session = this.startCaptureSession();
     const lifecycle = startRequestLifecycle(
       this.config,
@@ -463,10 +489,17 @@ export class LoggingContentGenerator implements ContentGenerator {
             requestSessionId,
           );
         }
+        // A nested call must not report dispatch to the enclosing stream.
         const result = await session.wrap(() =>
-          this.wrapped.generateContent(req, userPromptId),
+          observeRequestDispatch(undefined, () =>
+            this.wrapped.generateContent(req, userPromptId),
+          ),
         );
         responseCompleted = true;
+        observation?.update(result.usageMetadata, result.modelVersion);
+        observation?.finish(
+          abortedBeforeResponseCompletion ? 'cancelled' : 'success',
+        );
         lifecycle.finish(
           abortedBeforeResponseCompletion ? 'cancelled' : 'success',
         );
@@ -525,6 +558,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       const cancelled =
         (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
       lifecycle.finish(cancelled ? 'cancelled' : 'error');
+      observation?.finish(cancelled ? 'cancelled' : 'error', error);
       endLLMRequestSpan(llmSpan, {
         success: false,
         cancelled,
@@ -616,6 +650,14 @@ export class LoggingContentGenerator implements ContentGenerator {
     const spanContext = exchange.context;
 
     const startTime = Date.now();
+    const observation = startModelInvocationObservation({
+      sessionId: ownerSessionId,
+      executionId,
+      model: req.model,
+      authType: this.generatorAuthType,
+      startedAt: startTime,
+      retryAttempt: retrySnapshot.attempt,
+    });
     const session = this.startCaptureSession();
     const lifecycle = startRequestLifecycle(
       this.config,
@@ -627,6 +669,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     let streamRequest: {
       stream: AsyncGenerator<GenerateContentResponse>;
       requestIssuedAtMs: number;
+      dispatchedAt: number;
     };
     try {
       runtimeDiagnostics.recordGenerateContentRequest(req, {
@@ -644,12 +687,21 @@ export class LoggingContentGenerator implements ContentGenerator {
           );
         }
         return session.wrap(async () => {
-          const requestIssuedAtMs = performance.now();
-          const stream = await this.wrapped.generateContentStream(
-            req,
-            userPromptId,
+          let requestIssuedAtMs = performance.now();
+          let dispatchedAt: number | undefined;
+          const stream = await observeRequestDispatch(
+            () => {
+              if (dispatchedAt !== undefined) return;
+              dispatchedAt = Date.now();
+              requestIssuedAtMs = performance.now();
+            },
+            () => this.wrapped.generateContentStream(req, userPromptId),
           );
-          return { stream, requestIssuedAtMs };
+          return {
+            stream,
+            requestIssuedAtMs,
+            dispatchedAt: dispatchedAt ?? startTime,
+          };
         });
       });
     } catch (error) {
@@ -670,6 +722,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       const cancelled =
         (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
       lifecycle.finish(cancelled ? 'cancelled' : 'error');
+      observation?.finish(cancelled ? 'cancelled' : 'error', error);
       endLLMRequestSpan(llmSpan, {
         success: false,
         cancelled,
@@ -696,7 +749,8 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     }
-    const { stream, requestIssuedAtMs } = streamRequest;
+    const { stream, requestIssuedAtMs, dispatchedAt } = streamRequest;
+    observation?.touchStream();
 
     const openaiRequestPromise = this.openaiLogger
       ? session.resolve(req).catch((loggingError: unknown) => {
@@ -711,6 +765,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         lifecycle,
         stream,
         startTime,
+        dispatchedAt,
         requestIssuedAtMs,
         userPromptId,
         req.model,
@@ -720,6 +775,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         req.config?.abortSignal,
         retrySnapshot,
         exchange.controller,
+        observation,
       ),
       spanContext,
     );
@@ -732,13 +788,17 @@ export class LoggingContentGenerator implements ContentGenerator {
       return: async (value) => {
         try {
           if (!iterated)
-            await context.with(spanContext, () => stream.return(value));
+            await withStreamContext(spanContext, () => stream.return(value));
           return await wrapped.return(value);
         } catch (error) {
           lifecycle.finish('error');
+          observation?.finish('error', error);
           throw error;
         } finally {
           lifecycle.finish(
+            req.config?.abortSignal?.aborted ? 'cancelled' : 'interrupted',
+          );
+          observation?.finish(
             req.config?.abortSignal?.aborted ? 'cancelled' : 'interrupted',
           );
         }
@@ -746,10 +806,18 @@ export class LoggingContentGenerator implements ContentGenerator {
       throw: async (error) => {
         try {
           if (!iterated) {
-            await context.with(spanContext, () => stream.return(undefined));
+            await withStreamContext(spanContext, () =>
+              stream.return(undefined),
+            );
           }
           return await wrapped.throw(error);
         } catch (actualError) {
+          observation?.finish(
+            req.config?.abortSignal?.aborted && isAbortError(actualError)
+              ? 'cancelled'
+              : 'error',
+            actualError,
+          );
           lifecycle.finish(
             req.config?.abortSignal?.aborted && isAbortError(actualError)
               ? 'cancelled'
@@ -757,6 +825,12 @@ export class LoggingContentGenerator implements ContentGenerator {
           );
           throw actualError;
         } finally {
+          observation?.finish(
+            req.config?.abortSignal?.aborted && isAbortError(error)
+              ? 'cancelled'
+              : 'error',
+            error,
+          );
           lifecycle.finish(
             req.config?.abortSignal?.aborted && isAbortError(error)
               ? 'cancelled'
@@ -798,6 +872,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     lifecycle: ReturnType<typeof startRequestLifecycle>,
     stream: AsyncGenerator<GenerateContentResponse>,
     startTime: number,
+    dispatchedAt: number,
     requestIssuedAtMs: number,
     userPromptId: string,
     model: string,
@@ -814,6 +889,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     // entry-time read.
     retrySnapshot?: ReturnType<typeof snapshotRetryMetadata>,
     exchangeController?: GenAiExchangeController,
+    observation?: ReturnType<typeof startModelInvocationObservation>,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // Skip collecting full responses for internal prompts to avoid memory
@@ -844,15 +920,21 @@ export class LoggingContentGenerator implements ContentGenerator {
     let lastError: unknown;
     const subagentName = subagentNameContext.getStore();
 
-    // Internal first-visible-output timing: wall-clock from the existing
-    // generateContentStream startTime to the first chunk containing
-    // user-visible content. This is distinct from the standard first-chunk
-    // timer above.
+    // Internal first-visible-output timing: wall-clock from the provider's
+    // first request dispatch (startTime when the provider reports none) to
+    // the first chunk containing user-visible content, so request building
+    // is not counted. This is distinct from the standard first-chunk timer
+    // above.
     // Method-local closure variable — NEVER an instance field — because
     // LoggingContentGenerator is shared across concurrent generateContentStream
     // calls (one per ContentGenerator, see contentGenerator.ts:createContentGenerator).
     // See docs/design/telemetry-llm-request-timing-design.md (D1, D2).
     let ttftMs: number | undefined;
+    // From the first to the latest user-visible chunk. Output speed is measured
+    // over this window rather than up to stream end, which also includes the
+    // time the consumer spends on the final chunk.
+    let generationMs: number | undefined;
+    let firstVisibleAt: number | undefined;
     let firstChunkObserved = false;
     // Tracks whether the idle timeout fired and ended the span. If so,
     // a resumed-after-timeout consumer must not call endLLMRequestSpan
@@ -971,16 +1053,31 @@ export class LoggingContentGenerator implements ContentGenerator {
         // content. hasUserVisibleContent skips role-only / usageMetadata-only
         // chunks, so TTFT reflects "model produced something the operator can
         // attribute to user-perceived latency."
-        if (ttftMs === undefined && hasUserVisibleContent(response)) {
-          ttftMs = Date.now() - startTime;
+        if (hasUserVisibleContent(response)) {
+          const now = Date.now();
+          firstVisibleAt ??= now;
+          ttftMs ??= firstVisibleAt - dispatchedAt;
+          generationMs = now - firstVisibleAt;
         }
         resetSpanTimeout?.();
+        observation?.update(lastUsageMetadata, firstModelVersion, {
+          ttftMs,
+          generationMs,
+        });
+        observation?.touchStream();
         yield response;
       }
       abortedBeforeStreamCompletion ||= abortSignal?.aborted === true;
       streamCompleted = true;
       lifecycle.finish(abortedBeforeStreamCompletion ? 'cancelled' : 'success');
       refreshLateUsageMetadata();
+      observation?.update(lastUsageMetadata, firstModelVersion, {
+        ttftMs,
+        generationMs,
+      });
+      observation?.finish(
+        abortedBeforeStreamCompletion ? 'cancelled' : 'success',
+      );
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
         spanEndTimeout = undefined;
@@ -1021,6 +1118,8 @@ export class LoggingContentGenerator implements ContentGenerator {
           lastUsageMetadata,
           streamResponseText,
           ttftMs,
+          generationMs,
+          firstVisibleAt === undefined ? undefined : firstVisibleAt - startTime,
         );
         const openaiRequest = await openaiRequestPromise;
         await this.safelyLogOpenAIInteraction(
@@ -1033,6 +1132,15 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       errorOccurred = true;
       lastError = error;
+      refreshLateUsageMetadata();
+      observation?.update(lastUsageMetadata, firstModelVersion, {
+        ttftMs,
+        generationMs,
+      });
+      observation?.finish(
+        abortSignal?.aborted && isAbortError(error) ? 'cancelled' : 'error',
+        error,
+      );
       abortedBeforeStreamCompletion ||=
         !streamCompleted && abortSignal?.aborted === true;
       lifecycle.finish(
@@ -1086,6 +1194,20 @@ export class LoggingContentGenerator implements ContentGenerator {
         clearTimeout(spanEndTimeout);
       }
       refreshLateUsageMetadata();
+      observation?.update(lastUsageMetadata, firstModelVersion, {
+        ttftMs,
+        generationMs,
+      });
+      observation?.finish(
+        cancelled
+          ? 'cancelled'
+          : errorOccurred
+            ? 'error'
+            : streamCompleted
+              ? 'success'
+              : 'interrupted',
+        lastError,
+      );
       // If the idle timeout already ended the span, skip the redundant
       // endLLMRequestSpan call. The helper itself would no-op due to its
       // own ended guard, but we want to avoid pretending the final token
@@ -1099,6 +1221,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           cancelled,
           ...usageSpanMetadata(lastUsageMetadata),
           ttftMs,
+          requestBuildMs: dispatchedAt - startTime,
           durationMs: Date.now() - startTime,
           error: cancelled
             ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE

@@ -7,6 +7,29 @@ import {
 } from './settings';
 
 describe('settings presentation aliases', () => {
+  it('includes and excludes the Generated UI row through its public alias', () => {
+    expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:generated-ui');
+    expect(
+      isSettingVisible('experimental.generatedUi', {
+        includeItems: ['setting:generated-ui'],
+      }),
+    ).toBe(true);
+    expect(
+      isSettingVisible('experimental.generatedUi', {
+        excludeItems: ['setting:generated-ui'],
+      }),
+    ).toBe(false);
+    expect(
+      isSettingVisible('experimental.generatedUi', {
+        includeItems: WEB_SHELL_SETTING_ITEM_IDS,
+      }),
+    ).toBe(true);
+    expect(
+      isSettingVisible('experimental.generatedUi', {
+        excludeItems: WEB_SHELL_SETTING_ITEM_IDS,
+      }),
+    ).toBe(false);
+  });
   it('maps stable public aliases to configuration keys without accepting raw paths', () => {
     expect(
       isSettingVisible('fastModel', { excludeItems: ['setting:fast-model'] }),
@@ -149,10 +172,12 @@ describe('settings presentation aliases', () => {
     );
     for (const id of [
       'builtin:chat-width',
+      'builtin:arrow-key-history',
       'builtin:browser-notifications',
       'builtin:live-setup',
       'builtin:local-control',
       'builtin:connections',
+      'builtin:archived-sessions',
       'builtin:model-management',
     ]) {
       expect(WEB_SHELL_SETTING_ITEM_IDS).toContain(id);
@@ -216,6 +241,8 @@ describe('settings presentation aliases', () => {
       'setting:git-commit-co-author': 'general.gitCoAuthor.commit',
       'setting:git-pr-co-author': 'general.gitCoAuthor.pr',
       'setting:language': 'general.language',
+      'setting:output-language': 'general.outputLanguage',
+      'setting:display-language': 'general.displayLanguage',
       'setting:prevent-system-sleep': 'general.preventSystemSleep',
       'setting:review-attribution': 'review.attribution',
       'setting:review-sandbox': 'review.sandbox',
@@ -229,6 +256,7 @@ describe('settings presentation aliases', () => {
       'setting:workflow-keyword-trigger': 'ui.disableWorkflowKeywordTrigger',
       'setting:status-in-title': 'ui.showStatusInTitle',
       'setting:response-speed': 'ui.showResponseTokensPerSecond',
+      'setting:loading-phrases': 'ui.accessibility.enableLoadingPhrases',
       'setting:followup-suggestions': 'ui.enableFollowupSuggestions',
       'setting:tool-call-details': 'ui.showToolCallDetails',
       'setting:shell-output-limit': 'ui.shellOutputMaxLines',
@@ -237,6 +265,7 @@ describe('settings presentation aliases', () => {
       'setting:advisor-model': 'advisorModel',
       'setting:advisor-session-call-limit': 'advisorMaxUses',
       'setting:vision-model': 'visionModel',
+      'setting:vision-bridge-timeout': 'visionBridgeTimeoutMs',
       'setting:model-fallbacks': 'modelFallbacks',
       'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
       'setting:respect-qwen-ignore': 'context.fileFiltering.respectQwenIgnore',
@@ -253,12 +282,15 @@ describe('settings presentation aliases', () => {
       'setting:todo-write': 'tools.todoWrite.enabled',
       'setting:interactive-shell': 'tools.shell.enableInteractiveShell',
       'setting:workflows': 'tools.workflowsEnabled',
+      'setting:lsp': 'tools.lspEnabled',
       'setting:workflow-size': 'tools.workflowSizeGuideline',
       'setting:workflow-name-only': 'tools.workflowNameOnly',
       'setting:permission-strategy': 'policy.permissionStrategy',
+      'setting:max-sessions': 'serve.maxSessions',
       'setting:model-proposed-goals': 'goals.modelProposed',
       'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
       'setting:session-workflow': 'experimental.sessionWorkflow',
+      'setting:generated-ui': 'experimental.generatedUi',
       'setting:scheduled-tasks': 'experimental.cron',
       'setting:session-writer-lease': 'experimental.sessionWriterLease',
       'setting:agent-team': 'experimental.agentTeam',
@@ -266,8 +298,14 @@ describe('settings presentation aliases', () => {
       'setting:omni-media-delivery': 'omni.enabled',
       'setting:artifacts': 'experimental.artifact',
       'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
+      'setting:mods': 'experimental.mods',
+      'setting:unified-agent-loop': 'experimental.unifiedAgentLoop',
+      'setting:event-bus-agent-loop': 'experimental.eventBusAgentLoop',
+      'setting:model-availability-tracking':
+        'experimental.modelAvailabilityTracking',
       'setting:voice-model': 'voiceModel',
       'setting:image-model': 'imageModel',
+      'setting:worktree-retention': 'worktree.maxRetained',
     } satisfies Record<string, string>;
     const settingIds = WEB_SHELL_SETTING_ITEM_IDS.filter((id) =>
       id.startsWith('setting:'),

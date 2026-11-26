@@ -21,6 +21,7 @@ import {
   parseManagedCsiBoot,
   type ManagedCsiPodIdentity,
 } from './managed-csi-envelope.js';
+import { CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 
 const fixture = JSON.parse(
   readFileSync(
@@ -32,6 +33,8 @@ const fixture = JSON.parse(
   ready: unknown;
   executionBoot5: unknown;
   executionReady5: unknown;
+  finalizationBoot6: unknown;
+  finalizationReady6: unknown;
   validAuthorityOrigins: string[];
   invalidAuthorityOrigins: string[];
   expectedPod: ManagedCsiPodIdentity;
@@ -43,6 +46,62 @@ const fixture = JSON.parse(
 };
 
 describe('closed CSI file construction contract', () => {
+  it('accepts the independently pinned diagnostics profile and refuses mixed identity', () => {
+    const boot = parseManagedCsiFileBoot(fixture.finalizationBoot6);
+    const next = {
+      ...boot,
+      identity: {
+        ...boot.identity,
+        profile: 'csi-files-retirement/2',
+        capabilityDigest: CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+      },
+      context: {
+        ...boot.context,
+        capabilityDigest: CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+      },
+    };
+    expect(parseManagedCsiFileBoot(next).identity.profile).toBe(
+      'csi-files-retirement/2',
+    );
+    expect(() =>
+      parseManagedCsiFileBoot({ ...next, context: boot.context }),
+    ).toThrow();
+  });
+  it('requires the fixed boot6 finalization pin without upgrading boot4 or boot5', () => {
+    const boot = parseManagedCsiFileBoot(fixture.finalizationBoot6);
+    expect(boot.version).toBe(6);
+    expect(createManagedCsiFileReady(boot, 43190)).toEqual(
+      fixture.finalizationReady6,
+    );
+    expect(createManagedCsiFileAttestationRequest(boot)).toEqual(
+      fixture.attestationRequest,
+    );
+    validateManagedCsiFileAttestationResponse(
+      fixture.attestationResponse,
+      boot,
+      fixture.expectedPod,
+    );
+    for (const finalization of [
+      undefined,
+      null,
+      {},
+      'qwen-csi-file-finalize/2',
+    ])
+      expect(() =>
+        parseManagedCsiFileBoot({ ...boot, finalization }),
+      ).toThrow();
+    for (const version of [4, 5, 7])
+      expect(() => parseManagedCsiFileBoot({ ...boot, version })).toThrow();
+    expect(() =>
+      parseManagedCsiFileBoot({
+        ...(fixture.executionBoot5 as object),
+        version: 6,
+      }),
+    ).toThrow();
+    expect(parseManagedCsiFileBoot(fixture.boot).version).toBe(4);
+    expect(parseManagedCsiFileBoot(fixture.executionBoot5).version).toBe(5);
+  });
+
   it('retains the boot5 authority without exposing it in readiness or changing CSI2 attestation', () => {
     const boot = parseManagedCsiFileBoot(fixture.executionBoot5);
     expect(boot.version).toBe(5);
@@ -92,7 +151,7 @@ describe('closed CSI file construction contract', () => {
     },
   );
 
-  it('matches the proposed authority fixture without broadening legacy boot', () => {
+  it('matches the paired Java producer fixture without broadening legacy boot', () => {
     const boot = parseManagedCsiFileBoot(fixture.boot);
     expect(createManagedCsiFileReady(boot, 43190)).toEqual(fixture.ready);
     expect(createManagedCsiFileAttestationRequest(boot)).toEqual(

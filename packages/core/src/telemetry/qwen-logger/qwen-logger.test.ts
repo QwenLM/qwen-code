@@ -30,6 +30,7 @@ import {
   SubagentExecutionEvent,
   makeGoalStateEvent,
   type ToolCallEvent,
+  ToolResultSizeEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
@@ -264,6 +265,21 @@ describe('QwenLogger', () => {
       const payload = await rumPayload(QwenLogger.getInstance(config)!);
 
       expect(payload.properties?.['base_url']).toBe('https://api.example.com');
+    });
+
+    it.each(['managed', 'daemon', 'desktop', 'SDK', 'VSCode', 'ACP', 'CI'])(
+      'reports the runtime channel %s on properties.channel',
+      async (channel) => {
+        const config = makeFakeConfig({ getChannel: () => channel });
+        const payload = await rumPayload(QwenLogger.getInstance(config)!);
+        expect(payload.properties?.['channel']).toBe(channel);
+      },
+    );
+
+    it('omits properties.channel when the config resolves no channel', async () => {
+      const config = makeFakeConfig({ getChannel: () => undefined });
+      const payload = await rumPayload(QwenLogger.getInstance(config)!);
+      expect(payload.properties?.['channel']).toBeUndefined();
     });
 
     // The source.json cases can only check the payload's shape: exercising
@@ -776,6 +792,9 @@ describe('QwenLogger', () => {
       // sink even when telemetry log prompts are on.
       const callArgs = enqueueSpy.mock.calls[0][0];
       expect(callArgs.properties).not.toHaveProperty('error');
+      const serializedEvent = JSON.stringify(callArgs);
+      expect(serializedEvent).not.toContain('error output');
+      expect(serializedEvent).not.toContain('Command failed');
     });
 
     it.each<[string, Parameters<typeof shortHook>, string]>([
@@ -916,6 +935,40 @@ describe('QwenLogger', () => {
       const rumEvent = enqueueSpy.mock.calls[0][0];
       expect(rumEvent.properties).not.toHaveProperty('function_args');
       expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
+    });
+  });
+
+  describe('logToolResultSizeEvent privacy', () => {
+    it('mirrors size fields without leaking call or prompt correlators', () => {
+      const event = new ToolResultSizeEvent(
+        'shell',
+        'native',
+        'per_tool',
+        40000,
+        12000,
+        10000,
+        3000,
+        true,
+        12000,
+        'per_tool',
+        'call-1',
+        'prompt-1',
+      );
+      const enqueueSpy = expectLogged((l) => l.logToolResultSizeEvent(event), {
+        name: 'tool_result_size',
+        properties: expect.objectContaining({
+          function_name: 'shell',
+          layer: 'per_tool',
+          raw_content_length: 40000,
+          injected_content_length: 12000,
+          truncated: true,
+          applied_budget: 12000,
+          budget_source: 'per_tool',
+        }),
+      });
+      const rumEvent = enqueueSpy.mock.calls[0][0];
+      expect(rumEvent.properties).not.toHaveProperty('call_id');
+      expect(rumEvent.properties).not.toHaveProperty('prompt_id');
     });
   });
 

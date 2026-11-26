@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import request from 'supertest';
 import * as path from 'node:path';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { comparableBridgeOptions } from '../test-utils/bridge-options.js';
@@ -22,6 +23,7 @@ import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRes
 import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
 import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
 import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import type { StartScheduledTaskKeepaliveOptions } from './scheduled-task-keepalive.js';
 
 const WS_BOUND = path.resolve('/work/bound');
 
@@ -47,6 +49,30 @@ function makeBridge(
       return sessionCount;
     },
     getSessionSummary,
+    getDaemonStatusSnapshot: () => ({
+      limits: {
+        maxSessions: 20,
+        maxPendingPromptsPerSession: 5,
+        eventRingSize: 8_000,
+        eventRingMaxBytes: 8 * 1024 * 1024,
+        compactedReplayMaxBytes: 4 * 1024 * 1024,
+        maxJournalEvents: 10_000,
+        maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowth: null,
+        channelIdleTimeoutMs: 0,
+        sessionIdleTimeoutMs: 1_800_000,
+        sessionPromptSettledCloseGraceMs: 0,
+      },
+      sessionCount,
+      pendingPermissionCount: 0,
+      channelLive: true,
+      permissionPolicy: 'first-responder',
+      sessions: [],
+    }),
+    activePromptCount: 0,
+    lastActivityAt: null,
+    isChannelLive: () => true,
+    spawnOrAttach: vi.fn(),
     async shutdown() {},
     killAllSync() {},
   } as unknown as AcpSessionBridge;
@@ -55,17 +81,14 @@ function makeBridge(
 // The ecs-qwen pool runs several jobs at once; under that contention these
 // tests pass alone in milliseconds but blow the 15s ceiling without any
 // real hang. Give that pool the raised budget its other suites already use.
-const timeoutMs = isSlowTestHost() ? 60_000 : 15_000;
+const timeoutMs = isSlowTestHost() ? 60_000 : 30_000;
 vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 describe('createServeApp default bridge wiring', () => {
-  // Every test below resets the module registry and re-imports the full
-  // serve module graph; under heavy parallel CI load that can exceed the
-  // default timeout without any real hang.
-  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
-
   afterEach(() => {
     vi.doUnmock('./acp-session-bridge.js');
+    vi.doUnmock('./scheduled-task-keepalive.js');
+    vi.doUnmock('./server/session-restore.js');
     vi.resetModules();
     vi.restoreAllMocks();
   });
@@ -292,6 +315,7 @@ describe('createServeApp default bridge wiring', () => {
       maxSessions: 7,
       maxPendingPromptsPerSession: 8,
       eventRingSize: 1234,
+      eventRingMaxBytes: 1_234_567,
       compactedReplayMaxBytes: 2_345_678,
       maxJournalEvents: 3456,
       maxJournalBytes: 4_567_890,
@@ -303,7 +327,9 @@ describe('createServeApp default bridge wiring', () => {
       ...enabled,
       experimentalPairedEngines: true,
     });
+    expect(plain.eventRingMaxBytes).toBeUndefined();
     expect(plainEnabled).toMatchObject({
+      eventRingMaxBytes: 1_234_567,
       sessionShellCommandEnabled: true,
       initializeTimeoutMs: 12_345,
       permissionResponseTimeoutMs: 56_789,
@@ -426,6 +452,69 @@ describe('createServeApp default bridge wiring', () => {
     });
   });
 
+  it('reports disabled load admission on the default-bridge path when opted out', async () => {
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const { DISABLED_LOAD_ADMISSION_SNAPSHOT } = await import(
+      './load-admission.js'
+    );
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+        loadAdmission: false,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toEqual(
+      DISABLED_LOAD_ADMISSION_SNAPSHOT,
+    );
+  });
+
+  it('enables load admission by default on the default-bridge path', async () => {
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toMatchObject({
+      enabled: true,
+      overloaded: false,
+    });
+  });
+
   it('wires the effective restore timeout into the direct bridge', async () => {
     const bridgeOptions: BridgeOptions[] = [];
     vi.doMock('./acp-session-bridge.js', async () => {
@@ -505,8 +594,23 @@ describe('createServeApp default bridge wiring', () => {
     // defaults — so boot rehydrate and keepalive revive would preempt a
     // longer in-flight restore while the non-abortable bridge restore keeps
     // running.
-    let rehydrateOpts: { loadTimeoutMs?: number } | undefined;
-    let keepaliveOpts: { reviveTimeoutMs?: number } | undefined;
+    type RestoreSession = StartScheduledTaskKeepaliveOptions['restoreSession'];
+    let rehydrateOpts:
+      | { loadTimeoutMs?: number; restoreSession?: RestoreSession }
+      | undefined;
+    let keepaliveOpts:
+      | { reviveTimeoutMs?: number; restoreSession?: RestoreSession }
+      | undefined;
+    const restoredSession = { sessionId: 'task-session' };
+    const restoreSessionCore = vi
+      .fn()
+      .mockResolvedValue({ kind: 'restored', session: restoredSession });
+    vi.doMock('./server/session-restore.js', async () => ({
+      ...(await vi.importActual<typeof import('./server/session-restore.js')>(
+        './server/session-restore.js',
+      )),
+      restoreSessionCore,
+    }));
     vi.doMock('./scheduled-task-keepalive.js', async () => {
       const actual = await vi.importActual<
         typeof import('./scheduled-task-keepalive.js')
@@ -514,13 +618,13 @@ describe('createServeApp default bridge wiring', () => {
       return {
         ...actual,
         rehydrateScheduledTaskSessions: vi.fn(
-          async (opts: { loadTimeoutMs?: number }) => {
+          async (opts: NonNullable<typeof rehydrateOpts>) => {
             rehydrateOpts = opts;
             return { attempted: 0, restored: 0, failed: 0 };
           },
         ),
         startScheduledTaskKeepalive: vi.fn(
-          (opts: { reviveTimeoutMs?: number }) => {
+          (opts: NonNullable<typeof keepaliveOpts>) => {
             keepaliveOpts = opts;
             return { stop: () => {} };
           },
@@ -538,7 +642,7 @@ describe('createServeApp default bridge wiring', () => {
     });
 
     const { createServeApp } = await import('./server.js');
-    createServeApp(
+    const app = createServeApp(
       {
         port: 0,
         hostname: '127.0.0.1',
@@ -555,6 +659,167 @@ describe('createServeApp default bridge wiring', () => {
 
     expect(rehydrateOpts?.loadTimeoutMs).toBe(expected);
     expect(keepaliveOpts?.reviveTimeoutMs).toBe(expected);
-    vi.doUnmock('./scheduled-task-keepalive.js');
+    const registry = (app.locals as { workspaceRegistry: WorkspaceRegistry })
+      .workspaceRegistry;
+    const runtime = registry.primary;
+    for (const callback of [
+      rehydrateOpts?.restoreSession,
+      keepaliveOpts?.restoreSession,
+    ]) {
+      expect(callback).toBeTypeOf('function');
+      await expect(
+        callback!({
+          sessionId: 'task-session',
+          workspaceCwd: WS_BOUND,
+          sourceType: 'scheduled_task',
+          sourceId: 'task-1',
+        }),
+      ).resolves.toBe(restoredSession);
+      expect(restoreSessionCore).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          action: 'resume',
+          runtime,
+          workspaceCwd: WS_BOUND,
+          sessionId: 'task-session',
+          restoreSource: { sourceType: 'scheduled_task', sourceId: 'task-1' },
+          assertRuntimeGenerationOpen: expect.any(Function),
+        }),
+      );
+    }
+    registry.primaryEntry.current!.guard.close();
+    await expect(
+      keepaliveOpts!.restoreSession!({
+        sessionId: 'task-session',
+        workspaceCwd: WS_BOUND,
+      }),
+    ).rejects.toMatchObject({ code: 'workspace_generation_closed' });
+    expect(restoreSessionCore).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('createServeApp load admission factory injection', () => {
+  it('uses the injected monitor factory and wires its verdict into admission', async () => {
+    const factory = vi.fn(() => ({
+      snapshot: () => ({
+        enabled: true,
+        overloaded: true,
+        reason: 'cpu_load' as const,
+        loadRatio: 3,
+        eventLoopLagP99Ms: 1,
+        sampledAtMs: 1,
+      }),
+      dispose: vi.fn(),
+    }));
+    let captured: Record<string, unknown> | undefined;
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn((opts: Record<string, unknown>) => {
+          captured = opts;
+          return makeBridge();
+        }),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { createLoadAdmissionMonitor: factory },
+    );
+    expect(factory).toHaveBeenCalledTimes(1);
+
+    const admission = captured?.['freshSessionAdmission'] as
+      | ((ctx: { operation: string; workspaceCwd: string }) => unknown)
+      | undefined;
+    expect(admission).toBeTypeOf('function');
+    expect(() =>
+      admission!({ operation: 'spawn', workspaceCwd: WS_BOUND }),
+    ).toThrow('System overloaded');
+
+    // The fake bridge does not enforce admission internally, so the HTTP
+    // refusal is pinned by the real-bridge E2E rig; here the status verdict
+    // proves the injected monitor reaches the app's status projection.
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toMatchObject({
+      enabled: true,
+      overloaded: true,
+      reason: 'cpu_load',
+    });
+  });
+});
+
+describe('createServeApp load admission with injected workspace registry', () => {
+  it('never builds a monitor and reports disabled when a registry is injected', async () => {
+    const factory = vi.fn(() => ({
+      snapshot: () => ({
+        enabled: true,
+        overloaded: true,
+        reason: 'cpu_load' as const,
+        loadRatio: 3,
+        eventLoopLagP99Ms: 1,
+        sampledAtMs: 1,
+      }),
+      dispose: vi.fn(),
+    }));
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const { createWorkspaceRegistry } = await import('./workspace-registry.js');
+    const { ClientMcpSenderRegistry } = await import(
+      './acp-http/client-mcp-sender-registry.js'
+    );
+    const { DISABLED_LOAD_ADMISSION_SNAPSHOT } = await import(
+      './load-admission.js'
+    );
+    const registry = createWorkspaceRegistry([
+      {
+        workspaceId: 'primary',
+        workspaceCwd: WS_BOUND,
+        sessionRuntimeBaseDir: '/tmp/wiring-registry-runtime',
+        primary: true,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: makeBridge(),
+        workspaceService: {} as never,
+        routeFileSystemFactory: {} as never,
+        clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+      } as never,
+    ]);
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { createLoadAdmissionMonitor: factory, workspaceRegistry: registry },
+    );
+    expect(factory).not.toHaveBeenCalled();
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toEqual(
+      DISABLED_LOAD_ADMISSION_SNAPSHOT,
+    );
   });
 });

@@ -1,9 +1,12 @@
+import { ManagedExtensionsManagerPage } from '../managed/ManagedExtensionsManagerPage';
+import type { ManagedAgentProvider } from '../managed/managed-agent-provider';
 import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type Ref,
 } from 'react';
 import {
@@ -145,9 +148,16 @@ type PendingInteractionState = {
 const UPDATE_AVAILABLE: DaemonExtensionUpdateState = 'update available';
 
 interface ExtensionsManagerPageProps {
+  managed?: {
+    provider: ManagedAgentProvider;
+    workspaceId?: string;
+    sessionId?: string;
+  };
   onClose: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
   embedded?: EmbeddedManagerPage;
+  workspaceCwd?: string;
+  workspaceControl?: ReactNode;
 }
 
 function extensionTitle(extension: DaemonExtensionSummary): string {
@@ -431,16 +441,27 @@ function ExtensionInteractionDialog({
   );
 }
 
-export function ExtensionsManagerPage({
+export function ExtensionsManagerPage(props: ExtensionsManagerPageProps) {
+  return props.managed ? (
+    <ManagedExtensionsManagerPage {...props.managed} onClose={props.onClose} />
+  ) : (
+    <NativeExtensionsManagerPage {...props} />
+  );
+}
+
+function NativeExtensionsManagerPage({
   onClose,
   initialFocusRef,
   embedded,
+  workspaceCwd: requestedWorkspaceCwd,
+  workspaceControl,
 }: ExtensionsManagerPageProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const workspace = useWorkspace();
   const actions = useWorkspaceActions();
   const signals = useWorkspaceEventSignals();
+  const targetWorkspaceCwd = requestedWorkspaceCwd ?? workspace.workspaceCwd;
   const activationRequiresExplicitRefresh =
     workspace.capabilities?.features.includes(
       'extension_activation_explicit_refresh',
@@ -534,9 +555,9 @@ export function ExtensionsManagerPage({
   const load = useCallback(
     (preserveMessage = false) => {
       setLoading(true);
-      const projection = workspace.workspaceCwd
+      const projection = targetWorkspaceCwd
         ? workspace.client
-            .workspaceByCwd(workspace.workspaceCwd)
+            .workspaceByCwd(targetWorkspaceCwd)
             .workspaceExtensions()
             .catch(() => null)
         : Promise.resolve(null);
@@ -610,7 +631,7 @@ export function ExtensionsManagerPage({
         })
         .finally(() => setLoading(false));
     },
-    [actions, workspace.client, workspace.workspaceCwd, splitExtensionDetails],
+    [actions, workspace.client, targetWorkspaceCwd, splitExtensionDetails],
   );
 
   useEffect(() => {
@@ -1120,7 +1141,7 @@ export function ExtensionsManagerPage({
         pendingInstall ||
         pendingMutation ||
         checkingName ||
-        !workspace.workspaceCwd
+        !targetWorkspaceCwd
       ) {
         return;
       }
@@ -1148,10 +1169,10 @@ export function ExtensionsManagerPage({
               )
             : activation === 'inherit'
               ? await workspace.client
-                  .workspaceByCwd(workspace.workspaceCwd)
+                  .workspaceByCwd(targetWorkspaceCwd)
                   .clearExtensionActivation(extension.id)
               : await workspace.client
-                  .workspaceByCwd(workspace.workspaceCwd)
+                  .workspaceByCwd(targetWorkspaceCwd)
                   .setExtensionActivation(extension.id, activation);
         const completed =
           await workspace.client.waitForExtensionOperation(result);
@@ -1174,7 +1195,7 @@ export function ExtensionsManagerPage({
           // of the refresh that is still current.
           const refreshToken = ++refreshTokenRef.current;
           void workspace.client
-            .workspaceByCwd(workspace.workspaceCwd)
+            .workspaceByCwd(targetWorkspaceCwd)
             .refreshExtensionRuntime()
             .catch((error: unknown) => {
               if (refreshToken !== refreshTokenRef.current) {
@@ -1204,7 +1225,7 @@ export function ExtensionsManagerPage({
       pendingMutation,
       t,
       workspace.client,
-      workspace.workspaceCwd,
+      targetWorkspaceCwd,
       workspaceTrusted,
     ],
   );
@@ -1306,21 +1327,38 @@ export function ExtensionsManagerPage({
   );
   const navigation = embedded ? (
     selectedExtension ? (
-      <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
-        <BreadcrumbList className="h-8 text-sm">
-          <BreadcrumbItem>
-            <BreadcrumbLink asChild>
-              <button type="button" onClick={embedded.onRoot}>
-                {t('extensions.manage.title')}
-              </button>
-            </BreadcrumbLink>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
-          <BreadcrumbItem>
-            <BreadcrumbPage>{extensionTitle(selectedExtension)}</BreadcrumbPage>
-          </BreadcrumbItem>
-        </BreadcrumbList>
-      </Breadcrumb>
+      <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex flex-wrap items-center justify-between gap-3 border-b bg-background px-5 py-3">
+        <Breadcrumb>
+          <BreadcrumbList className="h-8 text-sm">
+            {embedded.onBack ? (
+              <BreadcrumbItem>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={embedded.onBack}
+                  aria-label={t('common.back')}
+                >
+                  <ArrowLeftIcon />
+                </Button>
+              </BreadcrumbItem>
+            ) : null}
+            <BreadcrumbItem>
+              <BreadcrumbLink asChild>
+                <button type="button" onClick={embedded.onRoot}>
+                  {t('extensions.manage.title')}
+                </button>
+              </BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>
+                {extensionTitle(selectedExtension)}
+              </BreadcrumbPage>
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
+        {workspaceControl}
+      </div>
     ) : null
   ) : (
     standaloneNavigation

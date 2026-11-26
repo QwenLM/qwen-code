@@ -8,6 +8,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { evaluatePermissionRules } from '../core/permission-helpers.js';
+import { runWithTurnSkillSnapshot } from '../skills/turn-skill-snapshot.js';
 import {
   parseRule,
   parseRules,
@@ -168,13 +170,15 @@ type PmOpts = Partial<{
    * tool. Independent of the permission rules (#10075).
    */
   eagerTools: string[];
-  /** Live folder trust; absent reads as trusted. */
-  isTrustedFolder: () => boolean;
+  /** Live explicit folder trust; absent denies repository grants. */
+  isExplicitlyTrustedFolder: () => boolean;
 }>;
 
 function makeConfig(opts: PmOpts = {}): PermissionManagerConfig {
   return {
-    ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
+    ...(opts.isExplicitlyTrustedFolder
+      ? { isExplicitlyTrustedFolder: opts.isExplicitlyTrustedFolder }
+      : {}),
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
@@ -234,6 +238,66 @@ const PROTO_KEYS = [
 /** The session allow list, which has no public accessor. */
 const sessionAllowRules = (pm: PermissionManager) =>
   (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules.allow;
+
+it.each(['read_file', 'run_shell_command'])(
+  'enforces source and staged Read restrictions for %s',
+  async (toolName) => {
+    const source = path.resolve('/project/skills/fixture/SKILL.md');
+    const staged = path.resolve('/snapshot/0/SKILL.md');
+    const request = (name: string) => {
+      const filePath = path.join(path.dirname(staged), name);
+      return toolName === 'read_file'
+        ? { toolName, filePath }
+        : { toolName, command: `cat "${filePath}"` };
+    };
+    const deny = makePm({
+      permissionsDeny: ['Read(./skills/fixture/private.txt)'],
+    });
+    const ask = makePm({
+      permissionsAsk: ['Read(./skills/fixture/review.txt)'],
+    });
+    const stagedFile = path
+      .join(path.dirname(staged), 'local.txt')
+      .replaceAll(path.sep, '/');
+    const stagedDeny = makePm({
+      permissionsDeny: [
+        `Read(${stagedFile.startsWith('/') ? '/' : ''}${stagedFile})`,
+      ],
+    });
+
+    await runWithTurnSkillSnapshot(
+      {
+        version: 1,
+        id: 'fixture',
+        digest: 'fixture',
+        skills: [
+          {
+            name: 'fixture',
+            description: 'fixture',
+            body: 'fixture',
+            level: 'project',
+            filePath: staged,
+            sourceFilePath: source,
+          },
+        ],
+      },
+      async () => {
+        await expect(
+          evaluatePermissionRules(deny, 'allow', request('private.txt')),
+        ).resolves.toEqual({ finalPermission: 'deny', pmForcedAsk: false });
+        await expect(
+          evaluatePermissionRules(ask, 'allow', request('review.txt')),
+        ).resolves.toEqual({ finalPermission: 'ask', pmForcedAsk: true });
+        await expect(
+          evaluatePermissionRules(ask, 'ask', request('public.txt')),
+        ).resolves.toEqual({ finalPermission: 'ask', pmForcedAsk: false });
+        await expect(
+          evaluatePermissionRules(stagedDeny, 'allow', request('local.txt')),
+        ).resolves.toEqual({ finalPermission: 'deny', pmForcedAsk: false });
+      },
+    );
+  },
+);
 
 // ─── getToolNameAliases ──────────────────────────────────────────────────────
 
@@ -860,6 +924,11 @@ describe('splitCompoundCommand', () => {
       'cat >\r\necho hi',
       ['cat >\r', 'echo hi'],
     ],
+    [
+      'a CR target behind the clobber operator',
+      'cat >|\r\necho hi',
+      ['cat >|\r', 'echo hi'],
+    ],
   ])('splits on a newline with %s', async (_label, command, parts) => {
     expect(split(command)).toEqual(parts);
   });
@@ -957,6 +1026,37 @@ describe('splitCompoundCommandSegments', () => {
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
   });
+
+  // `>|` is the clobber override, not a pipe: bash runs it as one command
+  // that writes the file. Splitting at its `|` dropped the write.
+  it('keeps a clobber redirect inside its command', async () => {
+    expect(segments("echo '{}' >| .qwen/settings.json")).toEqual([
+      { command: "echo '{}' >| .qwen/settings.json", terminator: '' },
+    ]);
+    expect(segments("echo '{}' >|.qwen/settings.json")).toEqual([
+      { command: "echo '{}' >|.qwen/settings.json", terminator: '' },
+    ]);
+    expect(segments('echo hi >| out.txt && cat out.txt')).toEqual([
+      { command: 'echo hi >| out.txt', terminator: '&&' },
+      { command: 'cat out.txt', terminator: '' },
+    ]);
+  });
+
+  it('still splits a real pipe after a clobber redirect', async () => {
+    expect(segments('echo hi >| out.txt | cat')).toEqual([
+      { command: 'echo hi >| out.txt', terminator: '|' },
+      { command: 'cat', terminator: '' },
+    ]);
+  });
+
+  // An escaped `\>` is a literal argument (bash prints `hi >`), so the `|`
+  // after it really is a pipe.
+  it('still splits the pipe after an escaped `>`', async () => {
+    expect(segments('echo hi \\>| cat')).toEqual([
+      { command: 'echo hi \\>', terminator: '|' },
+      { command: 'cat', terminator: '' },
+    ]);
+  });
 });
 
 // ─── resolvePathPattern ──────────────────────────────────────────────────────
@@ -995,6 +1095,21 @@ describe('resolvePathPattern', () => {
   it('/Users/alice/file is relative to project root, NOT absolute', async () => {
     expect(resolve('/Users/alice/file')).toBe('/project/Users/alice/file');
   });
+
+  // A Windows absolute path carries its own root. Joined onto cwd it became
+  // `<cwd>/D:/probe/**`, which no candidate path ever matched (#17802).
+  it.each([
+    ['drive letter, forward slashes', 'D:/probe/**'],
+    ['drive letter, backslashes', 'D:\\probe\\**'],
+    ['`//` prefix + drive letter', '//D:/probe/**'],
+    ['`//` prefix + drive letter, backslashes', '//D:\\probe\\**'],
+  ])('resolves %s to the drive-rooted pattern', (_label, pattern) => {
+    expect(resolve(pattern)).toBe('D:/probe/**');
+  });
+
+  it('resolves a UNC root to its forward-slash form', async () => {
+    expect(resolve('\\\\server\\share\\**')).toBe('//server/share/**');
+  });
 });
 
 // ─── matchesPathPattern ──────────────────────────────────────────────────────
@@ -1012,6 +1127,19 @@ describe('matchesPathPattern', () => {
     expect(matches('.env', '/project/.env')).toBe(true);
     expect(matches('*.env', '/project/.env')).toBe(true);
   });
+
+  // The three spellings a Windows user can write for one absolute directory.
+  // Every row was `false` before, so a `deny` on `D:` silently did not apply
+  // and an "Always Allow" entry never stopped the repeat prompt (#17802).
+  it.each(['D:/probe/**', 'D:\\probe\\**', '//D:/probe/**'])(
+    'matches a Windows drive path against %s',
+    async (pattern) => {
+      expect(matches(pattern, 'D:\\probe\\p.txt')).toBe(true);
+      expect(matches(pattern, 'D:/probe/nested/p.txt')).toBe(true);
+      expect(matches(pattern, 'D:\\other\\p.txt')).toBe(false);
+      expect(matches(pattern, '/project/probe/p.txt')).toBe(false);
+    },
+  );
 
   // A line terminator is an ordinary word character to bash, so a redirect
   // target can end in one, and picomatch's `.`-based `**` body matches none of
@@ -2003,6 +2131,18 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate(sh(command))).toBe('allow');
     });
 
+    // R7-9: an unresolvable -c payload may be the option terminator, so a
+    // wrapper wildcard must not auto-allow the unreadable spelling while
+    // the readable twin asks.
+    it('does not auto-allow an unresolvable wrapper payload via a wildcard', async () => {
+      pm = makeShellPm('bash', { permissionsAllow: ['Bash(bash -c *)'] });
+      expect(await pm.evaluate(mon('bash -c $CMD'))).toBe('ask');
+      expect(await pm.evaluate(mon("sh -c $(printf -- --) 'echo run'"))).toBe(
+        'ask',
+      );
+      expect(await pm.evaluate(mon("bash -c 'echo hi'"))).toBe('allow');
+    });
+
     // The comment fast path is sound only when the scanned string is what the
     // shell executes: true for run_shell_command, not for monitor, where
     // normalizePermissionContext() analyses the quote-stripped `safetyCommand`
@@ -2260,6 +2400,14 @@ describe('PermissionManager', () => {
 
       pm = makePm({ coreTools: ['loop_wakeup'] });
       expect(await enabled('loop_wakeup')).toBe(true);
+    });
+
+    it('coreTools allowlist gates autofix_pr, which pushes and replies', async () => {
+      pm = makePm({ coreTools: ['read_file'] });
+      expect(await enabled('autofix_pr')).toBe(false);
+
+      pm = makePm({ coreTools: ['AutofixPr'] });
+      expect(await enabled('autofix_pr')).toBe(true);
     });
 
     it('coreTools allowlist gates managed memory tools', async () => {
@@ -2672,7 +2820,7 @@ describe('PermissionManager', () => {
       // so a mid-session revocation applies at the next call and a later
       // grant restores the rule (the second side of the gate on the way in).
       let trusted = true;
-      pm = makePm({ isTrustedFolder: () => trusted });
+      pm = makePm({ isExplicitlyTrustedFolder: () => trusted });
       const call = sh('git commit');
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
       pm.addSessionAllowRule('Bash(npm *)'); // the user's own grant
@@ -2696,7 +2844,7 @@ describe('PermissionManager', () => {
       // the user's, which no folder trust suspends. A gated re-arrival (skill
       // reload) stays a skip.
       let trusted = true;
-      pm = makePm({ isTrustedFolder: () => trusted });
+      pm = makePm({ isExplicitlyTrustedFolder: () => trusted });
       const call = sh('git commit');
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
       pm.addSessionAllowRule('Bash(git *)'); // the user-level skill's grant
@@ -2709,9 +2857,9 @@ describe('PermissionManager', () => {
       expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
-    it('a trust-gated rule stays in force when the config reports no trust probe', async () => {
+    it('a trust-gated rule is withheld when the config reports no trust probe', async () => {
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
-      expect(await pm.evaluate(sh('git commit'))).toBe('allow');
+      expect(await pm.evaluate(sh('git commit'))).toBe('ask');
     });
 
     it('clearSessionAllowRules drops live and AUTO-stashed session grants', async () => {
@@ -2744,6 +2892,31 @@ describe('PermissionManager', () => {
       pm.addSessionDenyRule('Bash(rm -rf /)*');
       // Should NOT deny — the malformed rule must not act as catch-all
       expect(await pm.evaluate(sh('git status'))).not.toBe('deny');
+    });
+
+    it('tells the operator when a malformed deny rule is dropped', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        pm.addSessionDenyRule('Bash(rm -rf /)*');
+        // A deny rule that protects nothing is the dangerous direction: the
+        // operator's model says "blocked" while the runtime has no rule.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]![0]).toContain('deny rule');
+        expect(warn.mock.calls[0]![0]).toContain('Bash(rm -rf /)*');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('tells the operator when a malformed ask rule is dropped', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        pm.addSessionAskRule('Bash(git commit');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]![0]).toContain('ask rule');
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 
@@ -2885,6 +3058,27 @@ describe('buildPermissionRules', () => {
     it('falls back to bare display name when no filePath', async () => {
       expect(build({ toolName: 'read_file' })).toEqual(['Read']);
     });
+
+    // A Windows dirPath carries no leading separator, so without the full `//`
+    // prefix "Always Allow" persisted `Read(D:\proj\docs/**)` — a rule that
+    // could never match again, re-prompting for the same directory (#17802).
+    it.each([
+      [
+        'read_file',
+        'D:/Workspace/proj/docs/guide.md',
+        'Read(//D:/Workspace/proj/docs/**)',
+      ],
+      [
+        'glob',
+        'D:\\Workspace\\proj\\docs',
+        'Read(//D:/Workspace/proj/docs/**)',
+      ],
+    ])(
+      'writes a `//` rule for the Windows path %s',
+      (toolName, filePath, rule) => {
+        expect(build({ toolName, filePath })).toEqual([rule]);
+      },
+    );
   });
 
   describe('generated rules round-trip through parseRule and matchesRule', () => {
@@ -3134,6 +3328,107 @@ describe('buildHumanReadableRuleLabel', () => {
   });
 });
 
+describe('PermissionManager.removePersistentRule', () => {
+  it.each(['allow', 'ask', 'deny'] as const)(
+    'removes a persistent %s rule from subsequent permission decisions',
+    async (type) => {
+      const pm = makePm();
+      pm.addPersistentRule('Agent(review)', type);
+      pm.addPersistentRule('Agent(deploy)', type);
+      expect(await pm.evaluate(agentCtx({}, 'review'))).toBe(type);
+
+      expect(pm.removePersistentRule('Agent(review)', type)).toBe(true);
+      expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
+      expect(await pm.evaluate(agentCtx({}, 'deploy'))).toBe(type);
+      expect(pm.removePersistentRule('Agent(review)', type)).toBe(false);
+      expect(await pm.evaluate(agentCtx({}, 'deploy'))).toBe(type);
+    },
+  );
+
+  it('preserves other persistent rule types and matching session rules', async () => {
+    const raw = 'Agent(review)';
+    const pm = makePm({
+      permissionsAllow: [raw],
+      permissionsAsk: [raw],
+      permissionsDeny: [raw],
+    });
+    pm.addSessionAllowRule(raw);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('deny');
+
+    expect(pm.removePersistentRule(raw, 'deny')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('ask');
+    expect(pm.removePersistentRule(raw, 'ask')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+    expect(pm.removePersistentRule(raw, 'allow')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+    expect(pm.listRules()).toEqual([
+      { rule: parseRule(raw), type: 'allow', scope: 'session' },
+    ]);
+  });
+
+  it('leaves rules active when the raw string or rule type does not match', async () => {
+    const pm = makePm({ permissionsAllow: ['Agent(review)'] });
+
+    expect(pm.removePersistentRule('agent(review)', 'allow')).toBe(false);
+    expect(pm.removePersistentRule('Agent(review)', 'deny')).toBe(false);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+  });
+
+  it('requires the exact stored raw, so a padded argument does not match', async () => {
+    // Deliberate contract pin: `parseRule` stores the trimmed raw while this
+    // method compares the caller's argument with `===`, so a padded argument
+    // is a no-op even though `addPersistentRule` accepts it. Pinned here so
+    // the asymmetry is a written-down choice rather than an accident.
+    const pm = makePm({ permissionsAllow: ['Agent(review)'] });
+
+    expect(pm.removePersistentRule(' Agent(review) ', 'allow')).toBe(false);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+
+    expect(pm.removePersistentRule('Agent(review)', 'allow')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
+  });
+
+  it('removes only the first of two identical raw rules', async () => {
+    // Seeding through config bypasses `addPersistentRule`'s raw dedupe: cli
+    // `config.ts` concatenates `permissions.allow` with the deprecated
+    // `tools.allowed`, so one raw can arrive twice.
+    const pm = makePm({
+      permissionsAllow: ['Agent(review)', 'Agent(review)'],
+    });
+    expect(pm.listRules().filter((r) => r.type === 'allow')).toHaveLength(2);
+
+    expect(pm.removePersistentRule('Agent(review)', 'allow')).toBe(true);
+    // The surviving copy still auto-approves.
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+    expect(pm.listRules().filter((r) => r.type === 'allow')).toHaveLength(1);
+
+    expect(pm.removePersistentRule('Agent(review)', 'allow')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
+  });
+
+  it('cannot reach a rule AUTO mode has stashed, until it is restored', async () => {
+    // Deliberate contract pin: `initialize()` strips the wildcard into
+    // `strippedAllowRules.persistent`, which this method does not scan, so it
+    // reports false while the grant is still live after `restoreDangerousRules`.
+    const pm = makePm({
+      approvalMode: 'auto',
+      permissionsAllow: ['Bash(python:*)'],
+    });
+    expect(
+      pm.getStrippedDangerousRules()?.persistent.map((r) => r.raw),
+    ).toEqual(['Bash(python:*)']);
+    expect(await pm.evaluate(sh('python foo.py'))).toBe('ask');
+
+    expect(pm.removePersistentRule('Bash(python:*)', 'allow')).toBe(false);
+    expect(
+      pm.getStrippedDangerousRules()?.persistent.map((r) => r.raw),
+    ).toEqual(['Bash(python:*)']);
+
+    pm.restoreDangerousRules();
+    expect(await pm.evaluate(sh('python foo.py'))).toBe('allow');
+  });
+});
+
 // ─── PermissionManager.findMatchingDenyRule ──────────────────────────────────
 
 describe('PermissionManager.findMatchingDenyRule', () => {
@@ -3308,6 +3603,37 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
+  // B1: a `|` inside the redirect operator is a filename character. Before the
+  // syntax mask included `|`, `>"|/../".qwen/settings.json` was read as the `>|`
+  // clobber and the reported target lost its leading `|`, so `|/../X`
+  // normalised to `X` and this deny never matched while the same write was
+  // denied on base.
+  it('deny rule matches a write hidden behind a quoted clobber operator', async () => {
+    const ctx = sh('echo \'{}\' >"|/../".qwen/settings.json', '/repo');
+    expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
+  });
+
+  // The same filename rule with the other spellings: a single-quoted or escaped
+  // `|`, and a quoted word ending in `>` running straight into the redirect
+  // (`'>'>"|/../"…`), where the operator match must use the masked spelling so
+  // a literal `|` cannot be read as the clobber.
+  it.each<[title: string, command: string]>([
+    ['single-quoted', "echo '{}' >'|/../'.qwen/settings.json"],
+    ['escaped', "echo '{}' >\\|/../.qwen/settings.json"],
+    ['quoted word before', "echo '{}' '>'>\"|/../\".qwen/settings.json"],
+  ])(
+    'a %s pipe is not a clobber: the protected write is denied',
+    async (_title, command) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it('deny rule matches a redirect on the `cd` segment itself', async () => {
+    const ctx = sh('cd .qwen > .qwen/settings.json', '/repo');
+    expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
+  });
+
   it('deny rule matches a write through a `bash -lc` wrapper after `cd`', async () => {
     const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
@@ -3326,6 +3652,100 @@ describe('PermissionManager — compound shell write attribution', () => {
     const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
     const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
     expect(await pm.evaluate(ctx)).toBe('deny');
+  });
+
+  // #15600: `>&file` writes `file`, so it must hit that file's deny rule, while
+  // fd duplication (`2>&1`, `>&2`) writes nothing and must not be denied.
+  it.each<[command: string, expected: 'allow' | 'deny']>([
+    ['printf TXT > protected.txt', 'deny'],
+    ['printf TXT &>protected.txt', 'deny'],
+    ['printf TXT >&protected.txt', 'deny'],
+    ['printf TXT 1>&protected.txt', 'deny'],
+    ['df -hT / 2>&1', 'allow'],
+    ['df -hT / >&2', 'allow'],
+    ['printf TXT > other.txt', 'allow'],
+    // `>|` is the clobber override: the same write as `>`. The `|` used to
+    // split it into two segments, neither of which carried the write, so
+    // `Bash(*)` allowed a protected-path write with no rule seeing it.
+    ['printf TXT >| protected.txt', 'deny'],
+    ['printf TXT >|protected.txt', 'deny'],
+    ['printf TXT 1>| protected.txt', 'deny'],
+    ['printf TXT 2>|protected.txt', 'deny'],
+    ['printf TXT >| other.txt', 'allow'],
+    ['printf "TXT >| protected.txt"', 'allow'],
+    // A quoted or escaped `|` ends the word, so the `>` glued to it is a real
+    // redirect. bash writes the file, and the analysis has to report the same
+    // write or the deny below never fires.
+    ['echo hi "|">protected.txt', 'deny'],
+    ["echo hi '|'>protected.txt", 'deny'],
+    ['echo hi \\|>protected.txt', 'deny'],
+    ['echo hi "|" >protected.txt', 'deny'],
+    ['echo hi >"|"', 'allow'],
+  ])('Bash(*) allow + file deny: %s → %s', async (command, expected) => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['WriteFileTool(protected.txt)'],
+    });
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+  });
+
+  // A quoted or escaped `&` is part of the file name (`>"&1"` writes `&1`),
+  // so it must stay a write that the deny rule sees.
+  it.each<[command: string, deny: string, expected: 'allow' | 'deny']>([
+    ['printf TXT >"&1"', 'Edit', 'deny'],
+    ["printf TXT >'&1'", 'Edit', 'deny'],
+    ['printf TXT >\\&1', 'Edit', 'deny'],
+    ['printf TXT 2>"&1"', 'Edit', 'deny'],
+    ['printf TXT >"&"', 'Edit', 'deny'],
+    ['df -hT / 2>&1', 'Edit', 'allow'],
+    ['printf TXT >"&protected.txt"', 'WriteFileTool(&protected.txt)', 'deny'],
+    ['printf TXT >\\&protected.txt', 'WriteFileTool(&protected.txt)', 'deny'],
+    ['printf TXT >&protected.txt', 'WriteFileTool(&protected.txt)', 'allow'],
+    // A quoted `-` after `>&` is a file name; an unquoted one closes the
+    // descriptor and the rest of the word is an argument (`rm` removes it).
+    ['printf TXT >&"-x"', 'Edit', 'deny'],
+    ['printf TXT >&\\-x', 'Edit', 'deny'],
+    ['printf TXT >&-x', 'Edit', 'deny'],
+    ['rm >&-notes.txt', 'Edit', 'deny'],
+    ['rm >&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['rm 2>&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['cat <&-notes.txt', 'Read', 'deny'],
+    ['cat <&-notes.txt', 'Read(notes.txt)', 'deny'],
+    // The command decides what the rest of the word is, so the whole word
+    // stays a file operation: these stay denied under a bare deny.
+    ['tee >&-2', 'Edit', 'deny'],
+    ['tee >&-$HOME/.bashrc', 'Edit', 'deny'],
+    ['cat <&-2', 'Read', 'deny'],
+    ['my-tool >&-notes.txt', 'Edit', 'deny'],
+    ['rm -- >&--x', 'Edit', 'deny'],
+    ['df -hT / >&/dev/null', 'Edit', 'allow'],
+    // A chain of closes: the last word is still an argument.
+    ['rm >&->&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['rm >&->&-notes.txt', 'Edit', 'deny'],
+    // A quoted or escaped `)` is part of the file name.
+    ['printf TXT >"notes)"', 'WriteFileTool(notes))', 'deny'],
+    ['printf TXT >notes\\)', 'WriteFileTool(notes))', 'deny'],
+    ['printf TXT >&"y)"', 'WriteFileTool(y))', 'deny'],
+  ])(
+    'Bash(*) allow, %s with %s denied → %s',
+    async (command, deny, expected) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: [deny],
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+    },
+  );
+
+  // A long chain of closes in one word must still get a verdict, not a
+  // stack overflow out of the permission check.
+  it('Bash(*) allow, a long >&- chain with Edit(notes.txt) denied → deny', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['Edit(notes.txt)'],
+    });
+    const command = `rm ${'>&-'.repeat(20000)}notes.txt`;
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
   });
 
   // #11865: a redirect target of non-separator characters (one NBSP here) is a

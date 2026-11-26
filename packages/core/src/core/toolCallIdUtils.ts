@@ -12,6 +12,7 @@ import { carryIncompleteArgumentsMarker } from './incomplete-tool-call-args.js';
 const DUPLICATE_ID_SUFFIX = '__qwen_dup_';
 const GENERATED_ID_PREFIX = 'call_qwen_';
 const PROVIDER_TOOL_CALL_ID = Symbol('providerToolCallId');
+export const PROVIDER_TOOL_CALL_ID_METADATA = 'providerToolCallId';
 const debugLogger = createDebugLogger('TOOL_CALL_IDS');
 
 // Fingerprints are cached against the stable carrier object — a history or
@@ -60,6 +61,12 @@ export function collectToolCallIdsFromHistory(
     for (const part of content.parts ?? []) {
       addId(ids, part.functionCall?.id);
       addId(ids, part.functionResponse?.id);
+      const providerId = part.partMetadata?.[PROVIDER_TOOL_CALL_ID_METADATA];
+      // Keep the alias available for replay checks after compaction removes
+      // the call that originally occupied its raw id.
+      if (part.functionCall && typeof providerId === 'string') {
+        addId(ids, providerId);
+      }
     }
   }
   return ids;
@@ -67,7 +74,7 @@ export function collectToolCallIdsFromHistory(
 
 /**
  * Identity of a tool call for duplicate provider-id replay detection: the
- * same canonical (name, args) key the loop guards use, so "replay" means
+ * canonical (name, args) key of getToolCallRepeatKey, so "replay" means
  * the exact call the provider already saw answered — not merely a reused
  * id. Providers whose ids are only unique within a single response (e.g.
  * `{name}_{index}` schemes that restart at 0) legitimately reuse ids for
@@ -194,6 +201,14 @@ export function normalizeModelToolCallIds(
     normalized.push({
       ...part,
       functionCall: normalizedFunctionCall,
+      ...(rawId && rawId !== id
+        ? {
+            partMetadata: {
+              ...part.partMetadata,
+              [PROVIDER_TOOL_CALL_ID_METADATA]: rawId,
+            },
+          }
+        : {}),
     });
   }
 

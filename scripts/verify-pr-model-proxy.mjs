@@ -1,0 +1,577 @@
+#!/usr/bin/env node
+
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Host-side model proxy for a local `/verify-pr` round.
+ *
+ * A local round needs the same isolation the CI lane provides: the container
+ * executes untrusted PR code, so the real model credential must stay outside
+ * it. This proxy holds the real key on the host and lets the container reach
+ * the model with a per-run bearer token instead. It mirrors the CI lane's
+ * inline proxy (qwen-triage.yml `start_openai_proxy`), with changes the local
+ * shape needs: the listen address is a flag (a container cannot reach the
+ * host's loopback, so bind the Docker bridge address instead), and the
+ * coordinates are printed as one JSON line for the maintainer to consume.
+ * Hop-by-hop request headers are stripped rather than forwarded.
+ * The printed baseUrl uses the listen address, so bind the address clients
+ * dial — 0.0.0.0 listens on every interface but is not a dialable URL.
+ *
+ * The CI lane deliberately keeps its own inline copy: the proxy handles the
+ * real key, so it must not execute a script from the PR-head checkout.
+ *
+ * Usage (from a trusted checkout, never the PR-head tree — this process holds
+ * the real key and a PR can rewrite a script in its own checkout):
+ *   if [ -t 0 ]; then
+ *     read -rsp 'REVIEW_OPENAI_API_KEY: ' REVIEW_OPENAI_API_KEY; echo
+ *   else
+ *     IFS= read -r REVIEW_OPENAI_API_KEY \
+ *       < ~/.config/qwen-verify/review-openai-key
+ *   fi
+ *   export REVIEW_OPENAI_API_KEY
+ *   REVIEW_OPENAI_BASE_URL=<url> \
+ *     node <trusted-clone>/scripts/verify-pr-model-proxy.mjs \
+ *       [--listen <host>]
+ *
+ * Reading the key from a terminal when one exists and from a file otherwise
+ * keeps it out of shell history (an inline assignment is recorded) and keeps
+ * an agent-driven run, whose shell has no TTY, from blocking on `read`.
+ *
+ * Options:
+ *   --listen <host>  address to bind (default 127.0.0.1; use the Docker
+ *                    bridge address, e.g. 172.17.0.1, for container clients).
+ *                    The port is always ephemeral: a fixed port is a binding
+ *                    race the CI lane avoids too.
+ *
+ * Environment:
+ *   REVIEW_OPENAI_BASE_URL    upstream base URL, may carry a path prefix
+ *   REVIEW_OPENAI_API_KEY     the real key; never leaves this process
+ *   QWEN_VERIFY_PROXY_TOKEN   bearer clients must present (default: random)
+ *
+ * On readiness, prints one JSON line: {port, baseUrl, token, nonce}. Give the
+ * container `baseUrl` as the provider base URL and `token` as its credential;
+ * `GET /__health` echoes `nonce`. Only `POST <basePath>/chat/completions` is
+ * relayed — the path is matched exactly, not as a suffix.
+ */
+
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  chmodSync,
+  chownSync,
+  lstatSync,
+  readFileSync,
+  unlinkSync,
+} from 'node:fs';
+import http from 'node:http';
+import { Readable } from 'node:stream';
+import { isEntryPoint } from './lib/entry-point.js';
+import { validateSocketPathLength } from './verify-pr-vm-collector.mjs';
+
+export const DEFAULT_IDLE_TIMEOUT_MS = 240_000;
+const MAX_TOKEN_FILE_BYTES = 64 * 1024;
+
+// The qwen client tolerates 240 s of silence inside one stream
+// (DEFAULT_STREAM_IDLE_TIMEOUT_MS in the OpenAI content generator), so a
+// tighter proxy window would cut a completion its own client would have
+// waited out. Keep the default equal; a caller may still pass its own value.
+
+// RFC 7230 hop-by-hop headers describe the client's connection to us, not the
+// upstream one. Forwarding them is never correct, and a copied
+// transfer-encoding or expect also fights the framing undici chooses for the
+// relayed stream. `host` and `content-length` ride along for the same reason.
+const STRIPPED_REQUEST_HEADERS = [
+  'host',
+  'content-length',
+  'connection',
+  'keep-alive',
+  'proxy-authorization',
+  'proxy-authenticate',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'expect',
+];
+
+export function parseArgs(argv) {
+  const options = { listen: '127.0.0.1' };
+  let sawListen = false;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--listen') {
+      const value = argv[++i];
+      // An empty value would reach server.listen(port, ''), which binds
+      // every interface — past the bridge this proxy is meant to stay on.
+      if (value === undefined || value === '' || value.startsWith('--')) {
+        throw new Error('--listen requires a value');
+      }
+      options.listen = value;
+      sawListen = true;
+    } else if (arg === '--socket') {
+      const value = argv[++i];
+      if (value === undefined || value === '' || value.startsWith('--')) {
+        throw new Error('--socket requires a value');
+      }
+      options.socketPath = value;
+    } else if (arg === '--token-file') {
+      const value = argv[++i];
+      if (value === undefined || value === '' || value.startsWith('--')) {
+        throw new Error('--token-file requires a value');
+      }
+      options.tokenFile = value;
+    } else if (arg === '--max-requests') {
+      const raw = argv[++i];
+      const value = Number(raw);
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error('--max-requests requires a positive integer');
+      }
+      options.maxRequests = value;
+    } else if (arg === '--vmm-uid') {
+      const raw = argv[++i];
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error('--vmm-uid requires a positive integer');
+      }
+      options.vmmUid = value;
+    } else if (arg === '--vmm-gid') {
+      const raw = argv[++i];
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error('--vmm-gid requires a positive integer');
+      }
+      options.vmmGid = value;
+    } else {
+      throw new Error(`unknown argument: ${arg}`);
+    }
+  }
+  if (options.socketPath && sawListen) {
+    throw new Error('--socket and --listen are mutually exclusive');
+  }
+  if ((options.vmmUid !== undefined) !== (options.vmmGid !== undefined)) {
+    throw new Error('--vmm-uid and --vmm-gid must be provided together');
+  }
+  if (options.vmmUid !== undefined && !options.socketPath) {
+    throw new Error('--vmm-uid and --vmm-gid require --socket');
+  }
+  return options;
+}
+
+/**
+ * Fail-closed check against a per-round host token state file (shared with
+ * `verify-pr-vm-lifecycle.mjs` `reapOwnership()`). Any missing, symlinked,
+ * multi-linked, oversized, malformed, or non-`revoked:false` file is treated
+ * as revoked so a deleted or corrupted token record can never fail open.
+ */
+export function isTokenFileRevoked(tokenFilePath) {
+  let st;
+  try {
+    st = lstatSync(tokenFilePath);
+  } catch {
+    return true;
+  }
+  if (
+    st.isSymbolicLink() ||
+    !st.isFile() ||
+    st.nlink !== 1 ||
+    st.size > MAX_TOKEN_FILE_BYTES
+  ) {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(tokenFilePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return true;
+    }
+    return parsed.revoked !== false;
+  } catch {
+    return true;
+  }
+}
+
+function bearerMatches(authHeader, expectedToken) {
+  if (typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
+    return false;
+  }
+  const actual = Buffer.from(authHeader.slice('Bearer '.length), 'utf8');
+  const expected = Buffer.from(expectedToken, 'utf8');
+  if (actual.length !== expected.length) return false;
+  return timingSafeEqual(actual, expected);
+}
+
+/** Strips the trailing slashes a base path may carry; `''` means none. */
+export function normalizeBasePath(pathname) {
+  const trimmed = (pathname ?? '').replace(/\/+$/, '');
+  return trimmed === '/' ? '' : trimmed;
+}
+
+/**
+ * Assembles the base URL the maintainer hands to the container. A host that
+ * carries a colon is an IPv6 literal and needs brackets, or `new URL()`
+ * rejects the string downstream.
+ */
+export function formatLocalBaseUrl(listen, port, basePath = '') {
+  const host = listen.includes(':') ? `[${listen}]` : listen;
+  return `http://${host}:${port}${basePath}`;
+}
+
+/**
+ * Returns an http.Server that relays only POST /chat/completions to the
+ * upstream, replacing the client's bearer token with the real key. The idle
+ * watchdog is per-chunk, not total: qwen tolerates minutes of silence inside
+ * one stream, so a total cap would cut healthy long completions. It also
+ * stays quiet while the downstream is paused — backpressure from a slow but
+ * live client is not upstream idleness — and re-arms on 'drain'.
+ */
+export function createModelProxy({
+  baseUrl,
+  apiKey,
+  token,
+  nonce,
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+  tokenFile = null,
+  maxRequests = null,
+}) {
+  if (!baseUrl || !apiKey || !token || !nonce) {
+    throw new Error('baseUrl, apiKey, token and nonce are all required');
+  }
+  if (
+    maxRequests !== null &&
+    (!Number.isSafeInteger(maxRequests) || maxRequests <= 0)
+  ) {
+    throw new Error('maxRequests must be a positive integer when provided');
+  }
+  if (
+    tokenFile !== null &&
+    (typeof tokenFile !== 'string' || tokenFile.trim() === '')
+  ) {
+    throw new Error('tokenFile must be a non-empty path when provided');
+  }
+  const base = new URL(baseUrl);
+  const basePath = normalizeBasePath(base.pathname);
+  const stats = {
+    acceptedRequests: 0,
+    rejectedUnauthorized: 0,
+    rejectedRevoked: 0,
+    rejectedBudget: 0,
+  };
+
+  const server = http.createServer(async (req, res) => {
+    if (req.url === '/__health') {
+      // Identity, not just liveness: a squatter cannot know the nonce.
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(nonce);
+      return;
+    }
+
+    let timer;
+    try {
+      const incoming = new URL(req.url || '/', 'http://127.0.0.1');
+      const target = new URL(base.origin);
+
+      let path = incoming.pathname;
+      if (
+        basePath &&
+        basePath !== '/' &&
+        path !== basePath &&
+        !path.startsWith(`${basePath}/`)
+      ) {
+        path = `${basePath}${path.startsWith('/') ? '' : '/'}${path}`;
+      }
+      target.pathname = path;
+      target.search = incoming.search;
+
+      // Exact path, not a suffix: `endsWith('/chat/completions')` would also
+      // relay `/admin/chat/completions` to the upstream.
+      const allowedPath = basePath
+        ? `${basePath}/chat/completions`
+        : '/chat/completions';
+      if (req.method !== 'POST' || target.pathname !== allowedPath) {
+        res.writeHead(403, { 'content-type': 'text/plain' });
+        res.end(`proxy: only POST ${allowedPath} is allowed\n`);
+        return;
+      }
+
+      // Only the agent knows this run's token; anything else that finds the
+      // port cannot get the key used.
+      if (!bearerMatches(req.headers.authorization, token)) {
+        stats.rejectedUnauthorized += 1;
+        res.writeHead(401, { 'content-type': 'text/plain' });
+        res.end('proxy: unauthorized\n');
+        return;
+      }
+
+      if (tokenFile !== null && isTokenFileRevoked(tokenFile)) {
+        stats.rejectedRevoked += 1;
+        res.writeHead(403, { 'content-type': 'text/plain' });
+        res.end('proxy: token revoked\n');
+        return;
+      }
+
+      if (maxRequests !== null && stats.acceptedRequests >= maxRequests) {
+        stats.rejectedBudget += 1;
+        res.writeHead(429, { 'content-type': 'text/plain' });
+        res.end('proxy: request budget exceeded\n');
+        return;
+      }
+      stats.acceptedRequests += 1;
+
+      const headers = new Headers(req.headers);
+      for (const name of STRIPPED_REQUEST_HEADERS) headers.delete(name);
+      // RFC 7230 §6.1: a header nominated by Connection is hop-by-hop too,
+      // so a client cannot smuggle one through under an unlisted name.
+      const nominated = String(req.headers.connection ?? '')
+        .split(',')
+        .map((name) => name.trim().toLowerCase())
+        .filter(Boolean);
+      for (const name of nominated) headers.delete(name);
+      headers.set('authorization', `Bearer ${apiKey}`);
+
+      const init = { method: req.method, headers };
+      init.body = req;
+      init.duplex = 'half';
+
+      const controller = new AbortController();
+      let body = null;
+      let finished = false;
+      const arm = () => {
+        if (finished) return;
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          // A paused body is downstream backpressure, not upstream silence:
+          // the client is alive but slow, and aborting here would cut a
+          // healthy completion. The 'drain' listener re-arms this window.
+          if (body?.isPaused()) {
+            arm();
+            return;
+          }
+          controller.abort();
+        }, idleTimeoutMs);
+      };
+      // Registered before the fetch: a client that disconnects while the
+      // upstream headers are still in flight has already emitted 'close', so
+      // registering after the response would never abort that request.
+      res.on('close', () => {
+        finished = true;
+        clearTimeout(timer);
+        controller.abort();
+      });
+      res.on('drain', arm);
+      // A slow request UPLOAD is activity too: fetch resolves only on the
+      // upstream headers, so without this a large prompt on a slow link
+      // would be torn down mid-upload by a window meant for stream silence.
+      // 'readable', not 'data': a data listener switches the request to
+      // flowing mode and steals the body chunks from the relayed stream.
+      req.on('readable', arm);
+      arm();
+      let upstream;
+      try {
+        upstream = await fetch(target, { ...init, signal: controller.signal });
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          if (!res.destroyed && !res.writableEnded) {
+            res.writeHead(504, { 'content-type': 'text/plain' });
+            res.end('proxy error: upstream request timed out\n');
+          }
+          return;
+        }
+        throw error;
+      }
+      if (res.destroyed) {
+        finished = true;
+        clearTimeout(timer);
+        return;
+      }
+      // The timer is deliberately NOT cleared here: fetch() resolves on
+      // HEADERS, and the armed timer doubles as the first idle window for
+      // the body; the per-chunk handler below refreshes it.
+      const responseHeaders = {};
+      upstream.headers.forEach((value, key) => {
+        const lower = key.toLowerCase();
+        if (lower !== 'content-encoding' && lower !== 'content-length') {
+          responseHeaders[key] = value;
+        }
+      });
+      res.writeHead(upstream.status, responseHeaders);
+      if (upstream.body) {
+        body = Readable.fromWeb(upstream.body);
+        const done = () => {
+          finished = true;
+          clearTimeout(timer);
+        };
+        body.on('end', done);
+        // An idle watchdog firing mid-body aborts the upstream, which
+        // surfaces here as an error: tear down the downstream response too.
+        body.on('error', () => {
+          done();
+          res.destroy();
+        });
+        body.pipe(res);
+        body.on('data', arm);
+      } else {
+        finished = true;
+        clearTimeout(timer);
+        res.end();
+      }
+    } catch (error) {
+      clearTimeout(timer);
+      console.error('proxy upstream failure:', error);
+      res.writeHead(502, { 'content-type': 'text/plain' });
+      res.end('proxy error: upstream request failed\n');
+    }
+  });
+  server.getStats = () => ({ ...stats });
+  return server;
+}
+
+async function main(argv) {
+  let options;
+  try {
+    options = parseArgs(argv);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    return 2;
+  }
+  const baseUrl = process.env.REVIEW_OPENAI_BASE_URL;
+  const apiKey = process.env.REVIEW_OPENAI_API_KEY;
+  if (!baseUrl || !apiKey) {
+    process.stderr.write(
+      'REVIEW_OPENAI_BASE_URL and REVIEW_OPENAI_API_KEY must both be set\n',
+    );
+    return 2;
+  }
+  const token =
+    process.env.QWEN_VERIFY_PROXY_TOKEN || randomBytes(24).toString('hex');
+  const nonce = randomBytes(24).toString('hex');
+  const server = createModelProxy({
+    baseUrl,
+    apiKey,
+    token,
+    nonce,
+    tokenFile: options.tokenFile ?? null,
+    maxRequests: options.maxRequests ?? null,
+  });
+
+  if (options.socketPath) {
+    const len = validateSocketPathLength(options.socketPath);
+    if (!len.ok) {
+      process.stderr.write(`model-proxy: ${len.reason}\n`);
+      return 2;
+    }
+    try {
+      lstatSync(options.socketPath);
+      process.stderr.write(
+        `model-proxy: refusing existing socket path ${options.socketPath}\n`,
+      );
+      return 1;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(options.socketPath, resolve);
+    });
+    const socketStat = lstatSync(options.socketPath);
+    const socketIdentity = { dev: socketStat.dev, ino: socketStat.ino };
+    let socketCleanupFailed = false;
+    let socketIdentityChanged = false;
+    const removeSocket = () => {
+      let st;
+      try {
+        st = lstatSync(options.socketPath);
+      } catch (error) {
+        if (error.code !== 'ENOENT') socketCleanupFailed = true;
+        return !socketCleanupFailed;
+      }
+      if (
+        !st.isSocket() ||
+        st.dev !== socketIdentity.dev ||
+        st.ino !== socketIdentity.ino
+      ) {
+        socketCleanupFailed = true;
+        socketIdentityChanged = true;
+        process.stderr.write('model-proxy: socket identity changed\n');
+        return false;
+      }
+      try {
+        unlinkSync(options.socketPath);
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          socketCleanupFailed = true;
+          process.stderr.write('model-proxy: unable to remove owned socket\n');
+        }
+      }
+      return !socketCleanupFailed;
+    };
+    try {
+      chmodSync(options.socketPath, 0o600);
+      if (
+        Number.isInteger(options.vmmUid) &&
+        Number.isInteger(options.vmmGid)
+      ) {
+        chownSync(options.socketPath, options.vmmUid, options.vmmGid);
+      }
+    } catch (error) {
+      removeSocket();
+      if (socketIdentityChanged) {
+        server.unref();
+      } else {
+        server.close();
+      }
+      throw error;
+    }
+    server.on('close', removeSocket);
+    const onSignal = () => {
+      if (typeof server.closeAllConnections === 'function') {
+        server.closeAllConnections();
+      }
+      removeSocket();
+      if (socketIdentityChanged) {
+        // libuv uv_pipe_close() unlinks the bound path unconditionally; exit
+        // directly so the OS closes our fd without deleting the replacement.
+        process.exit(1);
+      }
+      server.close(() => {
+        process.exit(socketCleanupFailed ? 1 : 0);
+      });
+    };
+    process.once('SIGTERM', onSignal);
+    process.once('SIGINT', onSignal);
+    process.stdout.write(
+      `${JSON.stringify({ socketPath: options.socketPath, token, nonce })}\n`,
+    );
+    return 0;
+  }
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, options.listen, resolve);
+  });
+  const { port } = server.address();
+  const localBaseUrl = formatLocalBaseUrl(
+    options.listen,
+    port,
+    normalizeBasePath(new URL(baseUrl).pathname),
+  );
+  // One JSON line, on stdout: the maintainer pastes baseUrl/token into the
+  // container's provider configuration. The real key is never printed.
+  process.stdout.write(
+    `${JSON.stringify({ port, baseUrl: localBaseUrl, token, nonce })}\n`,
+  );
+  return 0;
+}
+
+if (isEntryPoint(import.meta.url, process.argv[1])) {
+  main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (error) => {
+      console.error(error);
+      process.exitCode = 1;
+    },
+  );
+}

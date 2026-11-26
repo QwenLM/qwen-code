@@ -226,17 +226,13 @@ describe.skipIf(process.platform === 'win32')('Managed engine host', () => {
     await managed.registryReleased;
     expect(registry.committedProcessCount).toBe(0);
 
-    // Restore arrives with M6; until then the host refuses it with the engine
-    // classification, and the Bridge starts no other channel for it.
-    await expect(
-      bridge!.loadSession({
-        sessionId: session.sessionId,
-        workspaceCwd: workspace,
-      }),
-    ).rejects.toMatchObject({
-      code: -32024,
-      data: { errorKind: 'session_execution_engine_unavailable' },
+    // A Managed host restores its own session: the load selects Managed and
+    // starts a second child instead of refusing with the engine classification.
+    const restored = await bridge!.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: workspace,
     });
+    expect(restored.sessionId).toBe(session.sessionId);
     expect(started.managed).toHaveLength(2);
     expect(started.legacy).toHaveLength(0);
   }, 120_000);

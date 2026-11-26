@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
 import {
   DaemonClient,
   DaemonHttpError,
@@ -17,7 +18,9 @@ import {
 } from '../../src/daemon/DaemonClient.js';
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 import type { DaemonSessionAgentsStatus } from '../../src/daemon/index.js';
+import type { RestoreWorktreeSessionRequest } from '../../src/index.js';
 import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
+import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
 import {
   DaemonCapabilityMissingError,
   DAEMON_REASONING_SELECTIONS,
@@ -28,6 +31,8 @@ import type {
   BranchSessionRequest,
   DaemonCapabilities,
   DaemonSessionCatalogResult,
+  DaemonSessionSummary,
+  DaemonSessionLiveStateBatchResult,
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
@@ -36,6 +41,7 @@ import type {
   DaemonSessionResourcesStatus,
   DaemonSessionOrganizationResult,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTasksStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
@@ -143,6 +149,151 @@ function recordingFetch(
   ) as unknown as typeof globalThis.fetch;
   return { fetch: fetchImpl, calls };
 }
+
+describe('worktree snapshot restore', () => {
+  it('uses the snapshot-restore route and workspace-scoped restore fields', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 'id/with/slash',
+        workspaceCwd: '/work/secondary',
+        attached: false,
+        callbackReplay: [],
+        state: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client.restoreWorktreeSession(
+      'id/with/slash',
+      {
+        workspaceCwd: '/work/secondary',
+        historyPageSize: 41,
+        approvalMode: 'yolo',
+        sourceType: 'fixture',
+        sourceId: 'fixture-1',
+      } satisfies RestoreWorktreeSessionRequest,
+      'local-client',
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      'http://daemon/session/id%2Fwith%2Fslash/worktree-restore',
+    );
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('local-client');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+      approvalMode: 'yolo',
+      historyPageSize: 41,
+      sourceType: 'fixture',
+      sourceId: 'fixture-1',
+    });
+  });
+
+  it('keeps legacy empty-body normalization for a primary-owned restore', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/primary',
+        attached: false,
+        restoreState: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client.restoreWorktreeSession('s-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({});
+  });
+
+  it('makes scope explicit through a workspace client but refuses id-only selectors', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/secondary',
+        attached: false,
+        state: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client
+      .workspaceByCwd('/work/secondary')
+      .restoreWorktreeSession('s-1', { historyPageSize: 77 }, 'client-1');
+    expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+      historyPageSize: 77,
+    });
+
+    await expect(
+      client.workspaceByCwd('secondary-id').restoreWorktreeSession('s-1'),
+    ).rejects.toThrow('registered workspace cwd');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('returns a replay-ready session client after ordinary restore', async () => {
+    const compactedReplay = [{ id: 1, v: 1, type: 'session_update', data: {} }];
+    const liveJournal = [{ id: 27, v: 1, type: 'session_update', data: {} }];
+    const lifecycleReplay = [
+      { id: 26, v: 1, type: 'session_update', data: {} },
+    ];
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/secondary',
+        state: { mode: 'replay-ready' },
+        lastEventId: 27,
+        eventEpoch: 'epoch-restore',
+        compactedReplay,
+        liveJournal,
+        lifecycleReplay,
+        lifecycleReplayIncomplete: true,
+        historyHasMore: true,
+        historyAnchorRecordId: 'anchor-restore-1',
+        replayProjectionWatermark: 17,
+        replayDegraded: true,
+        worktree: {
+          slug: 'recovered',
+          path: '/work/secondary/.qwen/worktrees/recovered',
+          branch: '',
+        },
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const restored = await DaemonSessionClient.restoreWorktree(
+      client,
+      's-1',
+      {
+        workspaceCwd: '/work/secondary',
+      },
+      'restore-client',
+    );
+    expect(restored).toBeInstanceOf(DaemonSessionClient);
+    expect(restored.workspaceCwd).toBe('/work/secondary');
+    expect(restored.worktree?.branch).toBe('');
+    expect(restored.state).toEqual({ mode: 'replay-ready' });
+    expect(restored.replaySnapshot).toEqual({
+      compactedReplay,
+      liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete: true,
+    });
+    expect(restored.lastEventId).toBe(27);
+    expect(restored.eventEpoch).toBe('epoch-restore');
+    expect(restored.historyHasMore).toBe(true);
+    expect(restored.historyAnchorRecordId).toBe('anchor-restore-1');
+    expect(restored.replayProjectionWatermark).toBe(17);
+    expect(restored.replayDegraded).toBe(true);
+    expect(restored.consumeReplaySnapshot().compactedReplay).toEqual(
+      compactedReplay,
+    );
+    expect(restored.replaySnapshot.compactedReplay).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('restore-client');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+    });
+  });
+});
 
 describe('DaemonClient', () => {
   describe('MCP App request deadlines', () => {
@@ -301,6 +452,14 @@ describe('DaemonClient', () => {
         },
       });
       expect(transportFetch).not.toHaveBeenCalled();
+
+      await client.continueSession('with/slash', {
+        clientId: 'client-1',
+        confirmCancellation: 'legacy-daemon',
+      });
+      expect(calls[1]?.body).toBe(
+        JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
+      );
     });
 
     it('returns clean no-ops and preserves rejection errors without retry', async () => {
@@ -328,6 +487,331 @@ describe('DaemonClient', () => {
         client.continueSession('s-1', { signal: AbortSignal.abort() }),
       ).rejects.toMatchObject({ name: 'AbortError' });
       expect(calls).toHaveLength(0);
+    });
+  });
+
+  describe('restart recovery', () => {
+    it('reads the interrupted-session batch over REST', async () => {
+      const body = {
+        workspaces: [
+          {
+            workspace: 'workspace-a',
+            workspaceId: 'workspace-id',
+            cwd: '/work/a',
+            v: 1 as const,
+            items: [
+              {
+                sessionId: 'session-1',
+                lastActivityAt: '2026-11-17T09:12:31.000Z',
+                interruption: 'daemon_shutdown',
+              },
+            ],
+            truncated: false,
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const transportFetch = vi.fn();
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'token-1',
+        fetch,
+        transport: { fetch: transportFetch } as unknown as DaemonTransport,
+      });
+
+      await expect(
+        client.getRestartRecoveries({
+          workspaces: ['workspace-a'],
+          sinceMs: 3_600_000,
+        }),
+      ).resolves.toEqual(body);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/sessions/recovery',
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer token-1',
+          'content-type': 'application/json',
+        },
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        workspaces: ['workspace-a'],
+        sinceMs: 3_600_000,
+      });
+    });
+
+    it('continues the selected batch over REST', async () => {
+      const body = {
+        results: [
+          {
+            workspace: 'workspace-a',
+            sessionId: 'session-1',
+            status: 'accepted',
+            kind: 'interrupted_prompt',
+            promptId: 'continue-1',
+            lastEventId: 17,
+            eventEpoch: 'epoch-1',
+          },
+          {
+            workspace: 'workspace-a',
+            sessionId: 'session-2',
+            status: 'confirmation_required',
+            kind: 'interrupted_turn',
+            code: 'tool_turn',
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const transportFetch = vi.fn();
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport: { fetch: transportFetch } as unknown as DaemonTransport,
+      });
+
+      await expect(
+        client.continueRestartRecoveries({
+          sessions: [
+            { workspace: 'workspace-a', sessionId: 'session-1' },
+            { workspace: 'workspace-a', sessionId: 'session-2' },
+          ],
+          confirmToolTurn: false,
+        }),
+      ).resolves.toEqual(body);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/sessions/recovery/continue',
+        method: 'POST',
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessions: [
+          { workspace: 'workspace-a', sessionId: 'session-1' },
+          { workspace: 'workspace-a', sessionId: 'session-2' },
+        ],
+        confirmToolTurn: false,
+      });
+    });
+
+    it('sizes a continuation from the advertised restore budget instead of the generic deadline', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const body = {
+          results: [
+            {
+              workspace: 'workspace-a',
+              sessionId: 'session-1',
+              status: 'accepted' as const,
+              kind: 'interrupted_prompt' as const,
+              promptId: 'continue-1',
+            },
+          ],
+        };
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 60_000 },
+              }),
+            );
+          }
+          signal = init?.signal ?? undefined;
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(
+              () => resolve(jsonResponse(200, body)),
+              45_000,
+            );
+            signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(signal?.reason);
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.capabilities();
+
+        const outcome = client.continueRestartRecoveries({
+          sessions: [
+            { workspace: 'workspace-a', sessionId: 'session-1' },
+            { workspace: 'workspace-a', sessionId: 'session-2' },
+          ],
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(15_000);
+        await expect(outcome).resolves.toEqual(body);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not abort at one budget and times out only after two derived budgets', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 60_000 },
+              }),
+            );
+          }
+          signal = init?.signal ?? undefined;
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal?.reason), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.capabilities();
+
+        const outcome = client
+          .continueRestartRecoveries({
+            sessions: [
+              { workspace: 'workspace-a', sessionId: 'session-1' },
+              { workspace: 'workspace-a', sessionId: 'session-2' },
+            ],
+          })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(99_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(40_000);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('preserves an explicit zero deadline over the derived member budget', async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetch, calls } = recordingFetch(
+          () =>
+            new Promise<Response>((resolve) => {
+              setTimeout(
+                () => resolve(jsonResponse(200, { workspaces: [] })),
+                45_000,
+              );
+            }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 30_000,
+        });
+        const outcome = client.getRestartRecoveries(
+          { workspaces: Array.from({ length: 20 }, (_, i) => `ws-${i}`) },
+          { timeoutMs: 0 },
+        );
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(calls[0]?.signal?.aborted ?? false).toBe(false);
+        await vi.advanceTimersByTimeAsync(15_000);
+        await expect(outcome).resolves.toEqual({ workspaces: [] });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('lets an explicit global timeout win instead of multiplying the member count', async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetch, calls } = recordingFetch(({ signal }) => {
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        });
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 1_000,
+        });
+        const outcome = client
+          .getRestartRecoveries({
+            workspaces: Array.from({ length: 20 }, (_, i) => `ws-${i}`),
+          })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(999);
+        expect(calls[0]?.signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('honors a per-call timeout independently of the member count', async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetch, calls } = recordingFetch(({ signal }) => {
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        });
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const outcome = client
+          .getRestartRecoveries(
+            {
+              workspaces: Array.from({ length: 20 }, (_, i) => `ws-${i}`),
+            },
+            { timeoutMs: 5_000 },
+          )
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(calls[0]?.signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('preserves a per-workspace error and a route rejection', async () => {
+      const member = {
+        workspaces: [
+          {
+            workspace: 'workspace-a',
+            error: {
+              code: 'untrusted_workspace',
+              message: 'Workspace is not trusted.',
+              status: 403,
+            },
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        calls.length === 1
+          ? jsonResponse(200, member)
+          : jsonResponse(404, { error: 'Not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getRestartRecoveries({ workspaces: ['workspace-a'] }),
+      ).resolves.toEqual(member);
+      await expect(
+        client.getRestartRecoveries({ workspaces: ['workspace-a'] }),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(calls).toHaveLength(2);
     });
   });
 
@@ -683,6 +1167,79 @@ describe('DaemonClient', () => {
       const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(client.capabilities()).resolves.toEqual(envelope);
+    });
+  });
+
+  describe('question-time sorting', () => {
+    it('forwards sorting to legacy, qualified and batch routes after capability discovery', async () => {
+      const { fetch, calls } = recordingFetch(({ url }) =>
+        jsonResponse(
+          200,
+          url.endsWith('/capabilities')
+            ? {
+                features: [
+                  'session_last_user_prompt_sort',
+                  'standalone_sessions_v1',
+                ],
+              }
+            : { sessions: [], workspaces: [] },
+        ),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const options = { sortBy: 'lastUserPromptAt' as const };
+      await client.listWorkspaceSessionsPage('/a', options);
+      await client.workspaceByCwd('/a').listWorkspaceSessionsPage(options);
+      await client.listStandaloneSessionsPage(options);
+      await client.listSessionsCatalog({ workspaces: 'all', options });
+      expect(
+        calls.filter(({ url }) => url.includes('/sessions?')),
+      ).toHaveLength(3);
+      expect(
+        calls
+          .filter(({ url }) => url.includes('/sessions?'))
+          .every(
+            ({ url }) =>
+              new URL(url).searchParams.get('sortBy') === 'lastUserPromptAt',
+          ),
+      ).toBe(true);
+      expect(
+        calls.filter(({ url }) => url.endsWith('/capabilities')),
+      ).toHaveLength(2);
+      expect(JSON.parse(String(calls.at(-1)?.body)).options.sortBy).toBe(
+        'lastUserPromptAt',
+      );
+    });
+    it('rejects unsupported sorting before sending a request to an older daemon', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { features: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.listWorkspaceSessionsPage('/a', { sortBy: 'lastUserPromptAt' }),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+    });
+    it('rejects the default sort value too, because older daemons reject the parameter', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { features: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const options = { sortBy: 'updatedAt' as const };
+      await expect(
+        client.listWorkspaceSessionsPage('/a', options),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      await expect(
+        client.workspaceByCwd('/a').listWorkspaceSessionsPage(options),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      await expect(
+        client.listStandaloneSessionsPage(options),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      await expect(
+        client.listSessionsCatalog({ workspaces: 'all', options }),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls.map(({ url }) => url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
     });
   });
 
@@ -1327,6 +1884,48 @@ describe('DaemonClient', () => {
       expect(err).toBeInstanceOf(DaemonHttpError);
       expect((err as DaemonHttpError).status).toBe(400);
       expect((err as DaemonHttpError).body).toEqual(body);
+    });
+  });
+
+  describe('setVisionBridgeSettings', () => {
+    it('POSTs both settings through the qualified workspace route', async () => {
+      const result = {
+        key: 'visionBridgeTimeoutMs',
+        scope: 'workspace',
+        value: 60_000,
+        requiresRestart: true,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceByCwd('/work/secondary')
+          .setVisionBridgeSettings('qwen-vl', 60_000),
+      ).resolves.toEqual(result);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspaces/%2Fwork%2Fsecondary/settings/vision-bridge',
+        body: '{"model":"qwen-vl","timeoutMs":60000}',
+      });
+    });
+
+    it('surfaces a missing batch route without falling back to separate writes', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'Not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceById('secondary')
+          .setVisionBridgeSettings('qwen-vl', 60_000),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/secondary/settings/vision-bridge',
+      );
     });
   });
 
@@ -1993,6 +2592,46 @@ describe('DaemonClient', () => {
       expect(transportFetch).not.toHaveBeenCalled();
     });
 
+    it('queries ignored paths against the selected workspace and session cwd', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, ignoredPaths: ['helper.log'] }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'wrong transport' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+      const response = await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitIgnoredPaths(
+          ['helper.log', 'source.ts'],
+          '/work/secondary/tree',
+          'session-1',
+        );
+      expect(response.ignoredPaths).toEqual(['helper.log']);
+      expect(response.v).toBe(1);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Fwork%2Fsecondary/git/check-ignore?cwd=%2Fwork%2Fsecondary%2Ftree&sessionId=session-1',
+      );
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        paths: ['helper.log', 'source.ts'],
+      });
+    });
+
     it('builds Git status query strings from cwd/wait options', async () => {
       const status = {
         v: 1 as const,
@@ -2120,6 +2759,27 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('forwards excludeRefs as the exclude query parameter on both clients', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/w', available: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceGitLog(50, 0, 'base..HEAD', {
+        excludeRefs: ['abc123', 'def456'],
+      });
+      await client
+        .workspaceByCwd('/work/main')
+        .workspaceGitLog(50, 0, '/wt', 'base..HEAD', {
+          excludeRefs: ['abc123', 'def456'],
+          sessionId: 's1',
+        });
+
+      expect(calls.map((c) => c.url)).toEqual([
+        'http://daemon/workspace/git/log?limit=50&skip=0&range=base..HEAD&exclude=abc123%2Cdef456',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fwt&range=base..HEAD&exclude=abc123%2Cdef456&sessionId=s1',
+      ]);
+    });
+
     it('reads workspace-qualified GitHub pull requests over REST', async () => {
       const list = {
         v: 1 as const,
@@ -2147,6 +2807,92 @@ describe('DaemonClient', () => {
       ).resolves.toEqual(list);
       expect(calls.map((call) => [call.method, call.url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs'],
+      ]);
+    });
+
+    it('fetches a PR file list over REST with cwd and sessionId', async () => {
+      const files = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        files: [{ path: 'src/a.ts', additions: 10, deletions: 2 }],
+        hiddenCount: 0,
+        additions: 10,
+        deletions: 2,
+        headSha: 'abc1234',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceByCwd('/work/secondary')
+          .workspaceGitHubPullRequestFiles(42, '/work/secondary', 'sess-1'),
+      ).resolves.toEqual(files);
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1',
+        ],
+      ]);
+    });
+
+    it('forwards the bound PR repo slug as a query parameter', async () => {
+      const files = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitHubPullRequestFiles(
+          42,
+          '/work/secondary',
+          'sess-1',
+          'o/r',
+        );
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1&repo=o%2Fr',
+        ],
+      ]);
+    });
+
+    it('omits an empty repo slug so the route resolves the PR locally', async () => {
+      // An empty repo means "not supplied"; forwarding `repo=` would hand the
+      // route a supplied-but-empty value it must reject with 400.
+      const files = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitHubPullRequestFiles(42, '/work/secondary', 'sess-1', '');
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1',
+        ],
       ]);
     });
 
@@ -2448,6 +3194,128 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('sends checkout resolution options in the body on both routes', async () => {
+      const ok = {
+        branch: 'feat/thing',
+        detached: false,
+        stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceGitCheckout('feat/thing', { stash: true }),
+      ).resolves.toEqual(ok);
+      await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitCheckout('feat/thing', '/work/secondary', 'session-a', {
+          force: true,
+        });
+
+      expect(String(calls[0]!.url)).toBe(
+        'http://daemon/workspace/git/checkout',
+      );
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        ref: 'feat/thing',
+        stash: true,
+      });
+      expect(String(calls[1]!.url)).toBe(
+        'http://daemon/workspaces/%2Fwork%2Fsecondary/git/checkout?cwd=%2Fwork%2Fsecondary&sessionId=session-a',
+      );
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        ref: 'feat/thing',
+        force: true,
+      });
+    });
+
+    it('lets workspaceGitCheckout outsize the client default fetch timeout', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      const inflight = client.workspaceGitCheckout(
+        'feat/thing',
+        { stash: true },
+        1_000,
+      );
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, { branch: 'feat/thing', detached: false }),
+        );
+      }, 5);
+
+      await expect(inflight).resolves.toEqual({
+        branch: 'feat/thing',
+        detached: false,
+      });
+      const call = slowFetch.mock.calls[0]!;
+      expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({
+        ref: 'feat/thing',
+        stash: true,
+      });
+    });
+
+    it('forwards the per-call checkout timeout on the workspace-qualified route', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+      const cwd = '/work/secondary/packages/app';
+
+      const inflight = client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitCheckout(
+          'feat/thing',
+          cwd,
+          undefined,
+          { force: true },
+          1_000,
+        );
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, { branch: 'feat/thing', detached: false }),
+        );
+      }, 5);
+
+      await expect(inflight).resolves.toEqual({
+        branch: 'feat/thing',
+        detached: false,
+      });
+      const call = slowFetch.mock.calls[0]!;
+      expect(String(call[0])).toBe(
+        `http://daemon/workspaces/%2Fwork%2Fsecondary/git/checkout?cwd=${encodeURIComponent(cwd)}`,
+      );
+    });
+
     it('lets ACP preheat wait longer than the client default timeout', async () => {
       let resolveResponse: ((value: Response) => void) | undefined;
       const slowFetch = vi.fn(
@@ -2706,6 +3574,18 @@ describe('DaemonClient', () => {
         now: 1_700_000_000_000,
         tasks: [],
       };
+      const runtime: DaemonSessionTaskRuntimeStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        taskId: 'bg_1',
+        runtime: {
+          memoryBytes: 2048,
+          outputBytes: 4096,
+          outputModifiedAt: 1_700_000_000_000,
+          outputTail: 'ready',
+          outputTailTruncated: false,
+        },
+      };
       const lsp: DaemonSessionLspStatus = {
         v: 1,
         sessionId: 'with/slash',
@@ -2758,6 +3638,9 @@ describe('DaemonClient', () => {
         ) {
           return jsonResponse(200, tasks);
         }
+        if (req.url.endsWith('/session/with%2Fslash/tasks/bg_1/runtime')) {
+          return jsonResponse(200, runtime);
+        }
         if (req.url.endsWith('/session/with%2Fslash/lsp')) {
           return jsonResponse(200, lsp);
         }
@@ -2778,6 +3661,9 @@ describe('DaemonClient', () => {
         client.sessionTasks('with/slash', 'client-1'),
       ).resolves.toEqual(tasks);
       await expect(
+        client.sessionTaskRuntime('with/slash', 'bg_1', 'client-1'),
+      ).resolves.toEqual(runtime);
+      await expect(
         client.sessionWorkflowTasks('with/slash', 'client-1'),
       ).resolves.toEqual(tasks);
       await expect(
@@ -2790,6 +3676,7 @@ describe('DaemonClient', () => {
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
         ['GET', 'http://daemon/session/with%2Fslash/tasks'],
+        ['GET', 'http://daemon/session/with%2Fslash/tasks/bg_1/runtime'],
         [
           'GET',
           'http://daemon/session/with%2Fslash/tasks?includeWorkflows=true',
@@ -2798,6 +3685,7 @@ describe('DaemonClient', () => {
         ['GET', 'http://daemon/session/with%2Fslash/resources'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
         'client-1',
@@ -4123,6 +5011,373 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('session operation deadlines', () => {
+    it.each([
+      [
+        'create',
+        (client: DaemonClient) =>
+          client.createOrAttachSession({ workspaceCwd: '/work/a' }),
+      ],
+      [
+        'worktree reset',
+        (client: DaemonClient) => client.resetWorktreeSession('s-1'),
+      ],
+    ])(
+      'holds a %s open for the advertised session budget, not the request deadline',
+      async (_name, start) => {
+        // Both routes answer only after an ACP child handshake, which the
+        // daemon bounds by its initialize budget. That budget is advertised
+        // through `limits.sessionRestoreTimeoutMs`; the generic 30s request
+        // deadline aborted a create the daemon was still completing.
+        vi.useFakeTimers();
+        try {
+          let signal: AbortSignal | undefined;
+          const fetch = vi.fn(
+            (input: RequestInfo | URL, init?: RequestInit) => {
+              const url = String(input);
+              if (url.endsWith('/capabilities')) {
+                return Promise.resolve(
+                  jsonResponse(200, {
+                    v: 1,
+                    mode: 'http-bridge',
+                    features: [],
+                    modelServices: [],
+                    limits: { sessionRestoreTimeoutMs: 80_000 },
+                  }),
+                );
+              }
+              return new Promise<Response>((_resolve, reject) => {
+                signal = init?.signal ?? undefined;
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(signal?.reason),
+                  {
+                    once: true,
+                  },
+                );
+              });
+            },
+          ) as unknown as typeof globalThis.fetch;
+          const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+          await client.capabilities();
+
+          const outcome = start(client).catch((error: unknown) => error);
+          await vi.advanceTimersByTimeAsync(89_999);
+          expect(signal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('lets an explicit global timeout win over the advertised session budget', async () => {
+      // Precedence, not just the derived branch: an operator who configured a
+      // 20s client deadline must not silently get the daemon's 90s budget.
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 80_000 },
+              }),
+            );
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            signal = init?.signal ?? undefined;
+            signal?.addEventListener('abort', () => reject(signal?.reason), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 20_000,
+        });
+        await client.capabilities();
+
+        const outcome = client
+          .createOrAttachSession({ workspaceCwd: '/work/a' })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(19_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls back to the restore default when no budget was advertised', async () => {
+      // Clients that create before reading capabilities (qwen-live, the VS
+      // Code companion) have no advertised value to size from.
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn(
+          (_input: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = init?.signal ?? undefined;
+              signal?.addEventListener('abort', () => reject(signal?.reason), {
+                once: true,
+              });
+            }),
+        ) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        const outcome = client
+          .createOrAttachSession({ workspaceCwd: '/work/a' })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(69_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      [
+        'create',
+        (client: DaemonClient) =>
+          client.createOrAttachSession({ workspaceCwd: '/work/a' }),
+      ],
+      [
+        'worktree reset',
+        (client: DaemonClient) => client.resetWorktreeSession('s-1'),
+      ],
+    ])(
+      'never lets a short restore budget pull a %s under the request deadline',
+      async (_name, start) => {
+        // `--session-restore-timeout-ms` is an operator knob for restore, and it
+        // may sit far below the spawn cost `--initialize-timeout-ms` allows.
+        // Sized from it alone, a spawn aborted at 5s + 10s headroom = 15s, which
+        // is under the 30s generic request deadline it replaced.
+        vi.useFakeTimers();
+        try {
+          let signal: AbortSignal | undefined;
+          const fetch = vi.fn(
+            (input: RequestInfo | URL, init?: RequestInit) => {
+              const url = String(input);
+              if (url.endsWith('/capabilities')) {
+                return Promise.resolve(
+                  jsonResponse(200, {
+                    v: 1,
+                    mode: 'http-bridge',
+                    features: [],
+                    modelServices: [],
+                    limits: { sessionRestoreTimeoutMs: 5_000 },
+                  }),
+                );
+              }
+              return new Promise<Response>((_resolve, reject) => {
+                signal = init?.signal ?? undefined;
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(signal?.reason),
+                  { once: true },
+                );
+              });
+            },
+          ) as unknown as typeof globalThis.fetch;
+          const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+          await client.capabilities();
+
+          const outcome = start(client).catch((error: unknown) => error);
+          await vi.advanceTimersByTimeAsync(29_999);
+          expect(signal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each([
+      [
+        'create',
+        (client: DaemonClient) =>
+          client.createOrAttachSession({ workspaceCwd: '/work/a' }),
+      ],
+      [
+        'worktree reset',
+        (client: DaemonClient) => client.resetWorktreeSession('s-1'),
+      ],
+    ])(
+      'bounds a %s whose advertised budget overflows the timer ceiling',
+      async (_name, start) => {
+        // `--session-restore-timeout-ms` accepts up to `MAX_TIMER_DELAY_MS`, and
+        // the derived deadline adds headroom on top, so a legal maximum
+        // overflows the ceiling. That overflow reported `0`, which
+        // `fetchWithTimeout` reads as "no deadline": the spawn armed no timer
+        // and attached no AbortSignal, so a stalled daemon held the create or
+        // worktree reset for the process lifetime (#14588 R1-4). It now clamps
+        // to the ceiling instead.
+        vi.useFakeTimers();
+        try {
+          let signal: AbortSignal | undefined;
+          const fetch = vi.fn(
+            (input: RequestInfo | URL, init?: RequestInit) => {
+              const url = String(input);
+              if (url.endsWith('/capabilities')) {
+                return Promise.resolve(
+                  jsonResponse(200, {
+                    v: 1,
+                    mode: 'http-bridge',
+                    features: [],
+                    modelServices: [],
+                    limits: { sessionRestoreTimeoutMs: 2_147_483_647 },
+                  }),
+                );
+              }
+              return new Promise<Response>((_resolve, reject) => {
+                signal = init?.signal ?? undefined;
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(signal?.reason),
+                  { once: true },
+                );
+              });
+            },
+          ) as unknown as typeof globalThis.fetch;
+          const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+          await client.capabilities();
+
+          const outcome = start(client).catch((error: unknown) => error);
+          // Clamped to the ceiling, so a deadline is armed at all — the whole
+          // point of the fix: before it, `signal` stayed undefined forever.
+          expect(signal).toBeDefined();
+          // One millisecond short of the ceiling it must still be live. The
+          // advances sum to exactly `MAX_TIMER_DELAY_MS`, so the timer fires on
+          // the final tick: flooring the clamp at 30s (or an off-by-one
+          // `MAX_TIMER_DELAY_MS - 1`) aborts earlier and reds this line.
+          await vi.advanceTimersByTimeAsync(2_147_483_647 - 1);
+          expect(signal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('keeps an explicit fetchTimeoutMs: 0 unbounded on the spawn routes', async () => {
+      // The doc on `resolveSessionSpawnTimeoutMs` promises an explicit deadline
+      // is returned verbatim, and `0` there asks for no deadline. The clamp
+      // above is only for a *derived* `0`, so this pins the override that a
+      // careless change would sweep away (#14588 R1-3).
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetchMock = vi.fn(
+          (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            if (url.endsWith('/capabilities')) {
+              return Promise.resolve(
+                jsonResponse(200, {
+                  v: 1,
+                  mode: 'http-bridge',
+                  features: [],
+                  modelServices: [],
+                  limits: { sessionRestoreTimeoutMs: 2_147_483_647 },
+                }),
+              );
+            }
+            return new Promise<Response>(() => {
+              signal = init?.signal ?? undefined;
+            });
+          },
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch: fetchMock as unknown as typeof globalThis.fetch,
+          fetchTimeoutMs: 0,
+        });
+        await client.capabilities();
+
+        void client
+          .createOrAttachSession({ workspaceCwd: '/work/a' })
+          .catch(() => {});
+        // `signal` is assigned only once the spawn request reaches the wire, so
+        // asserting it is undefined proves the deadline is absent *and* nothing
+        // else: a later change that drops the request before the wire (a
+        // validation throw, an added capability preflight, a transport that
+        // stops forwarding `init`) leaves `signal` undefined too and keeps this
+        // case green, silently turning an explicit `0` into the 24.8-day
+        // deadline R3-2 warns about. Pin the request first, then the deadline.
+        // `advanceTimersByTimeAsync` also drains the microtask chain inside the
+        // fire-and-forget create, so this waits for the request to reach the
+        // wire rather than racing it.
+        await vi.advanceTimersByTimeAsync(100);
+        const spawnCalls = fetchMock.mock.calls.filter(
+          ([input]) => !String(input).endsWith('/capabilities'),
+        );
+        expect(spawnCalls.length).toBeGreaterThan(0);
+        expect(spawnCalls[0]?.[1]?.signal).toBeUndefined();
+        expect(signal).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(2_147_483_647);
+        expect(spawnCalls.length).toBeGreaterThan(0);
+        expect(signal).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps a low restore pin unfloored on the restore route', async () => {
+      // The floor above is deliberately spawn-only: restore keeps the
+      // advertised budget as-is, so 5000 + 10s headroom still aborts at 15s.
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 5_000 },
+              }),
+            );
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            signal = init?.signal ?? undefined;
+            signal?.addEventListener('abort', () => reject(signal?.reason), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.capabilities();
+
+        const outcome = client
+          .loadSession('s-1')
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(14_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(signal?.aborted).toBe(true);
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('prompt', () => {
     it('POSTs the prompt body and returns the agent response', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -4304,6 +5559,138 @@ describe('DaemonClient', () => {
         limit: 7,
         pendingCount: 7,
       });
+    });
+
+    it('requires snapshot capability before posting a pinned prompt and verifies its receipt', async () => {
+      const digest = 'a'.repeat(64);
+      const body = {
+        prompt: [{ type: 'text' as const, text: 'hi' }],
+        pinSkills: true,
+        expectedSkillDigest: digest,
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: [] })
+          : jsonResponse(500, { error: 'unexpected prompt' }),
+      );
+      await expect(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }).promptNonBlocking(
+          's-1',
+          body,
+        ),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+
+      let admittedDigest = digest;
+      const { fetch: supported } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: ['turn_skill_file_snapshot'] })
+          : jsonResponse(202, {
+              promptId: 'p-1',
+              lastEventId: 1,
+              skillDigest: admittedDigest,
+            }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: supported,
+      });
+      await expect(
+        client.promptNonBlocking('s-1', body),
+      ).resolves.toMatchObject({
+        promptId: 'p-1',
+        skillDigest: digest,
+      });
+      admittedDigest = 'b'.repeat(64);
+      await expect(client.promptNonBlocking('s-1', body)).rejects.toThrow(
+        'did not confirm',
+      );
+    });
+
+    it('requires a usable event cursor and prompt identity in a pinned acceptance', async () => {
+      for (const receipt of [
+        { lastEventId: 0 },
+        { promptId: 'p', lastEventId: -1 },
+      ]) {
+        const { fetch } = recordingFetch((req) =>
+          req.url.endsWith('/capabilities')
+            ? jsonResponse(200, { features: ['turn_skill_file_snapshot'] })
+            : jsonResponse(202, { ...receipt, skillDigest: 'a'.repeat(64) }),
+        );
+        await expect(
+          new DaemonClient({
+            baseUrl: 'http://daemon',
+            fetch,
+          }).promptNonBlocking('s', {
+            pinSkills: true,
+            prompt: [{ type: 'text', text: 'test' }],
+          }),
+        ).rejects.toThrow('usable pinned prompt receipt');
+      }
+    });
+
+    it('rejects inconsistent resource pinning before contacting a legacy daemon', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const prompt = [{ type: 'text' as const, text: 'test' }];
+      for (const options of [
+        { expectedSkillDigest: 'a'.repeat(64) },
+        { pinExtensions: true, expectedExtensionGeneration: 1 },
+        { pinSkills: true, pinExtensions: true },
+        { pinSkills: true, expectedExtensionGeneration: 1 },
+        { pinSkills: true, expectedSkillDigest: 'invalid' },
+        {
+          pinSkills: true,
+          pinExtensions: true,
+          expectedExtensionGeneration: -1,
+        },
+      ]) {
+        await expect(
+          client.promptNonBlocking('s-1', { prompt, ...options }),
+        ).rejects.toThrow();
+        await expect(
+          client.prompt('s-1', { prompt, ...options }),
+        ).rejects.toThrow();
+      }
+      expect(calls).toHaveLength(0);
+    });
+
+    it('checks native skill session effects capability before sending and verifies its receipt', async () => {
+      const body = {
+        prompt: [{ type: 'text' as const, text: 'guarded' }],
+        pinSkills: true,
+        requireSessionSkillEffects: true,
+      };
+      let capable = false;
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              features: capable
+                ? [
+                    'turn_skill_session_effects_check',
+                    'turn_skill_file_snapshot',
+                  ]
+                : ['turn_skill_file_snapshot'],
+            })
+          : jsonResponse(202, {
+              promptId: 'p-1',
+              lastEventId: 0,
+              skillDigest: 'a'.repeat(64),
+            }),
+      );
+      const client = () =>
+        new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client().promptNonBlocking('s-1', body),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+      capable = true;
+      await expect(client().promptNonBlocking('s-1', body)).rejects.toThrow(
+        'did not confirm the requested skill session effects',
+      );
+      expect(
+        calls.filter((call) => call.url.endsWith('/session/s-1/prompt')),
+      ).toHaveLength(1);
     });
 
     it('maps invalid client id responses on non-blocking prompts', async () => {
@@ -5478,6 +6865,52 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('sendToSubSession', () => {
+    it('posts the send to the sub-sessions route of the caller', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(202, { sessionId: 'kid', workspaceCwd: '/work/b' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.sendToSubSession(
+        'main-1',
+        { prompt: 'look', workspace: '/work/b', targetSessionId: 'kid' },
+        'client-1',
+      );
+
+      expect(result).toEqual({ sessionId: 'kid', workspaceCwd: '/work/b' });
+      expect(calls[0]?.url).toBe('http://daemon/session/main-1/sub-sessions');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        prompt: 'look',
+        workspace: '/work/b',
+        targetSessionId: 'kid',
+      });
+    });
+
+    it('asks the tasks route for the sends it reports back', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 'main-1',
+          now: 1,
+          tasks: [],
+          subSessions: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.sessionTasks('main-1', undefined, {
+        includeSubSessions: true,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/main-1/tasks?includeSubSessions=true',
+      );
+    });
+  });
+
   describe('cancel', () => {
     it('POSTs /cancel and tolerates 204', async () => {
       const { fetch, calls } = recordingFetch(
@@ -5801,7 +7234,7 @@ describe('DaemonClient', () => {
 
       await client.archiveSessionsData(
         ['s-1'],
-        { resolveConflicts: true },
+        { resolveConflicts: true, requireIdle: true },
         'client-1',
       );
 
@@ -5809,6 +7242,7 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         sessionIds: ['s-1'],
         resolveConflicts: true,
+        requireIdle: true,
       });
     });
   });
@@ -6202,6 +7636,45 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('preserves optional last user prompt time across summary read APIs', async () => {
+      const summary: DaemonSessionSummary = {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        lastUserPromptAt: '2026-01-02T00:00:00.000Z',
+        updatedAt: '2026-01-03T00:00:00.000Z',
+      };
+      const legacy: DaemonSessionSummary = {
+        sessionId: 's-legacy',
+        workspaceCwd: '/work/a',
+        updatedAt: summary.updatedAt,
+      };
+      const sessions = [summary, legacy];
+      const { fetch } = recordingFetch(({ url }) => {
+        if (url.endsWith('/sessions/catalog')) {
+          return jsonResponse(200, {
+            workspaces: [{ workspace: '/work/a', sessions }],
+          });
+        }
+        return jsonResponse(
+          200,
+          url.endsWith('/status') ? summary : { sessions },
+        );
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const listed = await client.listWorkspaceSessions('/work/a');
+      expect(listed).toEqual(sessions);
+      expect(
+        (await client.workspaceByCwd('/work/a').listWorkspaceSessionsPage())
+          .sessions,
+      ).toEqual(sessions);
+      expect(
+        (await client.listSessionsCatalog({ workspaces: 'all' })).workspaces[0],
+      ).toEqual({ workspace: '/work/a', sessions });
+      expect(await client.sessionStatus('s-1')).toEqual(summary);
+      expect(listed[1]).not.toHaveProperty('lastUserPromptAt');
+    });
+
     it('GETs /workspace/:id/sessions and returns the array', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
@@ -6361,6 +7834,102 @@ describe('DaemonClient', () => {
       expect(calls[0]?.url).toBe(
         'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=20&parentSessionId=P',
       );
+    });
+
+    it('serializes liveOnly into both workspace session-list clients', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [{ sessionId: 's-live', workspaceCwd: '/work/a' }],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.listWorkspaceSessionsPage('/work/a', { liveOnly: true });
+      await client
+        .workspaceByCwd('/work/a')
+        .listWorkspaceSessionsPage({ liveOnly: true });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20&liveOnly=1',
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=20&liveOnly=1',
+      ]);
+    });
+
+    it('routes liveOnly through native REST when an ACP transport is configured', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessions: [] }),
+      );
+      const transport = new AcpHttpTransport('http://daemon', undefined, fetch);
+      const transportFetch = vi
+        .spyOn(transport, 'fetch')
+        .mockRejectedValue(new Error('ACP transport must not serve liveOnly'));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await client.listWorkspaceSessionsPage('/work/a', {
+        pageSize: 100,
+        liveOnly: true,
+      });
+      await client
+        .workspaceByCwd('/work/a')
+        .listWorkspaceSessionsPage({ pageSize: 100, liveOnly: true });
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=100&liveOnly=1',
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=100&liveOnly=1',
+      ]);
+    });
+
+    it('routes sortBy through native REST when an ACP transport is configured', async () => {
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['session_last_user_prompt_sort'],
+              modelServices: [],
+            })
+          : jsonResponse(200, { sessions: [] }),
+      );
+      const transport = new AcpHttpTransport('http://daemon', undefined, fetch);
+      const transportFetch = vi
+        .spyOn(transport, 'fetch')
+        .mockImplementation(async (url, init) => {
+          if (new URL(url).pathname.endsWith('/sessions')) {
+            throw new Error('ACP transport must not serve sortBy');
+          }
+          return await fetch(url, init);
+        });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await client.listWorkspaceSessionsPage('/work/a', {
+        pageSize: 100,
+        sortBy: 'lastUserPromptAt',
+      });
+      await client.workspaceByCwd('/work/a').listWorkspaceSessionsPage({
+        pageSize: 100,
+        sortBy: 'lastUserPromptAt',
+      });
+
+      expect(
+        transportFetch.mock.calls.map(([url]) => new URL(url).pathname),
+      ).toEqual(['/capabilities']);
+      expect(
+        calls
+          .filter((call) => call.url.includes('/sessions?'))
+          .map((call) => call.url),
+      ).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=100&sortBy=lastUserPromptAt',
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=100&sortBy=lastUserPromptAt',
+      ]);
     });
 
     it('serializes source filters into both workspace session-list clients', async () => {
@@ -6536,6 +8105,138 @@ describe('DaemonClient', () => {
         isPinned: true,
         groupId: 'g-1',
       });
+    });
+  });
+
+  describe('batch session live-state', () => {
+    it('reads mixed workspace snapshots in one authenticated native REST request', async () => {
+      const reply: DaemonSessionLiveStateBatchResult = {
+        workspaces: [
+          {
+            workspace: 'workspace-a',
+            workspaceId: 'workspace-a',
+            cwd: '/work/a',
+            v: 1,
+            catalogVersion: { generation: 'gen-a', revision: 3 },
+            sessions: [
+              {
+                sessionId: 'session-a',
+                clientCount: 1,
+                hasActivePrompt: true,
+                isWaitingForPermission: false,
+                isWaitingForUserQuestion: false,
+              },
+            ],
+          },
+          {
+            workspace: '/work/b',
+            workspaceId: 'workspace-b',
+            cwd: '/work/b',
+            v: 1,
+            catalogVersion: { generation: 'gen-b', revision: 0 },
+            sessions: [],
+          },
+          {
+            workspace: 'missing',
+            error: {
+              code: 'workspace_not_found',
+              message: 'Workspace is not registered with this daemon.',
+              status: 404,
+            },
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const transportFetch = vi.fn();
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client.getSessionsLiveState({
+          workspaces: ['workspace-a', '/work/b', 'missing'],
+        }),
+      ).resolves.toEqual(reply);
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/sessions/live-state',
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json',
+        },
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        workspaces: ['workspace-a', '/work/b', 'missing'],
+      });
+    });
+
+    it.each(['caller', 'timeout'] as const)(
+      'cancels a batch through %s without serializing transport options',
+      async (mode) => {
+        vi.useFakeTimers();
+        const controller = new AbortController();
+        let signal: AbortSignal | undefined;
+        let finish: ((response: Response) => void) | undefined;
+        let body: unknown;
+        const fetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+          signal = init?.signal ?? undefined;
+          body = JSON.parse(String(init?.body));
+          return new Promise<Response>((resolve, reject) => {
+            finish = resolve;
+            signal?.addEventListener('abort', () => reject(signal?.reason), {
+              once: true,
+            });
+          });
+        });
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const pending = client.getSessionsLiveState(
+          { workspaces: ['workspace-a'] },
+          {
+            signal: controller.signal,
+            timeoutMs: mode === 'timeout' ? 10 : 1000,
+          },
+        );
+        const outcome = pending.then(
+          () => 'resolved',
+          () => 'aborted',
+        );
+        try {
+          if (mode === 'caller') controller.abort();
+          await vi.advanceTimersByTimeAsync(20);
+          expect(signal?.aborted).toBe(true);
+          expect(await outcome).toBe('aborted');
+          expect(body).toEqual({ workspaces: ['workspace-a'] });
+        } finally {
+          finish?.(jsonResponse(200, { workspaces: [] }));
+          await outcome;
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('surfaces an older daemon error without automatic fan-out', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'Not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.getSessionsLiveState({ workspaces: ['workspace-a'] }),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(calls).toHaveLength(1);
     });
   });
 
@@ -6862,7 +8563,99 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('rateSessionTurn', () => {
+    it('POSTs promptId and rating and returns the recorded answer', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn('s-1', 'prompt-1', 'up');
+      expect(result).toEqual({ recorded: true });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/feedback');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'up',
+      });
+    });
+
+    it('sends the client identity header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn(
+        's-1',
+        'prompt-1',
+        'down',
+        'client-1',
+      );
+      expect(result).toEqual({ recorded: false });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'down',
+      });
+    });
+
+    it('throws on 404 (unknown session)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('surfaces the route label on failure', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: "`rating` must be 'up' or 'down'" }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringContaining('POST /session/:id/feedback'),
+      });
+    });
+  });
+
   describe('setSessionConfigOption', () => {
+    it.each(['acp-http', 'acp-ws'] as const)(
+      'normalizes only Workflow mode persistence on %s',
+      async (type) => {
+        let response: { configOptions: unknown[]; persisted?: boolean } = {
+          configOptions: [{ id: 'workflow_mode', currentValue: 'off' }],
+        };
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          transport: {
+            type,
+            supportsReplay: false,
+            connected: true,
+            fetch: async () => jsonResponse(200, response),
+            async *subscribeEvents() {},
+            dispose() {},
+          },
+        });
+        await expect(
+          client.setSessionConfigOption('s-1', 'workflow_mode', 'off'),
+        ).resolves.toEqual({
+          ...response,
+          persisted: true,
+        });
+        response = { configOptions: [], persisted: false };
+        await expect(
+          client.setSessionConfigOption('s-1', 'reasoning_effort', 'none'),
+        ).resolves.toEqual(response);
+        await expect(
+          client.setSessionConfigOption('s-1', 'workflow_mode', 'off'),
+        ).resolves.toEqual(response);
+      },
+    );
+
     it('POSTs a strict reasoning selection with optional persistence', async () => {
       const response = { configOptions: [], persisted: true };
       const { fetch, calls } = recordingFetch(() =>
@@ -6997,6 +8790,51 @@ describe('DaemonClient', () => {
   });
 
   describe('setUserLanguage (#10234)', () => {
+    it('uses REST for sessionless locale changes even with an ACP transport', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          language: 'en',
+          outputLanguage: null,
+          refresh: { runtimes: 0, sessions: 0, failed: 0 },
+        }),
+      );
+      const transportFetch = vi
+        .fn()
+        .mockRejectedValue(new Error('No ACP mapping'));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport: { fetch: transportFetch } as unknown as DaemonTransport,
+      });
+      await client.setUserLanguage('en');
+      await client.workspaceByCwd('/secondary').setUiLanguage('en');
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/language',
+        'http://daemon/workspaces/%2Fsecondary/language',
+      ]);
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+
+    it('writes UI language to the selected workspace without a session', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          language: 'zh',
+          outputLanguage: null,
+          refresh: { runtimes: 0, sessions: 0, failed: 0 },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client
+        .workspaceByCwd('/secondary project')
+        .setUiLanguage('zh', 'client-1');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Fsecondary%20project/language',
+      );
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ language: 'zh' });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('POSTs to the sessionless /language route and returns the typed result', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
@@ -7049,6 +8887,51 @@ describe('DaemonClient', () => {
         status: 404,
       });
     });
+  });
+
+  describe('askSessionModRow', () => {
+    it.each(['rest', 'acp-http', 'acp-ws'] as const)(
+      'POSTs the row over REST with a %s client',
+      async (type) => {
+        const answer = {
+          status: 'answered',
+          props: { text: '你好', isFirstOfReply: true },
+        };
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, answer),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          ...(type === 'rest'
+            ? { fetch }
+            : {
+                transport: {
+                  type,
+                  supportsReplay: true,
+                  connected: true,
+                  restFetch: fetch,
+                  fetch: async () =>
+                    jsonResponse(404, { error: 'No ACP mapping' }),
+                  async *subscribeEvents() {},
+                  dispose() {},
+                },
+              }),
+        });
+        const row = {
+          component: 'AssistantMessage',
+          props: { text: 'Hello', isFirstOfReply: true },
+        };
+        const signal = new AbortController().signal;
+        await expect(
+          client.askSessionModRow('s/1', row, { clientId: 'client-1', signal }),
+        ).resolves.toEqual(answer);
+        expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/mod-row');
+        expect(calls[0]?.method).toBe('POST');
+        expect(JSON.parse(calls[0]!.body as string)).toEqual(row);
+        expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+        expect(calls[0]?.signal).toBe(signal);
+      },
+    );
   });
 
   describe('recapSession (#4175 follow-up)', () => {
@@ -7533,6 +9416,81 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setUserSkillsActivation', () => {
+    it('uses REST when the client has an ACP transport', async () => {
+      const response = {
+        scope: 'user',
+        state: 'enabled',
+        propagation: 'queued',
+        results: [{ skillName: 'pdf', changed: true }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(404, { error: 'No ACP mapping' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client.setUserSkillsActivation(['pdf'], { state: 'enabled' }),
+      ).resolves.toEqual(response);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/skills/activation',
+        method: 'PUT',
+      });
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { state: 'enabled' },
+      { state: 'disabled' },
+      { state: 'disabled', mode: 'default' },
+    ] as const)(
+      'sends one PUT with no preliminary read for %j',
+      async (activation) => {
+        const response = {
+          scope: 'user',
+          ...activation,
+          propagation: 'queued',
+          results: [{ skillName: 'rust:pdf', changed: true }],
+        };
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, response),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(
+          client.setUserSkillsActivation(['rust:pdf'], activation, {
+            clientId: 'client-1',
+          }),
+        ).resolves.toEqual(response);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+          url: 'http://daemon/skills/activation',
+          method: 'PUT',
+          body: JSON.stringify({ skillNames: ['rust:pdf'], ...activation }),
+          headers: {
+            'content-type': 'application/json',
+            'x-qwen-client-id': 'client-1',
+          },
+        });
+      },
+    );
+  });
+
   describe('setWorkspaceSkillsEnabled', () => {
     const response = {
       enabled: false,
@@ -7639,6 +9597,181 @@ describe('DaemonClient', () => {
         status: 400,
         body: expect.objectContaining({ code: 'invalid_skill_names' }),
       });
+    });
+  });
+
+  describe('explicit session refresh', () => {
+    const skillResult = {
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+      configsRefreshed: 2,
+      configsFailed: 0,
+      reason: 'all',
+    };
+    const cases = [
+      {
+        name: 'primary Skill',
+        path: '/workspace/skills/refresh',
+        invoke: (client: DaemonClient, sessionIds?: string[]) =>
+          client.refreshWorkspaceSkills({ sessionIds }, 'client-1'),
+        result: skillResult,
+      },
+      {
+        name: 'qualified Skill',
+        path: '/workspaces/%2Ftmp%2Fwork%20space/skills/refresh',
+        invoke: (client: DaemonClient, sessionIds?: string[]) =>
+          client
+            .workspaceByCwd('/tmp/work space')
+            .refreshSkillRuntime({ sessionIds }, 'client-1'),
+        result: skillResult,
+      },
+      {
+        name: 'primary Extension',
+        path: '/workspace/extensions/refresh',
+        invoke: (client: DaemonClient, sessionIds?: string[]) =>
+          client.refreshExtensions('client-1', { sessionIds }),
+        result: { refreshed: 1, failed: 0 },
+      },
+      {
+        name: 'qualified Extension',
+        path: '/workspaces/%2Ftmp%2Fwork%20space/extensions/refresh',
+        invoke: (client: DaemonClient, sessionIds?: string[]) =>
+          client
+            .workspaceByCwd('/tmp/work space')
+            .refreshExtensionRuntime('client-1', { sessionIds }),
+        result: { accepted: true, operationId: 'op-refresh' },
+      },
+    ];
+
+    it.each(cases)(
+      'sends a selected $name refresh over REST',
+      async (target) => {
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, target.result),
+        );
+        const transportFetch = vi.fn(async () =>
+          jsonResponse(200, { features: ['workspace_session_refresh'] }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'token-1',
+          fetch,
+          transport: {
+            type: 'acp-http',
+            supportsReplay: true,
+            connected: true,
+            fetch: transportFetch,
+            async *subscribeEvents() {},
+            dispose() {},
+          },
+        });
+        const sessionIds = ['with/slash', 'session-2', 'with/slash'];
+
+        await expect(target.invoke(client, sessionIds)).resolves.toEqual(
+          target.result,
+        );
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+          url: `http://daemon${target.path}`,
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer token-1',
+            'x-qwen-client-id': 'client-1',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ sessionIds }),
+        });
+        expect(transportFetch).toHaveBeenCalledOnce();
+        expect(transportFetch).toHaveBeenCalledWith(
+          'http://daemon/capabilities',
+          expect.objectContaining({
+            headers: { Authorization: 'Bearer token-1' },
+          }),
+        );
+      },
+    );
+
+    it.each(cases)('preserves an empty selection for $name', async (target) => {
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: ['workspace_session_refresh'] })
+          : jsonResponse(200, target.result),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await target.invoke(client, []);
+      expect(calls.map((call) => [call.method, call.body])).toEqual([
+        ['GET', null],
+        ['POST', JSON.stringify({ sessionIds: [] })],
+      ]);
+    });
+
+    it.each(cases)(
+      'rejects unsupported selected $name refreshes',
+      async (target) => {
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { features: [] }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        await expect(target.invoke(client, [])).rejects.toMatchObject({
+          name: 'DaemonCapabilityMissingError',
+          capability: 'workspace_session_refresh',
+        });
+        expect(calls.map((call) => [call.method, call.url])).toEqual([
+          ['GET', 'http://daemon/capabilities'],
+        ]);
+      },
+    );
+
+    it.each(cases.slice(0, 2))(
+      'checks the capability for a full $name refresh',
+      async (target) => {
+        const { fetch, calls } = recordingFetch((req) =>
+          req.url.endsWith('/capabilities')
+            ? jsonResponse(200, { features: ['workspace_session_refresh'] })
+            : jsonResponse(200, skillResult),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        await target.invoke(client);
+        expect(calls.map((call) => [call.method, call.body])).toEqual([
+          ['GET', null],
+          ['POST', '{}'],
+        ]);
+      },
+    );
+
+    it('keeps full Extension refreshes compatible without a capability probe', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { refreshed: 2, failed: 0 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.refreshExtensions('client-1');
+      await client
+        .workspaceById('workspace/id')
+        .refreshExtensionRuntime('client-2', {});
+      await client.refreshExtensions('client-3', { sessionIds: undefined });
+      await client
+        .workspaceById('workspace/id')
+        .refreshExtensionRuntime('client-4', { sessionIds: undefined });
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        ['POST', 'http://daemon/workspace/extensions/refresh', '{}'],
+        [
+          'POST',
+          'http://daemon/workspaces/workspace%2Fid/extensions/refresh',
+          '{}',
+        ],
+        ['POST', 'http://daemon/workspace/extensions/refresh', '{}'],
+        [
+          'POST',
+          'http://daemon/workspaces/workspace%2Fid/extensions/refresh',
+          '{}',
+        ],
+      ]);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-2');
     });
   });
 
@@ -9905,6 +12038,44 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('forwards content=true on workspace-qualified memory reads', async () => {
+      const snapshot = {
+        v: 1,
+        workspaceCwd: '/work/b',
+        initialized: true,
+        files: [
+          {
+            kind: 'memory_file' as const,
+            path: '/work/b/QWEN.md',
+            scope: 'workspace' as const,
+            bytes: 12,
+            content: '# Secondary\n',
+          },
+        ],
+        totalBytes: 12,
+        fileCount: 1,
+        ruleCount: 0,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, snapshot),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.workspaceByCwd('/work/b').workspaceMemory({
+          includeContent: true,
+        }),
+      ).resolves.toEqual(snapshot);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspaces/%2Fwork%2Fb/memory?content=true',
+      });
+      await client.workspaceByCwd('/work/b').workspaceMemory();
+      expect(calls[1]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspaces/%2Fwork%2Fb/memory',
+      });
+    });
+
     it('POSTs /workspace/memory and forwards X-Qwen-Client-Id', async () => {
       const reply = {
         ok: true,
@@ -10579,6 +12750,23 @@ describe('DaemonClient', () => {
       expect(calls[0]?.signal?.aborted).toBe(true);
     });
 
+    it('reloads model providers through an encoded workspace-qualified mutation', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { status: 'applied' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client
+          .workspaceByCwd('/tmp/work space')
+          .reloadModelProviders({ clientId: 'client-1' }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/models/reload',
+      );
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('workspaceById and workspaceByCwd call workspace-qualified agents routes', async () => {
       const list = {
         v: 1,
@@ -10718,7 +12906,7 @@ describe('DaemonClient', () => {
       await expect(
         workspace.archiveSessionsData(
           ['s-1'],
-          { resolveConflicts: true },
+          { resolveConflicts: true, requireIdle: true },
           'client-2',
         ),
       ).resolves.toEqual(replies['/sessions/archive']);
@@ -10738,7 +12926,11 @@ describe('DaemonClient', () => {
       ]);
       expect(calls.map((call) => JSON.parse(call.body!))).toEqual([
         { sessionIds: ['s-1'] },
-        { sessionIds: ['s-1'], resolveConflicts: true },
+        {
+          sessionIds: ['s-1'],
+          resolveConflicts: true,
+          requireIdle: true,
+        },
         { sessionIds: ['s-1'] },
       ]);
     });
@@ -11517,6 +13709,34 @@ describe('DaemonClient', () => {
   });
 
   describe('workspace registration persistence', () => {
+    it('reads and saves shared workspace order through REST and propagates failures', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { cwds: ['/b', '/a'] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.getWorkspaceOrder()).resolves.toEqual({
+        cwds: ['/b', '/a'],
+      });
+      await expect(client.setWorkspaceOrder(['/b', '/a'])).resolves.toEqual({
+        cwds: ['/b', '/a'],
+      });
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        ['GET', 'http://daemon/workspace-order', null],
+        [
+          'POST',
+          'http://daemon/workspace-order',
+          JSON.stringify({ cwds: ['/b', '/a'] }),
+        ],
+      ]);
+      const failed = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: async () => jsonResponse(500, { error: 'disk full' }),
+      });
+      await expect(failed.setWorkspaceOrder(['/a'])).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+
     it('updates and clears workspace metadata through direct REST', async () => {
       const { fetch, calls } = recordingFetch((req) =>
         jsonResponse(200, {
@@ -11777,6 +13997,34 @@ describe('DaemonClient', () => {
 
       expect(JSON.parse(calls[0]!.body!)).toEqual({ groupId: 'group-1' });
     });
+
+    it('requests the Channel event journal with one parameter per name', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { events: [], truncated: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceChannelEvents({
+        limit: 5,
+        types: ['inbound', 'poll'],
+        channels: ['bot', 'a,b'],
+        since: '2026-11-02T00:00:00.000Z',
+      });
+      await client
+        .workspaceByCwd('/tmp/work space')
+        .workspaceChannelEvents({ channels: ['bot'] });
+
+      expect(calls.map(({ method, url }) => [method, url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspace/channels/events?limit=5&type=inbound%2Cpoll&channel=bot&channel=a%2Cb&since=2026-11-02T00%3A00%3A00.000Z',
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/events?channel=bot',
+        ],
+      ]);
+    });
   });
 
   describe('sessionWorkflowTaskAction', () => {
@@ -11876,6 +14124,58 @@ describe('workspace runtime stop', () => {
     expect(fetch.mock.calls[1][1]).toMatchObject({
       method: 'POST',
       body: JSON.stringify(confirmation),
+    });
+  });
+});
+
+describe('message group deletion', () => {
+  it('uses owner-aware REST, encodes session ids, and sends snapshot and client identity', async () => {
+    const { fetch, calls } = recordingFetch((req) =>
+      req.method === 'GET'
+        ? jsonResponse(200, {
+            snapshot: 'v1',
+            groups: [{ id: 'group', recordIds: ['group'] }],
+          })
+        : jsonResponse(200, {
+            deletedGroupIds: ['group'],
+            deletedPromptIds: ['prompt'],
+          }),
+    );
+    const transportFetch = vi.fn();
+    const transport: DaemonTransport = {
+      type: 'acp-http',
+      supportsReplay: true,
+      connected: true,
+      fetch: transportFetch,
+      async *subscribeEvents() {},
+      dispose() {},
+    };
+    const client = new DaemonClient({
+      baseUrl: 'http://daemon',
+      token: 'secret',
+      fetch,
+      transport,
+    });
+    await expect(client.getMessageGroups('with/slash')).resolves.toMatchObject({
+      snapshot: 'v1',
+    });
+    await expect(
+      client.deleteMessageGroups('with/slash', 'v1', ['group'], 'client-1'),
+    ).resolves.toEqual({
+      deletedGroupIds: ['group'],
+      deletedPromptIds: ['prompt'],
+    });
+    expect(transportFetch).not.toHaveBeenCalled();
+    expect(calls[0]!.url).toBe(
+      'http://daemon/session/with%2Fslash/message-groups',
+    );
+    expect(calls[1]!.url).toBe(
+      'http://daemon/session/with%2Fslash/messages/delete',
+    );
+    expect(calls[1]!.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[1]!.body!)).toEqual({
+      snapshot: 'v1',
+      groupIds: ['group'],
     });
   });
 });

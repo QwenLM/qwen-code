@@ -49,7 +49,7 @@ the checks that D2 and D3 build on.
 ### 4.1 Spec location and format
 
 The spec moves into
-`packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`
+`packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`
 and becomes the single source; the design repository points here from now on.
 
 It is stored as JSON rather than YAML. The repository's yamllint rules require
@@ -138,7 +138,7 @@ fake Harness of `ManagedAgentServerIntegrationTest` and its own in-memory H2
 database. The two classes load separate Spring contexts, and each context's
 dispatcher polls its database, so a shared database would let one test's
 dispatcher claim the other's Turns. It uses the test-scoped
-`com.networknt:json-schema-validator` (1.5.9, Jackson 2 like Spring Boot 3.5)
+`com.networknt:json-schema-validator` (2.0.0, Jackson 2 like Spring Boot 3.5)
 with JSON Schema 2020-12 and format assertions enabled. Schemas are addressed
 by JSON Pointer into the spec, so `$ref` resolves inside the one file.
 
@@ -256,7 +256,7 @@ WebShell client sends `text`, so both must change together in D2.
 
 ## 9. Validation
 
-- `mvn test` in `packages/sdk-java/managed-agent-server` runs the three
+- `mvn test` in `packages/managed-agent-server` runs the three
   contract tests with the recorded gaps.
 - Mutations each fail the matching test: a new field on a record, a new mapped
   route, a removed gap line, and a spec change without regenerating the

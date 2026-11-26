@@ -26,6 +26,7 @@ import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { ToolNames } from './tool-names.js';
 import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
+import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 
 // Type for accessing protected methods in tests
 type SkillToolWithProtectedMethods = SkillTool & {
@@ -147,7 +148,7 @@ describe('SkillTool', () => {
       enableReviewWorkflow: vi.fn().mockResolvedValue(undefined),
       getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
-      isTrustedFolder: vi.fn().mockReturnValue(true),
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getSkillManager: vi.fn(),
       getLlmClient: vi.fn().mockReturnValue(undefined),
@@ -678,14 +679,14 @@ describe('SkillTool', () => {
     }
 
     it('applies neither allowedTools nor hooks for a project skill in an untrusted folder, but still loads the body', async () => {
-      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(config.isExplicitlyTrustedFolder).mockReturnValue(false);
       const result = await invoke(repoSkill);
       expectNoSideEffects();
       expect(partToString(result.llmContent)).toContain('Repo skill body.');
     });
 
     it('applies both for a project skill in a trusted folder — the grants trust-gated', async () => {
-      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      vi.mocked(config.isExplicitlyTrustedFolder).mockReturnValue(true);
       await invoke(repoSkill);
       // Marked repository-controlled: the permission manager re-checks folder
       // trust at every decision (a mid-session revocation suspends them), and
@@ -701,11 +702,11 @@ describe('SkillTool', () => {
     });
 
     it('applies the side effects on re-invocation once trust is granted mid-session', async () => {
-      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(config.isExplicitlyTrustedFolder).mockReturnValue(false);
       await invoke(repoSkill);
       expectNoSideEffects();
 
-      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      vi.mocked(config.isExplicitlyTrustedFolder).mockReturnValue(true);
       const result = await invoke(repoSkill);
       // The dedup guard still answers "already loaded", but the gate is
       // re-evaluated and the grants are applied now.
@@ -715,14 +716,14 @@ describe('SkillTool', () => {
     });
 
     it('keeps refusing on re-invocation while the folder stays untrusted', async () => {
-      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(config.isExplicitlyTrustedFolder).mockReturnValue(false);
       await invoke(repoSkill);
       await invoke(repoSkill);
       expectNoSideEffects();
     });
 
     it('applies both for a user skill regardless of folder trust', async () => {
-      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(config.isExplicitlyTrustedFolder).mockReturnValue(false);
       await invoke({
         ...repoSkill,
         name: 'home-skill',
@@ -1244,6 +1245,44 @@ describe('SkillTool', () => {
       );
     });
 
+    it('does not register a Code Mode skill that finishes loading after cancellation', async () => {
+      let releaseOldLoad!: (skill: SkillConfig) => void;
+      const oldLoad = new Promise<SkillConfig>((resolve) => {
+        releaseOldLoad = resolve;
+      });
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockReturnValueOnce(
+        oldLoad,
+      );
+      const controller = new AbortController();
+      const pending = runWithToolCallSource({ kind: 'code_mode' }, () =>
+        inv('code-review').execute(controller.signal),
+      );
+      controller.abort();
+      const current = await execText('code-review');
+      releaseOldLoad({ ...mockRuntimeConfig, body: 'obsolete skill body' });
+      await expect(pending).rejects.toThrow();
+
+      expectLoadedContents(current);
+      expect(await execText('code-review')).toBe(alreadyLoaded);
+    });
+
+    it('forgets only the new skill body when its Code Mode batch aborts', async () => {
+      const review = await execText('code-review');
+      loads(mockSkills[1]);
+      const controller = new AbortController();
+      const result = await runWithToolCallSource(
+        { kind: 'code_mode', signal: controller.signal },
+        () => inv('testing').execute(controller.signal),
+      );
+      expectLoadedContents(review, partToString(result.llmContent));
+      controller.abort();
+      expectLoadedNames('code-review');
+      expectLoadedContents(review);
+      expect(await execText('testing')).toContain(
+        'Help write comprehensive tests.',
+      );
+    });
+
     it('restores loaded Skill state from full bodies in resumed history', async () => {
       const output = bodyOf(mockSkills[0]);
       await restore(skillPair('skill-call', 'code-review', output));
@@ -1345,7 +1384,7 @@ describe('SkillTool', () => {
         vi.mocked(registerSkillHooks).mockClear();
         vi.mocked(mockSkillManager.listSkills).mockClear();
         mockDebugLogger.warn.mockClear();
-        vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+        vi.mocked(config.isExplicitlyTrustedFolder).mockReturnValue(true);
         useHookSystem();
         caches([gatedSkill]);
       });
@@ -1423,7 +1462,7 @@ describe('SkillTool', () => {
           skillRoot: '/project/.qwen/skills/gated-skill',
         };
         caches([projectSkill]);
-        vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+        vi.mocked(config.isExplicitlyTrustedFolder).mockReturnValue(false);
 
         await restore(resumedHistory(projectSkill));
 

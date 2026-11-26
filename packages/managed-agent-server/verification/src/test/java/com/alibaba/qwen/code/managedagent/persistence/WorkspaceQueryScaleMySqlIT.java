@@ -1,0 +1,265 @@
+package com.alibaba.qwen.code.managedagent.persistence;
+
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
+import java.time.Clock;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class WorkspaceQueryScaleMySqlIT {
+    @Test
+    void tenfoldHistoryKeepsRecoveryBlockersAndChildClaimsBoundedByIndexes() {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            ManagedSchema.initialize(database.source());
+            var jdbc = new CapturingJdbc(database.source());
+            var manager = new DataSourceTransactionManager(database.source());
+            var transactions = new TransactionTemplate(manager);
+            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                    new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            String session = transactions.execute(ignored -> store.insertSessionCommand("tenant", "actor", "CREATE_SESSION",
+                    "create", "digest", "qwen-code", null, null, List.of(), null)).sessionId();
+            ManagedReceipts.insertCreation(jdbc, "tenant", "actor".getBytes(java.nio.charset.StandardCharsets.UTF_8), "creation", "digest", session, null, 1);
+            jdbc.update("UPDATE ma_session SET workspace_id = 'root', workspace_generation = 1, workspace_storage_id = 'storage',"
+                    + " cwd_relative = '.', context_config_ref = ?, context_revision = 1, workspace_config_ref = ?, workspace_policy_ref = ?"
+                    + " WHERE tenant_id = 'tenant' AND session_id = ?", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                    WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF, session);
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
+                    + " VALUES ('tenant', 'root', 1, 'storage', 'Root', ?, ?, 'ACTIVE')",
+                    WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            var children = new JdbcChildWorkspaceStore(jdbc, manager);
+            var binding = new ContextBinding("tenant", "root", 1, "storage", ".", "config", 1);
+            for (int index = 0; index < 5; index++) {
+                children.admit("tenant", session, "due-" + index, binding, 1);
+            }
+            for (int size : new int[] {1000, 10000}) {
+                addHistory(jdbc, session, size == 1000 ? 0 : 1000, size);
+                jdbc.execute("ANALYZE TABLE ma_operation, ma_workspace, ma_resource, ma_resource_ref");
+                ObjectNode source = (ObjectNode) WorkspaceRecoveryStore.currentSource(jdbc, "tenant", "storage", session, false);
+                assertThat(source.path("sessionId").asText()).isEqualTo(session);
+                assertBounded(jdbc, jdbc.blocker, "idx_ma_operation_session_state", 5);
+                assertBounded(jdbc, jdbc.deleteIntent, "idx_ma_resource_delete_intent", 5);
+                assertThat(children.findDue(10, 5)).hasSize(5);
+                assertBounded(jdbc, jdbc.due, "idx_ma_operation_due", 5);
+                source.putObject("head").put("tenantId", "tenant").put("workspaceId", "root")
+                        .put("sessionId", session).put("journalRevision", 1);
+                ObjectNode ref = new ObjectMapper().createObjectNode().put("resourceId", "history-resource-" + (size - 1))
+                        .put("kind", "managed-definition").put("schemaVersion", 1).put("byteLength", 2)
+                        .put("digest", com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                assertThat(new WorkspaceRecoveryReader(jdbc, null).resource(source, ref).path("bytesBase64").asText()).isEqualTo("e30=");
+                assertBounded(jdbc, jdbc.resource, "uk_ma_resource_id", 5);
+                assertBounded(jdbc, jdbc.reference, "idx_ma_ref_resource", 5);
+            }
+        }
+    }
+
+    @Test
+    void tenfoldClosedAliasHistoryKeepsPhysicalAuthorityInventoryBounded() {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            ManagedSchema.initialize(database.source());
+            var jdbc = new CapturingJdbc(database.source());
+            WorkspaceTestStorage.register(jdbc, "other-tenant", "other-storage");
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
+                    + " VALUES ('other-tenant', 'other-workspace', 1, 'other-storage', 'Workspace', 'config', 'policy', 'ACTIVE')");
+            var repository = new com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository(database.source(),
+                    new com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector("test", new byte[32]));
+            var request = new com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest(
+                    new com.alibaba.qwen.code.runtimebroker.RuntimeScope("other-tenant", "other-workspace", "1", "/scale",
+                            "sha256:" + "a".repeat(64), "workspace"), null, "local-process", "other-storage");
+            var failed = repository.findOrCreate(request);
+            var claimed = repository.claimOperation(failed.getBindingId(), "scale-worker", java.time.Duration.ofMinutes(1));
+            repository.compareAndSet(claimed, claimed.withState(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.FAILED,
+                    null, java.time.Instant.now()));
+            new WorkspaceOperations(jdbc, "other-tenant").create(WorkspaceOperations.Kind.STORAGE_MIGRATION, "pending-migration",
+                    WorkspaceOperations.values("storage_id", "other-storage", "state", "RETIRING"));
+            var child = new JdbcChildWorkspaceStore(jdbc, new DataSourceTransactionManager(database.source())).admit(
+                    "other-tenant", "collected-parent", "pending-child", new ContextBinding("other-tenant", "other-workspace", 1,
+                            "other-storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), 1);
+            String childKey = WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, "other-tenant", child.childWorkspaceId());
+            jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_ref = ?", JdbcChildWorkspaceStore.MERGED, childKey);
+            jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", JdbcChildWorkspaceStore.MERGED,
+                    "other-tenant", child.childWorkspaceId());
+            for (int size : new int[] {1000, 10000}) {
+                int from = size == 1000 ? 0 : 1000;
+                var sessions = new ArrayList<Object[]>();
+                var heads = new ArrayList<Object[]>();
+                var bindings = new ArrayList<Object[]>();
+                var operations = new ArrayList<Object[]>();
+                var children = new ArrayList<Object[]>();
+                var owners = new ArrayList<Object[]>();
+                for (int index = from; index < size; index++) {
+                    String id = "closed-" + index;
+                    sessions.add(new Object[] {id});
+                    heads.add(new Object[] {id, id});
+                    bindings.add(new Object[] {id, ManagedSchemaKeys.key(id), ManagedSchemaKeys.key("scope", id), "other-storage"});
+                    operations.add(new Object[] {ManagedIdentityRefs.tenantOperationRef("STORAGE_MIGRATION", "other-tenant", id), "other-tenant", id,
+                            "other-storage", "other-storage"});
+                    children.add(new Object[] {ManagedIdentityRefs.tenantOperationRef("CHILD_WORKSPACE", "other-tenant", "child-" + id), "other-tenant", "child-" + id,
+                            "other-storage", "other-storage", index % 2 == 0 ? JdbcChildWorkspaceStore.MERGED : JdbcChildWorkspaceStore.DISCARDED});
+                    owners.add(new Object[] {ManagedSchemaKeys.key("old-physical", id)});
+                }
+                jdbc.batchUpdate("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id,"
+                        + " is_resource_gc_completed, retirement_generation, retired_at, gmt_create, gmt_modified) VALUES ('other-tenant', ?, 'CONTROL', 'other-storage', TRUE, 1, 1, 1, 1)", sessions);
+                jdbc.batchUpdate("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, head_kind, workspace_id, state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES ('other-tenant', ?, ?, 'MANAGED_SESSION', 'other-workspace', 'DELETED', 1, 0, 0, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")", heads);
+                jdbc.batchUpdate("INSERT INTO ma_runtime_binding (binding_id, request_id, scope_id, tenant_id, workspace_id, workspace_generation, canonical_cwd, capability_digest, isolation_class, provisioner_kind, storage_id, runtime_generation, binding_state, attestation_generation, is_drain_requested, operation_generation, record_version, last_active_at) VALUES (?, ?, ?, 'other-tenant', 'other-workspace', '1', '/scale', 'digest', 'workspace', 'local-process', ?, 1, 'FAILED', 0, FALSE, 0, 0, " + ManagedSchemaTime.SQL_NOW + ")", bindings);
+                jdbc.batchUpdate("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id, target_kind, target_id, storage_id, state, phase, request_digest, request_json, gmt_create, gmt_modified)"
+                        + " VALUES (?, 'TENANT', ?, 'STORAGE_MIGRATION', ?, 'other-tenant', 'STORAGE', ?, ?, 'COMPLETED', 'COMPLETED', 'digest', '{}', 1, 1)", operations);
+                jdbc.batchUpdate("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id, target_kind, target_id, storage_id, state, phase, request_digest, request_json, gmt_create, gmt_modified)"
+                        + " VALUES (?, 'TENANT', ?, 'CHILD_WORKSPACE', ?, 'other-tenant', 'STORAGE', ?, ?, ?, 'SETTLED', 'digest', '{}', 1, 1)", children);
+                jdbc.batchUpdate("INSERT INTO ma_storage_owner (physical_id, storage_kind) VALUES (?, 'LOCAL')", owners);
+                jdbc.execute("ANALYZE TABLE ma_session, ma_session_head, ma_workspace, ma_runtime_binding, ma_operation, ma_storage_owner");
+                var session = new Query(LocalStorageOwners.SESSION_AUTHORITY_SQL, new Object[] {"other-tenant", "other-storage"});
+                assertThat(jdbc.queryForList(session.sql(), Integer.class, session.arguments())).isEmpty();
+                assertBounded(jdbc, session, "idx_ma_session_storage_scope", 5);
+                var runtime = new Query(LocalStorageOwners.RUNTIME_AUTHORITY_SQL, new Object[] {"other-tenant", "other-storage"});
+                assertThat(jdbc.queryForList(runtime.sql(), Integer.class, runtime.arguments())).containsExactly(1);
+                assertBounded(jdbc, runtime, "idx_ma_runtime_storage_alias_state", 5);
+                var operation = new Query(LocalStorageOwners.OPERATION_AUTHORITY_SQL, new Object[] {"other-tenant", "other-storage"});
+                assertThat(jdbc.queryForList(operation.sql(), Integer.class, operation.arguments())).containsExactly(1);
+                assertBounded(jdbc, operation, "idx_ma_operation_storage", 5);
+                String migrationKey = WorkspaceOperations.key(WorkspaceOperations.Kind.STORAGE_MIGRATION, "other-tenant", "pending-migration");
+                jdbc.update("UPDATE ma_operation SET state = 'COMPLETED' WHERE operation_ref = ?", migrationKey);
+                assertThat(jdbc.queryForList(operation.sql(), Integer.class, operation.arguments())).isEmpty();
+                assertBounded(jdbc, operation, "idx_ma_operation_storage", 5);
+                jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_ref = ?", JdbcChildWorkspaceStore.PREPARING, childKey);
+                jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", JdbcChildWorkspaceStore.PREPARING,
+                        "other-tenant", child.childWorkspaceId());
+                assertThat(jdbc.queryForList(operation.sql(), Integer.class, operation.arguments())).containsExactly(1);
+                assertBounded(jdbc, operation, "idx_ma_operation_storage", 5);
+                jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_ref = ?", JdbcChildWorkspaceStore.MERGED, childKey);
+                jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", JdbcChildWorkspaceStore.MERGED,
+                        "other-tenant", child.childWorkspaceId());
+                jdbc.update("UPDATE ma_operation SET state = 'RETIRING' WHERE operation_ref = ?", migrationKey);
+                var head = new Query(LocalStorageOwners.HEAD_AUTHORITY_SQL, new Object[] {"other-tenant", "other-tenant", "other-storage"});
+                assertThat(jdbc.queryForList(head.sql(), Integer.class, head.arguments())).isEmpty();
+                assertBounded(jdbc, head, "idx_ma_session_storage_scope", 5);
+            }
+            // Positive case: the fixtures above all set is_resource_gc_completed
+            // = TRUE and a non-null workspace_storage_id, so the outer WHERE
+            // empties HEAD_AUTHORITY before the = 1 marker is ever evaluated.
+            // A live, un-collected root with a null storage scope exercises the
+            // marker itself: registered = 1 admits the row, = 0 excludes it.
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id,"
+                    + " is_resource_gc_completed, is_publication_retention_registered, retirement_generation, retired_at, gmt_create, gmt_modified)"
+                    + " VALUES ('other-tenant', 'head-authority-live', 'CONTROL', NULL, FALSE, 1, 1, 1, 1, 1)");
+            jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, head_kind, workspace_id, state,"
+                    + " writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified)"
+                    + " VALUES ('other-tenant', 'head-authority-live', 'head-authority-live', 'MANAGED_SESSION', 'other-workspace', 'ACTIVE', 1, 0, 0, 0, 0, 'READY', "
+                    + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")");
+            var liveHead = new Query(LocalStorageOwners.HEAD_AUTHORITY_SQL, new Object[] {"other-tenant", "other-tenant", "other-storage"});
+            assertThat(jdbc.queryForList(liveHead.sql(), Integer.class, liveHead.arguments())).containsExactly(1);
+            jdbc.update("UPDATE ma_session SET is_publication_retention_registered = 0"
+                    + " WHERE tenant_id = 'other-tenant' AND session_id = 'head-authority-live'");
+            assertThat(jdbc.queryForList(liveHead.sql(), Integer.class, liveHead.arguments())).isEmpty();
+        }
+    }
+
+    private static void addHistory(CapturingJdbc jdbc, String session, int from, int to) {
+        var operations = new ArrayList<Object[]>();
+        var workspaces = new ArrayList<Object[]>();
+        var resources = new ArrayList<Object[]>();
+        var references = new ArrayList<Object[]>();
+        String journalOwnerRef = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, "tenant", session);
+        for (int index = from; index < to; index++) {
+            String child = "historical-child-" + index;
+            String rawRun = "historical-run-" + index;
+            operations.add(new Object[] {ManagedIdentityRefs.tenantOperationRef("CHILD_WORKSPACE", "tenant", child), "TENANT", "tenant", child,
+                    session, "CHILD_WORKSPACE", child, "merged", "IDLE"});
+            operations.add(new Object[] {ManagedIdentityRefs.operationRef("CLOSE", "tenant", "SESSION", session, session, "close-" + child), "SESSION", session, "close-" + child,
+                    session, "CLOSE", session, "COMPLETED", "CONFIRMED"});
+            workspaces.add(new Object[] {child, child,
+                    session, rawRun});
+            String resourceId = "history-resource-" + index;
+            resources.add(new Object[] {session,
+                    resourceId.getBytes(java.nio.charset.StandardCharsets.UTF_8), com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8))});
+            references.add(new Object[] {journalOwnerRef, session, resourceId.getBytes(java.nio.charset.StandardCharsets.UTF_8)});
+        }
+        jdbc.batchUpdate("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, tenant_id, session_id,"
+                + " operation_kind, target_kind, target_id, state, phase, delivery_state, request_digest, request_json, available_at, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, ?, 'tenant', ?, ?, 'SESSION', ?, ?, 'SETTLED', ?, 'digest', '{}', 0, 1, 1)", operations);
+        jdbc.batchUpdate("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref,"
+                + " state, workspace_kind, child_state, child_workspace_id, parent_workspace_id, parent_session_id, child_run_id, parent_cwd_relative)"
+                + " VALUES ('tenant', ?, 1, 'storage', 'Child', 'config', 'policy', 'ACTIVE', 'CHILD_GIT', 'merged', ?, 'root', ?, ?, '.')", workspaces);
+        jdbc.batchUpdate("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES ('tenant', 'root', ?, ?, 'managed-definition', 1, 2, ?, 'MYSQL_INLINE', X'7b7d', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")", resources);
+        jdbc.batchUpdate("INSERT INTO ma_resource_ref (owner_kind, owner_ref, owner_revision, tenant_id, workspace_id, session_id, resource_id, journal_revision, gmt_create) VALUES ('JOURNAL', ?, 1, 'tenant', 'root', ?, ?, 1, " + ManagedSchemaTime.SQL_NOW + ")", references);
+    }
+
+    private static void assertBounded(CapturingJdbc jdbc, Query query, String index, int limit) {
+        assertThat(query).isNotNull();
+        var plan = ExecutedQueryPlan.explain(jdbc, query.sql(), query.arguments());
+        assertThat(plan.tableScan()).as(plan.text()).isFalse();
+        if (plan.text().contains("Rows fetched before execution")) {
+            var table = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse(jdbc.queryForObject("EXPLAIN FORMAT=JSON " + query.sql(), String.class, query.arguments()))
+                    .path("query_block").path("table");
+            assertThat(table.path("access_type").asText()).isEqualTo("const");
+            assertThat(table.path("key").asText()).isEqualTo(index);
+            assertThat(table.path("rows_examined_per_scan").asInt()).isEqualTo(1);
+        } else {
+            assertThat(plan.usesIndex(index)).as(plan.text()).isTrue();
+        }
+        assertThat(plan.rowCounts()).as(plan.text()).isNotEmpty();
+        assertThat(plan.preExecutionPageReads()).as(plan.text()).isLessThanOrEqualTo(limit);
+        for (double count : plan.rowCounts()) {
+            assertThat(count).as(plan.text()).isLessThanOrEqualTo(limit);
+        }
+    }
+
+    private record Query(String sql, Object[] arguments) {}
+
+    private static final class CapturingJdbc extends ManagedSchemaJdbcTemplate {
+        private Query blocker;
+        private Query due;
+        private Query deleteIntent;
+        private Query resource;
+        private Query reference;
+
+        private CapturingJdbc(DataSource source) {
+            super(source);
+        }
+
+        @Override
+        public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+            if (sql.startsWith("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?")) {
+                blocker = new Query(sql, args.clone());
+            }
+            return super.queryForObject(sql, requiredType, args);
+        }
+
+        @Override
+        public <T> List<T> query(String sql, RowMapper<T> mapper, Object... args) {
+            if (sql.contains("WHERE o.delivery_state = 'PENDING'")) {
+                due = new Query(sql, args.clone());
+            }
+            if (sql.contains(" FROM ma_resource WHERE tenant_id")) {
+                resource = new Query(sql, args.clone());
+            }
+            return super.query(sql, mapper, args);
+        }
+
+        @Override
+        public <T> List<T> queryForList(String sql, Class<T> elementType, Object... args) {
+            if (sql.startsWith("SELECT r.resource_id FROM ma_resource r JOIN")) {
+                deleteIntent = new Query(sql, args.clone());
+            }
+            if (sql.startsWith("SELECT resource_id FROM ma_resource_ref")) {
+                reference = new Query(sql, args.clone());
+            }
+            return super.queryForList(sql, elementType, args);
+        }
+    }
+}

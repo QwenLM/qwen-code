@@ -912,4 +912,67 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       fs.access(path.join(dir, 'notarun', 'keep.txt')),
     ).resolves.toBeUndefined();
   });
+
+  // A `.json` that is not a snapshot must not consume the retention cap.
+  // `listWorkflowSnapshots` filters `.json` and then skips whatever
+  // `isWorkflowSnapshot` rejects, so such a file is invisible to the user's
+  // history; counting it here pushes the project over the cap and evicts a
+  // real run in its place. Oldest-mtime-first means the newest malformed file
+  // survives while a legitimate snapshot is silently lost.
+  it('does not count a malformed .json toward the retention cap', async () => {
+    const dir = runsDir();
+    const t0 = 1_000_000;
+    const runIds: string[] = [];
+    for (let i = 0; i < MAX_RETAINED_SNAPSHOTS; i++) {
+      const runId = `wf_${i.toString(16)}`;
+      runIds.push(runId);
+      await write({ runId, startTime: t0 + i });
+      // Distinct, ascending mtimes so the eviction victim is deterministic.
+      await fs.utimes(snapshotPath(runId), new Date(t0 + i), new Date(t0 + i));
+    }
+    // Newest file in the directory, and not a snapshot. The name deliberately
+    // does not match SNAPSHOT_TEMP_FILE, so the temp sweep cannot remove it
+    // before prune runs and hide the behaviour under test.
+    const malformed = path.join(dir, 'notarun.json');
+    await fs.writeFile(malformed, '{ not json', 'utf8');
+    const newest = new Date(t0 + 9_000);
+    await fs.utimes(malformed, newest, newest);
+
+    // Rewriting an existing runId triggers prune without adding a file: 30
+    // well-formed snapshots plus 1 malformed one is 31 `.json` on disk, but
+    // only 30 of them are snapshots, so the cap is reached and not exceeded.
+    const last = runIds[runIds.length - 1];
+    await write({ runId: last, startTime: t0 + 99_000 });
+
+    const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.json'));
+    expect(files.filter((f) => f !== 'notarun.json')).toHaveLength(
+      MAX_RETAINED_SNAPSHOTS,
+    );
+    // The oldest legitimate run survived — it was the pre-fix victim.
+    await expect(fs.access(snapshotPath(runIds[0]))).resolves.toBeUndefined();
+    // Prune only excludes the malformed file from the count; it does not
+    // delete `.json` files this module never wrote.
+    await expect(fs.readFile(malformed, 'utf8')).resolves.toBe('{ not json');
+  });
+
+  // The cap fix must not disable pruning itself: 31 well-formed snapshots
+  // still evict exactly the oldest one.
+  it('still evicts the oldest of 31 well-formed snapshots', async () => {
+    const t0 = 2_000_000;
+    const runIds: string[] = [];
+    for (let i = 0; i < MAX_RETAINED_SNAPSHOTS + 1; i++) {
+      const runId = `wf_c${i.toString(16)}`;
+      runIds.push(runId);
+      await write({ runId, startTime: t0 + i });
+      await fs.utimes(snapshotPath(runId), new Date(t0 + i), new Date(t0 + i));
+    }
+
+    const files = (await fs.readdir(runsDir())).filter((f) =>
+      f.endsWith('.json'),
+    );
+    expect(files).toHaveLength(MAX_RETAINED_SNAPSHOTS);
+    // Exactly one victim, and it is the oldest run.
+    await expect(fs.access(snapshotPath(runIds[0]))).rejects.toThrow();
+    await expect(fs.access(snapshotPath(runIds[1]))).resolves.toBeUndefined();
+  });
 });

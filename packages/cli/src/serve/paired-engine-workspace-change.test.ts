@@ -192,6 +192,7 @@ describe('paired Bridge workspace changes through the workspace routes', () => {
         revision: 1,
         kind: 'permissions',
         tightening: true,
+        scope: 'workspace',
         cwd: workspaceCwd,
       },
     ]);

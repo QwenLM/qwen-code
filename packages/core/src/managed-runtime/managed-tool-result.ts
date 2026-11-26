@@ -19,7 +19,7 @@ import {
 
 // The managed-tool-result/1 contract (O1a of #12723). The shared fixtures in
 // contracts/managed-tool-result-v1.fixtures.json pin it, and a conformance
-// test in packages/sdk-java/runtime-broker pins the same constants. The local
+// test in packages/managed-agent-server pins the same constants. The local
 // segment store consumes it in O1b; the worker follows in O1c.
 
 export const MANAGED_TOOL_RESULT_PROTOCOL = 'managed-tool-result/1';
@@ -316,6 +316,17 @@ function exactly<T>(value: unknown, expected: T, label: string): T {
 
 function id(value: unknown, label: string): string {
   return assertManagedSessionStableId(value as ManagedSessionJsonValue, label);
+}
+
+// The raw model tool-call id lands in ma_tool_execution.tool_call_id
+// VARCHAR(128). The shared stable-id rule (maxIdBytes) stays 512 for the
+// other id fields; only callId converges to the 128-character column bound.
+function toolCallId(value: unknown, label: string): string {
+  const callId = id(value, label);
+  if (callId.length > 128) {
+    fail(`${label} exceeds the 128-character tool-call bound.`);
+  }
+  return callId;
 }
 
 function token(value: unknown, label: string): string {
@@ -618,7 +629,7 @@ export function parseToolResultManifest(value: unknown): ToolResultManifest {
     sessionId: id(manifest.sessionId, 'manifest.sessionId'),
     turnId: id(manifest.turnId, 'manifest.turnId'),
     executionCallId: id(manifest.executionCallId, 'manifest.executionCallId'),
-    callId: id(manifest.callId, 'manifest.callId'),
+    callId: toolCallId(manifest.callId, 'manifest.callId'),
     invocationDigest: id(
       manifest.invocationDigest,
       'manifest.invocationDigest',

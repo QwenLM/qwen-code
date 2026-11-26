@@ -35,6 +35,19 @@ describe('Hosted Harness profile', () => {
     ).not.toThrow();
   });
 
+  it('accepts the Hosted Broker credential pair', () => {
+    const privateOptions = {
+      ...options,
+      profile: 'hosted-harness' as const,
+      token: 'harness-secret',
+      serveWebShell: false,
+      hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+      managedRuntimeBrokerToken: 'broker-secret',
+    };
+    expect(() => validateHostedHarnessProfile(privateOptions)).not.toThrow();
+  });
+
   it.each([
     { hostname: '0.0.0.0', error: 'loopback' },
     { mode: 'native' as const, error: '--http-bridge' },

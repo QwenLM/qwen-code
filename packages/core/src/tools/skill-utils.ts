@@ -8,6 +8,11 @@ import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
+import {
+  getSkillSource,
+  getTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+} from '../skills/turn-skill-snapshot.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { ToolNames } from './tool-names.js';
@@ -59,10 +64,11 @@ export function skillModelInvocationBlock(
   config: Config,
   skillManager: SkillManager,
   skill: SkillConfig,
+  liveOnly?: boolean,
 ): 'disabled' | 'inactive' | 'hidden' | undefined {
-  if (!config.isSkillEnabled(skill)) return 'disabled';
+  if (!config.isSkillEnabled(getSkillSource(skill))) return 'disabled';
   if (skill.disableModelInvocation) return 'hidden';
-  if (!skillManager.isSkillActive(skill)) return 'inactive';
+  if (!skillManager.isSkillActive(skill, liveOnly)) return 'inactive';
   return undefined;
 }
 
@@ -160,7 +166,12 @@ export function clearCollectedSkillEntriesCache(
 export async function collectAvailableSkillEntries(
   skillManager: SkillManager,
   config: Config,
+  options?: { liveOnly?: boolean },
 ): Promise<CollectedAvailableSkills> {
+  const snapshot = options?.liveOnly ? undefined : getTurnSkillSnapshot();
+  if (snapshot) {
+    return collectAvailableSkillEntriesUncached(skillManager, config, snapshot);
+  }
   const cached = collectCache.get(skillManager);
   if (cached && Date.now() - cached.ts < COLLECT_CACHE_TTL_MS) {
     return cached.promise;
@@ -186,15 +197,27 @@ export async function collectAvailableSkillEntries(
 async function collectAvailableSkillEntriesUncached(
   skillManager: SkillManager,
   config: Config,
+  snapshot?: TurnSkillSnapshot,
 ): Promise<CollectedAvailableSkills> {
   // Include a skill only when the model could invoke it right now (see
   // `skillModelInvocationBlock`). Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
-  const allSkills = await skillManager.listSkills();
-  const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
+  const allSkills = snapshot
+    ? [
+        ...snapshot.skills,
+        ...(await skillManager.listSkills({ level: 'bundled' })).filter(
+          (skill) =>
+            !snapshot.skills.some((pinned) => pinned.name === skill.name),
+        ),
+      ]
+    : await skillManager.listSkills();
+  const isEnabled = (skill: SkillConfig) =>
+    config.isSkillEnabled(getSkillSource(skill));
 
   const availableSkills = allSkills.filter(
-    (s) => skillModelInvocationBlock(config, skillManager, s) === undefined,
+    (s) =>
+      skillModelInvocationBlock(config, skillManager, s, !snapshot) ===
+      undefined,
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -210,7 +233,7 @@ async function collectAvailableSkillEntriesUncached(
           !s.disableModelInvocation &&
           s.paths &&
           s.paths.length > 0 &&
-          !skillManager.isSkillActive(s) &&
+          !skillManager.isSkillActive(s, !snapshot) &&
           isEnabled(s),
       )
       .map((s) => s.name),
@@ -326,15 +349,17 @@ ${escapeXml(entry.description)}
  * frontmatter hooks — may be applied. A project skill is discovered from
  * `<repo>/.qwen/skills/` regardless of folder trust because its body only
  * influences the model, but its side effects grant tool approvals or run
- * repo-supplied commands, so they need a trusted folder: the same gate
- * `Config.getProjectHooks()` applies to settings-file hooks. User, extension
+ * repo-supplied commands, so they need explicit folder trust. Disabling
+ * folder trust does not authorize these side effects. Settings-file project
+ * hooks additionally need the user's approval (`Config.getProjectHooks()`);
+ * skill and subagent frontmatter hooks do not yet. User, extension
  * and bundled skills are not repo-controlled and are unaffected.
  */
 export function canApplySkillSideEffects(
   skill: Pick<SkillConfig, 'level'>,
-  config: Pick<Config, 'isTrustedFolder'>,
+  config: Pick<Config, 'isExplicitlyTrustedFolder'>,
 ): boolean {
-  return skill.level !== 'project' || config.isTrustedFolder();
+  return skill.level !== 'project' || config.isExplicitlyTrustedFolder();
 }
 
 /**
@@ -387,7 +412,7 @@ export function applySkillAllowedTools(
  * added, so re-invoking a skill never stacks duplicate hooks.
  *
  * A project skill's hooks are marked trust-gated by `registerSkillHooks`, so
- * the event handler re-reads folder trust at fire time. `isTrustedFolder()`
+ * the event handler re-reads folder trust at fire time. `isExplicitlyTrustedFolder()`
  * reads the IDE context store first and only falls back to the `Config`'s
  * own readonly field, so with an IDE companion connected that value is live
  * and revoking trust silences an already-registered gate at the next event,
@@ -470,7 +495,9 @@ export async function applySkillSideEffects(
     | (Pick<Config, 'getHookSystem' | 'getSessionId' | 'getPermissionManager'> &
         Pick<
           Config,
-          'isTrustedFolder' | 'enableReviewWorkflow' | 'isWorkspaceAgentSession'
+          | 'isExplicitlyTrustedFolder'
+          | 'enableReviewWorkflow'
+          | 'isWorkspaceAgentSession'
         >)
     | null
     | undefined,
@@ -494,10 +521,18 @@ export async function applySkillSideEffects(
   if (!canApplySkillSideEffects(skill, config)) {
     if (skill.allowedTools?.length || skill.hooks) {
       debugLogger.warn(
-        `Skill "${skill.name}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
+        `Skill "${skill.name}" requires explicit folder trust; ignoring its allowedTools and hooks. Enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
       );
     }
     return;
+  }
+  if (
+    'sourceFilePath' in skill &&
+    (skill.allowedTools?.length || Object.keys(skill.hooks ?? {}).length)
+  ) {
+    throw new Error(
+      `turn_skill_session_effects_unavailable: "${skill.name}" requires session-scoped hooks or allow rules and cannot run in this pinned turn`,
+    );
   }
   applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools, {
     trustGated: skill.level === 'project',

@@ -22,24 +22,34 @@ concurrency:
 
 jobs:
   codeql:
-    name: 'CodeQL (${{ matrix.language }})'
+    name: 'CodeQL (${{ matrix.name || matrix.language }})'
     runs-on: 'ubuntu-latest'
     strategy:
       fail-fast: false
       matrix:
         include:
           - language: 'javascript'
-            timeout: 90
+            timeout: 180
           - language: 'java'
             timeout: 15
             sourceroot: 'packages/sdk-java'
-    # One job per language, each with its own measured cap: a shared job let
-    # the JavaScript leg's overrun kill the Java analysis with it. The
-    # JavaScript leg took 44m12s on the 2026-10-02 dispatch (run 37019120152)
-    # after the old shared 30-minute cap had cancelled the nightly on
-    # thirteen consecutive runs (2026-09-20 through 2026-10-02); the
-    # buildless Java leg took 4m40s. The caps stay finite so a runner that
-    # drops its heartbeat mid-analysis can't hold a slot for the default 6h.
+          - language: 'java'
+            name: 'managed-agent-server'
+            category: 'managed-agent-server'
+            timeout: 15
+            sourceroot: 'packages/managed-agent-server'
+    # One job per source tree, each with its own measured cap: a shared job let
+    # the JavaScript leg's overrun kill the Java analysis with it. The caps stay
+    # finite so a runner that drops its heartbeat mid-analysis can't hold a slot
+    # for the default 6h.
+    #
+    # Re-measure the JavaScript cap as the tree grows — it is a moving target.
+    # 44m12s on the 2026-10-02 dispatch (run 37019120152) set 90m, but the eight
+    # nightlies before #17796 ran 57-86m and the 2026-11-19 one reached the cap
+    # with every query already interpreted, dying inside "Exporting results to
+    # SARIF" (#17796). 180m covers that trend. Extraction is ~10m of the total
+    # and pulls in no build output, so narrowing scope is not the lever here.
+    # The buildless Java legs took 4m40s.
     timeout-minutes: '${{ matrix.timeout }}'
     steps:
       - name: 'Checkout'
@@ -53,7 +63,7 @@ jobs:
           # snapshots, so a real build here would duplicate sdk-java.yml's
           # install dance. build-mode none extracts from source instead
           # (javascript is interpreted and never builds either way). The java
-          # leg scans only the Maven modules: the Gradle tree under
+          # legs scan only the Maven modules: the Gradle tree under
           # packages/mobile-shell needs a real build, its Kotlin sources are
           # out of scope, and its Gradle JDK recommendation must not set the
           # API model for the Java 21 Maven modules.
@@ -62,6 +72,8 @@ jobs:
 
       - name: 'Perform CodeQL Analysis'
         uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
+        with:
+          category: '${{ matrix.category }}'
 
   # The scan is schedule-only and never a required check, so a dead nightly is
   # otherwise silent (#13249). `always()` because an overrun leg reports

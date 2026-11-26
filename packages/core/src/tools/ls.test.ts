@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { setImmediate } from 'node:timers/promises';
 import { LSTool } from './ls.js';
 import type { LSToolParams } from './ls.js';
 import type { Config } from '../config/config.js';
@@ -104,6 +105,67 @@ describe('LSTool', () => {
   });
 
   describe('execute', () => {
+    it('does not read the filesystem if the invocation was cancelled', async () => {
+      const invocation = lsTool.build({ path: tempRootDir });
+      const stat = vi.spyOn(fs, 'stat');
+      const reason = new Error('Turn cancelled');
+
+      try {
+        await expect(
+          invocation.execute(AbortSignal.abort(reason)),
+        ).rejects.toBe(reason);
+        expect(stat).not.toHaveBeenCalled();
+      } finally {
+        stat.mockRestore();
+      }
+    });
+
+    it('cancels while an entry stat is pending and skips the remaining stats', async () => {
+      const first = path.join(tempRootDir, 'first.txt');
+      const second = path.join(tempRootDir, 'second.txt');
+      await writeFiles(tempRootDir, { 'first.txt': '', 'second.txt': '' });
+      const originalStat = fs.stat;
+      const entryStats = await originalStat(first);
+      let markStarted = () => {};
+      let releaseStat = () => {};
+      const statStarted = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const heldStat = new Promise<void>((resolve) => {
+        releaseStat = resolve;
+      });
+      const stat = vi.spyOn(fs, 'stat').mockImplementation(async (target) => {
+        if (target !== first && target !== second) return originalStat(target);
+        markStarted();
+        await heldStat;
+        return entryStats;
+      });
+      const controller = new AbortController();
+      const result = lsTool
+        .build({ path: tempRootDir })
+        .execute(controller.signal);
+
+      try {
+        await statStarted;
+        const reason = 'send-now';
+        controller.abort(reason);
+        await expect(
+          Promise.race([result, setImmediate('pending')]),
+        ).rejects.toBe(reason);
+
+        releaseStat();
+        await setImmediate();
+        expect(
+          stat.mock.calls.filter(
+            ([target]) => target === first || target === second,
+          ),
+        ).toHaveLength(1);
+      } finally {
+        releaseStat();
+        stat.mockRestore();
+      }
+    });
+
     it('should list files in a directory', async () => {
       await writeFiles(tempRootDir, { 'file1.txt': 'content1' });
       await fs.mkdir(path.join(tempRootDir, 'subdir'));

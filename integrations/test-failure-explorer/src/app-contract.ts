@@ -12,6 +12,7 @@ import {
   reportItemSchema,
 } from './contracts.js';
 import type { querySchema } from './report-query.js';
+import { viewSpecSchema, type ViewSpecV1 } from './view-spec.js';
 
 export const APP_URI = 'ui://test-failure-explorer/v1/index.html';
 const count = z.number().int().safe().nonnegative();
@@ -80,28 +81,90 @@ const summaryDataSchema = z.object({
   kind: z.literal('summary'),
   summary: summarySchema,
 });
-export const showSchema = z
+const showEnvelopeSchema = z
   .object({
     ...identity,
     kind: z.literal('show'),
     summary: summarySchema,
     firstPage: listSchema.optional(),
-    viewResolution: z.object({ mode: z.literal('fixed') }),
+    initialDetail: detailSchema.optional(),
+    view: z.unknown().optional(),
+    viewResolution: z.object({
+      mode: z.string().max(32),
+      reason: z.string().max(100).optional(),
+      digest: z
+        .string()
+        .regex(/^[0-9a-f]{64}$/)
+        .optional(),
+    }),
   })
   .refine(
-    ({ reportId, firstPage }) =>
-      !firstPage ||
-      (firstPage.reportId === reportId &&
-        firstPage.collection === 'failures' &&
-        firstPage.offset === 0),
+    ({ reportId, firstPage, initialDetail }) =>
+      (!firstPage ||
+        (firstPage.reportId === reportId &&
+          firstPage.collection === 'failures' &&
+          firstPage.offset === 0)) &&
+      (!initialDetail ||
+        (initialDetail.reportId === reportId &&
+          initialDetail.item.status === 'failed' &&
+          initialDetail.field === 'diagnostics' &&
+          initialDetail.offset === 0)),
   );
+
+export type ShowData = Omit<
+  z.infer<typeof showEnvelopeSchema>,
+  'view' | 'viewResolution'
+> & {
+  view?: ViewSpecV1;
+  viewResolution:
+    | { mode: 'fixed'; reason?: string }
+    | { mode: 'generated'; digest: string };
+};
+
+export const showSchema = showEnvelopeSchema.transform((data): ShowData => {
+  const { view, viewResolution, initialDetail, ...report } = data;
+  if (viewResolution.mode === 'fixed') {
+    return {
+      ...report,
+      viewResolution: {
+        mode: 'fixed',
+        ...(viewResolution.reason ? { reason: viewResolution.reason } : {}),
+      },
+    };
+  }
+  const parsed = viewSpecSchema.safeParse(view);
+  if (
+    viewResolution.mode === 'generated' &&
+    viewResolution.digest &&
+    parsed.success &&
+    parsed.data.reportId === report.reportId
+  ) {
+    const evidence = parsed.data.sections.find(
+      (section) => section.kind === 'evidence',
+    );
+    return {
+      ...report,
+      view: parsed.data,
+      viewResolution: { mode: 'generated', digest: viewResolution.digest },
+      ...(initialDetail &&
+      initialDetail.item.itemId === evidence?.initialFailureId
+        ? { initialDetail }
+        : {}),
+    };
+  }
+  // A saved generated page may be filtered; its unknown layout cannot label it.
+  return {
+    ...report,
+    firstPage: undefined,
+    viewResolution: { mode: 'fixed', reason: 'unsupported-view' },
+  };
+});
 const queryDataSchema = z.discriminatedUnion('kind', [
   listSchema,
   detailSchema,
   summaryDataSchema,
 ]);
 
-export type ShowData = z.infer<typeof showSchema>;
 export type ListData = z.infer<typeof listSchema>;
 export type DetailData = z.infer<typeof detailSchema>;
 export type SummaryData = z.infer<typeof summaryDataSchema>;

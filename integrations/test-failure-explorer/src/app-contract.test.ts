@@ -27,6 +27,79 @@ const snapshot: ReportSnapshot = {
 };
 
 describe('App report contract', () => {
+  const view = {
+    schemaVersion: 1,
+    reportId: snapshot.reportId,
+    sections: [
+      {
+        kind: 'failure-list',
+        groupBy: 'none',
+        columns: ['title'],
+        initialTextFilter: 'does not match',
+      },
+      { kind: 'evidence', initialFailureId: 'f0:a1' },
+    ],
+  };
+
+  it('restores the effective generated layout and canonical evidence', () => {
+    const data = showSchema.parse(showResult(snapshot, view).structuredContent);
+    expect(data.view).toEqual(view);
+    expect(data.viewResolution).toMatchObject({
+      mode: 'generated',
+      digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(data.firstPage?.matchedCount).toBe(0);
+    expect(data.initialDetail).toMatchObject({
+      reportId: snapshot.reportId,
+      item: { itemId: 'f0:a1', status: 'failed' },
+      field: 'diagnostics',
+      offset: 0,
+    });
+  });
+
+  it.each([
+    { ...view, schemaVersion: 2 },
+    { ...view, reportId: `r1_${'b'.repeat(64)}` },
+    { ...view, sections: [{ kind: 'html', html: '<script>run()</script>' }] },
+  ])(
+    'falls back without treating a saved filtered page as all failures',
+    (invalid) => {
+      const generated = showResult(snapshot, view).structuredContent!;
+      const data = showSchema.parse({ ...generated, view: invalid });
+      expect(data.viewResolution).toEqual({
+        mode: 'fixed',
+        reason: 'unsupported-view',
+      });
+      expect(data.summary).toEqual(generated['summary']);
+      expect(data.firstPage).toBeUndefined();
+      expect(data.initialDetail).toBeUndefined();
+      expect(data.view).toBeUndefined();
+    },
+  );
+
+  it('does not restore a rejected candidate or an unrelated saved detail', () => {
+    const fixed = showResult(snapshot).structuredContent!;
+    expect(showSchema.parse({ ...fixed, view }).view).toBeUndefined();
+    const generated = showResult(snapshot, view).structuredContent!;
+    const otherDetail = queryReport(snapshot, {
+      kind: 'detail',
+      itemId: 'f0:a0',
+    }).structuredContent;
+    expect(
+      showSchema.safeParse({ ...generated, initialDetail: otherDetail })
+        .success,
+    ).toBe(false);
+    expect(
+      showSchema.safeParse({
+        ...generated,
+        initialDetail: {
+          ...(generated['initialDetail'] as object),
+          reportId: `r1_${'b'.repeat(64)}`,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it('accepts the actual server envelope and rejects a foreign initial page or protocol', () => {
     const data = showResult(snapshot).structuredContent!;
     expect(showSchema.safeParse(data).success).toBe(true);

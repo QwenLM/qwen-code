@@ -42,6 +42,11 @@ interface ReviewFinding {
   /** The executed evidence that settled the verdict, or its `not run` line. */
   witness?: string;
   suggestedFix?: string;
+  /**
+   * The acceptance criterion the suggested fix owes: the test that must go
+   * red if the fix is removed.
+   */
+  fixWitness?: string;
   category?: string;
   locations: FindingLocation[];
   /** Local evidence paths; rendered as workspace images where possible. */
@@ -216,6 +221,9 @@ function parseFinding(value: unknown, index: number): ReviewFinding {
       : {}),
     ...(optionalString(source['suggestedFix'], `${label}.suggestedFix`)
       ? { suggestedFix: source['suggestedFix'] as string }
+      : {}),
+    ...(optionalString(source['fixWitness'], `${label}.fixWitness`)
+      ? { fixWitness: source['fixWitness'] as string }
       : {}),
     ...(optionalString(source['category'], `${label}.category`)
       ? { category: source['category'] as string }
@@ -605,6 +613,12 @@ export function CodeReviewArtifactDetail({
                 <Detail
                   label={t('codeReview.suggestedFix')}
                   value={finding.suggestedFix}
+                />
+              )}
+              {finding.fixWitness && (
+                <Detail
+                  label={t('codeReview.fixWitness')}
+                  value={finding.fixWitness}
                 />
               )}
               {finding.outcome && (

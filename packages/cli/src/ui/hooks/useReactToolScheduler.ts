@@ -19,14 +19,10 @@ import type {
   CompletedToolCall,
   CancelledToolCall,
   OutputUpdateHandler,
-  AllToolCallsCompleteHandler,
-  ToolCallsUpdateHandler,
-  ToolCall,
   Status as CoreStatus,
   EditorType,
 } from '@qwen-code/qwen-code-core';
 import {
-  CoreToolScheduler,
   compactToolResultDisplayForHistory,
   convertToFunctionErrorResponse,
   createDebugLogger,
@@ -43,8 +39,21 @@ import type {
   IndividualToolCallDisplay,
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
-import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { isCollapsibleTool } from '../utils/tool-group-summary.js';
 import { collectInlineImages } from '../utils/inline-image-parts.js';
+
+import {
+  InteractiveModToolScheduler,
+  type InteractiveCompletedToolCall,
+  type InteractiveToolCall,
+  type InteractivePendingToolCall,
+} from '../../services/interactive-mod-tool-scheduler.js';
+
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
@@ -52,6 +61,13 @@ export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
   signal: AbortSignal,
   modelOverride?: string,
+  /**
+   * Receives this batch's completed calls in place of the hook's
+   * `onComplete`, for a caller that awaits the batch.
+   */
+  onBatchComplete?: (tools: InteractiveToolCall[]) => Promise<void>,
+  /** Fires when the kernel stops waiting for this cancelled batch. */
+  abandoned?: AbortSignal,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
@@ -98,14 +114,17 @@ void _ASSERT_INHERITED_FIELDS_PRESENT;
 export type TrackedExecutingToolCall = ExecutingToolCall & {
   responseSubmittedToLlm?: boolean;
 };
-export type TrackedCompletedToolCall = CompletedToolCall & {
+export type TrackedCompletedToolCall = InteractiveCompletedToolCall & {
+  nativeAttemptsObserved?: boolean;
   responseSubmittedToLlm?: boolean;
 };
 export type TrackedCancelledToolCall = CancelledToolCall & {
+  nativeAttemptsObserved?: boolean;
   responseSubmittedToLlm?: boolean;
 };
 
 export type TrackedToolCall =
+  | (InteractivePendingToolCall & { responseSubmittedToLlm?: boolean })
   | TrackedScheduledToolCall
   | TrackedValidatingToolCall
   | TrackedWaitingToolCall
@@ -114,11 +133,12 @@ export type TrackedToolCall =
   | TrackedCancelledToolCall;
 
 export function useReactToolScheduler(
-  onComplete: (tools: CompletedToolCall[]) => Promise<void>,
+  onComplete: (tools: InteractiveToolCall[]) => Promise<void>,
   config: Config,
   getPreferredEditor: () => EditorType | undefined,
   onEditorClose: () => void,
   onToolResultFullTurnModel?: (model: string) => boolean,
+  onNativeAttempt?: (call: CompletedToolCall) => Promise<void>,
 ): [TrackedToolCall[], ScheduleFn, MarkToolsAsSubmittedFn] {
   const [toolCallsForDisplay, setToolCallsForDisplay] = useState<
     TrackedToolCall[]
@@ -128,17 +148,20 @@ export function useReactToolScheduler(
   // Recreating CoreToolScheduler then would drop an in-flight batch's queue
   // and let a later schedule() run in parallel on a fresh idle instance.
   const onCompleteRef = useRef(onComplete);
+  const onNativeAttemptRef = useRef(onNativeAttempt);
   const getPreferredEditorRef = useRef(getPreferredEditor);
   const onEditorCloseRef = useRef(onEditorClose);
   const onToolResultFullTurnModelRef = useRef(onToolResultFullTurnModel);
 
   useLayoutEffect(() => {
     onCompleteRef.current = onComplete;
+    onNativeAttemptRef.current = onNativeAttempt;
     getPreferredEditorRef.current = getPreferredEditor;
     onEditorCloseRef.current = onEditorClose;
     onToolResultFullTurnModelRef.current = onToolResultFullTurnModel;
   }, [
     onComplete,
+    onNativeAttempt,
     getPreferredEditor,
     onEditorClose,
     onToolResultFullTurnModel,
@@ -166,15 +189,28 @@ export function useReactToolScheduler(
     [],
   );
 
-  const allToolCallsCompleteHandler: AllToolCallsCompleteHandler = useCallback(
-    async (completedToolCalls) => {
-      await onCompleteRef.current(completedToolCalls);
+  // The batches whose caller takes their completion, by call id.
+  const batchCompletionsRef = useRef(
+    new Map<string, (tools: InteractiveToolCall[]) => Promise<void>>(),
+  );
+  const allToolCallsCompleteHandler = useCallback(
+    async (completedToolCalls: InteractiveToolCall[]) => {
+      const completions = batchCompletionsRef.current;
+      const onBatchComplete = completedToolCalls
+        .map(({ request }) => completions.get(request.callId))
+        .find((completion) => completion !== undefined);
+      for (const { request } of completedToolCalls) {
+        if (completions.get(request.callId) === onBatchComplete) {
+          completions.delete(request.callId);
+        }
+      }
+      await (onBatchComplete ?? onCompleteRef.current)(completedToolCalls);
     },
     [],
   );
 
-  const toolCallsUpdateHandler: ToolCallsUpdateHandler = useCallback(
-    (updatedCoreToolCalls: ToolCall[]) => {
+  const toolCallsUpdateHandler = useCallback(
+    (updatedCoreToolCalls: InteractiveToolCall[]) => {
       setToolCallsForDisplay((prevTrackedCalls) =>
         updatedCoreToolCalls.map((coreTc) => {
           const existingTrackedCall = prevTrackedCalls.find(
@@ -223,13 +259,30 @@ export function useReactToolScheduler(
     [setToolCallsForDisplay],
   );
 
+  const clearToolCallDisplay = useCallback((callIds: ReadonlySet<string>) => {
+    setToolCallsForDisplay((calls) =>
+      calls.filter(
+        ({ request }) =>
+          !callIds.has(request.callId) &&
+          (request.parentCallId === undefined ||
+            !callIds.has(request.parentCallId)),
+      ),
+    );
+  }, []);
+
   const scheduler = useMemo(
     () =>
-      new CoreToolScheduler({
+      new InteractiveModToolScheduler({
         config,
+        waitForNestedToolSettlement:
+          config.isUnifiedAgentLoopEnabled?.('ink') === true &&
+          config.isEventBusAgentLoopEnabled?.('ink') === true,
+        onNativeAttempt: (call) =>
+          onNativeAttemptRef.current?.(call) ?? Promise.resolve(),
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,
+        onNestedToolsAbandoned: clearToolCallDisplay,
         getPreferredEditor: () => getPreferredEditorRef.current(),
         onEditorClose: () => onEditorCloseRef.current(),
         // Always wrap: Core treats a missing callback as false, and a later
@@ -242,6 +295,7 @@ export function useReactToolScheduler(
       outputUpdateHandler,
       allToolCallsCompleteHandler,
       toolCallsUpdateHandler,
+      clearToolCallDisplay,
     ],
   );
 
@@ -250,13 +304,49 @@ export function useReactToolScheduler(
       request: ToolCallRequestInfo | ToolCallRequestInfo[],
       signal: AbortSignal,
       modelOverride?: string,
+      onBatchComplete?: (tools: InteractiveToolCall[]) => Promise<void>,
+      abandoned?: AbortSignal,
     ) => {
+      const owner = captureHookExecutionOwner(config);
+      const sessionSignal =
+        getInteractiveModSession(config)?.captureToolSignal();
+      if (sessionSignal) signal = AbortSignal.any([signal, sessionSignal]);
       const requests = Array.isArray(request) ? request : [request];
+      if (onBatchComplete) {
+        for (const { callId } of requests) {
+          batchCompletionsRef.current.set(callId, onBatchComplete);
+        }
+      }
+      // A batch that ends without completing still releases its callback,
+      // with no calls, so its caller stops waiting and a later batch that
+      // reuses a call id is not routed to it.
+      const abandonBatchCompletion = (clearDisplay = false) => {
+        if (!onBatchComplete) return;
+        const released = new Set<string>();
+        for (const { callId } of requests) {
+          if (batchCompletionsRef.current.get(callId) === onBatchComplete) {
+            batchCompletionsRef.current.delete(callId);
+            released.add(callId);
+          }
+        }
+        if (released.size === 0) return;
+        if (clearDisplay) clearToolCallDisplay(released);
+        void onBatchComplete([]).catch((error: unknown) => {
+          debugLogger.error('Tool batch release failed:', error);
+        });
+      };
+      abandoned?.addEventListener('abort', () => abandonBatchCompletion(true), {
+        once: true,
+      });
       const isQueuedCancellation = (error: unknown) =>
         signal.aborted &&
         error instanceof Error &&
         error.message === 'Tool call cancelled while in queue.';
       const completeAsCancelled = async () => {
+        if (sessionSignal?.aborted) {
+          abandonBatchCompletion();
+          return;
+        }
         const reason =
           '[Operation Cancelled] Reason: Tool call cancelled before execution.';
         const cancelledCalls: CompletedToolCall[] = requests.map(
@@ -290,7 +380,10 @@ export function useReactToolScheduler(
       };
 
       if (!modelOverride?.endsWith('\0')) {
-        void scheduler.schedule(request, signal).catch((error: unknown) => {
+        void runWithHookExecutionOwner(owner, () =>
+          scheduler.schedule(request, signal, undefined, abandoned),
+        ).catch((error: unknown) => {
+          if (abandoned?.aborted) return;
           if (isQueuedCancellation(error)) {
             void completeAsCancelled().catch((completionError: unknown) => {
               debugLogger.error(
@@ -300,6 +393,7 @@ export function useReactToolScheduler(
             });
             return;
           }
+          abandonBatchCompletion();
           if (signal.aborted) return;
           debugLogger.error(
             `Tool scheduling failed: ${
@@ -313,6 +407,10 @@ export function useReactToolScheduler(
       // name the batch it failed to complete.
       void (async () => {
         const completeAsSchedulingError = async (error: unknown) => {
+          if (sessionSignal?.aborted || abandoned?.aborted) {
+            abandonBatchCompletion();
+            return;
+          }
           debugLogger.error(
             `Full-turn tool scheduling failed: ${
               error instanceof Error ? error.message : String(error)
@@ -370,8 +468,11 @@ export function useReactToolScheduler(
         }
 
         try {
-          await scheduler.schedule(request, signal, runtimeView);
+          await runWithHookExecutionOwner(owner, () =>
+            scheduler.schedule(request, signal, runtimeView, abandoned),
+          );
         } catch (error) {
+          if (abandoned?.aborted) return;
           // The busy scheduler rejects a queued request once its signal
           // aborts, which is a cancellation rather than a scheduling failure.
           // Completing it as `cancelled` — instead of returning early — still
@@ -405,7 +506,7 @@ export function useReactToolScheduler(
         );
       });
     },
-    [allToolCallsCompleteHandler, config, scheduler],
+    [allToolCallsCompleteHandler, clearToolCallDisplay, config, scheduler],
   );
 
   const markToolsAsSubmitted: MarkToolsAsSubmittedFn = useCallback(

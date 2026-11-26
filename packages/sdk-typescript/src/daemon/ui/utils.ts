@@ -16,7 +16,7 @@ export function getString(value: unknown, key: string): string | undefined {
   return typeof entry === 'string' ? entry : undefined;
 }
 
-function getFiniteNumber(
+export function getFiniteNumber(
   value: Record<string, unknown>,
   key: string,
 ): number | undefined {
@@ -51,6 +51,7 @@ export function extractTranscriptTiming(
   // producer never derives it, so a present value is a measurement.
   const startedAt = getFiniteNumber(timing, 'startedAt');
   const ttftMs = getFiniteNumber(timing, 'ttftMs');
+  const firstVisibleOffsetMs = getFiniteNumber(timing, 'firstVisibleOffsetMs');
   const status = timing['status'];
   const toolStatus = timing['toolStatus'];
   const carriedStrings: Record<string, string> = {};
@@ -73,6 +74,12 @@ export function extractTranscriptTiming(
     ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
     ...(kind === 'request' && ttftMs !== undefined && ttftMs >= 0
       ? { ttftMs }
+      : {}),
+    ...(kind === 'request' &&
+    firstVisibleOffsetMs !== undefined &&
+    firstVisibleOffsetMs >= 0 &&
+    firstVisibleOffsetMs <= durationMs
+      ? { firstVisibleOffsetMs }
       : {}),
     ...(kind === 'request' && (status === 'ok' || status === 'error')
       ? { status }

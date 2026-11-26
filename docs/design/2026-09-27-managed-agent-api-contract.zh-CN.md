@@ -45,7 +45,7 @@ Managed Agent 服务在 `/v1/agents/sessions` 下提供公共 Session 路由，�
 ### 4.1 spec 的位置与格式
 
 spec 迁入
-`packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`
+`packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`
 并成为唯一来源；设计仓库此后指向这里。
 
 它以 JSON 而不是 YAML 保存。本仓库的 yamllint 规则要求标量使用单引号且使用块
@@ -119,7 +119,7 @@ WebShell 的小写状态。绑定 Session 仍只有 Workspace 标识与 cwd，�
 `ManagedAgentServerIntegrationTest` 的假 Harness 和自己的内存 H2 数据库。两个
 测试类加载各自的 Spring 上下文，每个上下文的调度器都会轮询自己的数据库；如果共用
 数据库，一个测试的调度器会认领另一个测试的 Turn。它使用 test 作用域的
-`com.networknt:json-schema-validator`（1.5.9，与 Spring Boot 3.5 一样基于
+`com.networknt:json-schema-validator`（2.0.0，与 Spring Boot 3.5 一样基于
 Jackson 2），按 JSON Schema 2020-12 校验并开启 format 断言。schema 通过指向
 spec 的 JSON Pointer 定位，因此 `$ref` 在同一个文件内解析。
 
@@ -222,7 +222,7 @@ override 把 `openapi-typescript>supports-color` 固定为仓库已在使用的 
 
 ## 9. 验证
 
-- 在 `packages/sdk-java/managed-agent-server` 中运行 `mvn test`，三个契约测试在
+- 在 `packages/managed-agent-server` 中运行 `mvn test`，三个契约测试在
   已记录差异下通过。
 - 以下变更分别使对应测试失败：record 新增字段、新增映射路由、删除一行已知差异、
   修改 spec 而不重新生成 TypeScript 类型。

@@ -167,10 +167,10 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('emits scope:"global" on the system text when useGlobalCacheScope is set', () => {
-      // Anthropic-native + caching enabled → the generator passes
-      // `useGlobalCacheScope: true` and the system prefix joins cross-session
-      // caching under the `prompt-caching-scope-2026-01-05` beta. Other
-      // backends pass false (or omit) and get the per-session shape above.
+      // Caching on plus an explicit `forceGlobalCacheScope` opt-in → the
+      // generator passes `useGlobalCacheScope: true`, and the system prefix
+      // joins cross-session caching under the scope beta. Without the opt-in
+      // every backend gets the per-session shape above.
       expect(systemOf('sys', { useGlobalCacheScope: true })).toEqual([
         txt('sys', GLOBAL),
       ]);
@@ -243,6 +243,31 @@ describe('AnthropicContentConverter', () => {
       expect(messages).toEqual([
         assistant(think('internal', 'sig'), txt('visible')),
       ]);
+    });
+
+    it('fills an empty signature for a thought part without thoughtSignature when fillUnsignedThinkingSignature is set', () => {
+      // Cross-provider history where the upstream generator set `thought:
+      // true` without a signature used to replay as a `thinking` block with
+      // no `signature` field at all, which strict Anthropic-compatible
+      // backends (SGLang, llama.cpp, vLLM) reject with HTTP 400. With the
+      // option on, it must replay as an empty signature instead.
+      // https://github.com/QwenLM/qwen-code/issues/11772
+      const { messages } = convert(
+        [content('model', thought('internal'), { text: 'visible' })],
+        { fillUnsignedThinkingSignature: true },
+      );
+      expect(messages).toEqual([
+        assistant(think('internal', ''), txt('visible')),
+      ]);
+    });
+
+    it('leaves a thought part without thoughtSignature unsigned when fillUnsignedThinkingSignature is off', () => {
+      // The fill is opt-in per provider quadrant; without the option the
+      // block keeps its original (unsigned) shape.
+      const { messages } = convert([
+        content('model', thought('internal'), { text: 'visible' }),
+      ]);
+      expect(messages).toEqual([assistant(think('internal'), txt('visible'))]);
     });
 
     it('converts functionCall parts from model role into tool_use blocks', () => {
@@ -1059,12 +1084,12 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
-  describe('unsigned proxy thinking history', () => {
+  describe('unsigned assistant thinking history', () => {
     const dropUnsigned = { dropUnsignedAssistantThinking: true };
     const dropUnsignedNoCache = { ...dropUnsigned, enableCacheControl: false };
-    const expectProxyThrow = (...contents: Content[]) =>
+    const expectUnsignedThrow = (...contents: Content[]) =>
       expect(() => convert(contents, dropUnsigned)).toThrow(
-        'proxy omitted the thinking signature',
+        'thinking signature is missing',
       );
 
     it('drops unsigned thinking while preserving visible content and signed blocks', () => {
@@ -1102,7 +1127,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('fails locally when an unsigned thinking block belongs to a tool-use turn', () => {
-      expectProxyThrow(
+      expectUnsignedThrow(
         userText('Run tool'),
         content('model', thought('unsigned'), call('t1')),
         answer('t1'),
@@ -1122,7 +1147,7 @@ describe('AnthropicContentConverter', () => {
       // ordering, so a one-step fixture can't tell the orderings apart.
       // Step 1's empty-text thinking must be on a NON-latest turn still in
       // the unbroken tool_use/tool_result chain reaching the end of history.
-      expectProxyThrow(
+      expectUnsignedThrow(
         userText('Run tool'),
         content('model', thought(''), call('t1')),
         answer('t1'),
@@ -1147,7 +1172,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('fails when an earlier step in the active tool loop has unsigned thinking', () => {
-      expectProxyThrow(
+      expectUnsignedThrow(
         userText('Run tools'),
         content('model', thought('unsigned'), call('t1', 'first')),
         answer('t1', 'one', 'first'),
@@ -1570,9 +1595,9 @@ describe('AnthropicContentConverter', () => {
 
     it('emits scope:"global" on the last tool when useGlobalCacheScope is set', async () => {
       // Mirror of the system-block scope test: cross-session caching for
-      // tools (the largest, slowest-changing prefix) only fires for
-      // Anthropic-native baseURLs. The generator latches the predicate
-      // once per request and forwards the same value here.
+      // tools (the largest, slowest-changing prefix) only fires under an
+      // explicit `forceGlobalCacheScope` opt-in. The generator latches the
+      // predicate once per request and forwards the same value here.
       const result = await converter.convertLlmToolsToAnthropic(
         toolsOf(weather()),
         { useGlobalCacheScope: true },
@@ -1713,6 +1738,58 @@ describe('AnthropicContentConverter', () => {
 
       const parts = response.candidates?.[0]?.content?.parts || [];
       expect(parts).toEqual([fnCall('tool', { x: 1 }, 't1')]);
+    });
+
+    it('surfaces a refusal stop-details category', () => {
+      const response = respond({
+        stop_reason: 'refusal',
+        stop_details: {
+          type: 'refusal',
+          category: 'reasoning_extraction',
+          explanation: 'Provider-authored explanation',
+        },
+      });
+
+      expect(response.candidates?.[0]).toEqual(
+        expect.objectContaining({
+          finishReason: FinishReason.SAFETY,
+          finishMessage:
+            'Response refused because it requested hidden reasoning.',
+        }),
+      );
+    });
+
+    it.each([
+      ['cyber', 'Response refused due to cyber-related safety policy.'],
+      ['bio', 'Response refused due to biological safety policy.'],
+      [
+        'frontier_llm',
+        'Response refused due to frontier model development policy.',
+      ],
+      ['general_harms', 'Response refused due to a general safety policy.'],
+      // Provider text can be any string, including prototype keys: those must
+      // land on the generic notice instead of leaking `[object Object]`.
+      ['__proto__', 'Response refused due to safety reasons.'],
+      ['unmapped_category', 'Response refused due to safety reasons.'],
+    ])(
+      'maps the %s refusal category to its curated notice',
+      (category, expected) => {
+        const response = respond({
+          stop_reason: 'refusal',
+          stop_details: { type: 'refusal', category },
+        });
+
+        expect(response.candidates?.[0]?.finishMessage).toBe(expected);
+      },
+    );
+
+    it('ignores stop_details that is not a refusal', () => {
+      const response = respond({
+        stop_reason: 'end_turn',
+        stop_details: { type: 'something_else', category: 'cyber' },
+      });
+
+      expect(response.candidates?.[0]?.finishMessage).toBeUndefined();
     });
 
     it('forwards cache_read_input_tokens and cache_creation_input_tokens through to usageMetadata', () => {
@@ -1909,8 +1986,8 @@ describe('AnthropicContentConverter', () => {
 
       it('honors useGlobalCacheScope independently of enableCacheControl source', async () => {
         // Cache on (per-call), scope off (per-call default): the emitted
-        // shape is per-session even though cache_control IS attached —
-        // non-Anthropic baseURL behavior in one call.
+        // shape is per-session even though cache_control IS attached — the
+        // default on every baseURL.
         const { system } = convert(
           'Hello',
           {
@@ -2031,7 +2108,10 @@ describe('AnthropicContentConverter', () => {
     const anthropicNativeSignature =
       'EqQBCgIYAhIkAc6dE9c2eN8aBf1c5d7e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6E=';
     const noCache = { enableCacheControl: false };
-    const dropUnsigned = { dropUnsignedAssistantThinking: true };
+    const dropUnsigned = {
+      dropUnsignedAssistantThinking: true,
+      demoteForeignThoughtToText: true,
+    };
     /** A summary thought signed with `sig`. */
     const summary = (sig: string) => thought('Reasoning summary', sig);
     /** First / summary + answer / Second, converted under `opts`. */
@@ -2076,6 +2156,34 @@ describe('AnthropicContentConverter', () => {
       ).toEqual(assistant(txt('Visible answer')));
     });
 
+    it('drops foreign thinking without exposing its summary when demotion is disabled', () => {
+      expect(
+        replay(responsesReplaySignature, {
+          dropUnsignedAssistantThinking: true,
+          ...noCache,
+        })[1],
+      ).toEqual(assistant(txt('Visible answer')));
+    });
+
+    it('does not couple demotion to unsigned-thinking cleanup', () => {
+      const { messages } = convert(
+        [
+          userText('First'),
+          content(
+            'model',
+            thought('unsigned'),
+            summary(responsesReplaySignature),
+          ),
+          userText('Second'),
+        ],
+        { demoteForeignThoughtToText: true, ...noCache },
+      );
+
+      expect(messages[1]).toEqual(
+        assistant(think('unsigned'), txt('Reasoning summary')),
+      );
+    });
+
     it('does not throw on an active tool-use turn when dropping the replay payload', () => {
       const { messages } = convert(
         [
@@ -2090,7 +2198,7 @@ describe('AnthropicContentConverter', () => {
         dropUnsigned,
       );
 
-      // Must not throw "proxy omitted the thinking signature": the replay
+      // Must not throw "thinking signature is missing": the replay
       // payload is dropped rather than emitted as an unsigned thinking block,
       // so dropUnsignedThinkingFromAssistantMessages never sees one on this
       // active tool-use turn. The demoted summary survives as plain text and

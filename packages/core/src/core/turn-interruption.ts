@@ -5,8 +5,14 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { isSystemReminderContent } from './environmentContext.js';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from './environmentContext.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
+import { isApiHistoryDirectoryContext } from '../utils/api-history-metadata.js';
 
 /**
  * Classification of how a session's last turn ended, computed from persisted
@@ -46,8 +52,8 @@ export type TurnInterruption =
     };
 
 // Continue detection only walks the final run of trailing user/model entries.
-// A bounded tail avoids deep-cloning long daemon histories for each probe while
-// still leaving ample room for repeated failed sends and tool-result retries.
+// Limit meaningful recovery history copied per probe; trailing notifications
+// and agent envelopes are retained separately so retry cannot discard them.
 export const TURN_INTERRUPTION_HISTORY_TAIL_COUNT = 50;
 
 export function completedToolCallBoundary(
@@ -70,7 +76,18 @@ export function completedToolCallBoundary(
   return Math.max(0, ...boundaries.values());
 }
 
-// Envelope the background registries wrap a notification's `modelText` in.
+export function recoveryHistoryBoundary(
+  history: Content[],
+  toolCallIds?: readonly string[],
+): number {
+  let prefix = getStartupContextLength(history, { includeCompressed: true });
+  // A pending call is structural for rewind, but still needs recovery.
+  if (history[prefix - 1]?.parts?.some((part) => part.functionCall)) prefix--;
+  return Math.max(prefix, completedToolCallBoundary(history, toolCallIds));
+}
+
+// `<task-notification>`, the envelope the background registries wrap a
+// notification's `modelText` in.
 // Seven construction sites in six modules: `packages/cli/src/serve/create-sub-session.ts`,
 // `packages/core/src/services/monitorRegistry.ts` (two),
 // `packages/core/src/services/backgroundShellRegistry.ts`,
@@ -87,8 +104,6 @@ export function completedToolCallBoundary(
 // raw), and model output is never defanged at all, so the envelope shape alone
 // cannot prove provenance. The predicate below therefore gates on the role
 // that does carry it: every real notification record is user-role.
-const TASK_NOTIFICATION_OPEN = '<task-notification>';
-const TASK_NOTIFICATION_CLOSE = '</task-notification>';
 
 function isWrappedIn(part: Part, open: string, close: string): boolean {
   const text = part.text;
@@ -243,12 +258,10 @@ export function effectiveHistoryEnd(
       : history.length - trailingSystemNotifications;
   while (end > 0) {
     const entry = history[end - 1]!;
-    // A session multi-agent record (agent reply or @-mention) is durable
-    // conversation the main model was never asked to answer, so a trailing
-    // one is not an unfinished turn.
+    // Agent envelopes and marked directory refreshes do not ask for a reply.
     // TODO(multi-agent): an agent entry after trailing notifications shifts
     // the authoritative notification window below; revisit if that mixes.
-    if (isAgentEnvelopeContent(entry)) {
+    if (isAgentEnvelopeContent(entry) || isApiHistoryDirectoryContext(entry)) {
       end--;
       continue;
     }
@@ -286,7 +299,7 @@ export function detectTurnInterruption(
   completedToolCallIds?: readonly string[],
   trailingSystemNotifications?: number,
 ): TurnInterruption {
-  const boundary = completedToolCallBoundary(history, completedToolCallIds);
+  const boundary = recoveryHistoryBoundary(history, completedToolCallIds);
   // Trailing background notifications are not an unfinished turn: the daemon
   // persists each one before its automatic turn runs, so a notification whose
   // turn never ran leaves a `user` tail that nothing will ever answer. Left in
@@ -304,7 +317,8 @@ export function detectTurnInterruption(
     // Walk from the REAL end, not the trimmed one, while the verdict above
     // still reads `history[end - 1]`. The Retry send path
     // (`stripOrphanedUserEntriesFromHistory`) pops the ENTIRE trailing user
-    // run — its only break-guard is `isSystemReminderContent`, which is false
+    // run, including marked directory context that must be replayed with input.
+    // Its structural break-guard is `isSystemReminderContent`, which is false
     // for an envelope — so the re-submission has to carry every entry the
     // strip removes. Collecting from `end - 1` instead would drop a
     // recorded-but-undelivered notification from live history permanently:
@@ -323,6 +337,12 @@ export function detectTurnInterruption(
         break;
       }
       trailingUserEntries.unshift(entry);
+    }
+    if (
+      isSystemReminderContent(last) &&
+      trailingUserEntries.every(isApiHistoryDirectoryContext)
+    ) {
+      return { kind: 'none' };
     }
     // Capture every part, including any per-turn system-reminder parts riding
     // alongside the prompt. The Retry send path does not re-inject per-turn

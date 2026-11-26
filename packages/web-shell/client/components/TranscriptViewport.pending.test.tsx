@@ -15,11 +15,16 @@ import {
 } from '../daemon/session/turn-navigation-store';
 import type { MessageListHandle } from './MessageList';
 
+vi.mock('../hooks/useMessageDeletion', () => ({
+  useMessageDeletion: () => undefined,
+}));
+
 const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
+  useOptionalDaemonHistoryNavigationStore: () => observed.store,
 }));
 vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');

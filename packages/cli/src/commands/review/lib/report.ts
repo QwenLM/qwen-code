@@ -23,6 +23,19 @@ import { buildSelectionIdentity, type SelectionIdentity } from './selection.js';
 
 export interface FileMetric {
   path: string;
+  /**
+   * The old path of a rename (`DiffFile.renameFrom`) — absent otherwise, so
+   * a plan without renames pays nothing for it. `build-test` reads it: what
+   * imported the old path is no longer in any import graph, so a rename
+   * runs every suite whole rather than only the tests related to the diff.
+   */
+  renameFrom?: string;
+  /**
+   * Security-relevant git file mode (`100755` executable, `120000` symlink,
+   * `160000` submodule) propagated from `DiffFile.mode` for tiered sandbox
+   * escalation; absent for ordinary `100644` files.
+   */
+  mode?: '100755' | '120000' | '160000';
   kind: PathKind;
   /**
    * New-side line ranges this file's hunks occupy, 1-based inclusive.
@@ -196,6 +209,8 @@ export function buildPlanReport(
     });
     return {
       path: f.path,
+      ...(f.renameFrom !== undefined ? { renameFrom: f.renameFrom } : {}),
+      ...(f.mode !== undefined ? { mode: f.mode } : {}),
       kind: f.kind,
       hunks: f.hunks
         .filter((h) => h.newCount > 0)

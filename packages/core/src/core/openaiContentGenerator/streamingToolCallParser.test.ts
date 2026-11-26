@@ -782,6 +782,58 @@ describe('StreamingToolCallParser', () => {
     });
   });
 
+  describe('thought signatures', () => {
+    it('keeps a signature-only delta that arrives before the call', () => {
+      parser.addChunk(0, '', undefined, undefined, 'sig-early');
+      parser.addChunk(0, '{}', 'call_1', 'read_file');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          ...toolCall('call_1', 'read_file', {}, 0),
+          thoughtSignature: 'sig-early',
+        },
+      ]);
+    });
+
+    it('keeps an id-less signature-only delta on a completed call', () => {
+      openCall1('{}', 'read_file');
+      parser.addChunk(0, '', undefined, undefined, 'sig-late');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          ...toolCall('call_1', 'read_file', {}, 0),
+          thoughtSignature: 'sig-late',
+        },
+      ]);
+    });
+
+    it('captures a signature before returning a replayed complete call', () => {
+      openCall1('{}', 'read_file');
+      parser.addChunk(0, '{}', 'call_1', 'read_file', 'sig-replay');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          ...toolCall('call_1', 'read_file', {}, 0),
+          thoughtSignature: 'sig-replay',
+        },
+      ]);
+    });
+
+    it('associates a late signature with a remapped call', () => {
+      parser.addChunk(0, '{"first":true}', 'call_1', 'function1');
+      parser.addChunk(0, '{"second":true}', undefined, 'function2');
+      parser.addChunk(0, '', 'call_2', undefined, 'sig-second');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        toolCall('call_1', 'function1', { first: true }, 0),
+        {
+          ...toolCall('call_2', 'function2', { second: true }, 1),
+          thoughtSignature: 'sig-second',
+        },
+      ]);
+    });
+  });
+
   describe('hasIncompleteToolCalls', () => {
     it('should return false when no tool calls exist', () => {
       expect(parser.hasIncompleteToolCalls()).toBe(false);
@@ -810,6 +862,13 @@ describe('StreamingToolCallParser', () => {
       // Tool calls without a name should be ignored
       parser.addChunk(0, '{"key": "incomplete', undefined, undefined);
       expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+
+    it('names the first named tool call whose JSON is still incomplete', () => {
+      parser.addChunk(0, '{"key": "value"}', 'call_1', 'func_a');
+      expect(parser.getIncompleteToolCallName()).toBeUndefined();
+      parser.addChunk(1, '{"docs": [', 'call_2', 'func_b');
+      expect(parser.getIncompleteToolCallName()).toBe('func_b');
     });
 
     it('should detect incomplete among multiple tool calls', () => {

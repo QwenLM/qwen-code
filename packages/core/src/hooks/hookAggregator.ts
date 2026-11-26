@@ -76,6 +76,11 @@ export class HookAggregator {
     const allOutputs: HookOutput[] = [];
     const errors: Error[] = [];
     let totalDuration = 0;
+    const isToolEvent =
+      eventName === HookEventName.PreToolUse ||
+      eventName === HookEventName.PostToolUse ||
+      eventName === HookEventName.PostToolUseFailure ||
+      eventName === HookEventName.PostToolBatch;
 
     for (const result of results) {
       totalDuration += result.duration;
@@ -85,12 +90,58 @@ export class HookAggregator {
       }
 
       if (result.output) {
-        allOutputs.push(result.output);
+        if (
+          isToolEvent &&
+          result.exitCode !== undefined &&
+          result.exitCode !== 0 &&
+          result.exitCode !== 2
+        ) {
+          // Keep diagnostics and context, without letting a failed command
+          // stop the turn or override another hook's decision.
+          const output = { ...result.output };
+          delete output.continue;
+          delete output.stopReason;
+          delete output.decision;
+          delete output.reason;
+          if (
+            eventName === HookEventName.PreToolUse &&
+            output.hookSpecificOutput
+          ) {
+            output.hookSpecificOutput = { ...output.hookSpecificOutput };
+            delete output.hookSpecificOutput['permissionDecision'];
+            delete output.hookSpecificOutput['permissionDecisionReason'];
+            delete output.hookSpecificOutput['updatedInput'];
+          }
+          allOutputs.push(output);
+        } else if (
+          !result.success &&
+          (eventName === HookEventName.SessionStart ||
+            eventName === HookEventName.FileChanged) &&
+          result.output.hookSpecificOutput
+        ) {
+          const specific = { ...result.output.hookSpecificOutput };
+          delete specific['watchPaths'];
+          allOutputs.push({ ...result.output, hookSpecificOutput: specific });
+        } else {
+          allOutputs.push(result.output);
+        }
       }
     }
 
     const success = errors.length === 0;
     const finalOutput = this.mergeOutputs(allOutputs, eventName);
+
+    // Tool triggers see the merged output without the command exit status.
+    // Preserve exit code 2 when it would otherwise become a turn stop.
+    if (
+      finalOutput?.continue === false &&
+      finalOutput.decision !== 'block' &&
+      finalOutput.decision !== 'deny' &&
+      isToolEvent &&
+      results.some((result) => result.exitCode === 2)
+    ) {
+      finalOutput.decision = 'deny';
+    }
 
     return {
       success,
@@ -176,14 +227,14 @@ export class HookAggregator {
       }
 
       // Collect reasons
-      if (output.reason) {
+      if (typeof output.reason === 'string' && output.reason.trim()) {
         reasons.push(output.reason);
       }
 
       // Check continue flag
       if (output.continue === false) {
         hasContinueFalse = true;
-        if (output.stopReason) {
+        if (typeof output.stopReason === 'string' && output.stopReason.trim()) {
           stopReason = output.stopReason;
         }
       }

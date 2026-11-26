@@ -165,7 +165,9 @@ vi.mock('../telemetry/loggers.js', () => ({
   logRipgrepFallback: vi.fn(),
 }));
 
-vi.mock('../telemetry/types.js', () => ({
+vi.mock('../telemetry/types.js', async (importOriginal) => ({
+  LoopType: (await importOriginal<typeof import('../telemetry/types.js')>())
+    .LoopType,
   RipgrepFallbackEvent: vi.fn(),
   StartSessionEvent: vi.fn(),
 }));

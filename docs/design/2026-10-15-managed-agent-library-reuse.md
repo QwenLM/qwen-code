@@ -42,6 +42,15 @@ schemas, ownership checks, and lifecycle transitions retain their contracts.
   mutable application-wide configuration.
 - Record these reuse rules in the service's `AGENTS.md` so future changes use
   the same conventions.
+- Split Git output with `StringUtils.split(text, '\n')`, dropping only empty
+  lines and preserving carriage returns. Escape continuation-history text with
+  `StringUtils.replaceEach`, replacing only `&`, `<`, and `>` once; quotes,
+  control characters, and existing entity text retain the previous behavior.
+- Delegate artifact byte-range parsing and normalization to Spring's
+  `HttpRange.parseRanges`. Retain the ASCII grammar guard, outer `trim()`,
+  single-range restriction, 1 MiB limit, and existing 400/416 error mapping.
+  Parse invalid syntax and overflowing numbers before checking whether an
+  artifact is empty; malformed ranges remain 400 responses for empty artifacts.
 
 ## Validation and Acceptance
 
@@ -52,6 +61,10 @@ Compare incremental digests and HMAC output against the existing JDK
 implementations. Verify reserved event ID suffixes retain Unicode digit
 acceptance and reject empty or nonnumeric suffixes. Keep existing canonical
 JSON, five-field cron/DST evaluation, and JSON-byte-budget truncation unchanged.
+Verify LF-only splitting and continuation-history escaping through their
+callers. Cover closed, open-ended, and suffix byte ranges, empty artifacts,
+numeric overflow, non-ASCII digits, signs, whitespace, multiple ranges, and
+the exact 1 MiB boundary with unchanged selections and error codes.
 
 On fresh worktrees, prepare Core and CLI build artifacts using the repository
 dependency setup and build; the native CSI conformance tests import them.

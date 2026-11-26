@@ -22,22 +22,47 @@ import {
   sendAboutUntilRendered,
 } from './interactive-session.js';
 
+// A model reply to a workflow completion is a full roundtrip that starts only
+// after the run settles and the notification drains, which the previous 30s
+// budget was too tight for on a loaded runner (cf. the cron suite's #10904).
+// This widening is hardening, not the #14191 fix: #14191 was a docker boot
+// stall upstream of these waits — run 38524609091 job 115744720088 burned all
+// three retries' 90s ready-prompt budget in InteractiveSession.start with the
+// sandbox image already local — addressed by the self-hosted docker tier of
+// readyPromptBudgetMs in integration-tests/ready-prompt-budget.ts.
+const MODEL_REPLY_SCREEN_TIMEOUT = 120_000;
+
+// Per-case ceiling with slack over a loaded self-hosted docker-leg run
+// (~556s): 180s ready prompt + ~110s /about window (its 90s deadline is
+// checked only after a trailing 20s waitForScreen) + 2 x ~123s reply waits
+// (3s pre-poll sleep, then a 120s deadline) + ~20s of idles, paging, and
+// sends. The slack keeps a breach attributable to the wait that overran
+// instead of surfacing as a bare vitest timeout. retry: 0 because six cases
+// at this ceiling would multiply past the 20-minute no-AK PR gate that runs
+// this file, and a genuine break fails at its first waitForScreen either way
+// — retrying would only re-burn the same budget.
+const WORKFLOW_CASE_OPTIONS = { timeout: 600_000, retry: 0 };
+
 // OpenTUI's schedule_tool handler is a separate, unwired entry point.
 describe.skipIf(pickE2eRenderer() === 'opentui')(
   'saved workflow slash-command completion',
   () => {
+    const usedCaseDirs = new Set<string>();
     let rig: TestRig;
     let server: FakeOpenAIServer | undefined;
     let session: InteractiveSession | undefined;
     let restoreNoProxy: (() => void) | undefined;
 
     afterEach(async () => {
-      await session?.close();
-      session = undefined;
-      await server?.close();
-      server = undefined;
-      restoreNoProxy?.();
-      await rig?.cleanup();
+      try {
+        await session?.close();
+      } finally {
+        session = undefined;
+        await server?.close();
+        server = undefined;
+        restoreNoProxy?.();
+        await rig?.cleanup();
+      }
     });
 
     it.each([
@@ -95,13 +120,26 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
           'SET_TIMEOUT_12176',
         ],
       },
-    ])('delivers $marker once', async (testCase) => {
+    ])('delivers $marker once', WORKFLOW_CASE_OPTIONS, async (testCase) => {
       const isSlash = testCase.source === 'slash';
       rig = new TestRig();
       restoreNoProxy = applyContainerSandboxNoProxy();
-      await rig.setup(`workflow-completion-${testCase.status}`, {
-        settings: { telemetry: { enabled: false } },
-      });
+      // The marker keeps same-status cases from sharing a directory: the
+      // post-merge E2E legs set KEEP_OUTPUT (the no-AK PR gate that runs
+      // this file does not), so setup() there would remove the previous
+      // case's directory while its CLI is still writing, failing with
+      // ENOTEMPTY before the body runs.
+      await rig.setup(
+        `workflow-completion-${testCase.status}-${testCase.marker}`,
+        {
+          settings: { telemetry: { enabled: false } },
+        },
+      );
+      // sanitizeTestName is lossy, so distinct markers are not by themselves
+      // proof of distinct directories; nothing else catches a duplicate or
+      // dropped marker before a KEEP_OUTPUT leg hits ENOTEMPTY.
+      expect(usedCaseDirs.has(rig.testDir!)).toBe(false);
+      usedCaseDirs.add(rig.testDir!);
       const qwenHome = join(rig.testDir!, '.qwen-home');
       mkdirSync(qwenHome, { recursive: true });
       writeFileSync(
@@ -191,7 +229,7 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       await session.waitForScreen(
         (screen) => screen.includes(reply),
         'model reply based on the workflow completion, without a follow-up prompt',
-        30_000,
+        MODEL_REPLY_SCREEN_TIMEOUT,
       );
       await session.idle(1_000);
 
@@ -289,7 +327,7 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       await session.waitForScreen(
         (text) => text.includes(`${reply}_FOLLOWUP`),
         'follow-up result',
-        30_000,
+        MODEL_REPLY_SCREEN_TIMEOUT,
       );
       await session.idle(1_000);
       const followUpRequests = server.requests.filter(

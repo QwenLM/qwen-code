@@ -1,5 +1,10 @@
 # Browser Cross-Platform Hardening Journal
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 This journal records implementation and validation evidence for the browser
 support hardening branch. It is not a public support contract.
 

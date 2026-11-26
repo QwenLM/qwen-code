@@ -4,6 +4,16 @@
 
 [English](2026-10-04-managed-agent-event-transport.md) | [简体中文](2026-10-04-managed-agent-event-transport.zh-CN.md)
 
+> **Wake recovery update (2026-10-19):** The earlier source-ledger-only
+> fallback described here is superseded by the
+> [Hosted SQL wake scan](2026-10-18-hosted-wake-recovery.md). It discovers
+> committed, unconsumed monitor/background Shell, channel, child/workflow,
+> automation and Session-message inputs after writer loss. Public foreground
+> Turns still belong to their dispatcher; private CSI and other sources retain
+> their existing recovery paths. Real MQ-on and deployed/cross-platform scan
+> acceptance remain unverified. The historical MQ gates below do not prove this
+> new scan; its fault acceptance is specified in the linked design.
+
 **Status: design reserved — 设计预留·未交付.** The transport side remains
 unimplemented: no MQ client, no consumer, and no multi-node wake anywhere in
 the repository. (Written when no `EventTransport` type existed; MQ1 has since
@@ -560,22 +570,22 @@ This slice's validation is documentation-only:
 
 Read on `5ddfacc9d4` (2026-10-04). One line per resident responsibility.
 
-| Path                                                                                        | Resident responsibility                                                                                                          | Transport seam?                  |
-| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
-| `packages/sdk-java/managed-agent-server/.../store/CommittedEventPublisher.java`             | one-method after-commit fan-out interface `publish(List<EventRecord>)`                                                           | **YES — this is the seam**       |
-| `packages/sdk-java/managed-agent-server/.../store/ManagedAgentStore.java` (lines 2403–2411) | invokes `eventPublisher.publish(events)` from `TransactionSynchronization.afterCommit()`                                         | seam call site                   |
-| `packages/sdk-java/managed-agent-server/.../service/SessionEventHub.java`                   | sole implementation: in-process per-Session bounded buffers (cap 512), `overflowed` → re-read store; feeds Java SSE              | in-process only                  |
-| `packages/sdk-java/managed-agent-server/.../store/StoreModels.java` (`EventRecord`)         | committed event identity: `tenantId, sessionId, sequence, eventId, turnId, type, …, createdAt, schemaVersion, projectionVersion` | —                                |
-| `packages/sdk-java/managed-agent-server/.../store/ManagedExtensionRecordStore.java`         | Stage H record persistence; checks `domain.committed`; per-record delivery (outbox) line                                         | NO (persistence, no publication) |
-| `packages/sdk-java/managed-agent-server/.../db/migration/V18__managed_extension_record.sql` | `qwen_managed_session_extension_record` incl. `delivery_target`/`delivery_state` written in the committing transaction           | NO (SQL truth)                   |
-| `packages/sdk-java/managed-agent-server/.../db/migration/V14__managed_event_replay.sql`     | persisted replay floor backing SSE cursor recovery                                                                               | NO                               |
-| `packages/sdk-java/managed-agent-server/.../service/MessageMaterializer.java`               | async Item/Snapshot materialization (the "物化" consumer's current in-process form)                                              | NO                               |
-| `packages/core/src/managed-runtime/managed-session-inbox.ts`                                | durable Session inbox (`tenantId/sessionId/messageId`, states admitted/processing/finished)                                      | NO                               |
-| `packages/core/src/managed-runtime/managed-session-records.ts`                              | committed record index incl. `wake.requested` and `domain.committed` kinds                                                       | NO                               |
-| `packages/core/src/managed-runtime/managed-session-authority.ts`                            | commits Session input + wake intent in one transaction; reads the task projection                                                | NO                               |
-| `packages/core/src/managed-runtime/embedded-harness-scheduler.ts`                           | single-process activation pump over file leases; `scheduleRecoveryWake()` in-process timer                                       | NO (process-local by design)     |
-| `packages/core/src/managed-runtime/managed-activation-store.ts`                             | activation descriptors, leases, fences, epochs                                                                                   | NO                               |
-| `packages/core/src/managed-runtime/managed-extension-projection.ts`                         | `ManagedSessionTaskView` projection incl. outbox/delivery state                                                                  | NO                               |
+| Path                                                                               | Resident responsibility                                                                                                          | Transport seam?                  |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `packages/managed-agent-server/.../store/CommittedEventPublisher.java`             | one-method after-commit fan-out interface `publish(List<EventRecord>)`                                                           | **YES — this is the seam**       |
+| `packages/managed-agent-server/.../store/ManagedAgentStore.java` (lines 2403–2411) | invokes `eventPublisher.publish(events)` from `TransactionSynchronization.afterCommit()`                                         | seam call site                   |
+| `packages/managed-agent-server/.../service/SessionEventHub.java`                   | sole implementation: in-process per-Session bounded buffers (cap 512), `overflowed` → re-read store; feeds Java SSE              | in-process only                  |
+| `packages/managed-agent-server/.../store/StoreModels.java` (`EventRecord`)         | committed event identity: `tenantId, sessionId, sequence, eventId, turnId, type, …, createdAt, schemaVersion, projectionVersion` | —                                |
+| `packages/managed-agent-server/.../store/ManagedExtensionRecordStore.java`         | Stage H record persistence; checks `domain.committed`; per-record delivery (outbox) line                                         | NO (persistence, no publication) |
+| `packages/managed-agent-server/.../db/migration/V18__managed_extension_record.sql` | `qwen_managed_session_extension_record` incl. `delivery_target`/`delivery_state` written in the committing transaction           | NO (SQL truth)                   |
+| `packages/managed-agent-server/.../db/migration/V14__managed_event_replay.sql`     | persisted replay floor backing SSE cursor recovery                                                                               | NO                               |
+| `packages/managed-agent-server/.../service/MessageMaterializer.java`               | async Item/Snapshot materialization (the "物化" consumer's current in-process form)                                              | NO                               |
+| `packages/core/src/managed-runtime/managed-session-inbox.ts`                       | durable Session inbox (`tenantId/sessionId/messageId`, states admitted/processing/finished)                                      | NO                               |
+| `packages/core/src/managed-runtime/managed-session-records.ts`                     | committed record index incl. `wake.requested` and `domain.committed` kinds                                                       | NO                               |
+| `packages/core/src/managed-runtime/managed-session-authority.ts`                   | commits Session input + wake intent in one transaction; reads the task projection                                                | NO                               |
+| `packages/core/src/managed-runtime/embedded-harness-scheduler.ts`                  | single-process activation pump over file leases; `scheduleRecoveryWake()` in-process timer                                       | NO (process-local by design)     |
+| `packages/core/src/managed-runtime/managed-activation-store.ts`                    | activation descriptors, leases, fences, epochs                                                                                   | NO                               |
+| `packages/core/src/managed-runtime/managed-extension-projection.ts`                | `ManagedSessionTaskView` projection incl. outbox/delivery state                                                                  | NO                               |
 
 **Verdict: PARTIAL (read at the baseline `5ddfacc9d4`, 2026-10-04).** A Java
 after-commit seam exists (`CommittedEventPublisher`, at the baseline exactly

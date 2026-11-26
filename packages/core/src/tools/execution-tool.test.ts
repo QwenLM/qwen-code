@@ -234,9 +234,7 @@ describe('execution tool facade', () => {
     const file = await writeWorkspaceFile('file.txt', 'read me\n');
     const facade = wrap();
     await run(facade, file);
-    expect((await run(facade, file)).llmContent).toContain(
-      'unchanged since last read',
-    );
+    expect((await run(facade, file)).llmContent).toContain('Wasted call');
     config.getFileReadCache().clear();
     expect((await run(facade, file)).llmContent).toContain('read me');
   });
@@ -413,6 +411,46 @@ describe('execution tool facade', () => {
       persistedOutputFiles: [],
       resultFilePaths: [],
     });
+  });
+
+  it.each([
+    ['a declared size', { chars: 120_000, estimatedTokens: 30_000 }],
+    ['an explicit unknown', null],
+  ])(
+    'carries %s through the wrapper unchanged',
+    async (_title, rawOutputSize) => {
+      const file = await writeWorkspaceFile('file.txt', 'content');
+      vi.spyOn(environment, 'execute').mockResolvedValueOnce({
+        llmContent: 'bounded body',
+        returnDisplay: 'bounded body',
+        outputBudgetApplied: true,
+        rawOutputSize,
+      });
+
+      const result = await run(wrap(), file);
+
+      // Byte-for-byte, including `null`: the wrapper must not coalesce the
+      // producer's declared pre-reduction size (#13652 R4-4).
+      expect(result.rawOutputSize).toEqual(rawOutputSize);
+    },
+  );
+
+  it('carries a producer-declared truncation bit through the wrapper', async () => {
+    const file = await writeWorkspaceFile('file.txt', 'content');
+    vi.spyOn(environment, 'execute').mockResolvedValueOnce({
+      llmContent: 'bounded body',
+      returnDisplay: 'bounded body',
+      outputBudgetApplied: true,
+      rawOutputSize: null,
+      truncatedByProducer: true,
+    });
+
+    const result = await run(wrap(), file);
+
+    // The SSH environment bounds its own body; dropping this bit at the facade
+    // is what losing the truncation fact looked like (#14742).
+    expect(result.rawOutputSize).toBeNull();
+    expect(result.truncatedByProducer).toBe(true);
   });
 
   it.each([false, true])(

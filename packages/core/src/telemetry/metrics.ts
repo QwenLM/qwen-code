@@ -11,6 +11,7 @@ import type { Config } from '../config/config.js';
 import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import type { GoalLimitKind, GoalStatus } from '../goals/goal-protocol.js';
 import type {
+  ToolResultSizeEvent,
   GoalStateEvent,
   GoalStateEventCause,
   ModelSlashCommandEvent,
@@ -21,9 +22,10 @@ import type {
 } from './types.js';
 import type { ToolExecutionStatus } from '../core/turn.js';
 
+const TOOL_RESULT_CHARS = `${SERVICE_NAME}.tool.result.chars`;
+const TOOL_RESULT_TOKENS = `${SERVICE_NAME}.tool.result.tokens`;
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
 const TOOL_EXECUTION_COUNT = `${SERVICE_NAME}.tool.execution.count`;
-export const REPEATED_TOOL_FAILURE_GUARD_COUNT = `${SERVICE_NAME}.repeated_tool_failure_guard.count`;
 const TOOL_CALL_LATENCY = `${SERVICE_NAME}.tool.call.latency`;
 const API_REQUEST_COUNT = `${SERVICE_NAME}.api.request.count`;
 const API_REQUEST_LATENCY = `${SERVICE_NAME}.api.request.latency`;
@@ -130,42 +132,6 @@ const COUNTER_DEFINITIONS = {
       tool_type: 'native' | 'mcp';
     },
   },
-  [REPEATED_TOOL_FAILURE_GUARD_COUNT]: {
-    description:
-      'Counts privacy-safe repeated tool execution failure guard transitions.',
-    valueType: ValueType.INT,
-    assign: (c: Counter) => (repeatedToolFailureGuardCounter = c),
-    attributes: {} as {
-      route: 'acp_foreground';
-      mode: 'shadow' | 'warn' | 'enforce';
-      phase_before: 'idle' | 'tracking' | 'warned' | 'latched';
-      phase_after: 'idle' | 'tracking' | 'warned' | 'latched';
-      decision:
-        | 'reset'
-        | 'tracked'
-        | 'would_warn'
-        | 'warned'
-        | 'would_stop'
-        | 'stopped';
-      failure_count_bucket: '0' | '1-2' | '3-4' | '5-7' | '8+';
-      batch_count_bucket: '0' | '1' | '2' | '3+';
-      reset_reason?:
-        | 'success'
-        | 'cancelled'
-        | 'not_started'
-        | 'post_execution_failure'
-        | 'unknown'
-        | 'mixed'
-        | 'incomplete'
-        | 'external_input'
-        | 'queued_prompt'
-        | 'unreliable_input'
-        | 'contract_violation';
-      terminal_status?: 'error';
-      execution_status?: 'error';
-      tool_type?: 'native' | 'mcp';
-    },
-  },
   [API_REQUEST_COUNT]: {
     description: 'Counts API requests, tagged by model and status.',
     valueType: ValueType.INT,
@@ -261,6 +227,30 @@ const COUNTER_DEFINITIONS = {
 } as const;
 
 const HISTOGRAM_DEFINITIONS = {
+  [TOOL_RESULT_CHARS]: {
+    description: 'Raw and injected textual tool-result characters per call.',
+    unit: '{character}',
+    valueType: ValueType.INT,
+    assign: (h: Histogram) => (toolResultCharsHistogram = h),
+    attributes: {} as {
+      function_name: string;
+      tool_type: 'native' | 'mcp';
+      truncated?: boolean;
+      phase: 'raw' | 'injected';
+    },
+  },
+  [TOOL_RESULT_TOKENS]: {
+    description: 'Estimated raw and injected tool-result tokens per call.',
+    unit: '{token}',
+    valueType: ValueType.INT,
+    assign: (h: Histogram) => (toolResultTokensHistogram = h),
+    attributes: {} as {
+      function_name: string;
+      tool_type: 'native' | 'mcp';
+      truncated?: boolean;
+      phase: 'raw' | 'injected';
+    },
+  },
   [TOOL_CALL_LATENCY]: {
     description: 'Latency of tool calls in milliseconds.',
     unit: 'ms',
@@ -486,7 +476,8 @@ export enum ApiRequestPhase {
 let cliMeter: Meter | undefined;
 let toolCallCounter: Counter | undefined;
 let toolExecutionCounter: Counter | undefined;
-let repeatedToolFailureGuardCounter: Counter | undefined;
+let toolResultCharsHistogram: Histogram | undefined;
+let toolResultTokensHistogram: Histogram | undefined;
 let toolCallLatencyHistogram: Histogram | undefined;
 let apiRequestCounter: Counter | undefined;
 let apiRequestLatencyHistogram: Histogram | undefined;
@@ -738,6 +729,37 @@ export function recordChatCompressionMetrics(
   });
 }
 
+export function recordToolResultSizeMetrics(
+  config: Config,
+  event: ToolResultSizeEvent,
+): void {
+  if (!isMetricsInitialized) return;
+  const attributes = {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    function_name: event.function_name,
+    tool_type: event.tool_type,
+    ...(event.truncated !== undefined ? { truncated: event.truncated } : {}),
+  };
+  if (event.raw_content_length !== undefined)
+    toolResultCharsHistogram?.record(event.raw_content_length, {
+      ...attributes,
+      phase: 'raw',
+    });
+  if (event.raw_estimated_tokens !== undefined)
+    toolResultTokensHistogram?.record(event.raw_estimated_tokens, {
+      ...attributes,
+      phase: 'raw',
+    });
+  toolResultCharsHistogram?.record(event.injected_content_length, {
+    ...attributes,
+    phase: 'injected',
+  });
+  toolResultTokensHistogram?.record(event.injected_estimated_tokens, {
+    ...attributes,
+    phase: 'injected',
+  });
+}
+
 export function recordToolCallMetrics(
   config: Config,
   durationMs: number,
@@ -767,13 +789,6 @@ export function recordToolExecutionMetrics(
     ...baseMetricDefinition.getCommonAttributes(config),
     ...attributes,
   });
-}
-
-export function recordRepeatedToolFailureGuardMetrics(
-  attributes: MetricDefinitions[typeof REPEATED_TOOL_FAILURE_GUARD_COUNT]['attributes'],
-): void {
-  if (!repeatedToolFailureGuardCounter || !isMetricsInitialized) return;
-  repeatedToolFailureGuardCounter.add(1, attributes);
 }
 
 export function recordTokenUsageMetrics(

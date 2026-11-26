@@ -71,7 +71,7 @@ limit 为 1 到 100，默认 20。与其他列表一样，超出该范围的 32 
 ## 7. 验证
 
 - Managed Agent 服务的 `mvn test`（176 个测试）与 Checkstyle 通过。
-- `ManagedAgentMySqlIT` 在 CI 使用的 `mariadb:10.11.18` 与 `mysql:8.4` 上均 14/14 通过。去掉精确的 Turn ID 比较后，它在两个数据库上都会失败。
+- `ManagedAgentMySqlIT` 在 `mariadb:10.11.18` 与 `mysql:8.4` 上均 14/14 通过。去掉精确的 Turn ID 比较后，它在两个数据库上都会失败。
 - 重新生成 managed API 类型后没有变化。
 - 24 个变异各自让某个测试失败：按从旧到新排序；不按 Turn ID 打破并列；游标重复返回它指向的 Turn，或跳过与它创建时间相同的 Turn；键集忽略创建时间；恰好填满的最后一页报告还有更多；不检查 limit；游标接受前导零；溢出的创建时间返回其他错误；列表或详情跳过 Session 检查，或先于请求校验检查 Session；默认 limit 为 100；详情忽略 Session 或读取输入；查询过长的 ID；按 UTF-16 单元计算 ID 长度；最后一页仍给出游标；拒绝空游标或空白游标；因填充或因 Turn ID 超过服务端签发的长度而拒绝游标；以及忽略带有这种 ID 的游标。
 

@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getToolOutputProvenance,
+  measureToolOutput,
+  type ToolOutputBudgetSource,
+} from '../tools/tool-output-size.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -24,7 +29,6 @@ import { ToolNames } from '../tools/tool-names.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { AgentTool } from '../tools/agent/agent.js';
-import type { ToolErrorType } from '../tools/tool-error.js';
 import type {
   GoalLimitKind,
   GoalStateCause,
@@ -206,11 +210,20 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   response_id?: string;
   tool_type: 'native' | 'mcp';
   content_length?: number;
+  raw_content_length?: number;
+  raw_estimated_tokens?: number;
+  processed_estimated_tokens?: number;
+  truncated?: boolean;
+  applied_budget?: number;
+  budget_source?: ToolOutputBudgetSource;
   mcp_server_name?: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata?: { [key: string]: any };
 
-  constructor(call: CompletedToolCall) {
+  constructor(
+    call: CompletedToolCall,
+    config?: Pick<Config, 'getChatCompression'>,
+  ) {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
     this.call_id = call.request.callId;
@@ -244,7 +257,21 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this.error = call.response.error?.message;
     this.error_type = call.response.errorType;
     this.prompt_id = call.request.prompt_id;
+    const processed = measureToolOutput(call.response.responseParts, config);
+    const provenance = call.response.responseParts
+      .map(getToolOutputProvenance)
+      .find(Boolean);
+    // content_length keeps the meaning it already ships with on OTLP and RUM;
+    // the new measurement rides processed_estimated_tokens and the size events.
     this.content_length = call.response.contentLength;
+    this.processed_estimated_tokens = processed.estimatedTokens;
+    this.raw_content_length = provenance?.rawSize?.chars;
+    this.raw_estimated_tokens = provenance?.rawSize?.estimatedTokens;
+    this.truncated = provenance?.truncated;
+    this.applied_budget = Number.isFinite(provenance?.budget)
+      ? provenance?.budget
+      : undefined;
+    this.budget_source = provenance?.budgetSource;
     if (
       typeof call.tool !== 'undefined' &&
       call.tool instanceof DiscoveredMCPTool
@@ -403,6 +430,13 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   /** Time from stream dispatch to first user-visible content. */
   ttft_ms?: number;
   /**
+   * Time from the first to the last chunk with user-visible content; 0 when
+   * all of it arrived in one chunk.
+   */
+  generation_ms?: number;
+  /** Time from request start to first user-visible content, for local replay. */
+  first_visible_offset_ms?: number;
+  /**
    * Name of the subagent that issued this request, or undefined when the
    * request originates from the main conversation.
    */
@@ -419,6 +453,8 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     subagent_name?: string,
     ttft_ms?: number,
     execution_id?: string,
+    generation_ms?: number,
+    first_visible_offset_ms?: number,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
@@ -437,6 +473,8 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.auth_type = auth_type;
     this.subagent_name = subagent_name;
     this.ttft_ms = ttft_ms;
+    this.generation_ms = generation_ms;
+    this.first_visible_offset_ms = first_visible_offset_ms;
   }
 }
 
@@ -500,23 +538,34 @@ export class RipgrepRuntimeRecoveryEvent implements BaseTelemetryEvent {
 }
 
 export enum LoopType {
-  CONSECUTIVE_IDENTICAL_TOOL_CALLS = 'consecutive_identical_tool_calls',
-  CHANTING_IDENTICAL_SENTENCES = 'chanting_identical_sentences',
-  REPETITIVE_THOUGHTS = 'repetitive_thoughts',
-  READ_FILE_LOOP = 'read_file_loop',
-  ACTION_STAGNATION = 'action_stagnation',
-  /** Similar read-only shell inspection commands repeat with varied args. */
-  SHELL_COMMAND_STAGNATION = 'shell_command_stagnation',
-  /** Same (tool, args) pair appears N times across the entire turn, not necessarily consecutively. */
+  /**
+   * A provider replayed an executed tool-call id
+   * (LoopReason.PROVIDER_DUPLICATE_ID).
+   */
   GLOBAL_TOOL_CALL_DUPLICATE = 'global_tool_call_duplicate',
-  /** Two tools alternating in a fixed pattern (A B A B A B ...). */
-  ALTERNATING_TOOL_CALL_PATTERN = 'alternating_tool_call_pattern',
-  /** Total tool calls in a single turn exceeded the always-on hard cap, regardless of pattern. */
+  /** An explicit `model.maxToolCallsPerTurn` was exceeded. */
   TURN_TOOL_CALL_CAP = 'turn_tool_call_cap',
-  /** The same tool repeatedly failed schema validation with fresh tool-call ids. */
-  INVALID_TOOL_PARAMS_STAGNATION = 'invalid_tool_params_stagnation',
-  /** The same tool execution failure continued after a corrective reminder. */
-  REPEATED_TOOL_EXECUTION_FAILURE = 'repeated_tool_execution_failure',
+}
+
+/**
+ * Which cause stopped a turn (#14828).
+ * Only TURN_TOOL_CALL_CAP and GLOBAL_TOOL_CALL_DUPLICATE carry a reason.
+ */
+export enum LoopReason {
+  /** An explicit model.maxToolCallsPerTurn was exceeded. */
+  EXPLICIT_CAP = 'explicit_cap',
+  /** The duplicate provider tool-call id breaker. */
+  PROVIDER_DUPLICATE_ID = 'provider_duplicate_id',
+}
+
+/**
+ * Detail of a loop stop beyond its LoopType. The tool-call numbers are set
+ * only for TURN_TOOL_CALL_CAP: the calls counted when it fired and the cap.
+ */
+export interface LoopStopDetail {
+  loopReason?: LoopReason;
+  toolCallCount?: number;
+  toolCallLimit?: number;
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {
@@ -524,113 +573,22 @@ export class LoopDetectedEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   loop_type: LoopType;
   prompt_id: string;
+  declare loop_reason?: LoopReason;
+  declare tool_call_count?: number;
+  declare tool_call_limit?: number;
 
-  constructor(loop_type: LoopType, prompt_id: string) {
+  constructor(loop_type: LoopType, prompt_id: string, detail?: LoopStopDetail) {
     this['event.name'] = 'loop_detected';
     this['event.timestamp'] = new Date().toISOString();
     this.loop_type = loop_type;
     this.prompt_id = prompt_id;
-  }
-}
-
-export type RepeatedToolFailureGuardTelemetryMode =
-  | 'shadow'
-  | 'warn'
-  | 'enforce';
-export type RepeatedToolFailureGuardTelemetryPhase =
-  | 'idle'
-  | 'tracking'
-  | 'warned'
-  | 'latched';
-export type RepeatedToolFailureGuardTelemetryDecision =
-  | 'reset'
-  | 'tracked'
-  | 'would_warn'
-  | 'warned'
-  | 'would_stop'
-  | 'stopped';
-export type RepeatedToolFailureGuardCountBucket =
-  | '0'
-  | '1-2'
-  | '3-4'
-  | '5-7'
-  | '8+';
-export type RepeatedToolFailureGuardBatchBucket = '0' | '1' | '2' | '3+';
-export type RepeatedToolFailureGuardResetReason =
-  | 'success'
-  | 'cancelled'
-  | 'not_started'
-  | 'post_execution_failure'
-  | 'unknown'
-  | 'mixed'
-  | 'incomplete'
-  | 'external_input'
-  | 'queued_prompt'
-  | 'unreliable_input'
-  | 'contract_violation';
-
-export class RepeatedToolFailureGuardEvent implements BaseTelemetryEvent {
-  'event.name': 'repeated_tool_failure_guard';
-  'event.timestamp': string;
-  prompt_id: string;
-  route: 'acp_foreground';
-  mode: RepeatedToolFailureGuardTelemetryMode;
-  phase_before: RepeatedToolFailureGuardTelemetryPhase;
-  phase_after: RepeatedToolFailureGuardTelemetryPhase;
-  decision: RepeatedToolFailureGuardTelemetryDecision;
-  failure_count_bucket: RepeatedToolFailureGuardCountBucket;
-  batch_count_bucket: RepeatedToolFailureGuardBatchBucket;
-  candidate_ordinal: number;
-  declare reset_reason?: RepeatedToolFailureGuardResetReason;
-  declare terminal_status?: 'error';
-  declare execution_status?: 'error';
-  declare execution_error_type?: ToolErrorType;
-  declare tool_type?: 'native' | 'mcp';
-
-  constructor(
-    params: Omit<
-      RepeatedToolFailureGuardEvent,
-      'event.name' | 'event.timestamp'
-    >,
-  ) {
-    this['event.name'] = 'repeated_tool_failure_guard';
-    this['event.timestamp'] = new Date().toISOString();
-    this.prompt_id = params.prompt_id;
-    this.route = params.route;
-    this.mode = params.mode;
-    this.phase_before = params.phase_before;
-    this.phase_after = params.phase_after;
-    this.decision = params.decision;
-    this.failure_count_bucket = params.failure_count_bucket;
-    this.batch_count_bucket = params.batch_count_bucket;
-    this.candidate_ordinal = params.candidate_ordinal;
-    if (params.reset_reason !== undefined) {
-      this.reset_reason = params.reset_reason;
+    if (detail?.loopReason !== undefined) this.loop_reason = detail.loopReason;
+    if (detail?.toolCallCount !== undefined) {
+      this.tool_call_count = detail.toolCallCount;
     }
-    if (params.terminal_status !== undefined) {
-      this.terminal_status = params.terminal_status;
+    if (detail?.toolCallLimit !== undefined) {
+      this.tool_call_limit = detail.toolCallLimit;
     }
-    if (params.execution_status !== undefined) {
-      this.execution_status = params.execution_status;
-    }
-    if (params.execution_error_type !== undefined) {
-      this.execution_error_type = params.execution_error_type;
-    }
-    if (params.tool_type !== undefined) {
-      this.tool_type = params.tool_type;
-    }
-  }
-}
-
-export class LoopDetectionDisabledEvent implements BaseTelemetryEvent {
-  'event.name': 'loop_detection_disabled';
-  'event.timestamp': string;
-  prompt_id: string;
-
-  constructor(prompt_id: string) {
-    this['event.name'] = 'loop_detection_disabled';
-    this['event.timestamp'] = new Date().toISOString();
-    this.prompt_id = prompt_id;
   }
 }
 
@@ -1002,6 +960,34 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
   }
 }
 
+export class ToolResultSizeEvent implements BaseTelemetryEvent {
+  readonly 'event.timestamp' = new Date().toISOString();
+  readonly 'event.name': string;
+  constructor(
+    readonly function_name: string,
+    readonly tool_type: 'native' | 'mcp',
+    readonly layer:
+      | 'producer'
+      | 'persistence'
+      | 'per_tool'
+      | 'combined'
+      | 'batch'
+      | 'injection',
+    readonly raw_content_length: number | undefined,
+    readonly injected_content_length: number,
+    readonly raw_estimated_tokens: number | undefined,
+    readonly injected_estimated_tokens: number,
+    readonly truncated: boolean | undefined,
+    readonly applied_budget?: number,
+    readonly budget_source?: ToolOutputBudgetSource,
+    readonly call_id?: string,
+    readonly prompt_id?: string,
+  ) {
+    this['event.name'] =
+      layer === 'injection' ? 'tool_result_injected' : 'tool_result_size';
+  }
+}
+
 export class ToolResultPersistedEvent implements BaseTelemetryEvent {
   readonly eventName = 'tool_result_persisted';
   readonly 'event.timestamp' = new Date().toISOString();
@@ -1323,8 +1309,6 @@ export type TelemetryEvent =
   | FlashFallbackEvent
   | RipgrepRuntimeRecoveryEvent
   | LoopDetectedEvent
-  | RepeatedToolFailureGuardEvent
-  | LoopDetectionDisabledEvent
   | NextSpeakerCheckEvent
   | KittySequenceOverflowEvent
   | MalformedJsonResponseEvent
@@ -1343,6 +1327,7 @@ export type TelemetryEvent =
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
+  | ToolResultSizeEvent
   | ToolResultPersistedEvent
   | ModelSlashCommandEvent
   | AuthEvent
@@ -1666,7 +1651,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
     | 'queued'
     | 'memory_tool'
     | 'memory_pressure'
-    | 'session_mismatch';
+    | 'session_mismatch'
+    | 'cadence';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1679,7 +1665,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
       | 'queued'
       | 'memory_tool'
       | 'memory_pressure'
-      | 'session_mismatch';
+      | 'session_mismatch'
+      | 'cadence';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;

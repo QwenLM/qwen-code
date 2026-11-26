@@ -272,7 +272,6 @@ function setupGoalClient() {
     getArenaAgentClient: vi.fn(() => null),
     getModel: vi.fn(() => 'test-model'),
     getSkipNextSpeakerCheck: vi.fn(() => false),
-    getSkipLoopDetection: vi.fn(() => false),
     getMaxToolCallsPerTurn: vi.fn(() => Number.POSITIVE_INFINITY),
     getToolRegistry: vi.fn(() => ({
       getAllToolNames: () => [],
@@ -776,6 +775,27 @@ describe('LlmClient Goal admission', () => {
     expect(runtime.dispatch).not.toHaveBeenCalled();
   });
 
+  it('leaves a host-owned proposal parked when its turn exits with a provider error', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getGoalProposalHostSupported).mockReturnValue(true);
+    vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
+    withoutGoal(runtime);
+    const store = pendingGoalProposalStore();
+    useProposals(config, store.take, {
+      getSkipNextSpeakerCheck: vi.fn(() => true),
+    });
+    turnMocks.run.mockImplementationOnce(async function* () {
+      store.set(proposal('host proposal', 'host-failed-key'));
+      yield { type: LlmEventType.Error, value: { error: { status: 500 } } };
+    });
+
+    await drain(userQuery(client, 'set a goal for this', 'host-failed-key'));
+
+    // The host settles it when its turn ends and reports that it did not start.
+    expect(store.get()).toEqual(proposal('host proposal', 'host-failed-key'));
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
   it('drops a proposal when cancellation lands during runtime readiness', async () => {
     const { client, config, runtime } = setupGoalClient();
     // No Goal at the boundary, as in production: the only thing standing
@@ -942,60 +962,41 @@ describe('LlmClient Goal admission', () => {
     expect(runtime.dispatch).not.toHaveBeenCalled();
   });
 
-  it.each(['blocked', 'throwing'] as const)(
-    '%s owner ToolResult hook closes its parked approval',
-    async (hookExit) => {
-      const { client, config, runtime } = setupGoalClient();
-      withoutGoal(runtime);
-      const store = pendingGoalProposalStore(proposal('ship it', 'owner-key'));
-      Object.assign(config, { takePendingGoalProposal: store.take });
-      enableHooks(
-        config,
-        hookExit === 'throwing'
-          ? throwingBus('hook exploded')
-          : blockingBus('policy denied'),
-        'UserPromptSubmit',
-      );
+  it('settles a parked approval after its ToolResult without a prompt hook', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    withoutGoal(runtime);
+    nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
+    const store = pendingGoalProposalStore(proposal('ship it', 'owner-key'));
+    useProposals(config, store.take);
+    const messageBus = throwingBus('unexpected prompt hook');
+    enableHooks(config, messageBus, 'UserPromptSubmit');
 
-      const ownerStream = toolResult(
-        client,
-        'owner-key',
-        'propose_goal',
-        'approved',
-      );
-      let events: unknown[] = [];
-      if (hookExit === 'throwing') {
-        await expect(drain(ownerStream)).rejects.toThrow('hook exploded');
-      } else {
-        events = await collect(ownerStream);
-      }
+    await drain(toolResult(client, 'owner-key', 'propose_goal', 'approved'));
 
-      expect(store.get()).toBeUndefined();
-      if (hookExit === 'blocked') {
-        expectCreated(runtime);
-        expect(eventIndex(events, LlmEventType.GoalState)).toBeLessThan(
-          eventIndex(events, LlmEventType.UserPromptSubmitBlocked),
-        );
-      } else {
-        expect(runtime.dispatch).not.toHaveBeenCalled();
-      }
-    },
-  );
+    expect(messageBus.request).not.toHaveBeenCalled();
+    expect(turnMocks.run).toHaveBeenCalledOnce();
+    expect(store.get()).toBeUndefined();
+    expectCreated(runtime);
+  });
 
   it.each(['Stop-hook', 'next-speaker'] as const)(
-    'settles after a blocked %s continuation ends the owner turn',
+    'settles after a %s continuation without another prompt hook',
     async (continuation) => {
       const { client, config, runtime } = setupGoalClient();
       withoutGoal(runtime);
       const store = pendingGoalProposalStore();
+      let stopHookCount = 0;
       let userPromptSubmitCount = 0;
       const messageBus = {
         request: vi.fn(async (request: { eventName: string }) => {
           if (request.eventName === 'Stop') {
-            return {
-              output: { decision: 'block', reason: 'Keep working' },
-              stopHookCount: 1,
-            };
+            stopHookCount += 1;
+            return stopHookCount === 1
+              ? {
+                  output: { decision: 'block', reason: 'Keep working' },
+                  stopHookCount: 1,
+                }
+              : { output: {} };
           }
           userPromptSubmitCount += 1;
           return userPromptSubmitCount === 1
@@ -1003,20 +1004,22 @@ describe('LlmClient Goal admission', () => {
             : { output: { decision: 'block', reason: 'policy denied' } };
         }),
       };
-      useProposals(config, store.take);
+      useProposals(config, store.take, { getMaxSessionTurns: vi.fn(() => 0) });
       enableHooks(
         config,
         messageBus,
         'UserPromptSubmit',
         ...(continuation === 'Stop-hook' ? ['Stop'] : []),
       );
+      nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
       if (continuation === 'next-speaker') {
-        nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'model' });
+        nextSpeakerMocks.check.mockResolvedValueOnce({ next_speaker: 'model' });
       }
 
       await drain(proposingQuery(client, store, 'owner-key'));
 
-      expect(turnMocks.run).toHaveBeenCalledOnce();
+      expect(turnMocks.run).toHaveBeenCalledTimes(2);
+      expect(userPromptSubmitCount).toBe(1);
       expect(store.get()).toBeUndefined();
       expect(runtime.dispatch).toHaveBeenCalledTimes(1);
       expectCreated(runtime);
@@ -1073,6 +1076,47 @@ describe('LlmClient Goal admission', () => {
       type: LlmEventType.GoalState,
       value: { goal: { objective: 'ship', goalId: 'goal-1', revision: 1 } },
     });
+  });
+
+  it('leaves the runtime message of a Goal turn to a host that recorded it', async () => {
+    const { client, recorder, order } = setupGoalClient();
+
+    await drain(
+      goalTurn(client, 'Continue the Goal.', {
+        userTurn: { promptId: 'goal-prompt' },
+      }),
+    );
+
+    expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
+    expect(order).toContain('finish');
+  });
+
+  it("continues a Goal turn under its permit from a host's stop policy", async () => {
+    const { client, runtime, order } = setupGoalClient();
+    const policy = {
+      continueAt: vi
+        .fn()
+        .mockResolvedValueOnce([{ text: 'Finish the todos.' }])
+        .mockResolvedValue(undefined),
+    };
+    const getInterruptedGoalPauseReason = vi.fn(() => 'host reason');
+    const sendSpy = vi.spyOn(client, 'sendMessageStream');
+
+    await drain(
+      goalTurn(client, 'Continue the Goal.', {
+        stopPolicies: [policy],
+        getInterruptedGoalPauseReason,
+      }),
+    );
+
+    expect(policy.continueAt).toHaveBeenCalledTimes(2);
+    expect(sendSpy.mock.calls[1]?.[3]).toMatchObject({
+      type: SendMessageType.Hook,
+      ...exactPermit,
+      getInterruptedGoalPauseReason,
+    });
+    expect(runtime.finishTurn).toHaveBeenCalledOnce();
+    expect(order.filter((step) => step === 'finish')).toHaveLength(1);
   });
 
   it('fails closed before recording or sampling when an automatic permit is stale', async () => {
@@ -1252,6 +1296,7 @@ describe('LlmClient Goal admission', () => {
       // The send path stamps every delivered notification turn entry, which
       // is what lets recovery tell it apart from a cold pre-send record.
       true,
+      false,
     );
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
     expect(order).toEqual(['flush', 'finish']);
@@ -1339,10 +1384,7 @@ describe('LlmClient Goal admission', () => {
 
   it('passes loop detection failures to the host pause-reason resolver', async () => {
     const { client, runtime } = setupGoalClient();
-    vi.spyOn(
-      client['loopDetector'],
-      'checkAlwaysOnSafeties',
-    ).mockReturnValueOnce(true);
+    vi.spyOn(client['toolCallCap'], 'check').mockReturnValueOnce(true);
     turnMocks.run.mockReturnValueOnce(
       streamOf({
         type: LlmEventType.ToolCallRequest,
@@ -1466,9 +1508,9 @@ describe('LlmClient Goal admission', () => {
     expect(runtime.finishTurn).toHaveBeenCalledOnce();
   });
 
-  it('resets the loop detector before each Goal-owned Hook continuation', async () => {
+  it('resets the tool-call cap before each Goal-owned Hook continuation', async () => {
     const { client, config } = setupGoalClient();
-    const reset = vi.spyOn(client['loopDetector'], 'reset');
+    const reset = vi.spyOn(client['toolCallCap'], 'reset');
     const messageBus = blockStopHook(config, 'continue checking', 5);
 
     await drain(

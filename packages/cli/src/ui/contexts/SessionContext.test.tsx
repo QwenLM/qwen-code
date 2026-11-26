@@ -233,6 +233,114 @@ describe('SessionStatsContext', () => {
     uiTelemetryService.reset();
   });
 
+  it('preserves the conversation clock when a new run starts', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-05T00:00:00Z'));
+    uiTelemetryService.reset();
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    const sessionStart = uiTelemetryService.getSessionStartTime();
+
+    try {
+      vi.setSystemTime(new Date('2026-06-05T00:01:00Z'));
+      act(() => {
+        uiTelemetryService.resetLiveMetrics();
+        result.current.startNewSession('resumed');
+      });
+
+      expect(result.current.stats.sessionStartTime).toEqual(sessionStart);
+      expect(result.current.stats.sessionId).toBe('resumed');
+    } finally {
+      unmount();
+      vi.useRealTimers();
+      uiTelemetryService.reset();
+    }
+  });
+
+  it('captures a clock that binds during the subscription setup', () => {
+    const sessionId = 'target-session';
+    const firstClock = new Date('2026-06-05T00:00:00Z');
+    const restoredClock = new Date('2026-06-04T20:00:00Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(firstClock);
+    uiTelemetryService.reset();
+    uiTelemetryService.setSessionStartTime(firstClock, sessionId);
+    const subscribe = uiTelemetryService.on.bind(uiTelemetryService);
+    const subscription = vi
+      .spyOn(uiTelemetryService, 'on')
+      .mockImplementation((event, listener) => {
+        if (event === 'update') {
+          uiTelemetryService.setSessionStartTime(restoredClock, sessionId);
+        }
+        return subscribe(event, listener);
+      });
+    try {
+      const { result, unmount } = renderHook(() => useSessionStats(), {
+        wrapper: ({ children }) => (
+          <SessionStatsProvider sessionId={sessionId}>
+            {children}
+          </SessionStatsProvider>
+        ),
+      });
+      expect(result.current.stats.sessionStartTime).toEqual(restoredClock);
+      unmount();
+    } finally {
+      subscription.mockRestore();
+      uiTelemetryService.reset();
+      vi.useRealTimers();
+    }
+  });
+
+  it('follows a restored conversation clock bound after the initial render', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-05T00:00:00Z'));
+    uiTelemetryService.reset();
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    const restored = new Date('2026-06-04T20:00:00Z');
+    const runStart = uiTelemetryService.getRunStartTime();
+    try {
+      vi.setSystemTime(new Date('2026-06-05T00:01:00Z'));
+      act(() => {
+        uiTelemetryService.setSessionStartTime(restored);
+      });
+
+      expect(result.current.stats.sessionStartTime).toEqual(restored);
+      expect(uiTelemetryService.getRunStartTime()).toEqual(runStart);
+    } finally {
+      unmount();
+      vi.useRealTimers();
+      uiTelemetryService.reset();
+    }
+  });
+
+  it('follows the clock reset emitted with fresh metrics', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-05T00:00:00Z'));
+    uiTelemetryService.reset();
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    const previousClock = result.current.stats.sessionStartTime;
+    try {
+      vi.setSystemTime(new Date('2026-06-05T00:01:00Z'));
+      act(() => {
+        uiTelemetryService.reset();
+      });
+
+      expect(result.current.stats.sessionStartTime).not.toEqual(previousClock);
+      expect(result.current.stats.sessionStartTime).toEqual(
+        uiTelemetryService.getSessionStartTime(),
+      );
+    } finally {
+      unmount();
+      vi.useRealTimers();
+      uiTelemetryService.reset();
+    }
+  });
+
   it('should update when skill metrics are mutated in place', () => {
     uiTelemetryService.reset();
     const contextRef: MutableRefObject<
@@ -295,6 +403,9 @@ describe('SessionStatsContext', () => {
       totalTtftMs: 100,
       totalGenerationDurationMs: 400,
       totalThroughputOutputTokens: 20,
+      totalTimedGenerationDurationMs: 400,
+      totalOutputSpeedTokens: 20,
+      totalOutputSpeedDurationMs: 500,
       last: {
         model: 'qwen3-coder',
         ttftMs: 100,
@@ -326,6 +437,236 @@ describe('SessionStatsContext', () => {
     );
 
     uiTelemetryService.reset();
+  });
+
+  it('copies billing and updates when only the total or source attribution changes', () => {
+    uiTelemetryService.reset();
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    const metrics = uiTelemetryService.getMetrics();
+    metrics.billableOutputTokens = {
+      model: { total: 20, bySource: { main: 20 } },
+    };
+    const emit = () =>
+      act(() => {
+        uiTelemetryService.emit('update', { metrics, lastPromptTokenCount: 0 });
+      });
+    emit();
+    const previous = result.current.stats.metrics.billableOutputTokens;
+    metrics.billableOutputTokens.model.total = 30;
+    emit();
+    expect(result.current.stats.metrics.billableOutputTokens?.model.total).toBe(
+      30,
+    );
+    expect(previous?.model.total).toBe(20);
+    metrics.billableOutputTokens.model.bySource.main = 0;
+    metrics.billableOutputTokens.model.bySource.researcher = 30;
+    emit();
+    expect(
+      result.current.stats.metrics.billableOutputTokens?.model.bySource,
+    ).toEqual({
+      main: 0,
+      researcher: 30,
+    });
+    expect(previous?.model.bySource).toEqual({ main: 20 });
+    unmount();
+    uiTelemetryService.reset();
+  });
+
+  it('decouples the mint counter from the user-visible Prompts statistic (R9-5)', () => {
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    expect(result.current.stats.promptCount).toBe(0);
+    expect(result.current.stats.userPromptCount).toBe(0);
+
+    // A background mint (notification/goal/retry) advances only the mint
+    // counter, so the next minted id is unique without inflating the statistic.
+    act(() => {
+      result.current.startNewPrompt();
+    });
+    expect(result.current.stats.promptCount).toBe(1);
+    expect(result.current.stats.userPromptCount).toBe(0);
+
+    // A user-initiated turn advances both counters.
+    act(() => {
+      result.current.startNewPrompt();
+      result.current.recordUserPrompt();
+    });
+    expect(result.current.stats.promptCount).toBe(2);
+    expect(result.current.stats.userPromptCount).toBe(1);
+
+    // recordUserPrompt alone advances only the user statistic.
+    act(() => {
+      result.current.recordUserPrompt();
+    });
+    expect(result.current.stats.promptCount).toBe(2);
+    expect(result.current.stats.userPromptCount).toBe(2);
+    unmount();
+  });
+
+  it('seeds the visible Prompts statistic from the user-turn count on resume (S1)', () => {
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    // The mint-counter seed (10) can exceed the user-turn count (3) when
+    // background mints claimed higher ids; the visible statistic must resume
+    // from the user-turn count, not the mint seed.
+    act(() => {
+      result.current.seedPromptCount(10, 3);
+    });
+    expect(result.current.stats.promptCount).toBe(10);
+    expect(result.current.stats.userPromptCount).toBe(3);
+    // Without an explicit user seed the legacy single-seed behavior holds.
+    act(() => {
+      result.current.seedPromptCount(12);
+    });
+    expect(result.current.stats.promptCount).toBe(12);
+    expect(result.current.stats.userPromptCount).toBe(12);
+    unmount();
+  });
+
+  it('commits a restored clock atomically with the target session switch', () => {
+    uiTelemetryService.reset();
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: ({ children }) => (
+        <SessionStatsProvider sessionId="old-session">
+          {children}
+        </SessionStatsProvider>
+      ),
+    });
+    act(() => {
+      uiTelemetryService.recordSkillInvocation('old', true, 'old-session');
+      uiTelemetryService.recordSkillInvocation('new', true, 'target-session');
+    });
+    const oldState = result.current.stats;
+    const restoredClock = new Date(
+      oldState.sessionStartTime.getTime() - 60_000,
+    );
+
+    act(() => {
+      uiTelemetryService.setSessionStartTime(restoredClock, 'target-session');
+    });
+
+    expect(result.current.stats).toBe(oldState);
+    expect(result.current.stats.sessionId).toBe('old-session');
+    expect(result.current.stats.metrics.skills?.byName).toEqual({
+      old: { count: 1, success: 1, fail: 0 },
+    });
+
+    act(() => {
+      uiTelemetryService.recordSkillInvocation(
+        'old-again',
+        true,
+        'old-session',
+      );
+    });
+
+    expect(result.current.stats.sessionId).toBe('old-session');
+    expect(result.current.stats.sessionStartTime).toEqual(
+      oldState.sessionStartTime,
+    );
+    expect(result.current.stats.metrics.skills?.byName).toEqual({
+      old: { count: 1, success: 1, fail: 0 },
+      'old-again': { count: 1, success: 1, fail: 0 },
+    });
+
+    act(() => {
+      result.current.startNewSession('target-session');
+    });
+
+    expect(result.current.stats.sessionId).toBe('target-session');
+    expect(result.current.stats.sessionStartTime).toEqual(restoredClock);
+    expect(result.current.stats.metrics.skills?.byName).toEqual({
+      new: { count: 1, success: 1, fail: 0 },
+    });
+    unmount();
+    uiTelemetryService.reset();
+  });
+
+  it('captures each queued clock update at its event time', () => {
+    uiTelemetryService.reset();
+    const oldClock = new Date('2026-07-01T10:00:00.000Z');
+    const targetClock = new Date('2026-07-02T10:00:00.000Z');
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: ({ children }) => (
+        <SessionStatsProvider sessionId="old-session">
+          {children}
+        </SessionStatsProvider>
+      ),
+    });
+    act(() => {
+      uiTelemetryService.recordSkillInvocation('old', true, 'old-session');
+      uiTelemetryService.setSessionStartTime(oldClock, 'old-session');
+      uiTelemetryService.setSessionStartTime(targetClock, 'target-session');
+    });
+
+    expect(result.current.stats.sessionId).toBe('old-session');
+    expect(result.current.stats.sessionStartTime).toEqual(oldClock);
+    expect(uiTelemetryService.getSessionStartTime()).toEqual(targetClock);
+
+    act(() => {
+      result.current.startNewSession('target-session');
+    });
+    expect(result.current.stats.sessionStartTime).toEqual(targetClock);
+    unmount();
+    uiTelemetryService.reset();
+  });
+
+  it('applies the clock restored by a replay snapshot', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-01T00:00:00.000Z'));
+    uiTelemetryService.reset();
+    act(() => {
+      uiTelemetryService.recordSkillInvocation(
+        'snapshot-preserved',
+        true,
+        'old-session',
+      );
+    });
+    const snapshot = uiTelemetryService.snapshotForReplay(
+      'target-session',
+      'old-session',
+    );
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: ({ children }) => (
+        <SessionStatsProvider sessionId="old-session">
+          {children}
+        </SessionStatsProvider>
+      ),
+    });
+    try {
+      act(() => {
+        uiTelemetryService.setSessionStartTime(
+          new Date('2020-01-01T00:00:00.000Z'),
+        );
+        uiTelemetryService.recordSkillInvocation(
+          'abandoned-replay-only',
+          true,
+          'old-session',
+        );
+      });
+      expect(result.current.stats.sessionStartTime).toEqual(
+        new Date('2020-01-01T00:00:00.000Z'),
+      );
+      act(() => {
+        uiTelemetryService.restoreFromReplaySnapshot(snapshot);
+      });
+      expect(uiTelemetryService.getSessionStartTime()).toEqual(
+        snapshot.sessionStartTime,
+      );
+      expect(result.current.stats.sessionStartTime).toEqual(
+        snapshot.sessionStartTime,
+      );
+      expect(result.current.stats.metrics.skills?.byName).toEqual({
+        'snapshot-preserved': { count: 1, success: 1, fail: 0 },
+      });
+    } finally {
+      unmount();
+      vi.useRealTimers();
+      uiTelemetryService.reset();
+    }
   });
 
   it('should throw an error when useSessionStats is used outside of a provider', () => {

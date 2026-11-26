@@ -34,9 +34,15 @@ public final class DaemonSessionClient implements AutoCloseable {
     private static final Set<String> SESSION_FAILURE_EVENTS = Set.of(
             "client_evicted", "session_closed", "session_died",
             "state_resync_required", "stream_error");
+    // No id is burned on these by design (see sse-events.ts in packages/cli):
+    // they are synthesized outside the replayable sequence. session_snapshot
+    // is the id-less synthetic frame the bridge's withSnapshot wrapper emits
+    // for a ?snapshot=1 subscription on the primary events route; the hosted
+    // events route never reads that query parameter and stamps every frame
+    // with an id.
     private static final Set<String> IDLESS_SYNTHETIC_EVENTS = Set.of(
             "client_evicted", "slow_client_warning", "stream_error",
-            "state_resync_required", "replay_complete");
+            "state_resync_required", "replay_complete", "session_snapshot");
     private static final Set<String> OBSERVABLE_STREAM_EVENTS = Set.of(
             "slow_client_warning", "replay_complete");
     private static final Set<Integer> RETRYABLE_SSE_STATUS = Set.of(

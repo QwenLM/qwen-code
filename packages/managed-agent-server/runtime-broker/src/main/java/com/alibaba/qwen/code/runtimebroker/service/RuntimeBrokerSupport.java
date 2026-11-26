@@ -1,0 +1,471 @@
+package com.alibaba.qwen.code.runtimebroker.service;
+
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
+import com.alibaba.qwen.code.runtimebroker.RuntimeExecutionStatus;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
+import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
+
+final class RuntimeBrokerSupport {
+    private RuntimeBrokerSupport() { }
+
+    static final int MAX_CAS_ATTEMPTS = 16;
+
+    /** Tool v3 publication dispatch: a payload digest and publication grant. */
+    static boolean isPublicationV3(Map<String, Object> reference) {
+        return "deferred_v3".equals(reference.get("dispatchMode"));
+    }
+
+    /** Tool v3 provider protocol: an input digest in the reference itself. */
+    static boolean isProtocolV3(Map<String, Object> reference) {
+        return Integer.valueOf(3).equals(reference.get("runtimeProtocol"));
+    }
+
+    /** Either v3 encoding; a reference carries at most one of the two. */
+    static boolean isV3Family(Map<String, Object> reference) {
+        return isProtocolV3(reference) || isPublicationV3(reference);
+    }
+
+    static void requireSameSession(RuntimeSession actual,
+            RuntimeSession requested) {
+        if (!actual.getHarnessSessionId().equals(
+                requested.getHarnessSessionId())
+                || !actual.getTurnKind().equals(requested.getTurnKind())
+                || !actual.getScope().equals(requested.getScope())) {
+            throw conflict("runtime_session_conflict",
+                    "runtimeSessionId belongs to another Session identity");
+        }
+    }
+
+    static CompletionStage<Map<String, Object>> prepareExecutionReference(String runtimeSessionId,
+            Map<String, Object> reference, String payloadDigest, String publicationId) {
+        Map<String, Object> immutable = immutableMap(reference, "reference");
+        if (ProviderRuntimeProtocol.isReference(immutable)) {
+            ProviderRuntimeProtocol.reference(immutable, runtimeSessionId);
+        } else {
+            boolean measured = RuntimeToolMeasurements.selected(immutable);
+            boolean v3 = isProtocolV3(immutable);
+            if (v3 && payloadDigest != null) {
+                throw invalid("runtime_reference_invalid", "Tool v3 publication modes conflict");
+            }
+            Set<String> fields = new HashSet<>(v3
+                    ? Set.of("sessionId", "promptId", "callId", "argsDigest", "runtimeProtocol", "inputDigest")
+                    : Set.of("sessionId", "promptId", "callId", "argsDigest"));
+            if (measured) {
+                fields.add("resultProtocol");
+            }
+            if (!immutable.keySet().equals(fields)
+                    || !(immutable.get("argsDigest") instanceof String digest)
+                    || !digest.matches("sha256:[0-9a-f]{64}")
+                    || v3 && (!(immutable.get("inputDigest") instanceof String inputDigest)
+                        || !inputDigest.matches("[0-9a-f]{64}"))) {
+                throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
+            }
+            Map<String, Object> deferred = new LinkedHashMap<>(immutable);
+            if (payloadDigest == null) {
+                deferred.put("dispatchMode", "deferred");
+            } else {
+                if (!payloadDigest.matches("sha256:[0-9a-f]{64}")
+                        || publicationId == null
+                        || !publicationId.matches("[a-z0-9_-]{1,128}")) {
+                    throw invalid("runtime_reference_invalid", "Payload digest or publication ID is invalid");
+                }
+                deferred.put("dispatchMode", "deferred_v3");
+                deferred.put("payloadDigest", payloadDigest);
+                deferred.put("publicationId", publicationId);
+            }
+            if (deferred.containsValue(null)) {
+                // immutableMap admits null values; keep the rejection on the
+                // stage channel as a 400 rather than a synchronous NPE.
+                return CompletableFuture.failedFuture(invalid("runtime_reference_invalid",
+                        "Deferred execution reference is invalid"));
+            }
+            immutable = Map.copyOf(deferred);
+        }
+        return CompletableFuture.completedFuture(immutable);
+    }
+
+    static <T> CompletionStage<T> safeStage(
+            Supplier<CompletionStage<T>> supplier) {
+        try {
+            CompletionStage<T> stage = supplier.get();
+            if (stage == null) {
+                return failed(new IllegalStateException(
+                        "operation returned no CompletionStage"));
+            }
+            return stage;
+        } catch (RuntimeException | Error exception) {
+            return failed(exception);
+        }
+    }
+
+    static <T> CompletionStage<T> mapFailure(
+            CompletionStage<T> stage, String code, String message) {
+        return stage.handle((value, error) -> {
+            if (error == null) {
+                return value;
+            }
+            Throwable cause = unwrap(error);
+            if (cause instanceof RuntimeBrokerException) {
+                throw new CompletionException(cause);
+            }
+            throw new CompletionException(
+                    unavailable(code, message, cause));
+        });
+    }
+
+    /**
+     * Only a genuine store outage maps to a retryable 503 here: client-input
+     * errors, permanent invariant violations, and JVM errors keep the
+     * non-retryable mapping the HTTP layer gives them.
+     */
+    static <T> CompletionStage<T> mapStoreFailure(
+            CompletionStage<T> stage) {
+        return stage.handle((value, error) -> {
+            if (error == null) {
+                return value;
+            }
+            Throwable cause = unwrap(error);
+            if (cause instanceof RuntimeBrokerException) {
+                throw new CompletionException(cause);
+            }
+            if (cause instanceof StoreFailureException) {
+                throw new CompletionException(unavailable(
+                        "runtime_broker_store_unavailable",
+                        "Managed Runtime execution store is unavailable.",
+                        cause));
+            }
+            throw new CompletionException(cause);
+        });
+    }
+
+    static boolean workerRefusedRelease(Throwable error) {
+        Throwable cause = unwrap(error);
+        return cause instanceof RuntimeBrokerException failure
+                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
+                        || "managed_runtime_release_timeout".equals(failure.getCode()));
+    }
+
+    static Throwable unwrap(Throwable error) {
+        Throwable current = error;
+        while ((current instanceof CompletionException)
+                && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
+    static <T> CompletableFuture<T> failed(Throwable error) {
+        return CompletableFuture.failedFuture(error);
+    }
+
+    static RuntimeBrokerException invalid(String code,
+            String message) {
+        return new RuntimeBrokerException(400, code, message, false);
+    }
+
+    static RuntimeBrokerException notFound(String code,
+            String message) {
+        return new RuntimeBrokerException(404, code, message, false);
+    }
+
+    static RuntimeBrokerException conflict(String code,
+            String message) {
+        return new RuntimeBrokerException(409, code, message, false);
+    }
+
+    static RuntimeBrokerException conflict(String code,
+            String message, Throwable cause) {
+        return new RuntimeBrokerException(409, code, message, false, cause);
+    }
+
+    static RuntimeBrokerException unavailable(String code,
+            String message) {
+        return new RuntimeBrokerException(503, code, message, true);
+    }
+
+    static RuntimeBrokerException unavailable(String code,
+            String message, Throwable cause) {
+        return new RuntimeBrokerException(503, code, message, true, cause);
+    }
+
+    static String referenceString(Map<String, Object> reference,
+            String field) {
+        Object value = reference == null ? null : reference.get(field);
+        if (!(value instanceof String)) {
+            throw invalid("runtime_reference_invalid",
+                    "reference " + field + " is required");
+        }
+        try {
+            return BrokerValues.requireWellFormed(BrokerValues.requireId(
+                    (String) value, "reference." + field),
+                    "reference." + field);
+        } catch (IllegalArgumentException exception) {
+            throw invalid("runtime_reference_invalid",
+                    "reference " + field + " is invalid");
+        }
+    }
+
+    static Map<String, Object> immutableMap(Object value,
+            String name) {
+        if (!(value instanceof Map<?, ?>)) {
+            throw invalid("runtime_payload_invalid",
+                    name + " must be an object");
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, ?> source = (Map<String, ?>) value;
+        try {
+            return BrokerValues.immutableMap(source);
+        } catch (IllegalArgumentException exception) {
+            throw invalid("runtime_payload_invalid",
+                    name + " is invalid");
+        }
+    }
+
+    static Map<String, Object> runtimeMap(Object value,
+            String name) {
+        if (!(value instanceof Map<?, ?>)) {
+            throw unavailable("runtime_execution_cancel_failed",
+                    name + " must be an object");
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, ?> source = (Map<String, ?>) value;
+        try {
+            return BrokerValues.immutableMap(source);
+        } catch (IllegalArgumentException exception) {
+            throw unavailable("runtime_execution_cancel_failed",
+                    name + " is invalid", exception);
+        }
+    }
+
+    static Map<String, Object> projectV3Status(Map<String, Object> response) {
+        Object state = response.get("state");
+        if (!(state instanceof String name) || !RuntimeExecutionStatus.State.supports(name)
+                || "settled".equals(name) != (response.get("result") instanceof Map)) {
+            throw conflict("runtime_execution_conflict", "Tool v3 returned an invalid status");
+        }
+        return "settled".equals(name)
+                ? Map.of("state", name, "result", response.get("result"))
+                : Map.of("state", name);
+    }
+
+    static CompletionStage<HarnessSessionResolver.Capabilities> resolveCapabilities(
+            HarnessSessionResolver sessionResolver, String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        String id = BrokerValues.requirePathSafe(BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
+        return mapFailure(safeStage(() -> sessionResolver.resolveCapabilities(id, authority)),
+                "runtime_scope_resolution_failed", "Runtime scope resolution failed").thenApply(value -> {
+                    if (value == null || value.scope() == null) {
+                        throw unavailable("runtime_scope_resolution_failed", "Runtime scope resolver returned no scope");
+                    }
+                    return value;
+                });
+    }
+
+    static CompletionStage<RuntimeScope> resolveScope(HarnessSessionResolver sessionResolver,
+            String harnessSessionId, boolean admission,
+            RuntimeLifecycleAuthority authority) {
+        return mapFailure(safeStage(
+                () -> admission
+                        ? sessionResolver.resolveAdmission(harnessSessionId,
+                                authority)
+                        : sessionResolver.resolve(harnessSessionId, authority)),
+                "runtime_scope_resolution_failed",
+                "Runtime scope resolution failed").thenApply(scope -> {
+                    if (scope == null) {
+                        throw unavailable("runtime_scope_resolution_failed",
+                                "Runtime scope resolver returned no scope");
+                    }
+                    return scope;
+                });
+    }
+
+    static ScheduledExecutorService newScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable,
+                    "qwen-runtime-broker-coordination");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    static Duration requireDuration(Duration duration,
+            String name) {
+        if (duration == null || duration.isZero() || duration.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return duration;
+    }
+
+    static void requireOpen(AtomicBoolean closed) {
+        if (closed.get()) {
+            throw new IllegalStateException("Runtime Broker is closed");
+        }
+    }
+
+    static boolean sameReceipt(Map<String, Object> expected,
+            Map<String, Object> actual) {
+        if (actual == null || !actual.keySet().equals(Set.of("executionCallId", "manifest",
+                "deliveryStatus", "historyRevision"))
+                || !Objects.equals(expected.get("executionCallId"), actual.get("executionCallId"))
+                || !Objects.equals(expected.get("deliveryStatus"), actual.get("deliveryStatus"))) {
+            return false;
+        }
+        Object leftRevision = expected.get("historyRevision");
+        Object rightRevision = actual.get("historyRevision");
+        if (leftRevision == null ? rightRevision != null
+                : !(rightRevision instanceof Number number)
+                        || ((Number) leftRevision).longValue() != number.longValue()) {
+            return false;
+        }
+        Object left = expected.get("manifest");
+        Object right = actual.get("manifest");
+        if (left == null || right == null) {
+            return left == right;
+        }
+        if (!(left instanceof Map<?, ?> saved) || !(right instanceof Map<?, ?> received)
+                || !saved.keySet().equals(received.keySet())) {
+            return false;
+        }
+        for (String field : List.of("resourceId", "kind", "digest")) {
+            if (!Objects.equals(saved.get(field), received.get(field))) {
+                return false;
+            }
+        }
+        for (String field : List.of("schemaVersion", "byteLength")) {
+            if (!(saved.get(field) instanceof Number a) || !(received.get(field) instanceof Number b)
+                    || a.longValue() != b.longValue()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static Map<String, Object> sshNoStartReceipt(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
+        if (!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                || !execution.isSettled() || !"not_started".equals(execution.getExecutionStatus())
+                || execution.getResult() == null || !execution.getResult().containsKey("capture")
+                || execution.getResult().get("capture") != null
+                || !isV3Family(execution.getReference())
+                || ProviderRuntimeProtocol.isReference(execution.getReference())) {
+            return null;
+        }
+        Map<String, Object> receipt = new LinkedHashMap<>();
+        receipt.put("executionCallId", execution.getExecutionCallId());
+        receipt.put("manifest", null);
+        receipt.put("deliveryStatus", "committed");
+        receipt.put("historyRevision", null);
+        return BrokerValues.immutableMap(receipt);
+    }
+
+    /** The detached capture family: success with a manifest-less capture. */
+    static boolean isDetachedCapture(Map<?, ?> result) {
+        return result != null && "success".equals(result.get("executionStatus"))
+                && result.get("capture") instanceof Map<?, ?> capture
+                && "detached".equals(capture.get("captureStatus"))
+                && capture.get("manifest") == null;
+    }
+
+    static long renewalDelayMillis(Duration duration) {
+        return Math.max(1, duration.toMillis() / 3);
+    }
+
+    /**
+     * A retryable external-workspace provision failure keeps the binding
+     * recoverable instead of blocking it: the provider may answer on retry.
+     */
+    static boolean retryableExternalWorkspaceProvision(
+            RuntimeProvisionRequest request, Throwable cause) {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)) {
+            return false;
+        }
+        if (cause instanceof RuntimeBrokerException failure) {
+            return failure.isRetryable()
+                    && ("runtime_external_provider_failed".equals(failure.getCode())
+                            || failure.getStatusCode() == 503 && (RuntimeProvisionFailureHandler.externalRetryable(request, failure)
+                                    || "runtime_broker_provision_timeout".equals(failure.getCode())
+                                    || "managed_runtime_unavailable".equals(failure.getCode())));
+        }
+        return cause instanceof IOException || cause instanceof TimeoutException;
+    }
+
+    /**
+     * An external-workspace binding that already carries a lease and
+     * attestation adopts the worker through reconciliation rather than
+     * re-provisioning.
+     */
+    static boolean shouldReconcileExternalWorkspace(
+            RuntimeProvisionRequest request,
+            RuntimeBindingRecord record) {
+        return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
+                && record.getResourceHandle() != null && record.getLease() != null
+                && record.getAttestationGeneration() > 0;
+    }
+
+    /**
+     * A drain claim stays valid while its binding is DRAINING, or while a
+     * LOST binding still belongs to the claim that captured it.
+     */
+    static boolean isDrainClaimStateValid(RuntimeBindingRecord binding, boolean stoppedRecovery, boolean lostClaim) {
+        return binding.getState() == RuntimeBindingRecord.State.DRAINING
+                || (stoppedRecovery || lostClaim) && binding.getState() == RuntimeBindingRecord.State.LOST;
+    }
+
+    /**
+     * A restart-fenced external-workspace binding may still own a live worker
+     * with one stale Session row. The drain marks it drain-requested, stops
+     * that worker for the persisted receipt and re-checks for unsettled rows
+     * before RELEASED, so refusing here would only fence the storage holder
+     * with no exit. Executions in flight still refuse: nothing can settle
+     * them without their worker.
+     */
+    static boolean isLiveWorkerStopRecoverable(RuntimeBindingRecord claimed, boolean lost,
+            RuntimeRecoveryEvidence absence, boolean activeExecutions) {
+        return lost && absence == null && claimed.getDrainReceipt() == null && !activeExecutions
+                && WorkspaceExecutionProfile.isExternalWorkspaceRequest(claimed.getRequest());
+    }
+
+    /**
+     * Verifies that a drain receipt matches the claimed binding's identity,
+     * including the external-workspace seed/lease/handle chain.
+     */
+    static void verifyDrainReceiptIdentity(RuntimeBindingRecord expected, RuntimeDrainReceipt receipt) {
+        if (receipt == null || !receipt.matches(expected)
+                || expected.getDrainReceipt() != null && !expected.getDrainReceipt().equals(receipt)
+                || RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(expected.getRequest().getProvisionerKind())
+                        && (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(expected.getRequest())
+                                || expected.getResourceHandle() == null || expected.getProvisionSeed() == null
+                                || expected.getLease() == null || !expected.getProvisionSeed().matches(expected.getLease())
+                                || !expected.getResourceHandle().equals(receipt.resourceHandle()))) {
+            throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
+        }
+    }
+}

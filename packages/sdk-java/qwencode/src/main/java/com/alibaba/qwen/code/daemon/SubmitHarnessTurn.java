@@ -9,6 +9,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /** Caller-owned prompt admission request for a Hosted Harness session. */
 public final class SubmitHarnessTurn {
@@ -18,7 +19,10 @@ public final class SubmitHarnessTurn {
     private final String promptId;
     private final List<Map<String, Object>> promptContent;
     private final String payloadDigest;
+    private final Object wirePromptContent;
     private final Long deadlineMillis;
+    private final Map<String, Object> modelSelection;
+    private final Map<String, Object> approvalSelection;
 
     private SubmitHarnessTurn(Builder builder) {
         if (builder.session == null) {
@@ -38,12 +42,14 @@ public final class SubmitHarnessTurn {
         this.promptContent = Collections.unmodifiableList(content);
         this.payloadDigest = HostedHarnessClient.requireDigest(
                 builder.payloadDigest, "payloadDigest");
-        String computed = computePayloadDigest(this.promptContent);
-        if (!computed.equals(payloadDigest)) {
+        if (!computePayloadDigest(this.promptContent).equals(this.payloadDigest)) {
             throw new IllegalArgumentException(
                     "payloadDigest does not match promptContent");
         }
+        this.wirePromptContent = canonicalForDigest(this.promptContent);
         this.deadlineMillis = builder.deadlineMillis;
+        this.modelSelection = builder.modelSelection;
+        this.approvalSelection = builder.approvalSelection;
     }
 
     public static Builder builder() {
@@ -56,19 +62,50 @@ public final class SubmitHarnessTurn {
             throw new IllegalArgumentException(
                     "promptContent must not be empty");
         }
+        // The hosted route recomputes this value by re-serializing the
+        // parsed `prompt` member (JavaScript `JSON.stringify`
+        // semantics: compact separators, literal non-ASCII) and hashing
+        // those bytes, so the digest must cover exactly the canonical
+        // form toJson() also emits. Iteration order is only
+        // canonicalized recursively because fastjson2 does not sort
+        // maps nested in a collection.
+        return digestOver(canonicalForDigest(promptContent));
+    }
+
+    private static String digestOver(Object value) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] bytes = JsonSupport.encode(promptContent)
+            byte[] bytes = JsonSupport.encode(value)
                     .getBytes(StandardCharsets.UTF_8);
             byte[] hashed = digest.digest(bytes);
             StringBuilder result = new StringBuilder("sha256:");
-            for (byte value : hashed) {
-                result.append(String.format("%02x", value & 0xff));
+            for (byte b : hashed) {
+                result.append(String.format("%02x", b & 0xff));
             }
             return result.toString();
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 is unavailable", e);
         }
+    }
+
+    private static Object canonicalForDigest(Object value) {
+        if (value instanceof Map<?, ?>) {
+            Map<String, Object> sorted = new TreeMap<>();
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                sorted.put(String.valueOf(entry.getKey()),
+                        canonicalForDigest(entry.getValue()));
+            }
+            return sorted;
+        }
+        if (value instanceof List<?>) {
+            List<?> source = (List<?>) value;
+            List<Object> ordered = new ArrayList<>(source.size());
+            for (Object item : source) {
+                ordered.add(canonicalForDigest(item));
+            }
+            return ordered;
+        }
+        return value;
     }
 
     HarnessSessionRef getSession() {
@@ -83,13 +120,25 @@ public final class SubmitHarnessTurn {
         return payloadDigest;
     }
 
+    Map<String, Object> getModelSelection() { return modelSelection; }
+
+    Map<String, Object> getApprovalSelection() { return approvalSelection; }
+
+    List<Map<String, Object>> getPromptContent() { return promptContent; }
+
     Map<String, Object> toJson() {
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("prompt", promptContent);
+        result.put("prompt", wirePromptContent);
         result.put("promptId", promptId);
         result.put("payloadDigest", payloadDigest);
         if (deadlineMillis != null) {
             result.put("deadlineMs", deadlineMillis);
+        }
+        if (modelSelection != null) {
+            result.put("modelSelection", modelSelection);
+        }
+        if (approvalSelection != null) {
+            result.put("approvalSelection", approvalSelection);
         }
         return result;
     }
@@ -101,6 +150,8 @@ public final class SubmitHarnessTurn {
                 new ArrayList<>();
         private String payloadDigest;
         private Long deadlineMillis;
+        private Map<String, Object> modelSelection;
+        private Map<String, Object> approvalSelection;
 
         private Builder() {
         }
@@ -137,6 +188,46 @@ public final class SubmitHarnessTurn {
 
         public Builder payloadDigest(String payloadDigest) {
             this.payloadDigest = payloadDigest;
+            return this;
+        }
+
+        public Builder modelSelection(String modelId, long revision) {
+            if (modelId == null || modelId.isBlank()
+                    || modelId.getBytes(StandardCharsets.UTF_8).length > 512
+                    || modelId.chars().anyMatch(Character::isISOControl)
+                    || revision < 1 || revision > 9_007_199_254_740_991L) {
+                throw new IllegalArgumentException("Invalid Hosted model selection");
+            }
+            modelSelection = Collections.unmodifiableMap(new LinkedHashMap<>(
+                    Map.of("modelId", modelId, "revision", revision)));
+            return this;
+        }
+
+        public Builder approvalSelection(String mode, long revision) {
+            return approvalSelection(mode, revision, false);
+        }
+
+        public Builder approvalSelection(String mode, long revision, boolean planMode) {
+            return approvalSelection(mode, revision, planMode, null);
+        }
+
+        public Builder approvalSelection(String mode, long revision, boolean planMode, Map<String, ? extends List<String>> permissionRules) {
+            if (mode == null || !List.of("default", "auto", "auto-edit", "yolo").contains(mode)
+                    || revision < 0 || revision > 9_007_199_254_740_991L || (planMode || "auto".equals(mode)) && revision == 0) {
+                throw new IllegalArgumentException("Invalid Hosted approval selection");
+            }
+            Map<String, Object> fields = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision));
+            if (planMode) {
+                fields.put("planMode", true);
+            }
+            var rules = HostedPermissionRules.nonEmpty(HostedPermissionRules.copyOf(permissionRules));
+            if (rules != null) {
+                if (revision == 0) {
+                    throw new IllegalArgumentException("Permission rules require a selected approval revision");
+                }
+                fields.put("permissionRules", rules);
+            }
+            approvalSelection = Collections.unmodifiableMap(fields);
             return this;
         }
 

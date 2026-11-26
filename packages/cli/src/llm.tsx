@@ -9,6 +9,7 @@ import {
   hasLoadedEnvironmentValues,
 } from './config/environment.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
 import {
   AuthType,
@@ -25,11 +26,10 @@ import {
   SessionService,
   setStartupEventSink,
   createDebugLogger,
-  persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
-  uiTelemetryService,
+  resolveUsageStatisticsEnabled,
 } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
@@ -62,6 +62,7 @@ import {
   ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
+  getOperatorTrustSettings,
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
@@ -87,6 +88,7 @@ import {
   registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
+import { persistRunUsageOnExit } from './utils/usage-persistence.js';
 import { AppEvent, appEvents } from './utils/events.js';
 import { readStdin } from './utils/readStdin.js';
 import {
@@ -112,6 +114,12 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import {
+  getProjectHooksApprovalState,
+  getProjectHooksForApproval,
+  getProjectHooksHeadlessWarning,
+  getSeparatedHookSettings,
+} from './config/hook-approvals.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
@@ -123,6 +131,9 @@ import {
   superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import { isInteractiveInvocation } from './utils/interactive-mode.js';
+import { selectNpmBunHandoff } from './utils/npm-runtime.js';
+import { createLocalWorkflowAncestorTrustProvider } from './config/trustedFolders.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -208,6 +219,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 }
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
+import { modsWanted } from './services/display-translation-mod.js';
 import {
   handleUncaughtException,
   isExpectedPtyRaceError,
@@ -423,6 +435,8 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
     process.removeListener('SIGHUP', handleSighup);
   };
 }
+
+export { persistRunUsageOnExit };
 
 export async function main() {
   profileCheckpoint('main_entry');
@@ -684,6 +698,17 @@ export async function main() {
       return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
     };
     const sandboxConfig = await loadSandboxConfig(settings.merged, argv);
+    const npmBunHandoff = selectNpmBunHandoff({
+      interactive:
+        isInteractiveInvocation(argv) && Boolean(process.stdout.isTTY),
+      protocolMode: Boolean(
+        isAcpMode ||
+          argv.inputFormat === InputFormat.STREAM_JSON ||
+          (argv.inputFile ?? settings.merged.dualOutput?.inputFile) ||
+          argv.jsonFd !== undefined,
+      ),
+      sandbox: Boolean(sandboxConfig),
+    });
     const customSandboxImage =
       argv.sandboxImage ??
       process.env['QWEN_SANDBOX_IMAGE'] ??
@@ -723,16 +748,22 @@ export async function main() {
         undefined,
         [],
         // Pass separated hooks for proper source attribution
-        {
-          systemHooks: settings.getSystemHooks(),
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
+        getSeparatedHookSettings(settings),
         buildDisabledSkillNamesProvider(settings),
         undefined,
         undefined,
         undefined,
-        undefined,
+        {
+          lspDisabled: true,
+          ...(privateAcpParentCapability === undefined
+            ? {
+                workflowAncestorTrustProvider:
+                  createLocalWorkflowAncestorTrustProvider(
+                    getOperatorTrustSettings(settings),
+                  ),
+              }
+            : {}),
+        },
         buildEnabledSkillNamesProvider(settings),
       );
 
@@ -829,6 +860,18 @@ export async function main() {
       // provenance travels in `privateAcpChildEnv`, which is spread last.
       delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
 
+      // The container mounts only the user settings dir and builds its env
+      // passthrough from `process.env`, so a System-scope opt-out would never
+      // reach the sandboxed CLI and it would fetch models.dev.
+      if (
+        settings.merged.model?.catalogRefresh === false ||
+        resolveUsageStatisticsEnabled(
+          settings.merged.privacy?.usageStatisticsEnabled,
+        ) === false
+      ) {
+        process.env[MODEL_CATALOG_REFRESH_ENV] = 'off';
+      }
+
       await relaunchOnExitCode(
         () =>
           start_sandbox(
@@ -844,6 +887,7 @@ export async function main() {
       );
       process.exit(0);
     } else if (
+      !npmBunHandoff &&
       memoryArgs.length === 0 &&
       !hasLoadedEnvironmentValues() &&
       !isAcpMode &&
@@ -861,8 +905,13 @@ export async function main() {
       // Interactive and streaming modes keep a supervisor for in-session
       // restarts. A one-shot prompt can replace this already-loaded process.
       await relaunchAppInChildProcess(memoryArgs, [], {
+        interpreter: npmBunHandoff?.interpreter,
         afterSpawn: clearCorruptionEnvVars,
-        childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
+        childEnv: {
+          ...privateAcpChildEnv,
+          ...getRelaunchEnvProvenance(),
+          ...npmBunHandoff?.childEnv,
+        },
         environmentChangedSinceBoot: hasLoadedEnvironmentValues(),
         onUpdateRelaunch,
         replaceProcess:
@@ -1058,20 +1107,38 @@ export async function main() {
       process.cwd(),
       argv.extensions,
       // Pass separated hooks for proper source attribution
-      {
-        systemHooks: settings.getSystemHooks(),
-        userHooks: settings.getUserHooks(),
-        projectHooks: settings.getProjectHooks(),
-      },
+      getSeparatedHookSettings(settings),
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
       undefined,
-      undefined,
+      privateAcpParentCapability === undefined
+        ? {
+            ...(!isAcpMode && !isBareMode(argv.bare)
+              ? { modelPreferences: settings.merged.model?.preferences ?? {} }
+              : {}),
+            workflowAncestorTrustProvider:
+              createLocalWorkflowAncestorTrustProvider(
+                getOperatorTrustSettings(settings),
+              ),
+          }
+        : undefined,
       buildEnabledSkillNamesProvider(settings),
+      // Close over the live LoadedSettings: the YOLO-exit re-gate must see
+      // blocks a `/hooks` reload replaced, not the startup snapshot.
+      () => getProjectHooksForApproval(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    // The interactive UI segments text through Intl.Segmenter; on an ICU-less
+    // Node the first segmentation segfaults the process (#11747). Probe here,
+    // where interactivity is known, so headless and ACP runs (which never
+    // segment) are untouched by the gate.
+    if (config.isInteractive() && !config.getExperimentalZedIntegration()) {
+      const { assertFullIcuAvailable } = await import('./startup/icu-check.js');
+      assertFullIcuAvailable();
+    }
 
     const nonInteractiveHousekeeping =
       !config.isInteractive() || config.getExperimentalZedIntegration()
@@ -1087,6 +1154,13 @@ export async function main() {
     // reconnect / disconnect / restart without a session restart (#3696,
     // sub-task 3). Skipped in bare mode (no watcher).
     if (settingsWatcher && !config.getShellExecutionSandbox?.()) {
+      registerCleanup(
+        settingsWatcher.addChangeListener(() => {
+          config.setWorkflowKeywordTriggerEnabled(
+            settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+          );
+        }),
+      );
       const disposeMcpHotReload = registerMcpHotReload(
         settingsWatcher,
         settings,
@@ -1110,6 +1184,7 @@ export async function main() {
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
+      isAcpMode ||
       isBareMode(argv.bare) ||
       config.isSafeMode() ||
       config.getShellExecutionSandbox?.()
@@ -1180,26 +1255,7 @@ export async function main() {
 
     // Persist session usage for cross-session reports (must run before
     // config.shutdown() which clears telemetry state).
-    // sessionStartTime is read from uiTelemetryService so it stays correct
-    // after /clear resets the session (reset() updates the internal timestamp).
-    registerCleanup(() => {
-      try {
-        const metrics = uiTelemetryService.getMetrics();
-        const hasActivity = Object.values(metrics.models).some(
-          (m) => m.api.totalRequests > 0,
-        );
-        if (!hasActivity) return;
-        persistSessionUsage({
-          sessionId: config.getSessionId(),
-          startTime: uiTelemetryService.getSessionStartTime(),
-          endTime: new Date(),
-          project: config.getProjectRoot(),
-          metrics,
-        });
-      } catch {
-        // Best-effort — don't block shutdown
-      }
-    });
+    registerCleanup(() => persistRunUsageOnExit(config));
 
     registerCleanup(() => config.shutdownExecutionEnvironments(), {
       first: true,
@@ -1285,9 +1341,16 @@ export async function main() {
       !config.getExperimentalZedIntegration() &&
       !input &&
       !hasRemoteInput;
+    const allowSubscriptionStartupFallback =
+      !config.getExperimentalZedIntegration() &&
+      argv.model === undefined &&
+      argv.authType === undefined;
     markAcpStartup('appInitializationStart');
     const initializationResult = await initializeApp(config, settings, {
       deferIdeConnection,
+      allowSubscriptionStartupFallback,
+      allowUnlistedSubscriptionModel:
+        deferIdeConnection && allowSubscriptionStartupFallback,
     });
     markAcpStartup('appInitializationEnd');
     profileCheckpoint('after_initialize_app');
@@ -1369,6 +1432,9 @@ export async function main() {
 
     if (config.isInteractive()) {
       // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      if (initializationResult.authNotice) {
+        startupWarnings.push(initializationResult.authNotice);
+      }
       const interruptedWorkflowsNotice =
         await getInterruptedWorkflowRunsNotice(config);
       if (interruptedWorkflowsNotice) {
@@ -1404,6 +1470,12 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      if (modsWanted(settings)) {
+        const { createInteractiveModSession } = await import(
+          './services/interactive-mod-session.js'
+        );
+        createInteractiveModSession(config, settings);
+      }
       // Renderer dispatch for the ink→OpenTUI migration: QWEN_TUI_RENDERER
       // selects the experimental backend only on a runtime that can drive it;
       // every other case — including a failed load or boot of the entry —
@@ -1414,11 +1486,9 @@ export async function main() {
       const { selectTuiRenderer, TUI_RENDERER_STRICT_ENV_VAR } = await import(
         './ui/opentui/renderer-selection.js'
       );
-      const selection = selectTuiRenderer(
-        undefined,
-        undefined,
-        process.env,
-        config.getScreenReader(),
+      const selection = selectTuiRenderer(undefined, undefined, process.env);
+      const { setTuiRendererOfRecord } = await import(
+        './ui/tui-renderer-of-record.js'
       );
       if (selection.renderer === 'opentui') {
         try {
@@ -1437,6 +1507,7 @@ export async function main() {
             },
           );
           if (started) {
+            setTuiRendererOfRecord('opentui');
             clearCorruptionEnvVars();
             return;
           }
@@ -1460,6 +1531,9 @@ export async function main() {
       } else {
         debugLogger.debug(`TUI renderer: ${selection.reason}`);
       }
+      // Reached for the default ink renderer and for every non-strict OpenTUI
+      // boot fallback, so the diagnostic records the renderer actually serving.
+      setTuiRendererOfRecord('ink');
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,
@@ -1512,6 +1586,13 @@ export async function main() {
     if (!config.isInteractive()) {
       const yoloWarning = getHeadlessYoloSafetyWarning(config);
       if (yoloWarning) writeStderrLine(yoloWarning);
+      if (config.isProjectHooksPendingApproval()) {
+        writeStderrLine(
+          getProjectHooksHeadlessWarning(
+            getProjectHooksApprovalState(getProjectHooksForApproval(settings)),
+          ),
+        );
+      }
     }
 
     // For non-stream-json mode, initialize config here. Stream-json defers
@@ -1591,6 +1672,35 @@ export async function main() {
       config,
       settings,
     );
+
+    // The TUI shows a startup warning when the trust gate withholds project
+    // hooks; a headless run gets one stderr line so the failure is not silent.
+    // Mirror the TUI predicate: raw workspace hooks non-empty, trust absent,
+    // and no mode/switch that withholds hooks for a different reason. The
+    // Config accessor cannot see the feature-on case (the settings layer
+    // already dropped the workspace scope), so read the raw file like the
+    // TUI does.
+    const rawWorkspaceHooks = settings.workspace?.settings?.hooks;
+    if (
+      !nonInteractiveConfig.isInteractive?.() &&
+      // The approval-gate warning above already covers a pending/rejected
+      // block; this line is only for the trust-withheld case it cannot see.
+      !nonInteractiveConfig.isProjectHooksPendingApproval?.() &&
+      // Same guard as the TUI warning: an approved (or trust-authorized)
+      // block the execution accessor actually serves is not "not loaded".
+      nonInteractiveConfig.getProjectHooks?.() === undefined &&
+      !nonInteractiveConfig.isExplicitlyTrustedFolder?.() &&
+      !nonInteractiveConfig.getBareMode?.() &&
+      !nonInteractiveConfig.isSafeMode?.() &&
+      !nonInteractiveConfig.getDisableAllHooks?.() &&
+      rawWorkspaceHooks &&
+      typeof rawWorkspaceHooks === 'object' &&
+      Object.keys(rawWorkspaceHooks).length > 0
+    ) {
+      writeStderrLine(
+        'Project hooks in .qwen/settings.json were not loaded: the folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+      );
+    }
 
     const prompt_id = createNonInteractivePromptId(
       config.getSessionId(),

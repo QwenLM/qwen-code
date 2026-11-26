@@ -1,4 +1,6 @@
 /** Stable presentation aliases; schema paths are private implementation details. */
+export const OUTPUT_LANGUAGE_SETTING_KEY = 'general.outputLanguage';
+
 const SETTING_KEYS = {
   'setting:auto-update': 'general.enableAutoUpdate',
   'setting:session-recap': 'general.showSessionRecap',
@@ -8,6 +10,8 @@ const SETTING_KEYS = {
   'setting:git-commit-co-author': 'general.gitCoAuthor.commit',
   'setting:git-pr-co-author': 'general.gitCoAuthor.pr',
   'setting:language': 'general.language',
+  'setting:output-language': 'general.outputLanguage',
+  'setting:display-language': 'general.displayLanguage',
   'setting:prevent-system-sleep': 'general.preventSystemSleep',
   'setting:review-attribution': 'review.attribution',
   'setting:review-sandbox': 'review.sandbox',
@@ -21,6 +25,7 @@ const SETTING_KEYS = {
   'setting:workflow-keyword-trigger': 'ui.disableWorkflowKeywordTrigger',
   'setting:status-in-title': 'ui.showStatusInTitle',
   'setting:response-speed': 'ui.showResponseTokensPerSecond',
+  'setting:loading-phrases': 'ui.accessibility.enableLoadingPhrases',
   'setting:followup-suggestions': 'ui.enableFollowupSuggestions',
   'setting:tool-call-details': 'ui.showToolCallDetails',
   'setting:shell-output-limit': 'ui.shellOutputMaxLines',
@@ -29,6 +34,7 @@ const SETTING_KEYS = {
   'setting:advisor-model': 'advisorModel',
   'setting:advisor-session-call-limit': 'advisorMaxUses',
   'setting:vision-model': 'visionModel',
+  'setting:vision-bridge-timeout': 'visionBridgeTimeoutMs',
   'setting:model-fallbacks': 'modelFallbacks',
   'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
   'setting:respect-qwen-ignore': 'context.fileFiltering.respectQwenIgnore',
@@ -45,12 +51,16 @@ const SETTING_KEYS = {
   'setting:todo-write': 'tools.todoWrite.enabled',
   'setting:interactive-shell': 'tools.shell.enableInteractiveShell',
   'setting:workflows': 'tools.workflowsEnabled',
+  'setting:lsp': 'tools.lspEnabled',
   'setting:workflow-size': 'tools.workflowSizeGuideline',
   'setting:workflow-name-only': 'tools.workflowNameOnly',
   'setting:permission-strategy': 'policy.permissionStrategy',
+  'setting:max-sessions': 'serve.maxSessions',
   'setting:model-proposed-goals': 'goals.modelProposed',
   'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
+  'setting:worktree-retention': 'worktree.maxRetained',
   'setting:session-workflow': 'experimental.sessionWorkflow',
+  'setting:generated-ui': 'experimental.generatedUi',
   'setting:scheduled-tasks': 'experimental.cron',
   'setting:session-writer-lease': 'experimental.sessionWriterLease',
   'setting:agent-team': 'experimental.agentTeam',
@@ -58,16 +68,24 @@ const SETTING_KEYS = {
   'setting:omni-media-delivery': 'omni.enabled',
   'setting:artifacts': 'experimental.artifact',
   'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
+  'setting:mods': 'experimental.mods',
+  'setting:unified-agent-loop': 'experimental.unifiedAgentLoop',
+  'setting:event-bus-agent-loop': 'experimental.eventBusAgentLoop',
+  'setting:model-availability-tracking':
+    'experimental.modelAvailabilityTracking',
   'setting:voice-model': 'voiceModel',
   'setting:image-model': 'imageModel',
 } as const;
 
 const BUILTIN_IDS = [
   'builtin:chat-width',
+  'builtin:arrow-key-history',
   'builtin:browser-notifications',
   'builtin:live-setup',
   'builtin:local-control',
   'builtin:connections',
+  'builtin:archived-sessions',
+  'builtin:workspace-directories',
   'builtin:model-management',
 ] as const;
 

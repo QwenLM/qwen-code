@@ -1,11 +1,24 @@
-import { useCallback, type ReactNode } from 'react';
-import { WrenchIcon } from 'lucide-react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { EllipsisVerticalIcon, Trash2Icon, WrenchIcon } from 'lucide-react';
 import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../utils/clipboard';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useCopiedFlash } from '../hooks/useCopiedFlash';
+import { useI18n } from '../i18n';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu';
 import styles from './MessageTimestamp.module.css';
 
 interface MessageTimestampProps {
@@ -19,9 +32,12 @@ interface MessageTimestampProps {
   toolGroupSpacing?: boolean;
   copyText?: string;
   copyTitle?: string;
-  /** When set, render an edit action after the copy button. */
+  /** When set, include an edit action in the overflow menu. */
   onEdit?: () => void;
   editTitle?: string;
+  onDelete?: () => void;
+  deleteDisabled?: boolean;
+  deleteTitle?: string;
   /** When set, render an action that opens this turn's tool-call list. */
   onOpenTurnCalls?: () => void;
   turnCallsTitle?: string;
@@ -41,11 +57,34 @@ export function MessageTimestamp({
   copyTitle = 'Copy',
   onEdit,
   editTitle = 'Edit',
+  onDelete,
+  deleteDisabled = false,
+  deleteTitle = 'Delete messages',
   onOpenTurnCalls,
   turnCallsTitle = 'View tool calls',
 }: MessageTimestampProps) {
+  const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
   const [copied, flashCopied] = useCopiedFlash();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const openedByHover = useRef(false);
+  const hoverFocus = useRef<HTMLElement | null>(null);
+  const restoreHoverFocus = useRef(false);
+  const cancelClose = () => clearTimeout(closeTimer.current);
+  const handleDirectInteraction = () => {
+    cancelClose();
+    openedByHover.current = false;
+  };
+  const scheduleClose = () => {
+    cancelClose();
+    if (openedByHover.current) {
+      closeTimer.current = setTimeout(() => setMenuOpen(false), 120);
+    }
+  };
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
   const handleCopy = useCallback(() => {
     if (!copyText) return;
     void writeClipboardText(copyText)
@@ -60,6 +99,7 @@ export function MessageTimestamp({
     !copyText &&
     !toolGroupSpacing &&
     !onEdit &&
+    !onDelete &&
     !onOpenTurnCalls
   ) {
     return <>{children}</>;
@@ -75,28 +115,99 @@ export function MessageTimestamp({
       {copied ? <CheckIcon /> : <CopyIcon />}
     </button>
   ) : null;
-  const editButton = onEdit ? (
-    <button
-      type="button"
-      className={styles.copyButton}
-      title={editTitle}
-      aria-label={editTitle}
-      onClick={onEdit}
-    >
-      <PencilIcon />
-    </button>
-  ) : null;
-  const turnCallsButton = onOpenTurnCalls ? (
-    <button
-      type="button"
-      className={styles.copyButton}
-      title={turnCallsTitle}
-      aria-label={turnCallsTitle}
-      onClick={onOpenTurnCalls}
-    >
-      <WrenchIcon strokeWidth={1.6} aria-hidden="true" />
-    </button>
-  ) : null;
+  const moreActions =
+    onEdit || onDelete || onOpenTurnCalls ? (
+      <DropdownMenu
+        open={menuOpen}
+        onOpenChange={(open) => {
+          cancelClose();
+          setMenuOpen(open);
+        }}
+        modal={false}
+      >
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={styles.copyButton}
+            aria-label={t('message.moreActions')}
+            onPointerEnter={(event) => {
+              if (event.pointerType !== 'mouse') return;
+              cancelClose();
+              if (!menuOpen) {
+                hoverFocus.current =
+                  document.activeElement instanceof HTMLElement
+                    ? document.activeElement
+                    : null;
+                openedByHover.current = true;
+                restoreHoverFocus.current = true;
+                setMenuOpen(true);
+              }
+            }}
+            onPointerLeave={scheduleClose}
+            onPointerDown={(event) => {
+              if (
+                event.pointerType === 'mouse' &&
+                event.button === 0 &&
+                !event.ctrlKey &&
+                menuOpen
+              )
+                event.preventDefault();
+              handleDirectInteraction();
+            }}
+            onKeyDown={handleDirectInteraction}
+          >
+            <EllipsisVerticalIcon strokeWidth={1.6} aria-hidden="true" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="w-max max-w-72"
+          onPointerEnter={cancelClose}
+          onPointerLeave={scheduleClose}
+          onKeyDown={handleDirectInteraction}
+          onPointerDown={handleDirectInteraction}
+          onFocusCapture={(event) => {
+            if (
+              openedByHover.current &&
+              restoreHoverFocus.current &&
+              event.target === event.currentTarget
+            ) {
+              restoreHoverFocus.current = false;
+              hoverFocus.current?.focus({ preventScroll: true });
+            }
+          }}
+          onFocusOutside={(event) => {
+            if (openedByHover.current) event.preventDefault();
+          }}
+          onCloseAutoFocus={(event) => {
+            if (openedByHover.current) event.preventDefault();
+          }}
+        >
+          {onOpenTurnCalls && (
+            <DropdownMenuItem onSelect={onOpenTurnCalls}>
+              <WrenchIcon strokeWidth={1.6} aria-hidden="true" />
+              {turnCallsTitle}
+            </DropdownMenuItem>
+          )}
+          {onEdit && (
+            <DropdownMenuItem onSelect={onEdit}>
+              <PencilIcon />
+              {editTitle}
+            </DropdownMenuItem>
+          )}
+          {onDelete && (
+            <DropdownMenuItem
+              variant="destructive"
+              disabled={deleteDisabled}
+              onSelect={onDelete}
+            >
+              <Trash2Icon strokeWidth={1.6} aria-hidden="true" />
+              {deleteTitle}
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    ) : null;
   const rowClassName = chatMode
     ? styles.chatRow
     : toolGroupSpacing
@@ -107,8 +218,7 @@ export function MessageTimestamp({
       <div className={rowClassName}>
         {children}
         {copyButton}
-        {turnCallsButton}
-        {editButton}
+        {moreActions}
       </div>
     );
   }
@@ -116,19 +226,22 @@ export function MessageTimestamp({
     <div className={rowClassName}>
       {children}
       {chatMode ? (
-        <span className={styles.chatActions}>
+        <span
+          className={styles.chatActions}
+          data-menu-open={menuOpen || undefined}
+        >
           <span className={styles.chatTip} aria-hidden="true">
             {formatTimestamp(timestamp)}
           </span>
           {copyButton}
-          {turnCallsButton}
-          {editButton}
+          {moreActions}
         </span>
       ) : (
         <span className={styles.tip} aria-hidden="true">
           {formatTimestamp(timestamp)}
         </span>
       )}
+      {!chatMode && moreActions}
     </div>
   );
 }

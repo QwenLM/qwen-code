@@ -29,10 +29,8 @@ function makeManager(): NodeReplKernelManager {
   return manager;
 }
 
-afterEach(() => {
-  while (managers.length > 0) {
-    managers.pop()?.dispose();
-  }
+afterEach(async () => {
+  await Promise.all(managers.splice(0).map((manager) => manager.dispose()));
 });
 
 function firstText(events: Array<{ type: string; text?: string }>): string {
@@ -123,9 +121,7 @@ describe('node_repl scale & isolation', () => {
     // Dispose and confirm every process tree is gone and temp dirs removed.
     const tmpDirs = kernels.map((m) => m.getSessionTmpDir());
     const livePids = kernels.map((m) => m.getKernelPid());
-    while (managers.length > 0) managers.pop()?.dispose();
-    // Give SIGKILL a moment to reap.
-    await new Promise((r) => setTimeout(r, 500));
+    await Promise.all(managers.splice(0).map((manager) => manager.dispose()));
 
     for (const pid of livePids) {
       if (typeof pid !== 'number') continue;

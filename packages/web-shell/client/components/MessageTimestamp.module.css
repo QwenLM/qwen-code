@@ -67,6 +67,10 @@
   opacity: 1;
 }
 
+.row:has(button:hover) > .tip {
+  opacity: 0;
+}
+
 /* Chat mode: timestamp shown at bottom-right on hover */
 .chatRow {
   position: relative;
@@ -130,6 +134,7 @@
 }
 
 .chatRow:hover > .chatActions,
-.chatRow:focus-within > .chatActions {
+.chatRow:focus-within > .chatActions,
+.chatActions[data-menu-open='true'] {
   opacity: 1;
 }

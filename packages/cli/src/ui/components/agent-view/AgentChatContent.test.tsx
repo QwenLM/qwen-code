@@ -163,6 +163,7 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     auth: {
       authError: null,
       isAuthDialogOpen: false,
+      isAuthDialogDismissible: false,
       isAuthenticating: false,
       pendingAuthType: undefined,
       externalAuthState: null,
@@ -198,7 +199,6 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     providerUpdateRequest: undefined,
     settingInputRequests: [],
     pluginChoiceRequests: [],
-    loopDetectionConfirmationRequest: null,
     geminiMdFileCount: 0,
     streamingState: {} as UIState['streamingState'],
     initError: null,

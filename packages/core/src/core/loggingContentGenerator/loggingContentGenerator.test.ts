@@ -21,7 +21,10 @@ import type {
 import { AuthType } from '../contentGenerator.js';
 import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import { StreamingToolCallParser } from '../openaiContentGenerator/streamingToolCallParser.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
+import { markRequestDispatched } from './request-dispatch.js';
+import { setToolCallPreparations } from '../tool-call-preparation.js';
 import {
   convertResponsesEventToGemini,
   ResponsesStreamState,
@@ -37,6 +40,8 @@ import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
 import { APIUserAbortError } from 'openai';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { withModelObservationScope } from '../../telemetry/model-observation.js';
+import { retryContext } from '../../utils/retryContext.js';
 import {
   collect,
   content,
@@ -66,6 +71,7 @@ const loggingSpanRecords = vi.hoisted(
       responseModel?: string;
       finishReasons?: string[];
       ttftMs?: number;
+      requestBuildMs?: number;
       requestSetupMs?: number;
       attempt?: number;
       retryTotalDelayMs?: number;
@@ -188,6 +194,7 @@ vi.mock('../../telemetry/index.js', () => {
           responseModel?: string;
           finishReasons?: string[];
           ttftMs?: number;
+          requestBuildMs?: number;
           requestSetupMs?: number;
           attempt?: number;
           retryTotalDelayMs?: number;
@@ -507,6 +514,91 @@ const runContent = (
     request,
     promptId,
   );
+
+describe('Managed invocation observation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(startLLMRequestSpanWithContext).mockImplementation(
+      (model, promptId, options) => {
+        const span = createOwnedLlmSpan(model, promptId, options);
+        return {
+          span: span as never,
+          context: {
+            label: span.__spanName,
+            span,
+            getValue: () => options?.sessionId,
+          } as never,
+        };
+      },
+    );
+  });
+  const scope = <T>(observe: ReturnType<typeof vi.fn>, run: () => T) =>
+    withModelObservationScope(
+      {
+        sessionId: 'test-session',
+        source: 'main',
+        observe,
+        observationFailed: vi.fn(),
+      },
+      run,
+    );
+
+  it('collects model usage with telemetry disabled and a throwing telemetry logger', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    vi.mocked(logApiResponse).mockImplementationOnce(() => {
+      throw new Error('logger');
+    });
+    const observe = vi.fn();
+    const response = resp('observed');
+    response.usageMetadata = usage(13, 5);
+    await scope(observe, () => runContent(resolving(response), 'managed'));
+    expect(observe).toHaveBeenCalledOnce();
+    expect(observe.mock.calls[0][0]).toMatchObject({
+      outcome: 'success',
+      usage: { promptTokenCount: 13, candidatesTokenCount: 5 },
+    });
+  });
+
+  it.each([false, true])(
+    'closes a returned stream exactly once after iterated=%s',
+    async (iterated) => {
+      const observe = vi.fn();
+      const iterator = await scope(observe, () =>
+        openStream(streams(resp('partial')), 'managed-return'),
+      );
+      if (iterated) await iterator.next();
+      await iterator.return(undefined);
+      await iterator.return(undefined);
+      expect(observe).toHaveBeenCalledOnce();
+      expect(observe.mock.calls[0][0].outcome).toBe('interrupted');
+    },
+  );
+
+  it('retains partial usage on provider cancellation and an explicit outer retry ordinal', async () => {
+    const observe = vi.fn();
+    const abort = new AbortController();
+    const response = resp('partial');
+    response.usageMetadata = usage(10, 2);
+    const iterator = await scope(observe, () =>
+      retryContext.run(
+        { attempt: 2, requestSetupMs: 0, retryTotalDelayMs: 10 },
+        () =>
+          openStream(failingStream(userAbort(), response), 'managed-abort', {
+            request: helloRequest({ abortSignal: abort.signal }),
+          }),
+      ),
+    );
+    await iterator.next();
+    abort.abort();
+    await expect(iterator.next()).rejects.toBeInstanceOf(APIUserAbortError);
+    expect(observe).toHaveBeenCalledOnce();
+    expect(observe.mock.calls[0][0]).toMatchObject({
+      outcome: 'cancelled',
+      backoffRetryOrdinal: 1,
+      usage: { candidatesTokenCount: 2 },
+    });
+  });
+});
 
 /** Opens a stream through a fresh generator wrapping `stream`. */
 const openStream = (
@@ -1743,6 +1835,207 @@ describe('LoggingContentGenerator', () => {
     }
   });
 
+  /** Runs `chunks`, each arriving at its wall-clock time, then ends at `endMs`. */
+  const runTimedStream = async (
+    chunks: Array<[number, GenerateContentResponse]>,
+    endMs: number,
+  ) => {
+    let wallClockMs = 0;
+    const dateNowSpy = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => wallClockMs);
+    try {
+      await runStream(
+        resolving(
+          (async function* () {
+            for (const [atMs, chunk] of chunks) {
+              wallClockMs = atMs;
+              yield chunk;
+            }
+            wallClockMs = endMs;
+          })(),
+        ),
+        'prompt-timed',
+      );
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  };
+
+  it('times a tool-call-only stream from its preparation to the complete call', async () => {
+    const preparation = createResponse('r1', 'test-model', []);
+    setToolCallPreparations(preparation, [
+      { callId: 'call_1', toolName: 'read_file' },
+    ]);
+    await runTimedStream(
+      [
+        [800, preparation],
+        [
+          1200,
+          createResponse(
+            'r1',
+            'test-model',
+            [{ functionCall: { id: 'call_1', name: 'read_file', args: {} } }],
+            usage(10, 40),
+            'STOP',
+          ),
+        ],
+      ],
+      1215,
+    );
+
+    expect(loggedResponse()).toMatchObject({
+      duration_ms: 1215,
+      ttft_ms: 800,
+      generation_ms: 400,
+    });
+    expect(llmSpan().endMetadata?.ttftMs).toBe(800);
+  });
+
+  it('times TTFT from the first request dispatch, not from before the request is built', async () => {
+    let wallClockMs = 0;
+    let monotonicClockMs = 0;
+    const dateNowSpy = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => wallClockMs);
+    const performanceNowSpy = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => monotonicClockMs);
+    const streamFn = vi.fn().mockImplementation(async () => {
+      wallClockMs = 200;
+      monotonicClockMs = 200;
+      markRequestDispatched();
+      wallClockMs = 250;
+      monotonicClockMs = 250;
+      markRequestDispatched();
+      return (async function* () {
+        wallClockMs = 1000;
+        monotonicClockMs = 1000;
+        yield createResponse('r1', 'test-model', [{ text: 'a' }]);
+        wallClockMs = 1500;
+        monotonicClockMs = 1500;
+        yield createResponse('r1', 'test-model', [{ text: 'b' }]);
+        wallClockMs = 1600;
+        monotonicClockMs = 1600;
+        yield createResponse('r1', 'test-model', [], usage(10, 40), 'STOP');
+      })();
+    });
+
+    try {
+      await runStream(streamFn, 'prompt-dispatch');
+
+      expect(loggedResponse()).toMatchObject({
+        duration_ms: 1600,
+        ttft_ms: 800,
+        generation_ms: 500,
+        first_visible_offset_ms: 1000,
+      });
+      const spanRecord = llmSpan();
+      expect(spanRecord.endMetadata).toMatchObject({
+        ttftMs: 800,
+        requestBuildMs: 200,
+        durationMs: 1600,
+      });
+      expect(spanRecord.attributes[TTFC]).toBeCloseTo(0.8);
+    } finally {
+      dateNowSpy.mockRestore();
+      performanceNowSpy.mockRestore();
+    }
+  });
+
+  it('ignores dispatches from a nested non-streaming request during stream setup', async () => {
+    let now = 0;
+    const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const generator = makeGenerator({
+      generate: async () => {
+        now = 200;
+        markRequestDispatched();
+        return resp('inner');
+      },
+      stream: async () => {
+        await generator.generateContent(helloRequest(), 'nested');
+        now = 800;
+        markRequestDispatched();
+        return (async function* () {
+          now = 1000;
+          yield resp('outer');
+        })();
+      },
+    });
+
+    try {
+      await streamFrom(generator, 'outer');
+      const responses = vi
+        .mocked(logApiResponse)
+        .mock.calls.map((call) => call[1]);
+      expect(responses.map((response) => response.response_id)).toEqual([
+        'inner',
+        'outer',
+      ]);
+      expect(responses[0].ttft_ms).toBeUndefined();
+      expect(responses[1].ttft_ms).toBe(200);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('keeps a nested stream retry from starting the outer TTFT clock', async () => {
+    let now = 0;
+    const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const inner = makeGenerator({
+      stream: async () => {
+        now = 200;
+        markRequestDispatched();
+        return (async function* () {
+          now = 300;
+          markRequestDispatched();
+          now = 600;
+          yield resp('inner');
+        })();
+      },
+    });
+    const outer = makeGenerator({
+      stream: async () => {
+        await streamFrom(inner, 'inner');
+        now = 800;
+        markRequestDispatched();
+        return (async function* () {
+          now = 1000;
+          yield resp('outer');
+        })();
+      },
+    });
+
+    try {
+      await streamFrom(outer, 'outer');
+
+      expect(
+        vi.mocked(logApiResponse).mock.calls.map((call) => call[1]),
+      ).toMatchObject([
+        { response_id: 'inner', ttft_ms: 400 },
+        { response_id: 'outer', ttft_ms: 200, first_visible_offset_ms: 1000 },
+      ]);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('reports zero generation time when all visible output arrives in one chunk', async () => {
+    await runTimedStream(
+      [
+        [900, createResponse('r1', 'test-model', [{ text: 'done' }])],
+        [905, createResponse('r1', 'test-model', [], usage(10, 40), 'STOP')],
+      ],
+      910,
+    );
+
+    expect(loggedResponse()).toMatchObject({
+      duration_ms: 910,
+      ttft_ms: 900,
+      generation_ms: 0,
+    });
+  });
+
   it('forwards cachedInputTokens from usageMetadata to endLLMRequestSpan (Phase 4a)', async () => {
     await runStream(
       streams(
@@ -1761,6 +2054,94 @@ describe('LoggingContentGenerator', () => {
       inputTokens: 100,
       cachedInputTokens: 40,
     });
+  });
+
+  it('forwards a converter-reported cache creation count to endLLMRequestSpan', async () => {
+    // The value only survives because provenance is a WeakMap keyed on the
+    // usage object and the stream forwards that same reference. Reading
+    // provenance off the converter's own object (which the converter tests
+    // do) cannot see a copy, a spread or a JSON round-trip on the way.
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+          prompt_tokens_details: { cache_write_tokens: 256 },
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-cache-write',
+    );
+
+    expect(llmSpan().endMetadata).toMatchObject({
+      inputTokens: 373,
+      cacheCreationInputTokens: 256,
+    });
+  });
+
+  it('leaves cache creation unreported when the provider omits the field', async () => {
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-no-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'no-cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-no-cache-write',
+    );
+
+    // Absent must stay absent: session-tracing writes the attribute only when
+    // the value is defined, so a defaulted 0 would emit it on every turn.
+    expect(llmSpan().endMetadata!.cacheCreationInputTokens).toBeUndefined();
   });
 
   it('leaves ttftMs undefined when stream yields no user-visible chunks (Phase 4a)', async () => {

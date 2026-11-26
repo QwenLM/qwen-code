@@ -24,7 +24,6 @@ import {
   EVENT_EXTENSION_ENABLE,
   EVENT_IDE_CONNECTION,
   EVENT_TOOL_CALL,
-  EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
   EVENT_USER_RETRY,
   EVENT_FLASH_FALLBACK,
@@ -82,8 +81,8 @@ import {
   recordGoalStateMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
+  recordToolResultSizeMetrics,
   recordToolExecutionMetrics,
-  recordRepeatedToolFailureGuardMetrics,
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
@@ -103,13 +102,13 @@ import type {
   IdeConnectionEvent,
   StartSessionEvent,
   ToolCallEvent,
+  ToolResultSizeEvent,
+  ToolResultPersistedEvent,
   UserPromptEvent,
   UserRetryEvent,
   FlashFallbackEvent,
   NextSpeakerCheckEvent,
   LoopDetectedEvent,
-  RepeatedToolFailureGuardEvent,
-  LoopDetectionDisabledEvent,
   SlashCommandEvent,
   ConversationFinishedEvent,
   KittySequenceOverflowEvent,
@@ -373,6 +372,54 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
   });
 }
 
+export function logToolResultSize(
+  config: Config,
+  event: ToolResultSizeEvent,
+): void {
+  runToolTelemetrySink(() => {
+    QwenLogger.getInstance(config)?.logToolResultSizeEvent(event);
+  });
+  if (!isTelemetrySdkInitialized()) return;
+  runToolTelemetrySink(() => {
+    logs.getLogger(SERVICE_NAME).emit({
+      body: `Tool result size: ${event.function_name} (${event.layer}).`,
+      attributes: {
+        ...getCommonAttributes(config),
+        ...event,
+        'event.name': `${SERVICE_NAME}.${event['event.name']}`,
+      },
+    });
+  });
+  if (event.layer === 'injection')
+    runToolTelemetrySink(() => {
+      recordToolResultSizeMetrics(config, event);
+    });
+}
+
+export function logToolResultPersisted(
+  config: Config,
+  event: ToolResultPersistedEvent,
+): void {
+  // Output paths stay local; this event's public sinks carry numbers only.
+  runToolTelemetrySink(() => {
+    QwenLogger.getInstance(config)?.logToolResultPersistedEvent(event);
+  });
+  if (!isTelemetrySdkInitialized()) return;
+  runToolTelemetrySink(() => {
+    logs.getLogger(SERVICE_NAME).emit({
+      body: `Tool result persisted: ${event.tool_name}.`,
+      attributes: {
+        ...getCommonAttributes(config),
+        'event.name': `${SERVICE_NAME}.tool_result_persisted`,
+        'event.timestamp': event['event.timestamp'],
+        tool_name: event.tool_name,
+        bytes_written: event.bytes_written,
+        prompt_id: event.prompt_id,
+      },
+    });
+  });
+}
+
 export function logToolOutputTruncated(
   config: Config,
   event: ToolOutputTruncatedEvent,
@@ -624,8 +671,12 @@ export function logApiResponse(
   sessionId?: string,
   uiSubagentIdentity?: UiSubagentIdentity,
 ): void {
+  const { first_visible_offset_ms, ...apiEvent } = event;
   const uiEvent = {
-    ...event,
+    ...apiEvent,
+    ...(first_visible_offset_ms === undefined
+      ? {}
+      : { first_visible_offset_ms }),
     ...(uiSubagentIdentity
       ? {
           subagent_id: uiSubagentIdentity.id,
@@ -637,17 +688,17 @@ export function logApiResponse(
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
+  if (config.getUsageStatisticsEnabled()) {
+    recordTokenUsageFromApiResponseBestEffort(config, event);
+  }
   if (!isInternalPromptId(event.prompt_id)) {
-    if (config.getUsageStatisticsEnabled()) {
-      recordTokenUsageFromApiResponseBestEffort(config, event);
-    }
     recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
   if (!isTelemetrySdkInitialized()) return;
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
-    ...event,
+    ...apiEvent,
     ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
@@ -692,11 +743,8 @@ export function logApiResponse(
 export function logLoopDetected(
   config: Config,
   event: LoopDetectedEvent,
-  options: { recordToQwenLogger?: boolean } = {},
 ): void {
-  if (options.recordToQwenLogger !== false) {
-    QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
-  }
+  QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -710,53 +758,6 @@ export function logLoopDetected(
     attributes,
   };
   logger.emit(logRecord);
-}
-
-export function logRepeatedToolFailureGuard(
-  event: RepeatedToolFailureGuardEvent,
-): void {
-  // Deployment cohort and service version come from the OpenTelemetry
-  // Resource, which is attached to both the logger and meter providers.
-  runToolTelemetrySink(() => {
-    if (isTelemetrySdkInitialized()) {
-      const logger = logs.getLogger(SERVICE_NAME);
-      logger.emit({
-        body: `Repeated tool failure guard decision: ${event.decision}.`,
-        attributes: {
-          ...event,
-          'event.name': EVENT_REPEATED_TOOL_FAILURE_GUARD,
-        },
-      });
-    }
-  });
-  runToolTelemetrySink(() => {
-    recordRepeatedToolFailureGuardMetrics({
-      route: event.route,
-      mode: event.mode,
-      phase_before: event.phase_before,
-      phase_after: event.phase_after,
-      decision: event.decision,
-      failure_count_bucket: event.failure_count_bucket,
-      batch_count_bucket: event.batch_count_bucket,
-      ...(event.reset_reason !== undefined
-        ? { reset_reason: event.reset_reason }
-        : {}),
-      ...(event.terminal_status !== undefined
-        ? { terminal_status: event.terminal_status }
-        : {}),
-      ...(event.execution_status !== undefined
-        ? { execution_status: event.execution_status }
-        : {}),
-      ...(event.tool_type !== undefined ? { tool_type: event.tool_type } : {}),
-    });
-  });
-}
-
-export function logLoopDetectionDisabled(
-  config: Config,
-  _event: LoopDetectionDisabledEvent,
-): void {
-  QwenLogger.getInstance(config)?.logLoopDetectionDisabledEvent();
 }
 
 export function logNextSpeakerCheck(

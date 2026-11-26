@@ -20,6 +20,7 @@ import {
   worktreeAdminHoldsModules,
   worktreeHoldsSubmodules,
 } from './git-worktrees.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const tmpRoots: string[] = [];
 
@@ -463,9 +464,9 @@ describe('worktreeAdminHoldsModules', () => {
     expect(await worktreeAdminHoldsModules(repo, beta)).toBe('present');
   }, 20_000);
 
-  // POSIX fixtures: Windows ignores a directory's mode bits, and a relative
-  // link loop needs the symlink privilege. Measured on windows-2022.
-  it.skipIf(process.platform === 'win32')(
+  // The fixture needs permission bits to bind: Windows ignores a
+  // directory's mode bits, and root with its DAC capabilities bypasses them.
+  it.skipIf(!arePermissionBitsEnforced())(
     'never lets "cannot look" pass for "nothing is there"',
     async () => {
       const { repo, wt } = repoAndWorktree();
@@ -482,9 +483,19 @@ describe('worktreeAdminHoldsModules', () => {
       } finally {
         fs.chmodSync(modules, 0o755);
       }
+    },
+    20_000,
+  );
 
-      // Nor can it even be looked at: a loop is not "nothing is there".
-      fs.rmSync(modules, { recursive: true });
+  // A relative link loop needs the symlink privilege on Windows. Measured on
+  // windows-2022.
+  it.skipIf(process.platform === 'win32')(
+    'never lets a link loop pass for "nothing is there"',
+    async () => {
+      const { repo, wt } = repoAndWorktree();
+      const modules = adminDir(repo, 'wt', 'modules');
+
+      // A loop is not "nothing is there".
       fs.symlinkSync('modules', modules);
       expect(await worktreeAdminHoldsModules(repo, wt)).toBe('unknown');
     },
@@ -642,9 +653,9 @@ describe('worktreeAdminHoldsModules', () => {
     expect(await worktreeAdminHoldsModules(repo, b)).toBe('unknown');
   }, 20_000);
 
-  // POSIX fixtures: Windows ignores a directory's mode bits and needs a
-  // privilege to make a link. Measured on windows-2022.
-  it.skipIf(process.platform === 'win32')(
+  // The fixtures need permission bits to bind: Windows ignores a directory's
+  // mode bits, and root with its DAC capabilities bypasses them.
+  it.skipIf(!arePermissionBitsEnforced())(
     'says it cannot tell wherever it could not look',
     async () => {
       const { repo, wt } = repoAndWorktree();
@@ -668,9 +679,20 @@ describe('worktreeAdminHoldsModules', () => {
       } finally {
         fs.chmodSync(dot, 0o755);
       }
+    },
+    20_000,
+  );
+
+  // Windows needs a privilege to make a link. Measured on windows-2022.
+  it.skipIf(process.platform === 'win32')(
+    'says it cannot tell from a `.git` it will not read',
+    async () => {
+      const { repo, wt } = repoAndWorktree();
+      gitlink(wt, 'sub', git(repo, 'rev-parse', 'HEAD').trim());
+      mkdirp(wt, 'sub');
+      const dot = path.join(wt, 'sub', '.git');
 
       // A `.git` file that is a link, which this will not open.
-      fs.rmSync(dot, { recursive: true });
       const target = path.join(path.dirname(repo), 'gitfile');
       fs.writeFileSync(target, 'gitdir: /somewhere\n');
       fs.symlinkSync(target, dot);
@@ -807,7 +829,16 @@ describe('dryRunGitWorktreePrune', () => {
       path.join(adminDir(repo), 'dangling'),
     );
 
-    expect(await dryRunGitWorktreePrune(repo)).toEqual([
+    // git announces in readdir() order, not by name, so which of the two
+    // comes first is a filesystem property, not a contract: on a filesystem
+    // whose hash puts `stale` ahead of `dangling`, the same two entries come
+    // back reversed. The set and each entry's attribution are what this
+    // protects, so the order is normalised away rather than pinned.
+    expect(
+      (await dryRunGitWorktreePrune(repo)).sort((a, b) =>
+        String(a.id).localeCompare(String(b.id)),
+      ),
+    ).toEqual([
       { id: 'dangling', worktreePath: null },
       { id: 'stale', worktreePath: fs.realpathSync(stale) },
     ]);

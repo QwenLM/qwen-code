@@ -25,6 +25,13 @@ import {
   HOSTED_STORE_PREFIX,
 } from './scratch-dir.js';
 
+import {
+  PROVIDER_MEDIA_MYSQL_PREFIX,
+  PROVIDER_MEDIA_HARNESS_PREFIX,
+  PROVIDER_MEDIA_FIXTURES_PREFIX,
+  PROVIDER_MEDIA_PROBE_PREFIX,
+} from './helpers/provider-media-process-cleanup.mjs';
+
 // The env keys globalSetup's setup() writes, saved so a case can restore the
 // suite-wide values after re-importing the module and running its lifecycle.
 const SETUP_ENV_KEYS = [
@@ -155,6 +162,10 @@ describe('globalSetup hermetic qwen home', () => {
     ['per-agent ACP home', ACP_HOME_PREFIX],
     ['Hosted process root', HOSTED_HOME_PREFIX],
     ['Hosted Session Store root', HOSTED_STORE_PREFIX],
+    ['provider media MySQL root', PROVIDER_MEDIA_MYSQL_PREFIX],
+    ['provider media harness root', PROVIDER_MEDIA_HARNESS_PREFIX],
+    ['provider media fixture root', PROVIDER_MEDIA_FIXTURES_PREFIX],
+    ['provider media probe root', PROVIDER_MEDIA_PROBE_PREFIX],
   ])(
     'sweeps a stale %s a torn-down run left behind',
     async (_label, prefix) => {
@@ -227,5 +238,88 @@ describe('globalSetup hermetic qwen home', () => {
     } finally {
       writer.kill('SIGKILL');
     }
+  });
+});
+
+describe('globalSetup host config carry-over', () => {
+  let tmpRoot: string;
+  let homeDir: string;
+  let savedEnv: Map<string, string | undefined>;
+
+  beforeEach(async () => {
+    tmpRoot = await mkdtemp(join(tmpdir(), 'qwen-globalsetup-ci-'));
+    homeDir = await mkdtemp(join(tmpdir(), 'qwen-globalsetup-home-'));
+    savedEnv = new Map(
+      [...SETUP_ENV_KEYS, 'QWEN_HOME', 'HOME', 'CI', 'TMPDIR'].map((key) => [
+        key,
+        process.env[key],
+      ]),
+    );
+    delete process.env['QWEN_HOME'];
+    process.env['HOME'] = homeDir;
+    process.env['TMPDIR'] = tmpRoot;
+    process.env['KEEP_OUTPUT'] = 'false';
+    process.env['QWEN_CODE_MODELS_DEV_REFRESH'] = 'on';
+    await mkdir(join(homeDir, '.qwen'), { recursive: true });
+    await writeFile(
+      join(homeDir, '.qwen', 'settings.json'),
+      JSON.stringify({ security: { auth: { selectedType: 'qwen-oauth' } } }),
+      'utf-8',
+    );
+    await writeFile(
+      join(homeDir, '.qwen', 'oauth_creds.json'),
+      '{"access_token":"host"}',
+      'utf-8',
+    );
+  });
+
+  afterEach(async () => {
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    vi.resetModules();
+    await rm(tmpRoot, { recursive: true, force: true });
+    await rm(homeDir, { recursive: true, force: true });
+  });
+
+  async function loadGlobalSetup() {
+    vi.resetModules();
+    return import('./globalSetup.js');
+  }
+
+  it('does not carry host auth state into the hermetic home on CI', async () => {
+    process.env['CI'] = 'true';
+    const { setup, teardown } = await loadGlobalSetup();
+    await setup();
+
+    const home = process.env['QWEN_HOME']!;
+    await expect(
+      readFile(join(home, 'settings.json'), 'utf-8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      readFile(join(home, 'oauth_creds.json'), 'utf-8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await teardown();
+  });
+
+  it('carries host config into the hermetic home outside CI', async () => {
+    delete process.env['CI'];
+    const { setup, teardown } = await loadGlobalSetup();
+    await setup();
+
+    const home = process.env['QWEN_HOME']!;
+    await expect(
+      readFile(join(home, 'settings.json'), 'utf-8'),
+    ).resolves.toContain('qwen-oauth');
+    await expect(
+      readFile(join(home, 'oauth_creds.json'), 'utf-8'),
+    ).resolves.toContain('host');
+
+    await teardown();
   });
 });

@@ -1,6 +1,8 @@
-import type {
-  DaemonSessionArtifact,
-  DaemonWorkspaceFileBytes,
+import {
+  DaemonHttpError,
+  isSessionLevelNotFound,
+  type DaemonSessionArtifact,
+  type DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
 import { escapeAttribute } from '../preview/web-preview.js';
@@ -92,10 +94,10 @@ const OFFICE_DOCUMENT_EXTENSIONS = new Set([
 
 const AUDIO_EXTENSIONS = new Set(['.m4a', '.mp3', '.ogg', '.wav']);
 
+// Previewable Office types are allowed before this shared fallback is checked.
 const DOWNLOAD_ONLY_EXTENSIONS = new Set([
   ...OFFICE_DOCUMENT_EXTENSIONS,
   ...AUDIO_EXTENSIONS,
-  '.pdf',
   '.mp4',
   '.mov',
   '.webm',
@@ -109,11 +111,33 @@ export function isExcelFile(
   workspacePath?: string,
   mimeType?: string,
 ): boolean {
-  const extension = pathExtension(workspacePath);
+  const extension = workspaceFileExtension(workspacePath);
   return extension
     ? extension === '.xlsx'
     : normalizeArtifactMimeType(mimeType) ===
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+}
+
+export const DOCX_MIME_TYPE =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+export function isDocxFile(workspacePath?: string, mimeType?: string): boolean {
+  const extension = workspaceFileExtension(workspacePath);
+  return extension
+    ? extension === '.docx'
+    : normalizeArtifactMimeType(mimeType) === DOCX_MIME_TYPE;
+}
+
+export function isPdfArtifact(artifact: {
+  kind?: string;
+  workspacePath?: string;
+  mimeType?: string;
+}): boolean {
+  return (
+    workspaceFileExtension(artifact.workspacePath) === '.pdf' ||
+    normalizeArtifactMimeType(artifact.mimeType) === 'application/pdf' ||
+    artifact.kind === 'pdf'
+  );
 }
 
 export function isDownloadOnlyWorkspaceArtifact(artifact: {
@@ -122,16 +146,15 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   mimeType?: string;
 }): boolean {
   if (isExcelFile(artifact.workspacePath, artifact.mimeType)) return false;
-  const extension = pathExtension(artifact.workspacePath);
+  const extension = workspaceFileExtension(artifact.workspacePath);
   const mimeType = normalizeArtifactMimeType(artifact.mimeType);
-  if (
-    extension === '.svg' ||
-    mimeType === 'image/svg+xml' ||
-    DOWNLOAD_ONLY_EXTENSIONS.has(extension)
-  ) {
+  if (extension === '.svg' || mimeType === 'image/svg+xml') {
     return true;
   }
+  if (isDocxFile(artifact.workspacePath, artifact.mimeType)) return false;
+  if (DOWNLOAD_ONLY_EXTENSIONS.has(extension)) return true;
   if (
+    isPdfArtifact(artifact) ||
     getArtifactImageMimeType(artifact) ||
     extension === '.md' ||
     extension === '.markdown' ||
@@ -145,7 +168,6 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   if (
     artifact.kind === 'image' ||
     artifact.kind === 'document' ||
-    artifact.kind === 'pdf' ||
     artifact.kind === 'video' ||
     artifact.kind === 'audio'
   ) {
@@ -155,8 +177,11 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
 }
 
 export function pathExtension(workspacePath?: string): string {
-  const path = (workspacePath ?? '').split(/[?#]/, 1)[0];
-  const name = path.split(/[/\\]/).pop() ?? '';
+  return workspaceFileExtension((workspacePath ?? '').split(/[?#]/, 1)[0]);
+}
+
+function workspaceFileExtension(workspacePath?: string): string {
+  const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
 }
@@ -212,7 +237,7 @@ const IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
   webp: 'image/webp',
 };
 
-const MAX_WORKSPACE_FILE_BLOB_BYTES = 100 * 1024 * 1024;
+export const MAX_WORKSPACE_FILE_BLOB_BYTES = 100 * 1024 * 1024;
 const WORKSPACE_FILE_BLOB_CHUNK_BYTES = 256 * 1024;
 
 export function normalizeArtifactMimeType(mimeType?: string): string {
@@ -244,6 +269,12 @@ export function getReviewDownloadMimeType(value: string): string {
   return /\.html?$/i.test(value) ? 'text/html' : 'text/markdown';
 }
 
+interface WorkspaceFileBlobStat {
+  sizeBytes: number;
+  modifiedMs: number;
+  type?: string;
+}
+
 export async function readWorkspaceFileAsBlob(
   readFileBytes: (
     filePath: string,
@@ -257,16 +288,15 @@ export async function readWorkspaceFileAsBlob(
   filePath: string,
   mimeType: string,
   options: {
-    statFile: (
-      filePath: string,
-    ) => Promise<{ sizeBytes: number; modifiedMs: number; type?: string }>;
+    statFile: (filePath: string) => Promise<WorkspaceFileBlobStat>;
+    initialStat?: WorkspaceFileBlobStat;
     isCancelled?: () => boolean;
     maxBytes?: number;
   },
 ): Promise<Blob> {
-  const chunks: Uint8Array[] = [];
+  const chunks: Array<Uint8Array<ArrayBuffer>> = [];
   const maxBytes = options.maxBytes ?? MAX_WORKSPACE_FILE_BLOB_BYTES;
-  const initialStat = await options.statFile(filePath);
+  const initialStat = options.initialStat ?? (await options.statFile(filePath));
   if (options.isCancelled?.()) {
     throw new Error('File loading was cancelled.');
   }
@@ -570,4 +600,240 @@ function stripUnsafePreviewMarkup(html: string) {
       /<meta\b(?=[^>]*\bhttp-equiv\s*=\s*["']?Content-Security-Policy["']?)[^>]*>/gi,
       '',
     );
+}
+
+export function isWebPreviewSnapshotArtifact(
+  artifact: Pick<DaemonSessionArtifact, 'metadata'>,
+): boolean {
+  return artifact.metadata?.['artifactType'] === 'web_preview_snapshot';
+}
+
+export function isCodeReviewArtifact(
+  artifact: Pick<DaemonSessionArtifact, 'metadata'>,
+): boolean {
+  return artifact.metadata?.['artifactType'] === 'code_review';
+}
+
+export function isAutomationSnapshotArtifact(
+  artifact: Pick<DaemonSessionArtifact, 'metadata'>,
+): boolean {
+  return artifact.metadata?.['artifactType'] === 'automation_snapshot';
+}
+
+export function canPreviewWorkspaceArtifact(
+  artifact: Pick<DaemonSessionArtifact, 'storage' | 'workspacePath'>,
+): boolean {
+  return artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
+}
+
+export type WorkspaceArtifactDispatchAction =
+  | { kind: 'workspace_preview' }
+  | { kind: 'live_web_preview_snapshot' }
+  | { kind: 'jump_web_preview_snapshot' }
+  | { kind: 'metadata_detail' };
+
+/**
+ * Shared dispatch classification for session and workspace artifact views.
+ * Saved web-preview snapshots (`metadata.artifactType === 'web_preview_snapshot'`,
+ * stored with `storage: 'published'`) require a live attached session for the
+ * snapshot content route; cold/archived sessions must jump to the session
+ * first. Metadata-only `storage: 'managed'` artifacts render straight from the
+ * envelope descriptor without loading a session or hitting the content route.
+ */
+export function classifyWorkspaceArtifactDispatch(
+  artifact: DaemonSessionArtifact,
+  isSessionLive: boolean,
+): WorkspaceArtifactDispatchAction {
+  if (isWebPreviewSnapshotArtifact(artifact)) {
+    return isSessionLive
+      ? { kind: 'live_web_preview_snapshot' }
+      : { kind: 'jump_web_preview_snapshot' };
+  }
+  if (canPreviewWorkspaceArtifact(artifact) || isCodeReviewArtifact(artifact)) {
+    return { kind: 'workspace_preview' };
+  }
+  return { kind: 'metadata_detail' };
+}
+
+export interface DaemonHttpErrorInfo {
+  status?: number;
+  code?: string;
+  message: string;
+}
+
+export function readDaemonHttpErrorInfo(error: unknown): DaemonHttpErrorInfo {
+  if (error instanceof DaemonHttpError) {
+    const body =
+      typeof error.body === 'object' &&
+      error.body !== null &&
+      !Array.isArray(error.body)
+        ? (error.body as Record<string, unknown>)
+        : undefined;
+    const code =
+      typeof body?.['code'] === 'string'
+        ? body['code']
+        : typeof body?.['error'] === 'string'
+          ? body['error']
+          : undefined;
+    const message =
+      typeof body?.['message'] === 'string' && body['message'].length > 0
+        ? body['message']
+        : typeof body?.['error'] === 'string' && body['error'].length > 0
+          ? body['error']
+          : error.message;
+    return {
+      status: error.status,
+      ...(code ? { code } : {}),
+      message,
+    };
+  }
+  return {
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+export function isSessionNotFoundArtifactError(error: unknown): boolean {
+  return isSessionLevelNotFound(error);
+}
+
+export function isArtifactSnapshotUnavailableError(error: unknown): boolean {
+  const info = readDaemonHttpErrorInfo(error);
+  return info.status === 404 && info.code === 'artifact_snapshot_unavailable';
+}
+
+export interface PendingArtifactJumpOpenRequest {
+  readonly sessionId: string;
+  readonly artifactId: string;
+}
+
+/**
+ * Decides whether a session-keyed post-jump artifact open request should wait,
+ * open now, or be canceled because the user switched to another session
+ * mid-load. Opening before the target session's right-panel restore commits
+ * would have its tab wiped by the restore effect's reset.
+ */
+export function resolvePendingArtifactJumpOpen(
+  pending: PendingArtifactJumpOpenRequest | undefined,
+  state: {
+    currentSessionId: string | undefined;
+    switchingSessionId: string | null | undefined;
+    panelStateKey: string | undefined;
+    restoredSessionKey: string | undefined;
+    panelRestoring: boolean;
+    loadingTranscript: boolean | undefined;
+    artifactsLoading: boolean;
+    connected: boolean;
+  },
+): 'none' | 'wait' | 'open' | 'cancel' {
+  if (!pending) return 'none';
+  if (
+    state.switchingSessionId !== undefined &&
+    state.switchingSessionId !== null &&
+    state.switchingSessionId !== pending.sessionId
+  ) {
+    return 'cancel';
+  }
+  if (state.currentSessionId !== pending.sessionId) {
+    return state.switchingSessionId === pending.sessionId ? 'wait' : 'cancel';
+  }
+  if (
+    !state.connected ||
+    state.loadingTranscript ||
+    state.artifactsLoading ||
+    state.panelRestoring ||
+    !state.panelStateKey ||
+    state.restoredSessionKey !== state.panelStateKey
+  ) {
+    return 'wait';
+  }
+  return 'open';
+}
+
+export interface ArtifactLibrarySessionJumpDeps {
+  sessionId: string;
+  archiveState: 'active' | 'archived';
+  artifactId?: string;
+  targetCwd: string | undefined;
+  primaryCwd: string | undefined;
+  showChat: () => void;
+  unarchivePrimarySession: (sessionId: string) => Promise<unknown>;
+  unarchiveWorkspaceSessions: (
+    workspaceCwd: string,
+    sessionIds: string[],
+  ) => Promise<{
+    unarchived: string[];
+    alreadyActive: string[];
+    notFound: string[];
+    errors: Array<{ sessionId: string; error: string }>;
+  }>;
+  getPendingJumpArtifactOpen: () => PendingArtifactJumpOpenRequest | undefined;
+  setPendingJumpArtifactOpen: (
+    request: PendingArtifactJumpOpenRequest | undefined,
+  ) => void;
+  isCurrent: () => boolean;
+  loadSidebarSession: (
+    sessionId: string,
+    workspaceCwd?: string,
+  ) => Promise<void>;
+  reportError: (error: unknown, fallbackMessage: string) => void;
+}
+
+/**
+ * Orchestrates opening a session (and optionally arming a post-jump artifact
+ * tab open) from the workspace artifact library. For archived sessions, the
+ * pending artifact open is armed only AFTER unarchive resolves and immediately
+ * before `loadSidebarSession`, so `resolvePendingArtifactJumpOpen` does not
+ * cancel the request while the shell is still parked on the old session during
+ * the awaited unarchive RPC. `isCurrent()` is checked after the awaited
+ * unarchive so a navigation started meanwhile is never overridden.
+ */
+export async function runArtifactLibrarySessionJump(
+  deps: ArtifactLibrarySessionJumpDeps,
+): Promise<void> {
+  const {
+    sessionId,
+    archiveState,
+    artifactId,
+    targetCwd,
+    primaryCwd,
+    showChat,
+    unarchivePrimarySession,
+    unarchiveWorkspaceSessions,
+    getPendingJumpArtifactOpen,
+    setPendingJumpArtifactOpen,
+    isCurrent,
+    loadSidebarSession,
+    reportError,
+  } = deps;
+  showChat();
+  try {
+    if (archiveState === 'archived') {
+      if (targetCwd && primaryCwd && targetCwd !== primaryCwd) {
+        const result = await unarchiveWorkspaceSessions(targetCwd, [sessionId]);
+        if (result.errors.length > 0) {
+          throw new Error(result.errors[0]!.error);
+        }
+        if (result.notFound.includes(sessionId)) {
+          throw new Error(`${sessionId}: not found in its workspace catalog`);
+        }
+      } else {
+        await unarchivePrimarySession(sessionId);
+      }
+      if (!isCurrent()) return;
+    }
+    if (artifactId) {
+      setPendingJumpArtifactOpen({ sessionId, artifactId });
+    }
+    await loadSidebarSession(sessionId, targetCwd);
+  } catch (error) {
+    if (!isCurrent()) return;
+    const current = getPendingJumpArtifactOpen();
+    if (
+      current?.sessionId === sessionId &&
+      current?.artifactId === artifactId
+    ) {
+      setPendingJumpArtifactOpen(undefined);
+    }
+    reportError(error, 'Failed to open session');
+  }
 }

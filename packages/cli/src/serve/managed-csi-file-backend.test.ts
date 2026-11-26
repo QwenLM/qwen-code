@@ -17,6 +17,7 @@ import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profi
 import type { ManagedCsiMount } from './managed-csi-mount.js';
 import type { ManagedCsiMountReceipt } from './managed-csi-envelope.js';
 import { readCsiFileHistoryObservation } from './managed-csi-file-history-protocol.js';
+import { formatRecordArtifactReminder } from '@qwen-code/qwen-code-core/tools/artifact/workspace-auto-record.js';
 import { isModifiableDeclarativeTool } from '@qwen-code/qwen-code-core/tools/modifiable-tool.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 
@@ -823,6 +824,41 @@ function cases(mapped: boolean) {
     await expect(composed.close()).rejects.toThrow();
   });
 
+  // The profile declares no record_artifact and the Worker forwards no
+  // artifact metadata, so nothing records these files.
+  it.each(['', '1'])(
+    'does not claim an actual Write or Edit was recorded as an artifact (QWEN_CODE_ENABLE_ARTIFACT=%j)',
+    async (flag) => {
+      vi.stubEnv('QWEN_CODE_ENABLE_ARTIFACT', flag);
+      onTestFinished(() => {
+        vi.unstubAllEnvs();
+      });
+      const owned = await fixture(mapped);
+      const composed = await owned.compose();
+      const file = owned.file('report.md');
+      const written = await composed.tools.tools
+        .get('write_file')!
+        .build({ file_path: file, content: '# Report\n' })
+        .execute(signal);
+      const edited = await composed.tools.tools
+        .get('edit')!
+        .build({
+          file_path: file,
+          old_string: '# Report',
+          new_string: '# Final report',
+        })
+        .execute(signal);
+      expect(written.error).toBeUndefined();
+      expect(edited.error).toBeUndefined();
+      expect(await fs.readFile(file, 'utf8')).toBe('# Final report\n');
+      const claim = formatRecordArtifactReminder('report.md');
+      expect(String(written.llmContent)).not.toContain(claim);
+      expect(String(edited.llmContent)).not.toContain(claim);
+      expect(written.artifacts).toBeUndefined();
+      expect(edited.artifacts).toBeUndefined();
+    },
+  );
+
   it('keeps the actual team-memory secret guard without private pathname discovery', async () => {
     const owned = await fixture(mapped);
     const composed = await owned.compose();
@@ -880,13 +916,6 @@ function cases(mapped: boolean) {
       }),
     );
     expect(first.error).toBeUndefined();
-    expect(first.artifacts).toEqual([
-      expect.objectContaining({
-        storage: 'workspace',
-        workspacePath: 'nested/created.html',
-        sizeBytes: Buffer.byteLength('alpha\r\nsecond\r\n'),
-      }),
-    ]);
     const before = await run(tools.get('read_file')!, { file_path: file });
     expect(before.error).toBeUndefined();
     expect(JSON.stringify(before.llmContent)).toContain('alpha');

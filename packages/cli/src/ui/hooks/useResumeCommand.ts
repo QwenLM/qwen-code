@@ -5,6 +5,8 @@
  */
 
 import { useState, useCallback } from 'react';
+import type { WorkflowModeSnapshot } from '@qwen-code/qwen-code-core/core/workflow-mode.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   SessionService,
   buildSessionRecoveryPlan,
@@ -16,6 +18,7 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -26,6 +29,7 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -42,7 +46,7 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
-  seedPromptCount: (count: number) => void;
+  seedPromptCount: (count: number, userPromptCountSeed?: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -153,11 +157,14 @@ export function useResumeCommand(
       // the user is on, and rolling back against that stale id would land
       // on a session the UI never shows (#9844).
       const oldSessionId = config.getSessionId();
+      let oldWorkflowMode: WorkflowModeSnapshot | undefined;
       let coreSwapped = false;
       let uiSwapped = false;
+      let toolsInvalidated = false;
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
+        oldWorkflowMode = await config.captureWorkflowModeState?.();
         const cwd = config.getTargetDir();
         const sessionService = new SessionService(cwd);
         sessionService.assertLegacySessionExecution(sessionId);
@@ -211,6 +218,9 @@ export function useResumeCommand(
         //    opened above covers the initialize() replay (#9833; see
         //    beginTelemetrySwap's JSDoc in core client.ts).
         resetBackgroundStateForSessionSwitch(config);
+        const modSession = getInteractiveModSession(config);
+        modSession?.invalidateTools();
+        toolsInvalidated = modSession !== undefined;
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -243,13 +253,16 @@ export function useResumeCommand(
             sessionData.conversation.messages,
             sessionId,
           ),
+          computeResumedUserTurnCount(sessionData.conversation.messages),
         );
         uiSwapped = true;
+        flushRunUsageOnSessionSwap(config, oldSessionId);
         config.getLlmClient()?.commitTelemetrySwap?.();
+        await getInteractiveModSession(config)?.syncSession('resume');
         setSessionName?.(customTitle ?? null);
         clearPendingState?.();
         clearItems();
-        loadHistory(uiHistoryItems);
+        loadHistory(uiHistoryItems, sessionId);
         if (recoveredBackgroundAgentsNotice) {
           addItem(
             {
@@ -288,7 +301,10 @@ export function useResumeCommand(
             } catch {
               // Best-effort — see above.
             }
+            getInteractiveModSession(config)?.invalidateTools();
             config.startNewSession(oldSessionId, prevSessionData);
+            if (oldWorkflowMode)
+              config.restoreWorkflowModeState(oldWorkflowMode);
             // Re-hydrate the client against the restored session, mirroring
             // /branch's rollback: without it the client's chat stays on the
             // abandoned session's replayed history, and the abort below
@@ -327,6 +343,9 @@ export function useResumeCommand(
           // replays the old session's history on top of the abandoned
           // session's replay, and restore overwrites rather than subtracts,
           // so the final state is exactly pre-swap (#9833).
+          if (toolsInvalidated && config.getSessionId() === oldSessionId) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.abortTelemetrySwap?.();
         } else if (swapOpened) {
           // Either the core swap never happened (nothing was replayed — the
@@ -336,6 +355,13 @@ export function useResumeCommand(
           // attempt did not open — the shared slot may hold a different
           // in-flight swap (#9844). See beginTelemetrySwap's JSDoc in core
           // client.ts.
+          if (
+            toolsInvalidated &&
+            !uiSwapped &&
+            config.getSessionId() === oldSessionId
+          ) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.commitTelemetrySwap?.();
         }
         addItem(

@@ -7,6 +7,9 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { parseHostedRecoveryResource } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
+import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { managedCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-command-id.js';
 import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
@@ -16,6 +19,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
   hostedRuntimeSessionId,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
@@ -30,6 +34,17 @@ interface CleanupDescriptor {
   generation: string;
   workspaceGeneration: string;
   fileHistoryTurnId: string;
+}
+
+export interface HostedCleanupHold {
+  cleanupId: string;
+  descriptorRef: ManagedSessionDurableRef;
+  runtimeSessionId: string;
+}
+
+export interface HostedCleanupResult {
+  states: Map<string, 'owed' | 'confirmed'>;
+  held: Map<string, HostedCleanupHold>;
 }
 
 function cleanupIdentity(promptId: string, runtimeSessionId: string) {
@@ -58,7 +73,7 @@ async function commitCleanup(
   await authority.appendExecutionEvent(
     {
       operation: 'hostedCleanup',
-      commandId: eventId,
+      commandId: managedCommandId(eventId),
       sessionKey: authority.sessionHeader.sessionKey,
       contentDigest: createHash('sha256')
         .update(`${descriptorRef.digest}:${state}`)
@@ -225,18 +240,193 @@ export function hasHostedCleanupDebt(session: ManagedSession): boolean {
   return [...states.values()].some((state) => state === 'owed');
 }
 
+export async function hasHostedCleanupDebtExcluding(
+  session: ManagedSession,
+  promptId: string,
+): Promise<boolean> {
+  const authority = session.authority;
+  const snapshotSequence = authority.committedSequence;
+  const latest = new Map(
+    authority
+      .eventsInSequenceRange(1, snapshotSequence)
+      .filter((event) => event.kind === 'hosted.cleanup')
+      .map((event) => [event.payload['cleanupId'], event]),
+  );
+  for (const event of latest.values()) {
+    if (event.payload['state'] !== 'owed') continue;
+    const descriptor = await readDescriptor(
+      session,
+      event.payload['descriptorRef'],
+    );
+    if (descriptor.promptId !== promptId) return true;
+  }
+  // Debt committed while descriptors were read is absent from the snapshot;
+  // report debt conservatively rather than admit an unsafe suspension.
+  return authority.committedSequence !== snapshotSequence;
+}
+
+async function hasBackgroundHoldEvidence(
+  session: ManagedSession,
+  descriptor: CleanupDescriptor,
+): Promise<boolean> {
+  const authority = session.authority;
+  const sequence = authority.committedSequence;
+  const intents = new Map(
+    authority
+      .eventsInSequenceRange(1, sequence)
+      .filter((event) => event.kind === 'tool.intent')
+      .map((event) => [
+        event.payload['executionCallId'],
+        event.payload['argsRef'],
+      ]),
+  );
+  let held = false;
+  for (const domain of ['child_run', 'monitor_run'] as const) {
+    for (const entry of authority.extensionRecordsInDomain(domain)) {
+      const record =
+        domain === 'child_run'
+          ? parseChildRun(entry.record)
+          : parseMonitorRun(entry.record);
+      if ('kind' in record && record.kind !== 'shell') continue;
+      const run = record.run;
+      if (['settled', 'not_started_proven'].includes(run.execution ?? ''))
+        continue;
+      const inputRef = intents.get(run.executionCallId);
+      if (!inputRef) return false;
+      const ref = assertManagedSessionDurableRef(inputRef, 'background owner');
+      if (ref.kind !== 'managed-tool-input') return false;
+      const input = JSON.parse(
+        (await session.resources.read(ref)).toString('utf8'),
+      ) as {
+        harnessSessionId?: unknown;
+        runtimeSessionId?: unknown;
+      };
+      if (
+        input.harnessSessionId !== descriptor.sessionKey.sessionId ||
+        typeof input.runtimeSessionId !== 'string'
+      )
+        return false;
+      if (input.runtimeSessionId !== descriptor.runtimeSessionId) continue;
+      if (
+        !run.runtime ||
+        run.runtime.runtimeBindingId !== descriptor.bindingId ||
+        run.runtime.generation !== descriptor.generation ||
+        !record.startReceiptRef ||
+        !['running', 'waiting'].includes(run.state) ||
+        run.execution !== 'running_attached'
+      )
+        return false;
+      held = true;
+    }
+  }
+  return held && authority.committedSequence === sequence;
+}
+
+/**
+ * Whether every unsettled run and owed cleanup of this committed prefix is a
+ * verified background hold whose worker owns the observation pull (§4.8).
+ * Only then may a suspension exempt the background terms and certify them at
+ * its seal: a child_agent or workflow run, a lost or old-generation runtime,
+ * a missing start receipt, or a binding whose worker never took over the
+ * capture all keep the Session resident.
+ */
+export async function backgroundSuspensionCertificate(
+  session: ManagedSession,
+  observationBindings: ReadonlySet<string> | undefined,
+): Promise<boolean> {
+  if (!observationBindings || observationBindings.size === 0) return false;
+  const authority = session.authority;
+  const sequence = authority.committedSequence;
+  let held = 0;
+  for (const domain of ['child_run', 'monitor_run'] as const) {
+    for (const entry of authority.extensionRecordsInDomain(domain)) {
+      const record =
+        domain === 'child_run'
+          ? parseChildRun(entry.record)
+          : parseMonitorRun(entry.record);
+      if ('kind' in record && record.kind !== 'shell') {
+        if (!['settled', 'failed', 'cancelled'].includes(entry.run.state))
+          return false;
+        continue;
+      }
+      const run = record.run;
+      if (['settled', 'not_started_proven'].includes(run.execution ?? ''))
+        continue;
+      if (
+        !run.runtime ||
+        !observationBindings.has(
+          `${run.runtime.runtimeBindingId}@${run.runtime.generation}`,
+        ) ||
+        !record.startReceiptRef ||
+        !['running', 'waiting'].includes(run.state) ||
+        run.execution !== 'running_attached'
+      )
+        return false;
+      held += 1;
+    }
+  }
+  if (held === 0) return false;
+  const latest = new Map(
+    authority
+      .eventsInSequenceRange(1, sequence)
+      .filter((event) => event.kind === 'hosted.cleanup')
+      .map((event) => [event.payload['cleanupId'], event]),
+  );
+  for (const event of latest.values()) {
+    if (event.payload['state'] !== 'owed') continue;
+    const descriptor = await readDescriptor(
+      session,
+      event.payload['descriptorRef'],
+    );
+    if (!(await hasBackgroundHoldEvidence(session, descriptor))) return false;
+  }
+  return authority.committedSequence === sequence;
+}
+
+export async function hasBlockingHostedCleanupDebt(
+  session: ManagedSession,
+  holds?: ReadonlyMap<string, HostedCleanupHold>,
+): Promise<boolean> {
+  const sequence = session.authority.committedSequence;
+  const latest = new Map(
+    session.authority
+      .eventsInSequenceRange(1, sequence)
+      .filter((event) => event.kind === 'hosted.cleanup')
+      .map((event) => [event.payload['cleanupId'], event]),
+  );
+  for (const event of latest.values()) {
+    if (event.payload['state'] !== 'owed') continue;
+    const descriptor = await readDescriptor(
+      session,
+      event.payload['descriptorRef'],
+    );
+    const hold = holds?.get(descriptor.promptId);
+    if (
+      !hold ||
+      hold.cleanupId !== event.payload['cleanupId'] ||
+      hold.runtimeSessionId !== descriptor.runtimeSessionId ||
+      !isDeepStrictEqual(hold.descriptorRef, event.payload['descriptorRef']) ||
+      !(await hasBackgroundHoldEvidence(session, descriptor))
+    )
+      return true;
+  }
+  return session.authority.committedSequence !== sequence;
+}
+
 export async function reconcileHostedTurnCleanup(
   session: ManagedSession,
   options: HostedWorkspaceBrokerOptions,
   promptId?: string,
   drain = false,
-): Promise<Map<string, 'owed' | 'confirmed'>> {
+  excludedPromptId?: string,
+): Promise<HostedCleanupResult> {
   const events = session.authority.eventsInSequenceRange(
     1,
     session.authority.committedSequence,
   );
   const latest = new Map<string, (typeof events)[number]>();
   const states = new Map<string, 'owed' | 'confirmed'>();
+  const held = new Map<string, HostedCleanupHold>();
   for (const event of events)
     if (event.kind === 'hosted.cleanup')
       latest.set(event.payload['cleanupId'] as string, event);
@@ -246,6 +436,7 @@ export async function reconcileHostedTurnCleanup(
       event.payload['descriptorRef'],
     );
     if (promptId && descriptor.promptId !== promptId) continue;
+    if (descriptor.promptId === excludedPromptId) continue;
     const state = event.payload['state'] as 'owed' | 'confirmed';
     states.set(descriptor.promptId, state);
     if (state !== 'owed') continue;
@@ -268,11 +459,31 @@ export async function reconcileHostedTurnCleanup(
       descriptor.sessionKey,
       descriptor.runtimeSessionId,
     );
-    await broker.release({
-      bindingId: descriptor.bindingId,
-      generation: descriptor.generation,
-      ...(drain ? { drain: true } : {}),
-    });
+    try {
+      await broker.release({
+        bindingId: descriptor.bindingId,
+        generation: descriptor.generation,
+        ...(drain ? { drain: true } : {}),
+      });
+    } catch (cause) {
+      if (
+        drain ||
+        !(cause instanceof HostedWorkspaceBrokerRejection) ||
+        cause.status !== 409 ||
+        cause.code !== 'runtime_session_held' ||
+        !(await hasBackgroundHoldEvidence(session, descriptor))
+      )
+        throw cause;
+      held.set(descriptor.promptId, {
+        cleanupId,
+        descriptorRef: assertManagedSessionDurableRef(
+          event.payload['descriptorRef'],
+          'cleanup descriptor',
+        ),
+        runtimeSessionId: descriptor.runtimeSessionId,
+      });
+      continue;
+    }
     await commitCleanup(
       session,
       cleanupId,
@@ -284,5 +495,5 @@ export async function reconcileHostedTurnCleanup(
     );
     states.set(descriptor.promptId, 'confirmed');
   }
-  return states;
+  return { states, held };
 }

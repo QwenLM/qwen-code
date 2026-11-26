@@ -4,12 +4,47 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { parseAndFormatApiError } from './errorParsing.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  parseAndFormatApiError,
+  REPETITIVE_TOOL_CALLS_HINT,
+} from './errorParsing.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { StructuredError } from '../core/turn.js';
 
 describe('parseAndFormatApiError', () => {
+  it('only translates marked subscription errors', () => {
+    const translate = vi.fn(() => 'translated quota');
+    const message =
+      "You've used up your weekly credits. Please try again after the reset.";
+    expect(
+      parseAndFormatApiError(
+        { message, status: 403 },
+        AuthType.QWEN_SUBSCRIPTION,
+        translate,
+      ),
+    ).toBe(`[API Error: ${message}]`);
+    expect(translate).not.toHaveBeenCalled();
+    const quota = { type: 'subscription_quota', memberType: 'pro' };
+    expect(
+      parseAndFormatApiError(
+        { message, status: 402, subscriptionQuota: quota },
+        AuthType.QWEN_SUBSCRIPTION,
+        translate,
+      ),
+    ).toBe('[API Error: translated quota]');
+  });
+  it('keeps subscription rate-limit text without adding client advice', () => {
+    expect(
+      parseAndFormatApiError(
+        {
+          status: 429,
+          message: 'Concurrent request limit exceeded (principal scope)',
+        },
+        AuthType.QWEN_SUBSCRIPTION,
+      ),
+    ).toBe('[API Error: Concurrent request limit exceeded (principal scope)]');
+  });
   const vertexMessage = 'request a quota increase through Vertex';
   const geminiMessage = 'request a quota increase through AI Studio';
 
@@ -175,6 +210,60 @@ describe('parseAndFormatApiError', () => {
   // that string and double-wrap it. Returning already-formatted input
   // unchanged is the safety net that keeps the symptom from coming back even
   // if a future code path forgets to mark its throws.
+  describe('repeated tool-call rejection', () => {
+    const rejection =
+      'Repetitive tool calls detected in the conversation history. The same tool call with identical name and arguments has been repeated across multiple consecutive rounds.';
+
+    it('adds the recovery hint to a StructuredError', () => {
+      const error: StructuredError = {
+        message: `400 ${rejection}`,
+        status: 400,
+      };
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: 400 ${rejection}]${REPETITIVE_TOOL_CALLS_HINT}`,
+      );
+    });
+
+    it('adds the recovery hint to a JSON error payload', () => {
+      const payload = JSON.stringify({
+        error: { code: 'invalid_parameter_error', message: rejection },
+      });
+      expect(parseAndFormatApiError(`400 status code ${payload}`)).toBe(
+        `[API Error: ${rejection}]${REPETITIVE_TOOL_CALLS_HINT}`,
+      );
+    });
+
+    it('adds the recovery hint to a plain string', () => {
+      expect(parseAndFormatApiError(rejection)).toBe(
+        `[API Error: ${rejection}]${REPETITIVE_TOOL_CALLS_HINT}`,
+      );
+    });
+
+    it('targets the rejected session and offers a fallback for clients without /clear', () => {
+      const message = parseAndFormatApiError(rejection);
+      expect(message).toContain('qwen --resume <session-id> -p "/compress"');
+      expect(message).toContain('start a new session');
+      expect(message).not.toContain('/clear');
+    });
+
+    it('returns an already-hinted message unchanged', () => {
+      const formatted = parseAndFormatApiError(rejection);
+      expect(parseAndFormatApiError(formatted)).toBe(formatted);
+      expect(parseAndFormatApiError({ message: formatted, status: 400 })).toBe(
+        formatted,
+      );
+    });
+
+    it('leaves other 400 errors without the hint', () => {
+      expect(
+        parseAndFormatApiError({
+          message: '400 Invalid tool schema',
+          status: 400,
+        }),
+      ).toBe('[API Error: 400 Invalid tool schema]');
+    });
+  });
+
   describe('idempotency', () => {
     it('returns an already-formatted plain string unchanged', () => {
       const formatted =

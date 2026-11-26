@@ -18,6 +18,7 @@ import type {
 import { DeviceFlowRegistry } from './auth/device-flow.js';
 import {
   buildDaemonStatusResponse,
+  sseMaxConnections,
   type BuildDaemonStatusOptions,
   type DaemonMetricsBucket,
 } from './daemon-status.js';
@@ -25,6 +26,10 @@ import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
 import type { DaemonLogger } from './daemon-logger.js';
+import {
+  DISABLED_LOAD_ADMISSION_SNAPSHOT,
+  type LoadAdmissionSnapshot,
+} from './load-admission.js';
 import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
 import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 
@@ -35,6 +40,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
     eventRingSize: 8_000,
+    eventRingMaxBytes: 8 * 1024 * 1024,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
@@ -123,6 +129,44 @@ describe('buildDaemonStatusResponse', () => {
         'Daemon file logging is degraded; inspect full status for details.',
     });
     expect(JSON.stringify(response.issues)).not.toContain('/secret/path');
+  });
+
+  it('exposes the bridge event ring byte cap and retention diagnostics', async () => {
+    const session = {
+      sessionId: 'retention-session',
+      workspaceCwd: BASE_WORKSPACE,
+      createdAt: '2026-07-01T00:00:00.000Z',
+      clientCount: 1,
+      subscriberCount: 0,
+      attachCount: 1,
+      pendingPromptCount: 0,
+      pendingPermissionCount: 0,
+      hasActivePrompt: false,
+      lastEventId: 10,
+      eventRingCount: 2,
+      eventRingBytes: 1024,
+      eventRingEarliestEventId: 9,
+      eventRingEvictedEvents: 8,
+      eventRingEvictedBytes: 4096,
+      availableCommandsSnapshotBytes: 128,
+      maxJournalEvents: 10_000,
+      maxJournalBytes: 8 * 1024 * 1024,
+    };
+    const options = makeOptions({
+      bridgeSnapshot: {
+        ...BASE_BRIDGE_SNAPSHOT,
+        limits: { ...BASE_BRIDGE_SNAPSHOT.limits, eventRingMaxBytes: 2048 },
+        sessionCount: 1,
+        sessions: [session],
+      },
+    });
+    options.opts.eventRingMaxBytes = 4096;
+    const summary = await buildDaemonStatusResponse('summary', options);
+    expect(summary.limits.eventRingMaxBytes).toBe(2048);
+    expect(summary.full).toBeUndefined();
+    const full = await buildDaemonStatusResponse('full', options);
+    expect(full.limits.eventRingMaxBytes).toBe(2048);
+    expect(full.full?.sessions).toEqual([session]);
   });
 
   it('includes maxTotalSessions in daemon status limits', async () => {
@@ -1116,6 +1160,74 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('reports the load admission snapshot and warns while overloaded', async () => {
+    const snapshot: LoadAdmissionSnapshot = {
+      enabled: true,
+      overloaded: true,
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 120,
+      sampledAtMs: 1_000,
+    };
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ loadAdmissionSnapshot: snapshot }),
+    );
+
+    expect(response.runtime.loadAdmission).toEqual(snapshot);
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'system_overloaded',
+          severity: 'warning',
+        }),
+      ]),
+    });
+  });
+
+  it('reports a normal load admission snapshot without an issue', async () => {
+    const snapshot: LoadAdmissionSnapshot = {
+      enabled: true,
+      overloaded: false,
+      reason: null,
+      loadRatio: 0.3,
+      eventLoopLagP99Ms: 12,
+      sampledAtMs: 1_000,
+    };
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ loadAdmissionSnapshot: snapshot }),
+    );
+
+    expect(response.runtime.loadAdmission).toEqual(snapshot);
+    expect(
+      response.issues.filter((issue) => issue.code === 'system_overloaded'),
+    ).toHaveLength(0);
+  });
+
+  it('reports the disabled snapshot without an issue', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        loadAdmissionSnapshot: DISABLED_LOAD_ADMISSION_SNAPSHOT,
+      }),
+    );
+
+    expect(response.runtime.loadAdmission).toEqual(
+      DISABLED_LOAD_ADMISSION_SNAPSHOT,
+    );
+    expect(
+      response.issues.filter((issue) => issue.code === 'system_overloaded'),
+    ).toHaveLength(0);
+  });
+
+  it('omits the load admission section when no monitor is wired', async () => {
+    const response = await buildDaemonStatusResponse('summary', makeOptions());
+
+    expect(response.runtime.loadAdmission).toBeUndefined();
+  });
+
   it('uses total admission live count for total session capacity warnings', async () => {
     const options = makeOptions({
       totalAdmissionLiveCount: 8,
@@ -1285,6 +1397,11 @@ describe('buildDaemonStatusResponse', () => {
             pendingPermissionCount: 0,
             hasActivePrompt: false,
             lastEventId: 0,
+            eventRingCount: 0,
+            eventRingBytes: 0,
+            eventRingEvictedEvents: 0,
+            eventRingEvictedBytes: 0,
+            availableCommandsSnapshotBytes: 0,
             maxJournalEvents: 10_000,
             maxJournalBytes: 8 * 1024 * 1024,
           },
@@ -2109,6 +2226,12 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: true,
               lastEventId: 10,
+              eventRingCount: 2,
+              eventRingBytes: 1024,
+              eventRingEarliestEventId: 9,
+              eventRingEvictedEvents: 8,
+              eventRingEvictedBytes: 4096,
+              availableCommandsSnapshotBytes: 128,
               maxJournalEvents: 10_000,
               maxJournalBytes: 8 * 1024 * 1024,
             },
@@ -2123,6 +2246,11 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 0,
+              eventRingCount: 0,
+              eventRingBytes: 0,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
               maxJournalEvents: 10_000,
               maxJournalBytes: 8 * 1024 * 1024,
             },
@@ -2158,6 +2286,12 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 1,
+              eventRingCount: 1,
+              eventRingBytes: 128,
+              eventRingEarliestEventId: 1,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
               maxJournalEvents: 10_000,
               maxJournalBytes: 8 * 1024 * 1024,
             },
@@ -2188,6 +2322,12 @@ describe('buildDaemonStatusResponse', () => {
           pendingPermissionCount: 0,
           hasActivePrompt: true,
           lastEventId: 1,
+          eventRingCount: 1,
+          eventRingBytes: 128,
+          eventRingEarliestEventId: 1,
+          eventRingEvictedEvents: 0,
+          eventRingEvictedBytes: 0,
+          availableCommandsSnapshotBytes: 0,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
         },
@@ -2208,6 +2348,12 @@ describe('buildDaemonStatusResponse', () => {
           pendingPermissionCount: 0,
           hasActivePrompt: false,
           lastEventId: 1,
+          eventRingCount: 1,
+          eventRingBytes: 128,
+          eventRingEarliestEventId: 1,
+          eventRingEvictedEvents: 0,
+          eventRingEvictedBytes: 0,
+          availableCommandsSnapshotBytes: 0,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
         },
@@ -2276,6 +2422,12 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: true,
               lastEventId: 1,
+              eventRingCount: 1,
+              eventRingBytes: 128,
+              eventRingEarliestEventId: 1,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
               maxJournalEvents: 10_000,
               maxJournalBytes: 8 * 1024 * 1024,
             },
@@ -2363,7 +2515,9 @@ interface MakeOptionsInput {
   lastActivityAt?: number | null;
   totalAdmissionLiveCount?: number;
   totalAdmissionInFlight?: number;
+  loadAdmissionSnapshot?: LoadAdmissionSnapshot;
   daemonLog?: DaemonLogger;
+  writerIdleTimeoutMs?: number;
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -2400,6 +2554,7 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       port: 4170,
       mode: 'http-bridge',
       rateLimit: input.rateLimitEnabled,
+      writerIdleTimeoutMs: input.writerIdleTimeoutMs,
     },
     boundWorkspace: BASE_WORKSPACE,
     bridge,
@@ -2450,6 +2605,19 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       ? { rateLimiter: makeRateLimiter(input.rateLimitHits) }
       : {}),
     getRestSseActive: () => 0,
+    getStreamOccupancy: () => ({
+      total: 0,
+      bySurface: {
+        restEvents: 0,
+        agentEvents: 0,
+        generation: 0,
+        artifactLibrary: 0,
+        hostedEvents: 0,
+        acpSse: 0,
+        acpWs: 0,
+      },
+      byListener: { primary: 0, 'local-control': 0, 'remote-access': 0 },
+    }),
     features: ['health', 'daemon_status'],
     protocolVersions: { current: 'v1', supported: ['v1'] },
     supportedDeviceFlowProviders: ['qwen-oauth'],
@@ -2471,6 +2639,9 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
             inFlight: input.totalAdmissionInFlight!,
           }),
         }),
+    ...(input.loadAdmissionSnapshot
+      ? { getLoadAdmissionSnapshot: () => input.loadAdmissionSnapshot! }
+      : {}),
   };
 }
 
@@ -2503,3 +2674,48 @@ function fakeInterval(): ReturnType<typeof setInterval> {
     unref: () => {},
   } as unknown as ReturnType<typeof setInterval>;
 }
+
+describe('SSE capacity normalization and effective writer-stall budget', () => {
+  it('derives the SSE cap from the listener headroom', () => {
+    expect(sseMaxConnections(256, undefined)).toBe(204);
+    expect(sseMaxConnections(10, undefined)).toBe(8);
+    expect(sseMaxConnections(1, undefined)).toBe(1);
+    expect(sseMaxConnections(0, undefined)).toBeNull();
+    expect(sseMaxConnections(undefined, undefined)).toBe(204);
+  });
+
+  it('normalizes explicit caps: floor at one stream, clamp to headroom', () => {
+    // Fractional values must not collapse to 0 (the enforcement site
+    // treats 0 as unlimited while status would publish a third state).
+    expect(sseMaxConnections(256, 0.8)).toBe(1);
+    expect(sseMaxConnections(10, 0.8)).toBe(1);
+    // An explicit cap above the listener budget cannot erase the
+    // reserved short-request headroom.
+    expect(sseMaxConnections(256, 500)).toBe(204);
+    expect(sseMaxConnections(256, 5)).toBe(5);
+    // 0 / Infinity keep meaning unlimited, even with the listener cap
+    // disabled — an explicit cap still applies in that case.
+    expect(sseMaxConnections(256, 0)).toBeNull();
+    expect(sseMaxConnections(256, Infinity)).toBeNull();
+    expect(sseMaxConnections(0, 100)).toBe(100);
+    expect(sseMaxConnections(256, -3)).toBeNull();
+    expect(sseMaxConnections(256, Number.NaN)).toBeNull();
+  });
+
+  it('reports the effective writer-stall budget, not the raw flag', async () => {
+    // The reaper is default-on: an unset flag must report the 60s
+    // default, not null (which would read as "no writer eviction").
+    const unset = await buildDaemonStatusResponse('summary', makeOptions({}));
+    expect(unset.limits.writerIdleTimeoutMs).toBe(60_000);
+    const explicit = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ writerIdleTimeoutMs: 30_000 }),
+    );
+    expect(explicit.limits.writerIdleTimeoutMs).toBe(30_000);
+    const disabled = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ writerIdleTimeoutMs: 0 }),
+    );
+    expect(disabled.limits.writerIdleTimeoutMs).toBeNull();
+  });
+});

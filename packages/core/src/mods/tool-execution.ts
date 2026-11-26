@@ -17,8 +17,8 @@ import {
   resolveRegisteredToolName,
 } from '../tools/tool-names.js';
 import { ToolErrorType } from '../tools/tool-error.js';
-import { MOD_MAX_BYTES } from './types.js';
-import { record, validateInput } from './dispatch.js';
+import { MOD_MAX_BYTES, MOD_MAX_DEPTH } from './types.js';
+import { jsonDepth, record, validateInput } from './dispatch.js';
 import {
   MOD_TOOL_RESERVED,
   type ModToolCall,
@@ -116,6 +116,7 @@ export async function executeModTool(
   >();
   let latest: CompletedToolCall | undefined;
   let executed: CompletedToolCall | undefined;
+  let hookStopReason: string | undefined;
   let attempts = 0;
   let answer: ModToolResult;
   try {
@@ -138,6 +139,7 @@ export async function executeModTool(
             : { ...request, args: structuredClone(args) };
         const completed = await execute(nativeRequest, active, check);
         latest = completed;
+        hookStopReason ??= completed.response.hookStopReason;
         if (
           completed.response.executionStatus === 'success' ||
           (completed.response.executionStatus === 'error' &&
@@ -149,7 +151,10 @@ export async function executeModTool(
           response.responseParts.find((part) => part.functionResponse)
             ?.functionResponse?.response ?? {};
         let json = JSON.stringify(result);
-        if (Buffer.byteLength(json) > MOD_MAX_BYTES / 2) {
+        if (
+          Buffer.byteLength(json) > MOD_MAX_BYTES / 2 ||
+          jsonDepth(json) > MOD_MAX_DEPTH / 2
+        ) {
           result = {
             output:
               '[Native tool result exceeds the Mod payload limit; return this reference unchanged to retain it.]',
@@ -173,6 +178,15 @@ export async function executeModTool(
   } catch (error) {
     answer = { deny: `Mod tool dispatch failed: ${String(error)}` };
   }
+  // The Mod selects the visible result, but any native attempt can stop the turn.
+  const finish = (
+    response: ToolCallResponseInfo,
+    completed?: CompletedToolCall,
+  ) => ({
+    response:
+      hookStopReason === undefined ? response : { ...response, hookStopReason },
+    completed,
+  });
   const referenced =
     !('deny' in answer) && answer.ref !== undefined
       ? refs.get(answer.ref)
@@ -185,11 +199,10 @@ export async function executeModTool(
     (latest.response.executionStatus === 'not_started' ||
       latest.response.executionStatus === 'cancelled')
   ) {
-    if (!executed) return { response: latest.response, completed: latest };
+    if (!executed) return finish(latest.response, latest);
     const message = `An earlier Mod tool attempt ran. A later attempt failed: ${latest.response.error.message}`;
-    return {
-      completed: executed,
-      response: {
+    return finish(
+      {
         ...latest.response,
         executionStatus: executed.response.executionStatus,
         error: new Error(message),
@@ -205,22 +218,23 @@ export async function executeModTool(
           },
         ],
       },
-    };
+      executed,
+    );
   }
   if (
     referenced &&
     !('deny' in answer) &&
     isDeepStrictEqual(answer.result, referenced.value.result)
   ) {
-    return {
-      response: {
+    return finish(
+      {
         ...referenced.completed.response,
         executionStatus:
           executed?.response.executionStatus ??
           referenced.completed.response.executionStatus,
       },
-      completed: executed ?? referenced.completed,
-    };
+      executed ?? referenced.completed,
+    );
   }
   const message =
     'deny' in answer
@@ -271,5 +285,5 @@ export async function executeModTool(
     errorType:
       native?.errorType ?? (error ? ToolErrorType.EXECUTION_DENIED : undefined),
   };
-  return { response, completed: executed ?? selected };
+  return finish(response, executed ?? selected);
 }

@@ -1,6 +1,28 @@
-import { DIFFS_TAG_NAME, VirtualizedFile, Virtualizer } from '@pierre/diffs';
+import { bundledLanguages } from './pierre-resources';
+import {
+  DIFFS_TAG_NAME,
+  getFiletypeFromFileName,
+  VirtualizedFile,
+  Virtualizer,
+} from '@pierre/diffs';
 import { useEffect, useRef } from 'react';
 import { useTheme } from '../../themeContext';
+
+/** @internal */
+export function getPreviewLanguage(
+  path: string,
+): keyof typeof bundledLanguages | 'text' {
+  // Fold case on the extension only: a whole-path toLowerCase() would break
+  // the detector's uppercase-only whole-name keys (Gemfile, BUILD, ...).
+  const detected = getFiletypeFromFileName(
+    path.replace(/\.([^./\\]+)$/, (dot) => dot.toLowerCase()),
+  );
+  const language =
+    detected === 'yml' ? 'yaml' : detected === 'kts' ? 'kotlin' : detected;
+  return Object.hasOwn(bundledLanguages, language)
+    ? (language as keyof typeof bundledLanguages)
+    : 'text';
+}
 
 export default function PierreFilePreview({
   path,
@@ -54,7 +76,8 @@ export default function PierreFilePreview({
         file: {
           name: path,
           contents: content,
-          lang: content.length > 1024 * 1024 ? 'text' : undefined,
+          lang:
+            content.length > 1024 * 1024 ? 'text' : getPreviewLanguage(path),
         },
         fileContainer,
       });

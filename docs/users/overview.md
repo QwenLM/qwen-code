@@ -40,7 +40,15 @@ cd your-project
 qwen
 ```
 
-On first launch you'll be prompted to connect a model provider. The menu offers **Alibaba ModelStudio** (the official recommended setup), **Third-party Providers** (built-in providers such as DeepSeek, MiniMax, Z.AI, Kimi, and OpenRouter, connected with an API key), and **Custom Provider** (a local server, proxy, or unsupported provider). For the [Alibaba Cloud Token Plan](https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856) ([intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model)), choose **Alibaba ModelStudio → Token Plan**; to use a ModelStudio API key, choose **Alibaba ModelStudio → Standard API Key** and follow the API setup guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2974721)). Then let's start with understanding your codebase. Try one of these commands:
+On first launch you’ll be prompted to connect a model provider. The menu offers [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) (use a Qwen Plus or Pro subscription from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli)), **QwenCloud** (the official recommended setup), **Alibaba ModelStudio**, **Third-party Providers** (built-in providers such as DeepSeek, MiniMax, Z.AI, Kimi, and OpenRouter, connected with an API key), and **Custom Provider** (a local server, proxy, or unsupported provider).
+
+To use your Qwen subscription, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) and sign in with your Qwen account. A **Plus or Pro subscription** unlocks access to **Qwen Code and Agent**. If you don’t have a subscription yet, visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) to subscribe to Plus or Pro, then return to Qwen Code and select [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli).
+
+For a QwenCloud key, choose **QwenCloud → Token Plan** or **QwenCloud → Standard API Key** and then pick the platform (China or International) — see [Authentication](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/).
+
+For the [Alibaba Cloud Token Plan](https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856) ([intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model)), choose **Alibaba ModelStudio → Token Plan**; to use a ModelStudio API key, choose **Alibaba ModelStudio → Standard API Key** and follow the API setup guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2974721)).
+
+Then let’s start with understanding your codebase. Try one of these commands:
 
 ```
 what does this project do?

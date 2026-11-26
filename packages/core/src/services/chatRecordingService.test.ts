@@ -32,7 +32,13 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import { computeInitialTurnFromHistory } from './session-turn-state.js';
+import * as storageUtils from '../utils/sessionStorageUtils.js';
+import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
+import { postProcessSummary } from './postCompactAttachments.js';
+import {
+  collectSessionTurnState,
+  computeInitialTurnFromHistory,
+} from './session-turn-state.js';
 import type { Content, Part } from '@google/genai';
 import type { FileDiff, McpAppResultDisplay } from '../tools/tools.js';
 import {
@@ -46,6 +52,10 @@ import {
   SessionWriterUnavailableError,
   type SessionWriterLease,
 } from './session-writer-lease.js';
+import {
+  deleteSessionGoalSidecar,
+  writeSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
@@ -58,6 +68,7 @@ import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundar
 import { fnResponse, userText } from '../test-utils/model-fixtures.js';
 import { CompressionStatus } from '../core/turn.js';
 import { markApiHistoryPrompt } from './session-api-history.js';
+import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 
 function branchTestRecord(
   uuid: string,
@@ -147,6 +158,15 @@ const attributionSnapshot = {
 };
 
 vi.mock('node:path');
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  assertSessionArchiveGeneration: vi.fn(),
+  readSessionArchiveGeneration: vi.fn(),
+  withSessionArchiveWriteLockSync: vi.fn((_path, run) => run()),
+}));
 vi.mock('node:child_process');
 vi.mock('node:crypto', () => ({
   randomUUID: vi.fn(),
@@ -157,6 +177,15 @@ vi.mock('node:crypto', () => ({
   })),
 }));
 vi.mock('../utils/jsonl-utils.js');
+// The goal sidecar does real fs/promises I/O; this suite mocks the sync fs
+// surface instead. Mock only the mutations (the projection stays real) so
+// the journal-hook cases can assert calls and inject failures.
+vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-goal-sidecar.js')>()),
+  // The original implementation survives the suite's restoreAllMocks.
+  writeSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+  deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+}));
 
 const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
@@ -262,6 +291,73 @@ describe('ChatRecordingService', () => {
     vi.restoreAllMocks();
   });
 
+  describe('getExistingTranscriptPath', () => {
+    const transcript =
+      '/test/project/root/.gemini/projects/test-project/chats/test-session-id.jsonl';
+
+    beforeEach(() => {
+      vi.mocked(path.basename).mockImplementation(
+        (file) => file.split('/').at(-1)!,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation((file) =>
+        file.startsWith('/'),
+      );
+    });
+
+    it('returns an existing local file and never creates it', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      const stat = vi.spyOn(fs, 'lstatSync').mockReturnValue({
+        isFile: () => true,
+        size: 100,
+      } as fs.Stats);
+      const managed = vi
+        .spyOn(storageUtils, 'readManagedExecutionEvidenceSync')
+        .mockReturnValue(false);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBe(transcript);
+      expect(stat).toHaveBeenCalledWith(transcript);
+      managed.mockReturnValue(true);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(undefined);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(false);
+      stat.mockReturnValue({ isFile: () => true, size: 0 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockReturnValue({ isFile: () => false, size: 100 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(fs.mkdirSync).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('does not broaden the lookup for a glob metacharacter in a session ID', async () => {
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-*');
+      const recorder = new ChatRecordingService(mockConfig, undefined, false);
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await recorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+    });
+
+    it('does not point a rotated recorder at the new session', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      legacyRecorder.pinSessionIdentity('test-session-id');
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+    });
+  });
+
   type UserArgs = Parameters<ChatRecordingService['recordUserMessage']>;
   type RestOf<T> = T extends [unknown, ...infer R] ? R : never;
 
@@ -324,6 +420,86 @@ describe('ChatRecordingService', () => {
     vi.mocked(jsonl.writeLine).mockClear();
     await expect(target.recordSessionModel(payload)).resolves.toBe(true);
   }
+
+  describe('persisted last user prompt notifications', () => {
+    it('publishes the recorded timestamp only after a successful human write', async () => {
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      const held = holdNext(vi.mocked(jsonl.writeLine));
+      user('question');
+      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalled());
+      expect(notify).not.toHaveBeenCalled();
+      held.resolve!();
+      await svc.flush();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        writes().find((record) => record.type === 'user')!.timestamp,
+        'test-session-id',
+      );
+    });
+
+    it('does not advance metadata when a human write fails', async () => {
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      user('not persisted');
+      await expect(svc.flush()).rejects.toThrow('disk full');
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('ignores assistant and cron activity but includes human mid-turn input', async () => {
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      reply('assistant output');
+      svc.recordCronPrompt([{ text: 'automatic prompt' }]);
+      await svc.flush();
+      expect(notify).not.toHaveBeenCalled();
+      svc.recordMidTurnUserMessage([{ text: 'follow up' }], 'follow up');
+      await svc.flush();
+      const midTurn = writes().find(
+        (record) => record.subtype === 'mid_turn_user_message',
+      )!;
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        midTurn.timestamp,
+        'test-session-id',
+      );
+    });
+
+    it('requests cold recovery after a persisted rewind', async () => {
+      user('first');
+      reply('first answer');
+      user('second');
+      await svc.flush();
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      svc.rewindRecording(1, { truncatedCount: 1 });
+      await svc.flush();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        undefined,
+        'test-session-id',
+      );
+    });
+
+    it('keeps a successful write successful when an observer throws', async () => {
+      svc.setLastUserPromptRecordedCallback(() => {
+        throw new Error('observer');
+      });
+      user('persisted');
+      await expect(svc.flush()).resolves.toBeUndefined();
+    });
+  });
+
+  it('cancels work on the replaced branch after a rewind', async () => {
+    const branch = svc.getBranchAbortSignal();
+    turn('first', 'first answer');
+    user('second');
+    await svc.flush();
+    expect(svc.getBranchAbortSignal()).toBe(branch);
+    expect(branch.aborted).toBe(false);
+
+    svc.rewindRecording(1, { truncatedCount: 1 });
+    expect(branch.aborted).toBe(true);
+    expect(svc.getBranchAbortSignal().aborted).toBe(false);
+  });
 
   describe('background execution recording ownership', () => {
     const turn: BackgroundNotificationTurn = {
@@ -432,6 +608,44 @@ describe('ChatRecordingService', () => {
       return { record: await flushed(), attachmentReferences };
     }
 
+    it("records a Mod's prompt as the Mod's, not the person's", async () => {
+      svc.recordUserMessage(
+        [{ text: 'framed' }],
+        undefined,
+        { displayText: 'Run the linter', hookContext: '', mod: 'lint' },
+        'prompt-1',
+      );
+      const record = await flushed();
+      expect(record.provenance).toBe('mod_prompt');
+      expect(record.systemPayload).toEqual({
+        displayText: 'Run the linter',
+        hookContext: '',
+        mod: 'lint',
+      });
+      // A title drawn from the conversation knows the message to leave out.
+      expect([...svc.getModPromptKeysForTitle()]).toEqual(['framed']);
+    });
+
+    it('keeps the newest Mod prompts as title keys, and none sent as the person', async () => {
+      const mod = (text: string, asUser?: true) =>
+        svc.recordUserMessage([{ text }], undefined, {
+          displayText: text,
+          hookContext: '',
+          mod: 'lint',
+          ...(asUser && { asUser }),
+        });
+      for (let index = 0; index < 20; index++) mod(`k${index}`);
+      // Submitted again, k0 is the newest and outlives the next one in.
+      mod('k0');
+      mod('k20');
+      expect(svc.getModPromptKeysForTitle().has('k0')).toBe(true);
+      expect(svc.getModPromptKeysForTitle().has('k1')).toBe(false);
+      // Unframed, its text is what the person might type themselves.
+      mod('Continue', true);
+      expect(svc.getModPromptKeysForTitle().has('Continue')).toBe(false);
+      await svc.flush();
+    });
+
     it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
       svc.recordUserMessage(userParts, undefined, undefined, 'prompt-1');
@@ -534,7 +748,47 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
     });
 
-    it('freezes the compression snapshot array against later live-history mutation', async () => {
+    it('persists the summary without its live transcript pointer', async () => {
+      vi.mocked(path.basename).mockReturnValue('session.jsonl');
+      const hint = buildCompactionTranscriptHint('/host/session.jsonl');
+      const liveSummary = postProcessSummary('Task summary', hint);
+      svc.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [
+          {
+            role: 'user',
+            parts: [{ text: 'Startup prelude' }, { text: liveSummary }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+        ],
+      });
+      const record = await flushed();
+      const checkpoint = JSON.stringify(record.systemPayload);
+      expect(checkpoint).not.toContain('<compaction-transcript-hint>');
+      expect(checkpoint).not.toContain('/host');
+      expect(checkpoint).not.toContain('session.jsonl');
+      expect(record.systemPayload).toMatchObject({
+        compressedHistory: [
+          {
+            parts: [
+              { text: 'Startup prelude' },
+              { text: postProcessSummary('Task summary') },
+            ],
+          },
+          {},
+        ],
+      });
+      expect(liveSummary).toContain(hint);
+    });
+
+    it('freezes compression snapshot containers against later live-history mutation', async () => {
       // Deferred serialization must keep entries aligned with promptIds.
       const first: Content = { role: 'user', parts: [{ text: 'A' }] };
       const second: Content = { role: 'user', parts: [{ text: 'B' }] };
@@ -552,6 +806,13 @@ describe('ChatRecordingService', () => {
       });
 
       // Mutations the same turn performs before the queued write drains.
+      first.parts = [
+        ...(first.parts ?? []),
+        createUserPromptSubmitContextPart('rescued hook context'),
+      ];
+      second.parts?.push(
+        createUserPromptSubmitContextPart('rescued hook context'),
+      );
       liveHistory.splice(1, 0, {
         role: 'user',
         parts: [
@@ -825,6 +1086,37 @@ describe('ChatRecordingService', () => {
       // to pre-stamp transcripts so old and new cold records compare equal.
       expect(cold).toBeDefined();
       expect('deliveredTurn' in (cold as object)).toBe(false);
+    });
+
+    it('persists teammateTurn only on a Teammate notification record (R17-1)', async () => {
+      // Producer guard for the teammateTurn stamp: the resume Prompts seed
+      // counts notification records bearing it, so the argument must survive
+      // recordNotification -> recordNotificationLike -> createNotificationRecord
+      // -> appendRecord. A cold background notification stays unmarked.
+      svc.recordNotification(
+        [{ text: 'teammate finished' }],
+        'Teammate finished',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+        /* teammateTurn */ true,
+      );
+      svc.recordNotification(
+        [{ text: 'background notification' }],
+        'Background',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+        /* teammateTurn */ false,
+      );
+
+      const [teammate, background] = await flushedAll();
+      expect(teammate).toMatchObject({
+        subtype: 'notification',
+        teammateTurn: true,
+      });
+      expect(background).toMatchObject({ subtype: 'notification' });
+      expect('teammateTurn' in (background as object)).toBe(false);
     });
   });
 
@@ -1123,6 +1415,102 @@ describe('ChatRecordingService', () => {
       expect(svc.getTranscriptCursor()).toEqual({ recordId: 'goal-record' });
     });
 
+    describe('goal sidecar projection', () => {
+      const sidecarPath =
+        '/test/project/root/.gemini/projects/test-project/chats/test-session-id.goal.json';
+      let emitSessionGoalChanged: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        vi.mocked(writeSessionGoalSidecar).mockClear();
+        vi.mocked(writeSessionGoalSidecar).mockResolvedValue(undefined);
+        vi.mocked(deleteSessionGoalSidecar).mockClear();
+        vi.mocked(deleteSessionGoalSidecar).mockResolvedValue(undefined);
+        emitSessionGoalChanged = vi.fn();
+        vi.mocked(mockConfig.getSessionService).mockReturnValue({
+          emitSessionGoalChanged,
+        } as unknown as ReturnType<Config['getSessionService']>);
+      });
+
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      };
+
+      it('writes the projection after the journal append and marks the catalog', async () => {
+        await svc.recordGoalState('goal-record', goalPayload);
+        await settle();
+
+        expect(writeSessionGoalSidecar).toHaveBeenCalledWith(sidecarPath, {
+          v: 1,
+          goalId: 'goal-1',
+          status: 'active',
+          objective: 'ship it',
+          updatedAt: 100,
+        });
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).toHaveBeenCalledWith('test-session-id');
+      });
+
+      it('deletes the projection when the goal is cleared', async () => {
+        await svc.recordGoalState('goal-record', {
+          ...goalPayload,
+          cause: 'clear',
+          snapshot: { ...goalPayload.snapshot, goal: null },
+        });
+        await settle();
+
+        expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(sidecarPath);
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).toHaveBeenCalledWith('test-session-id');
+      });
+
+      it('a sidecar failure never fails the journal', async () => {
+        vi.mocked(writeSessionGoalSidecar).mockRejectedValueOnce(
+          new Error('disk full'),
+        );
+
+        const record = await svc.recordGoalState('goal-record', goalPayload);
+        await settle();
+
+        expect(record.uuid).toBe('goal-record');
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
+
+      it('does not touch the projection when the journal append fails', async () => {
+        // The projection refresh runs only after the strict append resolves;
+        // a failed append must leave the sidecar and the catalog clock alone.
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('disk full'),
+        );
+
+        await expect(
+          svc.recordGoalState('goal-record', goalPayload),
+        ).rejects.toThrow('disk full');
+        await settle();
+
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
+
+      it('skips the projection for managed logs', async () => {
+        // Managed logs own their metadata; the guard must short-circuit
+        // before any sidecar mutation or catalog mark.
+        const managed = new ChatRecordingService(mockConfig, undefined, true);
+        managed.bindManagedSink({
+          logSize: () => 0,
+        } as unknown as Parameters<ChatRecordingService['bindManagedSink']>[0]);
+
+        managed.refreshGoalProjection(goalPayload.snapshot.goal);
+        await settle();
+
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
+    });
+
     it('restores the persisted cursor when a queued append fails', async () => {
       user('persisted baseline');
       await svc.flush();
@@ -1385,8 +1773,202 @@ describe('ChatRecordingService', () => {
   });
 
   describe('rewindRecording', () => {
+    it.each(['live', 'full restore', 'selective restore'])(
+      'rewinds hooks recorded before the prompt through %s',
+      async (mode) => {
+        user('keep', undefined, undefined, 'p1');
+        reply('keep reply');
+        const before = (await flushedAll()).at(-1)!;
+        const hook = {
+          'event.name': 'hook_lifecycle' as const,
+          v: 1 as const,
+          kind: 'hook' as const,
+          executionId: 'pre-prompt-hook',
+          runtimeId: 'runtime',
+          sessionId: 'test-session-id',
+          promptId: 'p2',
+          agentId: null,
+          eventName: 'UserPromptExpansion',
+          hookType: 'command' as const,
+          source: 'project' as const,
+          name: 'safe',
+          startedAt: 100,
+          phase: 'started' as const,
+        };
+        svc.recordUiTelemetryEvent(hook);
+        user('remove', undefined, undefined, 'p2');
+        const records = await flushedAll();
+        if (mode === 'full restore') svc.rebuildTurnBoundaries(records);
+        if (mode === 'selective restore') {
+          svc = new ChatRecordingService(mockConfig, undefined, false, {
+            lastCompletedUuid: records.at(-1)!.uuid,
+            ...collectSessionTurnState(records, 'test-session-id'),
+          });
+        }
+        svc.rewindRecording(1, { truncatedCount: 1 });
+        await svc.flush();
+        expect(
+          writes().findLast((r) => r.subtype === 'rewind')?.parentUuid,
+        ).toBe(before.uuid);
+        if (mode !== 'selective restore') {
+          const count = writes().length;
+          svc.recordUiTelemetryEvent({
+            ...hook,
+            phase: 'ended',
+            endedAt: 120,
+            durationMs: 20,
+            outcome: 'success',
+          });
+          await svc.flush();
+          expect(writes()).toHaveLength(count);
+        }
+      },
+    );
+
+    it('keeps recorded boundaries aligned after a rejected user message', async () => {
+      const displayedTurn = (text: string) => {
+        user(text, undefined, { displayText: text, hookContext: '' });
+        reply(`reply ${text}`);
+      };
+      displayedTurn('T0');
+      svc.recordUserMessage([], undefined, {
+        displayText: 'rejected',
+        hookContext: '',
+      });
+      displayedTurn('B');
+      displayedTurn('C');
+      const records = await flushedAll();
+      const target = records.find((r) => r.message?.parts?.[0]?.text === 'C')!;
+      const parent = records.find(
+        (r) => r.message?.parts?.[0]?.text === 'reply B',
+      )!;
+      const index = svc.getRewindTurnIndex(`legacy-record:${target.uuid}`);
+      expect(index).toBe(2);
+      svc.rewindRecording(index, { truncatedCount: 2 });
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['T0', 'B']);
+      await svc.flush();
+      expect(writes().findLast((r) => r.subtype === 'rewind')?.parentUuid).toBe(
+        parent.uuid,
+      );
+    });
+
+    it.each(['live', 'full restore', 'selective restore'])(
+      'resolves legacy boundaries with an invisible ordinary turn through %s',
+      async (mode) => {
+        let records: ChatRecord[];
+        if (mode === 'live') {
+          turn('A', 'reply A');
+          svc.recordUserMessage([
+            { inlineData: { mimeType: 'image/png', data: 'image' } },
+          ]);
+          reply('reply image');
+          turn('C', 'reply C');
+          turn('D', 'reply D');
+          records = await flushedAll();
+        } else {
+          records = resumedChain(
+            null,
+            ['a', 'user', 'A'],
+            ['ra', 'assistant', 'reply A'],
+            ['image', 'user', ''],
+            ['ri', 'assistant', 'reply image'],
+            ['c', 'user', 'C'],
+            ['rc', 'assistant', 'reply C'],
+            ['d', 'user', 'D'],
+            ['rd', 'assistant', 'reply D'],
+          );
+          // resumedChain synthesizes `message` after spreading `extra`, so the
+          // inline-data shape has to be applied here, not passed as extra.
+          records[2] = {
+            ...records[2]!,
+            message: {
+              role: 'user',
+              parts: [{ inlineData: { mimeType: 'image/png', data: 'image' } }],
+            },
+          };
+          if (mode === 'full restore') {
+            svc.rebuildTurnBoundaries(records);
+          } else {
+            const state = collectSessionTurnState(records, 'test-session-id');
+            svc = new ChatRecordingService(mockConfig, undefined, false, {
+              lastCompletedUuid: 'rd',
+              turnParentUuids: state.turnParentUuids,
+              turnPromptIds: state.turnPromptIds,
+            });
+          }
+        }
+        expect(records[2]!.message?.parts?.[0]).toHaveProperty('inlineData');
+        const target = records.find(
+          (r) => r.message?.parts?.[0]?.text === 'D',
+        )!;
+        const parent = records.find(
+          (r) => r.message?.parts?.[0]?.text === 'reply C',
+        )!;
+        const key = `legacy-record:${target.uuid}`;
+        expect(svc.getRewindTurnIndex(key)).toBe(3);
+        svc.rewindRecording(svc.getRewindTurnIndex(key), { truncatedCount: 2 });
+        await svc.flush();
+        expect(
+          writes().findLast((r) => r.subtype === 'rewind')?.parentUuid,
+        ).toBe(parent.uuid);
+        expect(svc.getRewindTurnIndex(key)).toBe(-1);
+      },
+    );
+
+    it.each(['live', 'full restore', 'selective restore'])(
+      'resolves prompt boundaries through %s without counting automatic records',
+      async (mode) => {
+        if (mode === 'live') {
+          user('A', undefined, undefined, 'p1', 'daemon-A');
+          svc.recordGoalRuntimeMessage('automatic', goalPermit('automatic'));
+          user('B', undefined, undefined, 'p2', 'daemon-B');
+        } else {
+          const records = resumedChain(
+            null,
+            ['a', 'user', 'A', { promptId: 'p1', daemonPromptId: 'daemon-A' }],
+            ['auto', 'user', 'automatic', { subtype: 'goal_runtime' }],
+            ['b', 'user', 'B', { promptId: 'p2', daemonPromptId: 'daemon-B' }],
+          );
+          if (mode === 'full restore') svc.rebuildTurnBoundaries(records);
+          else
+            svc = new ChatRecordingService(mockConfig, undefined, false, {
+              lastCompletedUuid: 'b',
+              ...collectSessionTurnState(records, 'test-session-id'),
+            });
+        }
+        expect(svc.getRewindDaemonPromptId('p1')).toBe('daemon-A');
+        expect(svc.getRewindDaemonPromptId('p2')).toBe('daemon-B');
+        expect(svc.getRewindDaemonPromptId('missing')).toBeUndefined();
+        expect(svc.getRewindTurnIndex('p2')).toBe(1);
+        expect(svc.getRewindTurnIndex('missing')).toBe(-1);
+        svc.rewindRecording(1, { truncatedCount: 1 });
+        expect(svc.getRewindTurnIndex('p2')).toBe(-1);
+        expect(svc.getRewindDaemonPromptId('p2')).toBeUndefined();
+        expect(svc.getRewindTurnIndex('p1')).toBe(0);
+        user('duplicate', undefined, undefined, 'p1');
+        expect(svc.getRewindTurnIndex('p1')).toBe(-1);
+        expect(svc.getRewindDaemonPromptId('p1')).toBeUndefined();
+        await svc.flush();
+      },
+    );
+
     const displayed = (text: string) =>
       user(`hidden ${text}`, undefined, { displayText: text, hookContext: '' });
+
+    it("keeps a Mod's prompt out of the title, in its turn's place", async () => {
+      displayed('A');
+      user('framed', undefined, {
+        displayText: 'Run the linter',
+        hookContext: '',
+        mod: 'lint',
+      });
+      displayed('B');
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', null, 'B']);
+      svc.rewindRecording(2, { truncatedCount: 1 });
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', null]);
+      await svc.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+    });
 
     it('drops display projections from rewound user turns', async () => {
       displayed('A');
@@ -1468,6 +2050,29 @@ describe('ChatRecordingService', () => {
 
       const rewind = writes().find((record) => record.subtype === 'rewind');
       expect(rewind?.parentUuid).toBe('assistant-2');
+    });
+
+    it('counts the user turns that rewind boundaries track', async () => {
+      svc.rebuildTurnBoundaries(
+        resumedChain(
+          null,
+          ['user-1', 'user', 'first turn'],
+          ['assistant-1', 'assistant', 'response'],
+          [
+            'goal-runtime-1',
+            'user',
+            'Continue working.',
+            { subtype: 'goal_runtime', provenance: 'goal_runtime' },
+          ],
+          ['user-2', 'user', 'second turn'],
+        ),
+      );
+      expect(svc.getUserTurnCount()).toBe(2);
+      displayed('third');
+      expect(svc.getUserTurnCount()).toBe(3);
+      svc.rewindRecording(1, { truncatedCount: 2 });
+      expect(svc.getUserTurnCount()).toBe(1);
+      await svc.flush();
     });
 
     it('restores a rebuilt persisted tail after a failed append', async () => {
@@ -2589,6 +3194,149 @@ describe('ChatRecordingService', () => {
         modelId: 'qwen3-coder-flash',
         authType: 'openai',
       });
+    });
+  });
+
+  describe('recordSessionWorkflowMode', () => {
+    it('strictly writes explicit false once and rejects non-booleans', async () => {
+      await svc.recordSessionWorkflowMode(false);
+      await svc.recordSessionWorkflowMode(false);
+      expect(writes()).toEqual([
+        expect.objectContaining({
+          subtype: 'session_workflow_mode',
+          systemPayload: { enabled: false },
+        }),
+      ]);
+      await expect(
+        svc.recordSessionWorkflowMode('false' as unknown as boolean),
+      ).rejects.toThrow('boolean');
+      expect(svc.getSessionWorkflowMode()).toBe(false);
+    });
+
+    it('restores a projected false without duplicating it', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [],
+        sessionWorkflowMode: { enabled: false },
+      });
+      await service.recordSessionWorkflowMode(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(service.getSessionWorkflowMode()).toBe(false);
+    });
+
+    it('re-anchors the live choice even when rewind abandons its record', async () => {
+      user('first');
+      await svc.recordSessionWorkflowMode(false);
+      user('second');
+      await svc.recordSessionWorkflowMode(true);
+      vi.mocked(jsonl.writeLine).mockClear();
+      svc.rewindRecording(1, { truncatedCount: 1 });
+      const records = await flushedAll();
+      expect(subtypes(records)).toEqual(['rewind', 'session_workflow_mode']);
+      expect(records[1]?.systemPayload).toEqual({ enabled: true });
+      expect(records[1]?.parentUuid).toBe(records[0]?.uuid);
+    });
+
+    it('re-anchors a pending mode only after its strict write succeeds', async () => {
+      user('first');
+      await svc.recordSessionWorkflowMode(false);
+      user('second');
+      await svc.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+      const held = holdNext(vi.mocked(jsonl.writeLine));
+      const pending = svc.recordSessionWorkflowMode(true);
+      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+
+      svc.rewindRecording(1, { truncatedCount: 1 });
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      held.resolve?.();
+      await pending;
+      const records = await flushedAll();
+      expect(subtypes(records)).toEqual([
+        'session_workflow_mode',
+        'rewind',
+        'session_workflow_mode',
+      ]);
+      expect(records[2]?.systemPayload).toEqual({ enabled: true });
+      expect(records[2]?.parentUuid).toBe(records[1]?.uuid);
+    });
+
+    it('never writes a queued rewind anchor after the pending mode write fails', async () => {
+      user('first');
+      await svc.recordSessionWorkflowMode(false);
+      user('second');
+      await svc.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+      const held = holdNext(vi.mocked(jsonl.writeLine));
+      const pending = svc.recordSessionWorkflowMode(true);
+      const failure = pending.catch((error: unknown) => error);
+      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+
+      svc.rewindRecording(1, { truncatedCount: 1 });
+      const writeError = new Error('disk full');
+      held.reject?.(writeError);
+      expect(await failure).toBe(writeError);
+      await expect(svc.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(svc.getSessionWorkflowMode()).toBe(false);
+    });
+
+    it('strictly reports append failure and does not poison deduplication', async () => {
+      const service = legacyRecorder();
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw new Error('disk-full');
+      });
+      await expect(service.recordSessionWorkflowMode(true)).rejects.toThrow(
+        'disk-full',
+      );
+      expect(service.getSessionWorkflowMode()).toBeUndefined();
+      await service.recordSessionWorkflowMode(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('does not re-anchor a mode rejected before the legacy write queue', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sessionWorkflowMode: { enabled: false },
+      });
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw new Error('temporary file creation failure');
+      });
+      let settled = false;
+      let rewound = false;
+      const failure = service.recordSessionWorkflowMode(true).catch((error) => {
+        settled = true;
+        return error;
+      });
+      for (let step = 0; step < 20 && !settled; step++) {
+        await Promise.resolve();
+        if (service.getSessionWorkflowMode() === true) {
+          service.rewindRecording(0, { truncatedCount: 1 });
+          rewound = true;
+          break;
+        }
+      }
+      expect(await failure).toBeInstanceOf(Error);
+      if (!rewound) service.rewindRecording(0, { truncatedCount: 1 });
+      await service.flush();
+      expect(subtypes(writes())).toEqual(['rewind', 'session_workflow_mode']);
+      expect(writes().at(-1)?.systemPayload).toEqual({ enabled: false });
+      expect(writes()).not.toContainEqual(
+        expect.objectContaining({
+          subtype: 'session_workflow_mode',
+          systemPayload: { enabled: true },
+        }),
+      );
+    });
+
+    it('refuses a same-value request after writer ownership is lost', async () => {
+      await svc.recordSessionWorkflowMode(true);
+      vi.mocked(mockLease.assertOwnedAndUnchanged).mockRejectedValueOnce(
+        new SessionWriterLostError(),
+      );
+      await expect(svc.recordSessionWorkflowMode(true)).rejects.toThrow();
+      expect(writes()).toHaveLength(1);
     });
   });
 

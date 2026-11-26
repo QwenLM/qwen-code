@@ -10,6 +10,7 @@ import { parse } from 'shell-quote';
 import {
   getShellConfiguration,
   GitWorktreeService,
+  hasByteValuedAnsiCEscape,
   isWithinRoot,
   realpathNearestExistingAsync,
   splitCommands,
@@ -314,6 +315,12 @@ interface TrustedDaemonToolGuardRequest
 
 const UNVERIFIABLE_SCOPE_DENIAL_PREFIX =
   'Daemon shell guard could not establish the execution directory of this call: ';
+// The refusal names the boundary it enforced: a caller that retries elsewhere,
+// or hands the command to a fresh session, only moves the same denial. It
+// speaks about the directory, not the caller: a session whose own effective
+// directory moved outside the tracked one is refused the same way.
+const UNVERIFIABLE_SCOPE_DENIAL_HINT =
+  ' (a command runs only inside the session working directory or a worktree that session owns)';
 
 interface GuardToken {
   readonly text: string;
@@ -357,7 +364,11 @@ function envUnsetRemovesFunction(name: string, state: PrefixState): boolean {
 
 type GuardDenial = { allowed: false; reason: string };
 
-function sanitizeDenialPath(value: string, prefix: string): string {
+function sanitizeDenialPath(
+  value: string,
+  prefix: string,
+  suffix = '',
+): string {
   // Mirror containsUnsafeExternalToolGuardControlCharacter: control
   // characters would convert a clean denial into an invalid guard result.
   const stripped = [...value]
@@ -371,7 +382,8 @@ function sanitizeDenialPath(value: string, prefix: string): string {
       );
     })
     .join('');
-  const budget = EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS - prefix.length;
+  const budget =
+    EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS - prefix.length - suffix.length;
   if (stripped.length <= budget) return stripped;
   return `${stripped.slice(0, Math.max(1, budget - 1))}…`;
 }
@@ -380,10 +392,10 @@ function denyDynamicRelocation(): GuardDenial {
   return { allowed: false, reason: DYNAMIC_RELOCATION_DENIAL };
 }
 
-function denyTarget(prefix: string, target: string): GuardDenial {
+function denyTarget(prefix: string, target: string, suffix = ''): GuardDenial {
   return {
     allowed: false,
-    reason: `${prefix}${sanitizeDenialPath(target, prefix)}`,
+    reason: `${prefix}${sanitizeDenialPath(target, prefix, suffix)}${suffix}`,
   };
 }
 
@@ -683,6 +695,10 @@ function tokenizeSegment(
   } catch {
     return null;
   }
+  // ANSI-C byte and Unicode escapes can parse to different path bytes than
+  // bash executes. The parsed tokens cannot establish the actual target,
+  // so these segments fail closed.
+  if (hasByteValuedAnsiCEscape(segment)) return null;
   let depth = startDepth;
   const runs: GuardRun[] = [{ tokens: [], depth }];
   let redirectOperand = false;
@@ -3301,6 +3317,7 @@ async function evaluateBuiltInGuard(
           return denyTarget(
             UNVERIFIABLE_SCOPE_DENIAL_PREFIX,
             canonicalReported,
+            UNVERIFIABLE_SCOPE_DENIAL_HINT,
           );
         }
         if (
@@ -3315,7 +3332,11 @@ async function evaluateBuiltInGuard(
         GitWorktreeService.getWorktreesDir(request.sessionId),
       );
       if (!isWithinRoot(canonicalReported, ownedWorktrees)) {
-        return denyTarget(UNVERIFIABLE_SCOPE_DENIAL_PREFIX, canonicalReported);
+        return denyTarget(
+          UNVERIFIABLE_SCOPE_DENIAL_PREFIX,
+          canonicalReported,
+          UNVERIFIABLE_SCOPE_DENIAL_HINT,
+        );
       }
       canonicalEffectiveCwd = canonicalReported;
     }

@@ -1,5 +1,18 @@
 export { DingtalkChannel } from './DingtalkAdapter.js';
+export { DingtalkWebhookChannel } from './DingtalkWebhookChannel.js';
+export { webhookPlugin } from './webhook-plugin.js';
 export { downloadMedia } from './media.js';
+export {
+  ManagedDingtalkAdapter,
+  dingtalkSettings,
+} from './managed-dingtalk-adapter.js';
+export type {
+  DingtalkReplyContext,
+  DingtalkSettings,
+  ManagedDingtalkAdapterDeps,
+  ManagedDingtalkAdapterOptions,
+} from './managed-dingtalk-adapter.js';
+export { createManagedDingtalkDeps } from './managed-dingtalk-deps.js';
 
 import { DingtalkChannel } from './DingtalkAdapter.js';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
@@ -9,6 +22,11 @@ export const plugin: ChannelPlugin = {
   channelType: 'dingtalk',
   displayName: 'DingTalk',
   requiredConfigFields: ['clientId', 'clientSecret'],
+  // The runtime resolves env references from this list (plus the known
+  // credential fields); the settings store keys on management.fields[].
+  // envResolvable. Both must name cardTemplateId or a $VAR template id reaches
+  // the card API unresolved and every reply is terminally rejected (R2-3).
+  envResolvableConfigFields: ['cardTemplateId'],
   supportsOutputMode: true,
   management: {
     fields: [
@@ -25,6 +43,16 @@ export const plugin: ChannelPlugin = {
         kind: 'secret',
         required: true,
         envResolvable: true,
+      },
+      {
+        key: 'cardTemplateId',
+        label: 'Card Template ID',
+        kind: 'string',
+        envResolvable: true,
+        description:
+          'Operator-authored DingTalk card template id. When set, the managed ' +
+          'path (managed-dingtalk) renders each reply as one interactive card ' +
+          'instead of text messages; absent keeps the text path.',
       },
       {
         key: 'interactiveCards',

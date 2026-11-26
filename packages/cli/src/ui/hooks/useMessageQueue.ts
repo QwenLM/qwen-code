@@ -11,6 +11,9 @@ import type {
   GoalTurnHost,
   GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import type { UserPromptSubmitDecision } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit.js';
+import { restorePasteDraft } from '../utils/paste-placeholders.js';
 import { isSlashCommand } from '../utils/commandUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
@@ -24,6 +27,13 @@ export interface QueuedUserSubmission {
   kind: 'user';
   modelText: string;
   submittedPrompt?: string;
+  /** Editable user text; merged pastes can rename its placeholder IDs while
+   * submittedPrompt retains the original Hook declaration. */
+  displayText?: string;
+  humanInput?: HumanPromptInput;
+  hasUnknownInput?: boolean;
+  pasteExpansions?: ReadonlyMap<string, string>;
+  promptHook?: UserPromptSubmitDecision;
   turnKey: string;
   /**
    * Shell intent recorded when the message was submitted. The drain routes
@@ -65,6 +75,12 @@ export interface UseMessageQueueReturn {
     deferUntilIdle?: boolean,
     submittedPrompt?: string,
     shellMode?: boolean,
+    metadata?: {
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      hasUnknownInput?: boolean;
+      pasteExpansions?: ReadonlyMap<string, string>;
+    },
   ) => void;
   addPeerMessage: (
     message: string,
@@ -90,10 +106,17 @@ export interface UseMessageQueueReturn {
     onRemoved?: (turnKeys: string[]) => void,
   ) => QueuedUserSubmission | null;
   restoreMessages: (
-    messages: string[],
+    messages: Array<string | QueuedMessage>,
     submittedPrompt?: string,
     deferUntilIdle?: boolean,
     shellMode?: boolean,
+    metadata?: {
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      hasUnknownInput?: boolean;
+      pasteExpansions?: ReadonlyMap<string, string>;
+      promptHook?: UserPromptSubmitDecision;
+    },
   ) => void;
   restorePeerMessage: (
     message: string,
@@ -101,13 +124,21 @@ export interface UseMessageQueueReturn {
     displayed?: boolean,
     delivery?: PeerQueuedDelivery,
   ) => void;
-  drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
+  drainQueue: (
+    includeDeferred?: boolean,
+    goalTurnActive?: boolean,
+  ) => QueuedMessage[];
 }
 
-interface QueuedMessage {
+export interface QueuedMessage {
   key: string;
   text: string;
   submittedPrompt?: string;
+  displayText?: string;
+  humanInput?: HumanPromptInput;
+  hasUnknownInput?: boolean;
+  pasteExpansions?: ReadonlyMap<string, string>;
+  promptHook?: UserPromptSubmitDecision;
   deferUntilIdle: boolean;
   /**
    * Shell intent recorded at submit time (see QueuedUserSubmission).
@@ -140,11 +171,45 @@ function aggregateUserMessages(
   const submittedPrompt = messages
     .map((message) => message.submittedPrompt ?? message.text)
     .join('\n\n');
+  let pasteExpansions = new Map<string, string>();
+  const displayTexts = messages.map((message) => {
+    const display =
+      message.displayText ?? message.submittedPrompt ?? message.text;
+    if (!message.pasteExpansions?.size) return display;
+    const restored = restorePasteDraft(
+      display,
+      message.pasteExpansions,
+      pasteExpansions,
+    );
+    pasteExpansions = restored.pasteExpansions;
+    return restored.text;
+  });
+  const humanTexts = messages.flatMap(({ humanInput }) =>
+    humanInput === undefined ? [] : [humanInput.text],
+  );
   return {
     kind: 'user',
     modelText: text,
     turnKey: messages[0].key,
     submittedPrompt,
+    ...(messages.length === 1 && messages[0].promptHook
+      ? { promptHook: messages[0].promptHook }
+      : {}),
+    ...(messages.some(({ displayText }) => displayText !== undefined)
+      ? { displayText: displayTexts.join('\n\n') }
+      : {}),
+    ...(pasteExpansions.size > 0 ? { pasteExpansions } : {}),
+    ...(humanTexts.length > 0
+      ? {
+          humanInput: { text: humanTexts.join('\n\n') },
+          ...(messages.some(
+            (message) =>
+              message.hasUnknownInput || message.humanInput === undefined,
+          )
+            ? { hasUnknownInput: true }
+            : {}),
+        }
+      : {}),
     // Callers keep batches intent-homogeneous, so every member carries the
     // same value; the first represents the batch.
     ...(messages[0].shellMode === undefined
@@ -166,6 +231,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
       deferUntilIdle = false,
       submittedPrompt?: string,
       shellMode?: boolean,
+      metadata?: {
+        displayText?: string;
+        humanInput?: HumanPromptInput;
+        hasUnknownInput?: boolean;
+        pasteExpansions?: ReadonlyMap<string, string>;
+      },
     ) => {
       const text = message.trim();
       if (!text) return;
@@ -176,6 +247,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           text,
           deferUntilIdle,
           submittedPrompt,
+          ...metadata,
           ...(shellMode === undefined ? {} : { shellMode }),
         },
       ];
@@ -194,9 +266,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           key: nextMessageKey(),
           text,
           // Deferred exactly like the typed-input-deferred path: the
-          // mid-turn steer drain returns raw text only, and a drained
-          // envelope would be steered into the active turn with its
-          // projection lost.
+          // mid-turn steer drain would send a peer envelope as user input.
           deferUntilIdle: true,
           submittedPrompt: displayText,
           peer: true,
@@ -329,7 +399,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
         const batch: QueuedMessage[] = [];
         for (const message of plainMessages) {
           if (message.shellMode !== headIntent) break;
+          if (batch.length > 0 && message.promptHook) break;
           batch.push(message);
+          if (message.promptHook) break;
         }
         const batchKeys = new Set(batch.map(({ key }) => key));
         queueRef.current = queueRef.current.filter(
@@ -358,7 +430,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
 
   const getQueuedMessagesText = useCallback(() => {
     if (queuedMessages.length === 0) return '';
-    return queuedMessages.map(({ text }) => text).join('\n\n');
+    return queuedMessages
+      .map(({ text, displayText }) => displayText ?? text)
+      .join('\n\n');
   }, [queuedMessages]);
 
   const popAllMessages = useCallback(
@@ -382,23 +456,35 @@ export function useMessageQueue(): UseMessageQueueReturn {
 
   const restoreMessages = useCallback(
     (
-      messages: string[],
+      messages: Array<string | QueuedMessage>,
       submittedPrompt?: string,
       deferUntilIdle = false,
       shellMode?: boolean,
+      metadata?: {
+        displayText?: string;
+        humanInput?: HumanPromptInput;
+        hasUnknownInput?: boolean;
+        pasteExpansions?: ReadonlyMap<string, string>;
+        promptHook?: UserPromptSubmitDecision;
+      },
     ) => {
-      const restored = messages
-        .map((text) => text.trim())
-        .filter(Boolean)
-        .map((text) => ({
-          key: nextMessageKey(),
-          text,
-          ...(messages.length === 1 && submittedPrompt !== undefined
-            ? { submittedPrompt }
-            : {}),
-          deferUntilIdle,
-          ...(shellMode === undefined ? {} : { shellMode }),
-        }));
+      const restored = messages.flatMap((message): QueuedMessage[] => {
+        if (typeof message !== 'string') return [message];
+        const text = message.trim();
+        if (!text) return [];
+        return [
+          {
+            key: nextMessageKey(),
+            text,
+            ...(messages.length === 1 && submittedPrompt !== undefined
+              ? { submittedPrompt }
+              : {}),
+            deferUntilIdle,
+            ...(messages.length === 1 ? metadata : {}),
+            ...(shellMode === undefined ? {} : { shellMode }),
+          },
+        ];
+      });
       if (restored.length === 0) return;
       queueRef.current = [...restored, ...queueRef.current];
       setQueuedMessages(queueRef.current);
@@ -433,7 +519,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   const drainQueue = useCallback(
-    (includeDeferred = false, goalTurnActive = false): string[] => {
+    (includeDeferred = false, goalTurnActive = false): QueuedMessage[] => {
       const current = queueRef.current;
       if (current.length === 0) return [];
       const shouldDrain = (message: QueuedMessage) =>
@@ -446,13 +532,15 @@ export function useMessageQueue(): UseMessageQueueReturn {
       const rest = current.filter((message) => !shouldDrain(message));
       queueRef.current = rest;
       setQueuedMessages(rest);
-      return drained.map(({ text }) => text);
+      return drained;
     },
     [],
   );
 
   return {
-    messageQueue: queuedMessages.map(({ text }) => text),
+    messageQueue: queuedMessages.map(
+      ({ text, displayText }) => displayText ?? text,
+    ),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
     addMessage,
     addPeerMessage,

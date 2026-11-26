@@ -7,13 +7,14 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   uiTelemetryService,
   SessionEndReason,
   ToolNames,
-  persistSessionUsage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
 import {
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
@@ -30,6 +31,8 @@ export const clearCommand: SlashCommand = {
     return t('Clear conversation history and free up context');
   },
   kind: CommandKind.BUILT_IN,
+  // Session rotation must finish before the UI admits another turn.
+  canCancel: false,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context, _args) => {
     const { config } = context.services;
@@ -76,26 +79,13 @@ export const clearCommand: SlashCommand = {
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
 
-      // Persist current session's usage before resetting metrics
-      const metrics = uiTelemetryService.getMetrics();
-      const hasActivity = Object.values(metrics.models).some(
-        (m) => m.api.totalRequests > 0,
-      );
-      if (hasActivity) {
-        try {
-          persistSessionUsage({
-            sessionId: config.getSessionId(),
-            startTime: context.session.stats.sessionStartTime ?? new Date(),
-            endTime: new Date(),
-            project: config.getProjectRoot(),
-            metrics,
-          });
-        } catch {
-          // Best-effort — don't block /clear
-        }
-      }
+      flushRunUsageOnSessionSwap(config, config.getSessionId());
 
+      const interactiveMods = getInteractiveModSession(config);
+      interactiveMods?.invalidateTools();
       const newSessionId = config.startNewSession();
+      // In ACP, notify the session of the switch before yielding to old work.
+      if (interactiveMods) await interactiveMods.syncSession('clear');
 
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();
@@ -114,7 +104,7 @@ export const clearCommand: SlashCommand = {
       }
 
       // Clear UI first for immediate responsiveness
-      context.ui.clear();
+      context.ui.clear(newSessionId);
 
       const llmClient = config.getLlmClient();
       if (llmClient) {

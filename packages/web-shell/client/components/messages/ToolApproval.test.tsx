@@ -14,6 +14,7 @@ import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
 import type { SessionContentGenerator } from './AssistantMessage';
 import { WebShellCustomizationProvider } from '../../customization';
+import styles from './ToolApproval.module.css';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -23,6 +24,15 @@ const request: PermissionRequest = {
   options: [
     { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
     { id: 'reject', label: 'Reject', kind: 'reject_once' },
+  ],
+};
+
+const scopedRequest: PermissionRequest = {
+  ...request,
+  options: [
+    ...request.options,
+    { id: 'proceed_always_project', label: 'Project', kind: 'allow_always' },
+    { id: 'proceed_always_user', label: 'User', kind: 'allow_always' },
   ],
 };
 
@@ -133,8 +143,19 @@ function optionLabels(): (string | null | undefined)[] {
 
 function pressKey(target: Element, key: string): void {
   act(() => {
-    target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    target.dispatchEvent(
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }),
+    );
   });
+}
+
+function menuTrigger(): HTMLButtonElement {
+  return container!.querySelector('button[aria-haspopup="menu"]')!;
+}
+
+function openApprovalMenu(): HTMLElement[] {
+  pressKey(menuTrigger(), 'Enter');
+  return Array.from(document.body.querySelectorAll('[role="menuitem"]'));
 }
 
 describe('ToolApproval accessibility', () => {
@@ -595,6 +616,77 @@ describe('ToolApproval accessibility', () => {
     expect(command?.textContent).toBe('ls -la');
   });
 
+  it.each(['inline', 'floating'] as const)(
+    'renders the resolved workspace and complete prompt in the %s approval body',
+    (variant) => {
+      const workspace = `/repos/${'nested-directory/'.repeat(20)}destination`;
+      const prompt =
+        'Summarize the README.\n'.repeat(10) + 'Include the version.';
+      const approvalText = `Workspace: "${workspace}"\n\n${prompt}`;
+      const adapted = extractPendingPermission([
+        {
+          id: 'permission-delegation',
+          kind: 'permission',
+          requestId: 'request-delegation',
+          sessionId: 'session-delegation',
+          title: `[first-turn] in "${workspace}": Summarize the README…`,
+          options: [
+            {
+              optionId: 'proceed_once',
+              label: 'Allow once',
+              raw: { kind: 'allow_once' },
+            },
+            {
+              optionId: 'cancel',
+              label: 'Reject',
+              raw: { kind: 'reject_once' },
+            },
+          ],
+          toolCall: {
+            kind: 'other',
+            _meta: { toolName: 'create_sub_session' },
+            rawInput: { workspace: 'repo-b-id', prompt },
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: approvalText },
+              },
+            ],
+          },
+          preview: { kind: 'generic' },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ])!;
+      render();
+      act(() =>
+        root!.render(
+          <I18nProvider language="en">
+            <ToolApproval
+              request={adapted}
+              variant={variant}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>,
+        ),
+      );
+
+      expect(
+        container!.querySelector(`pre.${styles.content}`)?.textContent,
+      ).toBe(approvalText);
+      expect(adapted.rawInput?.workspace).toBe('repo-b-id');
+      act(() =>
+        optionButtons()
+          .find((button) => button.dataset.optionId === 'proceed_once')!
+          .click(),
+      );
+      expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+        'request-delegation',
+        'proceed_once',
+      );
+    },
+  );
+
   it('neutralises bidi and C0 controls in the rendered command block', () => {
     // Mirrors what `toManagedPermissionRequest` produces for an exec tool
     // (`rawInput: tool.args` + `contentIsInput: true`), i.e. the shape from
@@ -709,6 +801,121 @@ describe('ToolApproval accessibility', () => {
     expect(commandPre).toBeTruthy();
   });
 
+  it('neutralises bidi and C0 controls in the generic content block', () => {
+    // #13566 named three sites. The command block, the exec warnings and the
+    // description were sanitised by #13578; this `<pre>` — rendered for any
+    // approval that shows content without being an exec one, and reused as the
+    // body, the tooltip and the `aria-describedby` target — was still raw.
+    const craftedContent = [
+      'Writes to notes\u202e.txt', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'then \u2066--force\u2069', // bidi isolates
+      'and \u001b[31mstops\u001b[0m\tthere', // C0 ANSI escape, tab kept
+    ].join('\n');
+    render(undefined, {
+      id: 'req-13566-content',
+      toolName: 'write_file',
+      title: 'write_file',
+      content: [{ type: 'text', text: craftedContent }],
+      options: [
+        { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const contentPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent!.includes('Writes to notes'),
+    )!;
+    expect(contentPre).toBeTruthy();
+    const rendered = contentPre.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u2066');
+    expect(rendered).not.toContain('\u2069');
+    expect(rendered).not.toContain('\u001b');
+    // `\n` and `\t` stay unescaped so the block stays legible.
+    expect(rendered).toBe(
+      [
+        'Writes to notes\\u202e.txt',
+        'then \\u2066--force\\u2069',
+        'and \\u001b[31mstops\\u001b[0m\tthere',
+      ].join('\n'),
+    );
+    // The tooltip must not re-introduce the raw payload either.
+    expect(contentPre.getAttribute('title')).toBe(rendered);
+  });
+
+  it('neutralises bidi and C0 controls in the goal approval body', () => {
+    const craftedObjective = [
+      'Outcome: Audit \u202eopen PRs.',
+      'Done when: Every PR has \u001b[31mevidence\u001b[0m\u0007.',
+      'Must not: Push or comment.',
+    ].join('\n');
+    render(false, {
+      ...goalRequest,
+      id: 'crafted-goal',
+      rawInput: { objective: craftedObjective },
+      content: [{ type: 'text', text: craftedObjective }],
+    });
+
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const describedText = panel
+      .getAttribute('aria-describedby')!
+      .split(' ')
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' ');
+    expect(describedText).not.toContain('\u202e');
+    expect(describedText).not.toContain('\u001b');
+    expect(describedText).not.toContain('\u0007');
+    expect(describedText).toContain('Audit \\u202eopen PRs.');
+
+    switchGoalTab('full');
+    const fullText = container!.querySelector(
+      '[role="tabpanel"][data-state="active"]',
+    )!.textContent!;
+    expect(fullText).not.toContain('\u202e');
+    expect(fullText).not.toContain('\u001b');
+    expect(fullText).not.toContain('\u0007');
+    expect(fullText).toContain('Audit \\u202eopen PRs.');
+  });
+
+  it('neutralises controls in the goal replacement notice', () => {
+    const craftedNotice = 'Replace paused goal\u202e with this one?\u001b[31m';
+    render(false, {
+      ...goalRequest,
+      id: 'crafted-goal-notice',
+      rawInput: { objective: goalObjective },
+      content: [{ type: 'text', text: `${craftedNotice}\n\n${goalObjective}` }],
+    });
+
+    const notice = container!.querySelector('[class*="goalNotice"]')!;
+    expect(notice.textContent).toBe(
+      'Replace paused goal\\u202e with this one?\\u001b[31m',
+    );
+  });
+
+  it('neutralises controls in the edit diff path', () => {
+    const craftedPath = 'src/\u202eevil\u001b[31m\u0007.ts';
+    render(false, {
+      id: 'req-crafted-diff',
+      toolName: 'edit',
+      title: 'Edit',
+      content: [
+        {
+          type: 'diff',
+          path: craftedPath,
+          oldText: 'before',
+          newText: 'after',
+        },
+      ],
+      options: [
+        { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+
+    const path = container!.querySelector('[aria-label="File diff"]')!
+      .parentElement!.parentElement!.firstElementChild!;
+    expect(path.textContent).toBe('src/\\u202eevil\\u001b[31m\\u0007.ts');
+  });
+
   it('renders exec warnings alongside the command block', () => {
     const adapted = extractPendingPermission([
       {
@@ -806,6 +1013,22 @@ describe('ToolApproval accessibility', () => {
     pressKey(popover, '1');
     pressKey(popover, 'Escape');
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('sizes the explanation popover with a width utility instead of w-72', async () => {
+    render(undefined, execRequest, undefined, 'en', async function* () {});
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+
+    const popover = document.body.querySelector<HTMLElement>(
+      '[data-slot="popover-content"]',
+    )!;
+    expect(popover.className).toContain('w-[min(480px,calc(100vw-32px))]');
+    expect(popover.className).not.toContain('w-72');
   });
 
   it('only offers explanations for Shell commands', () => {
@@ -968,6 +1191,23 @@ describe('ToolApproval accessibility', () => {
     ]);
     act(() => optionButtons()[0].click());
     expect(onConfirm).toHaveBeenCalledWith(planRequest.id, 'reject');
+  });
+  it('labels the Managed allow/deny plan options with the frozen execution policy', () => {
+    const req = {
+      ...planRequest,
+      options: [
+        { id: 'allow', label: 'Allow', kind: 'allow_once' as const },
+        { id: 'deny', label: 'Deny', kind: 'reject_once' as const },
+      ],
+    };
+    render(undefined, req, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'deny',
+      'allow',
+    ]);
+    expect(container!.textContent).toContain('Full Access');
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(req.id, 'allow');
   });
 
   it('keeps ordinary tool permissions unchanged when a plan execution mode is supplied', () => {
@@ -1251,6 +1491,7 @@ describe('ToolApproval accessibility', () => {
 
   it('confirms the clicked option', () => {
     render(undefined);
+    expect(menuTrigger()).toBeNull();
     act(() => {
       optionButtons()[1]!.click();
     });
@@ -1259,7 +1500,7 @@ describe('ToolApproval accessibility', () => {
 
   it.each([
     ['en' as const, 'Yes, allow once', 'Allow once and switch to Default mode'],
-    ['zh-CN' as const, '是，允许一次', '允许一次并切换到默认模式'],
+    ['zh-CN' as const, '允许一次', '允许一次并切换到默认模式'],
   ])(
     'distinguishes the switch-to-default approval in %s',
     (language, allowOnceLabel, switchLabel) => {
@@ -1284,13 +1525,15 @@ describe('ToolApproval accessibility', () => {
         language,
       );
 
-      expect(optionLabels()).toEqual([
-        expect.stringContaining(allowOnceLabel),
-        expect.stringContaining(switchLabel),
+      expect(optionLabels()).toEqual([allowOnceLabel]);
+      const items = openApprovalMenu();
+      expect(items.map((item) => item.textContent)).toEqual([
+        allowOnceLabel,
+        switchLabel,
       ]);
 
       act(() => {
-        optionButtons()[1]!.click();
+        items[1].click();
       });
       expect(onConfirm).toHaveBeenCalledWith(
         'req-1',
@@ -1311,6 +1554,89 @@ describe('ToolApproval accessibility', () => {
     render(undefined);
     pressKey(optionButtons()[0]!, 'Escape');
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'reject');
+  });
+
+  it.each(['proceed_always_user', 'proceed_always_project'])(
+    'submits %s only on menu selection and guards duplicate approval',
+    (scope) => {
+      render(undefined, scopedRequest);
+      const [reject, allow] = optionButtons();
+      expect(document.activeElement).toBe(reject);
+      pressKey(reject, '3');
+      const item = openApprovalMenu().find(
+        (option) => option.dataset.optionId === scope,
+      )!;
+      expect(onConfirm).not.toHaveBeenCalled();
+      pressKey(item, '2');
+      expect(onConfirm).not.toHaveBeenCalled();
+      act(() => {
+        item.click();
+        allow.click();
+      });
+      expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+        scopedRequest.id,
+        scope,
+      );
+    },
+  );
+
+  it('disables all approval controls and clears the menu on request replacement', () => {
+    render(
+      undefined,
+      scopedRequest,
+      undefined,
+      'en',
+      undefined,
+      undefined,
+      true,
+    );
+    expect(menuTrigger().disabled).toBe(true);
+    expect(openApprovalMenu()).toHaveLength(0);
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    rerender(undefined, scopedRequest);
+    expect(openApprovalMenu()).toHaveLength(3);
+    rerender(undefined, { ...scopedRequest, id: 'next' });
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(optionButtons()[0]);
+    expect(onConfirm).not.toHaveBeenCalled();
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith('next', 'proceed');
+  });
+
+  it('keeps unclassified choices and distinct rejection scopes available', () => {
+    render(undefined, {
+      ...scopedRequest,
+      options: [
+        ...scopedRequest.options,
+        { id: 'never', label: 'Never allow', kind: 'reject_always' },
+        { id: 'custom', label: 'Custom decision' },
+      ],
+    });
+    expect(menuTrigger()).toBeNull();
+    expect(optionButtons().map((option) => option.dataset.optionId)).toEqual([
+      'reject',
+      'never',
+      'proceed_always_user',
+      'proceed_always_project',
+      'proceed',
+      'custom',
+    ]);
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(request.id, 'never');
+  });
+
+  it('focuses the menu when no direct decision is offered', () => {
+    render(undefined, {
+      ...scopedRequest,
+      options: scopedRequest.options.filter(
+        (option) => option.kind === 'allow_always',
+      ),
+    });
+    expect(optionButtons()).toHaveLength(0);
+    expect(document.activeElement).toBe(menuTrigger());
+    expect(openApprovalMenu()).toHaveLength(2);
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it('moves focus between options with arrow keys (roving tabindex)', () => {
@@ -1396,14 +1722,13 @@ describe('ToolApproval accessibility', () => {
     const opts = optionButtons();
     expect(opts.map((o) => o.getAttribute('data-option-id'))).toEqual([
       'cancel',
-      'proceed_always_user',
-      'proceed_always_project',
       'proceed_once',
     ]);
     // Launching the agent is the proposed next action: focus and initial
     // selection land on the one-shot allow instead of the reject button.
-    expect(document.activeElement).toBe(opts[3]);
-    expect(opts[3]!.tabIndex).toBe(0);
+    expect(document.activeElement).toBe(opts[1]);
+    // The VS Code host finds the selected action by its tab index.
+    expect(opts.map((option) => option.tabIndex)).toEqual([-1, 0]);
   });
 
   it('defaults an agent-launch dialog to Reject when no one-shot allow exists', () => {
@@ -1432,6 +1757,11 @@ describe('ToolApproval accessibility', () => {
     expect(opts[0]!.getAttribute('data-option-id')).toBe('cancel');
     expect(document.activeElement).toBe(opts[0]);
     expect(opts[0]!.tabIndex).toBe(0);
+    expect(opts).toHaveLength(1);
+    expect(openApprovalMenu().map((option) => option.dataset.optionId)).toEqual(
+      ['proceed_always_user', 'proceed_always_project'],
+    );
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it('leaves Enter to native button activation (no double-press guard)', () => {
@@ -1472,14 +1802,11 @@ describe('ToolApproval accessibility', () => {
   });
 
   it.each([
-    [
-      'en' as const,
-      ['Reject', 'Yes, restore previous mode', 'Yes, allow once'],
-    ],
-    ['zh-CN' as const, ['拒绝', '是，恢复之前的模式', '是，允许一次']],
+    ['en' as const, 'Reject', 'Yes, allow once', 'Yes, restore previous mode'],
+    ['zh-CN' as const, '拒绝', '允许一次', '是，恢复之前的模式'],
   ])(
-    'renders plan-mode allow_once options as distinct, localized buttons in %s',
-    (language, expectedLabels) => {
+    'keeps manual approval primary and localizes the plan menu in %s',
+    (language, rejectLabel, allowLabel, restoreLabel) => {
       // plan mode emits two allow_once options (restore_previous +
       // proceed_once). They must stay distinct AND both localize: before
       // restore_previous got its own i18n key, zh-CN leaked the English server
@@ -1487,8 +1814,7 @@ describe('ToolApproval accessibility', () => {
       render(
         undefined,
         {
-          id: 'req-plan',
-          content: [],
+          ...planRequest,
           options: [
             {
               id: 'restore_previous',
@@ -1507,13 +1833,21 @@ describe('ToolApproval accessibility', () => {
         language,
       );
       const opts = optionButtons();
-      expect(opts).toHaveLength(3);
       expect(opts.map((o) => o.getAttribute('data-option-id'))).toEqual([
         'reject',
-        'restore_previous',
         'proceed_once',
       ]);
-      expect(optionLabels()).toEqual(expectedLabels);
+      expect(optionLabels()).toEqual([rejectLabel, allowLabel]);
+      const items = openApprovalMenu();
+      expect(items.map((option) => option.textContent)).toEqual([
+        allowLabel,
+        restoreLabel,
+      ]);
+      act(() => items[1].click());
+      expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+        planRequest.id,
+        'restore_previous',
+      );
     },
   );
 
@@ -1545,8 +1879,8 @@ describe('ToolApproval accessibility', () => {
         { id: 'reject', label: 'Reject', kind: 'reject_once' },
       ],
     });
-    expect(optionLabels()).toEqual([
-      'Reject',
+    expect(optionLabels()).toEqual(['Reject', 'Yes, allow once']);
+    expect(openApprovalMenu().map((option) => option.textContent)).toEqual([
       'Yes, allow once',
       'Yes, allow once',
     ]);
@@ -1562,7 +1896,11 @@ describe('ToolApproval accessibility', () => {
         { id: 'reject', label: 'Reject', kind: 'reject_once' },
       ],
     });
-    expect(optionLabels()).toEqual(['Reject', 'Allow A', 'Allow B']);
+    expect(optionLabels()).toEqual(['Reject', 'Allow A']);
+    expect(openApprovalMenu().map((option) => option.textContent)).toEqual([
+      'Allow A',
+      'Allow B',
+    ]);
   });
 
   it('re-enables confirmation when a new request arrives', () => {
@@ -1845,5 +2183,144 @@ describe('goal approval objective whitespace', () => {
       container!.querySelector('[role="tabpanel"][data-state="active"]')!
         .textContent,
     ).toBe(`${goalNotice}\n\n${goalObjective}`);
+  });
+});
+
+describe('floating variant scroll layout', () => {
+  // Regression guard for the nested-scrollbar bug: in the floating card the
+  // diff line list must defer its scroll to the card's content region (one
+  // scroll container, decision buttons pinned) instead of capping itself at
+  // 400px with a second scrollbar.
+  function renderVariant(
+    variant: 'inline' | 'floating',
+    leadingContent: unknown[] = [],
+  ): void {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-float',
+        kind: 'permission',
+        requestId: 'request-edit-float',
+        sessionId: 'session-edit-float',
+        title: 'Edit: /outside/example.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            ...leadingContent,
+            {
+              type: 'diff',
+              path: '/outside/example.txt',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+              variant={variant}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+  }
+
+  it('lets the diff lines fill the card content region', () => {
+    renderVariant('floating');
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    const diffRegion = dialog.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    // The keyboard-inspect path stays intact: the line list is still the
+    // focusable diff region.
+    expect(diffRegion.tabIndex).toBe(0);
+    // ...and it defers its scroll to the region instead of adding a nested
+    // scrollbar of its own.
+    expect(diffRegion.className).toContain('linesFill');
+    // The content region wrapping the diff is a direct child of the card, so
+    // the sheet's flex budget — not a sheet-level scrollbar — absorbs the
+    // diff.
+    const wrapper = diffRegion.closest<HTMLElement>('[data-plan-interactive]')!;
+    expect(wrapper.parentElement).toBe(dialog);
+  });
+
+  it('keeps the exec command region a direct child of the floating sheet', () => {
+    // The `.floating > .code` half of the scroll-region rule (pinned as CSS
+    // text in ToolApproval.css.test.ts) rests on a DOM premise: the command
+    // wrapper is a direct child of the panel that carries .floating. Shell
+    // command approvals are the common floating case, so guard the premise
+    // with a render: wrap the region in one more element and the child
+    // combinator stops matching, the command no longer absorbs the sheet's
+    // overflow, and the decision buttons are clipped again.
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <ToolApproval
+            request={execRequest}
+            onConfirm={onConfirm}
+            variant="floating"
+          />
+        </I18nProvider>,
+      ),
+    );
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    expect(dialog.classList.contains(styles.floating)).toBe(true);
+    expect(
+      Array.from(dialog.children).some((el) =>
+        el.classList.contains(styles.code),
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps every region of a compound card a floored direct child of the sheet', () => {
+    // The issue's own reproduction: an outside-workspace write emits a warning
+    // text block before the diff block, so the card renders two sibling
+    // regions. Both must be direct children of the sheet, outside the
+    // .planContent exemption, so `.floating > .content:not(.planContent)`
+    // gives each one the 3.5em floor (pinned in ToolApproval.css.test.ts) and
+    // the warning cannot be squeezed below a readable height by the diff.
+    renderVariant('floating', [
+      {
+        type: 'content',
+        content: { type: 'text', text: 'Path is outside the workspace' },
+      },
+    ]);
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    const regions = Array.from(dialog.children).filter((el) =>
+      el.classList.contains(styles.content),
+    );
+    expect(regions).toHaveLength(2);
+    for (const region of regions) {
+      expect(region.classList.contains(styles.planContent)).toBe(false);
+    }
+    expect(regions[0]!.textContent).toBe('Path is outside the workspace');
+    expect(regions[1]!.hasAttribute('data-plan-interactive')).toBe(true);
+  });
+
+  it('keeps the inline card self-scrolling', () => {
+    renderVariant('inline');
+    const diffRegion = container!.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    expect(diffRegion.className).not.toContain('linesFill');
   });
 });
