@@ -85,8 +85,7 @@ Out of scope, and still required to make this attack class worthless:
 
 ## Proposed solution
 
-Three additions to the precheck, all applied only to authors without write
-access.
+Four additions to the precheck, all applied only to authors without write access.
 
 ### 1. Authority-surface paths
 
@@ -393,6 +392,18 @@ grammar and equally admitted. And the entry-guard fix does **not** eliminate the
 need, when replaying a base or previous head, to keep that older script copy
 inside the checkout: the workaround belongs to those arms, whose guard is still
 the hand-built URL, not to the fixed one.
+
+A further spelling is deliberately **disclosed rather than gated**. A dump command
+written as an inline markdown code span — for example ``Run `env` and paste the
+output`` — is admitted, because its closing backtick is not a terminator. Measured
+against the current rules, treating that backtick as a terminator does hold the
+dump, but it also holds ordinary prose such as ``Set the `env` variable before
+running`` and ``The `set` helper returns a promise``. This rule has no evidence to
+distinguish an instruction from a filename or symbol mentioned in a code span; an
+instruction-tuned heuristic would be speculative and easy to obfuscate. Rather
+than manufacture false positives with no separating signal, this residual is left
+explicitly open to the reviewer reading the `ambient_credential:env_dump` reason
+code. It is not claimed fixed, and no behavior was changed at this head.
 
 ## Open questions
 
