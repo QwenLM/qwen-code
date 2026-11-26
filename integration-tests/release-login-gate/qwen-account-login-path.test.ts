@@ -59,7 +59,46 @@ function webHeaders(json: boolean): Record<string, string> {
 interface AuthBody {
   success?: boolean;
   error?: string;
-  data?: { access_token?: string; email?: string; status?: boolean };
+  data?: {
+    access_token?: string;
+    email?: string;
+    status?: boolean;
+    code?: string;
+    details?: string;
+  };
+}
+
+/** Server-side throttle observed on verify/approve (~10 calls per window). */
+const RATE_LIMIT_CODE = 'Too_Many_Requests';
+const RATE_LIMIT_BACKOFF_MS = 60_000;
+const RATE_LIMIT_MAX_RETRIES = 4;
+
+function rateLimited(res: { status: number; body: AuthBody }): boolean {
+  return (
+    res.status === 429 ||
+    res.body.data?.code === RATE_LIMIT_CODE ||
+    res.body.error === RATE_LIMIT_CODE
+  );
+}
+
+/**
+ * Retry only the throttle response, with a backoff that outlives the ~3min
+ * server window. Every other response returns untouched so real failures
+ * still fail the gate immediately.
+ */
+async function withRateLimitBackoff(
+  label: string,
+  call: () => Promise<{ status: number; body: AuthBody }>,
+): Promise<{ status: number; body: AuthBody }> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await call();
+    if (!rateLimited(res) || attempt >= RATE_LIMIT_MAX_RETRIES) return res;
+    console.warn(
+      `[login-gate] ${label} throttled (attempt ${attempt + 1}); ` +
+        `backing off ${RATE_LIMIT_BACKOFF_MS}ms`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_BACKOFF_MS));
+  }
 }
 
 async function authRequest(
@@ -161,36 +200,42 @@ describeIfCredentials('release gate: Qwen account login path', () => {
     expect(userCode).toBeTruthy();
 
     // 3. Web side of the grant over plain HTTP: sign in, verify, approve.
-    const signin = await authRequest(
-      'POST',
-      `${AUTH_BASE}/api/v2/auths/signin`,
-      {
+    //    Throttle responses back off and retry; anything else fails loud
+    //    with the server body in the message so CI logs keep the evidence.
+    const signin = await withRateLimitBackoff('signin', () =>
+      authRequest('POST', `${AUTH_BASE}/api/v2/auths/signin`, {
         json: {
           email: EMAIL,
           password: createHash('sha256').update(PASSWORD!).digest('hex'),
         },
-      },
+      }),
     );
-    expect(signin.status, JSON.stringify(signin.body)).toBe(200);
-    const session = signin.body.data?.access_token as string;
-    expect(session, 'web sign-in must return a session token').toBeTruthy();
+    const session = signin.body.data?.access_token;
+    if (signin.status !== 200 || !session) {
+      throw new Error(`web sign-in failed: ${JSON.stringify(signin.body)}`);
+    }
     expect(signin.body.data?.email).toBe(EMAIL);
 
-    const verify = await authRequest(
-      'GET',
-      `${AUTH_BASE}/api/v2/auths/device/verify?user_code=${userCode}`,
-      { bearer: session },
+    const verify = await withRateLimitBackoff('verify', () =>
+      authRequest(
+        'GET',
+        `${AUTH_BASE}/api/v2/auths/device/verify?user_code=${userCode}`,
+        { bearer: session },
+      ),
     );
-    expect(verify.status, JSON.stringify(verify.body)).toBe(200);
-    expect(verify.body.success).not.toBe(false);
+    if (verify.status !== 200 || verify.body.success === false) {
+      throw new Error(`device verify failed: ${JSON.stringify(verify.body)}`);
+    }
 
-    const approve = await authRequest(
-      'POST',
-      `${AUTH_BASE}/api/v2/auths/device/approve`,
-      { json: { user_code: userCode, approve: true }, bearer: session },
+    const approve = await withRateLimitBackoff('approve', () =>
+      authRequest('POST', `${AUTH_BASE}/api/v2/auths/device/approve`, {
+        json: { user_code: userCode, approve: true },
+        bearer: session,
+      }),
     );
-    expect(approve.status, JSON.stringify(approve.body)).toBe(200);
-    expect(approve.body.data?.status).toBe(true);
+    if (approve.status !== 200 || approve.body.data?.status !== true) {
+      throw new Error(`device approve failed: ${JSON.stringify(approve.body)}`);
+    }
 
     // 4. The daemon must finish the grant with the test account's identity.
     const view = await pollUntil(
@@ -238,14 +283,19 @@ describeIfCredentials('release gate: Qwen account login path', () => {
     });
     expect((await after.json()).signedIn).toBe(false);
 
-    const refresh = await authRequest('POST', `${AUTH_BASE}/api/oauth/token`, {
-      form: {
-        grant_type: 'refresh_token',
-        client_id: 'qwen-code-cli',
-        refresh_token: refreshToken,
-      },
-    });
-    expect(refresh.status, 'revoked grant must not refresh').toBe(400);
-    expect(refresh.body.error).toBe('invalid_grant');
-  }, 240_000);
+    const refresh = await withRateLimitBackoff('refresh-after-revoke', () =>
+      authRequest('POST', `${AUTH_BASE}/api/oauth/token`, {
+        form: {
+          grant_type: 'refresh_token',
+          client_id: 'qwen-code-cli',
+          refresh_token: refreshToken,
+        },
+      }),
+    );
+    if (refresh.status !== 400 || refresh.body.error !== 'invalid_grant') {
+      throw new Error(
+        `revoked grant must not refresh: ${JSON.stringify(refresh.body)}`,
+      );
+    }
+  }, 900_000);
 });

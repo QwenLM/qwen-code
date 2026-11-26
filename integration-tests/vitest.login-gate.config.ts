@@ -18,7 +18,8 @@ export default defineConfig({
   test: {
     root: fileURLToPath(new URL('.', import.meta.url)),
     include: ['release-login-gate/**/*.test.ts'],
-    testTimeout: 240_000,
+    // Worst case: three throttled web steps each backing off 4x60s.
+    testTimeout: 900_000,
     hookTimeout: 120_000,
     reporters: ['default'],
     retry: 1,

@@ -600,16 +600,23 @@ jobs:
         run: '.release-workflow/.github/scripts/run-release-docker-integration.sh cleanup'
 
   login_e2e_gate:
-    name: 'Login Path Gate (Qwen Account)'
+    name: 'Login Path Gate (Qwen Account, ${{ matrix.os }})'
     # Hard release gate: the Qwen-account login path must complete end to end
     # (device flow -> web sign-in/approve over HTTP -> daemon credentials).
     # Deliberately NO force_skip_tests escape hatch: publish requires this job
     # to succeed even when the other validation lanes are skipped.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 20
+    # Environment matrix: a past escape happened on a single platform, so all
+    # three release platforms are verified. Hosted runners only (the ECS pool
+    # is linux-only); each leg builds its own artifacts because native
+    # prebuilds in the linux build output are not portable to mac/Windows.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: '${{ matrix.os }}'
+    timeout-minutes: 30
     needs:
       - 'prepare'
-      - 'quality_build'
     permissions:
       contents: 'read'
     # Test-account secrets are injected into this job only; every other job
@@ -618,11 +625,11 @@ jobs:
       QWEN_E2E_LOGIN_EMAIL: '${{ secrets.QWEN_E2E_LOGIN_EMAIL }}'
       QWEN_E2E_LOGIN_PASSWORD: '${{ secrets.QWEN_E2E_LOGIN_PASSWORD }}'
     steps:
-      - *restore_release_workspace
-
       # Fail closed on missing secrets so an unconfigured repo can never turn
-      # this gate into a silent skip.
+      # this gate into a silent skip. bash keeps the check identical on the
+      # Windows runner (default shell there is pwsh).
       - name: 'Require login gate credentials'
+        shell: bash
         run: |-
           if [ -z "${QWEN_E2E_LOGIN_EMAIL}" ] || [ -z "${QWEN_E2E_LOGIN_PASSWORD}" ]; then
             echo "::error::QWEN_E2E_LOGIN_EMAIL / QWEN_E2E_LOGIN_PASSWORD secrets are not configured; the login path gate cannot run."
@@ -631,13 +638,14 @@ jobs:
 
       - *checkout_release_validation
       - *setup_release_node_hosted
-      - *setup_release_node_self_hosted
-      - *release_disk_floor_gate
       - *install_release_dependencies
-      - *download_release_build
-      - *unpack_release_build
+
+      - name: 'Build Project'
+        shell: bash
+        run: 'npm run build'
 
       - name: 'Run Login Path Gate'
+        shell: bash
         run: 'npm run test:release:login-gate'
 
   audio_capture_prebuilds:
