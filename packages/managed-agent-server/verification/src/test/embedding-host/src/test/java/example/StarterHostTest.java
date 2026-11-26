@@ -143,7 +143,7 @@ class StarterHostTest {
     static class EarlyInvocationHost extends Host {
         @Bean
         IllegalStateException earlyFailure(@Qualifier("managedAgentService") ManagedAgentService service) {
-            return assertThatThrownBy(() -> service.getPublicSession(
+            return (IllegalStateException) assertThatThrownBy(() -> service.getPublicSession(
                     new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "owner", null), "missing"))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("Embedded Managed Agent is unavailable")
