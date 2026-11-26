@@ -6,9 +6,10 @@
 
 import { createHash } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
-import { promises as fs } from 'node:fs';
+import nodeFs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import * as path from 'node:path';
+import { PassThrough } from 'node:stream';
 import express from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,6 +24,7 @@ import {
   HOSTED_PACKAGE_PREPARATION_PREFIX as base,
 } from './hosted-package-preparation.js';
 
+const fs = nodeFs.promises;
 const boot = '11111111-1111-4111-8111-111111111111';
 const scope = {
   tenantId: 'tenant',
@@ -271,6 +273,80 @@ describe('Hosted process-global package preparation', () => {
       .send(archive.body)
       .expect(200);
     expect(inspection.body).toEqual(result.body.inspection);
+  });
+
+  it('releases an owned preparation idempotently', async () => {
+    const result = await prepare().expect(201);
+    const url = `${base}/${result.body.preparationId}`;
+    const scoped = (request: supertest.Test) =>
+      headers(request.query({ scope: JSON.stringify(scope) }));
+
+    await scoped(supertest(app).delete(url)).expect(204);
+    await scoped(supertest(app).delete(url)).expect(204);
+    await scoped(supertest(app).get(`${url}/archive`)).expect(404);
+  });
+
+  it('refuses to release another actor scope preparation', async () => {
+    const result = await prepare().expect(201);
+    const url = `${base}/${result.body.preparationId}`;
+
+    await headers(
+      supertest(app)
+        .delete(url)
+        .query({
+          scope: JSON.stringify({ ...scope, actorKey: 'b'.repeat(64) }),
+        }),
+    ).expect(404);
+    await headers(
+      supertest(app)
+        .get(`${url}/archive`)
+        .query({ scope: JSON.stringify(scope) }),
+    ).expect(200);
+  });
+
+  it('retains a released preparation until its last reader closes', async () => {
+    const result = await prepare().expect(201);
+    const url = `${base}/${result.body.preparationId}`;
+    const reader = new PassThrough();
+    let archivePath: string | undefined;
+    vi.spyOn(nodeFs, 'createReadStream').mockImplementation((file) => {
+      archivePath = String(file);
+      return reader as unknown as nodeFs.ReadStream;
+    });
+    syncBuiltinESMExports();
+    const completion = headers(
+      supertest(app)
+        .get(`${url}/archive`)
+        .query({ scope: JSON.stringify(scope) }),
+    )
+      .expect(200)
+      .then((response) => response);
+
+    try {
+      await vi.waitFor(() => expect(archivePath).toBeDefined());
+      if (!archivePath) throw new Error('Archive was not opened');
+      const openedArchive = archivePath;
+      await headers(
+        supertest(app)
+          .delete(url)
+          .query({ scope: JSON.stringify(scope) }),
+      ).expect(204);
+      await expect(fs.stat(openedArchive)).resolves.toBeDefined();
+
+      reader.end(await fs.readFile(openedArchive));
+      const archive = await completion;
+      expect(createHash('sha256').update(archive.body).digest('hex')).toBe(
+        result.body.packageDigest,
+      );
+      await vi.waitFor(async () => {
+        await expect(fs.stat(openedArchive)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      });
+    } finally {
+      reader.destroy();
+      await completion.catch(() => undefined);
+    }
   });
 
   it('rejects unauthorized, malformed and mismatching inputs', async () => {

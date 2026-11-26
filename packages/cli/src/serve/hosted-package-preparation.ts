@@ -21,6 +21,7 @@ import {
   ManagedPackageCompatibilityError,
 } from '@qwen-code/qwen-code-core/extension/managed-package.js';
 import { ManagedMcpRecipeError } from '@qwen-code/qwen-code-core/extension/managed-mcp-recipe.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   hostedHarnessContractMiddleware,
   type HostedHarnessContract,
@@ -28,6 +29,7 @@ import {
 
 export const HOSTED_PACKAGE_PREPARATION_PREFIX =
   '/internal/hosted-harness/v1/managed-packages';
+const debugLogger = createDebugLogger('HOSTED_PACKAGE_PREPARATION');
 const TTL_MS = 15 * 60_000;
 const DEADLINE_MS = 10 * 60_000;
 const MAX_PREPARING = 2;
@@ -50,6 +52,9 @@ interface Artifact {
   scope: string;
   expiresAt: number;
   byteLength: number;
+  readers: number;
+  released: boolean;
+  removal?: Promise<void>;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -102,6 +107,15 @@ function scopeKey(input: Scope): string {
   return JSON.stringify([input.tenantId, input.workspaceId, input.actorKey]);
 }
 
+function requestScope(req: Request): string {
+  if (
+    typeof req.query['scope'] !== 'string' ||
+    req.query['scope'].length > 2048
+  )
+    throw new Error('Invalid scope.');
+  return scopeKey(scope(JSON.parse(req.query['scope'])));
+}
+
 async function receive(
   req: Request,
   file: string,
@@ -142,16 +156,35 @@ export function registerHostedPackagePreparation(
   let closed = false;
   let preparing = 0;
   let retained = 0;
+  const release = (id: string, entry: Artifact): Promise<void> => {
+    entry.released = true;
+    // Keep the reservation until every reader has closed and deletion succeeds.
+    if (entry.readers > 0) return Promise.resolve();
+    if (entry.removal) return entry.removal;
+    entry.removal = fs
+      .rm(entry.directory, { recursive: true, force: true })
+      .then(() => {
+        if (artifacts.get(id) === entry) {
+          artifacts.delete(id);
+          retained -= entry.byteLength;
+        }
+      })
+      .finally(() => {
+        entry.removal = undefined;
+      });
+    return entry.removal;
+  };
+  const reportCleanupFailure = (error: unknown) => {
+    debugLogger.warn('Managed package preparation cleanup failed.', error);
+  };
   const expire = async () => {
     for (const [id, entry] of artifacts)
-      if (entry.expiresAt <= Date.now() || closed) {
-        artifacts.delete(id);
-        retained -= entry.byteLength;
-        await fs.rm(entry.directory, { recursive: true, force: true });
+      if (entry.released || entry.expiresAt <= Date.now() || closed) {
+        await release(id, entry).catch(reportCleanupFailure);
       }
   };
   const sweep = setInterval(() => {
-    void expire().catch(() => undefined);
+    void expire();
   }, 60_000);
   sweep.unref();
   app.use(
@@ -239,6 +272,8 @@ export function registerHostedPackagePreparation(
             scope: scopeKey(input),
             expiresAt: Date.now() + TTL_MS,
             byteLength: prepared.byteLength,
+            readers: 0,
+            released: false,
           });
           retained += prepared.byteLength;
           directory = undefined;
@@ -284,20 +319,17 @@ export function registerHostedPackagePreparation(
       res.setHeader('Cache-Control', 'no-store');
       let key: string;
       try {
-        if (
-          typeof req.query['scope'] !== 'string' ||
-          req.query['scope'].length > 2048
-        )
-          throw new Error('Invalid scope.');
-        key = scopeKey(scope(JSON.parse(req.query['scope'])));
+        key = requestScope(req);
       } catch {
         res.status(400).json({ code: 'invalid_managed_package_scope' });
         return;
       }
-      const entry = artifacts.get(String(req.params['preparationId']));
+      const id = String(req.params['preparationId']);
+      const entry = artifacts.get(id);
       if (
         !entry ||
         entry.scope !== key ||
+        entry.released ||
         entry.expiresAt <= Date.now() ||
         closed
       ) {
@@ -307,12 +339,47 @@ export function registerHostedPackagePreparation(
       res
         .type('application/octet-stream')
         .setHeader('Content-Length', entry.byteLength);
+      entry.readers++;
       const stream = createReadStream(
         path.join(entry.directory, 'package.tar.gz'),
       );
+      stream.once('close', () => {
+        entry.readers--;
+        if (entry.released || entry.expiresAt <= Date.now() || closed) {
+          void release(id, entry).catch(reportCleanupFailure);
+        }
+      });
       stream.on('error', () => res.destroy());
       res.once('close', () => stream.destroy());
       stream.pipe(res);
+    },
+  );
+  app.delete(
+    `${HOSTED_PACKAGE_PREPARATION_PREFIX}/:preparationId`,
+    async (req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'no-store');
+      let key: string;
+      try {
+        key = requestScope(req);
+      } catch {
+        res.status(400).json({ code: 'invalid_managed_package_scope' });
+        return;
+      }
+      const id = String(req.params['preparationId']);
+      const entry = artifacts.get(id);
+      if (entry && entry.scope !== key) {
+        res.status(404).json({ code: 'managed_package_preparation_not_found' });
+        return;
+      }
+      try {
+        if (entry) await release(id, entry);
+        res.status(204).end();
+      } catch (error) {
+        reportCleanupFailure(error);
+        res
+          .status(500)
+          .json({ code: 'managed_package_preparation_release_failed' });
+      }
     },
   );
   return async () => {

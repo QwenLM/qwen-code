@@ -42,6 +42,7 @@ describe('Managed composer input snapshots', () => {
       setText: vi.fn(),
       addTags: vi.fn(),
       removeTag: vi.fn(),
+      retainDraftDuringSessionCreation: vi.fn(),
       clear: vi.fn(),
       submit: vi.fn(),
     };

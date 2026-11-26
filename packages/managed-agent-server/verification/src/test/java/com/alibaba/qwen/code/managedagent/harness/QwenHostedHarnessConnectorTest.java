@@ -3108,6 +3108,43 @@ class QwenHostedHarnessConnectorTest {
         verify(oldClient, never()).createSession(any());
     }
 
+    @Test
+    void preparedPackageReleasesOnceWhenArchiveCloseFailsAndCloseRepeats() throws Exception {
+        HostedHarnessClient client = harnessClient();
+        QwenHostedHarnessConnector connector = connector(client);
+        Map<String, Object> metadata = Map.of("tenantId", "tenant", "workspaceId", "workspace",
+                "actorKey", "actor", "input", Map.of());
+        when(client.prepareManagedPackage(any(), any())).thenReturn(Map.of("preparationId", SESSION_ID));
+        java.io.InputStream archive = mock(java.io.InputStream.class);
+        java.io.IOException failure = new java.io.IOException("close failed");
+        doThrow(failure).when(archive).close();
+        when(client.managedPackageArchive(any(), any())).thenReturn(archive);
+        HarnessConnector.PreparedPackage prepared = connector.preparePackage(metadata,
+                java.io.InputStream.nullInputStream());
+
+        assertThatThrownBy(prepared::close).isSameAs(failure);
+        prepared.close();
+
+        verify(client).managedPackageArchive(SESSION_ID,
+                Map.of("tenantId", "tenant", "workspaceId", "workspace", "actorKey", "actor"));
+        verify(client).releaseManagedPackage(SESSION_ID,
+                Map.of("tenantId", "tenant", "workspaceId", "workspace", "actorKey", "actor"));
+    }
+
+    @Test
+    void preparePackageReleasesWhenArchiveOpenFails() {
+        HostedHarnessClient client = harnessClient();
+        QwenHostedHarnessConnector connector = connector(client);
+        when(client.prepareManagedPackage(any(), any())).thenReturn(Map.of("preparationId", SESSION_ID));
+        IllegalStateException failure = new IllegalStateException("archive failed");
+        doThrow(failure).when(client).managedPackageArchive(any(), any());
+
+        assertThatThrownBy(() -> connector.preparePackage(Map.of("input", Map.of()),
+                java.io.InputStream.nullInputStream())).isSameAs(failure);
+
+        verify(client).releaseManagedPackage(SESSION_ID, Map.of());
+    }
+
     // G3: a generation change adopts instead of pinning the Session. The
     // discovering call closes the pinned client and drops every cached
     // attachment, so the next call re-attaches on the rebuilt client.
