@@ -7353,7 +7353,16 @@ export class Session implements SessionContext {
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
+            const delegatedPromptSource = readPromptSource(
+              promptMetadata?.[DAEMON_PROMPT_SOURCE_META_KEY],
+            );
+            const checkDelegatedPrompt =
+              delegatedPromptSource !== undefined &&
+              this.settings.merged.enableDelegatedPromptHooks === true;
+            // Opted-in delegated text enters message admission, where hooks
+            // can block it or add context before any model request.
             const isSlashInput =
+              !checkDelegatedPrompt &&
               !isContinue &&
               !isRestoreAskUserQuestion &&
               isSlashCommand(inputText);
@@ -7648,15 +7657,14 @@ export class Session implements SessionContext {
               isFreshUserTurn &&
               (channelTurn
                 ? getChannelWorkflowOrigin()?.userInitiated === true
-                : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false);
+                : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false &&
+                  (!delegatedPromptSource || checkDelegatedPrompt));
             const hookSubmittedPrompt =
               isUserSubmissionTurn && submittedPrompt.trim().length > 0
                 ? submittedPrompt
                 : undefined;
             const hookSource = isUserSubmissionTurn
-              ? readPromptSource(
-                  promptMetadata?.[DAEMON_PROMPT_SOURCE_META_KEY],
-                )
+              ? delegatedPromptSource
               : undefined;
             // `experimental.unifiedAgentLoop`: a prompt sends its model rounds
             // through `LlmClient` on the shared agent loop's round: a fresh
