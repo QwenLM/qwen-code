@@ -1138,6 +1138,7 @@ export class ChatCompressionService {
     ): { history: Content[]; sizing: ColdRequestSizing } | undefined => {
       const kept = slimCompactionInput(sideQueryHistory, undefined, {
         maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+        stripUnsignedThoughts: true,
         keepTypedText: true,
       }).slimmedHistory;
       const keptChars = historyChars(kept) - historyChars(plain);

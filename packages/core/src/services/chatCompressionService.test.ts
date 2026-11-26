@@ -4695,6 +4695,49 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       );
     });
 
+    it('strips unsigned thoughts from the kept request as from the plain cut', async () => {
+      // The plain cut drops unsigned thought parts (#18209). The kept
+      // request drops them too, so it differs from the plain cut only by
+      // the typed text, and its output budget is smaller by that text alone.
+      const typed = ASCII.repeat(700);
+      const withThought = (history: Content[]): Content[] =>
+        history.map((entry, i) =>
+          i === 1
+            ? {
+                ...entry,
+                parts: [
+                  { text: 'thinking. '.repeat(600), thought: true },
+                  ...(entry.parts ?? []),
+                ],
+              }
+            : entry,
+        );
+      mockBackend();
+      const plain = await compressHistory(
+        withThought(typedSession(typed, 12, 20_000, false)),
+        64_000,
+      );
+      const plainSends = sent.splice(0);
+      const kept = await compressHistory(
+        withThought(typedSession(typed, 12, 20_000)),
+        64_000,
+      );
+      const keptSends = sent.splice(0);
+      expectCompressed(plain);
+      expectCompressed(kept);
+      expect(keptSends).toHaveLength(1);
+      expect(requestText(keptSends[0]!)).toBe(typed);
+      expect(
+        keptSends[0]!.contents.some((entry) =>
+          (entry.parts ?? []).some((part) => part.thought === true),
+        ),
+      ).toBe(false);
+      expect(keptSends[0]!.maxOutputTokens).toBe(
+        plainSends[0]!.maxOutputTokens -
+          (typed.length - plainCut(typed).length),
+      );
+    });
+
     it('sends the plain cut when keeping the text would leave the summary under its minimum', async () => {
       const typed = ASCII.repeat(1_500);
       const { kept, plainSends, keptSends } = await compare(typed, 48, 5_200);
