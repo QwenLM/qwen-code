@@ -22,8 +22,8 @@ import {
 import { createManagedHarnessHandle } from './managed-harness-factory.js';
 import { TurnBudget } from '../core/turn-budget.js';
 import { uiTelemetryService, type UiEvent } from '../telemetry/uiTelemetry.js';
-import { ApiResponseEvent } from '../telemetry/types.js';
-import { EVENT_API_RESPONSE } from '../telemetry/constants.js';
+import { ApiResponseEvent, type ApiErrorEvent } from '../telemetry/types.js';
+import { EVENT_API_ERROR, EVENT_API_RESPONSE } from '../telemetry/constants.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { enableManagedSessionDiagnostics } from './managed-session-diagnostics.js';
 import { captureManagedContext } from './managed-context-snapshot.js';
@@ -96,7 +96,7 @@ describe('Managed Hook model activation', () => {
     const { session, controller, options } = await fixture();
     await enableManagedSessionDiagnostics(session);
     await createManagedHarnessHandle(session).ensureRunnable();
-    const turnId = randomUUID();
+    const turnId = `arun_${'a'.repeat(64)}:input`;
     const model = 'm'.repeat(512);
     let snapshot: ReturnType<typeof captureManagedContext> | undefined;
     for (let length = 1; length <= 128; length++) {
@@ -167,6 +167,7 @@ describe('Managed Hook model activation', () => {
       ).toString(),
     );
     expect(event.payload['state']).toBe('output_committed');
+    expect(event.eventId).toMatch(/^arun_a{51}:sha256:[0-9a-f]{64}$/);
     expect(body.context.attemptId).toBe(event.payload['attemptId']);
     expect(body.context.inputTokens).toBe(100_000);
     expect(body.context.cachedTokens).toBe(9_999);
@@ -181,10 +182,11 @@ describe('Managed Hook model activation', () => {
     const { session, controller } = await fixture();
     await enableManagedSessionDiagnostics(session);
     await createManagedHarnessHandle(session).ensureRunnable();
-    await controller.runTurn('turn-failed', async (scope) => {
+    const turnId = `wake-recovery:${'a'.repeat(64)}`;
+    await controller.runTurn(turnId, async (scope) => {
       const complete = await scope.beginMainAttempt('main', undefined, {
         version: 1,
-        turnId: 'turn-failed',
+        turnId,
         model: 'main',
         providerPin: 'a'.repeat(64),
         observedAt: 1,
@@ -210,6 +212,7 @@ describe('Managed Hook model activation', () => {
     });
     const event = session.authority.lastEventOfKind('model.attempt')!;
     expect(event.payload['state']).toBe('abandoned');
+    expect(event.eventId).toMatch(/^wake-recovery:a{42}:sha256:[0-9a-f]{64}$/);
     const body = JSON.parse(
       (
         await session.resources.read(event.payload['usageRef'] as never)
@@ -477,6 +480,7 @@ describe('Managed Hook model activation', () => {
   it('commits complete final Parts with its output marker after renewal and refuses changed replay', async () => {
     const { session, controller, options } = await fixture();
     await createManagedHarnessHandle(session).ensureRunnable();
+    const turnId = `wake-recovery:${'b'.repeat(64)}`;
     const recoveryRef = await session.resources.publish(
       'hosted-model-request',
       Buffer.from('{}'),
@@ -489,7 +493,7 @@ describe('Managed Hook model activation', () => {
       type: 'assistant' as const,
       cwd: options.cwd,
       version: 'test',
-      daemonPromptId: 'turn-1',
+      daemonPromptId: turnId,
       model: 'main',
       message: {
         role: 'model' as const,
@@ -504,7 +508,7 @@ describe('Managed Hook model activation', () => {
         ],
       },
     };
-    await controller.runTurn('turn-1', async (scope) => {
+    await controller.runTurn(turnId, async (scope) => {
       await scope.bindBudget(new TurnBudget(), 'original');
       const complete = await scope.beginMainAttempt('main', recoveryRef);
       await Promise.all([
@@ -535,8 +539,10 @@ describe('Managed Hook model activation', () => {
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line));
-    const markerIndex = rows.findIndex((row) =>
-      row.managedSession?.commandId?.endsWith(':output_committed'),
+    const output = session.authority.lastEventOfKind('model.attempt')!;
+    expect(output.eventId).toMatch(/^wake-recovery:b{42}:sha256:[0-9a-f]{64}$/);
+    const markerIndex = rows.findIndex(
+      (row) => row.managedSession?.commandId === output.eventId,
     );
     const marker = rows[markerIndex].managedSession;
     const attempt = rows[markerIndex - 2].managedSession;
@@ -707,6 +713,47 @@ describe('Managed Hook model activation', () => {
     sessions.push(restored);
     expect(await restored.authority.harnessRunAuthorization()).toEqual({
       status: 'initial',
+    });
+  });
+
+  it('keeps new failure latency out of the closed legacy usage payload', async () => {
+    const { session, controller, options } = await fixture();
+    uiTelemetryService.addEvent(
+      {
+        'event.name': EVENT_API_ERROR,
+        model: evaluation.model,
+        duration_ms: 75,
+        error_message: 'mock_failed',
+      } as ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR },
+      options.sessionId,
+    );
+
+    await controller.runHookOperation(operation, async (scope) => {
+      await scope.evaluate(evaluation, async (usage) => {
+        usage({ totalTokenCount: 7 });
+        return result;
+      });
+    });
+
+    const attempts = session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'model.attempt');
+    const usage = JSON.parse(
+      (
+        await session.resources.read(
+          attempts.at(-1)!.payload['usageRef'] as never,
+        )
+      ).toString(),
+    );
+    expect(usage.models[evaluation.model].api).toEqual({
+      totalRequests: 1,
+      totalErrors: 1,
+      totalLatencyMs: 75,
+    });
+    expect(usage.models[evaluation.model].bySource.main.api).toEqual({
+      totalRequests: 1,
+      totalErrors: 1,
+      totalLatencyMs: 75,
     });
   });
 

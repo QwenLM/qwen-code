@@ -38,6 +38,7 @@
 //     never file "the build timed out" as a Critical against a PR.
 
 import type { CommandModule } from 'yargs';
+import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -51,14 +52,18 @@ import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   boxedRunLeftContainer,
+  closeGuestSessionSync,
   containerCommand,
   containerCommandEnv,
   containerName,
   containerPathFor,
   describeExecutionBoundary,
+  executeViaGuestBridgeSync,
+  guestCommandEnv,
   handOffRefused,
   mountRootFor,
   reapContainer,
+  reapVmWorker,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeIsRootless,
@@ -78,7 +83,11 @@ import {
   DEFAULT_WHOLE_CALL_BUDGET_S,
 } from './lib/build-budget.js';
 import { failingFilesOf } from './lib/failing-files.js';
-import { npmToolchainAdapter, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
+import {
+  lockfileInstaller,
+  npmToolchainAdapter,
+  TEST_COMMAND_RE,
+} from './lib/npm-toolchain.js';
 import {
   selectToolchainAdapter,
   type ReviewToolchainAdapter,
@@ -685,12 +694,24 @@ function containerised(
   };
 }
 
+export interface MicrovmBuildSession {
+  sessionId: string;
+  socketPath: string;
+  initialized: boolean;
+  installed: boolean;
+  /** Whether the session-bound close frame was acknowledged intact. */
+  closeStatus?: 'clean' | 'partial' | 'failed';
+  /** Why cleanup could not be verified (e.g. guest peer protocol skew). */
+  closeReason?: string;
+}
+
 export function run(
   command: string,
   cwd: string,
   timeoutMs: number,
   kind: CommandKind = 'test',
   trustContext?: ReviewTrustInput,
+  vmSession?: MicrovmBuildSession,
 ): CommandResult {
   const started = Date.now();
   // spawnSync validates `timeout` as an unsigned integer: the adapters'
@@ -707,6 +728,85 @@ export function run(
   // because `npm ci` runs `prepare`, which is the whole-project build on many
   // repos.
   const heapMb = kind === 'test' ? undefined : declaredBuildHeapMb(cwd);
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
+  if (verdict.kind === 'microvm') {
+    const guestEnv = guestCommandEnv(kind, heapMb);
+    const useReuse = Boolean(vmSession?.initialized);
+    const bridgeResult = executeViaGuestBridgeSync(verdict.socketPath, {
+      command,
+      kind,
+      timeoutMs: deadlineMs,
+      env: guestEnv,
+      ...(useReuse ? {} : { workspaceDir: cwd }),
+      ...(vmSession
+        ? {
+            workspaceSessionId: vmSession.sessionId,
+            workspaceMode: useReuse ? 'reuse' : 'replace',
+          }
+        : {}),
+    });
+    let markerFault = false;
+    if (vmSession && !bridgeResult.timedOut && !bridgeResult.protocolError) {
+      vmSession.initialized = true;
+      if (kind === 'install') {
+        // Verify the installer's real completeness marker inside the guest
+        // session (never on the host worktree, which is not mounted RW).
+        const marker =
+          lockfileInstaller(cwd) === 'pnpm'
+            ? '.modules.yaml'
+            : '.package-lock.json';
+        const markerCheck = executeViaGuestBridgeSync(verdict.socketPath, {
+          command: `test -f node_modules/${marker}`,
+          kind: 'test',
+          timeoutMs: Math.min(5_000, deadlineMs),
+          env: guestCommandEnv('test'),
+          workspaceSessionId: vmSession.sessionId,
+          workspaceMode: 'reuse',
+        });
+        markerFault =
+          markerCheck.timedOut || Boolean(markerCheck.protocolError);
+        vmSession.installed =
+          markerCheck.ok &&
+          !markerCheck.timedOut &&
+          !markerCheck.protocolError &&
+          markerCheck.exitCode === 0;
+      }
+    }
+    let teardownStatus: ReviewTeardownStatus | undefined;
+    if (bridgeResult.timedOut || bridgeResult.protocolError || markerFault) {
+      teardownStatus = verdict.workerPidFile
+        ? reapVmWorker({
+            pidFile: verdict.workerPidFile,
+            expectedExeTokens: [verdict.backend],
+          }).status
+        : 'partial';
+    }
+    const raw =
+      `${bridgeResult.stdout}${bridgeResult.stderr}` +
+      (bridgeResult.protocolError
+        ? `${bridgeResult.stdout || bridgeResult.stderr ? '\n' : ''}[microvm-bridge ${verdict.backend}] ${bridgeResult.protocolError}\n`
+        : '');
+    const failingFiles = failingFilesOf(raw, cwd);
+    const heapExhausted = bridgeResult.exitCode !== 0 && heapBannerIn(raw);
+    const spawnError = bridgeResult.timedOut
+      ? undefined
+      : bridgeResult.protocolError
+        ? 'EPROTO'
+        : undefined;
+    return {
+      command,
+      exitCode: bridgeResult.protocolError ? null : bridgeResult.exitCode,
+      seconds: Math.round((Date.now() - started) / 1000),
+      timedOut: bridgeResult.timedOut,
+      output: trimOutput(raw),
+      deadlineMs,
+      ...(failingFiles.length > 0 ? { failingFiles } : {}),
+      ...(heapExhausted ? { heapExhausted } : {}),
+      ...(bridgeResult.signal ? { signal: bridgeResult.signal } : {}),
+      ...(spawnError ? { spawnError } : {}),
+      ...(teardownStatus !== undefined ? { teardownStatus } : {}),
+    };
+  }
   const boxed = containerised(command, cwd, kind, heapMb, trustContext);
   const r = boxed
     ? spawnSync(boxed.file, boxed.args, {
@@ -1126,6 +1226,7 @@ function refusedReport(why: string): BuildTestReport {
 function runBuildTestUnguarded(
   args: BuildTestArgs,
   trustContext: ReviewTrustInput | undefined = trustInputFromPlan(args.plan),
+  vmSession?: MicrovmBuildSession,
 ): BuildTestReport {
   // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
   // rejecting it; NaN defeats every budget-floor comparison and reaches
@@ -1245,6 +1346,12 @@ function runBuildTestUnguarded(
       );
     }
   }
+  const initialVerdict = sandboxVerdict(
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
   const runArgs = {
     root,
     changedFiles,
@@ -1254,10 +1361,11 @@ function runBuildTestUnguarded(
     buildOnly: args.buildOnly,
     budget: args.budget,
     previous,
+    ...(vmSession ? { installComplete: () => vmSession.installed } : {}),
     exec:
       args.exec ??
       ((cmd: string, cwd: string, timeoutMs: number, kind?: CommandKind) =>
-        run(cmd, cwd, timeoutMs, kind, trustContext)),
+        run(cmd, cwd, timeoutMs, kind, trustContext, vmSession)),
   };
   // BEFORE anything is executed or handed off. Under `review.sandbox: required`
   // or `tiered` with no eligible runtime answering, this phase must produce no
@@ -1268,7 +1376,7 @@ function runBuildTestUnguarded(
   // otherwise run the install and the suite with nothing consulted.
   const refusal = refuseUnsandboxedPhase(
     root,
-    undefined,
+    initialVerdict,
     undefined,
     undefined,
     trustContext,
@@ -1361,7 +1469,18 @@ function runBuildTestUnguarded(
         'and give each command a deadline it can actually meet.',
     };
   }
-  return { ...adapter.run(runArgs), run: runIdentity };
+  try {
+    return { ...adapter.run(runArgs), run: runIdentity };
+  } finally {
+    if (vmSession?.initialized) {
+      const closed = closeGuestSessionSync(
+        vmSession.socketPath,
+        vmSession.sessionId,
+      );
+      vmSession.closeStatus = closed.ok ? 'clean' : 'partial';
+      vmSession.closeReason = closed.reason;
+    }
+  }
 }
 
 export const buildTestCommand: CommandModule = {
@@ -1490,15 +1609,19 @@ export function resumeWouldDestroyReport(
 
 function aggregateTeardownStatus(
   report: BuildTestReport,
+  closeStatus?: 'clean' | 'partial' | 'failed',
 ): ReviewTeardownStatus {
   const cmds = [
     ...(report.install ? [report.install] : []),
     ...report.build,
     ...report.test,
   ];
-  const statuses = cmds
-    .map((c) => c.teardownStatus)
-    .filter((s): s is ReviewTeardownStatus => s !== undefined);
+  const statuses = [
+    ...cmds
+      .map((c) => c.teardownStatus)
+      .filter((s): s is ReviewTeardownStatus => s !== undefined),
+    ...(closeStatus !== undefined ? [closeStatus] : []),
+  ];
   if (statuses.includes('failed')) return 'failed';
   if (statuses.includes('partial')) return 'partial';
   if (statuses.includes('clean')) return 'clean';
@@ -1525,7 +1648,17 @@ export function applyHandOffPolicy(
 
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const trustContext = trustInputFromPlan(args.plan);
-  const report = runBuildTestUnguarded(args, trustContext);
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
+  const vmSession: MicrovmBuildSession | undefined =
+    !args.exec && verdict.kind === 'microvm'
+      ? {
+          sessionId: `bt-${randomBytes(6).toString('hex')}`,
+          socketPath: verdict.socketPath,
+          initialized: false,
+          installed: false,
+        }
+      : undefined;
+  const report = runBuildTestUnguarded(args, trustContext, vmSession);
   // The THIRD continuation exit, and the one the invariant had not reached.
   // "A continuation must never answer with a FRESH report" is enforced by a
   // throw at the refusal gate and at `!adapter`; this conversion was added
@@ -1549,21 +1682,29 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     );
   }
   const finalReport = applyHandOffPolicy(report);
-  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
-  const teardownStatus = aggregateTeardownStatus(finalReport);
+  const teardownStatus = aggregateTeardownStatus(
+    finalReport,
+    vmSession?.closeStatus,
+  );
   const mountable = mountRootFor(resolve(args.worktree)) !== null;
   const effectiveBackend =
     finalReport.toolchain === 'refused'
       ? 'refused'
-      : verdict.kind === 'container' && mountable
-        ? 'container'
-        : 'direct';
+      : verdict.kind === 'microvm'
+        ? verdict.backend
+        : verdict.kind === 'container' && mountable
+          ? 'container'
+          : 'direct';
   const boundaryNote =
     teardownStatus === 'failed'
-      ? 'container teardown verification failed — a timed-out container may still be running'
-      : verdict.kind === 'container' && !mountable
-        ? 'tree is not under a review temp dir, so commands ran directly rather than in a container'
-        : undefined;
+      ? verdict.kind === 'microvm'
+        ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
+        : 'container teardown verification failed — a timed-out container may still be running'
+      : teardownStatus === 'partial' && verdict.kind === 'microvm'
+        ? `microVM (${verdict.backend}) teardown or guest session cleanup could not be fully verified${vmSession?.closeReason ? `: ${vmSession.closeReason}` : ''}`
+        : verdict.kind === 'container' && !mountable
+          ? 'tree is not under a review temp dir, so commands ran directly rather than in a container'
+          : undefined;
   const executionBoundary = describeExecutionBoundary({
     backend: effectiveBackend,
     trustContext,

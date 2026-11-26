@@ -7,9 +7,11 @@ import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.SubProtocolCapable;
 import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.AbstractWebSocketHandler;
 
+import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -17,10 +19,14 @@ import java.net.http.WebSocket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 /**
  * Relays a Managed Web Terminal between the browser and the Runtime worker.
@@ -263,18 +269,18 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         private static final int MAX_PENDING_ENTRIES = 8192;
         private final WebSocketSession browser;
         private final AtomicReference<WebSocket> worker = new AtomicReference<>();
-        private final java.util.concurrent.atomic.AtomicLong pendingBytes =
-                new java.util.concurrent.atomic.AtomicLong();
+        private final AtomicLong pendingBytes =
+                new AtomicLong();
         // The byte ceiling alone lets a flood of 1-byte frames pile up ~124x
         // their bytes in chained-send entries once the worker is attached;
         // bound the live chain's entry count too, not just the pre-attach list.
-        private final java.util.concurrent.atomic.AtomicInteger chainedEntries =
-                new java.util.concurrent.atomic.AtomicInteger();
+        private final AtomicInteger chainedEntries =
+                new AtomicInteger();
         // The JDK listener may deliver one worker message across several
         // callbacks; reassemble to the message boundary before the browser
         // decodes it, or a multibyte character split across callbacks corrupts.
-        private final java.io.ByteArrayOutputStream binaryBuffer =
-                new java.io.ByteArrayOutputStream();
+        private final ByteArrayOutputStream binaryBuffer =
+                new ByteArrayOutputStream();
         private final StringBuilder textBuffer = new StringBuilder();
         // JDK sends are asynchronous and reject a second send while one is
         // pending; chain them so backpressured input queues instead of closing.
@@ -284,11 +290,11 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         // The browser socket is open on 101 before the worker upgrade completes
         // (hold admission + handshake). Frames sent in that window — the initial
         // resize and early keystrokes — must queue, not be silently dropped.
-        private final java.util.List<PendingSend> preAttach = new java.util.ArrayList<>();
+        private final List<PendingSend> preAttach = new ArrayList<>();
         private volatile boolean failed;
 
         private record PendingSend(
-                java.util.function.Function<WebSocket, CompletionStage<WebSocket>> op,
+                Function<WebSocket, CompletionStage<WebSocket>> op,
                 int bytes) {
         }
 
@@ -419,7 +425,7 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
          * serializes the asynchronous JDK sends, which reject a second send
          * while one is pending; queued input waits its turn instead of closing
          * the connection. */
-        private void send(java.util.function.Function<WebSocket,
+        private void send(Function<WebSocket,
                 CompletionStage<WebSocket>> op, int bytes) {
             synchronized (sendLock) {
                 if (failed) {
@@ -453,7 +459,7 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         /** Chains one already-accounted send onto the pending tail; the caller
          * holds {@code sendLock}. */
         private void chainSend(WebSocket webSocket,
-                java.util.function.Function<WebSocket, CompletionStage<WebSocket>> op,
+                Function<WebSocket, CompletionStage<WebSocket>> op,
                 int bytes) {
             if (failed) {
                 return;
@@ -485,7 +491,7 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
             });
         }
 
-        private void sendToBrowser(org.springframework.web.socket.WebSocketMessage<?> message) {
+        private void sendToBrowser(WebSocketMessage<?> message) {
             try {
                 synchronized (browser) {
                     if (browser.isOpen()) {

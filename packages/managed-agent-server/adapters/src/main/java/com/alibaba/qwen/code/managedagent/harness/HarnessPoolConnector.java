@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.net.ssl.SSLContext;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -462,17 +463,17 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
-    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
         return packagePreparationMember().connector.preparePackage(metadata, source);
     }
 
     @Override
-    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
         return packagePreparationMember().connector.inspectPackage(metadata, source);
     }
 
     @Override
-    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
         return packagePreparationMember().connector.previewPackage(metadata, source);
     }
 
