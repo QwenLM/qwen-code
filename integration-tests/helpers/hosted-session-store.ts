@@ -271,6 +271,14 @@ export async function startHostedSessionStore(
     baseUrl: `http://127.0.0.1:${address.port}`,
     sessionKey,
     scan,
+    async publishInstructions(text: string) {
+      const ref = await resources.publish(
+        'managed-agent-instructions',
+        Buffer.from(text),
+      );
+      refs.set(ref.resourceId, ref);
+      return ref;
+    },
     readResource: (ref: ManagedSessionDurableRef) => {
       const local = refs.get(ref.resourceId);
       assert(local);

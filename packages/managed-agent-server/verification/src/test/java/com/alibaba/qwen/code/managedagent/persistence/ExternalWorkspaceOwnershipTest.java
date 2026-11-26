@@ -123,6 +123,17 @@ class ExternalWorkspaceOwnershipTest {
     }
 
     @Test
+    void externalClaimAcceptsAStoredDefinitionWithItsDigest() {
+        String agentId = "agent_" + "a".repeat(32);
+        jdbc.update("UPDATE ma_session SET agent_id = ?, agent_revision = '1' WHERE session_id = 'harness'", agentId);
+        assertThatThrownBy(() -> ownership.claim(context, session, binding, bindings))
+                .isInstanceOf(RuntimeBrokerException.class);
+        jdbc.update("UPDATE ma_session SET agent_definition_digest = ? WHERE session_id = 'harness'", "b".repeat(64));
+        ownership.claim(context, session, binding, bindings);
+        ownership.assertHeld(context, session, binding, bindings);
+    }
+
+    @Test
     void malformedRegistrationPermanentlyRefusesOwnershipWithoutMutatingHolder() {
         ownership.claim(context, session, binding, bindings);
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");

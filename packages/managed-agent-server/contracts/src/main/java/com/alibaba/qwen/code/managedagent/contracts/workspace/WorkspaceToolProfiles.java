@@ -95,11 +95,13 @@ public final class WorkspaceToolProfiles {
         return "default".equals(mode) || "auto".equals(mode) || "auto-edit".equals(mode) || "yolo".equals(mode);
     }
 
+    public static boolean hasAgentIdentity(String agentId, String definitionDigest) {
+        return "qwen-code".equals(agentId) ? definitionDigest == null : agentId != null && definitionDigest != null;
+    }
+
     public static boolean supportsApprovalSelection(StoreModels.SessionRecord session) {
         return session.workspace() != null
-                && ("qwen-code".equals(session.agentId())
-                        ? session.agentDefinitionDigest() == null
-                        : session.agentDefinitionDigest() != null)
+                && hasAgentIdentity(session.agentId(), session.agentDefinitionDigest())
                 && (isExternal(session.toolProfile())
                         ? "qwen-code".equals(session.agentId()) && session.agentDefinitionDigest() == null
                                 && session.publicChildAgentsVersion() == 0

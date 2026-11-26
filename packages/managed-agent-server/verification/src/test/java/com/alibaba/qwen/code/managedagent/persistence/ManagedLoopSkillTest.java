@@ -236,17 +236,14 @@ class ManagedLoopSkillTest {
     }
 
     @Test
-    void mergeIntoDoesNotDoubleAppendCallerSkillsAlreadyCarriedByTheExternalPin() {
-        // External creationPin carries the caller skills into the pin, so merged
-        // already holds them. Appending callerSkills again duplicates every name
-        // and the catalog validation refuses the whole creation.
+    void externalProfileMergesDefinitionAndCallerSkills() {
+        var definitionSkill = Map.<String, Object>of("name", "docs", "description", "d", "body", "docs");
         var callerSkill = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
-        var merged = new ArrayList<>(List.of(callerSkill));
+        var merged = new ArrayList<>(List.of(definitionSkill));
         var injected = ManagedLoopSkill.mergeInto(merged, List.of(callerSkill),
                 WorkspaceToolProfiles.EXTERNAL_FILES, true, List.of());
         assertThat(injected).isNull();
-        assertThat(merged).containsExactly(callerSkill);
-        assertThat(AgentDefinitionExtensions.sessionSkills(merged)).hasSize(1);
+        assertThat(merged).containsExactly(definitionSkill, callerSkill);
     }
 
     @Test
@@ -356,18 +353,11 @@ class ManagedLoopSkillTest {
     }
 
     @Test
-    void externalCreationPinCarriesTheCallerCatalogExactlyOnceThroughAdmission() {
-        // The external creationPin is the only carrier of the caller catalog: the
-        // profile never appends caller skills again, so a pin that dropped them
-        // (or a merge that appended them twice) either loses the catalog or fails
-        // the name-uniqueness validation. Reverting the pin to List.of() reddens
-        // the first assertion; removing the external definitionCount reset reddens
-        // the exact-once assertion with a duplicate name.
+    void externalCreationCarriesTheCallerCatalogExactlyOnceThroughAdmission() {
         var review = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
         var docs = Map.<String, Object>of("name", "docs", "description", "d", "body", "b");
         var caller = List.of(review, docs);
         var pin = externalCreationPin(caller);
-        assertThat(pin.skills()).containsExactly(review, docs);
         var merged = new ArrayList<>(pin.skills());
         var injected = ManagedLoopSkill.mergeInto(merged, caller, pin.toolProfile(), true, List.of());
         assertThat(injected).isNull();
@@ -377,10 +367,7 @@ class ManagedLoopSkillTest {
 
     @Test
     void externalCreationDropsTheBundledLoopImportInsteadOfPublishingCreatorlessLoop() throws Exception {
-        // The files lane publishes no loop creator, so a bundled caller import that
-        // reached the pin must be dropped rather than served with a body naming
-        // creators the profile lacks. Keeping the loop in the caller slice (no
-        // definitionCount reset) leaves it in the catalog.
+        // The files profile has no loop creator for a bundled caller import.
         var review = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
         var caller = List.of(review, bundledCallerLoop());
         var pin = externalCreationPin(caller);

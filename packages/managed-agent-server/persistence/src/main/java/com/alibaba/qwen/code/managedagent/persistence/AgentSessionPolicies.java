@@ -700,7 +700,7 @@ final class AgentSessionPolicies {
                 || !ExternalWorkspaceSessionPolicies.externalProfileAllowedOrRefuse(workspaces,
                         session.workspace(), session.toolProfile())
                 || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()
-                || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
+                || !WorkspaceToolProfiles.hasAgentIdentity(session.agentId(), session.agentDefinitionDigest())
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0
                 || hasMcpServers(session)
                 || creationSkills.initialSelection(tenantId, sessionId) != null
