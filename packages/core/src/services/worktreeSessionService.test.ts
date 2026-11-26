@@ -26,6 +26,7 @@ import {
   clearWorktreeSessionDurable,
   restoreWorktreeContext,
   getSessionRuntimeLiveness,
+  inspectSessionRuntimeLiveness,
   isSessionRuntimeActive,
   WorktreeSessionReadInconclusiveError,
   WorktreeRestoreRefusedError,
@@ -34,6 +35,36 @@ import {
 import { readWorktreeSessionMarker } from './gitWorktreeService.js';
 import { Storage } from '../config/storage.js';
 import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
+
+const unlinkGate = vi.hoisted(() => ({
+  active: undefined as
+    | {
+        filePath: string;
+        reached: () => void;
+        release: Promise<void>;
+      }
+    | undefined,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const wrapped = {
+    ...actual,
+    unlink: async (...args: Parameters<typeof actual.unlink>) => {
+      const gate = unlinkGate.active;
+      if (
+        gate &&
+        (String(args[0]) === gate.filePath ||
+          String(args[0]).startsWith(`${gate.filePath}.clear-`))
+      ) {
+        unlinkGate.active = undefined;
+        gate.reached();
+        await gate.release;
+      }
+      return actual.unlink(...args);
+    },
+  };
+  return { ...wrapped, default: wrapped };
+});
 
 const sample: WorktreeSession = {
   slug: 'my-feature',
@@ -92,6 +123,28 @@ describe('readWorktreeSession', () => {
     // A throwing read would block --resume on every subsequent attempt.
     await writeRaw('not valid json {');
     expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('can distinguish malformed records from genuine absence', async () => {
+    const onInvalid = vi.fn();
+    await writeRaw('not valid json {');
+    await expect(
+      readWorktreeSession(filePath, { onInvalid }),
+    ).resolves.toBeNull();
+    expect(onInvalid).toHaveBeenCalledTimes(1);
+
+    await fs.rm(filePath);
+    await expect(
+      readWorktreeSession(filePath, { onInvalid }),
+    ).resolves.toBeNull();
+    expect(onInvalid).toHaveBeenCalledTimes(1);
+
+    onInvalid.mockClear();
+    await writeJson(sample);
+    await expect(readWorktreeSession(filePath, { onInvalid })).resolves.toEqual(
+      sample,
+    );
+    expect(onInvalid).not.toHaveBeenCalled();
   });
 
   it('returns null when sidecar is missing required fields', async () => {
@@ -415,6 +468,36 @@ describe('writeWorktreeSession', () => {
     await expectStrictInvalid();
   });
 
+  it('round-trips the snapshot removal binding', async () => {
+    const session: WorktreeSession = {
+      ...sample,
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    };
+    await writeWorktreeSession(filePath, session);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session,
+    });
+  });
+
+  it('rejects malformed snapshot removal bindings', async () => {
+    const invalid = [
+      null,
+      {},
+      { archiveKey: 42 },
+      { archiveKey: '../escape.worktree-snapshot.tar.gz' },
+      { archiveKey: 'nested/archive.worktree-snapshot.tar.gz' },
+      { archiveKey: 'archive.worktree-snapshot.tar.gz', path: '/tmp/a' },
+      { archiveKey: 'archive.json' },
+    ];
+    for (const worktreeRemoved of invalid) {
+      await writeJson({ ...sample, worktreeRemoved });
+      await expectStrictInvalid();
+    }
+  });
+
   it('round-trips the carriedEntries overlay field (R9-6)', async () => {
     const withOverlay: WorktreeSession = {
       ...sample,
@@ -469,7 +552,13 @@ describe('writeWorktreeSession', () => {
       hash: 'a'.repeat(40),
       executable: false,
     }));
-    const big: WorktreeSession = { ...sample, carriedEntries: entries };
+    const big: WorktreeSession = {
+      ...sample,
+      carriedEntries: entries,
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    };
     await writeWorktreeSession(filePath, big);
     const read = await strictRead();
     expect(read.state).toBe('valid');
@@ -478,6 +567,7 @@ describe('writeWorktreeSession', () => {
       // but the binding itself stays readable rather than orphaned.
       expect(read.session.carriedEntries).toBeUndefined();
       expect(read.session.slug).toBe(sample.slug);
+      expect(read.session.worktreeRemoved).toEqual(big.worktreeRemoved);
     }
   });
 
@@ -603,6 +693,62 @@ describe('clearWorktreeSession', () => {
   it('is a no-op when file does not exist', async () => {
     await expect(clearWorktreeSession(filePath)).resolves.not.toThrow();
   });
+
+  it('refuses ordinary clearing of a retained-removal binding', async () => {
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    });
+
+    await expect(clearWorktreeSession(filePath)).rejects.toBeInstanceOf(
+      WorktreeRestoreRefusedError,
+    );
+    await expect(readWorktreeSession(filePath)).resolves.toMatchObject({
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    });
+  });
+
+  it('preserves a binding published during ordinary clearing', async () => {
+    await writeWorktreeSession(filePath, sample);
+    let reachedUnlink!: () => void;
+    let allowUnlink!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reachedUnlink = resolve;
+    });
+    const continueRemoval = new Promise<void>((resolve) => {
+      allowUnlink = resolve;
+    });
+    unlinkGate.active = {
+      filePath,
+      reached: reachedUnlink,
+      release: continueRemoval,
+    };
+    try {
+      const clearing = clearWorktreeSession(filePath);
+      await waiting;
+      await writeWorktreeSession(filePath, {
+        ...sample,
+        worktreeRemoved: {
+          archiveKey: 'session.race.1.worktree-snapshot.tar.gz',
+        },
+      });
+      allowUnlink();
+
+      await clearing;
+      await expect(readWorktreeSession(filePath)).resolves.toMatchObject({
+        worktreeRemoved: {
+          archiveKey: 'session.race.1.worktree-snapshot.tar.gz',
+        },
+      });
+    } finally {
+      allowUnlink();
+      unlinkGate.active = undefined;
+    }
+  });
 });
 
 describe('clearWorktreeSessionDurable', () => {
@@ -615,6 +761,56 @@ describe('clearWorktreeSessionDurable', () => {
 
   it('is idempotent when the parent directory is absent', async () => {
     await expect(clearWorktreeSessionDurable(filePath)).resolves.not.toThrow();
+  });
+
+  it('preserves a retained-removal binding instead of clearing it durably', async () => {
+    await createWorktreeSession(filePath, {
+      ...sample,
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    });
+
+    await expect(clearWorktreeSessionDurable(filePath)).rejects.toBeInstanceOf(
+      WorktreeRestoreRefusedError,
+    );
+    await expect(readWorktreeSession(filePath)).resolves.toMatchObject({
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    });
+  });
+
+  it('restores nlink === 1 and removes the staging directory after a transient read failure', async () => {
+    await createWorktreeSession(filePath, sample);
+    const realOpen = fs.open.bind(fs);
+    let injected = false;
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      if (!injected && String(args[0]).includes('.clear-')) {
+        injected = true;
+        throw Object.assign(new Error('injected transient EIO'), {
+          code: 'EIO',
+        });
+      }
+      return realOpen(...args);
+    });
+    try {
+      await expect(clearWorktreeSessionDurable(filePath)).rejects.toThrow(
+        'injected transient EIO',
+      );
+      expect(injected).toBe(true);
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    const stat = await fs.lstat(filePath);
+    expect(stat.nlink).toBe(1);
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'valid',
+      session: sample,
+    });
+    const siblings = await fs.readdir(path.dirname(filePath));
+    expect(siblings.some((entry) => entry.includes('.clear-'))).toBe(false);
   });
 });
 
@@ -678,6 +874,172 @@ describe('isSessionRuntimeActive', () => {
     await expect(
       getSessionRuntimeLiveness('owner-session', repoRoot),
     ).resolves.toBe('inactive');
+  });
+
+  it('distinguishes missing evidence from unverifiable records across project dirs and candidate bases', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    const worktreeRoot = path.join(tmpDir, 'worktree');
+    await fs.mkdir(repoRoot, { recursive: true });
+    await fs.mkdir(worktreeRoot, { recursive: true });
+    const runtimeBase = path.join(repoRoot, '.qwen-runtime');
+    Storage.setRuntimeBaseDir(runtimeBase);
+
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot]),
+    ).resolves.toBe('missing');
+    await expect(
+      getSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot]),
+    ).resolves.toBe('unknown');
+
+    const foreignRecord = (workDir: string) =>
+      JSON.stringify({
+        schema_version: 1,
+        pid: process.pid,
+        proc_start: null,
+        pid_ns: null,
+        session_id: 'owner-session',
+        work_dir: workDir,
+        hostname: 'unverifiable-owner.invalid',
+        started_at: Date.now() / 1000,
+        qwen_version: null,
+      });
+
+    // A1: unverifiable record under another project directory in the same base.
+    const otherProjectRecord = path.join(
+      runtimeBase,
+      'projects',
+      'subdir-project-hash',
+      'chats',
+      'owner-session.runtime.json',
+    );
+    await fs.mkdir(path.dirname(otherProjectRecord), { recursive: true });
+    await fs.writeFile(otherProjectRecord, foreignRecord(worktreeRoot));
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot]),
+    ).resolves.toBe('unknown');
+    await fs.rm(otherProjectRecord);
+
+    // A2: unverifiable record under a candidate runtime base derived from roots.
+    const candidateBaseRecord = path.join(
+      worktreeRoot,
+      '.qwen-runtime',
+      'projects',
+      'candidate-project-hash',
+      'chats',
+      'owner-session.runtime.json',
+    );
+    await fs.mkdir(path.dirname(candidateBaseRecord), { recursive: true });
+    await fs.writeFile(candidateBaseRecord, foreignRecord(worktreeRoot));
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot]),
+    ).resolves.toBe('unknown');
+    await fs.rm(candidateBaseRecord);
+
+    // Corrupt JSON, unknown schema_version, and mismatched session_id must
+    // fail closed as 'unknown' rather than collapsing into 'missing'.
+    const hashedPath = new Storage(repoRoot).getRuntimeStatusPath(
+      'owner-session',
+    );
+    await fs.mkdir(path.dirname(hashedPath), { recursive: true });
+    await fs.writeFile(hashedPath, '{corrupt json');
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot], {
+        scanProjectRoots: false,
+      }),
+    ).resolves.toBe('unknown');
+
+    await fs.writeFile(
+      hashedPath,
+      JSON.stringify({
+        schema_version: 99,
+        pid: process.pid,
+        session_id: 'owner-session',
+        work_dir: repoRoot,
+        hostname: os.hostname(),
+        started_at: Date.now() / 1000,
+      }),
+    );
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot], {
+        scanProjectRoots: false,
+      }),
+    ).resolves.toBe('unknown');
+
+    await fs.writeFile(
+      hashedPath,
+      JSON.stringify({
+        schema_version: 1,
+        pid: process.pid,
+        proc_start: null,
+        pid_ns: null,
+        session_id: 'different-session',
+        work_dir: repoRoot,
+        hostname: os.hostname(),
+        started_at: Date.now() / 1000,
+        qwen_version: null,
+      }),
+    );
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot], {
+        scanProjectRoots: false,
+      }),
+    ).resolves.toBe('unknown');
+    await fs.rm(hashedPath);
+
+    // Confirmed dead record returns inactive, not missing.
+    await writeRuntimeStatus(hashedPath, {
+      sessionId: 'owner-session',
+      workDir: repoRoot,
+      pid: 2147483647,
+    });
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot], {
+        scanProjectRoots: false,
+      }),
+    ).resolves.toBe('inactive');
+  });
+
+  it('finds active owners across symlinked repo roots inside a pinned runtime storage scope', async () => {
+    const realRepo = path.join(tmpDir, 'real-repo');
+    const linkRepo = path.join(tmpDir, 'link-repo');
+    const worktreeRoot = path.join(realRepo, '.qwen', 'worktrees', 'wt-linked');
+    await fs.mkdir(worktreeRoot, { recursive: true });
+    await fs.symlink(realRepo, linkRepo);
+
+    const pinnedBaseThroughLink = path.join(linkRepo, '.qwen-rel-rt');
+    const worktreeLocalBase = path.join(worktreeRoot, '.qwen-rel-rt');
+    const statusPath = new Storage(
+      worktreeRoot,
+      worktreeLocalBase,
+    ).getRuntimeStatusPath('owner-session');
+    await writeRuntimeStatus(statusPath, {
+      sessionId: 'owner-session',
+      workDir: worktreeRoot,
+      pid: process.pid,
+    });
+
+    const liveState = await Storage.runWithResolvedRuntimeBaseDir(
+      pinnedBaseThroughLink,
+      () =>
+        inspectSessionRuntimeLiveness(
+          'owner-session',
+          [realRepo, worktreeRoot],
+          { scanProjectRoots: false },
+        ),
+    );
+    expect(liveState).toBe('active');
+
+    await fs.rm(statusPath);
+    const missingState = await Storage.runWithResolvedRuntimeBaseDir(
+      pinnedBaseThroughLink,
+      () =>
+        inspectSessionRuntimeLiveness(
+          'owner-session',
+          [realRepo, worktreeRoot],
+          { scanProjectRoots: false },
+        ),
+    );
+    expect(missingState).toBe('missing');
   });
 
   it('treats EPERM from the local pid probe as active', async () => {
@@ -1306,6 +1668,116 @@ describe('restoreWorktreeContext', () => {
     expect(warnings).toHaveLength(1);
   });
 
+  it('restores context when .qwen/worktrees is a symlink and sidecar stores its realpath', async () => {
+    const repoDir = path.join(tmpDir, 'repo-symlink');
+    const externalWorktrees = path.join(tmpDir, 'external-wt-store');
+    await fs.mkdir(path.join(repoDir, '.qwen'), { recursive: true });
+    await fs.mkdir(externalWorktrees, { recursive: true });
+    await fs.symlink(
+      externalWorktrees,
+      path.join(repoDir, '.qwen', 'worktrees'),
+    );
+    const realWorktreePath = path.join(externalWorktrees, 'my-feature');
+    await fs.mkdir(realWorktreePath, { recursive: true });
+    await fs.writeFile(
+      path.join(realWorktreePath, '.qwen-session'),
+      'session-owner',
+      'utf8',
+    );
+    const live: WorktreeSession = {
+      ...sample,
+      originalCwd: repoDir,
+      worktreePath: realWorktreePath,
+    };
+    await writeWorktreeSession(filePath, live);
+
+    const { result, warnings } = await restoreWithWarnings();
+    expect(result.session).toEqual(live);
+    expect(result.contextMessage).toContain(`"${live.slug}"`);
+    expect(warnings).toEqual([]);
+    expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('rejects and clears a sidecar whose worktreePath leaf is a symlink escaping outside the managed subtree', async () => {
+    const repoDir = path.join(tmpDir, 'repo-leaf-escape');
+    const outsideDir = path.join(tmpDir, 'outside-secret-dir');
+    await fs.mkdir(path.join(repoDir, '.qwen', 'worktrees'), {
+      recursive: true,
+    });
+    await fs.mkdir(outsideDir, { recursive: true });
+    const symlinkLeaf = path.join(repoDir, '.qwen', 'worktrees', 'my-feature');
+    await fs.symlink(outsideDir, symlinkLeaf);
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      originalCwd: repoDir,
+      worktreePath: symlinkLeaf,
+    });
+
+    const warnings: unknown[] = [];
+    const result = await restoreWorktreeContext(
+      filePath,
+      (e) => warnings.push(e),
+      'session-owner',
+    );
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(await readWorktreeSession(filePath)).toBeNull();
+    await expect(
+      fs.lstat(path.join(outsideDir, '.qwen-session')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects and clears a sidecar with a relative originalCwd', async () => {
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      originalCwd: '.',
+      worktreePath: path.resolve('.', '.qwen', 'worktrees', 'my-feature'),
+    });
+
+    const { result, warnings } = await restoreWithWarnings();
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('rejects and clears a sidecar using <symlink>/.. traversal inside worktreePath', async () => {
+    const repoDir = path.join(tmpDir, 'repo-dotdot-escape');
+    const outsideRoot = path.join(tmpDir, 'outside-victim');
+    const outsideSub = path.join(outsideRoot, 'sub');
+    const outsideTarget = path.join(outsideRoot, 'target');
+    await fs.mkdir(path.join(repoDir, '.qwen', 'worktrees', 'target'), {
+      recursive: true,
+    });
+    await fs.mkdir(outsideSub, { recursive: true });
+    await fs.mkdir(outsideTarget, { recursive: true });
+    await fs.symlink(
+      outsideSub,
+      path.join(repoDir, '.qwen', 'worktrees', 'link'),
+    );
+    const traversalPath = `${path.join(repoDir, '.qwen', 'worktrees', 'link')}/../target`;
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      originalCwd: repoDir,
+      worktreePath: traversalPath,
+    });
+
+    const warnings: unknown[] = [];
+    const result = await restoreWorktreeContext(
+      filePath,
+      (e) => warnings.push(e),
+      'session-owner',
+    );
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(await readWorktreeSession(filePath)).toBeNull();
+    await expect(
+      fs.lstat(path.join(outsideTarget, '.qwen-session')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('rejects and clears a sidecar whose worktreePath escapes the managed subtree', async () => {
     // A tampered sidecar pointing at /tmp itself (a real dir) but not
     // under `<originalCwd>/.qwen/worktrees/` must be treated as
@@ -1353,6 +1825,45 @@ describe('restoreWorktreeContext', () => {
     // Sidecar should be deleted.
     expect(await readWorktreeSession(filePath)).toBeNull();
   });
+
+  it.each([false, true])(
+    'preserves a retained snapshot binding when its directory is present: %s',
+    async (directoryPresent) => {
+      const worktreePath = path.join(tmpDir, '.qwen', 'worktrees', 'removed');
+      if (directoryPresent) {
+        await fs.mkdir(worktreePath, { recursive: true });
+        await fs.writeFile(
+          path.join(worktreePath, '.qwen-session'),
+          'session-1',
+        );
+      }
+      const session: WorktreeSession = {
+        ...sample,
+        originalCwd: tmpDir,
+        worktreePath,
+        worktreeRemoved: {
+          archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+        },
+      };
+      await writeWorktreeSession(filePath, session);
+
+      const warnings: unknown[] = [];
+      const result = await restoreWorktreeContext(
+        filePath,
+        (error) => warnings.push(error),
+        'session-1',
+      );
+      expect(result).toEqual({ contextMessage: null, session: null });
+      expect(warnings[0]).toBeInstanceOf(WorktreeRestoreRefusedError);
+      expect((warnings[0] as Error).message).toContain(
+        'retained-removal binding',
+      );
+      await expect(strictRead()).resolves.toEqual({
+        state: 'valid',
+        session,
+      });
+    },
+  );
 
   it('treats a regular file at worktreePath as not-a-worktree', async () => {
     const filePathTarget = path.join(tmpDir, 'pretend-worktree');

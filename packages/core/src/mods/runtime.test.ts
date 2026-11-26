@@ -448,6 +448,30 @@ describe('ModRuntime with the real QuickJS worker', () => {
     });
   });
 
+  it('loads a Mod that hooks events Claude Code 2.1.332 added', async () => {
+    const runtime = await create(`export function register(on) {
+      on('session.stop', ($, e, next) => next(e));
+      on('tool.run', {tool:'Bash'}, ($, e, next) => next(e));
+      on('vcs.*', ($, e, next) => next(e));
+      on('classic.PreSkillShellCommand', ($, e, next) => next(e));
+      on('session.start', async ($, e, next) => {
+        $.ui.invalidate('tool.offer');
+        $.ui.invalidate('tool.list');
+        $.ui.invalidate('ui.offer');
+        await $.command.register({name:'hello',description:'Hello'});
+        return next(e);
+      });
+      on('command.run', {command:'hello'}, () => ({text:'still works'}));
+    }`);
+    expect(logs).toEqual([
+      {
+        to: 'transcript',
+        text: 'Hooks for unsupported events will not run: classic.PreSkillShellCommand, session.stop, tool.run, vcs.*',
+      },
+    ]);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('still works');
+  });
+
   it('fails initialization for skipped hooks when the plugin opts in', async () => {
     await expect(
       ModRuntime.createGroup(
@@ -510,7 +534,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
       {
         version: '1.2.3+wrapped',
         qwen: {
-          claudeCode: '2.1.318',
+          claudeCode: '2.1.332',
           events: [
             'clock.now',
             'clock.sleep',
@@ -957,6 +981,27 @@ describe('ModRuntime with the real QuickJS worker', () => {
       `start ${text.length} true`,
       `complete ${text.length} true`,
     ]);
+  });
+
+  it('takes a turn.complete answer naming its plugins and cache writes, and drops the names', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('turn.complete', async ($, e, next) => {
+          const heard = await next(e);
+          $.ui.log('heard ' + Object.keys(heard).join(','));
+          return heard;
+        });
+      }`,
+      `export function register(on) {
+        on('turn.complete', ($, e) => ({
+          text: 'Note',
+          by: ['mod-1'],
+          usage: {...e.usage, ephemeral_5m_input_tokens: 3, ephemeral_1h_input_tokens: 0},
+        }));
+      }`,
+    ]);
+    expect(await runtime.completeTurn(turnEnd, signal())).toBe('Note');
+    expect(logs.map((log) => log.text)).toEqual(['heard text,usage']);
   });
 
   it('names the plugins whose hooks hear the turn events', async () => {

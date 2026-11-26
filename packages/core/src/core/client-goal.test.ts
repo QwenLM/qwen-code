@@ -272,7 +272,6 @@ function setupGoalClient() {
     getArenaAgentClient: vi.fn(() => null),
     getModel: vi.fn(() => 'test-model'),
     getSkipNextSpeakerCheck: vi.fn(() => false),
-    getSkipLoopDetection: vi.fn(() => false),
     getMaxToolCallsPerTurn: vi.fn(() => Number.POSITIVE_INFINITY),
     getToolRegistry: vi.fn(() => ({
       getAllToolNames: () => [],
@@ -1385,10 +1384,7 @@ describe('LlmClient Goal admission', () => {
 
   it('passes loop detection failures to the host pause-reason resolver', async () => {
     const { client, runtime } = setupGoalClient();
-    vi.spyOn(
-      client['loopDetector'],
-      'checkAlwaysOnSafeties',
-    ).mockReturnValueOnce(true);
+    vi.spyOn(client['toolCallCap'], 'check').mockReturnValueOnce(true);
     turnMocks.run.mockReturnValueOnce(
       streamOf({
         type: LlmEventType.ToolCallRequest,
@@ -1512,9 +1508,9 @@ describe('LlmClient Goal admission', () => {
     expect(runtime.finishTurn).toHaveBeenCalledOnce();
   });
 
-  it('resets the loop detector before each Goal-owned Hook continuation', async () => {
+  it('resets the tool-call cap before each Goal-owned Hook continuation', async () => {
     const { client, config } = setupGoalClient();
-    const reset = vi.spyOn(client['loopDetector'], 'reset');
+    const reset = vi.spyOn(client['toolCallCap'], 'reset');
     const messageBus = blockStopHook(config, 'continue checking', 5);
 
     await drain(

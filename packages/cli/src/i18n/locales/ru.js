@@ -510,7 +510,6 @@ export default {
   'Screen Reader Mode': 'Режим программы чтения с экрана',
   'Max Session Turns': 'Макс. количество ходов сессии',
   'Skip Next Speaker Check': 'Пропустить проверку следующего говорящего',
-  'Skip Loop Detection': 'Пропустить обнаружение циклов',
   'Skip Startup Context': 'Пропустить начальный контекст',
   'Enable OpenAI Logging': 'Включить логирование OpenAI',
   'OpenAI Logging Directory': 'Директория логов OpenAI',
@@ -2186,6 +2185,8 @@ export default {
   'Loading suggestions...': 'Загрузка предложений...',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     'Показать разбивку использования окна контекста. Используйте "/context detail" для детализации по элементам.',
+  'Save the context window for the current model.':
+    'Сохранить размер окна контекста для текущей модели.',
   'Show per-item context usage breakdown.':
     'Показать разбивку использования контекста по элементам.',
 

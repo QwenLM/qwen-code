@@ -4638,123 +4638,6 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('shows the always-on hint (not the skipLoopDetection escape) for a consecutive-identical halt', async () => {
-    setupMetricsMock();
-    const toolCallEvent: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        name: 'run_shell_command',
-        args: { command: 'echo loop' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-consecutive-loop',
-      },
-    };
-    const events: ServerLlmStreamEvent[] = [
-      toolCallEvent,
-      {
-        type: LlmEventType.LoopDetected,
-        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    const exitCode = await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Repeat a tool',
-      'prompt-id-consecutive-loop',
-    );
-
-    expect(exitCode).toBe(1);
-    // The consecutive guard runs before the skipLoopDetection gate, so the
-    // headless message must point at model.loopProtection, which governs it,
-    // and must NOT suggest skipLoopDetection, which cannot disable it.
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Set `model.loopProtection` to "warn"'),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('`model.skipLoopDetection`'),
-    );
-  });
-
-  it('shows the skipLoopDetection escape hint for a heuristic loop type', async () => {
-    setupMetricsMock();
-    const toolCallEvent: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        name: 'run_shell_command',
-        args: { command: 'echo loop' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-heuristic-loop',
-      },
-    };
-    const events: ServerLlmStreamEvent[] = [
-      toolCallEvent,
-      {
-        type: LlmEventType.LoopDetected,
-        value: { loopType: LoopType.REPETITIVE_THOUGHTS },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    const exitCode = await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Repeat a tool',
-      'prompt-id-heuristic-loop',
-    );
-
-    expect(exitCode).toBe(1);
-    // A heuristic loop IS gated by skipLoopDetection, so the message must offer
-    // that escape hatch and must NOT claim it is an always-on guard. (Mutation
-    // guard: routing all types into the always-on hint would fail here.)
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('always-on guard'),
-    );
-  });
-
-  it('describes a chanting halt as output-or-reasoning repetition', async () => {
-    setupMetricsMock();
-    const events: ServerLlmStreamEvent[] = [
-      {
-        type: LlmEventType.LoopDetected,
-        value: { loopType: LoopType.CHANTING_IDENTICAL_SENTENCES },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    const exitCode = await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Chant',
-      'prompt-id-chanting-loop',
-    );
-
-    expect(exitCode).toBe(1);
-    // Reasoning-stream chants fire CHANTING_IDENTICAL_SENTENCES while
-    // getResponseText filters reasoning out of visible output, so the
-    // headless label must name both channels — a halt on an empty stdout
-    // with an "output"-only label reads as a detector misfire.
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'the model repeated the same sentence in its output or reasoning',
-      ),
-    );
-  });
-
   it('shows the maxToolCallsPerTurn hint when the per-turn cap halts the run', async () => {
     setupMetricsMock();
     const events: ServerLlmStreamEvent[] = [
@@ -4783,11 +4666,6 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
       expect.stringContaining('cannot be disabled'),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
     );
   });
 
@@ -4821,44 +4699,6 @@ describe('runNonInteractive', () => {
       expect.stringContaining(
         'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
       ),
-    );
-    // The reason replaces the hedged hint that lists every cause.
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('A per-turn tool-call cap was reached'),
-    );
-  });
-
-  it('offers the skipLoopDetection escape for the heuristic global duplicate', async () => {
-    setupMetricsMock();
-    const events: ServerLlmStreamEvent[] = [
-      {
-        type: LlmEventType.LoopDetected,
-        value: {
-          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-          loopReason: LoopReason.REPEATED_CALL,
-        },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Repeat',
-      'prompt-id-global-dup-reason',
-    );
-
-    // The heuristic detector runs only with skipLoopDetection: false, so the
-    // always-on hint the provider-id breaker gets would be wrong here.
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        '`model.skipLoopDetection` to true to disable this check',
-      ),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('always-on guard'),
     );
   });
 
@@ -7904,16 +7744,6 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
         'the provider replayed a tool call id that had already run',
-      ),
-    );
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'always-on guard and cannot be disabled via `model.skipLoopDetection`',
-      ),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
       ),
     );
   });

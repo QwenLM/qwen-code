@@ -4,6 +4,18 @@
 
 状态：已实现（implemented）
 
+2026-11-26 修订：CPU 信号现在需要事件循环延迟佐证才会进入，并在 daemon
+循环恢复健康后退出。一次重启后的 Spotlight 索引风暴曾让原始 ratio 闸门在
+一台 10 核 Mac 上持续拒绝约 13 分钟，而当时 CPU 63% 空闲、daemon p99 延迟
+仅 21–30 ms（load ratio 峰值 10.8）；闸门还在负荷波谷短暂打开后
+重新关闭。涉及文件：`load-admission.ts`、`load-admission.test.ts`、CLI
+帮助与选项注释（`commands/serve.ts`、`serve/types.ts`）、本设计文档对，
+以及已发布契约文档（`docs/users/qwen-serve.md`、
+`docs/developers/qwen-serve-protocol.md`、
+`docs/developers/daemon/17-configuration.md`、
+`docs/developers/daemon/18-error-taxonomy.md`）。见设计决策中的
+「CPU 信号需要佐证」。
+
 ## 问题
 
 主机已经高负荷时，daemon 仍继续放行新建会话。新建任务——调用方自带
@@ -30,7 +42,8 @@
 
 ## 目标
 
-- 主机饱和或 daemon 自身事件循环被饿死时，以可重试的 `503` 拒绝新建子进程。
+- 主机饱和（需 daemon 事件循环延迟佐证）或 daemon 自身事件循环被饿死时，
+  以可重试的 `503` 拒绝新建子进程。
 - 过载期间已有会话与控制面（prompt、cancel、detach、status、SSE）保持完全
   可用。
 - 决策可通过 `GET /daemon/status` 观测。
@@ -66,13 +79,21 @@ interface LoadAdmissionSnapshot {
 }
 ```
 
-两个信号，各带进入/退出阈值（滞回），外加一个单调钟观测缺口锁存：
+两个信号，各带进入/退出阈值（滞回），外加一个单调钟观测缺口锁存。CPU
+信号由事件循环延迟佐证：只有 daemon 循环已经感受到压力时才进入；一旦循环
+恢复健康即退出，即使主机负荷仍然偏高：
 
-| 信号 / 锁存  | 来源                                                               | 进入          | 退出              |
-| ------------ | ------------------------------------------------------------------ | ------------- | ----------------- |
-| CPU 负荷     | `os.loadavg()[0] / os.cpus().length`                               | ratio ≥ 2.0   | ratio < 1.0       |
-| 事件循环延迟 | `monitorEventLoopDelay({ resolution: 20 })`，每窗口 percentile(99) | p99 ≥ 1000 ms | p99 < 250 ms      |
-| 观测缺口锁存 | 距上次 tick 的单调钟年龄（`performance.now()`）                    | 年龄 > 3 周期 | 连续 3 次按时健康 |
+| 信号 / 锁存  | 来源                                                               | 进入                            | 退出                            |
+| ------------ | ------------------------------------------------------------------ | ------------------------------- | ------------------------------- |
+| CPU 负荷     | `os.loadavg()[0] / os.cpus().length`                               | ratio ≥ 2.0 且 lag p99 ≥ 250 ms | ratio < 1.0 或 lag p99 < 100 ms |
+| 事件循环延迟 | `monitorEventLoopDelay({ resolution: 20 })`，每窗口 percentile(99) | p99 ≥ 1000 ms                   | p99 < 250 ms                    |
+| 观测缺口锁存 | 距上次 tick 的单调钟年龄（`performance.now()`）                    | 年龄 > 3 周期                   | 连续 3 次按时健康               |
+
+佐证阈值是导出常量（`LOAD_CORROBORATION_ENTER_MS = 250`、
+`LOAD_CORROBORATION_EXIT_MS = 100`），与延迟信号自身的区间相互独立，便于
+分别调优。进入侧按设计与延迟信号的健康退出边界（250 ms）同值：高于它
+daemon 已不再是从容健康。退出侧远低于它（100 ms），因此循环在 100–250 ms
+区间徘徊时，不会单独触发 CPU 信号的进入或退出。
 
 每个信号各自维护持续计数，翻转条件连续 3 次采样（6 秒）成立后才翻转状态。
 当一次 tick 迟到超过 `3 * sampleMs`，或 `snapshot()` 读到上次 tick 年龄超过
@@ -171,6 +192,25 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 - **两个信号。** 主机 load average 捕捉整机饱和，包括 daemon 之外进程的
   压力。事件循环延迟直接捕捉 daemon 被饿死，且在 `os.loadavg()` 恒为零的
   Windows 上仍然有效。
+- **CPU 信号需要佐证。** 主机 load average 在不同系统上以不同方式误读
+  daemon 承受力：Linux 计入不可中断 IO 等待，IO 风暴在 CPU 空闲时仍显示
+  高负荷；macOS（XNU）采样可运行线程数，但其衰减平均在启动或索引的 CPU
+  突发后仍居高不下，而此时 CPU 与 daemon 循环已空闲。2026-11-26，一次
+  重启后的 Spotlight 索引风暴让一台 10 核 Mac 的 load ratio 峰值达 10.8，
+  而 CPU 63% 空闲、daemon p99 延迟 21–30 ms、零 swap；闸门拒绝会话加载
+  约 13 分钟，只在短暂的负荷波谷打开过。因此 CPU 信号仅在延迟佐证
+  （p99 ≥ 250 ms）——daemon 已感受到压力——时进入，并在负荷降到退出
+  ratio 以下、或循环恢复健康（p99 < 100 ms）时退出。主机繁忙本身不再
+  拒绝一个健康的 daemon。保护仍然成立：本闸门防范的卡死定义上就是 daemon
+  被饿死，佐证后的 CPU 信号比纯延迟信号更早捕捉它（250 ms 对 1000 ms）；
+  纯延迟信号与观测缺口锁存仍覆盖硬卡顿、Windows 与容器饥饿。
+- **佐证带的不对称是刻意滞回。** CPU 信号在 p99 ≥ 250 ms 佐证进入，但
+  经延迟退出只在低于 100 ms 时成立，因此循环在 [100, 250) ms 区间徘徊时
+  保持当前状态——既不单独进入也不单独退出。这与 ratio（2.0/1.0）、延迟
+  （1000/250 ms）信号用的是同一套进入/退出滞回；把退出侧收紧到 250 ms
+  会消除该区间，重新引入本次修订要消除的波谷抖动。低于 100 ms 按延迟
+  信号自身的度量已是健康，故在此释放并非「有压力时释放」；达到或超过
+  1000 ms 的循环则由独立延迟信号保持触闸，与 CPU 信号无关。
 - **观测缺口锁存。** 事件循环停摆时 tick 不运行，缓存判定会在 lag 信号最该起作用时保持健康。监视器在最后一次 tick 的单调年龄超过三个间隔时锁存 `observation_gap`，以同一 503 家族拒绝；锁存仅在三次按时健康 tick 后清除，跳过的间隔不算健康读数，冷启动（尚无 tick）保持 fail-open。新鲜度时钟用单调钟（`performance.now()`）而非 `Date.now()`，NTP 跳变与挂起不会伪造缺口。
 - **比值分子分母同为主机作用域。** `/proc/loadavg` 不做命名空间隔离，而
   `os.availableParallelism()` 遵守 cgroup 配额与亲和性掩码；两者相除曾让
@@ -194,10 +234,14 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 
 - **Windows：** `os.loadavg()` 返回零，CPU 信号在那里失效；延迟信号仍有效。
 - **cgroup：** load average 是主机-wide，不是容器作用域。带 CPU 配额的容器
-  可能在自身空闲时看到主机高负荷，产生误拒。延迟信号是 daemon 本地的，不受
-  影响；运维可 `--no-load-admission`。cgroup PSI 压力是后续工作。
-- **Linux IO wait：** load average 计入不可中断 IO 等待，IO 密集主机可能在
-  CPU 空闲时触发 CPU 信号。保守阈值与退出开关限定影响。
+  可能在自身空闲时看到主机高负荷；2026-11-26 修订后仅凭这一点不再触发 CPU
+  信号（空闲容器的循环保持健康）。延迟信号是 daemon 本地的，不受影响；运维
+  仍可 `--no-load-admission`。cgroup PSI 压力是后续工作。
+- **load average 不等于 daemon 承受力（Linux IO wait、macOS 可运行线程
+  平均）：** Linux load average 计入不可中断 IO 等待，IO 密集主机在 CPU
+  空闲时仍显示高负荷；macOS 平均可运行线程数，其衰减平均在 CPU 突发后
+  仍会滞留。2026-11-26 修订后 CPU 信号需要延迟佐证，这两种形状在 daemon
+  循环健康时都不再触闸；同时饿死 daemon 的风暴仍会经延迟信号触闸。
 - **误报会挡住新建。** 拒绝可见（toast、status issue、daemon 日志）且可逆
   （退出开关、负荷消退）。闸门绝不触碰已放行的工作。
 - **开销：** 多一个直方图与一个 2 秒定时器，与现有 5 秒 metrics sampler
@@ -205,25 +249,34 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 
 ## 验证计划
 
-- 单元测试（同目录）：监视器逐信号与组合的进入/退出/去抖矩阵、dispose、
-  零负荷失效；控制器过载拒绝与预留/释放不变量、禁用直通；REST 与 RPC
-  错误映射。计划任务 per-run 拒绝也核验 overload 字段、`Retry-After`、绑定父会话
+- 单元测试（同目录）：监视器逐信号与组合的进入/退出/去抖矩阵（含 CPU
+  佐证矩阵与 2026-11-26 事故重放：load ratio 10.8 配 25 ms 延迟永不触闸）、
+  dispose、零负荷失效；控制器过载拒绝与预留/释放不变量、禁用直通；REST
+  与 RPC 错误映射。计划任务 per-run 拒绝也核验 overload 字段、`Retry-After`、绑定父会话
   不变、失败 run 标记与一次性任务暂停待显式恢复的状态，不新分配子会话。
 
 - E2E 计划：`.qwen/e2e-tests/load-based-session-admission.md`。对全局安装
   的 `qwen` CLI 做基线 dry-run，展示缺口（负荷下新建仍被放行）。实现后对
   本地构建分组：真实 CPU burner 负荷 → 新建返回 `503 system_overloaded`，
   存活会话 prompt/cancel 保持可用，负荷停止后恢复；`--no-load-admission`
-  在同一负荷下放行；status 报告状态。
+  在同一负荷下放行；status 报告状态。佐证 A/B
+  （`.qwen/e2e-tests/load-admission-corroboration.md`）：低优先级 CPU
+  burner 抬高主机负荷而 daemon 循环保持健康——修订前构建以 `cpu_load`
+  拒绝新建，修订后构建放行并报告 `overloaded: false`。
 - `npm run build && npm run typecheck`，按改动包跑聚焦 vitest。
 
 ## 验收标准
 
-- 持续饱和（load ratio ≥ 2.0 或事件循环 p99 ≥ 1000 ms 达 ≥ 6 秒）时，新建
-  会话返回 `503 system_overloaded` 带 `Retry-After`，且不 spawn 子进程。
+- 持续饱和（load ratio ≥ 2.0 且事件循环 p99 ≥ 250 ms，或事件循环 p99
+  ≥ 1000 ms 单独成立，达 ≥ 6 秒）时，新建会话返回 `503 system_overloaded`
+  带 `Retry-After`，且不 spawn 子进程。
+- 主机负荷持续偏高、循环保持在佐证进入阈值以下（p99 < 250 ms）时，CPU
+  信号永不进入；新建被放行。一旦进入，循环在 100–250 ms 区间徘徊会保持
+  触闸——退出需要 ratio < 1.0 或 p99 < 100 ms。
 - 过载期间，发往存活会话的 prompt、cancel、detach、status、SSE 保持可用。
-- 各活动信号分别低于各自退出阈值持续 ≥ 6 秒（连续 3 次采样）后，新建重新被
-  放行；若卡顿期间同时触发了 `observation_gap` 锁存，则需在两信号均回落后
+- 各活动信号分别低于各自退出阈值持续 ≥ 6 秒（连续 3 次采样）后——CPU
+  信号在 load ratio < 1.0 或 lag p99 < 100 ms 时退出——新建重新被放行；
+  若卡顿期间同时触发了 `observation_gap` 锁存，则需在两信号均回落后
   再经过 3 次按时健康 tick 才解除（卡顿结束后总计约 10 秒）。
 - `--no-load-admission` 完全禁用闸门；行为与今天一致。
 - `GET /daemon/status` 报告负荷准入状态，过载时报告 `system_overloaded`
@@ -232,8 +285,9 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 
 ## 开放问题
 
-- 阈值调优（ratio 2.0/1.0、延迟 1000/250 ms、2 秒 × 3 次采样）待真实观测
-  后进行；当前刻意保持常量。
+- 阈值调优（ratio 2.0/1.0、延迟 1000/250 ms、佐证 250/100 ms、2 秒 × 3 次
+  采样）待真实观测后进行；当前刻意保持常量。佐证区间于 2026-11-26
+  Spotlight 风暴事故后加入；ratio 与延迟区间不变。
 - 内存压力信号与 cgroup 感知的 CPU 压力：后续。
 - 专门的 Web Shell 过载横幅与基于 status 节的新建按钮禁用：后续。
 

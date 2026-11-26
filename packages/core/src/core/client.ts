@@ -13,7 +13,7 @@ import {
 } from './workflow-intent.js';
 import { isTopLevelSession } from '../agents/runtime/agent-context.js';
 import { logWorkflowKeyword } from '../telemetry/loggers.js';
-import { WorkflowKeywordEvent } from '../telemetry/types.js';
+import { LoopType, WorkflowKeywordEvent } from '../telemetry/types.js';
 
 import {
   captureHookExecutionOwner,
@@ -111,6 +111,7 @@ import { buildOmniMediaGuidanceSection } from '../omni/media-guidance.js';
 import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
   CompressionStatus,
+  isAttemptRestartEvent,
   LlmEventType,
   Turn,
   type ChatCompressionInfo,
@@ -118,10 +119,7 @@ import {
 } from './turn.js';
 
 // Services
-import {
-  isAttemptRestartEvent,
-  LoopDetectionService,
-} from '../services/loopDetectionService.js';
+import { TurnToolCallCap } from '../services/turn-tool-call-cap.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import type {
   NotificationRecordPayload,
@@ -131,10 +129,6 @@ import type {
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
-import {
-  getToolExplorationKind,
-  ToolExplorationBudget,
-} from '../services/tool-exploration-budget.js';
 import {
   renderAutoMemoryFocusedSubtree,
   toAutoMemoryRef,
@@ -785,13 +779,7 @@ export class LlmClient {
     IssuedUserPromptAdmission
   >();
 
-  private readonly loopDetector: LoopDetectionService;
-  private readonly toolExplorationBudget = new ToolExplorationBudget();
-  // The prompt/turn that owns the exploration phase. A concurrent `/btw`
-  // side query reaches this same client with the full tool set, so the phase
-  // is bound to its owning interaction: every budget entrypoint below is a
-  // no-op for an invocation that does not own it.
-  private toolExplorationBudgetPromptId: string | undefined;
+  private readonly toolCallCap: TurnToolCallCap;
   // Prompt ids claimed by background interactions: concurrent `/btw` side
   // queries, Notification and Teammate sends. The CLI advances the prompt
   // counter for each, so their ids are unique (R6-1/R7-1 root fix). Their
@@ -913,7 +901,7 @@ export class LlmClient {
   private lastHookMicrocompactionTimestamp: number | null = null;
 
   constructor(private readonly config: Config) {
-    this.loopDetector = new LoopDetectionService(config);
+    this.toolCallCap = new TurnToolCallCap(config);
   }
 
   private compressionObserver?: ChatCompressionObserver;
@@ -2402,10 +2390,6 @@ export class LlmClient {
           `heapDiff=${((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024).toFixed(1)}MB`,
       );
     }
-  }
-
-  getLoopDetectionService(): LoopDetectionService {
-    return this.loopDetector;
   }
 
   async addDirectoryContext(): Promise<void> {
@@ -4535,9 +4519,7 @@ export class LlmClient {
         ? partToString(request)
         : undefined;
     if (startsInteraction) {
-      this.loopDetector.reset(prompt_id, {
-        keepReminders: options?.isConcurrentSideQuery,
-      });
+      this.toolCallCap.reset(prompt_id);
       this.lastPromptId = prompt_id;
       // A side question asked while a turn is running is not a new turn: it
       // must not move the running turn's starting point or drop its target —
@@ -4568,8 +4550,6 @@ export class LlmClient {
         }
       }
       if (!options?.isConcurrentSideQuery) {
-        this.toolExplorationBudget.reset();
-        this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
       } else {
         this.concurrentSideQueryPromptIds.add(prompt_id);
@@ -4966,7 +4946,7 @@ export class LlmClient {
       this.activeAutomaticTodoWorkChainPromptIds.add(prompt_id);
     }
     if (messageType === SendMessageType.Goal) {
-      this.loopDetector.reset(prompt_id);
+      this.toolCallCap.reset(prompt_id);
       this.lastPromptId = prompt_id;
     }
     if (startsInteraction && !hostInteractionSpan) {
@@ -4996,20 +4976,6 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
-    // Set when this send took a loop-protection reminder into requestToSend;
-    // cleared when the model accepts the request (commit) or on exit
-    // (abandon), so the `reminded` accounting and the pending state settle at
-    // the real delivery boundary instead of the draft request assembly.
-    let loopReminderPrepared = false;
-    // A concurrent `/btw` side query runs through this same client and its
-    // tool-result continuation is submitted without the flag, so ownership is
-    // carried by the prompt id the interaction claimed at its start: a
-    // non-owner invocation leaves the running turn's phase untouched (it
-    // neither records into it nor drains its pending reminder).
-    const ownsExplorationBudget =
-      !options?.isConcurrentSideQuery &&
-      prompt_id === this.toolExplorationBudgetPromptId;
-    const ownsToolLoopGuards = ownsExplorationBudget;
     // The delivery was prepared before the request went out, so commit vs
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
@@ -5647,50 +5613,6 @@ export class LlmClient {
 
       if (messageType === SendMessageType.ToolResult) {
         let carriesAgentToolResult = false;
-        // Record executed tool results for stateful read tools (task_list)
-        // so the loop guards can distinguish productive re-polling — the
-        // shared task board changed between identical calls — from a stuck
-        // loop (issue #9450). A detection here (the result-aware global
-        // duplicate count) halts the turn exactly like the event-loop
-        // guards below.
-        for (const part of requestToSend) {
-          if (
-            typeof part !== 'object' ||
-            part === null ||
-            !('functionResponse' in part)
-          ) {
-            continue;
-          }
-          const functionResponseId = (part as Part).functionResponse?.id;
-          if (!functionResponseId) continue;
-          if (
-            this.loopDetector.recordToolResultByCallId(
-              functionResponseId,
-              [part as Part],
-              { queueReminders: ownsExplorationBudget },
-            )
-          ) {
-            for (const goalEvent of await finalizeInterruptedGoalTurn(
-              undefined,
-              'loop detected',
-            )) {
-              yield goalEvent;
-            }
-            const loopType = this.loopDetector.getLastLoopType();
-            yield {
-              type: LlmEventType.LoopDetected,
-              ...(loopType && {
-                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
-              }),
-            };
-            await arenaAgentClient?.reportError('Loop detected');
-            this.lastApiCompletionTimestamp = Date.now();
-            endCurrentInteraction('error', 'loop detected', 'loop_detected');
-            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-            this.fireLoopDetectedStopFailure(loopType);
-            return turn;
-          }
-        }
         // A top-level Agent tool result means a delegated execution just
         // returned (#10953): real work advanced while the parent earned a
         // single tool turn, so the turn budget cannot come due on its own.
@@ -5767,24 +5689,6 @@ export class LlmClient {
         const activeTodoReminder = carriesAgentToolResult
           ? this.config.takeActiveTodoReminder(prompt_id, true)
           : this.config.takeActiveTodoReminder(prompt_id);
-        const explorationReminder =
-          this.loopDetector.isDisabledForSession() || !ownsToolLoopGuards
-            ? undefined
-            : this.toolExplorationBudget.takeReminder(
-                this.config.getMaxToolCallsPerTurn(),
-              );
-        if (explorationReminder)
-          requestToSend.push({ text: explorationReminder });
-        // Ownership-gated like the exploration reminder, so a concurrent side
-        // query neither queues nor drains the running turn's loop-protection
-        // reminders.
-        const loopReminder = ownsExplorationBudget
-          ? this.loopDetector.takeLoopReminder()
-          : undefined;
-        if (loopReminder) {
-          requestToSend.push({ text: loopReminder });
-          loopReminderPrepared = true;
-        }
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -5945,15 +5849,10 @@ export class LlmClient {
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
-      // callIds already fed to the loop guards this attempt. Mirrors the
-      // execution-side dedup (coreToolScheduler.dedupeRequestsByCallId / the
-      // interactive duplicate-call-id suppression), which collapses
-      // provider-duplicate emissions into one executed call and one result:
-      // feeding the guards once per call id keeps request counts and result
-      // evidence on the same population (main-session twin of the agent-core
-      // fix, issue #9450). Id-less requests are never deduped. Cleared on
-      // retry/fallback alongside the attempt's accumulated state.
-      const loopGuardFedCallIds = new Set<string>();
+      // Call ids already counted toward the tool-call cap this attempt: a
+      // provider-duplicate emission runs once, so it counts once. Id-less
+      // requests are never deduped. Cleared on retry/fallback.
+      const capCountedCallIds = new Set<string>();
       try {
         for await (const event of resultStream) {
           const acceptsModelInput =
@@ -5971,15 +5870,6 @@ export class LlmClient {
                   collectResidentMemoryBodies(this.getHistoryShallow()),
                 );
             }
-            if (loopReminderPrepared) {
-              // First model-accepted event: the request carrying the prepared
-              // loop-protection reminder is being consumed, so commit its
-              // delivery accounting here — not at take time, where a draft
-              // request cancelled at a yield or failed before acceptance
-              // would credit telemetry for a warning the model never saw.
-              this.loopDetector.commitLoopReminderDelivery();
-              loopReminderPrepared = false;
-            }
           }
           if (!steerInputSettled) {
             // Settle the attached steer input as soon as the first stream
@@ -5996,7 +5886,7 @@ export class LlmClient {
           } else if (isAttemptRestartEvent(event)) {
             modelRequestAccepted = false;
             hasToolCalls = false;
-            loopGuardFedCallIds.clear();
+            capCountedCallIds.clear();
             agentOutput.restartAttempt(
               event.type === LlmEventType.Retry &&
                 event.isContinuation === true,
@@ -6016,68 +5906,17 @@ export class LlmClient {
             didUpdateIdeContextState = true;
           }
 
-          // A provider-duplicate emission of an already-fed call id executes
-          // once (the schedulers collapse it), so feed the loop guards once —
-          // counting both emissions would leave the request counters one ahead
-          // of the executed result evidence and fail-safe-halt a productive
-          // stateful poller (issue #9450). The event itself still flows to
-          // consumers below; only the guard feed is deduped.
-          let duplicateLoopGuardRequest = false;
+          let duplicateCapRequest = false;
           if (event.type === LlmEventType.ToolCallRequest) {
-            const fedCallId = event.value.callId;
-            if (fedCallId) {
-              duplicateLoopGuardRequest = loopGuardFedCallIds.has(fedCallId);
-              loopGuardFedCallIds.add(fedCallId);
+            const callId = event.value.callId;
+            if (callId) {
+              duplicateCapRequest = capCountedCallIds.has(callId);
+              capCountedCallIds.add(callId);
             }
           }
-
-          // Always-on safety checks (consecutive-identical tool-call guard,
-          // shell inspection stagnation, and per-turn tool-call cap). These run
-          // before the skipLoopDetection gate; model.loopProtection decides
-          // whether they remind or stop.
-          const alwaysOnLoop =
-            !duplicateLoopGuardRequest &&
-            this.loopDetector.checkAlwaysOnSafeties(event, {
-              queueReminders: ownsExplorationBudget,
-            });
-          // Exploration-budget lifecycle, recorded before the halt handling
-          // below takes effect: a halted batch's over-count is harmless only
-          // because every core halt is terminal (the halt branch returns the
-          // turn, and the next interaction resets the budget). Keep any
-          // future non-terminal core halt from silently counting calls that
-          // never executed. Ownership-gated like every other entrypoint: a
-          // concurrent side turn's stream neither feeds this turn's phase nor
-          // rolls it back.
-          if (ownsToolLoopGuards) {
-            if (
-              event.type === LlmEventType.ToolCallRequest &&
-              !duplicateLoopGuardRequest
-            ) {
-              this.toolExplorationBudget.record(
-                getToolExplorationKind(
-                  this.config.getToolRegistry(),
-                  event.value.name,
-                  event.value.args,
-                ),
-              );
-            } else if (event.type === LlmEventType.Finished) {
-              this.toolExplorationBudget.commit();
-            } else if (isAttemptRestartEvent(event)) {
-              // A retry re-streams the failed attempt's calls, so its reads
-              // must not stay counted. A fallback attempt cannot have
-              // streamed calls (the chain only runs when the failed attempt
-              // yielded no candidate output), so its rollback is a no-op kept
-              // for symmetry — and harmless, because a rollback never goes
-              // below the committed floor.
-              this.toolExplorationBudget.rollback();
-            }
-          }
-          if (alwaysOnLoop) {
-            // Drop every tool call collected before the guard fired so the run
-            // halts here instead of spawning a continuation that re-trips it.
-            // turn.pendingToolCalls is internal to this loop and is not read
-            // after the early return — stream consumers (the TUI scheduler and
-            // the non-interactive runner) build their own list from the yielded
+          if (!duplicateCapRequest && this.toolCallCap.check(event)) {
+            // Drop every tool call collected before the cap so the run halts
+            // here. Stream consumers build their own list from the yielded
             // ToolCallRequest events and stop on LoopDetected.
             turn.pendingToolCalls.length = 0;
             for (const goalEvent of await finalizeInterruptedGoalTurn(
@@ -6086,12 +5925,12 @@ export class LlmClient {
             )) {
               yield goalEvent;
             }
-            const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && {
-                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
-              }),
+              value: {
+                loopType: LoopType.TURN_TOOL_CALL_CAP,
+                ...this.toolCallCap.getStop(),
+              },
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
@@ -6099,51 +5938,7 @@ export class LlmClient {
             this.lastApiCompletionTimestamp = Date.now();
             endCurrentInteraction('error', 'loop detected', 'loop_detected');
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-            this.fireLoopDetectedStopFailure(loopType);
-            settleMemoryDelivery();
-            return turn;
-          }
-
-          // Heuristic loop detection is opt-in: `model.skipLoopDetection`
-          // defaults to true (see settingsSchema) to avoid false-positive
-          // interruptions. Only the historically false-positive-prone heuristics
-          // (content/thought repetition, read-file and action stagnation,
-          // global-duplicate and alternating tool-call patterns) sit behind this
-          // flag. The precise consecutive-identical guard, shell inspection
-          // stagnation guard, and per-turn cap run unconditionally in
-          // checkAlwaysOnSafeties above, so the documented escape hatch only
-          // relaxes the heuristics (see nonInteractiveCli.ts).
-          const skipLoopDetection = this.config.getSkipLoopDetection();
-          const heuristicLoop =
-            !duplicateLoopGuardRequest &&
-            !skipLoopDetection &&
-            this.loopDetector.addAndCheckHeuristicLoops(event, {
-              queueReminders: ownsExplorationBudget,
-              toolCallPatterns: true,
-            });
-          if (heuristicLoop) {
-            for (const goalEvent of await finalizeInterruptedGoalTurn(
-              undefined,
-              'loop detected',
-            )) {
-              yield goalEvent;
-            }
-            const loopType = this.loopDetector.getLastLoopType();
-            yield {
-              type: LlmEventType.LoopDetected,
-              ...(loopType && {
-                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
-              }),
-            };
-            if (arenaAgentClient) {
-              await arenaAgentClient.reportError('Loop detected');
-            }
-            this.lastApiCompletionTimestamp = Date.now();
-            endCurrentInteraction('error', 'loop detected', 'loop_detected');
-            // finally cleanup catches this, but cancel explicitly to match
-            // the cleanup pattern at other early-return sites.
-            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-            this.fireLoopDetectedStopFailure(loopType);
+            this.fireLoopDetectedStopFailure(LoopType.TURN_TOOL_CALL_CAP);
             settleMemoryDelivery();
             return turn;
           }
@@ -6407,8 +6202,7 @@ export class LlmClient {
               },
             };
 
-            this.loopDetector.reset(prompt_id);
-            if (ownsExplorationBudget) this.toolExplorationBudget.reset();
+            this.toolCallCap.reset(prompt_id);
             const hookTurnBudget = boundedTurns - 1;
             const pendingSteer = await takeSteerInput(hookTurnBudget);
             for (const goalEvent of takePendingGoalEvents()) {
@@ -6516,8 +6310,7 @@ export class LlmClient {
           // semantics (fresh DaemonToolLoopState per continuation). Runaway
           // protection is preserved: the cap still bounds each iteration, and
           // the chain itself is bounded by stopHookBlockingCap.
-          this.loopDetector.reset(prompt_id);
-          if (ownsExplorationBudget) this.toolExplorationBudget.reset();
+          this.toolCallCap.reset(prompt_id);
 
           const hookTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(hookTurnBudget);
@@ -6601,8 +6394,7 @@ export class LlmClient {
           }
           if (!continueRequest?.length) continue;
           // Like a Stop hook's continuation, each gets its own tool budget.
-          this.loopDetector.reset(prompt_id);
-          if (ownsExplorationBudget) this.toolExplorationBudget.reset();
+          this.toolCallCap.reset(prompt_id);
           const policyTurn = yield* this.sendMessageStream(
             continueRequest,
             signal,
@@ -6814,15 +6606,6 @@ export class LlmClient {
       throw error;
     } finally {
       settleMemoryDelivery();
-      if (loopReminderPrepared) {
-        // The send exited before the model accepted the request that carried
-        // the prepared loop-protection reminder (cancelled at a yield, failed
-        // before any model event, ...): put it back so the streak's warning
-        // stays eligible for the next real send instead of being lost while
-        // the telemetry already counted it.
-        this.loopDetector.abandonLoopReminderDelivery();
-        loopReminderPrepared = false;
-      }
       if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
         this.restoreMemoryBodyStateFromHistory();
       }

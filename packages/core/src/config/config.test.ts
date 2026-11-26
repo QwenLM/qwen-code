@@ -66,7 +66,6 @@ const ON_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
-import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -8811,10 +8810,109 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  it('resolves model preferences by endpoint on switch and initialization', async () => {
+    const authType = AuthType.USE_OPENAI;
+    const model = 'shared.v2';
+    const first = 'https://first.example.com/v1';
+    const second = 'https://second.example.com/v1';
+    const params = {
+      authType,
+      model,
+      initialModelRegistryBaseUrl: first,
+      modelProvidersConfig: {
+        openai: [
+          route(model, first, 'API_KEY_A'),
+          route(model, second, 'API_KEY_B'),
+        ],
+      },
+      modelPreferenceDefaultEffort: 'low',
+    };
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+      (_config, selectedAuth, generationConfig, sources) => ({
+        config: {
+          ...generationConfig,
+          authType: selectedAuth,
+          model,
+          apiKey: 'test-key',
+          contextWindowSize: 400_000,
+        },
+        sources: { ...sources },
+      }),
+    );
+    stubContentGenerator();
+    const config = makeConfig({ ...params, modelPreferences: {} });
+    await config.refreshAuth(authType);
+    const firstKey = config.getModelPreferenceKey()!;
+    const firstPreference = {
+      reasoning: { effort: 'high' as const },
+      contextWindow: 128_000,
+    };
+    config.setModelPreferences({ [firstKey]: firstPreference });
+    expect(config.getReasoningEffort()).toBe('high');
+    expect(config.getContentGeneratorConfig().contextWindowSize).toBe(128_000);
+    expect(config.getModelPreferenceContextLimit()).toBe(400_000);
+
+    await config.switchModel(authType, model, { baseUrl: second });
+    const secondKey = config.getModelPreferenceKey()!;
+    expect(secondKey).not.toBe(firstKey);
+    expect(config.getReasoningEffort()).toBe('low');
+    expect(config.getContentGeneratorConfig().contextWindowSize).toBe(400_000);
+    const preferences = {
+      [firstKey]: firstPreference,
+      [secondKey]: {
+        reasoning: { effort: 'medium' as const },
+        contextWindow: 256_000,
+      },
+    };
+    config.setModelPreferences(preferences);
+    expect(config.getReasoningEffort()).toBe('medium');
+    expect(config.getContentGeneratorConfig().contextWindowSize).toBe(256_000);
+
+    await config.switchModel(authType, model, { baseUrl: first });
+    expect(config.getModelPreferenceKey()).toBe(firstKey);
+    expect(config.getReasoningEffort()).toBe('high');
+    expect(config.getContentGeneratorConfig().contextWindowSize).toBe(128_000);
+
+    const restarted = makeConfig({ ...params, modelPreferences: preferences });
+    await restarted.refreshAuth(authType);
+    expect(restarted.getReasoningEffort()).toBe('high');
+    expect(restarted.getContentGeneratorConfig().contextWindowSize).toBe(
+      128_000,
+    );
+
+    restarted.setReasoningEffort('xhigh');
+    restarted.setModelPreferences(
+      {
+        ...preferences,
+        [firstKey]: { reasoning: firstPreference.reasoning },
+      },
+      'contextWindow',
+    );
+    await restarted.refreshAuth(authType);
+    expect(restarted.getReasoningEffort()).toBe('xhigh');
+    expect(restarted.getContentGeneratorConfig().contextWindowSize).toBe(
+      400_000,
+    );
+
+    const proxy = 'https://proxy.example.com/v1';
+    const proxied = makeConfig({
+      ...params,
+      modelPreferences: preferences,
+      generationConfig: { baseUrl: proxy },
+      generationConfigSources: {
+        baseUrl: { kind: 'env', envKey: 'OPENAI_BASE_URL' },
+      },
+    });
+    await proxied.refreshAuth(authType);
+    expect(proxied.getContentGeneratorConfig().baseUrl).toBe(proxy);
+    expect(proxied.getModelPreferenceKey()).not.toBe(firstKey);
+    expect(proxied.getReasoningEffort()).toBe('low');
+  });
+
   describe('model switching optimization (QWEN_OAUTH)', () => {
     /** A Config whose initial qwen-oauth content generator is established. */
-    const qwenOauthConfig = async () => {
-      const config = makeConfig();
+    const qwenOauthConfig = async (params?: Partial<ConfigParameters>) => {
+      const config = makeConfig(params);
       const mockContentConfig: ContentGeneratorConfig = {
         authType: AuthType.QWEN_OAUTH,
         model: 'coder-model',
@@ -8865,6 +8963,52 @@ describe('Server Config (config.ts)', () => {
       const config = await qwenOauthConfig();
 
       await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+    });
+
+    it('updates preferences through the OAuth hot switch', async () => {
+      const config = await qwenOauthConfig({ modelPreferences: {} });
+      const key = config.getModelPreferenceKey()!;
+      config.setModelPreferences({
+        [key]: { reasoning: { effort: 'high' }, contextWindow: 128_000 },
+      });
+      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+
+      expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(1);
+      expect(config.getReasoningEffort()).toBe('high');
+      expect(config.getContentGeneratorConfig().contextWindowSize).toBe(
+        128_000,
+      );
+    });
+
+    it('keeps preferences when setting the same OAuth model programmatically', async () => {
+      const authType = AuthType.QWEN_OAUTH;
+      const model = 'coder-model';
+      const actual = await vi.importActual<
+        typeof import('../core/contentGenerator.js')
+      >('../core/contentGenerator.js');
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        actual.resolveContentGeneratorConfigWithSources,
+      );
+      stubContentGenerator();
+      const config = makeConfig({ authType, model, modelPreferences: {} });
+      await config.refreshAuth(authType);
+      expect(config.getCurrentModelRegistryBaseUrl()).toBeNull();
+      const { baseUrl } = config.getContentGeneratorConfig();
+      expect(baseUrl).toBeTruthy();
+      const key = config.getModelPreferenceKey()!;
+      config.setModelPreferences({
+        [key]: { reasoning: { effort: 'high' }, contextWindow: 128_000 },
+      });
+
+      await config.setModel(model);
+
+      expect(config.getCurrentModelRegistryBaseUrl()).toBeUndefined();
+      expect(config.getContentGeneratorConfig().baseUrl).toBe(baseUrl);
+      expect(config.getModelPreferenceKey()).toBe(key);
+      expect(config.getReasoningEffort()).toBe('high');
+      expect(config.getContentGeneratorConfig().contextWindowSize).toBe(
+        128_000,
+      );
     });
 
     it('should notify model change listeners after switchModel', async () => {
@@ -11842,37 +11986,22 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('getMaxToolCallsPerTurn', () => {
-    it('should return the default cap when unset', () => {
+    it('has no cap when unset', () => {
       expect(makeConfig().getMaxToolCallsPerTurn()).toBe(
-        DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        Number.POSITIVE_INFINITY,
       );
     });
 
-    it('defaults loopProtection to warn', () => {
-      expect(makeConfig().getLoopProtection()).toBe('warn');
-      expect(makeConfig({ loopProtection: 'stop' }).getLoopProtection()).toBe(
-        'stop',
-      );
-    });
-
-    it('falls back to warn for an unknown loopProtection mode', () => {
-      expect(
-        makeConfig({
-          loopProtection: 'Stop' as never,
-        }).getLoopProtection(),
-      ).toBe('warn');
+    it('has no cap when a settings file sets it to null', () => {
+      const config = makeConfig({
+        maxToolCallsPerTurn: null as unknown as number,
+      });
+      expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
     });
 
     it('should use a custom maxToolCallsPerTurn if provided', () => {
       const config = makeConfig({ maxToolCallsPerTurn: 42 });
       expect(config.getMaxToolCallsPerTurn()).toBe(42);
-    });
-
-    it('tracks whether maxToolCallsPerTurn was explicitly set', () => {
-      expect(makeConfig().isMaxToolCallsPerTurnExplicit()).toBe(false);
-      expect(
-        makeConfig({ maxToolCallsPerTurn: 42 }).isMaxToolCallsPerTurnExplicit(),
-      ).toBe(true);
     });
 
     it.each([0, -1])(
