@@ -56,20 +56,16 @@ export function useReverseSearchCompletion(
   // incremental search
   const prevQueryRef = useRef<string>('');
   const prevMatchesRef = useRef<Suggestion[]>([]);
+  const prevHistoryRef = useRef<readonly string[] | null>(null);
 
   // Clear incremental cache when activating reverse search
   useEffect(() => {
     if (reverseSearchActive) {
       prevQueryRef.current = '';
       prevMatchesRef.current = [];
+      prevHistoryRef.current = null;
     }
   }, [reverseSearchActive]);
-
-  // Also clear cache when history changes so new items are considered
-  useEffect(() => {
-    prevQueryRef.current = '';
-    prevMatchesRef.current = [];
-  }, [history]);
 
   const searchHistory = useCallback(
     (query: string, items: readonly string[]) => {
@@ -97,6 +93,7 @@ export function useReverseSearchCompletion(
 
     const query = debouncedQuery.toLowerCase();
     const canUseCache =
+      prevHistoryRef.current === history &&
       prevQueryRef.current &&
       query.startsWith(prevQueryRef.current) &&
       prevMatchesRef.current.length > 0;
@@ -122,8 +119,10 @@ export function useReverseSearchCompletion(
 
     prevQueryRef.current = debouncedQuery.toLowerCase();
     prevMatchesRef.current = matches;
+    prevHistoryRef.current = history;
   }, [
     debouncedQuery,
+    history,
     matches,
     reverseSearchActive,
     setSuggestions,
