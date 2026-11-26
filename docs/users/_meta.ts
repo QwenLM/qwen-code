@@ -13,6 +13,7 @@ export default {
   'integration-vscode': 'Visual Studio Code',
   'integration-zed': 'Zed IDE',
   'integration-jetbrains': 'JetBrains IDEs',
+  'integration-acp': 'Other ACP clients',
   'integration-github-action': 'GitHub Actions',
   'qwen-serve': 'Daemon mode (qwen serve)',
   'qwen-serve-deploy-local': 'Daemon mode — local launch templates',
