@@ -11695,11 +11695,21 @@ describe('qwen-triage verify Java toolchain', () => {
       expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
     }
     // The pool advertises both architectures on the same runners, so both
-    // workflows must pick the JDK from the host instead of the label.
+    // workflows must bind each host architecture to its own checksum.
+    expect(envValue(consumer, 'TEMURIN_SHA256_X64')).toBe(
+      'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94',
+    );
+    expect(envValue(consumer, 'TEMURIN_SHA256_AARCH64')).toBe(
+      '23e37e026f12f3e706f18938ff611db3032d075b09d0879a25d06718c773e223',
+    );
     for (const text of [consumer, mavenRepoProducerWorkflow]) {
-      expect(text).toContain('uname -m');
-      expect(text).toContain("temurin_arch='x64'");
-      expect(text).toContain("temurin_arch='aarch64'");
+      expect(text).toContain('case "$(uname -m)" in');
+      expect(text).toMatch(
+        /x86_64\) temurin_arch='x64'; temurin_sha="\$TEMURIN_SHA256_X64"/,
+      );
+      expect(text).toMatch(
+        /aarch64\|arm64\) temurin_arch='aarch64'; temurin_sha="\$TEMURIN_SHA256_AARCH64"/,
+      );
     }
   });
 
