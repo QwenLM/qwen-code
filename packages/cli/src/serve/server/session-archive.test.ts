@@ -4912,6 +4912,73 @@ describe('retained snapshot archive lifecycle', () => {
     expect(fs.existsSync(sourcePair.metaPath)).toBe(true);
   });
 
+  it('rolls back safely when a sourceOnly member is replaced with a new inode between classify and link during interrupted recovery', async () => {
+    const target = makeRetentionRepo(root, 'interrupted-source-inode-swap');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const destinationDir = path.dirname(archivedSidecar);
+    const destinationSnapshot = path.join(
+      destinationDir,
+      path.basename(sourcePair.snapshotPath),
+    );
+    const destinationMeta = path.join(
+      destinationDir,
+      path.basename(sourcePair.metaPath),
+    );
+    const record = await readWorktreeSessionStrict(state.sidecarPath);
+    if (record.state !== 'valid') throw new Error('Missing owner record');
+    await writeWorktreeSession(archivedSidecar, record.session);
+    fs.mkdirSync(destinationDir, { recursive: true });
+    // Phase 1 mid crash: tar is linked, meta is sourceOnly (nlink === 1).
+    fs.linkSync(sourcePair.snapshotPath, destinationSnapshot);
+
+    const replacementBytes = Buffer.from('{"replaced":true}\n');
+    const link = fs.promises.link.bind(fs.promises);
+    let swapped = false;
+    const linkSpy = vi
+      .spyOn(fs.promises, 'link')
+      .mockImplementation(async (existingPath, newPath) => {
+        if (!swapped && String(newPath) === destinationMeta) {
+          swapped = true;
+          // Atomically replace the source with a NEW inode after its
+          // identity was recorded but before the hardlink is created.
+          const tempPath = `${sourcePair.metaPath}.replacement`;
+          fs.writeFileSync(tempPath, replacementBytes);
+          fs.renameSync(tempPath, sourcePair.metaPath);
+        }
+        await link(existingPath, newPath);
+      });
+
+    let failure: unknown;
+    try {
+      await moveWorktreeSnapshotsWithSession(
+        target.service,
+        state.id,
+        'archived',
+      ).catch((error: unknown) => {
+        failure = error;
+      });
+    } finally {
+      linkSpy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(AggregateError);
+    expect((failure as Error).message).toContain(
+      'Snapshot source changed during move',
+    );
+    // The freshly created twin of the replacement inode must be unlinked so
+    // the replacement source is left intact at nlink === 1.
+    expect(fs.existsSync(destinationMeta)).toBe(false);
+    expect(fs.readFileSync(sourcePair.metaPath)).toEqual(replacementBytes);
+    expect(fs.lstatSync(sourcePair.metaPath, { bigint: true }).nlink).toBe(1n);
+  });
+
   it('rolls back a post-link identity probe failure and retries', async () => {
     const target = makeRetentionRepo(root, 'primary');
     const state = await removedBinding(target);

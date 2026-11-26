@@ -1343,6 +1343,25 @@ describe('worktree retention with real repositories', () => {
       }) + '\n',
     );
 
+    // Prove the warm cache is still masking the new transcript before the
+    // sweep, so the post-sweep assertion below pins cache invalidation
+    // rather than a natural TTL expiry.
+    const cachedRead = await runWithWorkspaceRuntimeStorage(
+      target.runtime,
+      () =>
+        listWorkspaceSessionsForResponse(
+          listBridge,
+          target.repo,
+          { size: 20 },
+          {
+            paginateMerged: true,
+            mergeLive: false,
+            runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+          },
+        ),
+    );
+    expect(cachedRead.sessions.map((s) => s.sessionId)).not.toContain(extraId);
+
     const outcome = await sweep(target);
     expect(outcome.removed).toEqual([evicted.id]);
 

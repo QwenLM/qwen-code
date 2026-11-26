@@ -21,7 +21,10 @@ import {
   configureRetention,
   type RetentionTestRuntime,
 } from '../../test-utils/worktree-session-retention-fixtures.js';
-import { WorktreeMarkerCommittedError } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import {
+  GitWorktreeService as GitWorktreeServiceSubpath,
+  WorktreeMarkerCommittedError,
+} from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import * as snapshotVerification from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
   preclassifyWorktreeCleanup,
@@ -461,6 +464,52 @@ describe('session worktree snapshot restore', () => {
     expect(git(target, target.repo, 'rev-parse', 'feature-snapshot')).toBe(
       target.head,
     );
+  });
+
+  it('rejects a revision-expression branch from snapshot metadata before any branch checkout attempt', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'invalid-branch-meta',
+        branch: 'feature-invalid-meta',
+        dirty: true,
+      }),
+    );
+    // A tampered metadata "branch" that check-ref-format rejects but
+    // rev-parse would still resolve to the captured head commit.
+    const metaPath = path.join(
+      path.dirname(state.sidecarPath),
+      `${state.archiveKey.slice(0, -'.tar.gz'.length)}.json`,
+    );
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as {
+      branch: string;
+    };
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({ ...meta, branch: `${meta.branch}^0` }),
+    );
+
+    const checkoutSpy = vi.spyOn(
+      GitWorktreeServiceSubpath.prototype,
+      'checkoutBranchInCheckout',
+    );
+    try {
+      const result = await restore(target, state.id);
+      expect(result.branch).toBe('');
+      // The invalid ref must be refused by the pre-filter, never handed to
+      // git checkout even though it would resolve to the captured commit.
+      expect(checkoutSpy).not.toHaveBeenCalled();
+      expect(git(target, state.worktreePath, 'branch', '--show-current')).toBe(
+        '',
+      );
+      expect(git(target, state.worktreePath, 'rev-parse', 'HEAD')).toBe(
+        target.head,
+      );
+    } finally {
+      checkoutSpy.mockRestore();
+    }
   });
 
   it('restores detached when the named ref has moved, leaving that ref untouched', async () => {
