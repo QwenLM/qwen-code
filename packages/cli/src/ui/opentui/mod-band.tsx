@@ -36,6 +36,9 @@ import {
   modBandChildKeys,
   modBandColor,
   modBandLayout,
+  modBandMaxLines,
+  modBandProgress,
+  modBandScrolls,
   modBandWrap,
   type ModBandBorder,
   type ModBandPalette,
@@ -300,7 +303,7 @@ function textProps(
 const textOf = (node: ModRenderNode): string =>
   typeof node === 'string'
     ? node
-    : node.type === 'engine'
+    : node.type === 'engine' || node.type === 'Progress'
       ? ''
       : (node.children ?? []).map(textOf).join('');
 
@@ -308,16 +311,41 @@ const textOf = (node: ModRenderNode): string =>
 // takes one; an empty box keeps its place in the layout.
 const emptyText = (key: string) => <box key={key} width={0} height={0} />;
 
+function drawProgress(props: ModRenderProps, key: string): ReactNode {
+  const { label, bar, figure } = modBandProgress(props);
+  return (
+    <text key={key} fg={C.text} wrapMode="none">
+      {label}{' '}
+      {bar ? (
+        <>
+          <span fg={color(props['color']) ?? C.accent}>
+            {'█'.repeat(bar.filled)}
+          </span>
+          <span attributes={TextAttributes.DIM}>{'░'.repeat(bar.empty)}</span>
+          {figure !== undefined && ` ${figure}`}
+        </>
+      ) : (
+        (figure ?? <span attributes={TextAttributes.DIM}>…</span>)
+      )}
+    </text>
+  );
+}
+
 function drawNode(
   node: ModRenderNode,
   key: string,
   inText: boolean,
+  inScroller: boolean,
 ): ReactNode {
   if (typeof node === 'string') {
     const text = cleanModBandText(node);
     if (inText) return text;
     return text ? (
-      <text key={key} fg={C.text}>
+      <text
+        key={key}
+        fg={C.text}
+        {...(inScroller && { wrapMode: 'none' as const })}
+      >
         {text}
       </text>
     ) : (
@@ -325,11 +353,14 @@ function drawNode(
     );
   }
   if (node.type === 'engine') return null;
+  if (node.type === 'Progress') return drawProgress(node.props, key);
   const props = node.props ?? {};
   const kids = node.children ?? [];
   const keys = modBandChildKeys(kids);
+  const scrolls =
+    node.type === 'Box' ? modBandScrolls(props, inScroller) : inScroller;
   const children = kids.map((child, index) =>
-    drawNode(child, keys[index], node.type === 'Text'),
+    drawNode(child, keys[index], node.type === 'Text', scrolls),
   );
   if (node.type === 'Box')
     return (
@@ -346,23 +377,31 @@ function drawNode(
     );
   if (!cleanModBandText(textOf(node))) return emptyText(key);
   // OpenTUI truncates in the middle; Ink's other truncations clip.
-  const wrap = modBandWrap(props);
+  const wrap = modBandWrap(props, inScroller);
   const truncation: { wrapMode?: 'none'; truncate?: true } =
     wrap === 'truncate-middle'
       ? { wrapMode: 'none', truncate: true }
       : wrap !== undefined && wrap !== 'wrap'
         ? { wrapMode: 'none' }
         : {};
-  return (
+  const text = (
     <text key={key} {...textProps(props, false)} {...truncation}>
       {children}
     </text>
+  );
+  const lines = modBandMaxLines(props, inScroller);
+  return lines === undefined ? (
+    text
+  ) : (
+    <box key={key} maxHeight={lines} overflow="hidden" flexShrink={1}>
+      {text}
+    </box>
   );
 }
 
 /** Draws a tree the runtime accepted, as Claude Code's terminal draws it. */
 export function drawOpenTuiModTree(tree: ModRenderElement): ReactNode {
-  return drawNode(tree, 'root', false);
+  return drawNode(tree, 'root', false, false);
 }
 
 export interface OpenTuiModBandProps {
