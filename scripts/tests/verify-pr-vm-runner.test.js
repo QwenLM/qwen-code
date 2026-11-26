@@ -40,6 +40,7 @@ import {
   inspectPidState,
   writeExecutionRecordAndBoundary,
 } from '../../scripts/verify-pr-vm-lifecycle.mjs';
+import { reapedPid } from './reaped-pid.js';
 import {
   buildAliyunAgentSandboxPlan,
   buildAliyunProviderPlan,
@@ -436,7 +437,7 @@ describe('verify-pr-vm-runner backend launch plans', () => {
       trustedInputDigest: SHA('5'),
       kernelDigest: SHA('6'),
       rootfsDigest: SHA('7'),
-      workerPid: 999911,
+      workerPid: reapedPid(),
       workerExe: '/firecracker-v1.18.0-aarch64',
       workerExitEvidence: 'absent',
     });
@@ -446,7 +447,7 @@ describe('verify-pr-vm-runner backend launch plans', () => {
       artifactDir: vault,
       verifyLivePid: true,
     });
-    expect(fin.ok).toBe(true);
+    expect(fin.ok, fin.errors?.join('\n')).toBe(true);
 
     const chk = spawnSync(
       process.execPath,
@@ -464,7 +465,7 @@ describe('verify-pr-vm-runner backend launch plans', () => {
       ],
       { encoding: 'utf8' },
     );
-    expect(chk.status).toBe(0);
+    expect(chk.status, chk.stderr).toBe(0);
     expect(chk.stdout).toMatch(/ok: verdict=merge-ready/);
   });
 });
