@@ -1257,9 +1257,187 @@ describe('release workflow', () => {
         expect(fallback.if).toBe(
           "${{ always() && steps.notify.outcome != 'success' && !steps.notify.outputs.issue_url }}",
         );
+        expect(fallback.run).toContain("--label 'autofix/skip'");
+        expect(fallback.run).not.toContain('autofix/approved');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
+    },
+  );
+
+  function runNotifyFailureWithExistingIssue({
+    author,
+    excludedLabel,
+    releaseTag = 'v1.2.3',
+    priorRun = 'https://github.example/run/2',
+    commentFails = false,
+  }) {
+    const directory = mkdtempSync(join(tmpdir(), 'release-notify-reuse-'));
+    const bin = join(directory, 'bin');
+    const ghLog = join(directory, 'gh-calls');
+    const issues = join(directory, 'issues.json');
+    const output = join(directory, 'github-output');
+    mkdirSync(bin);
+    writeFileSync(output, '');
+    const labels = [{ name: 'type/bug' }];
+    if (excludedLabel) labels.push({ name: excludedLabel });
+    writeFileSync(
+      issues,
+      JSON.stringify([
+        {
+          number: 15672,
+          url: 'https://github.example/QwenLM/qwen-code/issues/15672',
+          labels,
+          author: { login: author },
+          title: `Release Failed for ${releaseTag} on 2026-11-26`,
+          body: `The release workflow failed.\n\nRun: ${priorRun}\n`,
+        },
+      ]),
+    );
+    writeFileSync(
+      join(bin, 'gh'),
+      '#!/bin/sh\n' +
+        'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
+        'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
+        '  case "$*" in\n' +
+        '    *no:assignee*) echo true ;;\n' +
+        '    *) cat "$GH_ISSUES" ;;\n' +
+        '  esac\n' +
+        '  exit 0\n' +
+        'fi\n' +
+        'if [ "$1" = issue ] && [ "$2" = comment ] && [ "$GH_COMMENT_FAILS" = true ]; then\n' +
+        '  exit 1\n' +
+        'fi\n' +
+        'if [ "$1" = issue ] && [ "$2" = create ]; then\n' +
+        "  echo 'https://github.example/QwenLM/qwen-code/issues/9999'\n" +
+        'fi\n' +
+        'exit 0\n',
+      { mode: 0o755 },
+    );
+    try {
+      const result = spawnSync(
+        'bash',
+        [releaseStepScriptAbsolutePath, 'notify-failure'],
+        {
+          cwd: directory,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            GH_CALL_LOG: ghLog,
+            GH_ISSUES: issues,
+            GH_COMMENT_FAILS: String(commentFails),
+            GITHUB_OUTPUT: output,
+            GH_REPO: 'QwenLM/qwen-code',
+            RELEASE_TAG: releaseTag,
+            DETAILS_URL: 'https://github.example/run/2',
+            PREPARE_RESULT: 'success',
+            QUALITY_RESULT: 'failure',
+            INTEGRATION_NONE_RESULT: 'skipped',
+            INTEGRATION_DOCKER_RESULT: 'skipped',
+            PUBLISH_RESULT: 'skipped',
+            BUG_LABEL: 'type/bug',
+            READY_FOR_AGENT_LABEL: 'status/ready-for-agent',
+            AUTOFIX_APPROVED_LABEL: 'autofix/approved',
+          },
+        },
+      );
+      return {
+        result,
+        calls: readFileSync(ghLog, 'utf8'),
+        output: readFileSync(output, 'utf8'),
+      };
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  it.skipIf(process.platform === 'win32').each([
+    {
+      name: 'reuses the app-authored',
+      author: 'app/github-actions',
+      outcome: 'reuse',
+    },
+    {
+      name: 'replaces the human-authored',
+      author: 'some-maintainer',
+      outcome: 'replace',
+    },
+    {
+      name: 'records but does not dispatch for an autofix-skipped',
+      author: 'app/github-actions',
+      excludedLabel: 'autofix/skip',
+      outcome: 'excluded',
+    },
+    {
+      name: 'records but does not dispatch for an in-progress',
+      author: 'app/github-actions',
+      excludedLabel: 'autofix/in-progress',
+      outcome: 'excluded',
+    },
+  ])(
+    '$name release-failure issue while preserving ownership and evidence',
+    ({ author, excludedLabel, outcome }) => {
+      const { result, calls, output } = runNotifyFailureWithExistingIssue({
+        author,
+        excludedLabel,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      if (outcome === 'reuse') {
+        expect(calls).toContain('issue comment 15672');
+        expect(calls).not.toContain('issue create');
+        expect(calls).toContain('issue_number=15672');
+        expect(output).toBe(
+          'issue_url=https://github.example/QwenLM/qwen-code/issues/15672\n',
+        );
+      } else if (outcome === 'replace') {
+        expect(result.stdout).toContain(
+          'was opened by some-maintainer; creating a workflow-owned issue instead.',
+        );
+        expect(calls).toContain('issue create');
+        expect(calls).not.toContain('issue comment 15672');
+        expect(calls).toContain('issue_number=9999');
+        expect(output).toBe(
+          'issue_url=https://github.example/QwenLM/qwen-code/issues/9999\n',
+        );
+      } else {
+        expect(calls).toContain('issue comment 15672');
+        expect(calls).not.toContain('issue create');
+        expect(calls).not.toContain('workflow run');
+        expect(calls).not.toContain('--add-label');
+        expect(output).toBe(
+          'issue_url=https://github.example/QwenLM/qwen-code/issues/15672\n',
+        );
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32').each([
+    ['https://github.example/run/2', 15672],
+    ['https://github.example/run/20', 9999],
+  ])('matches unknown release versions by run URL (%s)', (priorRun, issue) => {
+    const { result, calls } = runNotifyFailureWithExistingIssue({
+      author: 'app/github-actions',
+      releaseTag: 'N/A',
+      priorRun,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls).toContain(`issue_number=${issue}`);
+    if (issue === 9999) expect(calls).not.toContain('issue comment 15672');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'hands an excluded issue comment failure to the workflow fallback',
+    () => {
+      const { result, calls, output } = runNotifyFailureWithExistingIssue({
+        author: 'app/github-actions',
+        excludedLabel: 'autofix/skip',
+        commentFails: true,
+      });
+      expect(result.status).toBe(1);
+      expect(calls).toContain('issue comment 15672');
+      expect(calls).not.toContain('workflow run');
+      expect(output).toBe('');
     },
   );
 
@@ -1293,7 +1471,7 @@ describe('release workflow', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'closes the workflow-owned failure issue once a later attempt succeeds',
+    'reconciles unadopted duplicates and reports linked-only matches',
     () => {
       const directory = mkdtempSync(join(tmpdir(), 'release-reconcile-'));
       const bin = join(directory, 'bin');
@@ -1306,9 +1484,53 @@ describe('release workflow', () => {
           {
             number: 15672,
             url: 'https://github.example/QwenLM/qwen-code/issues/15672',
-            labels: [{ name: 'type/bug' }, { name: 'status/ready-for-agent' }],
-            author: { login: 'github-actions[bot]' },
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'app/github-actions' },
+            assignees: [{ login: 'maintainer' }],
             title: 'Release Failed for v1.2.3 on 2026-10-26',
+          },
+          {
+            number: 15673,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15673',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-10-27',
+          },
+          {
+            number: 15674,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15674',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-10-28',
+          },
+          {
+            number: 15675,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15675',
+            labels: [{ name: 'status/need-information' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-10-29',
+          },
+          {
+            number: 15676,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15676',
+            labels: [{ name: 'status/need-retesting' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-10-30',
+          },
+          {
+            number: 15677,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15677',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'app/github-actions' },
+            linkedPr: true,
+            title: 'Release Failed for v1.2.3 on 2026-10-31',
+          },
+          {
+            number: 15678,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15678',
+            labels: [{ name: 'autofix/in-progress' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-11-01',
           },
         ]),
       );
@@ -1317,8 +1539,15 @@ describe('release workflow', () => {
         '#!/bin/sh\n' +
           'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
           'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
-          '  cat "$GH_ISSUES"\n' +
+          '  case "$*" in\n' +
+          '    *-linked:pr*) jq -c \'map(select(.linkedPr != true))\' "$GH_ISSUES" ;;\n' +
+          '    *linked:pr*) jq -c \'map(select(.linkedPr == true))\' "$GH_ISSUES" ;;\n' +
+          '    *) cat "$GH_ISSUES" ;;\n' +
+          '  esac\n' +
           '  exit 0\n' +
+          'fi\n' +
+          'if [ "$1" = issue ] && [ "$2" = close ] && [ "$3" = 15673 ]; then\n' +
+          '  exit 1\n' +
           'fi\n' +
           'if [ "$1" = issue ] && [ "$2" = edit ]; then\n' +
           '  case "$*" in\n' +
@@ -1329,34 +1558,72 @@ describe('release workflow', () => {
         { mode: 0o755 },
       );
       try {
+        const environment = {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          GH_CALL_LOG: ghLog,
+          GH_ISSUES: issues,
+          GH_REPO: 'QwenLM/qwen-code',
+          RELEASE_TAG: 'v1.2.3',
+          DETAILS_URL: 'https://github.example/run/1',
+          RUN_ATTEMPT: '2',
+        };
         const result = spawnSync(
           'bash',
           [releaseStepScriptAbsolutePath, 'reconcile-failure'],
-          {
-            cwd: directory,
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              PATH: `${bin}:${process.env.PATH}`,
-              GH_CALL_LOG: ghLog,
-              GH_ISSUES: issues,
-              GH_REPO: 'QwenLM/qwen-code',
-              RELEASE_TAG: 'v1.2.3',
-              DETAILS_URL: 'https://github.example/run/1',
-              RUN_ATTEMPT: '2',
-            },
-          },
+          { cwd: directory, encoding: 'utf8', env: environment },
         );
         expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          'https://github.example/QwenLM/qwen-code/issues/15677 was not reconciled because it is linked to a pull request.',
+        );
         const calls = readFileSync(ghLog, 'utf8');
-        expect(calls).toContain('issue comment 15672');
+        for (const adopted of [15672, 15675, 15676, 15677, 15678]) {
+          expect(calls).not.toContain(`issue comment ${adopted}`);
+          expect(calls).not.toContain(`issue edit ${adopted}`);
+          expect(calls).not.toContain(`issue close ${adopted}`);
+        }
+        expect(calls).toContain('issue comment 15673');
+        expect(calls).toContain('issue comment 15674');
         expect(calls).toContain(
-          'issue close 15672 --repo QwenLM/qwen-code --reason not planned',
+          'issue close 15673 --repo QwenLM/qwen-code --reason not planned',
+        );
+        expect(calls).toContain(
+          'issue close 15674 --repo QwenLM/qwen-code --reason not planned',
         );
         expect(calls).not.toContain('issue create');
         // One absent label must not abort the remaining removals or the close.
         expect(calls).toContain('--remove-label status/ready-for-agent');
         expect(calls).toContain('--remove-label autofix/in-progress');
+
+        writeFileSync(
+          issues,
+          JSON.stringify([
+            {
+              number: 15677,
+              url: 'https://github.example/QwenLM/qwen-code/issues/15677',
+              labels: [{ name: 'type/bug' }],
+              author: { login: 'app/github-actions' },
+              linkedPr: true,
+              title: 'Release Failed for v1.2.3 on 2026-10-31',
+            },
+          ]),
+        );
+        writeFileSync(ghLog, '');
+        const linkedOnly = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'reconcile-failure'],
+          { cwd: directory, encoding: 'utf8', env: environment },
+        );
+        expect(linkedOnly.status, linkedOnly.stderr).toBe(0);
+        expect(linkedOnly.stdout).toContain(
+          'https://github.example/QwenLM/qwen-code/issues/15677',
+        );
+        expect(linkedOnly.stdout).toContain('linked to a pull request');
+        expect(linkedOnly.stdout).not.toContain('nothing to reconcile');
+        const linkedCalls = readFileSync(ghLog, 'utf8');
+        expect(linkedCalls).not.toContain('issue comment 15677');
+        expect(linkedCalls).not.toContain('issue close 15677');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -2834,6 +3101,7 @@ describe('release workflow', () => {
     postGateFailAt = 2,
     dockerPsFails = false,
     dockerPsIds = '',
+    aptMirror = '',
     aptDefaultRate,
     aptAliyunRate,
     aptTunaRate,
@@ -3000,6 +3268,7 @@ esac`,
         POST_GATE_FAIL_AT: String(postGateFailAt),
         DOCKER_PS_FAILS: dockerPsFails ? '1' : '0',
         DOCKER_PS_IDS: dockerPsIds,
+        APT_MIRROR: aptMirror,
         CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
         CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
         CURL_TUNA_RATE: String(aptTunaRate ?? 0),
@@ -3049,6 +3318,20 @@ esac`,
       rmSync(directory, { recursive: true, force: true });
     }
   };
+
+  it.skipIf(process.platform === 'win32')(
+    'uses the runner apt mirror without probing and preserves the CI label',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        aptMirror: 'mirrors.cloud.aliyuncs.com',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).not.toContain('apt probe:');
+      expect(calls).toContain(
+        '--label org.qwen-code.ci.sandbox=true --build-arg APT_MIRROR=mirrors.cloud.aliyuncs.com',
+      );
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'selects the fast apt mirror and preserves the CI label in the build flags',
