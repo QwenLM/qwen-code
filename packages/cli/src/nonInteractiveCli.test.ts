@@ -4377,16 +4377,9 @@ describe('runNonInteractive', () => {
         parts: [{ text: 'do the thing' }],
       };
       markApiHistoryPrompt(content, 'client-A');
-      const historyOwner = {
-        history: [content],
-        unaccountedContextSnapshots: new WeakSet<Part>(),
-      } as unknown as LlmChat;
-      mockLlmClient.getChat = vi.fn(() => ({
-        getDebugResponses: mockGetDebugResponses,
-        getHistory: () => LlmChat.prototype.getHistory.call(historyOwner),
-        getHistoryShallow: () =>
-          LlmChat.prototype.getHistoryShallow.call(historyOwner),
-      }));
+      mockLlmClient.getChat.mockReturnValue(
+        new LlmChat(mockConfig, {}, [content]),
+      );
       mockConfig
         .getChatRecordingService()
         .readActiveTranscriptChain.mockResolvedValue([
