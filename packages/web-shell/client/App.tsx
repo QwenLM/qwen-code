@@ -1649,6 +1649,8 @@ export interface WebShellProps {
   composerVariant?: 'default' | 'simple';
   /** Show the composer focus glow and typing animation. Defaults to true. */
   composerGlowEnabled?: boolean;
+  /** Turn off Up/Down prompt recall for this shell, regardless of the browser preference. */
+  disableArrowKeyHistory?: boolean;
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -3822,6 +3824,7 @@ export function App({
   allowedApprovalModes: allowedApprovalModesProp,
   composerVariant = 'default',
   composerGlowEnabled,
+  disableArrowKeyHistory,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -24645,7 +24648,7 @@ export function App({
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
-          <ArrowKeyHistoryProvider>
+          <ArrowKeyHistoryProvider disabledByHost={disableArrowKeyHistory}>
         <div
           ref={appRootRef}
           className={appClassName}

@@ -1279,18 +1279,23 @@ export function SettingsMessage({
                             arrowKeyHistory
                           ) {
                             const label = t('settings.arrowKeyHistory.label');
+                            const disabled =
+                              arrowKeyHistory.setEnabled === undefined;
                             return (
                               <div key={item.localKey}>
                                 {separator}
                                 <SettingsRow
                                   title={label}
                                   description={t(
-                                    'settings.arrowKeyHistory.description',
+                                    disabled
+                                      ? 'settings.arrowKeyHistory.disabledByHost'
+                                      : 'settings.arrowKeyHistory.description',
                                   )}
                                   control={
                                     <Switch
                                       aria-label={label}
                                       checked={arrowKeyHistory.enabled}
+                                      disabled={disabled}
                                       onCheckedChange={
                                         arrowKeyHistory.setEnabled
                                       }

@@ -5859,6 +5859,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.arrowKeyHistory.label': '用上下鍵取回歷史訊息',
   'settings.arrowKeyHistory.description':
     '在訊息輸入框中按 ↑ 或 ↓ 可取回歷史訊息。此設定儲存在目前的瀏覽器中。',
+  'settings.arrowKeyHistory.disabledByHost':
+    '宿主應用程式已關閉方向鍵歷史尋回。',
   'settings.option.ui.chatWidth.1000': '常規',
   'settings.option.ui.chatWidth.wide': '超寬',
   'settings.category.General': '通用',

@@ -118,6 +118,8 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.arrowKeyHistory.label': 'Recall history with arrow keys',
   'settings.arrowKeyHistory.description':
     'Press Up or Down in the message box to recall previous prompts. Saved in this browser.',
+  'settings.arrowKeyHistory.disabledByHost':
+    'The host app has turned off arrow-key history recall.',
   'settings.label.ui.enableFollowupSuggestions': 'Enable Follow-up Suggestions',
   'settings.description.ui.enableFollowupSuggestions':
     'Show context-aware follow-up suggestions after a task completes. Press Tab or Right Arrow to insert, Enter to accept and submit.',
@@ -224,6 +226,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.arrowKeyHistory.label': '用上下键寻回历史消息',
   'settings.arrowKeyHistory.description':
     '在消息输入框中按 ↑ 或 ↓ 可寻回历史消息。此设置保存在当前浏览器中。',
+  'settings.arrowKeyHistory.disabledByHost': '宿主应用已关闭方向键历史寻回。',
   'settings.option.ui.chatWidth.1000': '常规',
   'settings.option.ui.chatWidth.wide': '超宽',
   'settings.category.General': '通用',
@@ -617,6 +620,8 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.arrowKeyHistory.label': 'История запросов по клавишам со стрелками',
   'settings.arrowKeyHistory.description':
     'Нажмите ↑ или ↓ в поле ввода, чтобы вернуть предыдущий запрос. Настройка сохраняется в этом браузере.',
+  'settings.arrowKeyHistory.disabledByHost':
+    'Основное приложение отключило вызов истории клавишами со стрелками.',
   'settings.label.ui.enableFollowupSuggestions':
     'Включить предложения следующих шагов',
   'settings.description.ui.enableFollowupSuggestions':

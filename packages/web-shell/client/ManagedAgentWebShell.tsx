@@ -92,6 +92,8 @@ export interface ManagedAgentWebShellProps
   baseUrl?: string;
   /** Only open the existing Session explicitly selected by the host. */
   hostSessionOnly?: boolean;
+  /** Turn off Up/Down prompt recall for this shell, regardless of the browser preference. */
+  disableArrowKeyHistory?: boolean;
   sessionId?: string;
   onSessionChange?: (sessionId: string | undefined) => void;
   language?: WebShellLanguage;
@@ -124,7 +126,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
       resetKeys={[props.baseUrl, props.managedAgentProvider]}
       fallback={shellErrorFallback(normalizeLanguage(props.language))}
     >
-      <ArrowKeyHistoryProvider>
+      <ArrowKeyHistoryProvider disabledByHost={props.disableArrowKeyHistory}>
         <ManagedAgentWebShellRoot {...props} />
       </ArrowKeyHistoryProvider>
     </ErrorBoundary>

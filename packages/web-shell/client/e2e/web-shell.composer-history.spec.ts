@@ -4,6 +4,7 @@ import {
   installMockDaemon,
   replayCompleteEvent,
 } from './utils/mockDaemon';
+import { submitLocalCommand } from './visuals/harness';
 
 const EDITOR = '[data-web-shell-composer-editor] .cm-content';
 const paragraph = Array.from(
@@ -13,17 +14,19 @@ const paragraph = Array.from(
 ).join(' ');
 const history = [`Older prompt: ${paragraph}`, `Newest prompt: ${paragraph}`];
 
-async function openSession(page: Page, baseURL: string) {
+async function installHistoryDaemon(page: Page, baseURL: string) {
   await page.addInitScript((entries) => {
     localStorage.setItem('qwen-web-shell-history', JSON.stringify(entries));
   }, history);
-  const scenario = createWebShellDaemonScenario();
-  const daemon = await installMockDaemon(page, scenario, { baseURL });
-  await page.goto(`/session/${scenario.sessionId}`);
-  await daemon.sse.waitForConnection(scenario.sessionId);
-  await daemon.sendEvent(
-    replayCompleteEvent({ sessionId: scenario.sessionId }),
-  );
+  return installMockDaemon(page, createWebShellDaemonScenario(), { baseURL });
+}
+
+async function openSession(page: Page, baseURL: string) {
+  const daemon = await installHistoryDaemon(page, baseURL);
+  const { sessionId } = daemon.scenario;
+  await page.goto(`/session/${sessionId}`);
+  await daemon.sse.waitForConnection(sessionId);
+  await daemon.sendEvent(replayCompleteEvent({ sessionId }));
   const editor = page.locator(EDITOR);
   await expect(editor).toBeEditable();
   return editor;
@@ -205,6 +208,63 @@ test('settings can turn off arrow-key prompt history across reloads @smoke', asy
   await expectText(editor, history[1]!);
   await editor.press('ArrowDown');
   await expect(editor).toHaveText('short draft');
+});
+
+test('host can disable arrow-key history without changing the saved preference @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  const daemon = await installHistoryDaemon(page, baseURL!);
+  const { sessionId } = daemon.scenario;
+  const editor = page.locator(EDITOR);
+  const openHost = async (disableArrowKeyHistory: boolean) => {
+    const params = new URLSearchParams({
+      sessionId,
+      disableArrowKeyHistory: String(disableArrowKeyHistory),
+    });
+    await page.goto(`/e2e/settings-harness.html?${params}`);
+    await daemon.sse.waitForConnection(sessionId);
+    await daemon.sendEvent(replayCompleteEvent({ sessionId }));
+    await expect(editor).toBeEditable();
+  };
+  const openUiSettings = async () => {
+    await submitLocalCommand(page, '/settings');
+    await page
+      .getByRole('navigation', { name: 'Settings' })
+      .getByRole('button', { name: /^UI/ })
+      .click();
+  };
+  const toggle = page.getByRole('switch', {
+    name: 'Recall history with arrow keys',
+    exact: true,
+  });
+
+  await openHost(false);
+  await openUiSettings();
+  await expect(toggle).toBeChecked();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+
+  await openHost(true);
+  await openUiSettings();
+  await expect(toggle).not.toBeChecked();
+  await expect(toggle).toBeDisabled();
+  await expect(
+    page.getByText('The host app has turned off arrow-key history recall.'),
+  ).toBeVisible();
+  await page.getByTestId('panel-back').click();
+  await editor.fill('short draft');
+  await editor.press('ArrowUp');
+  await expect(editor).toHaveText('short draft');
+  await editor.press('ArrowDown');
+  await expect(editor).toHaveText('short draft');
+
+  await openHost(false);
+  await editor.fill('short draft');
+  await editor.press('ArrowUp');
+  await expect(editor).toHaveText('/settings');
 });
 
 for (const [name, draft, wrapped] of [

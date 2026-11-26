@@ -19,10 +19,16 @@ const ARROW_KEY_HISTORY_STORAGE_KEY = 'qwen-code-web-shell-arrow-key-history';
 
 export const ArrowKeyHistoryContext = createContext<{
   enabled: boolean;
-  setEnabled: (enabled: boolean) => void;
+  setEnabled?: (enabled: boolean) => void;
 } | null>(null);
 
-export function ArrowKeyHistoryProvider({ children }: { children: ReactNode }) {
+export function ArrowKeyHistoryProvider({
+  children,
+  disabledByHost = false,
+}: {
+  children: ReactNode;
+  disabledByHost?: boolean;
+}) {
   const [enabled, setEnabled] = useState(() => {
     try {
       return (
@@ -41,8 +47,11 @@ export function ArrowKeyHistoryProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   const preference = useMemo(
-    () => ({ enabled, setEnabled: updateEnabled }),
-    [enabled, updateEnabled],
+    () => ({
+      enabled: enabled && !disabledByHost,
+      setEnabled: disabledByHost ? undefined : updateEnabled,
+    }),
+    [disabledByHost, enabled, updateEnabled],
   );
   return (
     <ArrowKeyHistoryContext.Provider value={preference}>
