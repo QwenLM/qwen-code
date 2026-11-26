@@ -330,8 +330,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     }
 
     @Override
-    public CompletionStage<Void> drainHarnessReceipts(String tenantId, String harnessSessionId) {
-        return drainCoordinator.drainHarnessReceipts(tenantId, harnessSessionId);
+    public CompletionStage<List<RuntimeDrainReceipt>> drainHarnessReceipts(String tenantId, String harnessSessionId) {
+        return harnessLifecycle.drainHarnessReceipts(tenantId, harnessSessionId);
     }
 
     public boolean supportsDrainedStop() {
