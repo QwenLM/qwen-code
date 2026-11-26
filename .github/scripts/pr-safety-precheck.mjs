@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  appendFileSync,
+  realpathSync,
+} from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 const SECRET_NAME_PATTERN = String.raw`secrets\.[A-Z0-9_]+|process\.env\.[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|_PAT)|\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY)\b`;
 const LOGGING_SINK_PATTERN = String.raw`\b(?:console\.\w+|process\.(?:stdout|stderr)\.write)\s*\(`;
@@ -49,7 +55,13 @@ const PROTECTED_FILE_NAMES = new Set([
   '.npmrc',
   '.pnpmfile.mjs',
 ]);
-const PROTECTED_FILE_PATHS = new Set(['.qwen/settings.json']);
+const PROTECTED_FILE_PATHS = new Set([
+  '.qwen/settings.json',
+  // Selected independently of the context-file loader: the CLI prefers a
+  // project's output-language file and appends it through
+  // getExtensionContextFilePaths(), so it reaches the system prompt too.
+  '.qwen/output-language.md',
+]);
 
 // Credentials the runner holds ambiently, reachable without naming a single
 // GitHub secret. #18362 read these from a CI script and #18364 asked the agent
@@ -305,6 +317,9 @@ function main() {
   console.log(JSON.stringify(result, null, 2));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare resolved URLs: `file://${argv[1]}` never matches when the checkout
+// path contains a space (%20) or goes through a symlink (/tmp -> /private/tmp),
+// and a silent no-output exit 0 is indistinguishable from a clean decision.
+if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   main();
 }

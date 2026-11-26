@@ -101,7 +101,7 @@ File names at any depth, because context files load hierarchically:
 `AGENTS.md`, `QWEN.md`, `QWEN.local.md`, `CLAUDE.md`, `package.json`,
 `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.mjs`.
 
-Exact paths: `.qwen/settings.json`.
+Exact paths: `.qwen/settings.json` and `.qwen/output-language.md`.
 
 Paths are derived from the diff, the only path source the workflow supplies.
 `---` and `+++` headers carry one unambiguous path each, so deletions, renames
@@ -192,20 +192,30 @@ that a human reads as routine diagnostics.
 stronger channel than a docs page whenever they are loaded, because they enter
 the system prompt rather than being read as evidence.
 
-**The path rule is deliberately broader than the channel live today.** An
-earlier revision of this design claimed the reviewer loads `QWEN.md` and
-`AGENTS.md` from the checked-out contribution. That is not true of the review
-lane at this head, and the claim is withdrawn: the review job checks out the
-repository's default branch, and workspace memory discovery is gated on folder
-trust (`packages/core/src/memory/memoryDiscovery.ts`), whose setting defaults to
-false (`packages/cli/src/config/config.ts`) and which the review workflow never
-enables. The project-local slot additionally needs implicit discovery and a
-resolved project root, and `.qwen/rules/` needs folder trust as well
-(`packages/core/src/config/rulesDiscovery.ts`). So `QWEN.local.md` and
-`.qwen/rules/` are **latent** instruction slots, not live ones. They are
-protected anyway: a lane that later turns trust on — the natural configuration
-for interactive use — must not silently widen what an outside contribution can
-inject, and a path list is cheap to keep ahead of that change.
+**Project context files load by default, and this design got the trust flag
+backwards twice before measuring it.** The original draft claimed the reviewer
+reads `QWEN.md` and `AGENTS.md` from the contribution. A later revision withdrew
+that as untrue, saying memory discovery is gated on folder trust and folder trust
+defaults to false, so those slots were "latent". **That withdrawal was wrong.**
+Folder trust is an opt-in hardened mode, not an opt-out of trust:
+`isWorkspaceTrusted()` returns `isTrusted: true` when the feature is off, and
+`Config.isTrustedFolder()` then supplies it to the loader as
+`this.getIdeWorkspaceTrust() ?? this.trustedFolder ?? !this.folderTrust`. Measured
+by calling `isWorkspaceTrusted` directly: with no setting and with
+`enabled: false` the result is `isTrusted = true`; only with `enabled: true` and no
+stored decision does it come back `undefined`. So `QWEN.md`, `AGENTS.md`,
+`QWEN.local.md`, `.qwen/rules/` and `.qwen/output-language.md` are **live**
+instruction inputs in an ordinary project session.
+
+**What actually insulates the review lane is the checkout, not the flag.** The
+review job checks out the repository's default branch and starts the CLI there,
+so a fork head's files are not the startup workspace. That is the only reason
+this lane does not read a contribution's context files, and it is why the path
+list has to stay ahead of any lane that ever runs in the contributed tree.
+`.qwen/output-language.md` deserves its own entry rather than being folded into
+the context filenames: the CLI selects a project's copy independently and appends
+it through `getExtensionContextFilePaths()`, outside the hierarchical memory
+loader — so it reaches the system prompt even where no trust condition applies.
 
 **Narrow `.qwen/` to authority-bearing subdirectories.** Working artifacts such
 as `.qwen/e2e-tests/` carry no authority; gating them would add noise without
@@ -278,7 +288,11 @@ content rules, as before. Only a missing head SHA still fails closed for them.
 
 ## Verified results (2026-11-26)
 
-- Unit suite: 116 passed, 0 failed. Four cases drive the real CLI so the flag
+- Unit suite: 119 passed, 0 failed. Two of those invoke the CLI from a checkout
+  path containing a space and through a symlink, because the entry guard used to
+  compare the module URL with a hand-built path and matched neither — the child
+  exited 0 with no output, which is indistinguishable from a clean decision when
+  the caller only reads stdout. Four cases drive the real CLI so the flag
   spellings are under test, and one derives the flag names from the CLI source
   and requires the workflow to pass each one from the collect step's matching
   output, including the untrusted path's own echo line — asserting only
@@ -289,7 +303,7 @@ content rules, as before. Only a missing head SHA still fails closed for them.
   `ambient_credential:cloud_metadata`, `ambient_credential:env_dump`.
 - #18364: `ambient_credential:cloud_metadata`,
   `ambient_credential:proc_environ`.
-- Mutation witness: 30 arms, all killed, none skipped, plus an unmutated control
+- Mutation witness: 32 arms, all killed, none skipped, plus an unmutated control
   that must stay green. The harness mirrors the repository layout in its temp
   dir, because the workflow-contract test reads the workflow through a relative
   URL — without the mirror that case reds in every arm for a missing file, and a
@@ -351,6 +365,12 @@ Disclosed rather than chased, since they are option and prefix grammar rather
 than the forms this rule enumerates: `env -u NAME`, the quoted-assignment spelling
 `env "FOO=bar"`, and command prefixes outside the anchor set — `time env`,
 `command env`, `{ env; }`, `! env`, `sudo -E env`.
+
+A fifth review added `.qwen/output-language.md` to the protected set and caught a
+defect outside the rules entirely: the script's entry guard compared
+`import.meta.url` with a hand-built URL, so a checkout path containing a space or
+a symlink made the child exit 0 with **no output at all**. Both now have committed
+cases. Reverting the guard reds 2 tests; removing the new path reds 1.
 
 ## Open questions
 

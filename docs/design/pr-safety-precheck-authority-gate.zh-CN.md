@@ -56,7 +56,7 @@
 
 任意深度的文件名（上下文文件按层级加载，嵌套副本同样能操纵 agent）：`AGENTS.md`、`QWEN.md`、`QWEN.local.md`、`CLAUDE.md`、`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`.npmrc`、`.pnpmfile.mjs`。
 
-精确路径：`.qwen/settings.json`。
+精确路径：`.qwen/settings.json`、`.qwen/output-language.md`。
 
 路径从 diff 推导——这是 workflow 唯一提供的路径来源。`---` 与 `+++` 头各承载一个无歧义路径，因此删除、重命名与含空格的路径都被覆盖；`diff --git` 头另外覆盖 mode-only 改动（这类改动不产出 side 头）。
 
@@ -97,7 +97,9 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 **保护 agent 指令面，不只保护 `.github`。** #18364 没有改动任何 `.github` 路径，所以「只挡 `.github`」的规则会漏掉它。指令文件一旦被加载就是比 docs 页更强的通道——它进入系统提示，而不是作为证据被阅读。
 
-**路径规则刻意比「今天真正活着的通道」更宽。** 本设计的早期版本声称评审器会从检出的贡献里加载 `QWEN.md` 与 `AGENTS.md`。这在本 head 的评审车道上**不成立，该主张撤回**：review job 检出的是仓库默认分支，而工作区记忆发现受 folder trust 门控（`packages/core/src/memory/memoryDiscovery.ts`），该设置默认 false（`packages/cli/src/config/config.ts`），且 review workflow 从不启用它。项目本地槽位还额外要求隐式发现与已解析的项目根，`.qwen/rules/` 同样需要 folder trust（`packages/core/src/config/rulesDiscovery.ts`）。因此 `QWEN.local.md` 与 `.qwen/rules/` 是**潜在**指令槽而非现行通道。仍然把它们纳入保护：某条车道日后打开 trust（交互式使用的自然配置）时，不能静默扩大外部贡献可注入的面，而让路径清单提前覆盖这一变化成本很低。
+**项目上下文文件默认就会加载，而本设计在这一点上把信任旗标搞反了两次，直到实测才定案。** 初稿称评审器会从检出的贡献里读取 `QWEN.md` 与 `AGENTS.md`；后一版撤回称「记忆发现受 folder trust 门控、而 folder trust 默认 false，因此这些槽位只是潜在」。**那次撤回是错的。** folder trust 是**可选开启的加固模式**，不是默认关闭信任的开关：功能关闭时 `isWorkspaceTrusted()` 返回 `isTrusted: true`，核心的 `Config.isTrustedFolder()` 再以 `this.getIdeWorkspaceTrust() ?? this.trustedFolder ?? !this.folderTrust` 把它交给加载器。直接调用实测：未设置该项与 `enabled: false` 时结果均为 `isTrusted = true`；只有 `enabled: true` 且没有已存决定时才返回 `undefined`。因此在普通项目会话里，`QWEN.md`、`AGENTS.md`、`QWEN.local.md`、`.qwen/rules/`、`.qwen/output-language.md` 都是**现行**指令输入。
+
+**真正让评审车道免疫的是检出步骤，不是旗标。** review job 检出的是仓库默认分支并在那里启动 CLI，所以 fork head 上的文件根本不是启动工作区。这才是这条车道读不到贡献者上下文文件的唯一原因，也是路径清单必须提前覆盖「将来某条车道直接在贡献树里运行」的理由。`.qwen/output-language.md` 值得单列一项，而不是并入上下文文件名：CLI 会独立地在项目里挑选这份副本，并经 `getExtensionContextFilePaths()` 追加——**不走**层级记忆加载器，因此在任何信任条件之外都能进入系统提示。
 
 **把 `.qwen/` 收窄到承载权限的子目录。** `.qwen/e2e-tests/` 这类工作产物不承载权限；把它们纳入只增加噪声、不减少暴露面。
 
@@ -137,10 +139,10 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 ## 已验证结果（2026-11-26）
 
-- 单元套件：116 通过、0 失败。其中四条驱动**真实 CLI**，使旗标拼写进入被测契约；另有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
+- 单元套件：119 通过、0 失败。其中两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
 - #18362：`protected_path:authority_surface`、`ambient_credential:cloud_metadata`、`ambient_credential:env_dump`。
 - #18364：`ambient_credential:cloud_metadata`、`ambient_credential:proc_environ`。
-- 变异见证：30 个臂，全部击杀，无跳过，另加一条**未变异对照**要求保持全绿。装置的临时目录**镜像仓库真实布局**——workflow 契约用例经相对 URL 读取 workflow；若不镜像，该用例在每个臂都会因文件缺失而红，而「文件缺失」会被误当成「变异击杀」。正是这条对照让整轮结果值得读。
+- 变异见证：32 个臂，全部击杀，无跳过，另加一条**未变异对照**要求保持全绿。装置的临时目录**镜像仓库真实布局**——workflow 契约用例经相对 URL 读取 workflow；若不镜像，该用例在每个臂都会因文件缺失而红，而「文件缺失」会被误当成「变异击杀」。正是这条对照让整轮结果值得读。
 - workflow 端到端决策表：9 个用例通过。它用打桩 `gh`、在步骤自身的 bash 契约下执行**真实的** collect 与 assess `run:` 块，断言最终决策而非中间旗标。覆盖恰好等于上限、上限加一、diff 调用失败、可信作者，以及「敌意正文 + 元数据调用成功／失败」两臂。
 - `prettier --check`、`eslint`、`actionlint`：干净。`eslint` 与 `actionlint` 均先用一个故意非法的输入证明过是活的。
 - `classify-profile.test.mjs`：27 通过、0 失败。
@@ -155,6 +157,8 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 有一处枚举清单的缺口选择披露而非关闭：带独立参数的 shell 旗标，如 `bash -o posix -c printenv`，仍被放行。
 
 第四轮又关闭六项：`.credentials` 的**反引号行内代码**写法；`-c` 串里第一条命令之后的导出（裸分支也需要把「其后跟操作符或行尾的闭合引号」算作终止符）；没有 utility 的 `env FOO=bar`；此前空转的 `$(…)` 与 `(…)` 锚点（终止符需要补 `)`）；`-c` 之前的 `--flag=value`；以及旗标钉子的盲区——trusted 分支那行同名 `echo` 曾把「untrusted 那行被删」掩盖掉。以下几项选择披露而非追逐，因为它们属于选项与前缀文法、而非本规则枚举的形态：`env -u NAME`、带引号的赋值写法 `env "FOO=bar"`，以及锚点集合之外的命令前缀 `time env`、`command env`、`{ env; }`、`! env`、`sudo -E env`。
+
+第五轮评审把 `.qwen/output-language.md` 纳入受保护集合，并抓到一个**与规则无关**的缺陷：脚本入口把 `import.meta.url` 与手工拼出的 URL 比较，因此含空格的检出路径或软链会让子进程以 0 退出且**完全没有输出**。两者现都有已提交用例。回退入口判断红 2 条用例，删除新路径红 1 条。
 
 ## 未决问题
 

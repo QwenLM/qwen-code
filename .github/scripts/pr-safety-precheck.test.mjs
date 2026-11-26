@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -348,6 +354,7 @@ for (const path of [
   'scripts/tests/foo.test.js',
   '.agents/reviewer.md',
   '.qwen/skills/probe/SKILL.md',
+  '.qwen/output-language.md',
   '.qwen/rules/injected.md',
   '.qwen/settings.json',
   '.qwen/QWEN.local.md',
@@ -799,6 +806,53 @@ test('CLI keeps the trusted-author short circuit ahead of both flags', () => {
   assert.equal(result.decision, 'allow_triage');
   assert.deepEqual(result.reason_codes, []);
 });
+
+// The entry guard used to compare import.meta.url with a hand-built URL, which
+// never matched a path containing a space or going through a symlink: the child
+// exited 0 with no output, and JSON.parse of an empty string was the only error.
+for (const [label, launch] of [
+  ['a checkout path containing a space', 'direct'],
+  ['a symlink to the script', 'symlink'],
+]) {
+  test(`CLI produces a decision when invoked from ${label}`, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'precheck space '));
+    try {
+      const target = join(dir, 'precheck.mjs');
+      writeFileSync(target, readFileSync(cliPath, 'utf8'));
+      const prPath = join(dir, 'pr.json');
+      const diffPath = join(dir, 'pr.diff');
+      writeFileSync(
+        prPath,
+        JSON.stringify({ headRefOid: 'abc123', title: 't', body: '' }),
+      );
+      writeFileSync(diffPath, diffFor('docs/note.md', 'Some prose.'));
+      const link = join(dir, 'linked.mjs');
+      if (launch === 'symlink') symlinkSync(target, link);
+      const stdout = execFileSync(
+        process.execPath,
+        [
+          launch === 'symlink' ? link : target,
+          '--pr',
+          prPath,
+          '--diff',
+          diffPath,
+          '--trusted-author',
+          'false',
+          '--metadata-unavailable',
+          'true',
+          '--output',
+          join(dir, 'gh-output'),
+        ],
+        { encoding: 'utf8' },
+      );
+      const result = JSON.parse(stdout);
+      assert.equal(result.decision, 'manual_required');
+      assert.deepEqual(result.reason_codes, ['input:metadata_unavailable']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
 
 // Pinning the CLI alone is half a contract: renaming the flag in the workflow
 // would pass an argument the CLI ignores, and the fail-closed arm would go dark
