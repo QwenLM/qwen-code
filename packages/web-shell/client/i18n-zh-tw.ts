@@ -2480,6 +2480,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.openWorkspaceTerminalFailed': '開啟終端失敗',
   'sidebar.openWorkspaceTerminalOpened': '已在工作區開啟終端',
   'sidebar.manageWorkspace': '管理',
+  'sidebar.trustWorkspace': '信任工作區',
+  'sidebar.trustingWorkspace': '正在信任…',
   'sidebar.reloadWorkspace': '重新載入執行時',
   'sidebar.reloadWorkspaceFailed': '重新載入工作區執行時失敗',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 個工作區`,
@@ -2512,6 +2514,13 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 個 hook（已禁用）`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} 個 hook，${v?.untrusted ?? 0} 個未載入（目錄未受信任）。請啟用 security.folderTrust.enabled 並信任該目錄，或在互動式終端中執行 qwen 審查。`,
+  'sidebar.overview.openFacet': (v) =>
+    `管理 ${v?.workspace ?? ''} 的${v?.facet ?? ''}：${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': '正在載入 hooks…',
+  'workspaceHooks.empty': '此工作區尚未配置任何 hook。',
+  'workspaceHooks.enabled': '已啟用',
+  'workspaceHooks.disabled': '已禁用',
   'sidebar.forceRemoveWorkspace': '強制移除',
   'sidebar.removeWorkspaceTitle': '移除工作區',
   'sidebar.removeWorkspaceConfirm': (v) =>
