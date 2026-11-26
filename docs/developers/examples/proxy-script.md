@@ -1,6 +1,6 @@
 # Example Proxy Script
 
-The following is an example of a proxy script that can be used with the `QWEN_SANDBOX_PROXY_COMMAND` environment variable. This script only allows `HTTPS` connections to `example.com:443` and declines all other requests.
+The following is an example of a proxy script that can be used with the `QWEN_SANDBOX_PROXY_COMMAND` environment variable. This script only allows `HTTPS` connections on port `443` to the hosts listed in `ALLOWED_DOMAINS`, including their subdomains, and declines all other requests.
 
 ```javascript
 #!/usr/bin/env node
@@ -11,7 +11,7 @@ The following is an example of a proxy script that can be used with the `QWEN_SA
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Example proxy server that listens on :::8877 and only allows HTTPS connections to example.com.
+// Example proxy server that listens on :::8877 and only allows HTTPS connections on port 443 to the hosts listed in ALLOWED_DOMAINS.
 // Set `QWEN_SANDBOX_PROXY_COMMAND=scripts/example-proxy.js` to run proxy alongside sandbox
 // Test via `curl https://example.com` inside sandbox (in shell mode or via shell tool)
 
