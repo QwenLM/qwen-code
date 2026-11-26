@@ -1296,6 +1296,9 @@ describe('useManagedChatControllerFromState', () => {
     } as unknown as ManagedAgentProvider;
 
     let controller: SessionChatController | undefined;
+    const pendingRespondCalls: Array<
+      Parameters<ReturnType<typeof useManagedActions>['respond']>
+    > = [];
     function Host() {
       const detail = useManagedSession(provider, 'client-1', 'session-1');
       const approvals = useManagedActions(
@@ -1305,6 +1308,18 @@ describe('useManagedChatControllerFromState', () => {
         detail.summary?.capabilities.actions,
         detail.events,
         true,
+      );
+      const pending = useMemo(
+        () => ({
+          ...approvals,
+          respond: (
+            ...args: Parameters<ReturnType<typeof useManagedActions>['respond']>
+          ) => {
+            pendingRespondCalls.push(args);
+            return approvals.respond(...args);
+          },
+        }),
+        [approvals],
       );
       const cancelObserverRef = useRef<ManagedTurnCancelObserver | undefined>(
         undefined,
@@ -1331,7 +1346,7 @@ describe('useManagedChatControllerFromState', () => {
         clientId: 'client-1',
         sessionId: 'session-1',
         detail,
-        pending: approvals,
+        pending,
         turnCancel,
         cancelObserverRef,
         messages: [],
@@ -1384,7 +1399,9 @@ describe('useManagedChatControllerFromState', () => {
       ]);
       await flushReact();
       expect(accepted.admission).toBe('accepted');
+      expect(pendingRespondCalls).toHaveLength(1);
       expect(provider.actions!.respond).toHaveBeenCalledTimes(1);
+      expect(controller!.pendingQuestions).toEqual([]);
       expect(
         controller!.operations.find((op) => op.kind === 'question')?.state,
       ).toBe('established');
@@ -1612,6 +1629,158 @@ describe('useManagedChatControllerFromState', () => {
       await flushReact();
       expect(capturedAbortSignal!.aborted).toBe(true);
       expect((await inFlightApproval).admission).toBe('unknown');
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it('settles respond without onAccepted as unknown with no stuck pending op, and reports responded when a mid-send re-list drops the action', async () => {
+    const actionV1: ManagedAgentPendingAction = {
+      actionId: 'a-no-ack',
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      functionCallId: 'call-no-ack',
+      toolName: 'write_file',
+      inputRevision: 1,
+      policyRevision: 'hosted-tool-approval/1',
+      expiresAt: Date.now() + 600_000,
+      options: [
+        { id: 'allow', label: 'Allow' },
+        { id: 'deny', label: 'Deny' },
+      ],
+    };
+    const actionV2: ManagedAgentPendingAction = {
+      ...actionV1,
+      inputRevision: 2,
+    };
+    const feed = stream();
+    let listStage = 0;
+    const midSendDeferred = deferred<void>();
+    let respondCalls = 0;
+    const provider = {
+      storageKey: 'fixture:shared-no-ack',
+      getSession: vi.fn(async (id: string) => summary(id)),
+      getTranscript: vi.fn(async () => ({ events: [], lastEventId: 0 })),
+      subscribeEvents: vi.fn(
+        (_sessionId: string, options: { signal: AbortSignal }) =>
+          feed.subscribe(options.signal),
+      ),
+      submitPrompt: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        turnId: 'turn-1',
+        operationId: 'prompt-1',
+      })),
+      cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
+      actions: {
+        listPending: vi.fn(async () => {
+          if (listStage === 0) return [actionV1];
+          if (listStage === 1) return [actionV2];
+          return [];
+        }),
+        respond: vi.fn(async () => {
+          respondCalls += 1;
+          if (respondCalls === 1) {
+            // Resolves without invoking onAccepted; next re-list returns v2.
+            listStage = 1;
+            return;
+          }
+          // Second call stays in flight while a mid-send re-list drops it.
+          await midSendDeferred.promise;
+        }),
+      },
+    } as unknown as ManagedAgentProvider;
+
+    let controller: SessionChatController | undefined;
+    function Host() {
+      const detail = useManagedSession(provider, 'client-1', 'session-1');
+      const approvals = useManagedActions(
+        provider,
+        'session-1',
+        'client-1',
+        detail.summary?.capabilities.actions,
+        detail.events,
+        true,
+      );
+      const cancelObserverRef = useRef<ManagedTurnCancelObserver | undefined>(
+        undefined,
+      );
+      const observer = useMemo<ManagedTurnCancelObserver>(
+        () => ({
+          onAccepted: (a) => cancelObserverRef.current?.onAccepted?.(a),
+          onSettlement: (s) => cancelObserverRef.current?.onSettlement?.(s),
+          onError: (e) => cancelObserverRef.current?.onError?.(e),
+        }),
+        [],
+      );
+      const turnCancel = useManagedTurnCancel(
+        provider,
+        'client-1',
+        'session-1',
+        detail.summary,
+        true,
+        detail.refreshSummary,
+        observer,
+      );
+      controller = useManagedChatControllerFromState({
+        provider,
+        clientId: 'client-1',
+        sessionId: 'session-1',
+        detail,
+        pending: approvals,
+        turnCancel,
+        cancelObserverRef,
+        messages: [],
+        selectedAction: approvals.action,
+        retainExpiredActions: true,
+        canCancel: true,
+      });
+      return null;
+    }
+
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <Host />
+            </I18nProvider>
+          </StrictMode>,
+        );
+      });
+      await flushReact();
+
+      // 1) Provider resolves without calling onAccepted -> settles 'unknown',
+      // leaves zero 'pending' operations, and does NOT block a second attempt.
+      const first = await controller!.respondApproval('a-no-ack', 'allow');
+      await flushReact();
+      expect(first.admission).toBe('unknown');
+      expect(controller!.operations.some((op) => op.state === 'pending')).toBe(
+        false,
+      );
+      expect(controller!.pendingApprovals.map((a) => a.id)).toEqual([
+        'a-no-ack',
+      ]);
+
+      // 2) Second attempt reaches the provider; while it is in flight, an
+      // action_updated event triggers a re-list that drops the action. Once
+      // the send resolves, outcome is 'responded' -> 'unknown', NOT 'rejected'.
+      const secondPromise = controller!.respondApproval('a-no-ack', 'allow');
+      await flushReact();
+      expect(provider.actions!.respond).toHaveBeenCalledTimes(2);
+      listStage = 2;
+      await act(async () => {
+        feed.push(event(1, 'session-1', 'action_updated'));
+      });
+      await flushReact();
+      midSendDeferred.resolve(undefined);
+      const second = await secondPromise;
+      await flushReact();
+      expect(second.admission).toBe('unknown');
     } finally {
       await act(async () => root.unmount());
       container.remove();

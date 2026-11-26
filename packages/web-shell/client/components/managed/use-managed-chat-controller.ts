@@ -95,13 +95,19 @@ function admissionFromError(error: unknown): ManagedTransportAdmission {
   };
 }
 
-export function useManagedChatController({
-  provider,
-  clientId,
-  sessionId,
-}: ManagedChatControllerOptions): SessionChatController | undefined {
-  const detail = useManagedSession(provider, clientId, sessionId);
-  const { t } = useI18n();
+interface BoundControllerHandles {
+  readonly controller: SessionChatController;
+  readonly onOperation:
+    | ((event: ManagedOperationSettlement) => void)
+    | undefined;
+  readonly onTurn: ((event: ManagedTurnSettlement) => void) | undefined;
+}
+
+function useBindingOwner(
+  provider: ManagedAgentProvider,
+  clientId: string,
+  sessionId: string | undefined,
+) {
   const [, render] = useReducer((value: number) => value + 1, 0);
   const owner = useMemo<BindingOwner>(
     () => ({
@@ -120,6 +126,250 @@ export function useManagedChatController({
     (candidate: BindingOwner) =>
       ownerRef.current === candidate && !candidate.abort.signal.aborted,
     [],
+  );
+
+  // StrictMode runs effect setup -> cleanup -> setup against the same memoized
+  // owner. Re-arm the AbortController on setup so StrictMode remounts remain
+  // live while real owner changes and unmounts still abort in-flight work.
+  useEffect(() => {
+    if (owner.abort.signal.aborted) {
+      owner.abort = new AbortController();
+    }
+    const abort = owner.abort;
+    return () => {
+      abort.abort();
+    };
+  }, [owner]);
+
+  return { owner, isCurrent, render };
+}
+
+function useObserveManagedOperation(
+  isCurrent: (candidate: BindingOwner) => boolean,
+  render: () => void,
+) {
+  return useCallback(
+    (
+      candidate: BindingOwner,
+      observation: ManagedAgentOperationSettlement,
+      expectedSessionId: string | undefined,
+      onCompleted?: () => void,
+    ) => {
+      if (
+        !isCurrent(candidate) ||
+        observation.sessionId !== expectedSessionId
+      ) {
+        return;
+      }
+      if (
+        observation.status !== 'completed' &&
+        observation.status !== 'failed' &&
+        observation.status !== 'cancelled' &&
+        observation.status !== 'recovery_blocked'
+      ) {
+        return;
+      }
+      if (observation.status === 'completed') {
+        onCompleted?.();
+      }
+      const listener = candidate.onOperation;
+      if (!listener) return;
+      listener({
+        operationId: observation.operationId,
+        status: observation.status,
+      });
+      render();
+    },
+    [isCurrent, render],
+  );
+}
+
+function useManagedCancelBinding(
+  owner: BindingOwner,
+  isCurrent: (candidate: BindingOwner) => boolean,
+  observeOperation: (
+    candidate: BindingOwner,
+    observation: ManagedAgentOperationSettlement,
+    expectedSessionId: string | undefined,
+  ) => void,
+) {
+  const cancelResponseRef = useRef<
+    | {
+        owner: BindingOwner;
+        turnId: string;
+        resolve: (admission: ManagedTransportAdmission) => void;
+        waiters: Array<(admission: ManagedTransportAdmission) => void>;
+      }
+    | undefined
+  >(undefined);
+  const cancelObserver = useMemo<ManagedTurnCancelObserver>(
+    () => ({
+      onAccepted: (admission) => {
+        const pendingCancel = cancelResponseRef.current;
+        if (
+          !pendingCancel ||
+          pendingCancel.owner !== owner ||
+          !isCurrent(owner)
+        ) {
+          return;
+        }
+        if (
+          admission.sessionId !== owner.sessionId ||
+          admission.turnId !== pendingCancel.turnId ||
+          !admission.operationId
+        ) {
+          pendingCancel.resolve({ admission: 'unknown' });
+          return;
+        }
+        pendingCancel.resolve({
+          admission: 'accepted',
+          operationId: admission.operationId,
+        });
+      },
+      // Operation poll settlements lack turnId, so they only settle already
+      // admitted operations via operationId and never forge admission for an
+      // unrelated turn's cancel() call.
+      onSettlement: (settlement) => {
+        observeOperation(owner, settlement, owner.sessionId);
+      },
+      onError: (error) => {
+        const pendingCancel = cancelResponseRef.current;
+        if (pendingCancel?.owner === owner) {
+          pendingCancel.resolve(admissionFromError(error));
+        }
+      },
+    }),
+    [isCurrent, observeOperation, owner],
+  );
+
+  const runCancelTurn = useCallback(
+    (
+      source: BindingOwner,
+      turnId: string,
+      canCancel: boolean,
+      busy: boolean,
+      requestCancel: () => Promise<void>,
+    ): Promise<ManagedTransportAdmission> => {
+      if (!isCurrent(source)) {
+        return Promise.resolve({ admission: 'unknown' });
+      }
+      if (!canCancel) {
+        return Promise.resolve({ admission: 'rejected' });
+      }
+      const live = cancelResponseRef.current;
+      if (live && live.owner === source) {
+        if (live.turnId === turnId) {
+          return new Promise((resolve) => {
+            live.waiters.push(resolve);
+          });
+        }
+        return Promise.resolve({ admission: 'unknown' });
+      }
+      if (busy) {
+        return Promise.resolve({ admission: 'rejected' });
+      }
+      return new Promise((resolve) => {
+        const signal = source.abort.signal;
+        let settled = false;
+        const slot = {
+          owner: source,
+          turnId,
+          resolve: (admission: ManagedTransportAdmission) => {
+            settle(admission);
+          },
+          waiters: [] as Array<(admission: ManagedTransportAdmission) => void>,
+        };
+        const settle = (admission: ManagedTransportAdmission) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', onAbort);
+          if (cancelResponseRef.current === slot) {
+            cancelResponseRef.current = undefined;
+          }
+          const resolved: ManagedTransportAdmission = isCurrent(source)
+            ? admission
+            : { admission: 'unknown' };
+          resolve(resolved);
+          for (const waiter of slot.waiters) {
+            waiter(resolved);
+          }
+          slot.waiters.length = 0;
+        };
+        const onAbort = () => settle({ admission: 'unknown' });
+        signal.addEventListener('abort', onAbort, { once: true });
+        cancelResponseRef.current = slot;
+        void requestCancel().then(
+          () => settle({ admission: 'unknown' }),
+          (error) => settle(admissionFromError(error)),
+        );
+      });
+    },
+    [isCurrent],
+  );
+
+  return { cancelObserver, runCancelTurn };
+}
+
+function useBindControllerSettlements(
+  owner: BindingOwner,
+  bound: BoundControllerHandles | undefined,
+  detail: ReturnType<typeof useManagedSession>,
+  ready: boolean,
+  isCurrent: (candidate: BindingOwner) => boolean,
+  render: () => void,
+) {
+  // Attach listeners only on commit so StrictMode double-invoked useMemo calls
+  // never overwrite the committed controller's callbacks with a discarded one.
+  useEffect(() => {
+    if (!bound) return;
+    owner.onOperation = bound.onOperation;
+    owner.onTurn = bound.onTurn;
+    return () => {
+      if (owner.onOperation === bound.onOperation)
+        owner.onOperation = undefined;
+      if (owner.onTurn === bound.onTurn) owner.onTurn = undefined;
+    };
+  }, [bound, owner]);
+
+  // Advance the monotonic event high-water mark so already-seen snapshot events
+  // and later loadOlder() pages (event.id <= highWaterId) never replay as fresh
+  // turn settlements.
+  useEffect(() => {
+    if (!ready || detail.loading) return;
+    let forwarded = false;
+    for (const event of detail.events) {
+      if (event.id <= owner.highWaterId) continue;
+      owner.highWaterId = event.id;
+      if (
+        event.sessionId !== owner.sessionId ||
+        !event.turnId ||
+        (event.type !== 'completed' &&
+          event.type !== 'failed' &&
+          event.type !== 'cancelled')
+      ) {
+        continue;
+      }
+      if (!isCurrent(owner)) return;
+      const listener = owner.onTurn;
+      if (!listener) continue;
+      listener({ turnId: event.turnId, outcome: event.type });
+      forwarded = true;
+    }
+    if (forwarded) render();
+  }, [detail.events, detail.loading, isCurrent, owner, ready, render]);
+}
+
+export function useManagedChatController({
+  provider,
+  clientId,
+  sessionId,
+}: ManagedChatControllerOptions): SessionChatController | undefined {
+  const detail = useManagedSession(provider, clientId, sessionId);
+  const { t } = useI18n();
+  const { owner, isCurrent, render } = useBindingOwner(
+    provider,
+    clientId,
+    sessionId,
   );
   const summary =
     detail.summary?.sessionId === sessionId ? detail.summary : undefined;
@@ -149,51 +399,7 @@ export function useManagedChatController({
     [],
   );
 
-  // StrictMode runs effect setup -> cleanup -> setup against the same memoized
-  // owner. Re-arm the AbortController on setup so StrictMode remounts remain
-  // live while real owner changes and unmounts still abort in-flight work.
-  useEffect(() => {
-    if (owner.abort.signal.aborted) {
-      owner.abort = new AbortController();
-    }
-    const abort = owner.abort;
-    return () => {
-      abort.abort();
-    };
-  }, [owner]);
-
-  const observeOperation = useCallback(
-    (
-      candidate: BindingOwner,
-      observation: ManagedAgentOperationSettlement,
-      refreshPending = false,
-    ) => {
-      if (
-        !isCurrent(candidate) ||
-        observation.sessionId !== candidate.sessionId
-      )
-        return;
-      if (
-        observation.status !== 'completed' &&
-        observation.status !== 'failed' &&
-        observation.status !== 'cancelled' &&
-        observation.status !== 'recovery_blocked'
-      ) {
-        return;
-      }
-      if (refreshPending && observation.status === 'completed') {
-        facts(candidate).retryPending();
-      }
-      const listener = candidate.onOperation;
-      if (!listener) return;
-      listener({
-        operationId: observation.operationId,
-        status: observation.status,
-      });
-      render();
-    },
-    [facts, isCurrent],
-  );
+  const observeOperation = useObserveManagedOperation(isCurrent, render);
 
   const sendResponse = useCallback(
     (
@@ -231,7 +437,9 @@ export function useManagedChatController({
         const onSettlement: ManagedAgentOperationObserver['onSettlement'] = (
           settlement,
         ) => {
-          observeOperation(source, settlement, true);
+          observeOperation(source, settlement, source.sessionId, () =>
+            facts(source).retryPending(),
+          );
         };
         signal.addEventListener('abort', onAbort, { once: true });
         if (!isCurrent(source)) {
@@ -261,7 +469,7 @@ export function useManagedChatController({
           (error) => settle(admissionFromError(error)),
         );
       }),
-    [isCurrent, observeOperation],
+    [facts, isCurrent, observeOperation],
   );
 
   const findAction = useCallback(
@@ -273,57 +481,10 @@ export function useManagedChatController({
       ),
     [facts],
   );
-  const cancelResponseRef = useRef<
-    | {
-        owner: BindingOwner;
-        turnId: string;
-        resolve: (admission: ManagedTransportAdmission) => void;
-        waiters: Array<(admission: ManagedTransportAdmission) => void>;
-      }
-    | undefined
-  >(undefined);
-  const cancelObserver = useMemo(
-    () => ({
-      onAccepted: (admission: {
-        operationId: string;
-        sessionId: string;
-        turnId?: string;
-      }) => {
-        const pendingCancel = cancelResponseRef.current;
-        if (
-          !pendingCancel ||
-          pendingCancel.owner !== owner ||
-          !isCurrent(owner)
-        ) {
-          return;
-        }
-        if (
-          admission.sessionId !== owner.sessionId ||
-          admission.turnId !== pendingCancel.turnId ||
-          !admission.operationId
-        ) {
-          pendingCancel.resolve({ admission: 'unknown' });
-          return;
-        }
-        pendingCancel.resolve({
-          admission: 'accepted',
-          operationId: admission.operationId,
-        });
-      },
-      // Operation poll settlements lack turnId, so they only settle already
-      // admitted operations via operationId and never forge admission for an
-      // unrelated turn's cancel() call.
-      onSettlement: (settlement: ManagedAgentOperationSettlement) => {
-        observeOperation(owner, settlement);
-      },
-      onError: (error: unknown) => {
-        const pendingCancel = cancelResponseRef.current;
-        if (pendingCancel?.owner === owner) {
-          pendingCancel.resolve(admissionFromError(error));
-        }
-      },
-    }),
-    [isCurrent, observeOperation, owner],
+  const { cancelObserver, runCancelTurn } = useManagedCancelBinding(
+    owner,
+    isCurrent,
+    observeOperation,
   );
   const turnCancel = useManagedTurnCancel(
     provider,
@@ -340,59 +501,15 @@ export function useManagedChatController({
     (
       source: BindingOwner,
       turnId: string,
-    ): Promise<ManagedTransportAdmission> => {
-      if (!isCurrent(source)) {
-        return Promise.resolve({ admission: 'unknown' });
-      }
-      if (facts(source).summary?.capabilities.canCancel !== true) {
-        return Promise.resolve({ admission: 'rejected' });
-      }
-      const live = cancelResponseRef.current;
-      if (live && live.owner === source) {
-        if (live.turnId === turnId) {
-          return new Promise((resolve) => {
-            live.waiters.push(resolve);
-          });
-        }
-        return Promise.resolve({ admission: 'unknown' });
-      }
-      return new Promise((resolve) => {
-        const signal = source.abort.signal;
-        let settled = false;
-        const slot = {
-          owner: source,
-          turnId,
-          resolve: (admission: ManagedTransportAdmission) => {
-            settle(admission);
-          },
-          waiters: [] as Array<(admission: ManagedTransportAdmission) => void>,
-        };
-        const settle = (admission: ManagedTransportAdmission) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', onAbort);
-          if (cancelResponseRef.current === slot) {
-            cancelResponseRef.current = undefined;
-          }
-          const resolved: ManagedTransportAdmission = isCurrent(source)
-            ? admission
-            : { admission: 'unknown' };
-          resolve(resolved);
-          for (const waiter of slot.waiters) {
-            waiter(resolved);
-          }
-          slot.waiters.length = 0;
-        };
-        const onAbort = () => settle({ admission: 'unknown' });
-        signal.addEventListener('abort', onAbort, { once: true });
-        cancelResponseRef.current = slot;
-        void turnCancelRef.current.request().then(
-          () => settle({ admission: 'unknown' }),
-          (error) => settle(admissionFromError(error)),
-        );
-      });
-    },
-    [facts, isCurrent],
+    ): Promise<ManagedTransportAdmission> =>
+      runCancelTurn(
+        source,
+        turnId,
+        facts(source).summary?.capabilities.canCancel === true,
+        false,
+        () => turnCancelRef.current.request(),
+      ),
+    [facts, runCancelTurn],
   );
 
   const bound = useMemo(() => {
@@ -552,45 +669,14 @@ export function useManagedChatController({
     sendResponse,
   ]);
 
-  // Attach listeners only on commit so StrictMode double-invoked useMemo calls
-  // never overwrite the committed controller's callbacks with a discarded one.
-  useEffect(() => {
-    if (!bound) return;
-    owner.onOperation = bound.onOperation;
-    owner.onTurn = bound.onTurn;
-    return () => {
-      if (owner.onOperation === bound.onOperation)
-        owner.onOperation = undefined;
-      if (owner.onTurn === bound.onTurn) owner.onTurn = undefined;
-    };
-  }, [bound, owner]);
-
-  // Advance the monotonic event high-water mark so already-seen snapshot events
-  // and later loadOlder() pages (event.id <= highWaterId) never replay as fresh
-  // turn settlements.
-  useEffect(() => {
-    if (!hasSummary || detail.loading) return;
-    let forwarded = false;
-    for (const event of detail.events) {
-      if (event.id <= owner.highWaterId) continue;
-      owner.highWaterId = event.id;
-      if (
-        event.sessionId !== owner.sessionId ||
-        !event.turnId ||
-        (event.type !== 'completed' &&
-          event.type !== 'failed' &&
-          event.type !== 'cancelled')
-      ) {
-        continue;
-      }
-      if (!isCurrent(owner)) return;
-      const listener = owner.onTurn;
-      if (!listener) continue;
-      listener({ turnId: event.turnId, outcome: event.type });
-      forwarded = true;
-    }
-    if (forwarded) render();
-  }, [detail.events, detail.loading, hasSummary, isCurrent, owner]);
+  useBindControllerSettlements(
+    owner,
+    bound,
+    detail,
+    hasSummary,
+    isCurrent,
+    render,
+  );
 
   return bound?.controller;
 }
@@ -627,24 +713,10 @@ export function useManagedChatControllerFromState({
   canRespondAction,
   canCancel = true,
 }: ManagedChatControllerFromStateOptions): SessionChatController {
-  const [, render] = useReducer((value: number) => value + 1, 0);
-  const owner = useMemo<BindingOwner>(
-    () => ({
-      provider,
-      clientId,
-      sessionId,
-      projectMessages: createManagedMessageProjector(),
-      abort: new AbortController(),
-      highWaterId: 0,
-    }),
-    [provider, clientId, sessionId],
-  );
-  const ownerRef = useRef(owner);
-  ownerRef.current = owner;
-  const isCurrent = useCallback(
-    (candidate: BindingOwner) =>
-      ownerRef.current === candidate && !candidate.abort.signal.aborted,
-    [],
+  const { owner, isCurrent, render } = useBindingOwner(
+    provider,
+    clientId,
+    sessionId,
   );
   const summary =
     detail.summary?.sessionId === sessionId ? detail.summary : undefined;
@@ -670,46 +742,7 @@ export function useManagedChatControllerFromState({
     [],
   );
 
-  useEffect(() => {
-    if (owner.abort.signal.aborted) {
-      owner.abort = new AbortController();
-    }
-    const abort = owner.abort;
-    return () => {
-      abort.abort();
-    };
-  }, [owner]);
-
-  const observeOperation = useCallback(
-    (
-      candidate: BindingOwner,
-      observation: ManagedAgentOperationSettlement,
-      expectedSessionId: string | undefined,
-    ) => {
-      if (
-        !isCurrent(candidate) ||
-        observation.sessionId !== expectedSessionId
-      ) {
-        return;
-      }
-      if (
-        observation.status !== 'completed' &&
-        observation.status !== 'failed' &&
-        observation.status !== 'cancelled' &&
-        observation.status !== 'recovery_blocked'
-      ) {
-        return;
-      }
-      const listener = candidate.onOperation;
-      if (!listener) return;
-      listener({
-        operationId: observation.operationId,
-        status: observation.status,
-      });
-      render();
-    },
-    [isCurrent],
-  );
+  const observeOperation = useObserveManagedOperation(isCurrent, render);
 
   const sendManagedActionResponse = useCallback(
     (
@@ -761,13 +794,12 @@ export function useManagedChatControllerFromState({
           .respond(action, response, { onAccepted, onSettlement, signal })
           .then(
             (outcome) =>
-              // Only a completed response counts as admitted when a mock
-              // provider omits `onAccepted`; an `ended` action was refused
-              // service-side and must reject cleanly so `tracked` does not
-              // retain an unsettleable pending op that blocks a replica-miss
-              // re-list.
+              // Without `onAccepted`, a completed send carries no backend
+              // `operationId` and could never settle if recorded as accepted,
+              // so match the standalone rule (`unknown`) while keeping
+              // pre-send skips and terminal `ended` refusals `rejected`.
               settle({
-                admission: outcome === 'responded' ? 'accepted' : 'rejected',
+                admission: outcome === 'responded' ? 'unknown' : 'rejected',
               }),
             (error) => settle(admissionFromError(error)),
           );
@@ -775,50 +807,10 @@ export function useManagedChatControllerFromState({
     [facts, isCurrent, observeOperation],
   );
 
-  const cancelResponseRef = useRef<
-    | {
-        owner: BindingOwner;
-        turnId: string;
-        resolve: (admission: ManagedTransportAdmission) => void;
-        waiters: Array<(admission: ManagedTransportAdmission) => void>;
-      }
-    | undefined
-  >(undefined);
-  const cancelObserver = useMemo<ManagedTurnCancelObserver>(
-    () => ({
-      onAccepted: (admission) => {
-        const pendingCancel = cancelResponseRef.current;
-        if (
-          !pendingCancel ||
-          pendingCancel.owner !== owner ||
-          !isCurrent(owner)
-        ) {
-          return;
-        }
-        if (
-          admission.sessionId !== owner.sessionId ||
-          admission.turnId !== pendingCancel.turnId ||
-          !admission.operationId
-        ) {
-          pendingCancel.resolve({ admission: 'unknown' });
-          return;
-        }
-        pendingCancel.resolve({
-          admission: 'accepted',
-          operationId: admission.operationId,
-        });
-      },
-      onSettlement: (settlement) => {
-        observeOperation(owner, settlement, owner.sessionId);
-      },
-      onError: (error) => {
-        const pendingCancel = cancelResponseRef.current;
-        if (pendingCancel?.owner === owner) {
-          pendingCancel.resolve(admissionFromError(error));
-        }
-      },
-    }),
-    [isCurrent, observeOperation, owner],
+  const { cancelObserver, runCancelTurn } = useManagedCancelBinding(
+    owner,
+    isCurrent,
+    observeOperation,
   );
 
   useEffect(() => {
@@ -836,64 +828,16 @@ export function useManagedChatControllerFromState({
       turnId: string,
     ): Promise<ManagedTransportAdmission> => {
       const currentFacts = facts(source);
-      if (!isCurrent(source)) {
-        return Promise.resolve({ admission: 'unknown' });
-      }
-      if (
-        !currentFacts.canCancel ||
-        currentFacts.summary?.capabilities.canCancel !== true
-      ) {
-        return Promise.resolve({ admission: 'rejected' });
-      }
-      const live = cancelResponseRef.current;
-      if (live && live.owner === source) {
-        if (live.turnId === turnId) {
-          return new Promise((resolve) => {
-            live.waiters.push(resolve);
-          });
-        }
-        return Promise.resolve({ admission: 'unknown' });
-      }
-      if (currentFacts.turnCancel.busy) {
-        return Promise.resolve({ admission: 'rejected' });
-      }
-      return new Promise((resolve) => {
-        const signal = source.abort.signal;
-        let settled = false;
-        const slot = {
-          owner: source,
-          turnId,
-          resolve: (admission: ManagedTransportAdmission) => {
-            settle(admission);
-          },
-          waiters: [] as Array<(admission: ManagedTransportAdmission) => void>,
-        };
-        const settle = (admission: ManagedTransportAdmission) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', onAbort);
-          if (cancelResponseRef.current === slot) {
-            cancelResponseRef.current = undefined;
-          }
-          const resolved: ManagedTransportAdmission = isCurrent(source)
-            ? admission
-            : { admission: 'unknown' };
-          resolve(resolved);
-          for (const waiter of slot.waiters) {
-            waiter(resolved);
-          }
-          slot.waiters.length = 0;
-        };
-        const onAbort = () => settle({ admission: 'unknown' });
-        signal.addEventListener('abort', onAbort, { once: true });
-        cancelResponseRef.current = slot;
-        void currentFacts.turnCancel.request().then(
-          () => settle({ admission: 'unknown' }),
-          (error) => settle(admissionFromError(error)),
-        );
-      });
+      return runCancelTurn(
+        source,
+        turnId,
+        currentFacts.canCancel &&
+          currentFacts.summary?.capabilities.canCancel === true,
+        currentFacts.turnCancel.busy,
+        () => currentFacts.turnCancel.request(),
+      );
     },
-    [facts, isCurrent],
+    [facts, runCancelTurn],
   );
 
   const bound = useMemo(() => {
@@ -990,39 +934,14 @@ export function useManagedChatControllerFromState({
     return { controller, onOperation, onTurn };
   }, [cancelTurn, facts, owner, sendManagedActionResponse]);
 
-  useEffect(() => {
-    owner.onOperation = bound.onOperation;
-    owner.onTurn = bound.onTurn;
-    return () => {
-      if (owner.onOperation === bound.onOperation)
-        owner.onOperation = undefined;
-      if (owner.onTurn === bound.onTurn) owner.onTurn = undefined;
-    };
-  }, [bound, owner]);
-
-  useEffect(() => {
-    if (!summary || detail.loading) return;
-    let forwarded = false;
-    for (const event of detail.events) {
-      if (event.id <= owner.highWaterId) continue;
-      owner.highWaterId = event.id;
-      if (
-        event.sessionId !== owner.sessionId ||
-        !event.turnId ||
-        (event.type !== 'completed' &&
-          event.type !== 'failed' &&
-          event.type !== 'cancelled')
-      ) {
-        continue;
-      }
-      if (!isCurrent(owner)) return;
-      const listener = owner.onTurn;
-      if (!listener) continue;
-      listener({ turnId: event.turnId, outcome: event.type });
-      forwarded = true;
-    }
-    if (forwarded) render();
-  }, [detail.events, detail.loading, isCurrent, owner, summary]);
+  useBindControllerSettlements(
+    owner,
+    bound,
+    detail,
+    summary !== undefined,
+    isCurrent,
+    render,
+  );
 
   return bound.controller;
 }

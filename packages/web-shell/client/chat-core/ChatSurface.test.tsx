@@ -2012,7 +2012,8 @@ describe('ChatSurface', () => {
     expect(captured.editor?.onCancel).toBeTypeOf('function');
     expect(captured.editor?.placeholderText).toBe('Custom placeholder');
     expect(container.querySelector('[data-testid="cmp-ftr"]')).not.toBeNull();
-    expect(captured.editor?.onSubmit('hi', undefined, undefined)).toBe(false);
+    const onSubmit = captured.editor?.onSubmit as SubmitHandler;
+    expect(onSubmit('hi', undefined, undefined)).toBe(false);
     expect(onComposerSubmit).toHaveBeenCalledTimes(1);
 
     // composerCancelEnabled=false suppresses isRunning and onCancel;

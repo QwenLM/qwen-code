@@ -46,9 +46,9 @@
   - 为 `respond` 新增可选第三参数 `options?: ManagedActionRespondOptions`
     （`ManagedAgentOperationObserver & { readonly signal?: AbortSignal }`），
     原样透传给 `provider.actions.respond(...)`。
-  - 返回 `Promise<ManagedActionRespondOutcome>`（响应成功返回 `'responded'`；
-    终态 `endedAction` 关闭卡片返回 `'ended'`；非待处理或在飞早退返回
-    `'skipped'`；可重试错误仍按原样抛出）。
+  - 返回 `Promise<ManagedActionRespondOutcome>`（响应成功返回 `'responded'`，
+    含并发刷新在发送中途移除了该动作的场景；终态 `endedAction` 关闭卡片返回
+    `'ended'`；发送前守卫早退返回 `'skipped'`；可重试错误仍按原样抛出）。
 - **`chat-controller.ts`：**
   - 将 `pendingProjection.requests`、`inFlightActionKeys` 与 `hasLiveAction` 键
     改为 `JSON.stringify([action.sessionId, action.actionId])`，防止不同子会话
@@ -71,9 +71,11 @@
   - 审批与提问提交经由 `pending.respond(action, response, { onAccepted, onSettlement, signal })`
     单次派发，同步驱动 `useManagedActions` 状态（`submitting`、`answerError`、
     `respondForbidden`、草稿清理、已答过滤）与控制器的准入/结算观测，在卸载或
-    切会话时中止请求，并对子会话动作按 `action.sessionId` 校验。仅
-    `'responded'` 记为已准入，`'ended'` 与 `'skipped'` 均按 `'rejected'` 结算，
-    避免在 `tracked` 中残留永不结算的 `pending` 操作。
+    切会话时中止请求，并对子会话动作按 `action.sessionId` 校验。仅带有效
+    `operationId` 的 `onAccepted` 记为 `'accepted'`；未触发 `onAccepted` 即完成
+    的 `'responded'` 与独立 `useManagedChatController` 一致按 `'unknown'` 结算
+    （避免在 `tracked` 中残留永不结算的 `pending` 操作），`'ended'` 与发送前
+    `'skipped'` 均按 `'rejected'` 结算。
   - 保留独立导出 `useManagedChatController({ provider, clientId, sessionId })`
     的原有契约与严格准入语义零变化。
 - **`ChatSurface.tsx`：**
@@ -116,12 +118,11 @@
      操作轮询）。
 2. **通过 `pending.respond(action, response, { onAccepted, onSettlement, signal })` 单次派发动作响应。**
    - 让 `useManagedActions` 的禁止闩锁、错误提示、草稿清理、已答过滤与控制器意
-     图台账保持一致，同时透传生命周期中止信号。当单测 mock 的
-     `provider.actions.respond` 未触发 `onAccepted` 却正常 resolve（`'responded'`）
-     时，`useManagedChatControllerFromState` 将已完成调用视为已准入（仍绝不在
-     缺少 `onSettlement` 时伪造 `established`）；终态 `'ended'` 失败按
-     `'rejected'` 结算以免残留待结算操作；独立 `useManagedChatController` 继续
-     保持严格的 `unknown` 规则。
+     图台账保持一致，同时透传生命周期中止信号。`useManagedChatControllerFromState`
+     与独立 `useManagedChatController` 统一采用严格准入规则：仅携带
+     `operationId` 的 `onAccepted` 结算为 `'accepted'`，未触发 `onAccepted`
+     的 `'responded'` 结算为 `'unknown'` 以避免在 `tracked` 中残留永不结算的
+     `pending` 操作，终态 `'ended'` 与发送前 `'skipped'` 结算为 `'rejected'`。
 3. **投影期按需保留过期动作（`retainExpiredActions: true`），对权限与提问统一禁用展示且提交期保持 fail-closed 拒绝。**
    - 保留 Managed 在过期卡片上的体验（经统一的 32 位安全定时器禁用控件，提问
      展示 `managed.question.expired`，权限展示 `managed.actions.expired`），
@@ -165,8 +166,8 @@
   - `use-managed-actions.test.tsx`、`chat-controller.local-integration.test.tsx`、
     `build-artifact.test.ts`。
 - **变异见证：** 全部可达新增守卫与分支在独立变异装置下验证转红。
-- **静态门禁：** `tsconfig.lib.json`、`tsconfig.json`、改动行严格测试 `tsc`、
-  `eslint --max-warnings=0`、`prettier --check`、全仓
+- **静态门禁：** `tsconfig.lib.json`、`tsconfig.json`、
+  `eslint --max-warnings=0`、`prettier --check` 与全仓
   `npm run build && npm run typecheck`。
 - **本地真实浏览器 Before/After E2E：** 真实本地 HTTP/SSE 服务 + Vite +
   Chromium（`<StrictMode>`）在未改动 `a3560a089b01`（改前）与切至

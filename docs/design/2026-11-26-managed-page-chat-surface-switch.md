@@ -54,9 +54,10 @@ session action isolation, or regressing Managed's durable outbox and layout:
     (`ManagedAgentOperationObserver & { readonly signal?: AbortSignal }`) on
     `respond` and forward it into `provider.actions.respond(...)`.
   - Return `Promise<ManagedActionRespondOutcome>` (`'responded'` when the
-    response succeeded; `'ended'` when a terminal `endedAction` closed the card;
-    `'skipped'` when early-returned as not pending or already in flight; throws
-    on retryable errors as before).
+    response succeeded, including when a concurrent re-list dropped the action
+    mid-send; `'ended'` when a terminal `endedAction` closed the card;
+    `'skipped'` when pre-send guards early-returned as not pending or already
+    in flight; throws on retryable errors as before).
 - **`chat-controller.ts`:**
   - Key `pendingProjection.requests`, `inFlightActionKeys`, and `hasLiveAction`
     by `JSON.stringify([action.sessionId, action.actionId])` so child sessions
@@ -83,9 +84,11 @@ response, { onAccepted, onSettlement, signal })` so `useManagedActions` state
     (`submitting`, `answerError`, `respondForbidden`, draft clearing, answered
     filtering) and controller admission/settlement stay synchronized through one
     transport call, aborting on unmount/session switch and accepting
-    `action.sessionId` for child-session actions. Only `'responded'` counts as
-    admitted; `'ended'` and `'skipped'` settle as `'rejected'` so no unsettleable
-    pending op is left in `tracked`.
+    `action.sessionId` for child-session actions. Only `onAccepted` with a
+    valid `operationId` settles as `'accepted'`; a `'responded'` completion
+    without `onAccepted` settles as `'unknown'` (matching standalone
+    `useManagedChatController`, leaving no unsettleable pending op in
+    `tracked`), while `'ended'` and pre-send `'skipped'` settle as `'rejected'`.
   - Preserve standalone `useManagedChatController({ provider, clientId,
 sessionId })` with identical public contract and strict admission semantics.
 - **`ChatSurface.tsx`:**
@@ -135,13 +138,12 @@ sessionId })` with identical public contract and strict admission semantics.
    - Keeps `useManagedActions`'s forbidden-session latch, error banner, draft
      clearing, and answered-key tracking synchronized with the controller's
      intent ledger and operation settlement observations, while forwarding the
-     lifecycle abort signal. When a test mock `provider.actions.respond`
-     resolves cleanly (`'responded'`) without invoking `onAccepted`,
-     `useManagedChatControllerFromState` treats the completed call as admitted
-     (still never forging `established` without an `onSettlement` event), while
-     terminal `'ended'` failures settle as `'rejected'` so no pending op is
-     stranded, and standalone `useManagedChatController` preserves its strict
-     `unknown` rule.
+     lifecycle abort signal. Both `useManagedChatControllerFromState` and
+     standalone `useManagedChatController` share the strict admission rule:
+     only `onAccepted` carrying an `operationId` settles as `'accepted'`, a
+     `'responded'` send without `onAccepted` settles as `'unknown'` so no
+     unsettleable pending operation is ever stranded in `tracked`, and
+     terminal `'ended'` / pre-send `'skipped'` outcomes settle as `'rejected'`.
 3. **Retain expired actions in UI projection (`retainExpiredActions: true`) while disabling both permissions and questions and rejecting submission fail-closed.**
    - Preserves Managed's UX (showing `managed.question.expired` for questions
      and `managed.actions.expired` for permissions alongside disabled controls
@@ -194,8 +196,8 @@ sessionId })` with identical public contract and strict admission semantics.
     `build-artifact.test.ts`.
 - **Mutation witnesses:** Reachable new guards and branches verified red under
   an isolated mutation harness.
-- **Static gates:** `tsconfig.lib.json`, `tsconfig.json`, strict test `tsc`,
-  `eslint --max-warnings=0`, `prettier --check`, repository
+- **Static gates:** `tsconfig.lib.json`, `tsconfig.json`,
+  `eslint --max-warnings=0`, `prettier --check`, and repository
   `npm run build && npm run typecheck`.
 - **Real browser Before/After E2E:** Real local HTTP/SSE server + Vite +
   Chromium (`<StrictMode>`) mounting `ManagedSessionsPage` Before (unmodified

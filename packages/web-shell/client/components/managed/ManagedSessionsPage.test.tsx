@@ -4539,6 +4539,7 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-testid="chat-surface"]'),
     ).not.toBeNull();
+    expect(mocks.client.getSession).toHaveBeenCalledTimes(1);
     expect(mocks.client.subscribeEvents).toHaveBeenCalledTimes(1);
     expect(listPending).toHaveBeenCalledTimes(1);
     expect(card.querySelector('[role="alertdialog"]')).toBeNull();

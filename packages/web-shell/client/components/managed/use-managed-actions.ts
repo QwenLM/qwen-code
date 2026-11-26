@@ -402,7 +402,10 @@ export function useManagedActions(
           idempotencyKey,
           ...options,
         });
-        if (!isPending()) return 'skipped';
+        // The send already completed; even if a concurrent re-list dropped the
+        // action before the response settled, report `'responded'` rather than
+        // `'skipped'` so callers do not treat a delivered answer as refused.
+        if (!isPending()) return 'responded';
         setAnswered((current) => new Set(current).add(key));
         setAnswerErrors((current) => {
           const next = new Map(current);

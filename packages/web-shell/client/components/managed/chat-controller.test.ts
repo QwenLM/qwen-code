@@ -1742,7 +1742,7 @@ describe('createManagedChatController', () => {
       tools: [
         {
           callId: 't1:fc-root',
-          name: 'run_shell_command',
+          toolName: 'run_shell_command',
           kind: 'execute',
           status: 'pending',
           args: { command: 'echo root-secret' },
@@ -1765,14 +1765,22 @@ describe('createManagedChatController', () => {
     expect(h.controller.pendingApprovals).toHaveLength(1);
     expect(h.controller.pendingApprovals[0]!.request.rawInput).toBeUndefined();
 
-    // Answering childA (left pending without settlement) must NOT block childB
-    // even though both share actionId "shared-id".
-    const resA = await h.controller.respondApproval('shared-id', 'allow');
-    expect(resA.admission).toBe('accepted');
+    // Answering childA while its dispatch is still in flight must NOT block
+    // childB even though both share actionId "shared-id".
+    const childADeferred = deferred<ManagedTransportAdmission>();
+    const childBDeferred = deferred<ManagedTransportAdmission>();
+    h.submitApproval
+      .mockReturnValueOnce(childADeferred.promise)
+      .mockReturnValueOnce(childBDeferred.promise);
+    const inFlightA = h.controller.respondApproval('shared-id', 'allow');
     h.setPendingActions([childB]);
-    const resB = await h.controller.respondApproval('shared-id', 'allow');
-    expect(resB.admission).toBe('accepted');
+    const inFlightB = h.controller.respondApproval('shared-id', 'allow');
     expect(h.submitApproval).toHaveBeenCalledTimes(2);
+    childADeferred.resolve({ admission: 'accepted', operationId: 'op-a' });
+    childBDeferred.resolve({ admission: 'accepted', operationId: 'op-b' });
+    const [resA, resB] = await Promise.all([inFlightA, inFlightB]);
+    expect(resA.admission).toBe('accepted');
+    expect(resB.admission).toBe('accepted');
 
     // retainExpiredActions keeps expired actions projected for disabled UI,
     // while respondApproval and respondQuestion still fail closed.
